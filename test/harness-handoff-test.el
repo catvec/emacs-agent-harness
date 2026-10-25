@@ -19,6 +19,8 @@
 (defvar harness-compaction--running)
 (defvar harness-handoff--pending)
 (defvar harness-handoff-risks)
+(declare-function harness-carry-property "harness-carry" (way property))
+(declare-function harness-carry-cost-text "harness-carry" (estimate way))
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (declare-function harness-define-provider "harness-provider")
@@ -111,7 +113,7 @@
         (should-not (plist-get check :running))
         (should (equal "demo:scripted" (plist-get check :from)))
         (should (equal "Hosted M" (plist-get check :to-label)))
-        (should (string-match-p "\\`Hosted keeps its own conversation" (plist-get check :reason)))
+        (should (string-match-p "\\`Hosted: own conversation" (plist-get check :reason)))
         (should (equal harness-handoff-risks (plist-get check :risks)))
         ;; The four risks: cache, fidelity, provider state, next step.
         (should (= 4 (length (plist-get check :risks))))
@@ -146,6 +148,64 @@
       ;; A state of another provider is no help.
       (harness-call 'session/set-provider-state sid '(:conv "c0" :provider "copilot"))
       (should (plist-get (harness-call 'handoff/check sid "hosted:m") :lossy)))))
+
+(ert-deftest harness-handoff-check-offers-the-ways-the-cold-cache-question-does ()
+  "A lossy check brings the ways to hand over, as the cold-cache question
+offers them: the same keys, labels and wording (`harness-carry-ways'),
+each priced as `compaction/estimate' says, the brief summary on the new
+model and the summary on the current one, and the modes that do them.
+A switch that loses nothing brings none, and neither does the check
+`handoff/switch' makes for itself."
+  (harness-handoff-test-with
+    (let* ((sid (harness-handoff-test--session t))
+           (check (harness-call 'handoff/check sid "hosted:m"))
+           (choices (plist-get check :choices)))
+      (should (equal '("brief" "summary" "transcript" "fresh" "hold")
+                     (mapcar (lambda (c) (plist-get c :choice)) choices)))
+      (should (equal '("b" "s" "t" "f" "q") (mapcar (lambda (c) (plist-get c :key)) choices)))
+      (should (equal '("compact-new" "compact" "transcript" "none" "cancel")
+                     (mapcar (lambda (c) (plist-get c :mode)) choices)))
+      (should (equal '("Brief summary" "Summary" "Transcript file" "Start afresh" "Cancel")
+                     (mapcar (lambda (c) (plist-get c :label)) choices)))
+      ;; The words are those of the table, but the switch's own for cancelling.
+      (dolist (way '(brief summary transcript fresh))
+        (should (equal (harness-carry-property way :what)
+                       (plist-get (cl-find (symbol-name way) choices
+                                           :key (lambda (c) (plist-get c :choice)) :test #'equal)
+                                  :what))))
+      (should (equal "model unchanged" (plist-get (car (last choices)) :what)))
+      ;; Priced as the cold-cache question prices them: the new model writes
+      ;; the brief summary, the current one the summary.
+      (let ((brief (nth 0 choices)) (summary (nth 1 choices)))
+        (should (equal "Hosted M" (plist-get brief :by)))
+        (should (equal "Demo scripted" (plist-get summary :by)))
+        (should (numberp (plist-get brief :cost)))
+        (should (string-match-p "\\`~\\$[0-9.]+\\'" (plist-get brief :cost-text)))
+        (should (numberp (plist-get summary :cost-uncached)))
+        (should (equal (harness-carry-cost-text (harness-call 'compaction/estimate sid '(:brief-model "hosted:m"))
+                                                'brief)
+                       (plist-get brief :cost-text))))
+      (should (equal '("free" "free") (mapcar (lambda (c) (plist-get c :cost-text)) (cl-subseq choices 2 4))))
+      (should-not (plist-get (car (last choices)) :cost-text))
+      ;; Nothing to choose for a switch that loses nothing.
+      (should-not (plist-get (harness-call 'handoff/check sid "api:m") :choices))
+      ;; The batch check brings them for each session that loses its conversation.
+      (let ((checks (harness-call 'handoff/check-all "hosted:m")))
+        (should (equal '("brief" "summary" "transcript" "fresh" "hold")
+                       (mapcar (lambda (c) (plist-get c :choice))
+                               (plist-get (car (cl-remove-if-not (lambda (c) (plist-get c :lossy)) checks))
+                                          :choices))))))))
+
+(ert-deftest harness-handoff-check-prices-nothing-without-the-compaction-module ()
+  "Without `compaction/estimate' the ways are offered all the same, with
+the prices left out: only what asks no model is known to be free."
+  (harness-handoff-test-with
+    (let ((sid (harness-handoff-test--session t)))
+      (harness-unregister-method 'compaction/estimate)
+      (let ((choices (plist-get (harness-call 'handoff/check sid "hosted:m") :choices)))
+        (should (= 5 (length choices)))
+        (should (equal '(nil nil "free" "free" nil)
+                       (mapcar (lambda (c) (plist-get c :cost-text)) choices)))))))
 
 (ert-deftest harness-handoff-check-all-skips-what-does-not-change ()
   (harness-handoff-test-with
@@ -238,7 +298,14 @@
         ;; The summary says it is a lossy handoff and to re-investigate.
         (should (string-match-p "Harness note: this conversation was handed over from Demo scripted"
                                 (plist-get compaction :content)))
-        (should (string-match-p "re-investigate" (plist-get compaction :content))))
+        (should (string-match-p "re-investigate" (plist-get compaction :content)))
+        ;; It keeps the conversation's first and last messages as they were
+        ;; written, which the choice says (`harness-carry-ways').
+        (should (string-match-p (concat "The conversation opened with this message, kept verbatim rather than"
+                                        " summarised:\n\nfix the parser")
+                                (plist-get compaction :content)))
+        (should (string-match-p "Its most recent message before this compaction, kept verbatim"
+                                (plist-get compaction :content))))
       ;; The new model's first message: the summary, then the user's.
       (harness-test-await (harness-call 'agent/prompt sid "go on"))
       (let ((request (car harness-handoff-test--requests)))
@@ -283,6 +350,12 @@ writes opens the new conversation with a lossy-handoff note."
           (should (string-match-p "Harness note: this conversation was handed over from Demo scripted"
                                   (plist-get compaction :content)))
           (should (string-match-p "re-investigate" (plist-get compaction :content)))
+          ;; The first and last messages are kept as they were written.
+          (should (string-match-p (concat "kept verbatim rather than summarised:\n\nmessage 0\n")
+                                  (plist-get compaction :content)))
+          (should (string-match-p (concat "most recent message before this compaction, kept verbatim rather than"
+                                          " summarised:\n\nmessage 19")
+                                  (plist-get compaction :content)))
           (let ((handoff (harness-node-handoff compaction)))
             (should (equal "compact-new" (plist-get handoff :mode)))
             (should (equal "sample" (plist-get handoff :context)))

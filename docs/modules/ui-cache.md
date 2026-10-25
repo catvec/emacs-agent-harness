@@ -66,9 +66,9 @@ lasts).  A switch that starts a conversation of its own on the new
 provider -- a hosted loop, handed over a summary or a transcript or
 nothing -- sends none of the old one, and a compaction replaces it
 with its summary: the session reports no cache then, and no panel
-shows.  While the switch banner asks how to hand over
+shows.  While the model switch asks how to carry the conversation over
 (harness-ui-handoff.el), the panel stays away: what the next request
-sends depends on the answer, and the banner says what the cache
+sends depends on the answer, and the question says what the cache
 means for each.  So it does while a message sent to the session
 waits on the question of what goes first, the cache being cold
 (harness-cowboy.el, drawn by harness-ui-cowboy.el), and while the
@@ -85,7 +85,7 @@ the turn as it is made, so the stamp is the turn's own while it runs.
 
 The panel comes on its own: each chat buffer has one timer, for the
 moment its session's cache lapses, which draws the tail again then
-(`harness-compose-redraw`), the switch banner included.  Nothing
+(`harness-compose-redraw`), the model switch's question included.  Nothing
 polls.  A session update moves the timer, as a new request keeps the
 cache longer, and the panel goes while the session runs -- a turn
 waiting on an answer included -- to come back when the turn ends with

@@ -481,6 +481,16 @@ its cards to the room they leave, and
 `harness-ui-tasks-redraw-tail-lines' draws them again when a function
 would draw something else.  The companion pet sits there this way.")
 
+(defvar harness-ui-tasks-panel-functions nil
+  "Functions drawing a panel above the lines over a board's compose box.
+Each is called without arguments in the board's buffer whenever those
+lines are drawn -- with the box, and as a window showing the board
+changes size -- and returns a string of whole lines, or nil for nothing.
+The panel of a question the board asks (harness-ui-carry.el) is drawn
+this way, above the error, the compose label and the settings, and its
+keys can be pressed from the box (`harness-compose-panel-key').  One that
+signals an error draws nothing.")
+
 (defun harness-ui-tasks--board-p (buffer)
   "Non-nil when BUFFER is a live task board.
 Window hooks and timers hand over whatever buffer a window shows by the
@@ -3633,6 +3643,23 @@ They are named for redraws, as the lines below them are."
       (unless (bolp) (insert "\n"))
       (put-text-property start (point) 'harness-task-tail 'corner))))
 
+(defun harness-ui-tasks--insert-panels ()
+  "Insert what `harness-ui-tasks-panel-functions' return, in order.
+Whole lines after a blank one, named for redraws as the lines below them
+are: a redraw keeps point on the panel when it was there.  The blank line
+is where the gap that keeps the box at the bottom of the window opens
+\(`harness-compose-pad-window'), so that a panel with a background of its
+own does not fill the gap with it."
+  (run-hook-wrapped 'harness-ui-tasks-panel-functions
+                    (lambda (fn)
+                      (when-let* ((text (ignore-errors (save-excursion (funcall fn)))))
+                        (unless (string-empty-p text)
+                          (let ((start (point)))
+                            (insert (propertize "\n" 'face 'default) text)
+                            (unless (bolp) (insert "\n"))
+                            (put-text-property start (point) 'harness-task-tail 'panel))))
+                      nil)))
+
 (defun harness-ui-tasks--insert-tail-head ()
   "Insert the error line, the compose label, the settings and the attachments.
 Each line is fitted to the window, like the board's: the buffer wraps
@@ -3658,6 +3685,7 @@ lines, which narrow for it, and above them."
          (beside (plist-get corner :beside))
          (reserve (or (plist-get corner :reserve) 0)))
     (harness-ui-tasks--insert-corner (plist-get corner :above))
+    (harness-ui-tasks--insert-panels)
     (cl-loop for (key fit band) in lines
              for i from 0
              for right = (nth i beside)

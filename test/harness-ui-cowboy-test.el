@@ -48,10 +48,25 @@
 (declare-function harness-chat-send "harness-ui-chat")
 (declare-function harness-acp--drop-client "harness-acp")
 (declare-function harness-cowboy-cold-p "harness-cowboy" (session &optional now))
+(declare-function harness-carry-choices "harness-carry" (ways estimate &optional make))
+(declare-function harness-carry-names "harness-carry" ())
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider--forget "harness-provider" (id))
 
 ;;;; The panel, from a record
+
+(defun harness-ui-cowboy-test--choices ()
+  "Return the choices of a priced question, as they come over the wire.
+The harness makes them with `harness-carry-choices' from an estimate; a
+vector is how a list travels."
+  (apply #'vector
+         (harness-carry-choices
+          (harness-carry-names)
+          (list :carry-on 0.315
+                :kinds (list (list :kind 'summary :model-label "Demo scripted" :cost 0.33 :after 1500)
+                             (list :kind 'brief :model-label "Demo cheap" :cost 0.004 :after 900)
+                             (list :kind 'transcript :cost 0.0 :after 200)
+                             (list :kind 'fresh :cost 0.0 :after 90))))))
 
 (defun harness-ui-cowboy-test--record (&rest overrides)
   "Return a cold-cache question record as the UI keeps it, with OVERRIDES.
@@ -66,21 +81,7 @@ for lists."
          :cowboy (list :at 1000.0 :ttl 300 :expires 1300.0 :model "demo:scripted" :model-label "Demo scripted"
                        :context 84000 :messages 12 :carry-on 0.315 :carry-on-cached 0.025
                        :preview "now add tests for the parser" :default "brief" :history t
-                       :choices
-                       (vector
-                        '(:choice "brief" :label "Brief summary" :what "a cheap model summarises the narrative, tool calls in brief"
-                                  :cost 0.004 :cost-text "~$0.0040" :by "Demo cheap" :after 900)
-                        '(:choice "summary" :label "Summary" :what "the session's model summarises it all, reading it uncached"
-                                  :cost 0.33 :cost-text "~$0.330" :by "Demo scripted" :after 1500)
-                        '(:choice "transcript" :label "Transcript file" :what "the conversation goes to a file the model reads as it needs"
-                                  :cost 0.0 :cost-text "free" :after 200)
-                        '(:choice "fresh" :label "Start afresh" :what "nothing is carried over; the model looks back when it needs to"
-                                  :cost 0.0 :cost-text "free" :after 90)
-                        '(:choice "carry-on" :label "Carry on" :what "the whole conversation goes again, uncached"
-                                  :cost 0.315 :cost-text "~$0.315 uncached")
-                        '(:choice "ignore" :label "Ignore" :what "send the whole context as it is, adding nothing"
-                                  :cost 0.315 :cost-text "~$0.315 uncached")
-                        '(:choice "hold" :label "Not now" :what "the message waits; nothing is sent yet"))))
+                       :choices (harness-ui-cowboy-test--choices)))
    overrides))
 
 (defun harness-ui-cowboy-test--lines (string)
@@ -89,8 +90,10 @@ for lists."
 
 (ert-deftest harness-ui-cowboy-panel-says-what-each-choice-costs ()
   "The panel says when the cache lapsed and for what, which message waits,
-what carrying on costs against the cache it lost, and a row per choice:
-its key, its button, its cost and what it does, the default marked."
+what resending costs against the cache it lost, and a row per choice:
+its key, its button, its cost and what it does, the default marked.
+It is the panel that asks the model switch's question too: the same
+rows, the same words, only the heading and the facts above them differ."
   (harness-test-reset-bus)
   (harness-test-load-module 'ui)
   (let* ((string (harness-ui-cowboy-panel-string "s1" (harness-ui-cowboy-test--record) 1400.0))
@@ -98,43 +101,44 @@ its key, its button, its cost and what it does, the default marked."
     (should (string-match-p (format "\\` .*Prompt cache cold  since %s · Demo scripted · ~84\\.0k tokens\\'"
                                     (regexp-quote (format-time-string "%H:%M" 1300.0)))
                             (nth 0 lines)))
-    (should (equal "   Your message waits: “now add tests for the parser”" (nth 1 lines)))
-    (should (equal (concat "   Carrying on sends the whole conversation again, uncached: about $0.315 instead of"
-                           " the $0.025 it would cost cached.  What goes first?")
-                   (nth 2 lines)))
+    (should (equal "   Waiting  your message · “now add tests for the parser”" (nth 1 lines)))
+    (should (equal "   Resend   $0.315 uncached against $0.025 cached" (nth 2 lines)))
     (should (equal "" (nth 3 lines)))
-    (should (equal '("    b  Brief summary    ~$0.0040          a cheap model summarises the narrative, tool calls in brief · the default"
-                     "    s  Summary          ~$0.330           the session's model summarises it all, reading it uncached"
-                     "    t  Transcript file  free              the conversation goes to a file the model reads as it needs"
-                     "    f  Start afresh     free              nothing is carried over; the model looks back when it needs to"
-                     "    c  Carry on         ~$0.315 uncached  the whole conversation goes again, uncached"
-                     "    i  Ignore           ~$0.315 uncached  send the whole context as it is, adding nothing"
-                     "    q  Not now                            the message waits; nothing is sent yet")
-                   (seq-subseq lines 4 11)))
-    (should (equal "" (nth 11 lines)))
-    (should (equal "    B   S   T   F   C   I  the same, in every session from now on, without asking" (nth 12 lines)))
-    (should (equal (concat "   Whichever you choose, the model can search and read the conversation it leaves out"
-                           " (session_history).")
-                   (nth 13 lines)))
-    (should (equal "   or type a choice below: “transcript”, “always brief”" (nth 14 lines)))
+    (should (equal "   Choose what goes first" (nth 4 lines)))
+    (should (equal '("    b  Brief summary    ~$0.0040          Demo cheap · narrative, tool calls in brief · first and last messages kept · default"
+                     "    s  Summary          ~$0.330           Demo scripted · whole conversation · first and last messages kept"
+                     "    t  Transcript file  free              whole conversation as a file the model reads"
+                     "    f  Start afresh     free              nothing carried over"
+                     "    c  Carry on         ~$0.315 uncached  whole conversation again, uncached"
+                     "    i  Ignore           ~$0.315 uncached  whole conversation, nothing added"
+                     "    q  Not now                            message waits")
+                   (seq-subseq lines 5 12)))
+    (should (equal "" (nth 12 lines)))
+    (should (equal "    B   S   T   F   C   I   default for every session, no asking" (nth 13 lines)))
+    (should (equal "   Left out: searchable with session_history" (nth 14 lines)))
+    (should (equal "   Type a choice below: “transcript”, “always brief”" (nth 15 lines)))
     ;; The keys type in the compose box: the last line says how to press one from there.
-    (should (equal "   from the box: C-c . b" (nth 15 lines)))
+    (should (equal "   from the box: C-c . b" (nth 16 lines)))
+    ;; Nothing is a sentence: no line ends in a full stop.
+    (should-not (cl-some (lambda (l) (string-match-p "[.!?]\\'" l)) lines))
     ;; Every character belongs to the panel, amber.
     (should (equal "p1" (get-text-property 0 'harness-ui-cowboy-panel string)))
+    (should (equal "p1" (get-text-property 0 'harness-ui-carry-panel string)))
     (should (equal "p1" (get-text-property (1- (length string)) 'harness-ui-cowboy-panel string)))
-    (should (memq 'harness-ui-cowboy-face (ensure-list (get-text-property 0 'face string))))
+    (should (memq 'harness-ui-carry-face (ensure-list (get-text-property 0 'face string))))
     ;; A row that wraps is indented in amber too.
-    (let ((prefix (get-text-property (string-search "a cheap model" string) 'wrap-prefix string)))
+    (let ((prefix (get-text-property (string-search "Demo cheap" string) 'wrap-prefix string)))
       (should (string-blank-p prefix))
-      (should (eq 'harness-ui-cowboy-face (get-text-property 0 'face prefix))))
+      (should (eq 'harness-ui-carry-face (get-text-property 0 'face prefix))))
     ;; A choice's button says more when hovered.
     (let* ((at (string-search "Brief summary" string))
            (help (get-text-property at 'help-echo string)))
-      (should (string-match-p "\\`Brief summary (~\\$0\\.0040): a cheap model summarises the narrative, tool calls in brief\\." help))
-      (should (string-match-p "Written by Demo cheap\\." help))
-      (should (string-match-p "The conversation then holds ~900 tokens\\." help))
-      (should (string-match-p "Press b on this panel, or click; B makes it the default of every session, taken without asking\\." help))
-      (should (string-match-p "The default, taken when nobody is asked\\." help)))))
+      (should (string-prefix-p "Brief summary (~$0.0040) · Demo cheap · narrative, tool calls in brief · first and last messages kept · default"
+                               help))
+      (should (string-match-p " · After: ~900 tokens · " help))
+      (should (string-suffix-p " · Press b on this panel, or click; B: default for every session, no asking" help))
+      ;; One line: with tooltips off it shows in the echo area.
+      (should-not (string-match-p "\n" help)))))
 
 (ert-deftest harness-ui-cowboy-panel-heads-a-cache-held-for-another-model ()
   "A cache held for a model the session no longer uses is headed so, in
@@ -151,9 +155,9 @@ place of the clock time it lapsed at, which is not why it is asked about."
 (ert-deftest harness-ui-cowboy-panel-heads-a-cache-a-redaction-dropped ()
   "A cache a redaction dropped is headed with the moment of the drop, in
 place of the clock time it would have lapsed at, and says it was a
-redaction.  The line under the waiting message compares the price of
-carrying on with no cached price, as none can be had; everything else is
-the panel of a lapsed cache, the choices and their prices included."
+redaction.  The facts compare the price of resending with no cached
+price, as none can be had; everything else is the panel of a lapsed
+cache, the choices and their prices included."
   (harness-test-reset-bus)
   (harness-test-load-module 'ui)
   (let* ((lapsed (harness-ui-cowboy-panel-string "s1" (harness-ui-cowboy-test--record) 1400.0))
@@ -167,14 +171,14 @@ the panel of a lapsed cache, the choices and their prices included."
                                     (regexp-quote (format-time-string "%H:%M" 1100.0)))
                             (nth 0 lines)))
     (should-not (string-match-p "since" (nth 0 lines)))
-    (should (equal "   Your message waits: “now add tests for the parser”" (nth 1 lines)))
-    ;; No "about $0.315 instead of the $0.025 it would cost cached": the cached price is not to be had.
-    (should (equal "   Carrying on sends the whole conversation again, uncached.  What goes first?" (nth 2 lines)))
-    (should-not (string-match-p "instead of\\|cost cached" dropped))
+    (should (equal "   Waiting  your message · “now add tests for the parser”" (nth 1 lines)))
+    ;; No "$0.315 uncached against $0.025 cached": the cached price is not to be had.
+    (should (equal "" (nth 2 lines)))
+    (should-not (string-match-p "against\\|Resend\\|cached\\'" dropped))
     ;; The rest is the panel of a lapsed cache, the price of carrying on on its row.
-    (should (equal (seq-subseq lapsed-lines 3) (seq-subseq lines 3)))
-    (should (member "    c  Carry on         ~$0.315 uncached  the whole conversation goes again, uncached" lines))
-    (should (member "    i  Ignore           ~$0.315 uncached  send the whole context as it is, adding nothing" lines))
+    (should (equal (seq-subseq lapsed-lines 3) (seq-subseq lines 2)))
+    (should (member "    c  Carry on         ~$0.315 uncached  whole conversation again, uncached" lines))
+    (should (member "    i  Ignore           ~$0.315 uncached  whole conversation, nothing added" lines))
     (should (equal "p1" (get-text-property (1- (length dropped)) 'harness-ui-cowboy-panel dropped)))
     ;; Drawn on a later day, the time says its day.
     (should (string-match-p "dropped by a redaction at [A-Z][a-z]+ [0-9]+, [0-9:]+ ·"
@@ -191,8 +195,7 @@ as the other model's, as the new model has none of it either way."
   (harness-test-reset-bus)
   (harness-test-load-module 'ui)
   (let* ((cowboy (plist-get (harness-ui-cowboy-test--record) :cowboy))
-         (compare (concat "   Carrying on sends the whole conversation again, uncached: about $0.315 instead of"
-                          " the $0.025 it would cost cached.  What goes first?"))
+         (compare "   Resend   $0.315 uncached against $0.025 cached")
          (lines (lambda (info)
                   (harness-ui-cowboy-test--lines
                    (harness-ui-cowboy-panel-string "s1" (harness-ui-cowboy-test--record :cowboy info) 1400.0))))
@@ -217,17 +220,17 @@ as the other model's, as the new model has none of it either way."
 
 (ert-deftest harness-ui-cowboy-panel-for-another-sender-and-sparse-info ()
   "A message another session sent says so; a question that brings less
-falls back to the choices' own words, with no costs."
+falls back to the table's words (`harness-carry-ways'), with no costs."
   (harness-test-reset-bus)
   (harness-test-load-module 'ui)
   (let* ((r (harness-ui-cowboy-test--record
              :cowboy (list :expires 1300.0 :from '(:kind "session" :id "abc12345" :name "Reviewer")
                            :preview "please look at this" :history :false :default "transcript")))
          (lines (harness-ui-cowboy-test--lines (harness-ui-cowboy-panel-string "s1" r 1400.0))))
-    (should (equal "   A message from session “Reviewer” waits: “please look at this”" (nth 1 lines)))
-    (should (equal "   Carrying on sends the whole conversation again, uncached.  What goes first?" (nth 2 lines)))
-    (should (member "    t  Transcript file  the conversation goes to a file the model reads as it needs · the default"
-                    lines))
+    (should (equal "   Waiting  message from session “Reviewer” · “please look at this”" (nth 1 lines)))
+    (should (equal "" (nth 2 lines)))
+    (should (member "    t  Transcript file  whole conversation as a file the model reads · default" lines))
+    (should (member "    b  Brief summary    narrative, tool calls in brief · first and last messages kept" lines))
     (should-not (cl-some (lambda (l) (string-match-p "session_history" l)) lines))))
 
 (ert-deftest harness-ui-cowboy-panel-is-a-panel-of-the-compose-box ()
@@ -316,7 +319,7 @@ digits of any question are there too."
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       (dolist (m '(ui ui-compose ui-markdown ui-pending ui-chat ui-cache ui-cowboy))
+       (dolist (m '(ui ui-compose ui-markdown ui-pending ui-chat ui-cache ui-carry ui-cowboy))
          (harness-test-load-module m))
        (clrhash harness-ui--sessions)
        (unwind-protect
@@ -363,10 +366,10 @@ and the panel and the queued message go."
       (with-current-buffer buffer
         (let ((text (buffer-substring-no-properties (point-min) (point-max))))
           (should (string-match-p "Prompt cache cold" text))
-          (should (string-match-p "Your message waits: “now add tests”" text))
+          (should (string-match-p "Waiting  your message · “now add tests”" text))
           (should (string-match-p " t  Transcript file  free" text)))
         ;; The ordinary question panel is not drawn as well.
-        (should-not (string-search "What goes first?  Answer \"always\""
+        (should-not (string-search "Answer \"always\" with a choice"
                                    (buffer-substring-no-properties (point-min) (point-max))))
         (should (harness-ui-cowboy-waiting-p sid)))
       ;; The message waits in no transcript, and the chat draws it as it
@@ -504,10 +507,9 @@ the new conversation, whose first request writes a cache of its own."
               (should (string-match-p (concat "Prompt cache cold  dropped by a redaction at [0-9:]+"
                                               " · Hosted M · ~3\\.0k tokens\n")
                                       text))
-              (should (string-match-p "Your message waits: “now add tests”" text))
-              (should (string-match-p
-                       "Carrying on sends the whole conversation again, uncached\\.  What goes first\\?\n" text))
-              (should-not (string-match-p "instead of the\\|since [0-9]" text))
+              (should (string-match-p "Waiting  your message · “now add tests”" text))
+              (should (string-match-p "Choose what goes first\n" text))
+              (should-not (string-match-p "against\\|since [0-9]" text))
               (should (string-match-p " c  Carry on  +~\\$[0-9.]+ uncached" text)))
             ;; c, with point on the panel.
             (let ((at (harness-ui-cowboy-test--panel buffer)))

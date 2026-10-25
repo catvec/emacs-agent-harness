@@ -29,6 +29,9 @@
 (declare-function harness-cowboy-parse-answer "harness-cowboy" (text))
 (declare-function harness-cowboy-cold-p "harness-cowboy" (session &optional now))
 (declare-function harness-cowboy-cost-text "harness-cowboy" (estimate choice))
+(declare-function harness-carry-property "harness-carry" (way property))
+(declare-function harness-carry-names "harness-carry" ())
+(declare-function harness-carry-cost-text "harness-carry" (estimate way))
 (declare-function harness-session--load-all "harness-session" ())
 (declare-function harness-session-flush "harness-session" (&optional id))
 
@@ -217,6 +220,15 @@ conversation."
       (should (equal '("brief" "summary" "transcript" "fresh" "carry-on" "ignore" "hold")
                      (mapcar (lambda (c) (plist-get c :choice)) (plist-get info :choices))))
       (should (equal "free" (plist-get (nth 2 (plist-get info :choices)) :cost-text)))
+      ;; Each with its key and the wording of the table every question of this
+      ;; kind shares (`harness-carry-ways'), the two summaries saying that
+      ;; the first and last messages are kept.
+      (should (equal '("b" "s" "t" "f" "c" "i" "q")
+                     (mapcar (lambda (c) (plist-get c :key)) (plist-get info :choices))))
+      (should (equal (mapcar (lambda (way) (harness-carry-property way :what)) (harness-carry-names))
+                     (mapcar (lambda (c) (plist-get c :what)) (plist-get info :choices))))
+      (should (string-match-p "first and last messages kept"
+                              (plist-get (nth 1 (plist-get info :choices)) :what)))
       (should (eq t (plist-get info :history)))
       (should (equal "now add tests" (plist-get info :preview)))
       (should (= 3020 (plist-get info :context)))
@@ -1239,7 +1251,10 @@ with \"always\" or without."
     (should (string-suffix-p " uncached" (harness-cowboy-cost-text estimate 'carry-on)))
     (should (string-suffix-p " uncached" (harness-cowboy-cost-text estimate 'ignore)))
     (should-not (harness-cowboy-cost-text estimate 'hold))
-    (should-not (harness-cowboy-cost-text nil 'summary))))
+    (should-not (harness-cowboy-cost-text nil 'summary))
+    ;; The model switch says what its choices cost with the same function.
+    (should (eq (indirect-function 'harness-cowboy-cost-text)
+                (indirect-function 'harness-carry-cost-text)))))
 
 ;;;; Other agents
 

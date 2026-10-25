@@ -229,6 +229,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-action-functions` — Functions adding actions of their own to the menu of a task's card.
 - `harness-ui-tasks-corner-functions` — Functions drawing something at the right of the lines above the compose box.
 - `harness-ui-tasks-header-functions` — Functions returning a segment of a board's header line, or nil.
+- `harness-ui-tasks-panel-functions` — Functions drawing a panel above the lines over a board's compose box.
 - `harness-ui-tasks-tick-hook` — Hook run, with no arguments, each time the boards' clock ticks.
 
 ### Commands

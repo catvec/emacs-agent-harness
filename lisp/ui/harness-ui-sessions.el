@@ -867,6 +867,49 @@ companion pet sits there this way; when what a function draws changes,
   "The id of the last row of the print under way, which the footer follows.
 Found at the print's first row, once a print, rather than at each row.")
 
+;;;; The panel above the rows
+;;
+;; A question the list asks -- how to carry the conversations of the
+;; marked sessions over to a new model, say -- shows above the rows as a
+;; panel (harness-ui-carry.el), until it is answered.  It is drawn with
+;; the rows, so it comes back whenever the list is printed, and a redraw
+;; leaves point on it when point was there.  It is no session's: RET and
+;; the row commands find none there.
+
+(defvar harness-ui-sessions-panel-functions nil
+  "Functions drawing a panel above the rows of the session list.
+Each is called without arguments in the list's buffer whenever the list
+is printed, and returns a string of whole lines, or nil for nothing.
+The panel of a question the list asks (harness-ui-carry.el) is drawn this
+way.  The strings go in order above the first row, before the banner of
+the blocked filter, and are no session's: RET and the row commands find
+none there.  One that signals an error draws nothing.")
+
+(defun harness-ui-sessions--insert-panels ()
+  "Insert at point what `harness-ui-sessions-panel-functions' return, in order.
+A string that does not end in a newline gets one, so the panels are
+whole lines."
+  (run-hook-wrapped 'harness-ui-sessions-panel-functions
+                    (lambda (fn)
+                      (when-let* ((text (ignore-errors (save-excursion (funcall fn)))))
+                        (unless (string-empty-p text)
+                          (insert text)
+                          (unless (eq (char-before) ?\n) (insert "\n"))))
+                      nil)))
+
+(defun harness-ui-sessions--insert-top ()
+  "Insert at point what goes above the first row.
+That is the panels, then the banner of the blocked filter."
+  (harness-ui-sessions--insert-panels)
+  (when harness-ui-sessions--blocked-only
+    (insert (harness-ui-sessions--banner))))
+
+(defun harness-ui-sessions--place (&optional pos)
+  "Return what is at POS, point by default, for a redraw to keep point on.
+That is a session's id, `panel' for the panel above the rows, or nil."
+  (or (tabulated-list-get-id pos)
+      (and (get-text-property (or pos (point)) 'harness-ui-carry-panel) 'panel)))
+
 (defun harness-ui-sessions--insert-footer ()
   "Insert at point what `harness-ui-sessions-footer-functions' return, in order.
 A string that does not end in a newline gets one, so the footer is
@@ -890,8 +933,8 @@ blocked session gets the line of what it waits on under its row
 opens it, SPC pops its request out, and it is not marked.
 Under the last row, and its line, goes the footer
 \(`harness-ui-sessions-footer-functions')."
-  (when (and harness-ui-sessions--blocked-only (bobp))
-    (insert (harness-ui-sessions--banner)))
+  (when (bobp)
+    (harness-ui-sessions--insert-top))
   ;; The entries are printed in order, sorted or not, so the first row says
   ;; which is the last.
   (let ((entries (and (listp tabulated-list-entries) tabulated-list-entries)))
@@ -912,14 +955,13 @@ Under the last row, and its line, goes the footer
 
 (defun harness-ui-sessions--print ()
   "Print the list.
-With no row to show, the printer has none to put the banner of the blocked
-filter above or the footer under: they go in here."
+With no row to show, the printer has none to put the panels and the
+banner of the blocked filter above or the footer under: they go in here."
   (tabulated-list-print t)
   (unless tabulated-list-entries
     (let ((inhibit-read-only t))
       (goto-char (point-max))
-      (when harness-ui-sessions--blocked-only
-        (insert (harness-ui-sessions--banner)))
+      (harness-ui-sessions--insert-top)
       (harness-ui-sessions--insert-footer)
       (set-buffer-modified-p nil))))
 
@@ -934,16 +976,20 @@ list no window shows is not printed: it is when a window shows it
       (harness-ui-sessions--redraw))))
 
 (defun harness-ui-sessions--position (id)
-  "Return where the row of session ID starts, else the first row, else `point-min'."
-  (save-excursion
-    (goto-char (point-min))
-    (let ((first nil) (found nil))
-      (while (and (not found) (not (eobp)))
-        (let ((here (tabulated-list-get-id)))
-          (cond ((and id (equal here id)) (setq found (point)))
-                ((and here (not first)) (setq first (point)))))
-        (forward-line 1))
-      (or found first (point-min)))))
+  "Return where the row of session ID starts, else the first row, else `point-min'.
+ID `panel' is the panel above the rows, when there is one
+\(`harness-ui-sessions--place')."
+  (or (and (eq id 'panel)
+           (text-property-not-all (point-min) (point-max) 'harness-ui-carry-panel nil))
+      (save-excursion
+        (goto-char (point-min))
+        (let ((first nil) (found nil))
+          (while (and (not found) (not (eobp)))
+            (let ((here (tabulated-list-get-id)))
+              (cond ((and id (equal here id)) (setq found (point)))
+                    ((and here (not first)) (setq first (point)))))
+            (forward-line 1))
+          (or found first (point-min))))))
 
 (defvar harness-ui-sessions-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1087,8 +1133,8 @@ whose session is gone goes to the first row.  How long it took sets how
 soon the list follows the sessions again (`harness-ui-sessions--due')."
   (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     (with-current-buffer buf
-      (let ((id (tabulated-list-get-id))
-            (windows (mapcar (lambda (w) (cons w (tabulated-list-get-id (window-point w))))
+      (let ((id (harness-ui-sessions--place))
+            (windows (mapcar (lambda (w) (cons w (harness-ui-sessions--place (window-point w))))
                              (get-buffer-window-list buf nil t)))
             (start (float-time)))
         (harness-ui-sessions--refresh)
@@ -1765,7 +1811,8 @@ the default model and the settings of the task boards stay as they are.
 The harness checks the switch (`_harness/handoff/check-all').  When no
 session would lose its conversation, they switch at once
 \(`_harness/session/set-all').  Otherwise `harness-ui-switch-function'
-asks once, for all of them, how to hand the conversations over, and the
+asks once, for all of them, how to carry the conversations over -- the
+panel of harness-ui-carry.el above the rows of the list -- and the
 switch goes by the mode chosen (`_harness/handoff/switch-all'); the
 answer `cancel' switches nothing.  A harness that cannot check switches
 them as it always did.  DONE is called with the ids of the sessions that
@@ -1773,7 +1820,9 @@ switched and, when the conversations were handed over, the clause that
 says how (`harness-ui-sessions--handoff-how'); FAILED is called with the
 error of a request that failed."
   (let ((filter (list :ids ids))
-        (label (harness-ui-model-label model)))
+        (label (harness-ui-model-label model))
+        ;; The question is asked in the list, above the rows.
+        (host (get-buffer harness-ui-sessions--buffer-name)))
     (cl-flet ((plain ()
                 (harness-ui-call "_harness/session/set-all"
                                  (list :settings (list :model model) :filter filter)
@@ -1786,7 +1835,7 @@ error of a request that failed."
            (if (null lossy)
                (plain)
              (funcall harness-ui-switch-function
-                      lossy label (length checks) nil nil
+                      lossy label (length checks) nil host
                       (lambda (mode)
                         (if (eq mode 'cancel)
                             (message "Models unchanged")

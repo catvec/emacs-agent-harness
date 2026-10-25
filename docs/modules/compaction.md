@@ -136,7 +136,7 @@ the token count progressively.
 ### Methods
 
 - `compaction/compact` (session-id &optional opts) — Compact the transcript of SESSION-ID; return a promise.
-- `compaction/estimate` (session-id) — Say what compacting SESSION-ID costs, kind by kind, and what carrying on does.
+- `compaction/estimate` (session-id &optional opts) — Say what compacting SESSION-ID costs, kind by kind, and what carrying on does.
 - `compaction/resend-cost` (session-id) — Say what sending SESSION-ID's context costs, read from the cache and not.
 - `compaction/status` (session-id) — Describe how full the context of SESSION-ID is.
 

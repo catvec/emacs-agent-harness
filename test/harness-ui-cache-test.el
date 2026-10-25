@@ -44,7 +44,7 @@
 (defvar harness-compose-end)
 (defvar harness-cache-ttl)
 (defvar harness-cache-ttl-overrides)
-(defvar harness-ui-handoff--prompt)
+(defvar harness-ui-carry--prompt)
 (defvar harness-compose-redraw-function)
 (declare-function harness-chat-buffer "harness-ui-chat")
 (declare-function harness-chat-send "harness-ui-chat")
@@ -663,16 +663,16 @@ as the new model has none of it either way."
                                " and caches it again.")
                        (get-text-property 0 'help-echo banner)))))))
 
-(ert-deftest harness-ui-cache-stays-away-while-the-switch-banner-asks ()
-  "While the switch banner asks how to hand over, the panel does not show:
-what the next message sends depends on the answer, which the banner
-weighs.  The moment the cache lapses still draws the tail again, so the
-banner says it did."
+(ert-deftest harness-ui-cache-stays-away-while-the-switch-asks ()
+  "While the model switch asks how to carry the conversation over, the panel
+does not show: what the next message sends depends on the answer, which
+the question weighs.  The moment the cache lapses still draws the tail
+again, so the question says it did."
   (with-temp-buffer
     (let ((s (harness-ui-cache-test--session))
           (drawn 0))
       (should (harness-ui-cache--current s 2000.0))
-      (setq-local harness-ui-handoff--prompt '(:checks nil))
+      (setq-local harness-ui-carry--prompt '(:id "switch"))
       (should-not (harness-ui-cache--current s 2000.0))
       (setq-local harness-compose-redraw-function (lambda () (cl-incf drawn)))
       (cl-letf (((symbol-function 'harness-compose-redraw)

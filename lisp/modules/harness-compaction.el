@@ -545,15 +545,22 @@ first and last messages kept verbatim add to the result."
                  model (if cached
                            (list :cache-read context :input ask :output output)
                          (list (harness-compaction--uncached-key model) (+ context ask) :output output)))
+          ;; What it costs once the cache lapsed: a client that keeps the
+          ;; estimate for a while says so when the cache lapses meanwhile.
+          :cost-uncached (harness-compaction--cost
+                          model (list (harness-compaction--uncached-key model) (+ context ask)
+                                      :output output))
           :after (+ output ends))))
 
-(defun harness-compaction--estimate-brief (session messages ends)
+(defun harness-compaction--estimate-brief (session messages ends &optional model)
   "Estimate a `brief' summary of SESSION, whose provider messages are MESSAGES.
 Its model is sent the system prompt and the conversation's narrative
 \(`harness-compaction--narrative-messages'), all of it uncached.  ENDS
 is `harness-compaction--verbatim-tokens': what the first and last
-messages kept verbatim add to the result."
-  (let* ((model (harness-compaction--brief-model session))
+messages kept verbatim add to the result.  MODEL, when given, writes it
+in place of `harness-compaction--brief-model': a handoff has the new
+model write it."
+  (let* ((model (or model (harness-compaction--brief-model session)))
          (input (+ (harness-estimate-tokens harness-compaction--system-prompt)
                    (harness-compaction--messages-tokens
                     (harness-compaction--narrative-messages messages))
@@ -602,7 +609,7 @@ CONTEXT and `:dropped' is 0."
      (list :kind 'truncate :model nil :model-label nil :input 0 :output 0 :cached nil :cost 0.0
            :after context :kept (length (harness-call 'session/messages session-id)) :dropped 0))))
 
-(harness-defmethod compaction/estimate (session-id)
+(harness-defmethod compaction/estimate (session-id &optional opts)
   "Say what compacting SESSION-ID costs, kind by kind, and what carrying on does.
 Return (:context N :model MODEL :model-label LABEL :cached BOOL
 :carry-on USD :carry-on-cached USD :compacting BOOL :kind KIND :kinds
@@ -622,7 +629,14 @@ verbatim, which that number includes.  Costs are
 at list prices, nil where the catalogue has none, and `transcript' and
 `fresh', which ask no model, cost 0; a transcript's `:file-tokens' is
 about how much the file holds.  `:messages' is how many messages the
-conversation sends now."
+conversation sends now.  A `summary' also says what it would cost once
+the prompt cache lapsed, `:cost-uncached': its `:cost' while the cache
+lasts is the cheaper one, and a client that keeps the answer for a
+while reads the other when the cache lapses meanwhile.
+
+OPTS `:brief-model' names the model that writes the `brief' summary in
+place of `harness-compaction-brief-model': a model switch has the new
+model write it, and asks what that costs."
   (let* ((session (harness-call 'session/get session-id))
          (model (plist-get session :model))
          (messages (harness-call 'session/messages session-id))
@@ -638,7 +652,8 @@ conversation sends now."
           :compacting (and (gethash session-id harness-compaction--running) t)
           :kind harness-compaction-kind
           :kinds (list (harness-compaction--estimate-summary session-id session context warm ends)
-                       (harness-compaction--estimate-brief session messages ends)
+                       (harness-compaction--estimate-brief session messages ends
+                                                           (plist-get opts :brief-model))
                        (harness-compaction--estimate-transcript context)
                        (harness-compaction--estimate-fresh (length messages) context)
                        (harness-compaction--estimate-truncate session-id context)))))

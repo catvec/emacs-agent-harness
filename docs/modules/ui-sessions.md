@@ -172,6 +172,7 @@ follows `task/changed` and `task/deleted` in between.
 ### Hooks
 
 - `harness-ui-sessions-footer-functions` — Functions drawing something under the rows of the session list.
+- `harness-ui-sessions-panel-functions` — Functions drawing a panel above the rows of the session list.
 
 ### Commands
 

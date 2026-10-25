@@ -56,9 +56,9 @@
 ;; provider -- a hosted loop, handed over a summary or a transcript or
 ;; nothing -- sends none of the old one, and a compaction replaces it
 ;; with its summary: the session reports no cache then, and no panel
-;; shows.  While the switch banner asks how to hand over
+;; shows.  While the model switch asks how to carry the conversation over
 ;; (harness-ui-handoff.el), the panel stays away: what the next request
-;; sends depends on the answer, and the banner says what the cache
+;; sends depends on the answer, and the question says what the cache
 ;; means for each.  So it does while a message sent to the session
 ;; waits on the question of what goes first, the cache being cold
 ;; (harness-cowboy.el, drawn by harness-ui-cowboy.el), and while the
@@ -75,7 +75,7 @@
 ;;
 ;; The panel comes on its own: each chat buffer has one timer, for the
 ;; moment its session's cache lapses, which draws the tail again then
-;; (`harness-compose-redraw'), the switch banner included.  Nothing
+;; (`harness-compose-redraw'), the model switch's question included.  Nothing
 ;; polls.  A session update moves the timer, as a new request keeps the
 ;; cache longer, and the panel goes while the session runs -- a turn
 ;; waiting on an answer included -- to come back when the turn ends with
@@ -102,7 +102,7 @@
 (defvar harness-chat--session)
 (defvar harness-ui-session-id)
 (defvar harness-compose-redraw-function)
-(defvar harness-ui-handoff--prompt)
+(defvar harness-ui-carry--prompt)
 (declare-function harness-chat--buffer-for "harness-ui-chat" (sid))
 (declare-function harness-compose-redraw "harness-ui-compose" ())
 (declare-function harness-compose-panel-hint "harness-ui-compose" (key))
@@ -121,8 +121,6 @@ It shows when a redaction dropped the cache too.  An orchid of its own,
 apart from the activity line's lavender, which shows in the same place
 while the session runs."
   :group 'harness-ui-cache)
-
-(harness-ui-define-icon harness-icon-clock "clock" "◷" "cache" "Time: a cache that lapsed.")
 
 (defvar-local harness-ui-cache--shown nil
   "What this buffer's cache panel showed when last drawn, or nil for nothing.
@@ -230,12 +228,12 @@ SESSION's own pending list or among the requests the UI knows of."
 
 (defun harness-ui-cache--current (session &optional now)
   "Return what this buffer's cache panel shows of SESSION at NOW, or nil.
-That is `harness-ui-cache--state', save while the switch banner asks
-how to hand over, or while a message waits on the question about the
-cold cache (`harness-ui-cache--asked-p'): what the next request sends
-depends on the answer, and the banner or the question says what the
-cache means for each."
-  (unless (or (bound-and-true-p harness-ui-handoff--prompt)
+That is `harness-ui-cache--state', save while the model switch asks how
+to carry the conversation over, or while a message waits on the
+question about the cold cache (`harness-ui-cache--asked-p'): what the
+next request sends depends on the answer, and the question says what
+the cache means for each."
+  (unless (or (bound-and-true-p harness-ui-carry--prompt)
               (harness-ui-cache--asked-p session))
     (harness-ui-cache--state session now)))
 
@@ -499,8 +497,8 @@ The tail is drawn again only when what the panel shows changed."
 
 (defun harness-ui-cache--lapse (buffer)
   "Draw BUFFER's tail again, its session's cache having lapsed by now.
-The cache panel shows from now on, or, while the switch banner asks
-instead, the banner says the cache expired; drawing sets the next
+The cache panel shows from now on, or, while the model switch asks
+instead, its question says the cache expired; drawing sets the next
 timer, if any."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer

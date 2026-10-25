@@ -634,6 +634,8 @@ truncation cost nothing."
         (should-not (plist-get summary :cached))
         (should (funcall near (/ (+ (* (+ 100000 ask) 12.5) (* harness-compaction--summary-output 50.0)) 1e6)
                          (plist-get summary :cost)))
+        ;; Uncached already: what it costs once the cache lapses is the same.
+        (should (funcall near (plist-get summary :cost) (plist-get summary :cost-uncached)))
         (should (equal "tiered:small" (plist-get brief :model)))
         (should (equal "Small" (plist-get brief :model-label)))
         (should (< (plist-get brief :input) 3000))
@@ -676,7 +678,12 @@ truncation cost nothing."
         (should (plist-get summary :cached))
         (should (< (abs (- (/ (+ (* 100000 1.0) (* ask 10.0) (* harness-compaction--summary-output 50.0)) 1e6)
                            (plist-get summary :cost)))
-                   1e-9))))
+                   1e-9))
+        ;; Once the cache lapses it reads all of it uncached: the other price.
+        (should (< (abs (- (/ (+ (* (+ 100000 ask) 12.5) (* harness-compaction--summary-output 50.0)) 1e6)
+                           (plist-get summary :cost-uncached)))
+                   1e-9))
+        (should (> (plist-get summary :cost-uncached) (plist-get summary :cost)))))
     ;; No catalogue prices: no costs, but the transcript's.
     (harness-define-provider 'unpriced
       :models (lambda () (harness-resolved (list (list :name "m" :context-window 100000))))
@@ -689,6 +696,28 @@ truncation cost nothing."
         (should-not (plist-get (car (plist-get e :kinds)) :cost))
         (should-not (plist-get (cadr (plist-get e :kinds)) :cost))
         (should (eql 0.0 (plist-get (nth 2 (plist-get e :kinds)) :cost)))))))
+
+(ert-deftest harness-compaction-estimate-prices-the-brief-summary-on-another-model ()
+  "A model switch has the new model write the brief summary, so it asks
+the estimate to price that one: the same narrative, on the model named."
+  (harness-compaction-test-with
+    (harness-compaction-test-tiered-provider)
+    (let ((id (harness-compaction-test-long-session))
+          (near (lambda (a b) (< (abs (- a b)) 1e-9))))
+      (harness-call 'session/update id :model "tiered:big" :silent t)
+      (let* ((brief (lambda (&optional opts)
+                      (cl-find 'brief (plist-get (harness-call 'compaction/estimate id opts) :kinds)
+                               :key (lambda (k) (plist-get k :kind)))))
+             (usual (funcall brief))
+             (other (funcall brief '(:brief-model "tiered:big"))))
+        (should (equal "tiered:small" (plist-get usual :model)))
+        (should (equal "tiered:big" (plist-get other :model)))
+        (should (equal "Big" (plist-get other :model-label)))
+        ;; The narrative is the same; the big model's list prices are higher.
+        (should (= (plist-get usual :input) (plist-get other :input)))
+        (should (funcall near (/ (+ (* (plist-get other :input) 12.5) (* (plist-get other :output) 50.0)) 1e6)
+                         (plist-get other :cost)))
+        (should (> (plist-get other :cost) (plist-get usual :cost)))))))
 
 (ert-deftest harness-compaction-resend-cost-prices-the-context-both-ways ()
   "`compaction/resend-cost' says what sending the context costs read from the

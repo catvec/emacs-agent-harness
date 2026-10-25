@@ -36,6 +36,14 @@
 ;;   what it is unsure of.  `handoff/switch-all' switches many at once,
 ;;   with one MODE for the lossy ones.
 ;;
+;; A lossy `handoff/check' brings the ways to hand over, as the
+;; cold-cache question offers its own (harness-cowboy.el): `:choices',
+;; from one table of ways with their keys and wording (harness-carry.el),
+;; each priced by `compaction/estimate' where that module is there, the
+;; new model writing the brief summary.  The UI asks with them in one
+;; panel (harness-ui-carry.el) and answers with the `:mode' of the
+;; choice.
+;;
 ;; The switch itself is immediate: a running turn finishes the step it
 ;; is in on the old model and takes the new one from its next step.  A
 ;; handoff has to land in the trailing user messages, after the model's
@@ -61,6 +69,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-carry)
 
 (defconst harness-handoff-modes '(compact compact-new transcript none)
   "How `handoff/switch' carries a conversation over to the new model.
@@ -129,10 +138,10 @@ Those come after the model's last reply, so a hosted loop is sent them."
        t))
 
 (defconst harness-handoff-risks
-  '("Cold cache: the new conversation starts uncached, so it pays cache writes where carrying on pays reads."
-    "Fidelity: the model explores again; tool calls, results and thinking arrive as text or a summary."
-    "Old state: a conversation it could resume, its own compaction and built-in tools stay behind."
-    "Timing: takes effect at the next step, not mid-step.")
+  '("Cold cache: new conversation uncached · cache writes where carrying on reads"
+    "Fidelity: exploring again · tool calls, results, thinking as text or a summary"
+    "Old state: resumable conversation, own compaction, built-in tools left behind"
+    "Timing: next step, not mid-step")
   "The risks of a lossy model switch, as `handoff/check' states them.
 Each is a short label, a colon and what it means, which the switch UI
 lays out as aligned rows.")
@@ -154,9 +163,42 @@ cache rather than read back from it."
       (format "%s tokens: %s to write, %s to read"
               (harness-format-tokens context) (harness-format-cost write) (harness-format-cost read)))))
 
-(defun harness-handoff--check (session model)
+(defun harness-handoff--estimate (session-id model)
+  "Return what carrying SESSION-ID over to MODEL costs, or nil.
+That is `compaction/estimate''s answer.  The new model writes the brief
+summary, so that is priced on MODEL.  A harness without the compaction
+module, or whose estimate fails, prices nothing: the choices are offered
+all the same."
+  (and (harness-method-exists-p 'compaction/estimate)
+       (condition-case err
+           (harness-call 'compaction/estimate session-id (list :brief-model model))
+         (error (harness-log 'warn "handoff: no estimate for %s: %s"
+                             session-id (harness-error-short-message err))
+                nil))))
+
+(defun harness-handoff--choices (session-id model)
+  "Return the choices a lossy switch of SESSION-ID to MODEL offers.
+Each is a choice of `harness-carry-choices', the cold-cache question's
+too, priced as `compaction/estimate' says, with `:mode', the
+`handoff/switch' mode that hands over that way (`cancel' for the choice
+that leaves the model alone): see `harness-carry-switch-ways'.  The
+summary on the current model also says what it costs once the prompt
+cache lapsed, `:cost-uncached': it reads the conversation back from the
+cache while that lasts."
+  (let* ((estimate (harness-handoff--estimate session-id model))
+         (uncached (plist-get (harness-carry-kind-estimate estimate 'summary) :cost-uncached)))
+    (mapcar (lambda (choice)
+              (if (equal (plist-get choice :choice) "summary")
+                  (append choice (list :cost-uncached uncached))
+                choice))
+            (harness-carry-choices (mapcar #'car harness-carry-switch-ways) estimate
+                                   #'harness-carry-switch-choice))))
+
+(defun harness-handoff--check (session model &optional choices)
   "Return what switching SESSION, a session plist, to MODEL means.
-See `handoff/check' for the shape."
+See `handoff/check' for the shape.  CHOICES non-nil prices the ways to
+hand over a lossy switch offers, which asking about it needs and doing
+it does not."
   (let* ((id (plist-get session :id))
          (from (plist-get session :model))
          (path (harness-call 'session/nodes id))
@@ -184,11 +226,12 @@ See `handoff/check' for the shape."
           :to-provider (harness-handoff--provider-label model)
           :lossy lossy :history history :running running
           :reason (or reason
-                      (format (concat "%s keeps its own conversation and is sent only the user messages after"
-                                      " the model's last reply, so none of this session's history reaches it.")
+                      (format (concat "%s: own conversation · only the user messages after"
+                                      " the model's last reply")
                               (harness-handoff--provider-label model)))
           :risks (and lossy harness-handoff-risks)
           :cache-cost (and lossy (harness-handoff--cache-cost session model))
+          :choices (and lossy choices (harness-handoff--choices id model))
           ;; Summarising on the current model is cheap while its cache
           ;; lasts: the UI says whether it still does when it asks.
           :cache (plist-get session :cache))))
@@ -197,20 +240,26 @@ See `handoff/check' for the shape."
   "Say what switching SESSION-ID to MODEL means for its conversation.
 Return (:id :name :from :from-label :to :to-label :to-provider :lossy
 BOOL :history BOOL :running BOOL :reason TEXT :risks (TEXT...)
-:cache-cost TEXT :cache CACHE).  A switch is lossy when MODEL's provider
-runs a hosted loop (it keeps the conversation and is sent only the
-newest user messages), cannot continue the session's own conversation
-\(`session/provider-state'), is not the session's current provider, and
-the session has history that would not reach it with no handoff
-waiting for it.  `:reason' says why it is lossy or why not; for a lossy
-switch `:risks' are `harness-handoff-risks', `:cache-cost' what the
-cold cache costs at MODEL's list prices (nil when they are unknown),
-and `:running' says a turn runs, which the switch reaches at its next
-step.  `:cache' is the session's prompt cache as `session/get' gives
-it, (:at :ttl :expires :model) or nil: a summary on the current model
-\(mode `compact') reads the conversation back from it while it lasts,
-and pays for all of it again uncached once it lapsed."
-  (harness-handoff--check (harness-call 'session/get session-id) model))
+:cache-cost TEXT :choices (CHOICE...) :cache CACHE).  A switch is lossy
+when MODEL's provider runs a hosted loop (it keeps the conversation and
+is sent only the newest user messages), cannot continue the session's
+own conversation (`session/provider-state'), is not the session's
+current provider, and the session has history that would not reach it
+with no handoff waiting for it.  `:reason' says why it is lossy or why
+not; for a lossy switch `:risks' are `harness-handoff-risks',
+`:cache-cost' what the cold cache costs at MODEL's list prices (nil when
+they are unknown), and `:running' says a turn runs, which the switch
+reaches at its next step.  `:choices' are the ways to hand over a lossy
+switch offers, in the order they are offered, each as the cold-cache
+question offers it (see `harness-carry-choices'): `:choice' the way,
+`:key', `:label', `:what', what it costs (`:cost', `:cost-text') and
+`:by', the model that writes it, and `:mode', the `handoff/switch' mode
+that does it, or `cancel'.  `:cache' is the session's prompt cache as
+`session/get' gives it, (:at :ttl :expires :model) or nil: a summary on
+the current model (mode `compact') reads the conversation back from it
+while it lasts, and pays for all of it again uncached once it lapsed,
+which that choice's `:cost-uncached' says."
+  (harness-handoff--check (harness-call 'session/get session-id) model t))
 
 (defun harness-handoff--selected (filter)
   "Return the session plists FILTER selects, as `session/set-all' does.
@@ -227,7 +276,7 @@ Sessions that already use MODEL are left out, as `session/set-all'
 leaves them alone.  Return the checks, newest session first."
   (cl-loop for s in (harness-handoff--selected filter)
            unless (equal (plist-get s :model) model)
-           collect (harness-handoff--check s model)))
+           collect (harness-handoff--check s model t)))
 
 ;;;; Handing over
 

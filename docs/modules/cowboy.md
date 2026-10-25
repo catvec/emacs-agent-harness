@@ -21,10 +21,13 @@ session's agent writing to it, the merge queue reporting a conflict
 -- sends the whole conversation again uncached: for a long one, much
 of what the session ever cost, paid at once for a cache nothing reads.
 
-Cowboy compaction is the quick way out the switch banner offered for
-a switch of provider (harness-handoff.el): replace the conversation
-with something small before the message goes, rather than send it
-all again.  This module makes it part of every turn.  Its
+Cowboy compaction is the quick way out a switch of provider offers
+(harness-handoff.el): replace the conversation with something small
+before the message goes, rather than send it all again.  The ways to
+do it are the ones the switch offers, from one table
+(harness-carry.el): the same keys, the same words, the same prices
+(`harness-cowboy-cost-text` is its `harness-carry-cost-text`), and
+one panel (harness-ui-carry.el) asks both questions.  This module makes it part of every turn.  Its
 `agent/before-turn` gate (`harness-cowboy--gate`) holds a turn whose
 session's cache lapsed -- or is held for a model the session no
 longer uses, which caches nothing for the model the message goes to

@@ -68,6 +68,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;web                ; Web search (pluggable providers, Brave built in; else the model…
  :ui
  ;;btw                ; BTW side conversations over the current session or view.
+ ;;carry              ; The panel that asks how to carry a conversation over: a cold prompt…
  ;;children           ; Running sub-agents of a session, pinned above its compose box: name,…
  ;;compact            ; Compact a session's conversation by hand, choosing the kind at a known…
  ;;dirs               ; Obsolete: the directories of a session are a section of its access…
@@ -172,6 +173,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-btw](ui-btw.md) |  | [ui](ui.md) | BTW side conversations over the current session or view. |
 | [ui-cache](ui-cache.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Warns above a session's compose box once its prompt cache has expired or been dropped, offering to compact. |
 | [ui-cache-warm](ui-cache-warm.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | A session's prompt cache kept warm, in the UI: a flame and a countdown in the chat header, the user's activity reported, and /warm, K and the flame to set a period by hand. |
+| [ui-carry](ui-carry.md) |  | [ui](ui.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) | The panel that asks how to carry a conversation over: a cold prompt cache, a model switch. |
 | [ui-chat](ui-chat.md) | by default | [ui](ui.md) | The chat buffer: transcript, pending panel, queue, attachments and compose box. |
 | [ui-children](ui-children.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Running sub-agents of a session, pinned above its compose box: name, progress and elapsed time. |
 | [ui-commit-msg](ui-commit-msg.md) |  | [ui](ui.md) | M-x harness-commit-msg-uninstall: take the harness's commit-msg hook out of a repository. |
@@ -179,10 +181,10 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-compose](ui-compose.md) | by default | [ui](ui.md) | The compose box shared by chat buffers and the task board. |
 | [ui-config](ui-config.md) | by default | [ui](ui.md) | Settings page: every harness setting, edited globally or for the project. |
 | [ui-cost-compare](ui-cost-compare.md) |  | [ui](ui.md), [ui-usage](ui-usage.md) | Compare what the recorded usage would have cost at other models' prices. |
-| [ui-cowboy](ui-cowboy.md) |  | [ui](ui.md), [ui-pending](ui-pending.md) | The cold-cache question as a panel: what goes first, at what cost. |
+| [ui-cowboy](ui-cowboy.md) |  | [ui](ui.md), [ui-pending](ui-pending.md), [ui-carry](ui-carry.md) | The cold-cache question as a panel: what goes first, at what cost. |
 | [ui-decisions](ui-decisions.md) |  | [ui](ui.md) | Lasting decisions in the UI: the cache the notes' [Undo] and [Redo] read, and the commands that move one. |
 | [ui-dirs](ui-dirs.md) |  | [ui-access](ui-access.md) | Obsolete: the directories of a session are a section of its access view (ui-access), which this loads. |
-| [ui-handoff](ui-handoff.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | The switch banner of a session: choose how to hand the conversation over. |
+| [ui-handoff](ui-handoff.md) |  | [ui](ui.md), [ui-chat](ui-chat.md), [ui-carry](ui-carry.md) | The question of a model switch: choose how to carry the conversation over. |
 | [ui-insights](ui-insights.md) |  | [ui](ui.md), [ui-usage](ui-usage.md) | The Insights report: figures and a written summary of your work with the agents, for any provider. |
 | [ui-linking](ui-linking.md) | by default | [ui](ui.md), [ui-chat](ui-chat.md) | Following the links agents write: a click on a harness: link opens the session, message, tool call, task or thread it names. |
 | [ui-media](ui-media.md) |  | [ui](ui.md) | Audio playback and recording, video thumbnails, clipboard images. |
@@ -383,8 +385,8 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-chat-header-end-functions` | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md) | [ui-cache-warm](ui-cache-warm.md), [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
-| `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
-| `harness-chat-panel-functions` | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-children](ui-children.md), [ui-handoff](ui-handoff.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
+| `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
+| `harness-chat-panel-functions` | [ui-cache](ui-cache.md), [ui-carry](ui-carry.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-carry](ui-carry.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
 | `harness-chat-send-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md) | [ui-btw](ui-btw.md) |
 | `harness-chat-tool-body-functions` | [ui-chat](ui-chat.md) | [ui-report](ui-report.md) |
 | `harness-chat-top-functions` | [ui-chat](ui-chat.md) |  |
@@ -422,10 +424,12 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-review-pending-functions` | [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) | [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-sessions-changed-hook` | [ui](ui.md) | [ui-notify](ui-notify.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-sessions-footer-functions` | [ui-sessions](ui-sessions.md) |  |
+| `harness-ui-sessions-panel-functions` | [ui-carry](ui-carry.md), [ui-sessions](ui-sessions.md) | [ui-carry](ui-carry.md) |
 | `harness-ui-set-all-functions` | [ui](ui.md) | [ui-tasks](ui-tasks.md) |
 | `harness-ui-tasks-action-functions` | [ui-tasks](ui-tasks.md) |  |
 | `harness-ui-tasks-corner-functions` | [ui-tasks](ui-tasks.md) |  |
 | `harness-ui-tasks-header-functions` | [ui-tasks](ui-tasks.md) | [ui-tasks-search](ui-tasks-search.md), [ui-version](ui-version.md) |
+| `harness-ui-tasks-panel-functions` | [ui-carry](ui-carry.md), [ui-tasks](ui-tasks.md) | [ui-carry](ui-carry.md) |
 | `harness-ui-tasks-tick-hook` | [ui-tasks](ui-tasks.md) | [ui-slots](ui-slots.md) |
 | `harness-ui-update-functions` | [ui](ui.md), [ui-children](ui-children.md) | [ui-access](ui-access.md), [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-tree](ui-tree.md) |
 | `harness-update-hook` | [ui-version](ui-version.md), `harness.el` | [ui-version](ui-version.md) |

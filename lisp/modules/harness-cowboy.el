@@ -10,10 +10,13 @@
 ;; -- sends the whole conversation again uncached: for a long one, much
 ;; of what the session ever cost, paid at once for a cache nothing reads.
 ;;
-;; Cowboy compaction is the quick way out the switch banner offered for
-;; a switch of provider (harness-handoff.el): replace the conversation
-;; with something small before the message goes, rather than send it
-;; all again.  This module makes it part of every turn.  Its
+;; Cowboy compaction is the quick way out a switch of provider offers
+;; (harness-handoff.el): replace the conversation with something small
+;; before the message goes, rather than send it all again.  The ways to
+;; do it are the ones the switch offers, from one table
+;; (harness-carry.el): the same keys, the same words, the same prices
+;; (`harness-cowboy-cost-text' is its `harness-carry-cost-text'), and
+;; one panel (harness-ui-carry.el) asks both questions.  This module makes it part of every turn.  Its
 ;; `agent/before-turn' gate (`harness-cowboy--gate') holds a turn whose
 ;; session's cache lapsed -- or is held for a model the session no
 ;; longer uses, which caches nothing for the model the message goes to
@@ -114,6 +117,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-policy)
+(require 'harness-carry)
 
 (defvar harness-non-interactive)
 (declare-function harness-compaction-history-p "harness-compaction" (session-id))
@@ -121,15 +125,12 @@
 ;;;; Settings
 
 (defconst harness-cowboy-choices
-  '((brief "Brief summary" "a cheap model summarises the narrative, tool calls in brief")
-    (summary "Summary" "the session's model summarises it all, reading it uncached")
-    (transcript "Transcript file" "the conversation goes to a file the model reads as it needs")
-    (fresh "Start afresh" "nothing is carried over; the model looks back when it needs to")
-    (carry-on "Carry on" "the whole conversation goes again, uncached")
-    (ignore "Ignore" "send the whole context as it is, adding nothing")
-    (hold "Not now" "the message waits; nothing is sent yet"))
+  (mapcar (lambda (way)
+            (list way (harness-carry-label way) (harness-carry-property way :what)))
+          (harness-carry-names))
   "What a message to a session whose prompt cache went cold can do first.
-Each entry is (CHOICE LABEL WHAT), in the order they are offered.
+Each entry is (CHOICE LABEL WHAT), in the order they are offered: the
+ways of `harness-carry-ways', which the model switch offers too.
 CHOICE is a symbol, LABEL what the options and the UI call it, and WHAT
 says what it does in a few words.  All but `hold' can be the default
 \(`harness-cowboy-default'); `hold' is only ever an answer.")
@@ -184,7 +185,7 @@ goes on as it is: sending a small conversation uncached costs little.
 
 (defun harness-cowboy-label (choice)
   "Return the label of CHOICE, a symbol."
-  (or (nth 1 (assq choice harness-cowboy-choices)) (format "%s" choice)))
+  (harness-carry-label choice))
 
 (defun harness-cowboy--default ()
   "Return the choice taken unasked: `harness-cowboy-default', or `brief'."
@@ -276,29 +277,12 @@ A switch the policy sets wins, then the session's own, then
          (error (harness-log 'warn "cowboy: no estimate for %s: %s" session-id (harness-error-short-message err))
                 nil))))
 
-(defun harness-cowboy--kind-estimate (estimate choice)
-  "Return ESTIMATE's entry for compaction kind CHOICE, or nil."
-  (cl-find-if (lambda (k) (eq (harness-cowboy--choice (plist-get k :kind)) choice))
-              (plist-get estimate :kinds)))
-
-(defun harness-cowboy--cost (estimate choice)
-  "Return what CHOICE costs as ESTIMATE says, in US dollars, or nil.
-Carrying on costs sending the context as things are; holding nothing."
-  (pcase choice
-    ('carry-on (plist-get estimate :carry-on))
-    ('ignore (plist-get estimate :carry-on))
-    ('hold nil)
-    (_ (plist-get (harness-cowboy--kind-estimate estimate choice) :cost))))
-
-(defun harness-cowboy-cost-text (estimate choice)
+(defalias 'harness-cowboy-cost-text #'harness-carry-cost-text
   "Return what CHOICE costs as ESTIMATE says, in a few words, or nil.
-\"free\" for what asks no model, \"~$0.42\" for the rest, and for
-carrying on what the uncached context costs."
-  (let ((cost (harness-cowboy--cost estimate choice)))
-    (cond ((memq choice '(transcript fresh)) "free")
-          ((not (numberp cost)) nil)
-          ((memq choice '(carry-on ignore)) (format "~%s uncached" (harness-format-cost cost)))
-          (t (format "~%s" (harness-format-cost cost))))))
+Called as (ESTIMATE CHOICE).  \"free\" for what asks no model,
+\"~$0.42\" for the rest, and for carrying on what the uncached context
+costs.  The model switch says what its choices cost the same way: this
+is `harness-carry-cost-text', which both share.")
 
 (defun harness-cowboy--duration (seconds)
   "Describe SECONDS in words: \"5 minutes\", \"3 hours\"."
@@ -427,15 +411,7 @@ would have said; nil otherwise."
           :history (and (fboundp 'harness-compaction-history-p)
                         (harness-compaction-history-p session-id)
                         t)
-          :choices (mapcar (lambda (entry)
-                             (let* ((choice (car entry))
-                                    (kind (harness-cowboy--kind-estimate estimate choice)))
-                               (list :choice (symbol-name choice) :label (nth 1 entry) :what (nth 2 entry)
-                                     :cost (harness-cowboy--cost estimate choice)
-                                     :cost-text (harness-cowboy-cost-text estimate choice)
-                                     :by (plist-get kind :model-label)
-                                     :after (plist-get kind :after))))
-                           harness-cowboy-choices))))
+          :choices (harness-carry-choices (mapcar #'car harness-cowboy-choices) estimate))))
 
 ;;;; Reading the answer
 
@@ -455,9 +431,10 @@ rather than carries on with a note; `brief' before `summary', so \"brief
 summary\" is brief.")
 
 (defconst harness-cowboy--keys
-  '(("b" . brief) ("s" . summary) ("t" . transcript) ("f" . fresh) ("c" . carry-on)
-    ("i" . ignore) ("q" . hold) ("h" . hold) ("n" . hold))
-  "One-letter answers, the keys of the chat's panel.")
+  (append (mapcar (lambda (way) (cons (char-to-string (harness-carry-key way)) way))
+                  (harness-carry-names))
+          '(("h" . hold) ("n" . hold)))
+  "One-letter answers: the keys of the panel (`harness-carry-ways'), and h and n.")
 
 (defun harness-cowboy-parse-answer (text)
   "Return the choice TEXT answers, as (CHOICE . ALWAYS), or nil.

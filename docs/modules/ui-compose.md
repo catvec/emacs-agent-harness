@@ -8,7 +8,7 @@ The compose box shared by chat buffers and the task board.
 - **Source:** [lisp/ui/harness-ui-compose.el](../../lisp/ui/harness-ui-compose.el)
 - **Loaded:** by default
 - **Requires:** [ui](ui.md)
-- **Required by:** [ui-pending](ui-pending.md), [ui-popout](ui-popout.md)
+- **Required by:** [ui-carry](ui-carry.md), [ui-pending](ui-pending.md), [ui-popout](ui-popout.md)
 
 ## About
 

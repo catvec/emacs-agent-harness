@@ -2015,22 +2015,30 @@ with the message that waits drawn above the compose box as a queued
 message (*queued*, `[edit]`, `[delete]`):
 
 ```
- ◷ Prompt cache cold  since 09:12 · Claude Opus · ~84.0k tokens
-   A message from the harness (tasks) waits: “The tests fail on CI; …”
-   Carrying on sends the whole conversation again, uncached: about $0.315 instead of the $0.025 it would cost cached.  What goes first?
+ ◷ Prompt cache cold  since 09:12 · Opus 5.5 · ~84.0k tokens
+   Waiting  message from the harness · “The tests fail on CI; …”
+   Resend   $0.315 uncached against $0.025 cached
 
-    b  Brief summary    ~$0.011           a cheap model summarises the narrative, tool calls in brief · the default
-    s  Summary          ~$0.463           the session's model summarises it all, reading it uncached
-    t  Transcript file  free              the conversation goes to a file the model reads as it needs
-    f  Start afresh     free              nothing is carried over; the model looks back when it needs to
-    c  Carry on         ~$0.315 uncached  the whole conversation goes again, uncached
-    i  Ignore           ~$0.315 uncached  send the whole context as it is, adding nothing
-    q  Not now                            the message waits; nothing is sent yet
+   Choose what goes first
+    b  Brief summary    ~$0.011           Haiku 5.5 · narrative, tool calls in brief · first and last messages kept · default
+    s  Summary          ~$0.463           Opus 5.5 · whole conversation · first and last messages kept
+    t  Transcript file  free              whole conversation as a file the model reads
+    f  Start afresh     free              nothing carried over
+    c  Carry on         ~$0.315 uncached  whole conversation again, uncached
+    i  Ignore           ~$0.315 uncached  whole conversation, nothing added
+    q  Not now                            message waits
 
-    B   S   T   F   C   I  the same, from now on without asking
-   Whichever you choose, the model can search and read the conversation it leaves out (session_history).
-   or type a choice below: “transcript”, “always brief”
+    B   S   T   F   C   I   default for every session, no asking
+   Left out: searchable with session_history
+   Type a choice below: “transcript”, “always brief”
+   from the box: C-c . b
 ```
+
+The two summaries keep the conversation's first and last messages as
+they were written, and say so: the task and the newest ask survive the
+summary. The panel is the one a [model switch](#switching-model-or-provider)
+asks with: the same ways, keys, words and costs, drawn by one
+component (`ui-carry`).
 
 A key with point on the panel, or a click on a choice, answers it; so
 does a digit, or a choice typed in the message box ("transcript",
@@ -5111,30 +5119,65 @@ Claude Code and Copilot keep the conversation themselves and are sent
 only your newest message, so switching a session to one of them from
 another provider would start a conversation that knows nothing of the
 work so far. With the `handoff` module (`:features handoff`), which
-brings its banner, `ui-handoff`, such a switch asks first — once for
-all of them with `C-c h M` — and lists the risks: a cold prompt cache (with what the
-session's context costs to write), lower fidelity (the model explores
-again; tool calls and thinking reach it only as text), the old
-provider's own state left behind, and that a running turn finishes its
-current step first. The question shows as a banner over the session's
-message box — the models, the risks and the costs, then one button and
-key per way to hand over — and as a minibuffer question when the session
-has no chat buffer open. Then choose:
+brings its panel, `ui-handoff`, such a switch asks first -- once for
+all of them with `C-c h M` -- and lists the risks: a cold prompt cache
+(with what the session's context costs to write), lower fidelity (the
+model explores again; tool calls and thinking reach it only as text),
+the old provider's own state left behind, and that a running turn takes
+the switch at its next step. Below the risks come the ways to carry the
+conversation over, each with its key and what it costs. They are the
+ways of the question a message asks when it meets a cold cache (see [A
+message to a session whose cache went cold](#a-message-to-a-session-whose-cache-went-cold)),
+in the same panel with the same keys, words and prices:
 
-- **`c` current model summarises**: it summarises the conversation,
-  whose cache is warm, and the new one starts from that summary;
-- **`n` new model summarises** (advanced): the new model writes the
-  summary itself, from the conversation's narrative — every user and
-  assistant message, each tool call and result in a line — so the whole
-  conversation's payloads never run through it. Use this when the
-  current provider cannot answer at all — its plan ran out, it is down —
-  or to keep the job cheap. What tools read and wrote is left out, so
-  the summary is a lossy one;
-- **`t` full transcript**: the whole transcript is written to
+```
+ ⚙ Switch model  Opus 5.5 → GPT-5.5 (Copilot)
+   Copilot: own conversation · only the user messages after the model's last reply
+   Cold cache  new conversation uncached · cache writes where carrying on reads
+   Fidelity    exploring again · tool calls, results, thinking as text or a summary
+   Old state   resumable conversation, own compaction, built-in tools left behind
+   Timing      next step, not mid-step
+   Cache cost  84.0k tokens: $0.525 to write, $0.042 to read (list prices)
+
+   Choose how to hand over
+    b  Brief summary    ~$0.041  new model GPT-5.5 (Copilot) · narrative, tool calls in brief · first and last messages kept
+    s  Summary          ~$0.014  current model Opus 5.5 · whole conversation · first and last messages kept · cache warm
+    t  Transcript file  free     whole conversation as a file the model reads
+    f  Start afresh     free     nothing carried over
+    q  Cancel                    model unchanged
+   from the box: C-c . b
+```
+
+- **`b` brief summary**: the new model writes the summary from the
+  conversation's narrative -- every user and assistant message, each
+  tool call and result in a line -- so the payloads never run through
+  it. Use this when the current provider cannot answer at all -- its
+  plan ran out, it is down -- or to keep the job cheap. What tools read
+  and wrote is left out, so the summary is a lossy one;
+- **`s` summary**: the current model summarises the whole conversation,
+  and the new one starts from that summary. While the session's prompt
+  cache is warm it reads the conversation back from it; once the cache
+  lapsed, or is another model's, the row says so ("cache expired at
+  14:07 · all uncached") and costs the uncached price;
+- **`t` transcript file**: the whole transcript is written to
   `.harness/handoff/` in the session's directory (git ignores it), and
   the new model is told to read it before it answers; its prompt cache
   holds it as it reads;
-- **`s` no handoff**, or **`q` cancel**.
+- **`f` start afresh**, which only switches, or **`q` cancel**.
+
+Both summaries keep the conversation's first and last messages as they
+were written, so the task and the newest ask survive the summary; the
+rows say so. A switch of many sessions costs each choice for all of
+them, and the panel names the sessions that lose their conversation.
+
+The panel shows where the switch started, and never in the minibuffer,
+which asks only for the model: above the compose box of the session's
+chat; above the rows of the session list, when you press it there, for
+the marked sessions or the one at point; above the lines over the
+compose box of a task board, when you press it there. A switch of every
+session started in any other buffer asks in the session list, opened
+for it. The keys answer while point is on the panel, which is where it
+puts point, and a click answers from anywhere.
 
 If the summariser fails, the transcript goes over instead. Whichever
 handoff you choose, the message that opens the new conversation says the
@@ -5155,10 +5198,11 @@ Without a mark they change the session at point. A marked session
 that works on a task passes the setting on to its task, which keeps it
 for its next start; tasks in review, done or archived are history and
 are left alone. A model switch that would lose conversations asks once,
-for all the marked sessions, how to hand them over, with the choices
-above. Each command changes only its own setting, so the priorities
-stay as they were unless you press `p` (or `+` and `-`), and the marks
-stay, so more settings can be given to the same sessions.
+for all the marked sessions, how to hand them over, in a panel above the
+rows of the list, with the choices above. Each command changes only its
+own setting, so the priorities stay as they were unless you press `p`
+(or `+` and `-`), and the marks stay, so more settings can be given to
+the same sessions.
 
 ### Session settings, from an agent
 
@@ -5603,7 +5647,7 @@ with it.
 | Providers | `provider` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-review` `tools-emacs-eval` `tools-dev` `tools-events` `tools-compact` `skills` |
 | Connections | `acp` | `acp-remote` `notifications` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-cache-warm` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` `ui-todo-sync` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-cache-warm` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` `ui-carry` `ui-todo-sync` |
 
 [docs/modules](docs/modules/README.md) has a page for each module,
 generated from its source by `scripts/module-docs.sh`: what it is, what

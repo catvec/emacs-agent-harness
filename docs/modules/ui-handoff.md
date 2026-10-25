@@ -2,12 +2,12 @@
 
 # ui-handoff
 
-The switch banner of a session: choose how to hand the conversation over.
+The question of a model switch: choose how to carry the conversation over.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-handoff.el](../../lisp/ui/harness-ui-handoff.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
-- **Requires:** [ui](ui.md), [ui-chat](ui-chat.md)
+- **Requires:** [ui](ui.md), [ui-chat](ui-chat.md), [ui-carry](ui-carry.md)
 - **Brings along:** [handoff](handoff.md) (the rest of it)
 
 ## About
@@ -17,46 +17,32 @@ with it.
 
 A switch to a model that keeps its own conversation (Claude Code,
 Copilot) starts a new conversation there, so the harness asks how to
-hand the old one over.  The question shows as a banner above the
-session's compose box -- a chat panel, as the review banner is -- with
-what the switch costs and a button for every way to hand over:
-summarise on the current model, have the new model summarise a limited
-context, hand the whole transcript over as a file, switch without a
-handoff, or cancel.
+carry the old one over.  The question is the panel that asks the same
+of a cold prompt cache (harness-ui-carry.el): the ways to carry a
+conversation over, with the keys, labels and wording of
+harness-carry.el, each with what it costs as the harness priced it
+(`handoff/check`'s `:choices`): a brief summary written by the new
+model, a summary written by the current one, a transcript file, a fresh
+start, or cancel.  Above them the panel says what the switch is, why
+it loses the conversation, its risks and what the new model's cold
+cache costs; a batch names the sessions that lose their conversation
+and says how many change in all, and each choice costs what it costs
+for all of them.
 
 Summarising on the current model is the cheap choice while that
 model's prompt cache is warm, as it reads the conversation back from
 it; once the cache lapsed (or is another model's) it reads all of it
-again uncached, and the option says so instead (see
-`harness-ui--handoff-choices-for`).  The cache panel
-(harness-ui-cache.el) stays away while the banner asks, and draws the
-tail again when the cache lapses, which brings the banner up to date.
+again uncached, and the choice says so, and costs that instead
+\(`harness-ui-handoff--cache-note`).  The cache panel
+(harness-ui-cache.el) stays away while the question is asked, and
+draws the tail again when the cache lapses, which brings the panel up
+to date.
 
-The banner's options work as a question's do: each names its key, the
-keys answer while point is on the banner, and a click answers from
-anywhere.  In the compose box the keys type; C-c . and a key press it
-on the banner from there (`harness-compose-panel-key`), which the
-banner's last line says.  Choosing runs `handoff/switch`
-(`handoff/switch-all` for a batch) through the UI connection, and the
-banner goes away.  A batch names the sessions that lose their
-conversation and says how many change in all.
-
-A harness with no chat buffer to show (a switch asked for outside the
-UI, or over ACP) cannot use the banner; the minibuffer question of
-`harness-ui--read-handoff` asks instead (see
-`harness-ui-switch-function`).
-
-## Provides
-
-### Hooks
-
-- `harness-chat-mode-hook`
-- `harness-chat-panel-functions`
-
-## Uses
-
-### Hooks it adds to
-
-- `harness-chat-mode-hook` → `harness-ui-handoff--setup`
-- `harness-chat-panel-functions` → `harness-ui-handoff--panel`
+Where the panel shows is the host's (harness-ui-carry.el): the chat of
+the session, the buffer the command ran in when that is the session
+list or the task board, else the session list, opened for it.  A
+switch of many sessions started anywhere therefore asks the same panel
+in a buffer you can see, and never in the minibuffer.  Choosing runs
+`handoff/switch` (`handoff/switch-all` for a batch) through the UI
+connection, and the panel goes away.
 

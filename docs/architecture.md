@@ -175,6 +175,11 @@ default) the layers above are split across two Emacs processes:
   harness-redaction below) is loaded on both sides.  The harness process
   redacts the stores with it; the UI uses it to take a secret out of the
   buffers of the user's Emacs, which the harness cannot reach.
+- The ways to carry a conversation over (lisp/harness-carry.el, see
+  cowboy and handoff below) are loaded on both sides: the cold-cache
+  question and the model switch send their choices from one table of
+  keys, labels and wording, priced by one cost function, and the UI
+  draws them with one panel (ui-carry).
 - The Claude plugin library (lisp/harness-claude-plugin.el, see
   "Looking like an ordinary Claude Code session" under provider) is
   loaded on both sides like the others, but only the harness process
@@ -5204,7 +5209,8 @@ and tools.
   delivered (`:delivered-after` the compaction node).  One that still
   waits for the turn's next step is no node (see agent): the step that
   follows the compaction records it, after the summary.
-- `compaction/estimate SESSION-ID` → `(:context :model :model-label
+- `compaction/estimate SESSION-ID &optional OPTS` → `(:context :model
+  :model-label
   :messages :cached :carry-on :carry-on-cached :compacting :kind
   :kinds)`: the context the next message sends, how many messages it
   holds, whether the prompt cache still lasts
@@ -5225,6 +5231,11 @@ and tools.
   `:dropped` (how many nodes each) and `:kept-tokens` and
   `:dropped-tokens`, with `:after` the note plus what is kept, and
   `:dropped` 0 when nothing can be cut (`:after` is then the context).
+  A summary's entry also says what it would cost once the prompt cache
+  lapsed, `:cost-uncached` (its `:cost` while the cache lasts is the
+  cheaper one), and OPTS `:brief-model` names the model that writes the
+  brief summary in place of `harness-compaction-brief-model`: a model
+  switch has the new model write it, and prices that.
 - `compaction/resend-cost SESSION-ID` → `(:context N :model MODEL
   :cached USD :uncached USD)`: what sending the context costs read from
   the model's prompt cache and not (the dearer of cache write and input),
@@ -5284,8 +5295,8 @@ and tools.
 ### cowboy
 
 What a message to a session whose prompt cache went cold does first.
-The quick compaction the switch banner offers on a switch of provider,
-made part of every turn: whoever sent the message (the user, a task's
+The quick compaction a switch of provider offers (see handoff), made
+part of every turn: whoever sent the message (the user, a task's
 feedback, another session's agent, the merge queue), it is not sent
 as it is, all of the conversation uncached, without a decision.
 
@@ -5303,7 +5314,9 @@ as it is, all of the conversation uncached, without a decision.
   as a new conversation's first message, uncached.  So the gate asks
   right after a redaction, or takes the default for a session nobody is
   asked about, as for any cold cache.
-- The choices (`harness-cowboy-choices`): `brief`, `summary`,
+- The choices (`harness-cowboy-choices`, the ways of `harness-carry-ways`
+  in lisp/harness-carry.el, which the model switch offers too, with the
+  same keys b s t f c i q and the same words): `brief`, `summary`,
   `transcript` and `fresh` compact as `compaction/compact` does, with
   `:meta (:cowboy (:choice C :by BY))`, before the message; `carry-on`
   sends the conversation as it is and says so in a hint; `ignore` sends
@@ -5331,8 +5344,10 @@ as it is, all of the conversation uncached, without a decision.
   waiting as `:waiting-message` `(:text :from)`, and `:cowboy`: `(:at
   :ttl :expires :dropped :cache-model :model :model-label :context
   :messages :carry-on :carry-on-cached :from :preview :default :history
-  :choices)`, each choice `(:choice :label :what :cost :cost-text :by
-  :after)`.  `:dropped`, when a redaction dropped the cache, is the
+  :choices)`, each choice `(:choice :key :label :what :cost :cost-text
+  :by :after)` (`harness-carry-choices`; `harness-cowboy-cost-text` is
+  `harness-carry-cost-text`, which prices the model switch's choices
+  too).  `:dropped`, when a redaction dropped the cache, is the
   moment, and then the question says so ("a redaction dropped this
   session's provider conversation at HH:MM, so no prompt cache holds
   it") and names no cached price to compare with: none can be had; the
@@ -5564,18 +5579,30 @@ so switching to either loses nothing.
 
 - `handoff/check SESSION-ID MODEL` → `(:id :name :from :from-label :to
   :to-label :to-provider :lossy :history :running :reason :risks
-  :cache-cost :cache)`.  Lossy when MODEL's provider differs from the
+  :cache-cost :choices :cache)`.  Lossy when MODEL's provider differs from the
   session's, runs a hosted loop, cannot continue the session's state
   (`session/provider-state`), and the session has history it would
   miss (anything a model or tool wrote since the last compaction) with
   no handoff already waiting for it.  `:reason` says why or why not.
   For a lossy switch `:risks` are `harness-handoff-risks`: a cold prompt
   cache (cache writes where carrying on would read), reduced fidelity
-  (the model explores again; tool calls and thinking reach it as text),
+  (exploring again; tool calls and thinking reach it as text),
   provider state left behind (resume, the provider's own compaction,
   its built-in tools), and that it takes effect at the next step, not
   mid-step; `:cache-cost` prices the session's context at MODEL's
-  cache-write and cache-read list prices.  `:cache` is the session's
+  cache-write and cache-read list prices.  For a lossy switch
+  `:choices` are the ways to hand over it offers, in order, as the
+  cold-cache question offers its own (`harness-carry-choices`): `(:choice
+  :key :label :what :cost :cost-text :by :after :mode)` for `brief` (the
+  new model writes it, mode `compact-new`), `summary` (the current model
+  does, mode `compact`; it also has `:cost-uncached`, what it costs once
+  the cache lapsed), `transcript`, `fresh` (mode `none`) and `hold`
+  (labelled Cancel, mode `cancel`), priced by `compaction/estimate`, the
+  new model writing the brief summary (without that module nothing is
+  priced but what asks no model); the check `handoff/switch` makes for
+  itself leaves them out.  The wording is
+  nouns, a segment after another, and says that the two summaries keep the
+  conversation's first and last messages as they were written.  `:cache` is the session's
   (see "Session"): whether the old model's prompt cache still lasts,
   which is what makes it cheap for that model to summarise.
 - `handoff/check-all MODEL &optional FILTER` → the checks of the
@@ -11523,25 +11550,57 @@ panel (decorating it with `harness-ui-pending-decorate`, the request's
 id and a keymap) returns non-nil, so the ordinary panel is not drawn
 too; `harness-ui-pending-session` names the session of the buffer
 drawing.
+How to carry a conversation over (`harness-ui-carry`, module `ui-carry`):
+the one panel that asks it, for the cold-cache question and the model
+switch, drawn from a spec (`harness-ui-carry-panel-string`) with a
+heading (an icon, a title, a detail), dim lines, labelled rows of facts,
+an imperative line, a row per choice and footer lines.  A choice
+is one of `harness-carry-ways` as the harness sends it (`harness-carry-choice`:
+`:choice :key :label :what :cost-text :by :after`): its key as a chip,
+a button, its cost in a column of its own, and its wording -- the model
+that writes it, then nouns, a segment after another, the default
+marked -- which breaks between segments (`:width`) in a buffer that
+truncates its lines; the tooltip names the cost, the wording, the
+context after it and the keys.  The keys answer while point is on the
+panel (`harness-ui-carry-keymap`; a capital answers "always" where the
+spec allows it, never for `hold`), a click answers from anywhere, and the
+panel is a panel of the compose box (`harness-compose-panel`), so `C-c .`
+presses a key from the box, which its last line says where a host has a
+box.  Its amber is `harness-ui-carry-face` (`harness-chat-switch-face`
+and `harness-ui-cowboy-face` are its obsolete names).  The text is nouns
+and imperatives, no sentences.
 Cold-cache question (`harness-ui-cowboy`, module `ui-cowboy`): the
-harness's question about a cold prompt cache (see cowboy) as a panel of
-its own, in the switch banner's amber (`harness-ui-cowboy-face`): a
-heading with the clock time the cache lapsed (or, when `:cowboy`
+harness's question about a cold prompt cache (see cowboy) as that panel,
+in place of the ordinary question panel: a heading with the clock time
+the cache lapsed (or, when `:cowboy`
 has `:dropped`, "dropped by a redaction at 14:07"; a cache held for
 another model reads as that model's, whatever became of it), the model
-and the context; who sent the message that waits, with its first line;
-what carrying on costs against the cache it lost (against none for a
-dropped cache: no cached price can be had); a row per choice with its
-key, a button, its cost and what it does, the default marked, the
-tooltip naming the writer and the context after it; and a footer with
-the capitals that answer "always", a line about session_history when
-the session has it, and the typed answers.  Its keymap
-(`harness-ui-cowboy-keys`: b s t f c i q, capitals for "always") has
+and the context; the message that waits, who sent it and its first line;
+what resending costs against the cache it lost (against none for a
+dropped cache: no cached price can be had); the choices of the payload,
+what it leaves out of one coming from `harness-carry-ways`; and a footer
+with the capitals that answer "always", a line about session_history when
+the session has it, and the typed answers.  Its keymap has
 `harness-ui-pending-question-map` as its parent, so digits pick an
 option as on any question; answers go through
 `harness-ui-pending-answer-question` (`harness-ui-cowboy-answer`), and
 text typed in the box answers it too.  Without a `:cowboy` the ordinary
 question panel shows.
+The question of a model switch (`harness-ui-handoff`, module `ui-handoff`)
+is the same panel with a local question: a spec made whenever the panel
+is drawn, so what the cache means for the summary is true as of then,
+and an answer that is a callback, not a pending request.  It needs a
+host, a buffer that shows the panel until it is answered
+(`harness-ui-carry-show`; `harness-ui-carry-hosts`): a chat, which draws
+it with `harness-chat-panel-functions`, above its compose box; the
+session list, above its rows
+(`harness-ui-sessions-panel-functions`; point stays on the panel when the
+list redraws, and the mode line and the marks are as they were); or a
+task board, in the lines over its compose box
+(`harness-ui-tasks-panel-functions`).  `harness-ui-carry-host` picks it:
+the buffer the command ran in, when it can host, else the session's own
+chat, else the session list, shown for it, so that a switch started
+anywhere asks in a buffer, and never in the minibuffer.
 Lasting decisions (`harness-ui-decisions`, module `ui-decisions`): a
 cache of the harness's decisions (see decisions), fetched whole with
 `_harness/decision/list` on connect and after `harness/reloaded`, then
@@ -11619,10 +11678,10 @@ compare it with.  The model switch wins when both apply: a cache held
 for another model reads as that model's, dropped or not.  The first
 request that stamps a cache after a redaction clears the dropped mark,
 and so does a compaction, so the panel goes then as well.  While the
-switch banner (`ui-handoff`) asks how to
-hand over, or the cold-cache question waits (`harness-ui-cache--asked-p`),
-the panel stays away: the banner's options, or the question's, say what
-the cache means for each.  The panel needs no input and no polling: each
+model switch (`ui-handoff`) asks how to
+carry the conversation over (`harness-ui-carry--prompt`), or the
+cold-cache question waits (`harness-ui-cache--asked-p`), the panel stays
+away: the question's choices say what the cache means for each.  The panel needs no input and no polling: each
 chat buffer holds one timer, for the moment its cache lapses, which
 redraws the box and whatever panel is above it (`harness-compose-redraw`);
 a session update (a new request stamps a new `:cache-at`) reschedules
@@ -12394,7 +12453,7 @@ text property of that name are gone: nothing reads the property.
 
 A panel's key, from the box: what sits above the box and binds keys of
 its own -- a question's digits, a permission's y, s, a, n and N, the
-cache panel's and the model-switch banner's choices, the task board's F
+cache panel's and the carry-over panel's choices, the task board's F
 and the other keys of its cards, a popout's q and g -- acts while point
 is on it, and in the box the same keys type (`harness-compose--pre-command`
 sends typing from outside the box into it, unless the key is a command
@@ -12680,30 +12739,42 @@ session list, below).
 A model switch asks the harness first (`handoff/check`, or
 `handoff/check-all` for `harness-set-model-all`, which asks once for the
 whole batch).  A lossy one asks how to hand over through
-`harness-ui-switch-function`: with the `ui-switch` module the question is
-a banner above the session's compose box -- the chat panel the review
-banner uses (`harness-chat-panel-functions`) -- with the two models, the
-reason, the risks, the cache cost and the running turn as labelled rows,
-and one button per choice (current model summarises, new model
-summarises a limited context, full transcript, no handoff, cancel).
-Summarising on the current model is cheap while its prompt cache lasts
-("warm cache"); once `handoff/check`'s `:cache` lapsed, or belongs to
-another model, the choice says so instead ("cache expired at 14:07:
-re-reads it all uncached", "cache cold: …", and for a batch how many
-lapsed), in the banner and the minibuffer alike
-(`harness-ui--handoff-choices-for`).  For one session whose cache a
-redaction dropped (`:cache` has `:dropped`, see `session/reset-provider`)
-it says so, as the cache panel does: "cache dropped at 14:07 by a
-redaction: re-reads it all uncached".  Its
-keys answer while point is on the banner and a click answers from
-anywhere; the banner says the handoff is lossy and the new model is told
-to re-investigate.  Without a chat buffer to show it in (a switch asked
-for outside the UI, or over ACP) the minibuffer question of
-`harness-ui--read-handoff` asks instead.  The answer goes to
-`handoff/switch` (`handoff/switch-all`); cancelling changes nothing, not
-even the default for new sessions.  A switch that loses nothing goes
-through `session/set_model` (`session/set-all`) as before, and so does
-any switch when the harness cannot check.
+`harness-ui-switch-function`: with the `ui-handoff` module the question is
+the panel of `ui-carry`, the one the cold-cache question is drawn with,
+with the two models, the reason, the risks, the cache cost and the
+running turn as labelled rows, and one choice per way to carry the
+conversation over, as `handoff/check`'s `:choices` send them: a brief
+summary the new model writes, a summary the current model writes, a
+transcript file, a fresh start, cancel -- with the keys b s t f q, the
+words of the cold-cache question, and what each costs (`harness-carry`),
+which for a batch is what it costs for all of its sessions, nothing
+where a price is not known.  Summarising on the current model is cheap
+while its prompt cache lasts ("cache warm"); once `handoff/check`'s
+`:cache` lapsed, or belongs to another model, the choice says so instead
+("cache expired at 14:07 · all uncached", "cache cold · all uncached",
+and for a batch how many lapsed) and costs what `:cost-uncached` says
+(`harness-ui-handoff--cache-note`, `harness-ui-handoff--choices`).  For
+one session whose cache a redaction dropped (`:cache` has `:dropped`, see
+`session/reset-provider`) it says so, as the cache panel does: "cache
+dropped at 14:07 by a redaction · all uncached".
+
+The panel shows where the switch started (`harness-ui-carry-host`, see
+"Chat buffer"): HOST, the buffer the command ran in, which every caller
+of `harness-ui-switch-function` passes, when it is a chat, the session
+list or a task board; else the chat of the session being switched, if it
+has one; else the session list, shown for it.  A switch of many sessions
+has no chat of its own, so it asks where it was started or in the list,
+never in the minibuffer, which asks only for the model: the switch of
+the list's marked sessions passes the list.  A UI without the
+`ui-handoff` module (`harness-ui-switch-function` is then
+`harness-ui--cancel-handoff`) cancels the switch with a message: a
+conversation is never lost unasked.  Keys answer while point is on the
+panel, which it draws with point there, and a click answers from
+anywhere; the answer goes to `handoff/switch` (`handoff/switch-all`);
+cancelling changes nothing, not even the default for new sessions.  A
+switch that loses nothing goes through `session/set_model`
+(`session/set-all`) as before, and so does any switch when the harness
+cannot check.
 
 Desktop notifications: `harness-ui` answers `_harness/client/notify` by
 showing the notification on this Emacs's desktop
@@ -14001,8 +14072,9 @@ marked ids as the filter (`(:ids IDS)`), `_harness/supervisor/set-all`
 for the supervisor mode, and for a model `_harness/handoff/check-all`,
 then `_harness/session/set-all` when no conversation would be lost or,
 when one would, `harness-ui-switch-function` asking once for all of them
-how to hand them over (the answer `cancel` changes nothing) and
-`_harness/handoff/switch-all` by the mode chosen.  Then, for the marked
+how to carry them over, in the panel of `ui-carry` above the rows of the
+list (`harness-ui-sessions-panel-functions`; the answer `cancel` changes
+nothing) and `_harness/handoff/switch-all` by the mode chosen.  Then, for the marked
 sessions that work on a task, one `_harness/task/set-all` with the
 setting and the tasks' ids as its filter (`(:ids TASK-IDS)`, tasks of
 every project, none named by a project), so each task starts again with
@@ -14204,12 +14276,16 @@ session for the feedback that sends it back (`harness-tasks--on-message'), so
 those two keys over the buffer's own, only for as long as it shows; it
 follows the task events of its session and draws again only when what
 it shows changes, finding the chat buffer by session id with `equal`,
-since an id from the harness process is a fresh string), the switch
-banner of a session (`harness-ui-handoff`: the chat panel that asks how
-to hand the conversation over when a lossy model switch needs it -- the
-models, the reason, the risks and costs as labelled rows, and a button
-and a key per way to hand over, falling back to the minibuffer question
-when no chat buffer shows; see "Switching model or provider"), the
+since an id from the harness process is a fresh string), the question
+of a model switch (`harness-ui-handoff`: what asks how to carry the
+conversation over when a lossy switch needs it, in the panel of
+`harness-ui-carry` -- the models, the reason, the risks and costs as
+labelled rows, and a key, a button and a price per way -- in the chat,
+the session list or the task board where the switch started, never the
+minibuffer; see "Switching model or provider"), the panel that asks it
+(`harness-ui-carry`: one spec, drawn for the cold-cache question and the
+model switch alike, with the hosts that show a local question; see "Chat
+buffer"), the
 prompt cache warning of a session (`harness-ui-cache`: the chat panel
 that says the cache lapsed and what the next message re-sends, drawn
 by a timer at the moment it lapses, with buttons that compact the
@@ -14217,9 +14293,9 @@ conversation first; see "Chat buffer"), cache warming
 (`harness-ui-cache-warm`: the flame and countdown in the chat's header
 while the cache is kept warm, the user's activity reported to the
 harness, `/warm`; see "Chat buffer"), the cold-cache question
-(`harness-ui-cowboy`: the panel that asks what goes first when a
-message meets a cold cache, through `harness-ui-pending-panel-functions`;
-see "Chat buffer"), compacting by hand
+(`harness-ui-cowboy`: what asks what goes first when a
+message meets a cold cache, in that panel, through
+`harness-ui-pending-panel-functions`; see "Chat buffer"), compacting by hand
 (`harness-ui-compact`: `harness-compact`, `C-c h C` and "C" in the
 menu, asks which kind with `read-multiple-choice`, the help buffer a
 table of each kind's writer, cost and effect and what carrying on

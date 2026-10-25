@@ -53,6 +53,16 @@
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks-edit "harness-ui-tasks")
+(declare-function harness-ui-tasks-compose-reset "harness-ui-tasks")
+(declare-function harness-ui-carry-show "harness-ui-carry")
+(declare-function harness-ui-carry-position "harness-ui-carry")
+(declare-function harness-ui-carry-host "harness-ui-carry")
+(declare-function harness-ui-carry-host-p "harness-ui-carry")
+(declare-function harness-ui-carry-on-panel-p "harness-ui-carry")
+(declare-function harness-ui-action-push "harness-ui" (&optional event))
+(declare-function harness-carry-switch-choice "harness-carry")
+(declare-function harness-compose-text "harness-ui-compose")
+(declare-function harness-ui-tasks--render-tail "harness-ui-tasks")
 (declare-function harness-ui-tasks--header "harness-ui-tasks")
 (declare-function harness-ui-tasks--render "harness-ui-tasks")
 (declare-function harness-ui-tasks--find "harness-ui-tasks")
@@ -6654,6 +6664,65 @@ first; resumed, the queue starts it.  A task at work is paused with its
         (dolist (id (list first second))
           (harness-test-wait (lambda () (eq 'done (plist-get (harness-call 'task/get id) :state))) 15
                              (format "task %s to finish" id)))))))
+
+(ert-deftest harness-ui-tasks-board-hosts-the-question-a-switch-asks ()
+  "A question that asks how to carry a conversation over shows on the
+board as a panel above the lines over the compose box, until a key or a
+click answers it: point goes to it, a redraw leaves point on it, the box's
+C-c . presses its keys, and the board is as it was once it is answered."
+  (harness-ui-tasks-test-with
+    (dolist (m '(ui-compose ui-markdown ui-pending ui-chat ui-carry))
+      (harness-test-load-module m))
+    (set-window-buffer (selected-window) board)
+    (let ((answers nil)
+          (spec (lambda ()
+                  (list :id "switch" :icon 'harness-icon-system :title "Switch model" :detail "A → B"
+                        :ask "Choose how to hand over"
+                        :choices (list (harness-carry-switch-choice 'summary :cost-text "~$0.010")
+                                       (harness-carry-switch-choice 'transcript :cost-text "free")
+                                       (harness-carry-switch-choice 'hold))))))
+      (should (harness-ui-carry-host-p board))
+      (should (eq board (harness-ui-carry-host nil board)))
+      (harness-ui-carry-show board "switch" spec (lambda (name) (push name answers)))
+      (with-current-buffer board
+        (let* ((start (harness-ui-carry-position))
+               (text (buffer-substring-no-properties (point-min) (point-max))))
+          ;; Above the compose box, below the cards, in the lines over it.
+          (should (>= start harness-ui-tasks--list-end))
+          (should (< start harness-compose-start))
+          (should (eq 'panel (get-text-property start 'harness-task-tail)))
+          ;; After a blank line, where the gap that keeps the box at the bottom
+          ;; opens: the panel's amber does not fill the gap.
+          (should (eq ?\n (char-before start)))
+          (should-not (memq 'harness-ui-carry-face (ensure-list (get-text-property (1- start) 'face))))
+          (should (string-match-p "Switch model  A → B" text))
+          (should (string-match-p "^    s  Summary +~\\$0\\.010 +" text))
+          (should (string-match-p "^   from the box: C-c \\. s$" text))
+          ;; Point is on it, so its keys work; they are the board's no more.
+          (should (harness-ui-carry-on-panel-p))
+          (harness-ui-tasks--render-tail)
+          (should (harness-ui-carry-on-panel-p))
+          (should (equal "switch" (get-text-property (point) 'harness-compose-panel)))
+          ;; From the box, where s types, C-c . s presses it.
+          (goto-char harness-compose-end)
+          (execute-kbd-macro "s")
+          (should (equal "s" (harness-compose-text)))
+          (harness-ui-tasks-compose-reset)
+          (execute-kbd-macro (kbd "C-c . s"))))
+      (should (equal '("summary") answers))
+      (with-current-buffer board
+        (should-not (harness-ui-carry-position))
+        (should-not (string-match-p "Switch model" (buffer-substring-no-properties (point-min) (point-max)))))
+      ;; A click on a button answers from anywhere.
+      (harness-ui-carry-show board "switch" spec (lambda (name) (push name answers)))
+      (with-current-buffer board
+        (goto-char (point-min))
+        (search-forward "Transcript file")
+        (goto-char (match-beginning 0))
+        (harness-ui-action-push))
+      (should (equal '("transcript" "summary") answers))
+      (with-current-buffer board
+        (should-not (harness-ui-carry-position))))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

@@ -2590,9 +2590,9 @@ nothing."
   "A model switch of the marked sessions is checked first, for all of them.
 When no session would lose its conversation, they switch together
 \(`session/set-all').  When one would, `harness-ui-switch-function' asks
-once, as `harness-set-model-all' has it ask, for no session and no
-chat: the checks of the sessions that lose theirs, the model's label and
-how many sessions change in all.  The mode it answers goes to
+once, as `harness-set-model-all' has it ask, for no session and the list
+as its host: the checks of the sessions that lose theirs, the model's
+label and how many sessions change in all.  The mode it answers goes to
 `handoff/switch-all' with the same sessions; `cancel' sends nothing.  A
 harness that cannot check switches them as it always did.  The tasks take
 the model after the sessions, and the default model stays."
@@ -2627,7 +2627,8 @@ the model after the sessions, and the default model stays."
                   `(("_harness/handoff/check-all"
                      . ,(list lossy (list :id "b" :from "demo:scripted" :lossy :false)))))
             (switch)
-            (should (equal `(((,lossy) ,label 2 nil nil)) asked))
+            ;; For no session, and the list the command ran in as the host.
+            (should (equal `(((,lossy) ,label 2 nil ,(get-buffer harness-ui-sessions--buffer-name))) asked))
             (should (equal '("_harness/handoff/check-all")
                            (mapcar #'car (harness-ui-sessions-test--answers))))
             ;; The answer goes to the switch of the same sessions, then to their

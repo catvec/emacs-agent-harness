@@ -46,6 +46,14 @@ conversation over when asked to:
   what it is unsure of.  `handoff/switch-all` switches many at once,
   with one MODE for the lossy ones.
 
+A lossy `handoff/check` brings the ways to hand over, as the
+cold-cache question offers its own (harness-cowboy.el): `:choices`,
+from one table of ways with their keys and wording (harness-carry.el),
+each priced by `compaction/estimate` where that module is there, the
+new model writing the brief summary.  The UI asks with them in one
+panel (harness-ui-carry.el) and answers with the `:mode` of the
+choice.
+
 The switch itself is immediate: a running turn finishes the step it
 is in on the old model and takes the new one from its next step.  A
 handoff has to land in the trailing user messages, after the model's
@@ -84,6 +92,7 @@ cache's stamp as any compaction does.
 
 - `agent/running` ([agent](agent.md))
 - `compaction/compact` ([compaction](compaction.md))
+- `compaction/estimate` ([compaction](compaction.md)), when it is loaded
 - `provider/capabilities` ([provider](provider.md))
 - `provider/model` ([provider](provider.md))
 - `session/append` ([session](session.md))

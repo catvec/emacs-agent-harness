@@ -7,8 +7,8 @@ The cold-cache question as a panel: what goes first, at what cost.
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-cowboy.el](../../lisp/ui/harness-ui-cowboy.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
-- **Requires:** [ui](ui.md), [ui-pending](ui-pending.md)
-- **Brings along:** [cowboy](cowboy.md) (the rest of it), [ui-compose](ui-compose.md) (its file requires it)
+- **Requires:** [ui](ui.md), [ui-pending](ui-pending.md), [ui-carry](ui-carry.md)
+- **Brings along:** [cowboy](cowboy.md) (the rest of it)
 
 ## About
 
@@ -20,14 +20,17 @@ other; its payload's `:cowboy` says when the cache lapsed (or that it
 is held for a model the session no longer uses, or that a redaction
 dropped it, and when), what carrying on costs and what each choice
 costs, a dropped cache being compared with no cached price, as none
-can be had.  This module draws it
-as a panel of its own, in place of the ordinary question panel
-(`harness-ui-pending-panel-functions`), in the chat and in a popout
-of it: who sent the message that waits, what carrying on costs
-against the cache it lost, and a line per choice with its key, its
-cost and what it does.  Its amber is the switch banner's
-(harness-ui-handoff.el), the other place a conversation is carried
-over at a cost.
+can be had.  This module draws it as a panel of its own, in place of
+the ordinary question panel (`harness-ui-pending-panel-functions`), in
+the chat and in a popout of it.
+
+The panel is the one that asks how to carry a conversation over
+(harness-ui-carry.el), which the model switch uses too
+(harness-ui-handoff.el): this module only says what to put in it --
+why the cache is cold, which message waits, what resending costs
+against the cache it lost -- and what an answer does.  The choices,
+their keys and their wording are those of harness-carry.el, as the
+harness sends them; what the payload leaves out of one is the table's.
 
 A key answers once -- b, s, t, f, c, i -- and its capital always: B,
 S, T, F, C or I makes the choice `harness-cowboy-default` and stops

@@ -3,6 +3,7 @@
 
 (require 'harness-test-helpers)
 (require 'harness-ui)
+(require 'harness-carry)
 
 ;; The tasks module's cap: declared here so that the context limit test
 ;; can bind it, the way a task's session is capped.
@@ -2425,18 +2426,25 @@ NAME is the session's name; RUNNING says a turn runs."
   (list :id id :name name :lossy t :history t :running running
         :from "deepseek:deepseek-flash" :from-label "DeepSeek V4.1 Flash"
         :to "claude:claude-opus-5-5" :to-label "Claude Opus 5.5" :to-provider "Claude Code"
-        :reason "Claude Code keeps its own conversation and is sent only the user messages after the model's last reply."
-        :risks '("Cold prompt cache: written, not read."
-                 "Reduced fidelity: explored again."
-                 "Old provider state: a conversation it could resume, compaction it did itself and its built-in tools stay behind."
-                 "Timing: takes effect at the next step, not mid-step.")
-        :cache-cost "120k tokens: $0.60 to write, $0.02 to read"))
+        :reason "Claude Code: own conversation · only the user messages after the model's last reply"
+        :risks '("Cold cache: new conversation uncached"
+                 "Fidelity: exploring again"
+                 "Old state: resumable conversation left behind"
+                 "Timing: next step, not mid-step")
+        :cache-cost "120k tokens: $0.60 to write, $0.02 to read"
+        :choices (list (harness-carry-switch-choice 'brief :cost 0.01 :cost-text "~$0.010")
+                       (harness-carry-switch-choice 'summary :cost 0.02 :cost-text "~$0.020")
+                       (harness-carry-switch-choice 'transcript)
+                       (harness-carry-switch-choice 'fresh)
+                       (harness-carry-switch-choice 'hold))))
 
-(defmacro harness-ui-test-with-switch (answers key &rest body)
+(defmacro harness-ui-test-with-switch (answers mode &rest body)
   "Run BODY switching models with the harness answering from ANSWERS.
 ANSWERS maps a method to its result.  The user picks the first model
-and, asked about a lossy switch, KEY.  BODY sees CALLS, the requests
-made, newest first, and ASKED, the arguments of each question asked."
+and, asked how to carry a lossy switch over, answers MODE, a mode of
+`handoff/switch' or `cancel'.  BODY sees CALLS, the requests made,
+newest first, and ASKED, the arguments of each question asked (all but
+the callback).  Nothing is asked in the minibuffer."
   (declare (indent 2))
   `(let ((calls nil) (asked nil))
      (cl-letf (((symbol-function 'harness-ui-refresh-models)
@@ -2449,159 +2457,43 @@ made, newest first, and ASKED, the arguments of each question asked."
                   (when callback (funcall callback (cdr (assoc method ,answers))))))
                ((symbol-function 'completing-read) (lambda (_prompt table &rest _) (caar table)))
                ((symbol-function 'read-multiple-choice)
-                (lambda (prompt choices &optional help show &rest _)
-                  (push (list prompt choices help show) asked)
-                  (assq ,key choices))))
-       ,@body)))
+                (lambda (&rest _) (error "The switch asked in the minibuffer"))))
+       (let ((harness-ui-switch-function
+              (lambda (&rest args)
+                (push (butlast args) asked)
+                (funcall (car (last args)) ,mode))))
+         ,@body))))
 
 (ert-deftest harness-ui-set-model-asks-before-losing-the-conversation ()
-  "A lossy switch states its risks first and hands over as the user chooses."
+  "A lossy switch asks how to carry the conversation over, in the buffer
+the command ran in, and hands over as the user chooses."
   (harness-ui-test-with-switch
       (list (cons "_harness/handoff/check" (harness-ui-test--lossy-check "s1" "Fix the parser" t))
             (cons "_harness/handoff/switch" '(:mode "transcript" :file "/tmp/p/.harness/handoff/s1.md")))
-      ?t
-    (harness-set-model "s1")
-    (should (= 1 (length asked)))
-    (pcase-let ((`(,_prompt ,choices ,help ,show) (car asked)))
-      ;; Shown at once: the switch, the risks, the choices -- as tables.
-      (should show)
-      (should (equal '(?c ?n ?t ?s ?q) (mapcar #'car choices)))
-      (should (string-match-p (concat "^MODEL SWITCH → "
-                                      (regexp-quote (harness-ui-model-label "claude:claude-opus-5-5")) "$")
-                              help))
-      (should (string-match-p "^  Session  “Fix the parser”$" help))
-      (should (string-match-p (concat "^  From     " (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash")) "$")
-                              help))
-      (should (string-match-p "sent only the user[ \n]+messages after the model's last reply" help))
-      (should (string-match-p "^  Cache    120k tokens: \\$0\\.60 to write, \\$0\\.02 to read (list prices)$" help))
-      (should (string-match-p "^  Turn     running; the switch takes effect at its next step$" help))
-      ;; The risks table: a heading, a header row, the four labelled risks.
-      (should (string-match-p "^RISKS$" help))
-      (should (string-match-p "^  RISK\\( +\\)WHAT IT MEANS$" help))
-      (dolist (risk '("Cold prompt cache" "Reduced fidelity" "Old provider state" "Timing"))
-        (should (string-match-p (format "^  %s +." (regexp-quote risk)) help)))
-      ;; Short, one line each, easy to scan: key, name, what it does.
-      (should (string-match-p "^  c  current model summarises[ ]+warm cache; summary from the whole conversation$" help))
-      (should (string-match-p "^  n  new model summarises[ ]+the conversation's narrative, tool calls in brief; small, but lossy$" help))
-      (should (string-match-p "^  t  full transcript[ ]+whole conversation as a file the new model reads$" help))
-      (should (string-match-p "^  s  no handoff[ ]+no context; the new model starts from your next message$" help))
-      (should (string-match-p "^  q  cancel[ ]+keep the current model$" help))
-      (should (string-match-p "^HAND OVER$" help))
-      (should (string-match-p "^  lossy; the new model is told to re-investigate$" help)))
+      'transcript
+    (with-temp-buffer
+      (harness-set-model "s1")
+      (should (= 1 (length asked)))
+      ;; The check, the model's label, one session, which one, and where the command ran.
+      (pcase-let ((`(,checks ,label ,total ,session ,host) (car asked)))
+        (should (equal (list (harness-ui-test--lossy-check "s1" "Fix the parser" t)) checks))
+        (should (equal (harness-ui-model-label "claude:claude-opus-5-5") label))
+        (should (= 1 total))
+        (should (equal "s1" session))
+        (should (eq (current-buffer) host))))
     (let ((check (cdr (assoc "_harness/handoff/check" calls)))
           (switch (cdr (assoc "_harness/handoff/switch" calls))))
       (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5") check))
       (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5" :mode "transcript") switch)))
     (should-not (assoc "session/set_model" calls))))
 
-(ert-deftest harness-ui-handoff-choices-say-when-the-cache-is-cold ()
-  "Summarising on the current model is cheap while that model's cache is
-warm, so the choice says when it is not: it lapsed, or it is another
-model's.  Where nothing is known, or every cache is warm, it reads as
-ever; the other choices always do."
-  (let* ((now 10000.0)
-         (warm '(:from "a:m" :cache (:at 9900.0 :ttl 300 :expires 10200.0 :model "a:m")))
-         (expired '(:from "a:m" :cache (:at 9000.0 :ttl 300 :expires 9300.0 :model "a:m")))
-         (other '(:from "a:m" :cache (:at 9900.0 :ttl 300 :expires 10200.0 :model "b:m")))
-         (unknown '(:from "a:m"))
-         (usual (nth 3 (assq ?c harness-ui--handoff-choices)))
-         (describe (lambda (&rest checks) (nth 3 (assq ?c (harness-ui--handoff-choices-for checks now))))))
-    (should (equal "warm cache; summary from the whole conversation" usual))
-    (should (equal usual (funcall describe warm)))
-    (should (equal usual (funcall describe unknown)))
-    (should (equal usual (funcall describe warm unknown)))
-    (should (equal (format "cache expired at %s: re-reads it all uncached" (harness-ui-format-clock 9300.0 now))
-                   (funcall describe expired)))
-    (should (equal "cache cold: re-reads it all uncached" (funcall describe other)))
-    (should (equal "caches expired: re-reads them all uncached" (funcall describe expired other)))
-    (should (equal "re-reads it all uncached where the cache lapsed (1 of 3)"
-                   (funcall describe warm expired unknown)))
-    (dolist (key '(?n ?t ?s ?q))
-      (should (equal (assq key harness-ui--handoff-choices)
-                     (assq key (harness-ui--handoff-choices-for (list expired) now)))))
-    ;; The minibuffer question says so too.
-    (let ((help (harness-ui--handoff-text (list (append (list :id "s1" :name "Fix it") expired))
-                                          "Hosted M" 1)))
-      (should (string-match-p (format "^  c  current model summarises +cache expired at %s: re-reads it all uncached$"
-                                      (regexp-quote (harness-ui-format-clock 9300.0)))
-                              help))
-      (should-not (string-match-p "warm cache" help)))))
-
-(ert-deftest harness-ui-handoff-choices-do-not-call-the-cache-of-a-running-turn-expired ()
-  "A session whose turn runs reads its cache with every request: it is not called lapsed.
-The stamp of a hosted loop (Claude Code) is the turn before's until the
-turn says its next request, and a switch made then summarises at the
-turn's next step, from a cache the turn has just used.  The switch
-banner would have said the cache expired at a moment before the turn
-began: a false alarm.  What the stamp says of another model's cache holds
-whatever the turn does, and so does a cache that is warm."
-  (let* ((now 10000.0)
-         (expired '(:from "a:m" :running t :cache (:at 9000.0 :ttl 300 :expires 9300.0 :model "a:m")))
-         (idle (plist-put (copy-sequence expired) :running nil))
-         (other '(:from "a:m" :running t :cache (:at 9900.0 :ttl 300 :expires 10200.0 :model "b:m")))
-         (warm '(:from "a:m" :running t :cache (:at 9900.0 :ttl 300 :expires 10200.0 :model "a:m")))
-         (usual (nth 3 (assq ?c harness-ui--handoff-choices)))
-         (describe (lambda (&rest checks) (nth 3 (assq ?c (harness-ui--handoff-choices-for checks now))))))
-    ;; The same stamp, said of an idle session, is a lapsed cache.
-    (should (equal (format "cache expired at %s: re-reads it all uncached" (harness-ui-format-clock 9300.0 now))
-                   (funcall describe idle)))
-    (should (equal usual (funcall describe expired)))
-    (should (equal usual (funcall describe warm)))
-    (should (equal "cache cold: re-reads it all uncached" (funcall describe other)))
-    ;; A batch counts the lapsed caches of the sessions that wait.
-    (should (equal "re-reads it all uncached where the cache lapsed (1 of 2)"
-                   (funcall describe idle expired)))
-    (should (equal usual (funcall describe expired warm)))))
-
-(ert-deftest harness-ui-handoff-choices-say-when-a-redaction-dropped-the-cache ()
-  "A cache a redaction dropped (the check's `:cache' has `:dropped') is not one that lapsed.
-Asked about one session, the choice says when the redaction dropped it, as
-the cache panel does, and that it re-reads everything uncached.  Every
-other case reads as it did: a lapsed cache, another model's cache -- the
-cache a redaction dropped of a model the session left is that, first --
-a batch, and a cache that still lasts."
-  (let* ((now (+ 10000.0 86400.0))
-         (dropped '(:from "a:m" :cache (:at 9000.0 :ttl 300 :expires 10100.0 :model "a:m" :dropped 10100.0)))
-         (lapsed '(:from "a:m" :cache (:at 9000.0 :ttl 300 :expires 9300.0 :model "a:m")))
-         (other '(:from "a:m" :cache (:at 9000.0 :ttl 300 :expires 10100.0 :model "b:m" :dropped 10100.0)))
-         (warm (list :from "a:m" :cache (list :at (- now 10) :ttl 300 :expires (+ now 290) :model "a:m")))
-         (describe (lambda (&rest checks) (harness-ui--handoff-compact-text checks now)))
-         (clock (harness-ui-format-clock 10100.0 now)))
-    ;; The drop is said with its moment, which is the cache's `:expires', and by whom.
-    (should (equal (format "cache dropped at %s by a redaction: re-reads it all uncached" clock)
-                   (funcall describe dropped)))
-    (should (equal (format "cache dropped at %s by a redaction: re-reads it all uncached"
-                           (harness-ui-format-clock 10100.0 10200.0))
-                   (harness-ui--handoff-compact-text (list dropped) 10200.0)))
-    ;; Not the words for a cache that lapsed by itself, which read as they did.
-    (should (equal (format "cache expired at %s: re-reads it all uncached" (harness-ui-format-clock 9300.0 now))
-                   (funcall describe lapsed)))
-    (should (equal "cache cold: re-reads it all uncached" (funcall describe other)))
-    ;; A batch says only how many lapsed, as ever.
-    (should (equal "caches expired: re-reads them all uncached" (funcall describe dropped lapsed)))
-    (should (equal "caches expired: re-reads them all uncached" (funcall describe dropped dropped)))
-    (should (equal "re-reads it all uncached where the cache lapsed (1 of 2)" (funcall describe warm dropped)))
-    (should-not (funcall describe warm))
-    ;; The choice and the minibuffer question carry it; the other choices do not change.
-    (should (equal (format "cache dropped at %s by a redaction: re-reads it all uncached" clock)
-                   (nth 3 (assq ?c (harness-ui--handoff-choices-for (list dropped) now)))))
-    (dolist (key '(?n ?t ?s ?q))
-      (should (equal (assq key harness-ui--handoff-choices)
-                     (assq key (harness-ui--handoff-choices-for (list dropped) now)))))
-    (let ((help (harness-ui--handoff-text (list (append (list :id "s1" :name "Fix it") dropped))
-                                          "Hosted M" 1)))
-      (should (string-match-p (format "^  c  current model summarises +cache dropped at %s by a redaction: re-reads it all uncached$"
-                                      (regexp-quote (harness-ui-format-clock 10100.0)))
-                              help))
-      (should-not (string-match-p "warm cache\\|cache expired" help)))))
-
 (ert-deftest harness-ui-set-model-compacts-with-the-new-model ()
-  "The advanced choice has the new model summarise a limited context."
+  "The brief summary has the new model summarise a limited context."
   (harness-ui-test-with-switch
       (list (cons "_harness/handoff/check" (harness-ui-test--lossy-check "s1" "Fix the parser" t))
             (cons "_harness/handoff/switch"
                   '(:mode "compact-new" :summarizer "claude:claude-opus-5-5" :context "sample")))
-      ?n
+      'compact-new
     (harness-set-model "s1")
     (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5" :mode "compact-new")
                    (cdr (assoc "_harness/handoff/switch" calls))))))
@@ -2610,42 +2502,39 @@ a batch, and a cache that still lasts."
   "Cancelling leaves the model alone; a switch that loses nothing just happens."
   (harness-ui-test-with-switch
       (list (cons "_harness/handoff/check" (harness-ui-test--lossy-check "s1" "Fix the parser")))
-      ?q
+      'cancel
     (harness-set-model "s1")
     (should (= 1 (length asked)))
     (should-not (assoc "_harness/handoff/switch" calls))
     (should-not (assoc "session/set_model" calls)))
   (harness-ui-test-with-switch
       (list (cons "_harness/handoff/check" '(:id "s1" :lossy nil :reason "The new model is of the same provider.")))
-      ?q
+      'cancel
     (harness-set-model "s1")
     (should-not asked)
     (should (equal '(:sessionId "s1" :modelId "claude:claude-opus-5-5")
                    (cdr (assoc "session/set_model" calls))))))
 
 (ert-deftest harness-ui-set-model-all-asks-once ()
-  "Switching every session asks once, for all those that would lose their conversation."
+  "Switching every session asks once, for all those that would lose their
+conversation, in the buffer the command ran in."
   (harness-ui-test-with-switch
       (list (cons "_harness/handoff/check-all"
                   (list (harness-ui-test--lossy-check "s1" "Fix the parser" t)
                         (harness-ui-test--lossy-check "s2" nil)
                         '(:id "s3" :lossy nil :reason "Same provider.")))
             (cons "_harness/handoff/switch-all" '("s1" "s2" "s3")))
-      ?c
-    (harness-set-model-all)
-    (should (= 1 (length asked)))
-    (let ((help (nth 2 (car asked))))
-      (should (string-match-p "^  Sessions  2 of 3 start a new conversation there$" help))
-      (should (string-match-p (concat "^MODEL SWITCH → "
-                                      (regexp-quote (harness-ui-model-label "claude:claude-opus-5-5")) "$")
-                              help))
-      (should (string-match-p "^  SESSION +\\(FROM +TURN +CACHE COST\\)$" help))
-      (let ((from (regexp-quote (harness-ui-model-label "deepseek:deepseek-flash"))))
-        (should (string-match-p (concat "^  “Fix the parser” +" from " +running +120k tokens: \\$0\\.60 to write, \\$0\\.02 to read$")
-                                help))
-        (should (string-match-p (concat "^  s2 +" from " +- +120k tokens: \\$0\\.60 to write, \\$0\\.02 to read$")
-                                help)))
-      (should (string-match-p "The choice applies to each session listed; the others just switch" help)))
+      'compact
+    (with-temp-buffer
+      (harness-set-model-all)
+      (should (= 1 (length asked)))
+      ;; The checks of the sessions that lose theirs, how many change in all,
+      ;; no session of its own, and where the command ran.
+      (pcase-let ((`(,checks ,_label ,total ,session ,host) (car asked)))
+        (should (equal '("s1" "s2") (mapcar (lambda (c) (plist-get c :id)) checks)))
+        (should (= 3 total))
+        (should-not session)
+        (should (eq (current-buffer) host))))
     ;; Every project's sessions, those of the current tasks included, are
     ;; checked and switched with the handoff; then the tasks' records,
     ;; whose sessions have switched already.
@@ -2664,9 +2553,25 @@ a batch, and a cache that still lasts."
   ;; Cancelled: nothing changes, not even the default for new sessions.
   (harness-ui-test-with-switch
       (list (cons "_harness/handoff/check-all" (list (harness-ui-test--lossy-check "s1" "Fix the parser"))))
-      ?q
+      'cancel
     (harness-set-model-all)
     (should (equal '("_harness/handoff/check-all") (mapcar #'car calls)))))
+
+(ert-deftest harness-ui-switch-without-a-way-to-ask-cancels ()
+  "With nothing that asks how to carry a conversation over, a lossy switch
+is cancelled: the conversation is not lost unasked, and the minibuffer is
+not where the question goes."
+  (let ((answer nil) (said nil))
+    (cl-letf (((symbol-function 'read-multiple-choice)
+               (lambda (&rest _) (error "The switch asked in the minibuffer")))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+      (should (eq #'harness-ui--cancel-handoff (default-value 'harness-ui-switch-function)))
+      (funcall (default-value 'harness-ui-switch-function)
+               (list (harness-ui-test--lossy-check "s1" "Fix the parser")) "Claude Opus 5.5" 1 "s1" nil
+               (lambda (mode) (setq answer mode))))
+    (should (eq 'cancel answer))
+    (should (string-match-p "Model unchanged" (car said)))))
 
 (ert-deftest harness-ui-one-line-collapses-hover-help ()
   "Hover help becomes one line: a second line grows the echo area.
