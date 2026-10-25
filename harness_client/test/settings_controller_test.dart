@@ -59,11 +59,21 @@ void main() {
     expect(settings.address, isEmpty);
     expect(settings.token, isEmpty);
 
+    expect(settings.newTaskChoices, const NewTaskChoices());
+
     // Setters still update memory and do not throw when there is no store.
     await settings.setThemeMode(ThemeMode.dark);
     await settings.rememberConnectionDetails('ws://host:4276/acp', 'token');
+    await settings.setNewTaskChoices(
+      const NewTaskChoices(priority: 'high', mainTree: true),
+    );
     expect(settings.themeMode, ThemeMode.dark);
     expect(settings.address, 'ws://host:4276/acp');
+    expect(
+      settings.newTaskChoices,
+      const NewTaskChoices(priority: 'high', mainTree: true),
+      reason: 'kept for this run of the app',
+    );
   });
 
   test('valid stored values are read', () async {
@@ -339,6 +349,176 @@ void main() {
         expect((await _onDisk(store))['flutter.address'], 'ws://h/acp');
       },
     );
+  });
+
+  group('how the new-task sheet was left', () {
+    // The priority and the three switches of the sheet are the device's: the
+    // sheet starts from them, and the next run of the app does too.
+    const set = NewTaskChoices(
+      priority: 'high',
+      refine: true,
+      plan: false,
+      mainTree: true,
+    );
+
+    test('starts as a task is by default', () async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = SettingsController();
+      expect(settings.newTaskChoices, const NewTaskChoices());
+      await settings.load();
+      expect(settings.newTaskChoices.priority, 'medium');
+      expect(settings.newTaskChoices.refine, isFalse);
+      expect(settings.newTaskChoices.plan, isFalse);
+      expect(settings.newTaskChoices.mainTree, isFalse);
+      expect(settings.loadError, isNull);
+    });
+
+    test('is kept on the device, and read again by the next run', () async {
+      SharedPreferences.setMockInitialValues({});
+      var settings = SettingsController();
+      await settings.load();
+      await settings.setNewTaskChoices(set);
+      expect(settings.newTaskChoices, set);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('newTaskPriority'), 'high');
+      expect(prefs.getBool('newTaskRefine'), isTrue);
+      expect(prefs.getBool('newTaskPlan'), isFalse);
+      expect(prefs.getBool('newTaskMainTree'), isTrue);
+
+      // The next run of the app.
+      SharedPreferences.setMockInitialValues(await _onDiskNow());
+      settings = SettingsController();
+      await settings.load();
+      expect(settings.newTaskChoices, set);
+      expect(settings.loadError, isNull);
+    });
+
+    test('is changed one choice at a time, and the last stays', () async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = SettingsController();
+      await settings.load();
+      await settings.setNewTaskChoices(set);
+      await settings.setNewTaskChoices(
+        settings.newTaskChoices.copyWith(priority: 'low', mainTree: false),
+      );
+      expect(
+        settings.newTaskChoices,
+        const NewTaskChoices(priority: 'low', refine: true),
+      );
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('newTaskPriority'), 'low');
+      expect(prefs.getBool('newTaskRefine'), isTrue);
+      expect(prefs.getBool('newTaskMainTree'), isFalse);
+    });
+
+    test('is left alone by the person signing out', () async {
+      SharedPreferences.setMockInitialValues({
+        'address': 'ws://host:4276/acp',
+        'token': 'hs1_device',
+      });
+      final settings = SettingsController();
+      await settings.load();
+      await settings.setNewTaskChoices(set);
+      await settings.clearConnection();
+      await settings.setRememberConnection(false);
+      expect(settings.newTaskChoices, set);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('token'), isNull);
+      expect(prefs.getString('newTaskPriority'), 'high');
+      expect(prefs.getBool('newTaskMainTree'), isTrue);
+    });
+
+    test('keeps a damaged value to its default, and the rest', () async {
+      SharedPreferences.setMockInitialValues({
+        'newTaskPriority': 'low',
+        'newTaskRefine': 'yes', // Not a bool.
+        'newTaskPlan': true,
+        'newTaskMainTree': true,
+      });
+      final settings = SettingsController();
+      await settings.load();
+      expect(settings.loadError, isNotNull);
+      expect(
+        settings.newTaskChoices,
+        const NewTaskChoices(priority: 'low', plan: true, mainTree: true),
+      );
+    });
+
+    test('takes no priority a task does not have', () async {
+      SharedPreferences.setMockInitialValues({
+        'newTaskPriority': 'urgent',
+        'newTaskPlan': true,
+      });
+      final settings = SettingsController();
+      await settings.load();
+      expect(settings.newTaskChoices.priority, 'medium');
+      expect(settings.newTaskChoices.plan, isTrue);
+      expect(settings.loadError, isNull, reason: 'the store is not damaged');
+    });
+
+    test('made while the store is still being read is kept', () async {
+      final store = _SlowStore()..readGate = Completer<void>();
+      await store.setValue('String', 'flutter.newTaskPriority', 'low');
+      await store.setValue('Bool', 'flutter.newTaskMainTree', true);
+      SharedPreferencesStorePlatform.instance = store;
+      SharedPreferences.resetStatic();
+      final settings = SettingsController();
+      final loading = settings.load();
+      // The sheet was opened and set before what was kept arrived.
+      final saved = settings.setNewTaskChoices(set);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(settings.loaded, isFalse);
+      store.readGate!.complete();
+      await loading;
+      await saved;
+
+      expect(settings.newTaskChoices, set);
+      final disk = await _onDisk(store);
+      expect(disk['flutter.newTaskPriority'], 'high');
+      expect(disk['flutter.newTaskRefine'], isTrue);
+      expect(disk['flutter.newTaskMainTree'], isTrue);
+    });
+
+    test('ends with the last choice, whichever write lands last', () async {
+      final store = _SlowStore();
+      SharedPreferencesStorePlatform.instance = store;
+      SharedPreferences.resetStatic();
+      final settings = SettingsController();
+      await settings.load();
+
+      // The write of the first priority is slow, and the second is made
+      // while it is on its way: the device must not be left with the first.
+      store.lateWrites['high'] = const Duration(milliseconds: 60);
+      final first = settings.setNewTaskChoices(
+        const NewTaskChoices(priority: 'high'),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 15));
+      final second = settings.setNewTaskChoices(
+        const NewTaskChoices(priority: 'low'),
+      );
+      await Future.wait([first, second]);
+
+      expect((await _onDisk(store))['flutter.newTaskPriority'], 'low');
+      expect(settings.newTaskChoices.priority, 'low');
+    });
+
+    test('a write the store refuses is said, and the choice kept', () async {
+      final store = RefusingStore()
+        ..refuse = false
+        ..refuseKeys.add('flutter.newTaskPlan');
+      SharedPreferencesStorePlatform.instance = store;
+      SharedPreferences.resetStatic();
+      final settings = SettingsController();
+      await settings.load();
+      await settings.setNewTaskChoices(set.copyWith(plan: true));
+      expect(
+        settings.persistenceProblem,
+        'The settings store refused to save "newTaskPlan".',
+      );
+      expect(settings.newTaskChoices.plan, isTrue, reason: 'for this run');
+      // The rest of them were written all the same.
+      expect((await _onDisk(store))['flutter.newTaskPriority'], 'high');
+    });
   });
 
   group('when the device cannot keep what it learns', () {

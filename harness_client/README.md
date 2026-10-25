@@ -353,6 +353,17 @@ time it opens. It asks again only when the harness does.
   the pictures stay with the description if the sheet is closed or the
   connection lost, and the button shows only when the harness's `task/settings`
   say it takes them (`inlineAttachments`): an older harness would lose them.
+- **Starts a new task as the last one was set.** The New task sheet's
+  priority and its three switches (*Write it up first*, *Plan first*, *Work in
+  the main tree*) are kept as they were left, so a person who files the same
+  kind of task over and over picks them once: the next sheet opens with them,
+  and so does the next run of the app (shared preferences, `newTaskPriority`,
+  `newTaskRefine`, `newTaskPlan`, `newTaskMainTree`). They are kept as they
+  change on the sheet, whether or not a task is sent from it. Sending clears
+  the description, the project and the pictures, which are the draft's, and
+  leaves these four; so does losing the connection, and signing out (they are
+  the device's, whichever harness it is signed in to). Only the sheet reads
+  and writes them: a task sent another way is sent with the options it names.
 - **Survives a lost connection.** A phone loses its connection all the time:
   it sleeps, changes network, a VPN restarts, the harness reloads. The app
   does not tell the person to go and reconnect. Over `ws://` and `wss://` it
@@ -673,26 +684,31 @@ e2e/                  Playwright mobile-emulated flows and screenshots
   the api, and the session, task and usage controllers built on it, to the new
   `AcpClient`) with the backoff above, then reads everything again. It gives
   up only when the harness refuses the device's session secret (`needsAuth`).
-  `DraftStore` keeps unsent text outside the widgets. `resume()` is what the
-  app does when it opens (`HarnessApp` starts it as soon as the settings are
-  read, which `main` does before the first frame, waiting at most a second
-  for a store that does not answer): it connects with the address and secret
-  `SettingsController` kept (`canResume`), through the same `connect` as a tap
-  on the form, and while the harness cannot be reached repeats it with the
-  same backoff (`resuming`, `resumeError`, `cancelResume`). It stops at
-  `needsAuth`, which is a question for the person. A `connect` that was
+  `DraftStore` keeps unsent text outside the widgets (a new task's
+  description, project and pictures are its `TaskDraft`; how the sheet's
+  priority and switches are set is not, but the device's, below). `resume()`
+  is what the app does when it opens (`HarnessApp` starts it as soon as the
+  settings are read, which `main` does before the first frame, waiting at most
+  a second for a store that does not answer): it connects with the address and
+  secret `SettingsController` kept (`canResume`), through the same `connect`
+  as a tap on the form, and while the harness cannot be reached repeats it
+  with the same backoff (`resuming`, `resumeError`, `cancelResume`). It stops
+  at `needsAuth`, which is a question for the person. A `connect` that was
   taken over by a newer one (the person asked for another address while the
   first was still waiting for its harness) ends without touching what the
   newer one did.
 - `SettingsController` keeps the address and the session secret (shared
   preferences), `rememberConnection`, and `reconnectOnLaunch`, which says
   whether the app goes back in by itself next time: a connection makes it
-  true, *Disconnect* makes it false. Its writes of the connection go one
-  after another and write what is held when they run. It reads each value on
-  its own, and knows when the store does not work: `persistenceProblem` is why
-  the device cannot keep anything (the store did not open, or the last write
-  of some key was refused or raised), which the connection form and Settings
-  put on screen.
+  true, *Disconnect* makes it false. It keeps, too, how the new task sheet was
+  left (`newTaskChoices`, a `NewTaskChoices`: the priority and the three
+  switches), which the sheet starts from and writes as each changes; no
+  screen follows it, so it tells none. Its writes of the connection and of
+  those choices go one after another and write what is held when they run. It
+  reads each value on its own, and knows when the store does not work:
+  `persistenceProblem` is why the device cannot keep anything (the store did
+  not open, or the last write of some key was refused or raised), which the
+  connection form and Settings put on screen.
 - The quick search is three small pieces and the page that draws them.
   `QuickSearchApi` is the harness's `search/warm`, `search/ask` and
   `task/search-apply`, typed (`QuickSearchPlan` is what `search/ask` answers).
@@ -1086,6 +1102,18 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   draft, limited to four, refused by type and size, hidden from a harness that
   does not take them, listed on the task), and the message composer still
   attaching as it did
+- the new-task sheet's priority and switches (`test/new_task_choices_test.dart`,
+  and `settings_controller_test.dart` for the store): the first sheet starts
+  from the defaults, the next from how the last was set, sent or only closed,
+  changing one and sending updates what is kept, they are there when the app is
+  opened again and after the connection is lost, and a task sent without the
+  sheet is sent as it was asked for. The store: written a key at a time, read
+  again by the next run, a damaged value (or a priority no task has) keeping
+  its default and the rest, a choice made while the store is still being read
+  kept, the last write the one that lasts, a refused write said, signing out
+  leaves them. With `HARNESS_SHOTS=DIR` the same file draws the sheet as it
+  opens, with the choices made and opened again, as Android and as iPhone
+  pictures (the Material buttons' labels are squares in the test font)
 - task review and verification, usage (a row per project, worktrees added),
   server capability table and project list
 - what can be done with a task (`test/task_actions_test.dart`,

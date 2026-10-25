@@ -625,14 +625,12 @@ void main() {
       app.drafts.setText(DraftStore.composerKey('s1'), 'half a thought');
       app.drafts
         ..task.prompt = 'Fix the thing'
-        ..task.priority = 'high'
-        ..task.mainTree = true;
+        ..task.project = '/work/app';
       await app.disconnect();
       await app.connect('ws://memory/acp');
       expect(app.drafts.text(DraftStore.composerKey('s1')), 'half a thought');
       expect(app.drafts.task.prompt, 'Fix the thing');
-      expect(app.drafts.task.priority, 'high');
-      expect(app.drafts.task.mainTree, isTrue);
+      expect(app.drafts.task.project, '/work/app');
     });
 
     test('is forgotten when it is emptied or cleared', () {
@@ -646,11 +644,13 @@ void main() {
       expect(drafts.text('b'), '');
       drafts.task
         ..prompt = 'p'
-        ..refine = true;
+        ..cwd = '/work/app'
+        ..project = '/work/app';
       expect(drafts.task.isEmpty, isFalse);
       drafts.task.clear();
       expect(drafts.task.isEmpty, isTrue);
-      expect(drafts.task.refine, isFalse);
+      expect(drafts.task.cwd, isEmpty);
+      expect(drafts.task.project, isNull);
     });
   });
 }

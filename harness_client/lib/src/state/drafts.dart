@@ -54,33 +54,30 @@ class DraftStore extends ChangeNotifier {
 }
 
 /// A task as far as the new-task sheet got with it.
+///
+/// How the sheet's switches are set (the priority, written up first, planned
+/// first, the main tree) is not part of it: those are the device's, and last
+/// from one task to the next, which sending does not clear
+/// (`SettingsController.newTaskChoices`).
 class TaskDraft {
   String prompt = '';
   String cwd = '';
 
   /// The project chosen among the known ones; null when the path was typed.
   String? project;
-  String priority = 'medium';
-  bool refine = false;
-  bool plan = false;
-  bool mainTree = false;
 
   /// The pictures attached so far.  They are kept like the words, in memory:
   /// picking them again is worse than retyping.
   List<PromptAttachment> attachments = const [];
 
   /// Whether anything worth keeping was typed: the prompt is the work, and
-  /// the pictures attached to it, the rest is a choice among defaults.
+  /// the pictures attached to it, the rest is only where it goes.
   bool get isEmpty => prompt.trim().isEmpty && attachments.isEmpty;
 
   void clear() {
     prompt = '';
     cwd = '';
     project = null;
-    priority = 'medium';
-    refine = false;
-    plan = false;
-    mainTree = false;
     attachments = const [];
   }
 }

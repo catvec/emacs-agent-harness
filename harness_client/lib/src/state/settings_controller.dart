@@ -6,6 +6,71 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 enum PreviewPlatform { system, material, cupertino }
 
+/// How the new-task sheet is set: the priority of the next task, and whether
+/// it is written up first, planned first, or made to work in the project's
+/// main tree instead of a worktree of its own.
+///
+/// A person who files one kind of task over and over should not have to pick
+/// the same four things each time the sheet opens, so the sheet starts from
+/// how it was last left ([SettingsController.newTaskChoices]).
+@immutable
+class NewTaskChoices {
+  const NewTaskChoices({
+    this.priority = defaultPriority,
+    this.refine = false,
+    this.plan = false,
+    this.mainTree = false,
+  });
+
+  /// The priorities a task has, lowest first, as the harness names them.
+  static const priorities = ['low', 'medium', 'high'];
+
+  /// What a task is given when nothing else was asked for.
+  static const defaultPriority = 'medium';
+
+  /// One of [priorities].
+  final String priority;
+
+  /// The task waits in the backlog while an agent writes it up
+  /// (`task/submit` with `refine`).
+  final bool refine;
+
+  /// A strong model plans the task for a medium one to carry out (`plan`).
+  final bool plan;
+
+  /// The task works in the project's checkout itself: no worktree, no branch
+  /// (`mainTree`).
+  final bool mainTree;
+
+  NewTaskChoices copyWith({
+    String? priority,
+    bool? refine,
+    bool? plan,
+    bool? mainTree,
+  }) => NewTaskChoices(
+    priority: priority ?? this.priority,
+    refine: refine ?? this.refine,
+    plan: plan ?? this.plan,
+    mainTree: mainTree ?? this.mainTree,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is NewTaskChoices &&
+      other.priority == priority &&
+      other.refine == refine &&
+      other.plan == plan &&
+      other.mainTree == mainTree;
+
+  @override
+  int get hashCode => Object.hash(priority, refine, plan, mainTree);
+
+  @override
+  String toString() =>
+      'NewTaskChoices(priority: $priority, refine: $refine, plan: $plan, '
+      'mainTree: $mainTree)';
+}
+
 /// Local preferences, and what this device remembers of the harness it signed
 /// in to: its address and the session secret the harness gave it.  The secret
 /// is kept only when "Remember" is on; it is the device's own session, which
@@ -24,6 +89,7 @@ class SettingsController extends ChangeNotifier {
   bool _reconnectOnLaunch = true;
   String _address = '';
   String _token = '';
+  NewTaskChoices _newTaskChoices = const NewTaskChoices();
   bool _loaded = false;
   Object? _loadError;
 
@@ -33,6 +99,9 @@ class SettingsController extends ChangeNotifier {
   bool _detailsChanged = false;
   bool _flagChanged = false;
 
+  /// Likewise for [newTaskChoices].
+  bool _choicesChanged = false;
+
   /// The writes the platform store did not take, by key, with why in words
   /// for a person.  A key leaves when it is written well after all, so one
   /// write that works does not hide another that did not.
@@ -41,18 +110,24 @@ class SettingsController extends ChangeNotifier {
   /// Completes once [load] is over, whether or not the store answered.
   final Completer<void> _ready = Completer<void>();
 
-  /// The writes of the connection details, one after the other.  Each writes
-  /// the details as they are *when it runs*, so the last thing set is what
-  /// ends up on the device, whatever order the platform finishes its writes
-  /// in.  (Two saves that overlapped used to be able to leave the older
-  /// secret behind, which the harness no longer honours: the next launch
-  /// would have had to sign in again.)
+  /// The writes of the connection details and of the new-task choices, one
+  /// after the other.  Each writes what is held *when it runs*, so the last
+  /// thing set is what ends up on the device, whatever order the platform
+  /// finishes its writes in.  (Two saves that overlapped used to be able to
+  /// leave the older secret behind, which the harness no longer honours: the
+  /// next launch would have had to sign in again.)
   late Future<void> _saving = _ready.future;
 
   ThemeMode get themeMode => _themeMode;
   PreviewPlatform get previewPlatform => _previewPlatform;
   bool get showThinking => _showThinking;
   bool get rememberConnection => _rememberConnection;
+
+  /// How the new-task sheet was last left, which is how it starts the next
+  /// time it opens, in this run of the app and in the next ones.  It is the
+  /// device's, whichever harness it is signed in to, and signing out does not
+  /// forget it.
+  NewTaskChoices get newTaskChoices => _newTaskChoices;
 
   /// Whether the app connects again by itself when it opens.  It does, unless
   /// the person left the harness on purpose ("Disconnect"): that is
@@ -178,6 +253,34 @@ class SettingsController extends ChangeNotifier {
       read('showThinking', () {
         _showThinking = prefs.getBool('showThinking') ?? true;
       });
+      // How the new-task sheet was left, a value at a time as well: a damaged
+      // one keeps its default and costs the others nothing.  A choice made
+      // while the store was still answering is kept over what it holds.
+      read('newTaskPriority', () {
+        if (_choicesChanged) return;
+        final stored = prefs.getString('newTaskPriority');
+        if (NewTaskChoices.priorities.contains(stored)) {
+          _newTaskChoices = _newTaskChoices.copyWith(priority: stored);
+        }
+      });
+      read('newTaskRefine', () {
+        if (_choicesChanged) return;
+        _newTaskChoices = _newTaskChoices.copyWith(
+          refine: prefs.getBool('newTaskRefine') ?? false,
+        );
+      });
+      read('newTaskPlan', () {
+        if (_choicesChanged) return;
+        _newTaskChoices = _newTaskChoices.copyWith(
+          plan: prefs.getBool('newTaskPlan') ?? false,
+        );
+      });
+      read('newTaskMainTree', () {
+        if (_choicesChanged) return;
+        _newTaskChoices = _newTaskChoices.copyWith(
+          mainTree: prefs.getBool('newTaskMainTree') ?? false,
+        );
+      });
     }
     _loaded = true;
     if (!_ready.isCompleted) _ready.complete();
@@ -208,6 +311,24 @@ class SettingsController extends ChangeNotifier {
     _showThinking = value;
     notifyListeners();
     await _setBool('showThinking', value);
+  }
+
+  /// Keep [choices] as how the new-task sheet is set.  The sheet calls this
+  /// each time a choice changes, so what is kept is how it was left, whether
+  /// or not a task was sent from it.  Nothing on screen shows these but the
+  /// sheet, which reads them as it opens, so listeners are not told.
+  Future<void> setNewTaskChoices(NewTaskChoices choices) {
+    if (choices == _newTaskChoices) return Future.value();
+    _choicesChanged = true;
+    _newTaskChoices = choices;
+    return _enqueue(() async {
+      // Read here, when the write runs: see [_saving].
+      final held = _newTaskChoices;
+      await _setString('newTaskPriority', held.priority);
+      await _setBool('newTaskRefine', held.refine);
+      await _setBool('newTaskPlan', held.plan);
+      await _setBool('newTaskMainTree', held.mainTree);
+    });
   }
 
   /// Turn remembering the harness on or off.  Off forgets what was kept; on
