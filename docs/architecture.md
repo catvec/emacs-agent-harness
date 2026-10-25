@@ -10227,32 +10227,49 @@ the slots the machine this harness runs on allows while that machine is
 loaded, and gives the configured limit back as the load falls (see
 tool-slots for the slots themselves).  A machine running a build, a
 test run or a game has no processor to spare for one more process tree,
-and the governed calls only queue up anyway.  Disable it
-\(`harness-disabled-modules`) to stop watching the load; the limit is
-the baseline again, as plain tool-slots leaves it.
+and the governed calls only queue up anyway.  It reads two load
+averages: the long-term one (`harness-tool-slots-load-window', the
+5-minute average by default) sets the limit as it always did, and the
+short-term one (`harness-tool-slots-load-short-window', the 1-minute
+average by default) may only lower that limit further, never raise it.
+A short burst of load therefore takes slots away at once even while the
+5-minute average has hardly moved, and a limit the short-term average
+pulled down comes back a step at a time
+(`harness-tool-slots-load-recovery-step' and
+`harness-tool-slots-load-recovery-cooldown') rather than at once when
+the burst is over.  Disable it (`harness-disabled-modules`) to stop
+watching the load; the limit is the baseline again, as plain tool-slots
+leaves it.
 
 Options:
 
 - `harness-tool-slots-load-enabled` (default t): the watch, on or off,
   without unloading the module.
 - `harness-tool-slots-load-window` (default 5): which load average is
-  read, over 1, 5 or 15 minutes.  These are the three averages
-  `load-average` reports and the only ones the system keeps, so another
-  window -- 10, say -- reads the 5-minute one.  The 5-minute average
-  follows the load that lasts.  A test run or a compile of a minute or
-  two moves it a little, so the slots are not taken away and given back
-  with every burst of work, while a build that goes on lowers them
-  within a few minutes, and they come back a few minutes after it is
-  over.  The 1-minute average reacts to every burst at once, and gives
-  the slots back as fast; the 15-minute one is steadier still, and
-  slower to give them back.  On a system that keeps fewer averages the
-  longest one it has is read.
+  the long-term one, over 1, 5 or 15 minutes.  These are the three
+  averages `load-average` reports and the only ones the system keeps,
+  so another window -- 10, say -- reads the 5-minute one.  The 5-minute
+  average follows the load that lasts.  A test run or a compile of a
+  minute or two moves it a little, while a build that goes on lowers
+  the limit within a few minutes, and the limit comes back a few
+  minutes after it is over.  Only this average can allow more slots
+  than the load does now; the 15-minute one is steadier still, and
+  slower to give the slots back.  On a system that keeps fewer averages
+  the longest one it has is read.
+- `harness-tool-slots-load-short-window` (default 1): which load
+  average is the short-term one.  It reacts to a test run or a compile
+  at once, and may only lower the limit below what the long-term one
+  allows; it never gives a slot back, and a drop of it does not restore
+  the limit at once either (see the recovery options below).  Set it
+  to the same average as `harness-tool-slots-load-window` to give
+  neither watch the edge over the other.
 - `harness-tool-slots-load-low` (default 1.0) and
   `harness-tool-slots-load-high` (default 2.0): the load per processor
   at or below which the limit is the baseline, and at or above which it
   is the floor.  Load per processor is the average divided by
   `num-processors`, so 1.0 means one processor's worth of runnable work
-  on each processor; between the two the slots fall with the load.
+  on each processor; between the two the slots fall with the load.  The
+  same thresholds apply to both averages.
 - `harness-tool-slots-load-floor` (default 1): how few slots the
   machine keeps, never below one and never above the baseline.
 - `harness-tool-slots-load-interval` (default 5.0) and
@@ -10261,13 +10278,24 @@ Options:
   is sampled often and the limit changed rarely: a sample inside the
   cooldown is read and changes nothing, so a spike cannot make the
   slots flap, and the sessions are not told about a change that a
-  quieter reading would take back at once.
+  quieter reading would take back at once.  Lowering waits for this
+  cooldown.
+- `harness-tool-slots-load-recovery-step` (default 1) and
+  `harness-tool-slots-load-recovery-cooldown` (default 120.0): how many
+  slots a limit the short-term average lowered gains at a time, and the
+  least time between those rises.  Each step gives back that many
+  slots, the next waits that long again, and the limit stops at what
+  the long-term average allows; so a short burst does not give all the
+  slots back at once when it is over.  A limit the long-term average
+  alone lowered comes back as it always did.
 - `harness-tool-slots-load-deadband` (default 0.15): how far the load
   must move from the load that took the last change, in the direction
   of this one, before another change is taken, so noise around a
   threshold does not move the limit.  A rise back to the baseline is
-  taken as soon as the load is at or below the low threshold, deadband
-  or not, so a quiet machine always gets its full limit back.
+  taken as soon as the long-term load is at or below the low threshold,
+  deadband or not, so a quiet machine always gets its full limit back
+  -- unless the short-term average pulled the limit down, which
+  recovers in steps instead.
 - `harness-tool-slots-load-function`: the function that returns the
   machine's load average (`load-average` by default, the same numbers
   /proc/loadavg shows on GNU/Linux); a system it cannot read from --
@@ -10275,14 +10303,18 @@ Options:
 
 The number in force is the smaller of the baseline
 \(`harness-tool-slots-count` plus `harness-tool-slots-burst`) and what
-the load allows, so the plugin can only take slots away and give them
-back: it never allows more than tool-slots would, and at low load it is
-the baseline exactly.  Only this machine's slots are modulated: a call
-on another host -- over TRAMP or through the ssh tool -- runs on a
-machine whose load this harness cannot read, and keeps that host's
-baseline slots.  When the limit rises, the calls already waiting start
-at once, up to what now fits, in the priority order the queue keeps
-\(a module that raises a limit admits them through
+the load allows, which is the smaller of what each average allows, so
+the plugin can only take slots away and give them back: it never allows
+more than tool-slots would, and at low load it is the baseline exactly.
+The short-term average can only move that number down; only the
+long-term one can let it rise, and a rise it caused by a short-term cut
+is a step at a time, each after the recovery cooldown, until the limit
+reaches what the long-term average allows.  Only this machine's slots
+are modulated: a call on another host -- over TRAMP or through the ssh
+tool -- runs on a machine whose load this harness cannot read, and
+keeps that host's baseline slots.  When the limit rises, the calls
+already waiting start at once, up to what now fits, in the priority
+order the queue keeps (a module that raises a limit admits them through
 `harness-tool-slots--admit'); when it falls, the calls running are left
 alone and no new one starts until the machine is under the limit again.
 A sample is taken once at startup and then every
@@ -10293,9 +10325,12 @@ active session as a system message (`session/list`; a closed or
 inactive session is left alone), so the user sees why calls are
 waiting: "Tool slots reduced from 18 to 5: system load 1.8x on this
 machine", and "Tool slots restored to 18: system load back to normal".
-It is sent only when the number really changes, not on every sample.
-The calls that had to wait still say so themselves ("Waited 3.2s for a
-free slot on this machine"), as tool-slots has them.
+It is sent only when the number really changes, not on every sample,
+and each step of a short-term recovery is a change of its own (so a
+recovery of several steps fills one note rather than a message each;
+see below).  The calls that had to wait still say so themselves
+("Waited 3.2s for a free slot on this machine"), as tool-slots has
+them.
 
 A load that moves a lot changes the number again and again, and a hint
 to each change would fill the transcript (and cut every run of tool

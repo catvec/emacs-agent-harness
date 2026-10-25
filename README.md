@@ -63,10 +63,13 @@ OpenAI-compatible APIs and AWS Bedrock.
   calls waiting go by session priority (low, medium or high; `C-c h +`
   and `C-c h -` raise and lower it, `C-c h y` sets it, and a task's is
   its session's), so the commands of a task you marked high go
-  before a low one's. The limit follows the machine's 5-minute load
-  average too, so a load that lasts counts and a short burst does not:
-  under load fewer slots are handed out, down to one, and the full limit
-  comes back as the load falls (`harness-tool-slots-load-window`,
+  before a low one's. The limit follows the machine's load average too:
+  the 5-minute one sets it, so a load that lasts counts, and the
+  1-minute one may only take more slots away, so a short burst lowers
+  them at once and they come back a step at a time, not all at once
+  when it is over (`harness-tool-slots-load-window`,
+  `harness-tool-slots-load-short-window`,
+  `harness-tool-slots-load-recovery-step`,
   `harness-tool-slots-load-high`, `harness-tool-slots-load-floor`). While
   they are held back every chat pins how many there are above its
   compose box, and says when the number changes in one note that opens

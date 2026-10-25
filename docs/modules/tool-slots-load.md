@@ -22,12 +22,16 @@ shares the processors with, and the commands only queue up anyway.
 So this plugin watches this machine's load average (`load-average`,
 the same numbers /proc/loadavg shows on GNU/Linux) and lowers the
 slots it allows while the load is high, restoring the configured
-limit as the load falls.  It reads the 5-minute average by default
-(`harness-tool-slots-load-window`), which follows a load that lasts,
-such as a build.  The 1-minute average jumps with every test run or
-compile, and the slots would jump with it, down and back up again a
-minute later.  The load is read per processor: 1.0 means
-one processor's worth of runnable work on each processor, and at
+limit as the load falls.  It reads two averages.  The longer one
+(`harness-tool-slots-load-window`, the 5-minute average by default)
+follows the load that lasts, such as a build, and sets the limit as
+it always did.  The shorter one (`harness-tool-slots-load-short-window`,
+the 1-minute average by default) moves with every test run or
+compile, and may only lower the limit below what the longer one
+allows: it never gives a slot back.  A burst of work therefore takes
+slots away at once, even while the 5-minute average has hardly
+moved.  The load is read per processor: 1.0 means one processor's
+worth of runnable work on each processor, and at
 `harness-tool-slots-load-high` -- 2.0 by default -- the limit is
 down to `harness-tool-slots-load-floor`, one slot, so the work still
 goes on, slowly.
@@ -40,10 +44,17 @@ exactly.  The load is sampled often and the limit changed rarely: a
 change is taken only once the load has moved away from the load that
 took the last one by `harness-tool-slots-load-deadband`, and then at
 most once per `harness-tool-slots-load-cooldown`, so a spike does
-not make the slots flap.  On a rise the calls already waiting start
-at once, up to what now fits; on a fall the calls running are left
-alone and no new one starts until the machine is under the limit
-again.
+not make the slots flap.  Lowering stays that fast.  A limit the
+shorter average has pulled down comes back slowly, though: it rises
+by `harness-tool-slots-load-recovery-step` slots at a time, and only
+once per `harness-tool-slots-load-recovery-cooldown`, up to what the
+longer average allows -- so the slots a short burst took are not
+given back at once merely because the burst is over, and a machine
+that stays quiet gets them all back after a few of those steps.  A
+limit the longer average alone took still comes back as it did.  On
+a rise the calls already waiting start at once, up to what now fits;
+on a fall the calls running are left alone and no new one starts
+until the machine is under the limit again.
 
 Only this machine is watched.  A call on another host -- over TRAMP
 or through the ssh tool -- runs on a machine whose load this harness
@@ -109,7 +120,10 @@ the limit is the baseline again, as plain tool-slots leaves it.
 - `harness-tool-slots-load-high` — Load per processor at or above which only the floor is allowed.
 - `harness-tool-slots-load-interval` — Seconds between load samples.
 - `harness-tool-slots-load-low` — Load per processor at or below which every slot is allowed.
-- `harness-tool-slots-load-window` — Which load average the module reads: over 1, 5 or 15 minutes.
+- `harness-tool-slots-load-recovery-cooldown` — Seconds a limit the short-term watch lowered waits before it rises.
+- `harness-tool-slots-load-recovery-step` — How many slots a limit the short-term watch lowered gains at a time.
+- `harness-tool-slots-load-short-window` — Which load average the short-term watch reads: over 1, 5 or 15 minutes.
+- `harness-tool-slots-load-window` — Which load average the long-term watch reads: over 1, 5 or 15 minutes.
 
 ## Uses
 

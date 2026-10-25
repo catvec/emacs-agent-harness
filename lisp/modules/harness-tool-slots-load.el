@@ -12,12 +12,16 @@
 ;; So this plugin watches this machine's load average (`load-average',
 ;; the same numbers /proc/loadavg shows on GNU/Linux) and lowers the
 ;; slots it allows while the load is high, restoring the configured
-;; limit as the load falls.  It reads the 5-minute average by default
-;; (`harness-tool-slots-load-window'), which follows a load that lasts,
-;; such as a build.  The 1-minute average jumps with every test run or
-;; compile, and the slots would jump with it, down and back up again a
-;; minute later.  The load is read per processor: 1.0 means
-;; one processor's worth of runnable work on each processor, and at
+;; limit as the load falls.  It reads two averages.  The longer one
+;; (`harness-tool-slots-load-window', the 5-minute average by default)
+;; follows the load that lasts, such as a build, and sets the limit as
+;; it always did.  The shorter one (`harness-tool-slots-load-short-window',
+;; the 1-minute average by default) moves with every test run or
+;; compile, and may only lower the limit below what the longer one
+;; allows: it never gives a slot back.  A burst of work therefore takes
+;; slots away at once, even while the 5-minute average has hardly
+;; moved.  The load is read per processor: 1.0 means one processor's
+;; worth of runnable work on each processor, and at
 ;; `harness-tool-slots-load-high' -- 2.0 by default -- the limit is
 ;; down to `harness-tool-slots-load-floor', one slot, so the work still
 ;; goes on, slowly.
@@ -30,10 +34,17 @@
 ;; change is taken only once the load has moved away from the load that
 ;; took the last one by `harness-tool-slots-load-deadband', and then at
 ;; most once per `harness-tool-slots-load-cooldown', so a spike does
-;; not make the slots flap.  On a rise the calls already waiting start
-;; at once, up to what now fits; on a fall the calls running are left
-;; alone and no new one starts until the machine is under the limit
-;; again.
+;; not make the slots flap.  Lowering stays that fast.  A limit the
+;; shorter average has pulled down comes back slowly, though: it rises
+;; by `harness-tool-slots-load-recovery-step' slots at a time, and only
+;; once per `harness-tool-slots-load-recovery-cooldown', up to what the
+;; longer average allows -- so the slots a short burst took are not
+;; given back at once merely because the burst is over, and a machine
+;; that stays quiet gets them all back after a few of those steps.  A
+;; limit the longer average alone took still comes back as it did.  On
+;; a rise the calls already waiting start at once, up to what now fits;
+;; on a fall the calls running are left alone and no new one starts
+;; until the machine is under the limit again.
 ;;
 ;; Only this machine is watched.  A call on another host -- over TRAMP
 ;; or through the ssh tool -- runs on a machine whose load this harness
@@ -99,15 +110,34 @@ same and stops the sampling."
   :group 'harness)
 
 (defcustom harness-tool-slots-load-window 5
-  "Which load average the module reads: over 1, 5 or 15 minutes.
+  "Which load average the long-term watch reads: over 1, 5 or 15 minutes.
 These are the three averages `load-average' reports.  The 5-minute
 average, the default, follows the load that lasts.  A test run or a
-compile of a minute or two moves it a little, so the slots are not taken
-away and given back with every burst of work, while a build that goes
-on lowers them within a few minutes, and they come back a few minutes
-after it is over.  The 1-minute average reacts to every burst at once,
-and gives the slots back as fast.  The 15-minute one is steadier still,
-and slower to give them back."
+compile of a minute or two moves it a little, so the limit is not
+taken away by every burst of work, while a build that goes on lowers
+it within a few minutes, and it comes back a few minutes after it is
+over.  This average sets the limit, and only it can allow more slots
+than the load does now; the short-term watch
+\(`harness-tool-slots-load-short-window') may only lower that number.
+The 1-minute average reacts to every burst at once; the 15-minute one
+is steadier still, and slower to give the slots back."
+  :type '(choice (const :tag "1 minute" 1)
+                 (const :tag "5 minutes" 5)
+                 (const :tag "15 minutes" 15))
+  :group 'harness)
+
+(defcustom harness-tool-slots-load-short-window 1
+  "Which load average the short-term watch reads: over 1, 5 or 15 minutes.
+These are the three averages `load-average' reports, and the default
+is the 1-minute one, which reacts to a test run or a compile at once.
+This average never raises the limit: it may only lower it below what
+the long-term watch (`harness-tool-slots-load-window') allows.  A drop
+of this average does not give the slots back at once either; a limit
+it pulled down recovers a step at a time
+\(`harness-tool-slots-load-recovery-step',
+`harness-tool-slots-load-recovery-cooldown').  Set it to the same
+average as `harness-tool-slots-load-window' to give neither watch the
+edge over the other."
   :type '(choice (const :tag "1 minute" 1)
                  (const :tag "5 minutes" 5)
                  (const :tag "15 minutes" 15))
@@ -116,10 +146,11 @@ and slower to give them back."
 (defcustom harness-tool-slots-load-low 1.0
   "Load per processor at or below which every slot is allowed.
 The load is the average `harness-tool-slots-load-function' reports for
-`harness-tool-slots-load-window', divided by the processor count, so
-1.0 is one processor's worth of runnable work per processor.  At or
-below this the limit is the baseline; above it the slots go down with
-the load."
+each watch -- `harness-tool-slots-load-window' and
+`harness-tool-slots-load-short-window' -- divided by the processor
+count, so 1.0 is one processor's worth of runnable work per processor.
+At or below this the limit is the baseline; above it the slots go down
+with the load."
   :type 'number
   :group 'harness)
 
@@ -152,7 +183,30 @@ but the limit itself changes at most once per
 A sample within the cooldown is read, and the limit does not change, so
 a short spike cannot make the slots flap.  A fall waits for the
 cooldown as a rise does, which also keeps the sessions from being told
-about a change that is over by the next sample."
+about a change that is over by the next sample.  A rise of a limit the
+short-term watch lowered waits for
+`harness-tool-slots-load-recovery-cooldown' instead."
+  :type 'number
+  :group 'harness)
+
+(defcustom harness-tool-slots-load-recovery-step 1
+  "How many slots a limit the short-term watch lowered gains at a time.
+A limit the short-term load pulled below what the long-term load
+allows comes back slowly: it rises by this many slots, and no more,
+each time `harness-tool-slots-load-recovery-cooldown' is over, until
+it reaches what the long-term load allows.  At least one slot is given
+back at a time."
+  :type 'integer
+  :group 'harness)
+
+(defcustom harness-tool-slots-load-recovery-cooldown 120.0
+  "Seconds a limit the short-term watch lowered waits before it rises.
+Each rise gives back `harness-tool-slots-load-recovery-step' slots,
+and the next waits this long again, so a short burst of load does not
+give all the slots back at once when it is over.  The ordinary
+`harness-tool-slots-load-cooldown' holds too.  Lowering is not held
+back by this: it waits only for `harness-tool-slots-load-cooldown'.
+A limit the long-term load alone lowered comes back as it always did."
   :type 'number
   :group 'harness)
 
@@ -163,7 +217,9 @@ that took the last one, in the direction of the change, so noise around
 a threshold does not move the slots.  A rise back to the baseline is
 taken as soon as the load is at or below
 `harness-tool-slots-load-low', deadband or not, so a quiet machine
-always gets its full limit back."
+always gets its full limit back -- unless the short-term watch pulled
+the limit down, which recovers in steps instead
+\(`harness-tool-slots-load-recovery-cooldown')."
   :type 'number
   :group 'harness)
 
@@ -208,7 +264,18 @@ what the load allows, never above the baseline.")
   "Time the limit last changed, or nil while it has never changed.")
 
 (defvar harness-tool-slots-load--changed-pressure nil
-  "Load per processor when the limit last changed, or nil.")
+  "Load per processor when the limit last changed, or nil.
+It is the reading of whichever watch -- long or short -- took the
+limit there, so a deadband measured from it is that watch's own.")
+
+(defvar harness-tool-slots-load--short-limited nil
+  "Non-nil while the short-term load holds the limit below the long-term one.
+It is set when the short-term watch takes slots away that the long-term
+watch would not, and cleared once the limit has climbed back to what
+the long-term watch allows.  While it is set, the limit rises only in
+`harness-tool-slots-load-recovery-step' steps, one per
+`harness-tool-slots-load-recovery-cooldown', and the quiet-machine
+shortcut does not restore the baseline at once.")
 
 (defvar harness-tool-slots-load--changed-text nil
   "What the sessions were told when the limit last changed, or nil.
@@ -218,18 +285,33 @@ for a UI that shows the slots as they are now.")
 (defvar harness-tool-slots-load--timer nil
   "The repeating timer that samples the load, or nil when it is off.")
 
-(defun harness-tool-slots-load--pressure ()
-  "Return this machine's load per processor, or nil when unknown.
-An unreadable load -- `load-average' signals, or the load function
-says nothing useful -- is nil, and a limit is never lowered for it."
+(defun harness-tool-slots-load--pressure-at (window)
+  "Return this machine's load per processor over WINDOW, or nil.
+WINDOW is the average to read, in minutes, and nil means
+`harness-tool-slots-load-window'.  An unreadable load -- `load-average'
+signals, or the load function says nothing useful -- is nil, and a
+limit is never lowered for it."
   (let ((load (condition-case err
                   (funcall harness-tool-slots-load-function
-                           harness-tool-slots-load-window)
+                           (or window harness-tool-slots-load-window))
                 (error (harness-log 'debug "tool-slots-load: %s"
                                     (harness-error-message err))
                        nil))))
     (when (and (numberp load) (>= load 0))
       (/ (float load) (max 1 (num-processors))))))
+
+(defun harness-tool-slots-load--pressure ()
+  "Return this machine's load per processor over the long-term window.
+That is `harness-tool-slots-load-window' minutes, the load that sets
+the limit.  A load it cannot read is nil, and the limit is left alone."
+  (harness-tool-slots-load--pressure-at harness-tool-slots-load-window))
+
+(defun harness-tool-slots-load--short-pressure ()
+  "Return this machine's load per processor over the short-term window.
+That is `harness-tool-slots-load-short-window' minutes, the load that
+may only lower the limit.  A load it cannot read is nil; it then has
+nothing to say, and only the long-term load sets the limit."
+  (harness-tool-slots-load--pressure-at harness-tool-slots-load-short-window))
 
 (defun harness-tool-slots-load--cap (pressure baseline)
   "Return the slots PRESSURE allows on this machine, at most BASELINE.
@@ -276,6 +358,15 @@ machine's to read."
   (or (null harness-tool-slots-load--changed-at)
       (>= (- (float-time) harness-tool-slots-load--changed-at)
           (max 0 (float harness-tool-slots-load-cooldown)))))
+
+(defun harness-tool-slots-load--recovered-p ()
+  "Non-nil when a short-term-lowered limit may rise another step.
+That waits `harness-tool-slots-load-recovery-cooldown' after the last
+change, longer than `harness-tool-slots-load-cooldown' keeps a fall
+from flapping."
+  (or (null harness-tool-slots-load--changed-at)
+      (>= (- (float-time) harness-tool-slots-load--changed-at)
+          (max 0 (float (or harness-tool-slots-load-recovery-cooldown 0))))))
 
 (defun harness-tool-slots-load--moved-p (pressure cap current baseline)
   "Non-nil when PRESSURE has moved enough for CAP to replace CURRENT.
@@ -349,7 +440,8 @@ that moves for hours would otherwise write one ever longer note anew
 at every change.  With the default options the load of a build, from
 idle to full and back, changes the slots fewer times than that, each
 `harness-tool-slots-load-deadband' of load being one change at most,
-so a build is one note.")
+and the stepwise recovery of a short-term cut one change per step, so
+a build is one note.")
 
 (defun harness-tool-slots-load--note-count-title (items)
   "Return the title of a note holding ITEMS: the title, and how many changes.
@@ -542,11 +634,17 @@ start when the limit rose, and every active session hears the new number."
 
 (defun harness-tool-slots-load--tick ()
   "Sample this machine's load and set its slots to what the load allows.
-Called on a timer, once at startup, and by a test.  A limit only
-changes when the load has moved by
+Called on a timer, once at startup, and by a test.  The long-term
+average (`harness-tool-slots-load-window') sets the limit; the
+short-term one (`harness-tool-slots-load-short-window') may only lower
+it.  A falling limit is taken when the load has moved by
 `harness-tool-slots-load-deadband' since the last change, and then at
-most once per `harness-tool-slots-load-cooldown'; a load the machine
-cannot report leaves the limit as it is."
+most once per `harness-tool-slots-load-cooldown'.  A limit the
+short-term load lowered rises slowly, by
+`harness-tool-slots-load-recovery-step' slots and one step per
+`harness-tool-slots-load-recovery-cooldown', until it reaches what the
+long-term load allows; other rises are taken as they always were.  A
+load the machine cannot report leaves the limit as it is."
   (let* ((baseline (harness-tool-slots--baseline))
          (current (min baseline (or harness-tool-slots-load--limit baseline))))
     (cond
@@ -555,15 +653,50 @@ cannot report leaves the limit as it is."
       (when harness-tool-slots-load--limit
         (harness-tool-slots-load--set nil nil)))
      (t
-      (when-let* ((pressure (harness-tool-slots-load--pressure)))
-        (let ((cap (min baseline
-                        (harness-tool-slots-load--cap pressure baseline))))
-          (when (and (/= cap current)
-                     (harness-tool-slots-load--cooled-p)
-                     (harness-tool-slots-load--moved-p
-                      pressure cap current baseline))
-            (harness-tool-slots-load--set (if (= cap baseline) nil cap)
-                                          pressure))))))))
+      (when-let* ((long (harness-tool-slots-load--pressure)))
+        (let* ((short (harness-tool-slots-load--short-pressure))
+               (long-cap (min baseline
+                              (harness-tool-slots-load--cap long baseline)))
+               (short-cap (and short
+                               (min baseline
+                                    (harness-tool-slots-load--cap
+                                     short baseline))))
+               (cap (if short-cap (min long-cap short-cap) long-cap))
+               (short-binds-p (and short-cap (< short-cap long-cap)))
+               ;; The reading that asks for CAP: the short-term one when it
+               ;; holds the limit below what the long-term one allows.
+               (pressure (if short-binds-p short long)))
+          ;; The long-term load alone now allows CURRENt: no short-term
+          ;; cut is left to recover.
+          (when (and harness-tool-slots-load--short-limited
+                     (>= current long-cap))
+            (setq harness-tool-slots-load--short-limited nil))
+          (cond
+           ((< cap current)
+            (when (and (harness-tool-slots-load--cooled-p)
+                       (harness-tool-slots-load--moved-p
+                        pressure cap current baseline))
+              (setq harness-tool-slots-load--short-limited short-binds-p)
+              (harness-tool-slots-load--set (if (= cap baseline) nil cap)
+                                            pressure)))
+           ((> cap current)
+            (if harness-tool-slots-load--short-limited
+                ;; A step back up, not the whole way at once.
+                (when (and (harness-tool-slots-load--cooled-p)
+                           (harness-tool-slots-load--recovered-p))
+                  (let* ((step (max 1 (or harness-tool-slots-load-recovery-step 1)))
+                         (new (min cap (+ current step))))
+                    ;; Once the long-term load allows NEW there is nothing
+                    ;; of the short-term cut left, and its rules take over.
+                    (setq harness-tool-slots-load--short-limited
+                          (< new long-cap))
+                    (harness-tool-slots-load--set (if (= new baseline) nil new)
+                                                  pressure)))
+              (when (and (harness-tool-slots-load--cooled-p)
+                         (harness-tool-slots-load--moved-p
+                          pressure cap current baseline))
+                (harness-tool-slots-load--set (if (= cap baseline) nil cap)
+                                              pressure)))))))))))
 
 ;;;; The module
 
@@ -575,7 +708,8 @@ cannot report leaves the limit as it is."
                 #'harness-tool-slots-load--slots-advice))
   (setq harness-tool-slots-load--changed-at nil
         harness-tool-slots-load--changed-pressure nil
-        harness-tool-slots-load--changed-text nil)
+        harness-tool-slots-load--changed-text nil
+        harness-tool-slots-load--short-limited nil)
   ;; Who holds a slot is told to the UIs along with the limit.
   (harness-on 'tool-slots/holders-changed #'harness-tool-slots-load--notify-soon)
   ;; The machine may already be busy: take the first reading now.
@@ -603,7 +737,8 @@ goes with the limit."
     (setq harness-tool-slots-load--limit nil
           harness-tool-slots-load--changed-at nil
           harness-tool-slots-load--changed-pressure nil
-          harness-tool-slots-load--changed-text nil)
+          harness-tool-slots-load--changed-text nil
+          harness-tool-slots-load--short-limited nil)
     (when held
       (harness-tool-slots-load--admit)
       (harness-emit 'tool-slots/changed (harness-tool-slots-load--state)))))
