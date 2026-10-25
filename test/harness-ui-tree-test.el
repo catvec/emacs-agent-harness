@@ -212,6 +212,21 @@
         (should-not moves)
         (should (equal n1 (plist-get (harness-call 'session/get sid) :head)))))))
 
+(ert-deftest harness-ui-tree-marks-a-reverted-compaction ()
+  ;; The node stays where it is, but the model is not sent what it says.
+  (harness-ui-tree-test-with
+    (should (equal "SUMMARY of the work"
+                   (harness-ui-tree--excerpt '(:kind "compaction" :content "SUMMARY of the work"
+                                                     :meta (:compaction "summary")))))
+    (should (equal "(reverted) SUMMARY of the work"
+                   (harness-ui-tree--excerpt '(:kind "compaction" :content "SUMMARY of the work"
+                                                     :meta (:compaction "summary" :reverted t)))))
+    (should (equal "(reverted)" (substring (harness-ui-tree--excerpt '(:kind compaction :content "x"
+                                                                       :meta (:reverted t)))
+                                           0 10)))
+    ;; Nothing else is marked, whatever its meta says.
+    (should (equal "hello" (harness-ui-tree--excerpt '(:kind "user" :content "hello" :meta (:reverted t)))))))
+
 (ert-deftest harness-ui-tree-tells-denied-results-from-failed-ones ()
   ;; A result the permission system refused reads apart from a failure,
   ;; with the chat's icons: a yellow circle, a red triangle, and a green

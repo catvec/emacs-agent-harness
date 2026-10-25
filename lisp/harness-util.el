@@ -558,6 +558,72 @@ NODE's kind may be the symbol or, as a client hears it, its name."
             ((equal (format "%s" (plist-get meta :context)) "sample") "brief")
             (t "summary")))))
 
+;;;; Reverted compactions
+;;
+;; A compaction node stands for everything before it: the transcript a
+;; model is sent starts at the last one (`session/messages').  The nodes
+;; before it stay on the session's path, so the user can take the
+;; compaction back and give the model the whole conversation again, and
+;; redo it: the node's `:meta' `:reverted' says the compaction is
+;; reverted (`compaction/revert', `compaction/restore').  A reverted
+;; compaction is no longer where the transcript starts, and the user
+;; messages it carried over after itself (`:carried-from') are the
+;; originals again, which are on the path before it.
+
+(defun harness-node-compaction-p (node)
+  "Non-nil when NODE is a compaction node, its kind a symbol or a name."
+  (equal (format "%s" (plist-get node :kind)) "compaction"))
+
+(defun harness-node-compaction-reverted-p (node)
+  "Non-nil when NODE is a compaction the user reverted.
+The conversation then goes on as if it had not been made, until it is
+restored: its `:meta' `:reverted' is set (see `compaction/revert')."
+  (and (harness-node-compaction-p node)
+       (harness-json-true-p (plist-get (plist-get node :meta) :reverted))))
+
+(defun harness-node-compaction-in-force-p (node)
+  "Non-nil when NODE is a compaction the conversation starts from.
+That is a compaction node that is not reverted."
+  (and (harness-node-compaction-p node)
+       (not (harness-node-compaction-reverted-p node))))
+
+(defun harness-path-live (path)
+  "Return PATH, nodes oldest first, without what its reverted compactions left.
+A reverted compaction node (`harness-node-compaction-reverted-p') is
+left out, and so is a user message it carried over after itself -- a
+node whose `:meta' `:carried-from' names a node that is on PATH before
+the compaction: the original stands in its place.  A copy whose original
+is not on PATH stays, as nothing else would tell the model of it.
+PATH itself is returned when nothing on it was reverted."
+  (if (not (cl-some #'harness-node-compaction-reverted-p path))
+      path
+    (let ((at (make-hash-table :test 'equal))
+          (last-reverted -1)
+          (i 0)
+          out)
+      (dolist (n path)
+        (let* ((from (plist-get (plist-get n :meta) :carried-from))
+               (original (and from (gethash from at))))
+          (cond
+           ((harness-node-compaction-reverted-p n) (setq last-reverted i))
+           ((and original (< original last-reverted)) nil)
+           (t (push n out)))
+          (puthash (plist-get n :id) i at)
+          (cl-incf i)))
+      (nreverse out))))
+
+(defun harness-path-from-compaction (path)
+  "Return PATH, oldest first, from the compaction its conversation starts at.
+That is the last compaction on PATH that is in force
+\(`harness-node-compaction-in-force-p'), node included, or all of PATH
+without one; reverted compactions and what they carried over are left
+out first (`harness-path-live').  It is the part of a transcript a
+model is sent: the summary in the compaction node stands for everything
+before it."
+  (let* ((live (harness-path-live path))
+         (start (cl-position-if #'harness-node-compaction-in-force-p live :from-end t)))
+    (if start (nthcdr start live) live)))
+
 ;;;; Notes of lasting permission answers
 ;;
 ;; An answer to a permission request that holds beyond the call (for

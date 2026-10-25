@@ -1992,6 +1992,30 @@ session whose prompt cache lapsed, compacted by hand from the panel
 below, does not ask what goes first either: the compaction under way
 is the answer.
 
+A compaction can be taken back. Nothing it replaced is deleted, so the
+chat's note of the latest compaction ends in `[Revert]`: it gives the
+model the conversation from before the compaction again, in place of
+its summary, followed by whatever was said since. The note then reads
+*reverted*, struck through, and offers `[Go post-compaction]`, which
+gives the model the summary again, like undo and redo, as often as you
+like. The same two calls are `compaction/revert` and
+`compaction/restore` (`_harness/compaction/revert` over ACP), and the
+transcript says what the model is sent after each. Only the latest
+compaction can be flipped; an older one keeps the state it had when the
+next was made, so undoing the latest returns the conversation exactly to
+what it was. A compaction made to hand the conversation over to another
+model has no button. The phone app draws the same two buttons under its
+note of the latest compaction. Neither call is made while a turn or a
+compaction runs or is queued (the same wait a message has). The model is
+sent another conversation than its last request's, so the prompt cache
+starts over, as after a compaction, and a hosted provider (Claude Code,
+Copilot) starts a new conversation. The conversation you get back may be
+over the context limit that made the compaction: it still fits the
+window, so the automatic compaction before your next message is skipped
+that once -- it would only make the compaction again before the model
+saw anything -- and the message after it compacts as usual; one that does
+not fit the window says so, and the next message compacts it again.
+
 A provider's prompt cache lasts only a while after its last use: five
 minutes or an hour for Claude, hours for DeepSeek (see
 `harness-cache-ttl`). Once it expires, the next message re-sends the

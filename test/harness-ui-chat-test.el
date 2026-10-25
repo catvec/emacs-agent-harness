@@ -6516,6 +6516,101 @@ undone, [redo].  Another hint has no buttons."
                            5 "the note redrawn with its undo again")
         (should (equal '("mode" "mode" "mode") (mapcar #'caddr (reverse seen))))))))
 
+(defvar harness-ui-chat-test-summary-script
+  '((:type text :delta "SUMMARY TEXT") (:type done :stop-reason end-turn))
+  "What the demo model answers a compaction's request with.")
+
+(defun harness-ui-chat-test-compact (sid)
+  "Compact session SID with the demo model; return the compaction node."
+  (let ((harness-provider-demo-script-override harness-ui-chat-test-summary-script))
+    (harness-await (harness-call 'compaction/compact sid))))
+
+(ert-deftest harness-ui-chat-the-newest-compaction-offers-to-be-taken-back ()
+  "The newest compaction draws [Revert]; clicking it asks the harness, which
+gives the model the conversation before it, and the note is drawn again
+with [Go post-compaction], its text struck through; that goes back.  An
+older compaction draws no button, and neither does one made for a handoff.
+The real compaction module, end to end."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'compaction)
+    (let* ((sid (harness-ui-chat-test-session))
+           (shown nil))
+      (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
+      (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
+      (let* ((first (harness-ui-chat-test-compact sid))
+             (buf (harness-ui-chat-test-open sid))
+             (header (lambda (id)
+                       (with-current-buffer buf
+                         (let ((block (gethash id harness-chat--blocks)))
+                           (buffer-substring-no-properties (harness-chat-block-start block)
+                                                           (harness-chat-block-end block))))))
+             (click (lambda (text)
+                      (with-current-buffer buf
+                        (goto-char (1- (harness-ui-chat-test-find buf text)))
+                        (setq shown nil)
+                        (cl-letf (((symbol-function 'message)
+                                   (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) shown)))))
+                          (harness-chat-push)
+                          (harness-test-wait (lambda () shown) 5 "the echo area"))))))
+        (should (string-match-p "context compacted (.* words)  \\[Revert\\]\n" (funcall header (plist-get first :id))))
+        (should-not (string-match-p "reverted" (funcall header (plist-get first :id))))
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-face-at (- (harness-ui-chat-test-find buf "[Revert]") 2) 'button)))
+        ;; Reverted: the model is sent the conversation before it.
+        (funcall click "[Revert]")
+        (should (string-match-p "\\`Reverted the compaction: the model sees the conversation before it again"
+                                (car shown)))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "[Go post-compaction]")) 5
+                           "the note redrawn with its way back")
+        (should (string-match-p "words), reverted  \\[Go post-compaction\\]\n" (funcall header (plist-get first :id))))
+        (should-not (string-match-p "\\[Revert\\]" (funcall header (plist-get first :id))))
+        (with-current-buffer buf
+          ;; Struck through, as the text of an undone decision is.
+          (should (memq :strike-through
+                        (flatten-tree (get-text-property (harness-ui-chat-test-find buf "context compacted") 'face))))
+          (should (string-match-p "Reverted the compaction"
+                                  (plist-get (car (last (harness-call 'session/nodes sid))) :content))))
+        (should (= 2 (length (harness-call 'session/messages sid))))
+        ;; And back, as often as asked.
+        (funcall click "[Go post-compaction]")
+        (should (string-match-p "\\`Back to the compaction" (car shown)))
+        (harness-test-wait (lambda () (string-match-p "\\[Revert\\]" (funcall header (plist-get first :id))))
+                           5 "the note redrawn with [Revert] again")
+        (should-not (string-match-p "reverted" (funcall header (plist-get first :id))))
+        (should (= 1 (length (harness-call 'session/messages sid))))
+        ;; A second compaction takes the button over.
+        (harness-call 'session/append sid '(:kind user :content "now the lexer"))
+        (harness-call 'session/append sid '(:kind assistant :content "Done: lexer.el rewritten"))
+        (let ((second (harness-ui-chat-test-compact sid)))
+          (harness-test-wait (lambda () (gethash (plist-get second :id)
+                                                 (buffer-local-value 'harness-chat--blocks buf)))
+                             5 "the second compaction")
+          (harness-test-wait (lambda () (not (string-match-p "\\[Revert\\]" (funcall header (plist-get first :id)))))
+                             5 "the first compaction without its button")
+          (should (string-match-p "words)  \\[Revert\\]\n" (funcall header (plist-get second :id)))))))))
+
+(ert-deftest harness-ui-chat-a-compaction-it-cannot-take-back-draws-no-button ()
+  "A compaction made for a handoff to another model draws no button, nor does a
+cut an earlier harness made, which kept nothing to go back to: the harness
+refuses to revert either (`compaction/revert')."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'compaction)
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "hello"))
+      (harness-call 'session/append
+                    sid (list :kind 'compaction :content "handed over"
+                              :meta '(:compaction "summary" :handoff (:mode "compact" :from "a:b" :to "c:d"))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (should (harness-ui-chat-test-find buf "context compacted to hand over to"))
+        (should-not (harness-ui-chat-test-find buf "[Revert]")))
+      (harness-call 'session/append sid '(:kind user :content "and more"))
+      (harness-call 'session/append sid (list :kind 'compaction :content "cut"
+                                            :meta '(:compaction "truncate" :truncate-dropped 3)))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "by cutting its oldest context away")) 5
+                           "the cut")
+        (should-not (harness-ui-chat-test-find buf "[Revert]"))))))
+
 (ert-deftest harness-ui-chat-permission-pattern-is-editable ()
   "A prompt about paths shows the pattern it is answered for; e edits it, the answer carries it."
   (harness-ui-chat-test-with

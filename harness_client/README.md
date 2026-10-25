@@ -35,6 +35,16 @@ time it opens. It asks again only when the harness does.
   the activity of the running turn (waiting, thinking, writing, preparing a
   tool call, running tools, compacting). A conversation opens on its latest
   message.
+- **Takes a compaction back.** Under the note of the latest compaction a
+  button, *Revert*, gives the model the conversation from before it again in
+  place of the summary; the note is then dimmed and says *Reverted*, and the
+  button becomes *Go post-compaction*, which gives it the summary again, like
+  undo and redo, as often as you like (`compaction/revert`,
+  `compaction/restore`). The harness refuses while a turn or a compaction
+  runs, and says why. An older compaction, one made to hand a conversation
+  over to another model, and a harness without the two methods have no
+  button. The button is a widget of its own (`CompactionToggle`) around the
+  note, whatever the note looks like.
 - **Draws what is written as Markdown.** The answers of the agent, the
   messages sent to it (yours, another session's, the harness's), a plan, the
   summary a compaction leaves (a line, "Context compacted · 37 words", which

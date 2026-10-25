@@ -2164,5 +2164,93 @@ of the data are cut as before, and the message is one line at the limit."
     (should (<= (length short) 80))
     (should-not (string-match-p "\n" short))))
 
+(defun harness-core-test-path (&rest specs)
+  "Return a path of nodes from SPECS, each (ID KIND &optional META), oldest first."
+  (mapcar (lambda (spec) (list :id (nth 0 spec) :kind (nth 1 spec) :meta (nth 2 spec))) specs))
+
+(defun harness-core-test-ids (path)
+  "Return the ids of the nodes of PATH."
+  (mapcar (lambda (n) (plist-get n :id)) path))
+
+(ert-deftest harness-util-a-compaction-is-in-force-until-it-is-reverted ()
+  "A compaction node is in force, or reverted by its `:meta' `:reverted'.
+The kind may be a symbol or its name, as a node arrives over the wire; the
+mark is true or `:false', as JSON gives it; nothing but a compaction is either."
+  (let ((live (list :kind 'compaction :meta '(:compaction "summary")))
+        (reverted (list :kind "compaction" :meta '(:compaction "summary" :reverted t)))
+        (restored (list :kind 'compaction :meta '(:compaction "summary" :reverted :false)))
+        (user (list :kind 'user :meta '(:reverted t))))
+    (should (harness-node-compaction-in-force-p live))
+    (should-not (harness-node-compaction-reverted-p live))
+    (should (harness-node-compaction-reverted-p reverted))
+    (should-not (harness-node-compaction-in-force-p reverted))
+    (should (harness-node-compaction-in-force-p restored))
+    (should-not (harness-node-compaction-reverted-p user))
+    (should-not (harness-node-compaction-in-force-p user))
+    (should-not (harness-node-compaction-in-force-p nil))))
+
+(ert-deftest harness-util-the-conversation-starts-at-the-compaction-in-force ()
+  "A transcript starts at its last compaction that is in force, reverted ones being none."
+  (let* ((reverted '(:reverted t))
+         (path (harness-core-test-path '("a" user) '("b" assistant) '("c1" compaction) '("d" user)
+                                       '("c2" compaction) '("e" user))))
+    ;; Without a revert it is the last compaction.
+    (should (eq path (harness-path-live path)))
+    (should (equal '("c2" "e") (harness-core-test-ids (harness-path-from-compaction path))))
+    ;; The last reverted: the one before it.
+    (let ((path (harness-core-test-path '("a" user) '("b" assistant) '("c1" compaction) '("d" user)
+                                        (list "c2" 'compaction reverted) '("e" user))))
+      (should (equal '("a" "b" "c1" "d" "e") (harness-core-test-ids (harness-path-live path))))
+      (should (equal '("c1" "d" "e") (harness-core-test-ids (harness-path-from-compaction path)))))
+    ;; Both reverted: all of it, with neither compaction.
+    (let ((path (harness-core-test-path '("a" user) '("b" assistant) (list "c1" 'compaction reverted)
+                                        '("d" user) (list "c2" 'compaction reverted) '("e" user))))
+      (should (equal '("a" "b" "d" "e") (harness-core-test-ids (harness-path-from-compaction path)))))
+    ;; An older one reverted under a newer one in force changes nothing.
+    (let ((path (harness-core-test-path '("a" user) (list "c1" 'compaction reverted) '("d" user)
+                                        '("c2" compaction) '("e" user))))
+      (should (equal '("c2" "e") (harness-core-test-ids (harness-path-from-compaction path)))))
+    ;; No compaction at all.
+    (should (equal '("a" "b") (harness-core-test-ids (harness-path-from-compaction
+                                                      (harness-core-test-path '("a" user) '("b" assistant))))))
+    (should-not (harness-path-from-compaction nil))))
+
+(ert-deftest harness-util-a-reverted-compaction-gives-back-the-messages-it-carried-over ()
+  "A message a compaction carried over after itself is dropped with a reverted
+compaction when its original is on the path before it: the original is the
+message then.  A copy whose original is not there stays, and so does a copy
+of a compaction that is in force."
+  (let* ((carried (lambda (id from) (list id 'user (list :carried-from from))))
+         (reverted '(:reverted t)))
+    ;; Reverted: the original, not the copy.
+    (should (equal '("a" "u" "h" "e")
+                   (harness-core-test-ids
+                    (harness-path-live
+                     (harness-core-test-path '("a" user) '("u" user) '("h" hint)
+                                             (list "c" 'compaction reverted)
+                                             (funcall carried "u2" "u") '("e" user))))))
+    ;; In force: the copy stays, the original is before the compaction.
+    (should (equal '("c" "u2" "e")
+                   (harness-core-test-ids
+                    (harness-path-from-compaction
+                     (harness-core-test-path '("a" user) '("u" user) '("c" compaction)
+                                             (funcall carried "u2" "u") '("e" user))))))
+    ;; A copy of a message that is not on the path (a cut that kept the
+    ;; original off it) stays.
+    (should (equal '("a" "u2" "e")
+                   (harness-core-test-ids
+                    (harness-path-live
+                     (harness-core-test-path '("a" user) (list "c" 'compaction reverted)
+                                             (funcall carried "u2" "gone") '("e" user))))))
+    ;; A copy of a copy: dropped with the compaction that made it, the
+    ;; copy it was made from standing for it.
+    (should (equal '("u" "c1" "u1" "e")
+                   (harness-core-test-ids
+                    (harness-path-live
+                     (harness-core-test-path '("u" user) '("c1" compaction)
+                                             (funcall carried "u1" "u")
+                                             (list "c2" 'compaction reverted)
+                                             (funcall carried "u2" "u1") '("e" user))))))))
+
 (provide 'harness-core-test)
 ;;; harness-core-test.el ends here

@@ -512,9 +512,11 @@ that id, which `harness-session--load-nodes' merges into it."
 (defun harness-session--from-compaction (path)
   "Return PATH from its last compaction node on, or all of it without one.
 That is the part of a transcript `session/messages' sends: the summary
-in the compaction node stands for everything before it."
-  (let ((start (cl-position-if (lambda (n) (eq (plist-get n :kind) 'compaction)) path :from-end t)))
-    (if start (nthcdr start path) path)))
+in the compaction node stands for everything before it.  A compaction
+the user reverted (`compaction/revert') is no such node, and neither is
+what it carried over: the conversation before it is sent whole
+\(`harness-path-from-compaction')."
+  (harness-path-from-compaction path))
 
 (defun harness-session--unanswered (path)
   "Return the tool-call nodes on PATH that no tool result on PATH answers.
@@ -3012,9 +3014,11 @@ Nil when the node has no images."
   "Return provider messages (:role :content BLOCKS) for the transcript of ID.
 Adjacent assistant-side nodes merge into one assistant message; tool
 results become user messages with tool_result blocks; the transcript
-starts at the last compaction node when one exists.  A steering message
-stands where the model got it, after its `:delivered-after' node and
-the tool results right after that, not where it was sent mid-step.
+starts at the last compaction node when one exists, one the user did
+not revert (`compaction/revert'): the conversation before a reverted
+compaction is sent whole.  A steering message stands where the model
+got it, after its `:delivered-after' node and the tool results right
+after that, not where it was sent mid-step.
 Every tool call is answered in the message after it, by a stand-in
 result when the path has none (see `harness-session--pair-tools').
 A tool_result block is (:type \"tool_result\" :tool_use_id ID :content

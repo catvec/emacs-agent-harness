@@ -11,6 +11,7 @@
 (defvar harness-agent--turns)
 (defvar harness-compaction--running)
 (defvar harness-compaction--pending)
+(defvar harness-compaction--revert-hold)
 (defvar harness-compaction-kind)
 (defvar harness-compaction-brief-model)
 (defvar harness-compaction-mid-turn)
@@ -39,6 +40,7 @@
      (clrhash harness-agent--turns)
      (clrhash harness-compaction--running)
      (clrhash harness-compaction--pending)
+     (clrhash harness-compaction--revert-hold)
      (clrhash harness-compaction--mid-turn)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override nil)
@@ -1843,6 +1845,478 @@ not show it queued for good."
         (should (plist-get (plist-get copy :meta) :steering))
         (should (equal (plist-get node :id) (plist-get (plist-get copy :meta) :delivered-after)))
         (should (plist-get (plist-get copy :meta) :carried-from))))))
+
+
+;;;; Reverting a compaction
+
+(defun harness-compaction-test-compacted-session ()
+  "Create a session of one answered exchange, compacted; return its id.
+The summary says SUMMARY TEXT."
+  (let ((id (harness-compaction-test-session))
+        (harness-provider-demo-script-override harness-compaction-test-script))
+    (harness-await (harness-call 'compaction/compact id))
+    id))
+
+(defun harness-compaction-test-message-texts (id)
+  "Return the text of each message the model of session ID is sent, oldest first."
+  (mapcar (lambda (m)
+            (mapconcat (lambda (b) (or (plist-get b :text) "")) (plist-get m :content) "\n"))
+          (harness-call 'session/messages id)))
+
+(defun harness-compaction-test-turn (id text)
+  "Send TEXT to session ID, wait for the demo model to answer; return its request."
+  (setq harness-compaction-test--requests nil)
+  (let ((harness-provider-demo-script-override #'harness-compaction-test--answer))
+    (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id text) 20)
+                                     :stop-reason))))
+  (car harness-compaction-test--requests))
+
+(defun harness-compaction-test-refusal (thunk)
+  "Call THUNK, which must signal a `harness-error'; return its message."
+  (condition-case err
+      (progn (funcall thunk) (ert-fail "no error was signalled"))
+    (harness-error (format "%s" (cadr err)))))
+
+(ert-deftest harness-compaction-revert-gives-the-model-the-conversation-before-it ()
+  "Reverting a compaction sends the model the conversation it stood for.
+The next request is the whole of it, then the new message -- not the
+summary -- and the node stays where it is, marked reverted."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-compacted-session))
+           (node (car (harness-compaction-test-compactions id))))
+      (should (string-prefix-p "Summary of the conversation so far:"
+                               (car (harness-compaction-test-message-texts id))))
+      (let ((answer (harness-call 'compaction/revert id)))
+        (should (eq 'reverted (plist-get answer :state)))
+        (should (eq t (plist-get answer :changed)))
+        (should (equal (plist-get node :id) (plist-get answer :node-id)))
+        (should (string-prefix-p "Reverted the compaction" (plist-get answer :message))))
+      ;; Nothing was deleted: the node stays, marked.
+      (should (equal (list (plist-get node :id))
+                     (mapcar (lambda (n) (plist-get n :id)) (harness-compaction-test-compactions id))))
+      (should (harness-node-compaction-reverted-p (car (harness-compaction-test-compactions id))))
+      (should (equal '("please refactor the parser" "Done: parser.el rewritten")
+                     (harness-compaction-test-message-texts id)))
+      ;; The transcript says so, where it happened.
+      (should (string-prefix-p "Reverted the compaction" (car (last (harness-compaction-test-hints id)))))
+      ;; The next request is the conversation before the compaction, whole.
+      (let ((text (harness-compaction-test-request-text (harness-compaction-test-turn id "and the lexer?"))))
+        (should (string-match-p "please refactor the parser\nDone: parser.el rewritten\nand the lexer\\?\\'" text))
+        (should-not (string-match-p "Summary of the conversation so far" text))))))
+
+(ert-deftest harness-compaction-restore-sends-the-summary-again ()
+  "Going back to the compaction sends the summary in place of the conversation.
+What was said meanwhile follows it, as it follows the conversation
+reverted: it is after the compaction either way."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-compacted-session)))
+      (harness-call 'compaction/revert id)
+      (harness-compaction-test-turn id "and the lexer?")
+      (let ((answer (harness-call 'compaction/restore id)))
+        (should (eq 'compacted (plist-get answer :state)))
+        (should (eq t (plist-get answer :changed)))
+        (should (string-prefix-p "Back to the compaction" (plist-get answer :message))))
+      (should-not (harness-node-compaction-reverted-p (car (harness-compaction-test-compactions id))))
+      (should (= 2 (length (harness-call 'session/messages id))))
+      (let* ((request (harness-compaction-test-turn id "and the parser?"))
+             (messages (plist-get request :messages)))
+        ;; The summary and the first question after it, the answer, the new question.
+        (should (equal '(user assistant user) (mapcar (lambda (m) (plist-get m :role)) messages)))
+        (should (string-prefix-p "Summary of the conversation so far:\n\nSUMMARY TEXT"
+                                 (plist-get (car (plist-get (car messages) :content)) :text)))
+        (should (equal "and the lexer?" (plist-get (cadr (plist-get (car messages) :content)) :text)))
+        (should (string-match-p "Done\\.\nand the parser\\?\\'" (harness-compaction-test-request-text request)))))))
+
+(ert-deftest harness-compaction-revert-and-restore-toggle-as-often-as-asked ()
+  "Undo and redo, again and again: each move puts the model's context back as it was.
+Asking for what is the case already changes nothing, so a button
+clicked twice does not undo itself."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-compacted-session))
+           (compacted (harness-compaction-test-message-texts id))
+           (reverted '("please refactor the parser" "Done: parser.el rewritten")))
+      (dotimes (_ 4)
+        (should (eq 'reverted (plist-get (harness-call 'compaction/revert id) :state)))
+        (should (equal reverted (harness-compaction-test-message-texts id)))
+        (should (eq 'compacted (plist-get (harness-call 'compaction/restore id) :state)))
+        (should (equal compacted (harness-compaction-test-message-texts id))))
+      (let ((hints (length (harness-compaction-test-hints id))))
+        ;; Already as asked: nothing is done, nothing is said.
+        (let ((answer (harness-call 'compaction/restore id)))
+          (should (eq 'compacted (plist-get answer :state)))
+          (should (eq :false (plist-get answer :changed))))
+        (harness-call 'compaction/revert id)
+        (setq hints (length (harness-compaction-test-hints id)))
+        (let ((answer (harness-call 'compaction/revert id)))
+          (should (eq 'reverted (plist-get answer :state)))
+          (should (eq :false (plist-get answer :changed))))
+        (should (= hints (length (harness-compaction-test-hints id))))
+        (should (equal reverted (harness-compaction-test-message-texts id)))))))
+
+(ert-deftest harness-compaction-revert-keeps-what-was-said-after-the-compaction ()
+  "The conversation the model gets back is followed by what came after the compaction.
+A message the compaction carried over after itself is the original
+again, not both."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session)))
+      (harness-call 'session/append id '(:kind user :content "carry me"))
+      (let ((harness-provider-demo-script-override harness-compaction-test-script))
+        (harness-await (harness-call 'compaction/compact id)))
+      ;; The compaction carried the unanswered message over: two of it are recorded.
+      (should (= 2 (cl-count "carry me" (harness-compaction-test-user-texts id) :test #'equal)))
+      (harness-compaction-test-turn id "and then?")
+      (harness-call 'compaction/revert id)
+      (should (equal '("please refactor the parser" "Done: parser.el rewritten"
+                       "carry me\nand then?" "Done.")
+                     (harness-compaction-test-message-texts id)))
+      (harness-call 'compaction/restore id)
+      (let ((texts (harness-compaction-test-message-texts id)))
+        (should (= 2 (length texts)))
+        (should (string-prefix-p "Summary of the conversation so far:" (car texts)))
+        (should (string-suffix-p "carry me\nand then?" (car texts)))
+        (should (equal "Done." (cadr texts)))))))
+
+(ert-deftest harness-compaction-revert-waits-for-a-turn-or-a-compaction ()
+  "Nothing is reverted or restored while a turn runs, a compaction runs or one is queued.
+The same waits a message has: the turn writes into the conversation
+whose context this would change.  A refusal changes nothing; once the
+wait is over the same call works."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-compacted-session))
+           (reverted-p (lambda () (harness-node-compaction-reverted-p
+                                   (car (harness-compaction-test-compactions id)))))
+           (hints (length (harness-compaction-test-hints id))))
+      (dolist (case (list
+                     (list "turn" "is running a turn"
+                           (lambda () (harness-compaction-test--running id))
+                           (lambda () (remhash id harness-agent--turns)))
+                     (list "compaction" "compaction is under way"
+                           (lambda () (puthash id (harness-make-promise) harness-compaction--running))
+                           (lambda () (remhash id harness-compaction--running)))
+                     (list "queue" "compaction is queued"
+                           (lambda () (puthash id (list :opts nil) harness-compaction--pending))
+                           (lambda () (remhash id harness-compaction--pending)))))
+        (funcall (nth 2 case))
+        (dolist (method '(compaction/revert compaction/restore))
+          (should (string-match-p (nth 1 case)
+                                  (harness-compaction-test-refusal (lambda () (harness-call method id))))))
+        (should-not (funcall reverted-p))
+        (should (= hints (length (harness-compaction-test-hints id))))
+        (funcall (nth 3 case)))
+      (should (eq 'reverted (plist-get (harness-call 'compaction/revert id) :state)))
+      ;; Restoring waits as well.
+      (harness-compaction-test--running id)
+      (should (string-match-p "running a turn"
+                              (harness-compaction-test-refusal (lambda () (harness-call 'compaction/restore id)))))
+      (should (funcall reverted-p))
+      (remhash id harness-agent--turns)
+      (should (eq 'compacted (plist-get (harness-call 'compaction/restore id) :state))))))
+
+(ert-deftest harness-compaction-revert-says-no-to-what-it-cannot-do ()
+  "A conversation with no compaction, another node than the latest, a handoff's summary."
+  (harness-compaction-test-with
+    (let ((fresh (harness-compaction-test-session)))
+      (should (string-match-p "no compaction to revert"
+                              (harness-compaction-test-refusal (lambda () (harness-call 'compaction/revert fresh)))))
+      (should (string-match-p "no compaction to restore"
+                              (harness-compaction-test-refusal (lambda () (harness-call 'compaction/restore fresh)))))
+      (should (string-match-p "No session"
+                              (harness-compaction-test-refusal (lambda () (harness-call 'compaction/revert "nope"))))))
+    (let* ((id (harness-compaction-test-compacted-session))
+           (node (car (harness-compaction-test-compactions id))))
+      (should (string-match-p "Only the latest compaction can be reverted: n-nope is an older one"
+                              (harness-compaction-test-refusal (lambda () (harness-call 'compaction/revert id "n-nope")))))
+      ;; The node itself may be named.
+      (should (eq 'reverted (plist-get (harness-call 'compaction/revert id (plist-get node :id)) :state)))
+      (should (string-match-p "restored: n-nope"
+                              (harness-compaction-test-refusal (lambda () (harness-call 'compaction/restore id "n-nope")))))
+      (should (eq 'compacted (plist-get (harness-call 'compaction/restore id (plist-get node :id)) :state))))
+    ;; A compaction made to hand the conversation over to another model.
+    (let* ((id (harness-compaction-test-session))
+           (harness-provider-demo-script-override harness-compaction-test-script))
+      (harness-await (harness-call 'compaction/compact id
+                                   (list :meta '(:handoff (:mode "compact" :from "demo:scripted" :to "other:model")))))
+      (should (string-match-p "hand the conversation over to another model cannot be reverted"
+                              (harness-compaction-test-refusal (lambda () (harness-call 'compaction/revert id)))))
+      (should-not (harness-node-compaction-reverted-p (car (harness-compaction-test-compactions id)))))))
+
+(ert-deftest harness-compaction-revert-survives-a-restart ()
+  "A reverted compaction is still reverted when the session is loaded again, and restored too."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-compacted-session))
+           (compacted (harness-compaction-test-message-texts id))
+           (reverted '("please refactor the parser" "Done: parser.el rewritten"))
+           (restart (lambda ()
+                      (harness-session-flush)
+                      (clrhash harness-sessions)
+                      (harness-session--load-all)
+                      (harness-call 'session/resume id))))
+      (harness-call 'compaction/revert id)
+      (funcall restart)
+      (should (harness-node-compaction-reverted-p (car (harness-compaction-test-compactions id))))
+      (should (equal reverted (harness-compaction-test-message-texts id)))
+      (harness-call 'compaction/restore id)
+      (funcall restart)
+      (should-not (harness-node-compaction-reverted-p (car (harness-compaction-test-compactions id))))
+      (should (equal compacted (harness-compaction-test-message-texts id)))
+      ;; And it can be flipped again after the restart.
+      (should (eq 'reverted (plist-get (harness-call 'compaction/revert id) :state)))
+      (should (equal reverted (harness-compaction-test-message-texts id))))))
+
+(ert-deftest harness-compaction-revert-starts-the-cache-over ()
+  "Reverting or restoring sends the model another conversation than the last request's.
+Its prompt cache is gone, as a compaction leaves it, until the next
+request stamps a new one, and the context the session reports is an
+estimate of the one it has now."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-compacted-session))
+           (stamp (lambda ()
+                    (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 400 :context 420
+                                                           :cache-at 1000.0))))
+           (usage (lambda () (plist-get (harness-call 'session/get id) :usage))))
+      (dolist (way '(compaction/revert compaction/restore))
+        (funcall stamp)
+        (should (plist-get (harness-call 'session/get id) :cache))
+        (harness-call way id)
+        (should-not (plist-get (harness-call 'session/get id) :cache))
+        (should-not (plist-member (funcall usage) :cache-at))
+        (should (plist-get (funcall usage) :cache-pending))
+        ;; What the model is sent now: the conversation before the compaction is
+        ;; at least as big as the model said it was when it was compacted.
+        (let ((live (harness-compaction--live-tokens id))
+              (was (plist-get (plist-get (car (harness-compaction-test-compactions id)) :meta) :input-tokens)))
+          (should (= (if (eq way 'compaction/revert) (max live was) live)
+                     (plist-get (funcall usage) :context))))
+        (should (= 0 (plist-get (funcall usage) :last-output)))))))
+
+(ert-deftest harness-compaction-revert-counts-what-the-model-said-it-compacted ()
+  "The context a revert reports is never under what the compaction replaced, as the model read it.
+The estimate of the nodes leaves out what it cannot see -- a long system prompt, a picture --
+so the size the model reported when it compacted the conversation is the floor."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-session))
+           (harness-provider-demo-script-override
+            '((:type text :delta "SUMMARY")
+              (:type usage :input 150000 :output 5 :context 150000)
+              (:type done :stop-reason end-turn))))
+      (harness-await (harness-call 'compaction/compact id))
+      (let ((answer (harness-call 'compaction/revert id)))
+        (should (= 150000 (plist-get answer :context)))
+        (should (= 150000 (plist-get (plist-get (harness-call 'session/get id) :usage) :context)))
+        (should (string-match-p "about 150k tokens" (plist-get answer :message))))
+      ;; Restored, it is the summary's size again.
+      (let ((answer (harness-call 'compaction/restore id)))
+        (should (< (plist-get answer :context) 1000))))))
+
+(ert-deftest harness-compaction-revert-starts-a-hosted-loop-over ()
+  "A provider that keeps the conversation itself starts a new one from the other context."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-compacted-session))
+          (changed nil))
+      (harness-on 'session/provider-state-changed (lambda (sid state) (push (list sid state) changed)))
+      (dolist (way '(compaction/revert compaction/restore))
+        (harness-call 'session/set-provider-state id '(:conv "c9"))
+        (setq changed nil)
+        (harness-call way id)
+        (should-not (plist-get (harness-call 'session/get id) :provider-state))
+        (should (equal (list (list id nil)) changed))))))
+
+(defun harness-compaction-test-long-exchange (id chars)
+  "Append to session ID a user message and a CHARS characters long answer."
+  (harness-call 'session/append id '(:kind user :content "write it all out"))
+  (harness-call 'session/append id (list :kind 'assistant :content (make-string chars ?x))))
+
+(ert-deftest harness-compaction-revert-is-not-compacted-again-before-the-next-turn ()
+  "A conversation over the limit that the user asked for is sent once as it is.
+Its window is 8000 tokens and the limit 7000: the reverted conversation
+is some 7500.  The automatic compaction before the next turn would make
+the compaction again before the model saw any of it, so it lets that
+turn through; the one after it compacts as it always did."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session)))
+      (harness-compaction-test-long-exchange id 30000)
+      (let ((harness-provider-demo-script-override harness-compaction-test-script))
+        (harness-await (harness-call 'compaction/compact id)))
+      (let ((answer (harness-call 'compaction/revert id)))
+        (should (< 7000 (plist-get answer :context) 8000))
+        (should-not (string-match-p "compacts it again" (plist-get answer :message))))
+      (should (gethash id harness-compaction--revert-hold))
+      (should (harness-compaction-needed-p (harness-call 'session/get id)))
+      (let ((request (harness-compaction-test-turn id "and now?")))
+        (should (= 1 (harness-compaction-test-compaction-count id)))
+        (should (string-match-p "xxxxxxxx" (harness-compaction-test-request-text request))))
+      (should-not (gethash id harness-compaction--revert-hold))
+      ;; The next turn: nothing holds the compaction back.
+      (harness-compaction-test-turn id "and then?")
+      (should (= 2 (harness-compaction-test-compaction-count id))))))
+
+(ert-deftest harness-compaction-revert-over-the-window-is-compacted-at-once ()
+  "A conversation that does not fit the window is not let through: the reverted
+conversation says so, and the next message compacts it again."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session)))
+      (harness-compaction-test-long-exchange id 40000)
+      (let ((harness-provider-demo-script-override harness-compaction-test-script))
+        (harness-await (harness-call 'compaction/compact id)))
+      (let ((answer (harness-call 'compaction/revert id)))
+        (should (< 8000 (plist-get answer :context)))
+        (should (string-match-p "more than its 8k window, so the next message compacts it again"
+                                (plist-get answer :message))))
+      (should-not (gethash id harness-compaction--revert-hold))
+      (harness-compaction-test-turn id "and now?")
+      (should (= 2 (harness-compaction-test-compaction-count id))))))
+
+(ert-deftest harness-compaction-restore-and-a-new-compaction-forget-the-hold ()
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session)))
+      (harness-compaction-test-long-exchange id 30000)
+      (let ((harness-provider-demo-script-override harness-compaction-test-script))
+        (harness-await (harness-call 'compaction/compact id))
+        (harness-call 'compaction/revert id)
+        (should (gethash id harness-compaction--revert-hold))
+        (harness-call 'compaction/restore id)
+        (should-not (gethash id harness-compaction--revert-hold))
+        (harness-call 'compaction/revert id)
+        (should (gethash id harness-compaction--revert-hold))
+        (harness-await (harness-call 'compaction/compact id))
+        (should-not (gethash id harness-compaction--revert-hold))
+        (harness-call 'compaction/revert id)
+        (harness-call 'session/delete id)
+        (should-not (gethash id harness-compaction--revert-hold))))))
+
+(ert-deftest harness-compaction-only-the-latest-compaction-is-reverted ()
+  "An older compaction keeps the state it had, so undoing the latest goes back exactly.
+Reverting the second compaction leaves the conversation as the first
+made it; reverting the first before the second was made leaves the
+whole conversation after the second is reverted too."
+  (harness-compaction-test-with
+    (let* ((harness-provider-demo-script-override harness-compaction-test-script)
+           (id (harness-compaction-test-session)))
+      (harness-await (harness-call 'compaction/compact id))
+      (harness-call 'session/append id '(:kind user :content "second task"))
+      (harness-call 'session/append id '(:kind assistant :content "second done"))
+      (let ((first (car (harness-compaction-test-compactions id))))
+        (harness-await (harness-call 'compaction/compact id))
+        (let ((second (cadr (harness-compaction-test-compactions id))))
+          ;; The first is no longer the latest.
+          (should (string-match-p "Only the latest compaction can be reverted"
+                                  (harness-compaction-test-refusal
+                                   (lambda () (harness-call 'compaction/revert id (plist-get first :id))))))
+          (should (equal (plist-get second :id)
+                         (plist-get (harness-call 'compaction/revert id) :node-id)))
+          ;; The first compaction is where the conversation starts again.
+          (let ((texts (harness-compaction-test-message-texts id)))
+            (should (string-prefix-p "Summary of the conversation so far:" (car texts)))
+            (should (string-suffix-p "Done: parser.el rewritten\nsecond task" (car texts)))
+            (should (equal "second done" (cadr texts))))
+          (should-not (harness-node-compaction-reverted-p (car (harness-compaction-test-compactions id))))
+          (harness-call 'compaction/restore id)
+          (should (string-prefix-p "Summary of the conversation so far:"
+                                   (car (harness-compaction-test-message-texts id))))))
+      ;; Reverted first, while it was the latest; then a second one is made.
+      (let ((id (harness-compaction-test-compacted-session)))
+        (harness-call 'compaction/revert id)
+        (harness-call 'session/append id '(:kind user :content "second task"))
+        (harness-call 'session/append id '(:kind assistant :content "second done"))
+        (harness-await (harness-call 'compaction/compact id))
+        (should (= 1 (length (harness-call 'session/messages id))))
+        (harness-call 'compaction/revert id)
+        (should (equal '("please refactor the parser" "Done: parser.el rewritten" "second task" "second done")
+                       (harness-compaction-test-message-texts id)))
+        (harness-call 'compaction/restore id)
+        (should (= 1 (length (harness-call 'session/messages id))))))))
+
+(ert-deftest harness-compaction-a-fork-keeps-the-state-and-flips-it-on-its-own ()
+  "A fork copies the nodes, the mark on a reverted compaction with them, and
+flipping it in the fork or in the session leaves the other as it is."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-compacted-session))
+           (node (car (harness-compaction-test-compactions id))))
+      (harness-call 'compaction/revert id)
+      (let* ((fork (plist-get (harness-await (harness-call 'session/fork id)) :id))
+             (in-fork (lambda () (car (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'compaction))
+                                                        (harness-call 'session/nodes fork))))))
+        (should (equal (plist-get node :id) (plist-get (funcall in-fork) :id)))
+        (should (harness-node-compaction-reverted-p (funcall in-fork)))
+        (should (equal '("please refactor the parser" "Done: parser.el rewritten")
+                       (harness-compaction-test-message-texts fork)))
+        (harness-call 'compaction/restore fork)
+        (should-not (harness-node-compaction-reverted-p (funcall in-fork)))
+        (should (harness-node-compaction-reverted-p (car (harness-compaction-test-compactions id))))
+        (should (= 2 (length (harness-call 'session/messages id))))
+        (should (= 1 (length (harness-call 'session/messages fork))))))))
+
+(ert-deftest harness-compaction-revert-a-compaction-made-in-the-middle-of-a-turn ()
+  "A compaction in the middle of a turn can be reverted once the turn is over.
+The tool call and its result are in the conversation that comes back,
+paired, and the model's last answer follows them."
+  (harness-compaction-test-with
+    (harness-compaction-test-define-echo)
+    (let* ((id (harness-compaction-test-session))
+           (harness-provider-demo-script-override (harness-compaction-test-tool-turn '(7500 600))))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (eq t (plist-get (plist-get (car (harness-compaction-test-compactions id)) :meta) :mid-turn)))
+      ;; The summary, with the note to carry on, and the answer that followed it.
+      (should (= 2 (length (harness-call 'session/messages id))))
+      (harness-call 'compaction/revert id)
+      (let ((messages (harness-call 'session/messages id)))
+        (should (equal '(user assistant user assistant user assistant)
+                       (mapcar (lambda (m) (plist-get m :role)) messages)))
+        (should (equal '("tool_result")
+                       (mapcar (lambda (b) (plist-get b :type)) (plist-get (nth 4 messages) :content))))
+        (should (equal '("text" "tool_use")
+                       (mapcar (lambda (b) (plist-get b :type)) (plist-get (nth 3 messages) :content))))
+        (should (equal (plist-get (cadr (plist-get (nth 3 messages) :content)) :id)
+                       (plist-get (car (plist-get (nth 4 messages) :content)) :tool_use_id)))
+        (should (equal "All done." (plist-get (car (plist-get (nth 5 messages) :content)) :text))))
+      (harness-call 'compaction/restore id)
+      (let ((messages (harness-call 'session/messages id)))
+        (should (equal '(user assistant) (mapcar (lambda (m) (plist-get m :role)) messages)))
+        (should (string-suffix-p harness-compaction--mid-turn-note
+                                 (plist-get (car (plist-get (car messages) :content)) :text)))))))
+
+(ert-deftest harness-compaction-truncate-keeps-what-it-cut-on-the-path ()
+  "The nodes a truncation cuts away stay on the session's path, before its node.
+They are what session_history reads and what a revert gives the model
+back; the kept nodes follow the node, as before."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-long-session))
+           (before (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id)))
+           (harness-compaction--truncate-keep 0.1)
+           (node (harness-await (harness-call 'compaction/compact id '(:kind "truncate"))))
+           (meta (plist-get node :meta))
+           (path (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id)))
+           (at (cl-position (plist-get node :id) path :test #'equal))
+           (dropped (plist-get meta :truncate-dropped)))
+      ;; The cut nodes, then the compaction, its hint, and the kept nodes: all 20 are there.
+      (should (equal (cl-subseq before 0 dropped) (cl-subseq path 0 at)))
+      (should (equal (nth (1- dropped) before) (plist-get meta :truncate-after)))
+      (should (equal (cl-subseq before dropped) (nthcdr (+ at 2) path)))
+      (should (= (+ 20 2) (length path)))
+      ;; The head is still the newest node.
+      (should (equal (car (last before)) (plist-get (harness-call 'session/get id) :head)))
+      (let ((reverted-count (length (harness-call 'session/messages id))))
+        (should (< reverted-count 20))
+        (harness-call 'compaction/revert id)
+        (should (= 20 (length (harness-call 'session/messages id))))
+        (should (string-prefix-p "message 0 " (car (harness-compaction-test-message-texts id))))
+        (harness-call 'compaction/restore id)
+        (should (= reverted-count (length (harness-call 'session/messages id))))))))
+
+(ert-deftest harness-compaction-revert-refuses-a-cut-from-before-it-could-be-undone ()
+  "A truncation of an earlier harness lost the nodes it cut off the path: there is nothing to go back to."
+  (harness-compaction-test-with
+    (let ((id (harness-compaction-test-session)))
+      (harness-call 'session/append id (list :kind 'compaction :content "cut"
+                                            :meta '(:compaction "truncate" :truncate-dropped 3)))
+      (should (string-match-p "cannot be reverted"
+                              (harness-compaction-test-refusal (lambda () (harness-call 'compaction/revert id))))))
+    ;; Nor one that opens the path: nothing before it.
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted") :id)))
+      (harness-call 'session/append id (list :kind 'compaction :content "first of all"
+                                            :meta '(:compaction "summary")))
+      (should (string-match-p "nothing before this compaction"
+                              (harness-compaction-test-refusal (lambda () (harness-call 'compaction/revert id))))))))
 
 (provide 'harness-compaction-test)
 ;;; harness-compaction-test.el ends here

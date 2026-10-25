@@ -471,6 +471,12 @@ class _SessionScreenState extends State<SessionScreen> {
                             // runs, never one that waits for you.
                             tools: controller.tools,
                             waiting: controller.waitingCalls,
+                            // The latest compaction can be taken back, and
+                            // made again, where the harness can.
+                            onToggleCompaction:
+                                _app.capability?.compactionRevert == true
+                                ? controller.toggleCompaction
+                                : null,
                           ),
                   ),
                   if (plan.isNotEmpty && interaction == null)

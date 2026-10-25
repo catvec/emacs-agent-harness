@@ -598,8 +598,9 @@ match is read, so a node of megabytes costs no more than a short one."
 That is its last compaction node, or its last handoff note when that
 comes later: what the model is sent starts there, and the nodes before
 it reach the model only as that node tells of them -- a summary, a
-transcript file, or nothing."
-  (cl-position-if (lambda (n) (or (eq (plist-get n :kind) 'compaction) (harness-node-handoff n)))
+transcript file, or nothing.  A compaction the user reverted is none:
+the conversation before it reached the model whole."
+  (cl-position-if (lambda (n) (or (harness-node-compaction-in-force-p n) (harness-node-handoff n)))
                   path :from-end t))
 
 (defun harness-tools-sessions--when (node)
@@ -667,7 +668,10 @@ Its text is cut to CHARS; the nodes around it are shown short."
 (defun harness-tools-sessions--history (input ctx)
   "Handler of session_history."
   (let* ((sid (plist-get ctx :session-id))
-         (path (harness-call 'session/nodes sid))
+         ;; A compaction the user reverted is no boundary: the conversation
+         ;; before it reached the model whole, and what the compaction
+         ;; carried over is that conversation's own (`harness-path-live').
+         (path (harness-path-live (harness-call 'session/nodes sid)))
          (boundary (harness-tools-sessions--boundary path))
          (all (harness-json-true-p (plist-get input :all)))
          (scope (if (and boundary (not all)) (seq-take path boundary) path))

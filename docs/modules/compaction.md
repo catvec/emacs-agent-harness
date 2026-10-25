@@ -53,6 +53,29 @@ session's path, where the session_history tool searches and reads it
 (harness-tools-sessions.el): every note and summary ends by saying so
 when the session has the tool (`harness-compaction--history-note`).
 
+Because nothing is deleted, a compaction can be taken back, and made
+again, as with undo and redo (`compaction/revert`, `compaction/restore`):
+the latest compaction is marked reverted in its `:meta`, and the
+transcript `session/messages` sends starts at the compaction before it,
+or at the very start -- the whole conversation the compaction stood
+for, then what was said since -- instead of at its summary; restoring
+clears the mark.  The shared rule is `harness-path-from-compaction`
+(harness-util.el): a reverted compaction is no start of the
+conversation, and the user messages it carried over after itself are the
+originals again.  Only the latest compaction can be flipped; an older
+one keeps the state it had when the next was made, so that undoing the
+latest returns the conversation exactly to what it was.  A compaction
+made to hand the conversation to another model cannot be.  Both are
+refused while a turn or a compaction runs or is queued (the wait a
+message has), start the prompt cache over and a hosted loop's
+conversation, as a compaction does, and say in the transcript what the
+model is sent now.  A conversation given back that is over the context
+limit but fits the window skips the automatic compaction before the
+next turn once (`harness-compaction--revert-hold`): the user asked for
+the model to see it, and it would be compacted again before the model
+did.  The chats draw [Revert] and [Go post-compaction] on the latest
+compaction's note and follow its update.
+
 Automatic compaction makes `harness-compaction-kind`; by hand (the
 UI's `harness-compact`, or the panel of a session whose prompt cache
 expired) any kind, with what each costs (`compaction/estimate`).  A
@@ -138,6 +161,8 @@ the token count progressively.
 - `compaction/compact` (session-id &optional opts) — Compact the transcript of SESSION-ID; return a promise.
 - `compaction/estimate` (session-id &optional opts) — Say what compacting SESSION-ID costs, kind by kind, and what carrying on does.
 - `compaction/resend-cost` (session-id) — Say what sending SESSION-ID's context costs, read from the cache and not.
+- `compaction/restore` (session-id &optional node-id) — Go back to the latest compaction of SESSION-ID, reverted before.
+- `compaction/revert` (session-id &optional node-id) — Go back to the conversation before the latest compaction of SESSION-ID.
 - `compaction/status` (session-id) — Describe how full the context of SESSION-ID is.
 
 ### Events
@@ -172,6 +197,7 @@ the token count progressively.
 - `session/nodes` ([session](session.md))
 - `session/provider-state` ([session](session.md))
 - `session/set-provider-state` ([session](session.md))
+- `session/update-node` ([session](session.md))
 - `session/usage-add` ([session](session.md))
 - `session/write-transcript` ([session](session.md))
 - `tools/list` ([tools](tools.md)), when it is loaded

@@ -370,6 +370,29 @@ class SessionController extends ChangeNotifier {
     }
   }
 
+  /// Takes the compaction [item] back, or goes back to it once it was taken
+  /// back, as often as the person likes: the model is sent the conversation
+  /// before it, or its summary, from the next message on.  The harness
+  /// marks the node and announces it, so the note in the transcript changes
+  /// by itself; what it refuses -- while a turn runs -- is shown as an error.
+  Future<void> toggleCompaction(TranscriptItem item) async {
+    final nodeId = item.nodeId;
+    if (nodeId == null) return;
+    try {
+      await api.toggleCompaction(
+        sessionId,
+        nodeId,
+        revert: !item.isRevertedCompaction,
+      );
+    } on AcpException catch (failure) {
+      error = _friendlyError(failure);
+      _notify();
+    } catch (failure) {
+      error = '$failure';
+      _notify();
+    }
+  }
+
   Future<void> setMode(String mode) async {
     try {
       await api.setMode(sessionId, mode);

@@ -917,9 +917,7 @@ becomes one user message: the handoff text (see
 `harness-agent--handoff-text'), then the newest message's own blocks.
 Otherwise MESSAGES is returned as it is."
   (let* ((provider (harness-agent--model-provider (plist-get session :model)))
-         (path (harness-call 'session/nodes (plist-get session :id)))
-         (start (cl-position 'compaction path :key (lambda (n) (plist-get n :kind)) :from-end t))
-         (path (if start (nthcdr start path) path))
+         (path (harness-path-from-compaction (harness-call 'session/nodes (plist-get session :id))))
          (own (cl-position-if (lambda (n) (equal (harness-agent--node-provider n) provider)) path :from-end t))
          ;; A handoff note is the conversation's deliberate opening for this
          ;; provider, not something it missed: the handoff module wrote it,

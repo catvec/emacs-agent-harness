@@ -961,6 +961,18 @@ opens the file.  An assistant or thinking node's `:meta` `:model` is
 the model of the step that wrote it, which a switch during that step
 does not change.
 
+A compaction node stands for the conversation before it, and the user
+can take it back (see "compaction"): its `:meta` `:reverted` is then
+true, and the nodes before it are sent to the model whole again, the
+transcript starting at the compaction before it, or at the root.  Read
+the mark with `harness-node-compaction-reverted-p` and a transcript
+from its compaction in force with `harness-path-from-compaction`
+\(harness-util, both sides of ACP): the path without the reverted
+compactions, and without the user messages one carried over after itself
+\(`:meta` `:carried-from` names the original, which is on the path before
+it), from the last compaction that is not reverted.  `session/nodes` is
+the whole path, reverted or not, which is what a chat draws.
+
 A hint the perms module writes after a lasting answer to a permission
 request (allow or deny for the session, or always) says what the answer
 recorded in its `:meta` `:permission`: `(:scope session|always :rule
@@ -5117,6 +5129,11 @@ and tools.
     re-appended after the node, which carries a note
     (`harness-compaction--truncate-note`) saying how many nodes of
     about how many tokens went and that the most recent are kept below.
+    The node follows the node before the first kept one, which
+    `:meta` `:truncate-after` names, so the nodes cut away stay on the
+    session's path before it, where session_history reads them and a
+    revert gives them back to the model (the kept nodes keep their ids,
+    so appending them again moves them behind the node).
     It is what a conversation too big to summarise gets: nothing has to
     be read to make it, and `:meta` records `:truncate-dropped`,
     `:truncate-kept` and `:dropped-tokens`.  It refuses (`harness-error`)
@@ -5244,6 +5261,45 @@ and tools.
   at list prices, nil where the catalogue has none -- the two numbers of
   `compaction/estimate`'s carrying on, without the rest of it.  Keeping a
   cache warm weighs one against the other (cache-warm).
+- `compaction/revert SESSION-ID &optional NODE-ID` and
+  `compaction/restore SESSION-ID &optional NODE-ID` take the latest
+  compaction back and make it again, like an undo and a redo, as often
+  as asked (`_harness/compaction/revert` and `_harness/compaction/restore`
+  over ACP).  Nothing is deleted, so a revert only marks the node: its
+  `:meta` `:reverted` is set (`session/update-node`, which the node log
+  keeps and the clients follow as `session/node-updated`), and
+  `session/messages` sends the conversation from the compaction before
+  it, or from the root, followed by what was said since; the user
+  messages the compaction carried over after itself (`:carried-from`)
+  are the originals again.  A restore clears the mark.  Only the latest
+  compaction on the path can be flipped: an older one keeps the state it
+  had when the next was made, which undoing the latest returns the
+  conversation to exactly; NODE-ID, when given, must name it.  Refused
+  (`harness-error`): a session with no compaction, a compaction made for
+  a handoff (`:handoff`), one with nothing before it on the path, a cut
+  (`truncate`) of an earlier harness, which cut the older nodes off the
+  path (`:truncate-after` missing), and any time a compaction runs
+  (`harness-compaction-busy-p`), one is queued, or a turn runs: the wait
+  a message has.  Asking for what is so already changes nothing.
+  A flip starts the conversation over as a compaction does: the provider
+  state of a hosted loop goes (`harness-compaction--start-over`), the
+  usage record carries `:cache-reset` (the prompt cache is gone until
+  the next request stamps one) and `:context`, an estimate of what the
+  model is sent now, and a hint says so in the transcript.  A revert
+  that gives back a conversation over the context limit but within the
+  window sets `harness-compaction--revert-hold`, which the
+  `agent/before-turn` compaction clears and skips once, since it would
+  make the compaction again before the model read the conversation the
+  user asked for; a new compaction, a restore, or deleting the session
+  clears it too, a restart forgets it, and the mid-turn compaction is
+  not held.  A conversation over the window is not let through: the
+  answer says the next message compacts it again.  The answer is
+  `(:state reverted|compacted :changed t|:false :node-id ID :context N
+  :window N :message TEXT)`, TEXT being what the echo area says.  The
+  chat draws `[Revert]` and `[Go post-compaction]` on the latest
+  compaction's note (`harness-chat--compaction-button`), and the phone
+  app (harness_client) draws the same two buttons under it
+  (`CompactionToggle`), where the harness announces both methods.
 - Settings (section "Compaction"): `harness-compaction-kind`, the kind
   automatic compaction makes (`summary`; any of the kinds, `truncate`
   included), `harness-compaction-mid-turn` (on) and

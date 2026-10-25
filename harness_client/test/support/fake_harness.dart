@@ -96,6 +96,8 @@ class FakeHarness {
         'session/update',
         'session/fork',
         'session/delete',
+        'compaction/revert',
+        'compaction/restore',
         'agent/activity',
         'agent/prompt',
         'priority/set',
@@ -222,6 +224,14 @@ class FakeHarness {
 
   /// Make `provider/quota` fail, as a provider whose probe goes wrong does.
   bool failQuota = false;
+
+  /// The calls of `compaction/revert` and `compaction/restore`, as they
+  /// came: the method, as the client named it, and its params.
+  final List<({String method, JsonMap params})> compactionRequests = [];
+
+  /// Refuse `compaction/revert` and `compaction/restore` with this message,
+  /// as the harness does while a turn or a compaction runs.
+  String? refuseCompaction;
 
   /// Whether the harness offers `tools/list`: its tools, what people call
   /// them, and the allow list of the calls a chat folds into runs.  An older
@@ -1653,6 +1663,48 @@ class FakeHarness {
         sessions[sid] = copy;
         nodes[sid] = List<Map<String, Object?>>.from(nodes[parent] ?? const []);
         _respond(id, copy);
+        return;
+      }
+      if (method == '_harness/compaction/revert' ||
+          method == '_harness/compaction/restore') {
+        // As the harness does: the node is marked (or not), announced again,
+        // and the answer says what the model is sent now.
+        final sid = asString(params['session-id']);
+        final nodeId = asString(params['node-id']);
+        compactionRequests.add((method: method, params: params));
+        if (refuseCompaction != null) {
+          _respondError(id, -32603, refuseCompaction!);
+          return;
+        }
+        final node = (nodes[sid] ?? const <Map<String, Object?>>[])
+            .where((node) => node['id'] == nodeId)
+            .firstOrNull;
+        if (node == null) {
+          _respondError(id, -32603, 'No node $nodeId');
+          return;
+        }
+        final revert = method.endsWith('/revert');
+        final meta = Map<String, Object?>.from(asMap(node['meta']));
+        if (revert) {
+          meta['reverted'] = true;
+        } else {
+          meta.remove('reverted');
+        }
+        node['meta'] = meta;
+        _send('session/update', {
+          'sessionId': sid,
+          'update': {'sessionUpdate': '_harness/node', 'node': node},
+        });
+        _respond(id, {
+          'state': revert ? 'reverted' : 'compacted',
+          'changed': true,
+          'node-id': nodeId,
+          'message': revert
+              ? 'Reverted the compaction: the model sees the conversation '
+                    'before it again, about 58 tokens'
+              : 'Back to the compaction: the model sees its summary again, '
+                    'about 206 tokens',
+        });
         return;
       }
       if (method == '_harness/session/delete') {

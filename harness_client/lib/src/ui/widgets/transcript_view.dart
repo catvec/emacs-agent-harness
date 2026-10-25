@@ -10,6 +10,7 @@ import '../adaptive/mark.dart';
 import '../adaptive/platform_style.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
+import 'compaction_toggle.dart';
 import 'markdown_view.dart';
 import 'tool_card.dart';
 import 'tool_run_card.dart';
@@ -23,6 +24,7 @@ class TranscriptView extends StatefulWidget {
     this.scrollTick = 0,
     this.tools = ToolCatalogue.empty,
     this.waiting = const {},
+    this.onToggleCompaction,
   });
 
   final List<TranscriptItem> items;
@@ -38,6 +40,13 @@ class TranscriptView extends StatefulWidget {
   /// The ids of the calls that wait for the person to answer: a run never
   /// folds them away.
   final Set<String> waiting;
+
+  /// Takes the latest compaction of the conversation back, or goes back to
+  /// it once it was taken back, when the person taps the button under its
+  /// note (see [CompactionToggle]).  Null for a harness that cannot, which
+  /// leaves the note without one.  Only the latest compaction offers it: an
+  /// older one keeps the state it had when the next was made.
+  final void Function(TranscriptItem item)? onToggleCompaction;
 
   @override
   State<TranscriptView> createState() => _TranscriptViewState();
@@ -254,6 +263,12 @@ class _TranscriptViewState extends State<TranscriptView> {
         ),
       );
     }
+    // Only the latest compaction can be taken back.
+    final latestCompaction = widget.items
+        .where((item) => item.kind == TranscriptKind.compaction)
+        .lastOrNull
+        ?.key;
+    final toggleCompaction = widget.onToggleCompaction;
     return Stack(
       children: [
         ListView.builder(
@@ -283,6 +298,19 @@ class _TranscriptViewState extends State<TranscriptView> {
                   showThinking: widget.showThinking,
                   streaming: widget.streaming,
                 );
+                if (item.kind == TranscriptKind.compaction) {
+                  return CompactionToggle(
+                    key: ValueKey(item.key),
+                    item: item,
+                    onToggle:
+                        toggleCompaction == null ||
+                            item.key != latestCompaction ||
+                            !item.canRevertCompaction
+                        ? null
+                        : () => toggleCompaction(item),
+                    note: entry,
+                  );
+                }
                 return nested
                     ? ToolRunMember(
                         reveal: item.key == _revealing,

@@ -153,6 +153,30 @@ class TranscriptItem {
   bool get isAssistant => kind == TranscriptKind.assistant;
   bool get isThinking => kind == TranscriptKind.thinking;
   bool get isTool => kind == TranscriptKind.tool;
+
+  JsonMap get _meta => asMap(node?['meta']);
+
+  /// A compaction the person took back: the model is sent the conversation
+  /// before it, not its summary, until it is restored.  The harness marks
+  /// the node (`meta.reverted`) and announces it again.
+  bool get isRevertedCompaction =>
+      kind == TranscriptKind.compaction && asBool(_meta['reverted']);
+
+  /// Whether the harness can take this compaction back and make it again
+  /// (`compaction/revert`, `compaction/restore`).  Not one made to hand the
+  /// conversation over to another model, nor a cut an earlier harness made,
+  /// which kept nothing to go back to: the harness refuses those, so no
+  /// button is offered.  Only the latest compaction of a conversation can
+  /// be, which the transcript view decides.
+  bool get canRevertCompaction {
+    if (kind != TranscriptKind.compaction || nodeId == null) return false;
+    final meta = _meta;
+    if (asMap(meta['handoff']).isNotEmpty) return false;
+    if (asString(meta['compaction']) == 'truncate') {
+      return (meta['truncate-after'] ?? meta['truncateAfter']) != null;
+    }
+    return true;
+  }
 }
 
 /// Turns the stream of `session/update` notifications into a transcript.

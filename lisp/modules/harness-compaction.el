@@ -43,6 +43,29 @@
 ;; (harness-tools-sessions.el): every note and summary ends by saying so
 ;; when the session has the tool (`harness-compaction--history-note').
 ;;
+;; Because nothing is deleted, a compaction can be taken back, and made
+;; again, as with undo and redo (`compaction/revert', `compaction/restore'):
+;; the latest compaction is marked reverted in its `:meta', and the
+;; transcript `session/messages' sends starts at the compaction before it,
+;; or at the very start -- the whole conversation the compaction stood
+;; for, then what was said since -- instead of at its summary; restoring
+;; clears the mark.  The shared rule is `harness-path-from-compaction'
+;; (harness-util.el): a reverted compaction is no start of the
+;; conversation, and the user messages it carried over after itself are the
+;; originals again.  Only the latest compaction can be flipped; an older
+;; one keeps the state it had when the next was made, so that undoing the
+;; latest returns the conversation exactly to what it was.  A compaction
+;; made to hand the conversation to another model cannot be.  Both are
+;; refused while a turn or a compaction runs or is queued (the wait a
+;; message has), start the prompt cache over and a hosted loop's
+;; conversation, as a compaction does, and say in the transcript what the
+;; model is sent now.  A conversation given back that is over the context
+;; limit but fits the window skips the automatic compaction before the
+;; next turn once (`harness-compaction--revert-hold'): the user asked for
+;; the model to see it, and it would be compacted again before the model
+;; did.  The chats draw [Revert] and [Go post-compaction] on the latest
+;; compaction's note and follow its update.
+;;
 ;; Automatic compaction makes `harness-compaction-kind'; by hand (the
 ;; UI's `harness-compact', or the panel of a session whose prompt cache
 ;; expired) any kind, with what each costs (`compaction/estimate').  A
@@ -272,6 +295,15 @@ of the window; the rest, oldest first, are dropped.")
   "Session id -> the compaction waiting for that session's next boundary.
 A plist (:opts OPTS :interrupt BOOL :running PROMISE), `:running' set
 once it is under way.")
+
+(defvar harness-compaction--revert-hold (make-hash-table :test 'equal)
+  "Session id -> t while a reverted compaction waits for the next turn.
+Set by `compaction/revert' when the conversation it gives back is over
+the context limit but still fits the window: the user asked for the
+model to see all of it, so the automatic compaction before the next
+turn is skipped once (`harness-compaction--before-turn'), and does not
+make the compaction again at once.  Gone as it is used, when a compaction
+is made, restored, or the session is deleted; not kept across a restart.")
 
 (defconst harness-compaction--mid-turn-note
   "Harness note: this compaction was made in the middle of your turn, because the conversation reached its context limit while you were working, so the work it describes is not finished.  Carry on with it from where it stood, without waiting for the user; check the files and the state first if you are unsure where you were."
@@ -968,7 +1000,12 @@ the summariser was given (see `compaction/compact'), KIND one of
 `harness-compaction-kinds' \(`summary' by default), META more for
 the node's `:meta': a transcript's `:file', a handoff's `:handoff', and
 KEEP nodes to append after the compaction node, verbatim, before
-TRAILING.  META `:mid-turn' says it was made in the middle of a turn
+TRAILING.  Those are nodes of the conversation that stay where they
+were in it, moved behind the compaction node; the compaction node
+itself then follows the node before the first of them, so the nodes cut
+away stay on the session's path, before it, for `session_history' to
+read and for the user to go back to (`compaction/revert').  META
+`:mid-turn' says it was made in the middle of a turn
 \(`harness-compaction-mid-turn'): the content then ends in the note
 telling the model to carry on (`harness-compaction--mid-turn-note').
 The conversation starts over from the node
@@ -987,6 +1024,13 @@ The conversation starts over from the node
                                                        :input-tokens input-tokens
                                                        :summary-tokens (harness-estimate-tokens content))
                                                  meta)))))
+    ;; Re-appending a kept node moves it behind the compaction node, with
+    ;; its id, so what came before it would be cut off the path unless the
+    ;; node follows the one before the first of them.
+    (when keep
+      (setq node (harness-call 'session/update-node session-id (plist-get node :id)
+                               :parent (plist-get (car keep) :parent))))
+    (remhash session-id harness-compaction--revert-hold)
     (harness-call 'session/hint session-id (harness-compaction--done-hint kind input-tokens meta))
     (dolist (n keep)
       (harness-call 'session/append session-id n))
@@ -1107,9 +1151,10 @@ of the usable window, and the unanswered user nodes carried over after
 them.  The path before the last compaction, if any, is dropped too.
 Signal `harness-error' when nothing would be dropped."
   (let* ((session (harness-call 'session/get session-id))
-         (path (harness-call 'session/nodes session-id))
-         (start (cl-position 'compaction path :key (lambda (n) (plist-get n :kind)) :from-end t))
-         (tail (if start (nthcdr (1+ start) path) path))
+         ;; The conversation as the model has it: from the compaction in
+         ;; force, a reverted one being none (`harness-path-from-compaction').
+         (path (harness-path-from-compaction (harness-call 'session/nodes session-id)))
+         (tail (if (harness-node-compaction-p (car path)) (cdr path) path))
          (trailing (harness-compaction--trailing-user-nodes tail))
          (candidates (if trailing (butlast tail (length trailing)) tail))
          (units (harness-compaction--node-units candidates))
@@ -1180,7 +1225,11 @@ asked anything."
                                 (plist-get plan :trailing) 'full 'truncate
                                 (append (list :truncate-dropped (length dropped)
                                               :truncate-kept (length keep)
-                                              :dropped-tokens (plist-get plan :dropped-tokens))
+                                              :dropped-tokens (plist-get plan :dropped-tokens)
+                                              ;; The node the cut conversation ends at, which the
+                                              ;; compaction node follows: it can be reverted
+                                              ;; (`compaction/revert').
+                                              :truncate-after (plist-get (car keep) :parent))
                                         meta)
                                 keep)))
 
@@ -1390,6 +1439,162 @@ none of that belongs in *Messages*, in a hint or in the tree."
     (harness-emit 'compaction/failed session-id msg)
     (harness-reject promise err)))
 
+;;;; Reverting a compaction
+
+(defun harness-compaction--latest (session-id)
+  "Return the latest compaction node on SESSION-ID's path, reverted or not, or nil."
+  (cl-find-if #'harness-node-compaction-p (harness-call 'session/nodes session-id) :from-end t))
+
+(defun harness-compaction--toggle-busy (session-id)
+  "Return why SESSION-ID's compaction cannot be reverted or restored now, or nil.
+That is the same wait a message has: a compaction under way
+\(`harness-compaction-busy-p'), one queued for the turn's next boundary,
+or a turn that runs -- it is writing into the conversation whose
+context this would change."
+  (cond
+   ((harness-compaction-busy-p session-id)
+    "a compaction is under way; wait for it to finish")
+   ((gethash session-id harness-compaction--pending)
+    "a compaction is queued for the turn's next boundary")
+   ((and (harness-method-exists-p 'agent/running) (harness-call 'agent/running session-id))
+    "the session is running a turn; wait for it to end, or stop it")))
+
+(defun harness-compaction--toggle-refusal (session-id node node-id revert)
+  "Return why compaction NODE of SESSION-ID cannot be reverted, or nil.
+REVERT non-nil says it is a revert, else a restore, and NODE-ID is the
+node the caller named, or nil.  The latest compaction on the path is the
+only one that can be: an older one keeps the state it had when the next
+was made, which undoing the latest returns the conversation to."
+  (let* ((verb (if revert "reverted" "restored"))
+         (kind (harness-node-compaction-kind node))
+         (path (harness-call 'session/nodes session-id)))
+    (cond
+     ((null node)
+      (format "This conversation has no compaction to %s" (if revert "revert" "restore")))
+     ((and node-id (not (equal node-id (plist-get node :id))))
+      (format "Only the latest compaction can be %s: %s is an older one" verb node-id))
+     ((harness-node-handoff node)
+      (format "A compaction made to hand the conversation over to another model cannot be %s" verb))
+     ((zerop (cl-position (plist-get node :id) path :key (lambda (n) (plist-get n :id)) :test #'equal))
+      "There is nothing before this compaction to go back to")
+     ((and (equal kind "truncate") (not (plist-get (plist-get node :meta) :truncate-after)))
+      (concat "This cut was made before the harness kept the conversation it cut on the record,"
+              " so it cannot be " verb))
+     ((let ((busy (harness-compaction--toggle-busy session-id)))
+        (and busy (format "The compaction cannot be %s now: %s" verb busy)))))))
+
+(defun harness-compaction--mark-reverted (session-id node reverted)
+  "Set compaction NODE of SESSION-ID reverted, or in force when REVERTED is nil.
+The mark is its `:meta' `:reverted', which the node log keeps and the
+UIs follow (`session/node-updated').  Return the node."
+  (let ((meta (harness-plist-remove (plist-get node :meta) :reverted)))
+    (harness-call 'session/update-node session-id (plist-get node :id)
+                  :meta (if reverted (plist-put meta :reverted t) meta))))
+
+(defun harness-compaction--live-tokens (session-id)
+  "Estimate the tokens of the conversation SESSION-ID's model is sent now.
+The nodes from the compaction in force on (`harness-path-from-compaction'),
+the hints, which no model is sent, left out.  A tool call counts its input
+as well as its result, which the estimate of the messages
+\(`harness-compaction--messages-tokens') does not."
+  (harness-compaction--nodes-tokens
+   (cl-remove-if (lambda (n) (eq (plist-get n :kind) 'hint))
+                 (harness-path-from-compaction (harness-call 'session/nodes session-id)))))
+
+(defun harness-compaction--toggle-text (revert tokens window)
+  "Return the sentence that tells the context became TOKENS after a toggle.
+REVERT non-nil says the compaction was reverted, else restored; WINDOW
+is the model's context window, TOKENS being more than it when the
+conversation before the compaction does not fit."
+  (if revert
+      (format "Reverted the compaction: the model sees the conversation before it again, about %s tokens%s"
+              (harness-format-tokens tokens)
+              (if (> tokens window)
+                  (format ", more than its %s window, so the next message compacts it again"
+                          (harness-format-tokens-compact window))
+                ""))
+    (format "Back to the compaction: the model sees its summary again, about %s tokens"
+            (harness-format-tokens tokens))))
+
+(defun harness-compaction--toggle (session-id node-id revert)
+  "Revert the latest compaction of SESSION-ID, or restore it when REVERT is nil.
+NODE-ID, when non-nil, names the compaction the caller means (see
+`compaction/revert').  Return the answer of `compaction/revert'."
+  (unless (harness-call 'session/exists-p session-id)
+    (signal 'harness-error (list (format "No session %s" session-id))))
+  (let* ((node (harness-compaction--latest session-id))
+         (why (harness-compaction--toggle-refusal session-id node node-id revert)))
+    (when why (signal 'harness-error (list why)))
+    (let ((state (if revert 'reverted 'compacted)))
+      (if (eq revert (harness-node-compaction-reverted-p node))
+          ;; Asked for what is the case already -- a second click on a
+          ;; button that has not changed yet -- so there is nothing to do.
+          (list :state state :changed :false :node-id (plist-get node :id)
+                :message (if revert
+                             "The compaction is reverted already"
+                           "The conversation is on the compaction already"))
+        (harness-log 'info "compaction: %s %s the compaction %s" session-id
+                     (if revert "reverts" "restores") (plist-get node :id))
+        (harness-compaction--mark-reverted session-id node revert)
+        ;; The model's next request is another conversation than the last:
+        ;; a hosted loop starts a new one, and nothing the provider cached
+        ;; of the old one is read, as after a compaction.
+        (harness-compaction--start-over session-id)
+        (let* ((session (harness-call 'session/get session-id))
+               ;; The conversation given back is at least as big as it was when
+               ;; the compaction replaced it, the size the model reported then.
+               (tokens (max (harness-compaction--live-tokens session-id)
+                            (or (and revert (plist-get (plist-get node :meta) :input-tokens)) 0)))
+               (window (harness-compaction--window session))
+               (text (harness-compaction--toggle-text revert tokens window)))
+          (harness-call 'session/usage-add session-id
+                        (list :context tokens :last-output 0 :cache-reset t))
+          (if (and revert (<= tokens window))
+              (puthash session-id t harness-compaction--revert-hold)
+            (remhash session-id harness-compaction--revert-hold))
+          (harness-call 'session/hint session-id text)
+          (list :state state :changed t :node-id (plist-get node :id)
+                :context tokens :window window :message text))))))
+
+(harness-defmethod compaction/revert (session-id &optional node-id)
+  "Go back to the conversation before the latest compaction of SESSION-ID.
+The model is sent that conversation whole again, from the start (or
+from the compaction before), followed by whatever was said since --
+instead of the summary that stood in for it.  Nothing is deleted: the
+compaction node stays where it is, marked reverted in its `:meta'
+\(`harness-node-compaction-reverted-p'), and `compaction/restore'
+undoes this, any number of times, as the user does with undo and redo.
+NODE-ID, when given, is the compaction the caller means; it must be the
+latest one, the only one that can be reverted (an older one keeps the
+state it had when the next was made, which undoing the latest returns the
+conversation to), and it must not be one made to hand the conversation
+over to another model.
+
+Refused while a compaction is under way, one is queued, or a turn runs.
+The conversation the model is sent is another one, so its prompt cache
+is dropped as a compaction drops it (`session/usage-add' `:cache-reset')
+and a hosted loop starts a new conversation; the context the session
+reports becomes an estimate of the new one.  When that is over the
+context limit but fits the window, the automatic compaction before the
+next turn is skipped once (`harness-compaction--revert-hold'), or it
+would make the compaction again at once; the mid-turn one is not.  A hint
+in the transcript says what the model sees now.
+
+Return (:state STATE :changed BOOL :node-id ID :message TEXT :context N
+:window N): STATE is `reverted', `:changed' false when the compaction was
+reverted already, N the estimated context tokens and the model's window,
+TEXT what to tell the user.  The node's update (`session/node-updated')
+is what a chat follows to draw the other button."
+  (harness-compaction--toggle session-id node-id t))
+
+(harness-defmethod compaction/restore (session-id &optional node-id)
+  "Go back to the latest compaction of SESSION-ID, reverted before.
+The model is sent its summary (or note, or the cut conversation) again
+instead of the conversation before it: the redo of `compaction/revert',
+with the same rules, the same refusals and the same answer, whose
+STATE is `compacted'."
+  (harness-compaction--toggle session-id node-id nil))
+
 ;;;; Waiting for the next boundary
 
 (defun harness-compaction--kind-name (kind)
@@ -1484,6 +1689,7 @@ it (`harness-compaction--mid-turn')."
 (defun harness-compaction--on-deleted (session-id &rest _)
   "Forget the compaction of SESSION-ID, which is gone."
   (remhash session-id harness-compaction--mid-turn)
+  (remhash session-id harness-compaction--revert-hold)
   (remhash session-id harness-compaction--pending))
 
 ;;;; A message that comes while a compaction runs
@@ -1567,9 +1773,19 @@ decide as they would have."
 VALUE and NEXT are the `agent/before-turn' filter arguments.  SESSION
 is read again first: a handler earlier in the chain (the fallback) may
 have moved it to another model, whose window and compaction decide.
-The compaction is of `harness-compaction-kind'."
-  (let ((session (or (ignore-errors (harness-call 'session/get (plist-get session :id))) session)))
+The compaction is of `harness-compaction-kind'.  A conversation the
+user just gave back whole (`compaction/revert') is let through once,
+or the compaction would be made again before the model saw it
+\(`harness-compaction--revert-hold')."
+  (let* ((session (or (ignore-errors (harness-call 'session/get (plist-get session :id))) session))
+         (held (and (plist-get value :proceed)
+                    (gethash (plist-get session :id) harness-compaction--revert-hold))))
+    (when held
+      (remhash (plist-get session :id) harness-compaction--revert-hold)
+      (harness-log 'info "compaction: %s goes on with the conversation its user reverted"
+                   (plist-get session :id)))
     (if (or (not (plist-get value :proceed))
+            held
             (not (harness-compaction-needed-p session))
             (harness-compaction-hosted-p session))
         (funcall next value)

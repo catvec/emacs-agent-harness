@@ -101,6 +101,11 @@ class HarnessCapabilities {
   bool get projects => has('insights/projects');
   bool get search => has('session/search');
   bool get fork => has('session/fork');
+
+  /// Taking the latest compaction back, and making it again
+  /// (`compaction/revert`, `compaction/restore`).
+  bool get compactionRevert =>
+      has('compaction/revert') && has('compaction/restore');
   bool get deleteSession => has('session/delete');
   bool get renameSession => has('session/update');
   bool get config => has('config/describe');

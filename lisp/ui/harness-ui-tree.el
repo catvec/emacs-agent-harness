@@ -361,7 +361,10 @@ triangle when it failed.  That icon has a face of its own."
      ("tool-result" (concat (harness-ui-level-icon (harness-ui-tool-level (harness-ui-tool-outcome node)))
                             " "
                             (harness-first-line (or (plist-get node :output) ""))))
-     (_ (harness-first-line (or (plist-get node :content) ""))))))
+     ;; A compaction the user reverted (`compaction/revert') is still a
+     ;; node of the path, but the model is not sent what it says.
+     (_ (concat (if (harness-node-compaction-reverted-p node) "(reverted) " "")
+                (harness-first-line (or (plist-get node :content) "")))))))
 
 (defun harness-ui-tree--excerpt-face (node)
   "Return the face for NODE's excerpt."

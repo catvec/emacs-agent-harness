@@ -321,6 +321,39 @@ the text as typed."
         (should (plist-get r :is-error))
         (should (string-match-p "No session matches" (plist-get r :content)))))))
 
+(ert-deftest harness-tools-sessions-history-ignores-a-reverted-compaction ()
+  "A compaction the user reverted is no boundary: the model's context holds the
+whole conversation, so session_history says so, and neither the summary nor the
+message the compaction carried over is found a second time.  Restored, the
+compaction is the boundary again."
+  (harness-tools-sessions-test-with
+    (let ((sid (harness-tools-sessions-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "ask about the parser"))
+      (harness-call 'session/append sid '(:kind assistant :content "the parser answer"))
+      (let ((asked (harness-call 'session/append sid '(:kind user :content "unanswered lexer question"))))
+        (let ((compaction (harness-call 'session/append
+                                        sid '(:kind compaction :content "SUMMARY of the work"
+                                                    :meta (:compaction "summary")))))
+          ;; The copy the compaction carries over after itself.
+          (harness-call 'session/append
+                        sid (list :kind 'user :content "unanswered lexer question"
+                                  :meta (list :carried-from (plist-get asked :id))))
+          (should (string-prefix-p "The conversation before the summary compaction"
+                                   (harness-tools-sessions-test-ok sid "session_history" nil)))
+          (harness-call 'session/update-node sid (plist-get compaction :id)
+                        :meta '(:compaction "summary" :reverted t))
+          ;; Left out: the compaction and the copy of the message.
+          (let ((text (harness-tools-sessions-test-ok sid "session_history" nil)))
+            (should (string-prefix-p "This conversation was never compacted: all 3 nodes are in your context already."
+                                     text))
+            (should-not (string-search "SUMMARY of the work" text)))
+          (should (string-match-p "1 node mentions"
+                                  (harness-tools-sessions-test-ok sid "session_history" '(:query "lexer question"))))
+          (harness-call 'session/update-node sid (plist-get compaction :id)
+                        :meta '(:compaction "summary"))
+          (should (string-prefix-p "The conversation before the summary compaction"
+                                   (harness-tools-sessions-test-ok sid "session_history" nil))))))))
+
 (ert-deftest harness-tools-sessions-history-before-a-compaction ()
   "session_history searches and reads the session's own conversation from
 before its last compaction, the part its context holds only as the

@@ -118,10 +118,9 @@ once it runs.")
 That is anything a model or a tool wrote since the last compaction,
 whose summary opens what is sent.  A tool call the harness recorded
 \(`harness-outside-node-p') is no model's history."
-  (let ((start (cl-position 'compaction path :key (lambda (n) (plist-get n :kind)) :from-end t)))
-    (cl-some (lambda (n) (and (memq (plist-get n :kind) harness-handoff--history-kinds)
-                              (not (harness-outside-node-p n))))
-             (if start (nthcdr start path) path))))
+  (cl-some (lambda (n) (and (memq (plist-get n :kind) harness-handoff--history-kinds)
+                            (not (harness-outside-node-p n))))
+           (harness-path-from-compaction path)))
 
 (defun harness-handoff--waiting-p (path)
   "Non-nil when a handoff waits in PATH's trailing user messages.

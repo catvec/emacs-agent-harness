@@ -269,6 +269,21 @@ class HarnessApi {
     {'id': sessionId, if (name != null) 'name': name},
   );
 
+  /// Takes the compaction [nodeId] of [sessionId] back, so the model is sent
+  /// the conversation before it again ([revert]), or goes back to it.  The
+  /// harness marks the node and announces it again, which the transcript
+  /// follows, and answers with what it did: `state` (`reverted` or
+  /// `compacted`) and the `message` that says what the model is sent now.
+  /// It refuses while a turn or a compaction runs.
+  Future<JsonMap> toggleCompaction(
+    String sessionId,
+    String nodeId, {
+    required bool revert,
+  }) => extension(revert ? 'compaction/revert' : 'compaction/restore', {
+    'session-id': sessionId,
+    'node-id': nodeId,
+  });
+
   /// Turns non-interactive mode on or off for one session.
   Future<JsonMap> setNonInteractive(String sessionId, bool on) =>
       extension('session/update', {'id': sessionId, 'non-interactive': on});

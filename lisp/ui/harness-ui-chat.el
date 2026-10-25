@@ -2743,6 +2743,79 @@ undo, or its redo once undone.  The echo area says what happened."
                    (list :session-id harness-ui-session-id :node-id node-id :action action)
                    (lambda (result) (message "%s" (or (plist-get result :message) "Done")))))
 
+;;;; Taking a compaction back
+;;
+;; The newest compaction of the transcript offers to take itself back, as
+;; an undo would: [Revert] gives the model the conversation before it
+;; again, and then [Go post-compaction] gives it the summary again,
+;; as often as the user likes (`compaction/revert', `compaction/restore').
+;; An older compaction draws no button: it keeps the state it had when the
+;; next was made, which taking the newest back returns the conversation to.
+
+(defvar-local harness-chat--compaction-toggle-id nil
+  "Id of the compaction block that draws the button taking it back, or nil.
+That is the newest compaction block of the transcript.
+`harness-chat--sync-compaction-button' keeps it so as blocks are added.")
+
+(defun harness-chat--latest-compaction-id ()
+  "Return the id of the newest compaction block this buffer draws, or nil."
+  (cl-loop for id in harness-chat--order
+           for block = (gethash id harness-chat--blocks)
+           when (and block (equal (harness-chat-block-kind block) "compaction")) return id))
+
+(defun harness-chat--sync-compaction-button ()
+  "Make the newest compaction block the one that draws the button, and no other.
+The block that had it and the one that has it now are drawn again."
+  (let ((latest (harness-chat--latest-compaction-id))
+        (old harness-chat--compaction-toggle-id))
+    (unless (equal latest old)
+      (setq harness-chat--compaction-toggle-id latest)
+      (dolist (id (delq nil (list old latest)))
+        (let ((block (gethash id harness-chat--blocks)))
+          (when (and block (markerp (harness-chat-block-start block)))
+            (harness-chat--rerender block)))))))
+
+(defun harness-chat--compaction-way (block)
+  "Return what the button of compaction BLOCK does: `revert', `restore' or nil.
+Nil when the block draws none: it is not the newest compaction, it was
+made to hand the conversation over to another model, or it is a cut an
+earlier harness made, which kept nothing to go back to
+\(`compaction/revert' refuses those).  A reverted compaction offers to
+be restored, any other to be reverted."
+  (let ((node (harness-chat-block-node block)))
+    (and (equal (harness-chat-block-id block) harness-chat--compaction-toggle-id)
+         (not (harness-node-handoff node))
+         (or (not (equal (harness-node-compaction-kind node) "truncate"))
+             (plist-get (plist-get node :meta) :truncate-after))
+         (if (harness-node-compaction-reverted-p node) 'restore 'revert))))
+
+(defun harness-chat--compaction-button (block)
+  "Return the button of compaction BLOCK, after two spaces, or \"\" for none.
+See `harness-chat--compaction-way'."
+  (let ((id (harness-chat-block-id block)))
+    (pcase (harness-chat--compaction-way block)
+      ('revert
+       (concat "  " (harness-chat--button
+                     "[Revert]" (lambda () (harness-chat--toggle-compaction id 'revert))
+                     :help (concat "Give the model the conversation before this compaction again, in place"
+                                   " of its summary; [Go post-compaction] takes this back"))))
+      ('restore
+       (concat "  " (harness-chat--button
+                     "[Go post-compaction]" (lambda () (harness-chat--toggle-compaction id 'restore))
+                     :help (concat "Give the model the summary of this compaction again, in place of the"
+                                   " conversation before it; [Revert] takes this back"))))
+      (_ ""))))
+
+(defun harness-chat--toggle-compaction (node-id way)
+  "Ask the harness to revert compaction NODE-ID, WAY `revert', or restore it.
+The harness does so unless a turn or a compaction runs (`compaction/revert'),
+and updates the node, which the chat draws again with the other button
+\(`session/node-updated'); the echo area says what the model is sent
+now, or why it was not done."
+  (harness-ui-call (format "_harness/compaction/%s" way)
+                   (list :session-id harness-ui-session-id :node-id node-id)
+                   (lambda (result) (message "%s" (or (plist-get result :message) "Done")))))
+
 (defun harness-chat--render-compaction (block)
   "Return the body of compaction BLOCK.
 A summary made to hand the conversation over to a model of another
@@ -2755,13 +2828,17 @@ oldest of it went.  One made because a message met a cold prompt cache
 still held the conversation, just before it lapsed
 \(harness-cache-compact.el, its `:meta' `:precompact'), says that.  So does
 one made in the middle of a turn that outgrew its context limit
-\(harness-compaction.el, its `:meta' `:mid-turn')."
+\(harness-compaction.el, its `:meta' `:mid-turn').  The newest compaction
+ends in a button that takes it back, [Revert], and once reverted, its
+text struck through, in the one that goes back to it, [Go post-compaction]
+\(`harness-chat--compaction-way')."
   (let* ((id (harness-chat-block-id block))
          (node (harness-chat-block-node block))
          (content (or (plist-get node :content) ""))
          (handoff (harness-node-handoff node))
          (kind (harness-node-compaction-kind node))
          (meta (plist-get node :meta))
+         (reverted (harness-node-compaction-reverted-p node))
          (file (and (equal kind "transcript") (plist-get meta :file)))
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
@@ -2787,13 +2864,17 @@ one made in the middle of a turn that outgrew its context limit
                                                     ", in the middle of a turn")
                                                    (t ""))
                                              (harness-chat--words content))
-                                     'face 'harness-summary-face)
+                                     'face (if reverted
+                                               (harness-chat--struck 'harness-summary-face)
+                                             'harness-summary-face))
+                         (if reverted (propertize ", reverted" 'face 'harness-summary-face) "")
                          (if (and (stringp file) (not (string-empty-p file)))
                              (concat "  "
                                      (harness-chat--button "[open the transcript]"
                                                            (lambda () (find-file-other-window file))
                                                            :help (format "Open %s" file)))
                            "")
+                         (harness-chat--compaction-button block)
                          "\n"))
          (body (harness-chat--foldable
                 (concat (harness-chat--face (harness-chat--ensure-newline
@@ -3107,6 +3188,9 @@ before it draws again, to keep them so."
     (harness-chat--insert-block block (marker-position harness-chat--transcript-end))
     (set-marker harness-chat--transcript-end (marker-position (harness-chat-block-end block)))
     (push (harness-chat-block-id block) harness-chat--order)
+    ;; The newest compaction is the one that can be taken back.
+    (when (equal (harness-chat-block-kind block) "compaction")
+      (harness-chat--sync-compaction-button))
     ;; The first block replaces the "No messages yet" notice.
     (when (and first (not harness-chat--batch) (not harness-chat--loading))
       (harness-chat--render-top))
@@ -4274,6 +4358,7 @@ own.  The BTW module says what a side conversation is for with it.")
         harness-chat--render-timers (make-hash-table :test 'equal)
         harness-chat--stale nil
         harness-chat--order nil
+        harness-chat--compaction-toggle-id nil
         harness-chat--unfinished nil
         harness-chat--sending nil
         harness-compose-start nil
@@ -4449,7 +4534,9 @@ page from its top, and land near the top again."
         (when-let* ((call (gethash (gethash (plist-get r :call-id) harness-chat--calls) harness-chat--blocks)))
           (harness-chat--attach-result call r)))
       (harness-chat--adopt-orphans)
-      (harness-chat--regroup))))
+      (harness-chat--regroup)
+      ;; A page of older history may hold the only compaction there is.
+      (harness-chat--sync-compaction-button))))
 
 (defun harness-chat--adopt-orphans ()
   "Join each result shown on its own to its call, now rendered above it.
