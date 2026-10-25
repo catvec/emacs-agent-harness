@@ -53,6 +53,7 @@
 
 (declare-function harness-reload "harness")
 (declare-function harness-tasks "harness-ui-tasks")
+(declare-function harness-tasks-all "harness-ui-tasks")
 (declare-function harness-sessions "harness-ui-sessions")
 (declare-function harness-ui-notify-show-waiting "harness-ui-notify")
 
@@ -4466,9 +4467,10 @@ fails is logged and the others still run."
 Every active session (idle, running or blocked) of every project, and
 the session of every current task whatever its status: a task's session
 may be closed, after a restart say, and still be where the task goes
-on.  Inactive sessions of no current task are history.  A completed
-task's session, in the board's done column, is left out by the
-selection itself (`session/select'), even an active one."
+on.  Inactive sessions of no current task are history.  A completed or
+cancelled task's session, in the board's done or cancelled column, is
+left out by the selection itself (`session/select'), even an active
+one."
   (list :active t :tasks t))
 
 (defun harness-ui--count (n word)
@@ -5295,6 +5297,8 @@ leaves the buffer's commands out, never the whole menu."
     ("g" "Search sessions" harness-search-sessions
      :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))
     ("a" "Task mode" harness-tasks :if (lambda () (harness-ui--command-available-p 'harness-tasks)))
+    ("G" "Task mode, every project" harness-tasks-all
+     :if (lambda () (harness-ui--command-available-p 'harness-tasks-all)))
     ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
     ("b" "BTW side conversation" harness-btw :if (lambda () (harness-ui--command-available-p 'harness-btw)))
     ("F" (lambda () (if (harness-ui--fullscreen-layout) "End fullscreen" "Fullscreen overview"))

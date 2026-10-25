@@ -778,3 +778,43 @@ rather than that no task matches.  A plan from the quick search's
     (let ((text (harness-ui-tasks-search-test--board-text board)))
       (should (string-match-p "“how\\?”  ·  answered" text))
       (should (string-search "Press r on its card." text)))))
+
+(declare-function harness-tasks-all "harness-ui-tasks")
+(declare-function harness-ui-tasks-filter-project "harness-ui-tasks")
+(declare-function harness-tasks-search "harness-ui-tasks-search")
+
+(ert-deftest harness-ui-tasks-search-asks-for-a-project-on-the-board-of-every-project ()
+  "The board of every project is searched one project at a time.
+Unfiltered, the search -- / and the command -- asks for a project first;
+filtered to one, it is that project's: the harness is asked for its
+tasks, not the directory the board was opened from."
+  (harness-ui-tasks-search-test-with
+    (let ((other (harness-test-temp-dir))
+          (asked nil))
+      (harness-ui-tasks-search-test--submit board "Fix the flaky test")
+      (harness-call 'task/submit other "A task of another project")
+      (let ((all (harness-tasks-all)))
+        (unwind-protect
+            (progn
+              (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-tasks--loading all)))
+                                 5 "the board of every project to load")
+              (harness-ui-tasks-search-test--wait-text all "A task of another project")
+              (with-current-buffer all
+                (should-error (harness-tasks-search "anything") :type 'user-error)
+                (should-error (call-interactively #'harness-ui-tasks-search) :type 'user-error)
+                (should-not harness-ui-tasks-search--state)
+                (harness-ui-tasks-filter-project
+                 (plist-get (cl-find "A task of another project" harness-ui-tasks--tasks
+                                     :key (lambda (task) (plist-get task :prompt)) :test #'equal)
+                            :project)))
+              (cl-letf* ((call (symbol-function 'harness-ui-call))
+                         ((symbol-function 'harness-ui-call)
+                          (lambda (method params &rest more)
+                            (when (equal method "_harness/search/ask") (push (plist-get params :cwd) asked))
+                            (apply call method params more))))
+                (harness-ui-tasks-search-test--search all "which tasks are there?")
+                (harness-ui-tasks-search-test--wait-status all 'done))
+              (should (= 1 (length asked)))
+              (should (equal (file-name-as-directory other) (file-name-as-directory (car asked)))))
+          (kill-buffer all)
+          (ignore-errors (delete-directory other t)))))))

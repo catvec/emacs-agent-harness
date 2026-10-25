@@ -291,6 +291,9 @@ Every task a method returns or an event carries also has a derived
                 (unless that session waits on the user: needs-input)
   active        in progress
   done          completed
+  cancelled     done after the user cancelled it: its turn was stopped
+                (`:outcome` cancelled) and the task marked done by hand,
+                its branch never merged; finished work stays in done
 
 Records are written shortly after every change and on exit; the
 sessions persist as usual.  A git project keeps its tasks inside its
@@ -337,7 +340,7 @@ here logs, emits or returns one.
 - `task/adopt` (session-id) — Make the ongoing session SESSION-ID a task and return the task.
 - `task/adoptable` (&optional cwd) — Return the open sessions of CWD's project (every project without CWD) that
 - `task/archive` (id &optional restore) — Archive done task ID, hiding it and deactivating its session; RESTORE undoes it.
-- `task/archive-done` (&optional cwd) — Archive every done task of CWD's project (every project without CWD).
+- `task/archive-done` (&optional cwd column) — Archive every done task of CWD's project (every project without CWD).
 - `task/backlog-mode` (&optional cwd) — Return the backlog mode of CWD's project (the current one by default).
 - `task/btw` (cwd &optional name model) — Start a BTW conversation about the task board of CWD's project.
 - `task/cancel` (id) — Cancel task ID: a pending task is dropped, a working one stops its turn.

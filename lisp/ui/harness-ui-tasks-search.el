@@ -504,7 +504,7 @@ A search the board dropped, or one asked after, is left alone."
   "Have the harness start the model of this board's next search now.
 It also says which model answers, which the banner names."
   (let ((board (current-buffer)))
-    (harness-ui-call "_harness/search/warm" (list :cwd harness-ui-tasks--dir)
+    (harness-ui-call "_harness/search/warm" (list :cwd (harness-ui-tasks--scope-dir))
                      (lambda (r)
                        (when (and (buffer-live-p board) (plist-get r :model))
                          (with-current-buffer board
@@ -613,6 +613,8 @@ compose box is left as it is."
   (interactive)
   (let ((board (or (harness-ui-tasks-search--board) (user-error "No task board to search"))))
     (with-current-buffer board
+      ;; The board of every project is searched one project at a time.
+      (harness-ui-tasks--need-project)
       (if query
           (harness-ui-tasks-search-submit query)
         (harness-ui-tasks-search--open)))
@@ -642,7 +644,7 @@ to the best match, once the board shows it."
                 :focus focus))
     (harness-ui-tasks-search--install)
     (harness-ui-tasks-search--spin)
-    (harness-ui-call "_harness/search/ask" (list :cwd harness-ui-tasks--dir :query query :opts opts)
+    (harness-ui-call "_harness/search/ask" (list :cwd (harness-ui-tasks--scope-dir) :query query :opts opts)
                      (lambda (plan) (harness-ui-tasks-search--arrived board seq plan))
                      (lambda (err)
                        (harness-ui-tasks-search--update board seq :status 'failed

@@ -1400,6 +1400,44 @@ the handler moves nothing the user did not confirm."
       (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "delete"))
       (should-not (harness-call 'task/list)))))
 
+(declare-function harness-tasks--set "harness-tasks")
+
+(ert-deftest harness-tools-sessions-task-list-has-the-cancelled-column ()
+  "task_list names the cancelled column and filters by it; task_wait settles on it.
+A task the user cancelled and marked done is in the cancelled column,
+not the done one, as the board shows it: finished work stays done.  A
+wait for a task to be done, or to settle, returns for it as it does for
+a done one."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (submit (lambda (prompt)
+                     (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" (list :prompt prompt)) :meta)
+                                :task-id)))
+           (cancelled (funcall submit "Sketch the retry schedule"))
+           (finished (funcall submit "Export the audit log")))
+      (harness-tasks--set cancelled :state 'done :outcome 'cancelled :finished (float-time))
+      (harness-tasks--set finished :state 'done :outcome 'end-turn :finished (float-time))
+      (should (eq 'cancelled (plist-get (harness-call 'task/get cancelled) :column)))
+      (should (eq 'done (plist-get (harness-call 'task/get finished) :column)))
+      ;; Each column lists its own.
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" '(:column "cancelled"))))
+        (should (string-match-p (concat (regexp-quote cancelled) " +cancelled") listing))
+        (should-not (string-match-p (regexp-quote finished) listing)))
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" '(:column "done"))))
+        (should (string-match-p (concat (regexp-quote finished) " +done") listing))
+        (should-not (string-match-p (regexp-quote cancelled) listing)))
+      ;; A model may ask for the column: it is in the tool's schema.
+      (let* ((tool (cl-find "task_list" (harness-call 'tools/list)
+                            :key (lambda (spec) (plist-get spec :name)) :test #'equal))
+             (column (plist-get (plist-get (plist-get tool :schema) :properties) :column)))
+        (should (member "cancelled" (plist-get column :enum))))
+      ;; Over is over: waiting for done, or for it to settle, is met at once.
+      (should (string-match-p "Done waiting" (harness-tools-sessions-test-ok
+                                              me "task_wait" (list :task_id cancelled :until "done"))))
+      (should (string-match-p "Done waiting" (harness-tools-sessions-test-ok
+                                              me "task_wait" (list :task_id cancelled)))))))
+
 (ert-deftest harness-tools-sessions-task-list-titles-waiting-tasks ()
   "A task waiting for a slot is listed with its title: it is named as it is submitted."
   (harness-tools-sessions-test-with

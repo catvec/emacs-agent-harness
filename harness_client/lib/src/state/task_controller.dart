@@ -46,6 +46,7 @@ class TaskController extends ChangeNotifier {
       'merging',
       'backlog',
       'done',
+      'cancelled',
     ];
     final present = {
       for (final task in tasks)

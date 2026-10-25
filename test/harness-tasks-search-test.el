@@ -1159,5 +1159,24 @@ answer; nothing for a blank reply or JSON broken before any answer."
     (should (equal "{\"a\":\"x\\ny\",\n\"b\":1}" (harness-tasks-search--escape-controls "{\"a\":\"x\ny\",\n\"b\":1}")))
     (should (equal "{\"a\":\"\\\"q\\\"\\t\"}" (harness-tasks-search--escape-controls "{\"a\":\"\\\"q\\\"\t\"}")))))
 
+(declare-function harness-tasks-search--status "harness-tasks-search")
+(declare-function harness-tasks-search--applies-p "harness-tasks-search")
+
+(ert-deftest harness-tasks-search-reads-the-cancelled-column ()
+  "A cancelled task reads as stopped, then marked done, and has no priority to change.
+It is over like a completed one -- no priority orders what no longer
+runs -- but the model is told it was cancelled, not that it was completed."
+  (harness-tasks-search-test-with
+    (let ((cancelled (list :id "t-1" :column 'cancelled :state 'done :outcome 'cancelled))
+          (completed (list :id "t-2" :column 'done :state 'done :outcome 'end-turn))
+          (waiting (list :id "t-3" :column 'pending :state 'pending)))
+      (should (equal "cancelled: stopped, then marked done" (harness-tasks-search--status cancelled nil)))
+      (should (equal "done: completed" (harness-tasks-search--status completed nil)))
+      (should-not (harness-tasks-search--applies-p "priority" cancelled nil "high"))
+      (should-not (harness-tasks-search--applies-p "priority" completed nil "high"))
+      (should (harness-tasks-search--applies-p "priority" waiting nil "high"))
+      ;; Archiving it still means something.
+      (should (harness-tasks-search--applies-p "archive" cancelled nil)))))
+
 (provide 'harness-tasks-search-test)
 ;;; harness-tasks-search-test.el ends here

@@ -1476,8 +1476,9 @@ redact).
   (`harness-session--tmp-finished-p`) means not running and not blocked,
   and: the session of a task, or a sub-agent of one (followed up the
   `:parent-id`s of sub-agents, `harness-session--family-task`), when the
-  task is in the done column (`task/for-session`, a method of the tasks
-  module, which the session module does not require); any other session
+  task is in the done or cancelled column (`task/for-session`, a method
+  of the tasks module, which the session module does not require); any
+  other session
   when it is closed (`inactive`).  An open conversation, a task in
   review (its evidence images are files in the directory), a pending one
   and the rest keep theirs.  A session over also has to have been so for
@@ -1522,9 +1523,10 @@ redact).
   newest first: `session/list`'s filter plus `:except` ids, and `:tasks`
   non-nil to add the sessions of the current tasks of every project
   (`task/session-ids`), even an inactive one a task goes on in, and to
-  leave out those of completed tasks, the board's done column
-  (`task/session-ids` with `:columns '("done")`), an active one
-  included: a bulk change must not reach a task that is over.  `:ids`
+  leave out those of completed and cancelled tasks, the board's done and
+  cancelled columns (`task/session-ids` with `:columns '("done"
+  "cancelled")`), an active one included: a bulk change must not reach a
+  task that is over.  `:ids`
   limits even the sessions `:tasks` adds: one it does not name is never
   selected, which is how the session list changes exactly its marked
   sessions.  An internal session is selected only when `:kind` asks for
@@ -6275,7 +6277,7 @@ harness keys.
 Task mode: one session per task.  TASK =
 `(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…) :name "title or nil"
 :state pending|refining|active|merging|review|done
-:column pending|backlog|needs-input|active|review|merging|done
+:column pending|backlog|needs-input|active|review|merging|done|cancelled
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
 :waiting nil|"what the session started runs outside its turn"
@@ -6297,7 +6299,13 @@ prompt cache asks before its turn begins blocks the session, so it is
 branch holds a place in the merge queue (`:merge-status` is queued,
 merging or conflict; `:merge-queued` is when it joined, which orders the
 board's section), `review` while its finished work waits for the user's
-verdict.  The record keeps no priority: a task's priority is its
+verdict, and `cancelled` for a task that is `done` with the outcome
+`cancelled` and was never merged (`harness-tasks--cancelled-p`): the user
+stopped its turn (`task/cancel`) and marked it done (`task/complete`,
+which keeps the outcome), so the done column keeps finished work only.  A
+task whose branch merged stays `done` whatever its last turn did, and a
+session that waits on the user, or a message on its way, still puts the
+task in `needs-input` or `active` first.  The record keeps no priority: a task's priority is its
 session's (`harness-priority-of-task'), and a read of a task has one
 all the same (`:priority' in `task/get''s and `task/list''s answer, the
 board's facts), computed from that session when it is asked for, never
@@ -7056,8 +7064,8 @@ priority).
   and of the all-sessions commands' and `set_non_interactive`'s),
   `task/session-ids &optional FILTER` (the sessions of the tasks FILTER
   selects, whatever their status; `session/select`'s `:tasks` adds
-  those of the current tasks and subtracts those of the done column's
-  with `:columns '("done")`),
+  those of the current tasks and subtracts those of the done and
+  cancelled columns' with `:columns '("done" "cancelled")`),
   `task/prompt ID TEXT &optional ATTACHMENTS OPTS` (follow-up or
   steering; reopens; OPTS `:from` is the sender, as `agent/prompt` takes it; in review the
   user's sends the task back and another session's does not, as above), `task/refine ID &optional TEXT`,
@@ -7071,7 +7079,10 @@ priority).
   `task/reject ID FEEDBACK &optional ATTACHMENTS` (both in review only),
   `task/complete ID` (counts as verified), `task/archive ID &optional
   RESTORE` (deactivates the session; removes a merged task's worktree and
-  branch), `task/archive-done &optional CWD`, `task/cancel ID` (drops a
+  branch), `task/archive-done &optional CWD COLUMN` (every done task of
+  CWD's project, every project's without it; COLUMN, `done` or
+  `cancelled`, keeps to that column of the board, as the board's two
+  [Archive all] buttons do), `task/cancel ID` (drops a
   task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree),
   `task/for-session SESSION-ID` (the task of a session, or nil, which
@@ -9080,10 +9091,10 @@ TRAMP prefixes come from the session host):
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
 | `watch_events` | Watch events | events (kinds), prompt, actions (default `["wake"]`), session_id, task_id, all_projects, once (default true), timeout_seconds | read (tools-events; registers a watch and returns at once, never waiting; needs no approval: `harness-perms--inspection-tools`) |
 | `unwatch_events` | Stop watching events | watch_id (default: every watch of the session) | read (tools-events; needs no approval: `harness-perms--inspection-tools`) |
-| `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent); oldest first, each waiting task saying `#N in line` (`task/queue-order`) and why when it was put back, and what holds it (paused, or out of quota / over a hard budget, with the reason), the pending column alone in start order | read (needs no approval: `harness-perms--inspection-tools`) |
+| `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done/cancelled), include_archived, all_projects, limit (the most recent); oldest first, each waiting task saying `#N in line` (`task/queue-order`) and why when it was put back, and what holds it (paused, or out of quota / over a hard budget, with the reason), the pending column alone in start order | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/return-to-pending/pause/resume/merge/verify/reject/complete/archive/restore/delete/priority, and on a project with no task_id: suspend-queue/resume-queue, pause-all/resume-all, auto-queue/manual-queue for its backlog mode), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives), cwd (the project of the project actions; default: this session's), all_projects (every project, for suspend-queue/resume-queue/pause-all/resume-all) | meta |
-| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
+| `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review and cancelled, done a cancelled task too, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `review_threads` | Review threads | status (open/closed), task (default: the session's own) | meta (tools-review; task sessions only; lists the threads of the task's review with the comments the user sent, by id; needs no approval: `harness-perms--auto-allow-tools`) |
 | `review_comment` | Review comment | thread (an id, or the start of one), body, status (open/closed), file, line, side (new/old), task (default: the session's own) | meta (tools-review; task sessions only; answers a thread, or starts one on the change or on a file and line, and may close or reopen the thread -- the thread of a reply of the user's in a thread started in the chat is named by the marker after it; the comment records the session, this call and the commit the session is at, and the result keeps which thread and comment on the node, for the chat; needs no approval: `harness-perms--auto-allow-tools`) |
@@ -12692,9 +12703,9 @@ t)`, through `session/set-all`, or `handoff/switch-all` for a model so
 no lossy switch escapes the handoff), then the current tasks of every
 project (`task/set-all` without `:cwd`), whose sessions hold the value
 by then and so are not changed or told twice
-(`harness-ui--apply-everywhere`).  A session whose task is completed,
-in the board's done column, is left alone by all of them, even an
-active one: the selection subtracts the done tasks' sessions
+(`harness-ui--apply-everywhere`).  A session whose task is completed or
+cancelled, in the board's done or cancelled column, is left alone by all
+of them, even an active one: the selection subtracts those tasks' sessions
 (`session/select`), and `task/set-all` never touches review, done or
 archived tasks.  `harness-ui-set-all-functions` lets
 what starts later follow, and returns the directories it changed
@@ -12938,9 +12949,10 @@ dropped.  The places redraw when the icon comes or goes
 (`harness-ui-version--nag-changed`); a reload of the file adds its
 hooks again, as the module is not initialised again.
 
-Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in seven
+Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in eight
 sections -- requires your input, ready for review, merging, in progress,
-pending, backlog, completed -- with each card's current todo, progress, how
+pending, backlog, completed, cancelled (shown only while it holds a task)
+-- with each card's current todo, progress, how
 long it has worked or waited and merge state (what its session has to say
 -- context in use, tokens written, average output rate, cost -- is in the
 tooltip of its title, made when you hover),
@@ -13098,7 +13110,10 @@ running] or, in the attention face, [Queue: suspended]
 shows the other state at once and sends `_harness/task/toggle-queue`,
 and every board follows its `task/queue` event.  Neither switch is in
 the header line, nor pushed to the right edge, where [Archive all]
-ends the Completed heading.  What holds a waiting task back is on its
+ends the Completed heading (the Cancelled heading has its own, which archives
+the cancelled tasks only: `harness-ui-tasks-archive-done` sends
+`task/archive-done`'s COLUMN, `done` or `cancelled`, of the column point is
+in).  What holds a waiting task back is on its
 card (`:hold` of the view, which the harness works out as
 `harness-tasks--hold`): a fact of its own beside the time, state like
 the archived and main-tree flags, so a card short of room gives up its
@@ -13230,10 +13245,14 @@ boards for their elapsed times (`harness-ui-tasks--tick`, every
 `harness-ui-tasks-tick-hook`, so a view whose times run as the board's
 needs no timer of its own.  `S` opens the project's task slots page
 (below).  Boards reload after any
-task, merge, turn, status, worktree, budget or reload event.  New tasks show at
-the top of in progress (latest started first), review lists the latest
-finished first and completed the latest completed (verified, else
-finished) first; merging is the queue's own order, from when each
+task, merge, turn, status, worktree, budget or reload event.  In progress
+and review go by priority first, the higher first
+(`harness-ui-tasks--priority-first` wraps the order each had), then, so a
+task arriving shows at the top of its priority, in progress lists the
+latest started first and review the latest finished first; completed and
+cancelled, the columns of tasks that are over, list the latest completed
+(verified, else finished) first whatever the priority, which only ever
+ordered what had yet to run; merging is the queue's own order, from when each
 branch joined it; pending is the queue, in the order its tasks start
 (`harness-ui-tasks--starts-before-p`, which reads
 `harness-tasks--start-order` off the views -- `:priority`, `:sent-back`,
@@ -13245,6 +13264,31 @@ each card's place in line counts down that order.  The backlog and
 Requires your input go by priority, then the oldest
 (`harness-ui-tasks--ranks-before-p`); only queued tasks have a place in
 line.
+
+The board of every project (`harness-tasks-all`, `C-c h G`; `G`
+`harness-ui-tasks-toggle-projects` on a board, [All projects] in its
+header) is the same major mode in a buffer of its own, "all projects"
+(`harness-ui-tasks--all`): it asks `_harness/task/list` without a
+directory, so the tasks are every project's, and
+`harness-ui-tasks--visible` keeps to the project it is filtered to
+(`harness-ui-tasks--project-filter`, `f` or [Project: …],
+`harness-ui-tasks-filter-project`, read with completion; the filter is in
+the board's drawing key and fit shape).  A card has the project's name as
+its first fact (the `project` kind of `harness-ui-tasks--fact-kinds`,
+`harness-ui-tasks--project-fact`; the name of the directory, the last two
+directories for projects that share one, `harness-ui-tasks--project-names`;
+the whole directory in the tooltip), and a place in line is counted among
+the tasks of one project, each having a queue of its own.  Everything that is
+about one project goes through `harness-ui-tasks--scope-dir` -- the
+project it is filtered to, else the directory it was opened from, which is
+where a new task goes (the compose label says "New task in acme") -- and
+the commands that are only about one project (`P`, `W`, `I`, `/`) signal
+`Pick a project first (f)` while it is filtered to none
+(`harness-ui-tasks--need-project`); their switches are drawn on the Pending
+and Backlog headings only while it is.  `task/changed` of any project
+updates it, and [Archive all] asks `task/archive-done` of each project the
+section shows.  A session's own board (`harness-ui-tasks--board-of-session`)
+is the project's, not this one, which lists every task.
 
 The board's search (`harness-ui-tasks-search`, `/` on the board,
 [Search] in its header, `C-c h /` on a board) turns the board's compose

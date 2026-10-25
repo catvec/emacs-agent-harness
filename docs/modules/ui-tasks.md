@@ -19,12 +19,15 @@ project, one section per column, most urgent first:
 
   Requires your input   blocked on a permission or question, stopped,
                         or refused by its write-up as a duplicate:
-                        drop it, or have it written up all the same
+                        drop it, or have it written up all the same;
+                        by priority, then oldest first
   Ready for review      finished, waiting for you: verify it (v), which
-                        merges it, or send it back with feedback (R)
+                        merges it, or send it back with feedback (R);
+                        by priority, then the last to finish first
   Merging               in the merge queue, in the order it takes them:
                         queued, merging, or resolving the conflicts
-  In progress           working, with its current todo and progress
+  In progress           working, with its current todo and progress;
+                        by priority, then the last to start first
   Pending               waiting for a slot, so it starts on its own
                         while the project has one free; editable,
                         startable; in the order they start: by
@@ -44,7 +47,12 @@ project, one section per column, most urgent first:
                         [Auto queue] (W) says whether a finished
                         write-up waits here or joins the queue itself
   Completed             finished and verified; reply to reopen,
-                        archive to hide
+                        archive to hide; the last to complete first
+  Cancelled             stopped by you, then marked done, its work never
+                        merged; reply to reopen, archive to hide, each
+                        with an [Archive all] of its own; the last to
+                        close first.  The section shows only while it
+                        holds a task
 
 and a compose box at the bottom: describe a task, C-c C-c submits it
 and it gets a session of its own.  A toggle above the box (C-c C-t)
@@ -119,6 +127,15 @@ setting, at once, mark their sessions in the session list
 (`harness-sessions`): its keys and the harness's setting commands act
 on every marked session, and on the tasks they work on.
 
+The columns go by priority where there is something left to run:
+Requires your input, Ready for review, In progress, Pending and the
+Backlog list the higher priority first, then in the order each has
+always had; Merging stays the queue's, and the columns of tasks that are
+over, Completed and Cancelled, go by when they were completed, as a
+priority only ever ordered what had yet to run.  The harness decides
+which column a task is in (`:column`, the tasks module's
+`harness-tasks--column`); the board draws what it says.
+
 Pausing: u, or a card's [Pause], pauses the task at point.  A task at
 work has its turn stopped and goes back to Pending, a task waiting
 there stays; either is held, however many slots are free, until U, or
@@ -136,6 +153,24 @@ on the settings page): finished tasks then merge and complete by
 themselves, and Ready for review shows only while tasks from before
 still wait there.  It is a harness option, so it holds for every
 board and across restarts.
+
+Every project: `harness-tasks-all` (C-c h G, or G on a board, or
+[All projects] in its header) shows the same board over the tasks of
+every project -- `_harness/task/list` without a directory -- in a
+buffer of its own, "all projects".  A card names its project as the
+first of its facts (two projects of one name keep a directory above
+it: work/app and play/app), and the tasks of every project are drawn
+in the same columns, by the same orders; a place in line is counted
+in the task's own project, each having a queue of its own.  f, or the
+header's [Project: all], filters it to one project, chosen with
+completion, and to all of them again.  What is about one project --
+its queue and the backlog's mode, adding a session, the search, its
+settings and budgets -- is the filtered project's: the board asks for
+a project first (f), and the Pending and Backlog switches show only
+while it is filtered.  A new task goes to the project the board was
+opened from, as the compose box says ("New task in acme"), or to the
+one it is filtered to.  G leads to the project's own board, at the
+card of the task it was on, and from there back.
 
 The mode line notifier (harness-ui-notify.el) counts the tasks ready
 for your review, of every project, beside the sessions it counts:
@@ -235,11 +270,12 @@ the chevron that folds a card's recap, which only draws the card again.
 ### Commands
 
 - `harness-tasks` — Show the task board of DIRECTORY's project (the current one by default).
+- `harness-tasks-all` — Show the task board of every project, each card naming its project.
 - `harness-tasks-review` — Show the tasks ready for your review on their project's task board.
 - `harness-ui-tasks-adopt` — Make an ongoing session of this project a task, chosen with completion.
 - `harness-ui-tasks-allow` — Answer the permission request the task at point waits on with Allow.
 - `harness-ui-tasks-archive` — Archive the task at point, completed or in review, or restore it when archived.
-- `harness-ui-tasks-archive-done` — Archive every completed task of this project.
+- `harness-ui-tasks-archive-done` — Archive every completed task of this project, or every cancelled one.
 - `harness-ui-tasks-assume-worktree` — Assume the worktree of the task at point as the project, or reset it.
 - `harness-ui-tasks-attach` — Attach the task at point to the board's compose box.
 - `harness-ui-tasks-btw` — Ask about the tasks in a BTW side conversation over the board.
@@ -254,6 +290,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-delete` — Delete the task at point, and its session when confirmed.
 - `harness-ui-tasks-deny` — Answer the permission request the task at point waits on with Deny.
 - `harness-ui-tasks-edit` — Edit the prompt of the pending task at point in the compose box.
+- `harness-ui-tasks-filter-project` — Show one project's tasks on the board of every project, or every project's.
 - `harness-ui-tasks-lower-priority` — Lower the priority of the task at point: high to medium, medium to low.
 - `harness-ui-tasks-merge` — Send the branch of the task at point through the merge queue again.
 - `harness-ui-tasks-mouse-open` — Open the task clicked in EVENT, or toggle the clicked section.
@@ -284,6 +321,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-toggle-archived` — Show or hide archived tasks.
 - `harness-ui-tasks-toggle-backlog-mode` — Switch the board's backlog between a manual and an auto queue.
 - `harness-ui-tasks-toggle-main-tree` — Switch the next task between its own worktree and the main tree.
+- `harness-ui-tasks-toggle-projects` — Switch between a project's board and the board of every project.
 - `harness-ui-tasks-toggle-queue` — Suspend the pending queue of the board's project, or resume it.
 - `harness-ui-tasks-toggle-review` — Turn the review of finished tasks off, or back on.
 - `harness-ui-tasks-toggle-subtitle` — Show or hide the recap subtitle of the task card at point.

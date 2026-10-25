@@ -45,6 +45,7 @@ class _TasksScreenState extends State<TasksScreen> {
     'merging',
     'backlog',
     'done',
+    'cancelled',
   ];
 
   @override
@@ -153,6 +154,7 @@ class _TasksScreenState extends State<TasksScreen> {
       'backlog',
       'merging',
       'done',
+      'cancelled',
     ]) {
       if (controller.countFor(column) > 0) return column;
     }
@@ -2001,6 +2003,7 @@ String _columnLabel(String column) => switch (column) {
   'merging' => 'Merging',
   'backlog' => 'Backlog',
   'done' => 'Done',
+  'cancelled' => 'Cancelled',
   _ => column,
 };
 

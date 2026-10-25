@@ -545,6 +545,8 @@ nil for nowhere.
 | `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a permission request, answer it with Allow or Deny, as the request's own `y` and `n` do |
 | `C-c h g` | `harness-search-sessions` | Search what was said in every session: words, the exact text, a regexp or meaning (see [Searching sessions](#searching-sessions)) |
 | `C-c h a` | `harness-tasks` | Show the task board |
+| `C-c h G` | `harness-tasks-all` | Show the task board of every project: all their tasks in one board, each card naming its project (see [Task board](#task-board)) |
+| `G` / `f` | `harness-ui-tasks-toggle-projects` / `harness-ui-tasks-filter-project` | On the task board, switch between the project's board and the board of every project, point on the same task; on the board of every project, show one project's tasks only, or every project's again |
 | `C-c h /` | `harness-quick-search` | Quick search: find a command, a session or a task in words; on the task board, in its compose box (see [Quick search](#quick-search)) |
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board, session list or a main session on one side, a session beside it |
 | `C-x 4 4` / `C-x 5 5` / `C-x t t` | Emacs's `other-window-prefix` / `other-frame-prefix` / `other-tab-prefix` | Before a command that shows a view or a session — `C-c h a`, `C-c h s`, `RET` or a click on a task or session — show it in another window, a new frame or a new tab, as for any buffer |
@@ -3725,6 +3727,24 @@ with), `recap` writes the recaps on the cards,
   `priority` action or `set_priority` on the task's session, and the
   board's search understands "do the docs
   task first".
+- The sections list what is still to be done by priority, high first,
+  and within a priority in the order each has always had: *Requires
+  your input* and *Backlog* oldest first, *Ready for review* the last
+  task to finish first, *In progress* the last to start first, and
+  *Pending* in the order the queue starts them. *Merging* stays the
+  merge queue's order. A priority only ever orders what has yet to
+  run, so *Completed* and *Cancelled* list their tasks by when each was
+  completed, the last first, and show no priority arrow.
+- **Cancelled** holds the tasks you stopped and then marked done
+  (`[Mark done]`, `d`), whose work never merged; *Completed* keeps the
+  finished work, and a task whose branch merged stays there whatever
+  its last turn did. The section appears with its first task, as the
+  harness puts it in the cancelled column (`:column`, which `task_list`
+  and `task_wait` know too): the tasks already marked done that way move
+  into it by themselves. A card there has [Archive] and [Reply], which
+  reopens the task, and each of the two sections has its own
+  **[Archive all]**; `X` archives the column point is in, *Completed*
+  anywhere else (`task/archive-done` takes the column).
 - The `own worktree` / `main tree` switch and the priority button above
   the compose box apply to the next task only; the main-tree switch
   keeps it on when clicked again, and the priority notice's `[keep on]`
@@ -3806,6 +3826,24 @@ with), `recap` writes the recaps on the cards,
   else of the project whose task came to review last, with point on
   the newest card; the board's project becomes current first, as for a
   click on a task's notification.
+- **Every project** has a board of its own: `C-c h G` (`M-x
+  harness-tasks-all`), `G` on a project's board, or its header's **[All
+  projects]** opens the same board over the tasks of every project, in the
+  same sections and orders, in one buffer called "all projects". Each
+  card names its project as the first of its facts (two projects of
+  one name keep the directory above it, `work/app` and `play/app`; the
+  tooltip has the whole path), and a place in line is counted among
+  the tasks of the project it queues in. `f`, or the header's
+  **[Project: all]**, picks one project with completion and shows its
+  tasks only, and `All projects` shows every project's again; `G` leads
+  to the board of the project of the task at point, and from there
+  back. What is about one project is the one it is filtered to: its
+  queue switch, the backlog's mode, **[Add session]**, the search, the
+  settings and budgets in the header; unfiltered, `P`, `W`, `I` and `/`
+  ask you to pick a project first, and the sections' switches are not
+  shown. A new task goes to the project the board was opened from, which
+  the box says (`New task in acme`), or to the one it is filtered to;
+  everything else on a card works wherever its project is.
 - `u` pauses the task at point. One at work goes back to *Pending*, one
   that only waits on its supervisor's workers too: its turn stops and it
   keeps its session, branch and worktree; one already waiting there is
@@ -5103,9 +5141,10 @@ idle, running and blocked sessions change — deactivated ones are history
 and are left alone, unless a current task goes on in one — no running
 turn is cancelled (it takes the new model at its next step), and each
 session records the change once, as a hint. A session whose task is
-completed (in the board's `done` column) is over and is left alone too,
-even while it is still running, idle or blocked; so are the records of
-completed tasks, which `task/set-all` never touches. When the default
+completed or cancelled (in the board's `done` or `cancelled` column) is
+over and is left alone too, even while it is still running, idle or
+blocked; so are the records of completed tasks, which `task/set-all`
+never touches. When the default
 changes,
 they then say what still wins over it: a project whose `.dir-locals.el`
 sets `harness-model` (or `harness-thinking`), at the project or the

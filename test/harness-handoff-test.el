@@ -519,7 +519,7 @@ goes on in it, so it is asked about and handed over like the others."
       (harness-call 'session/deactivate history)
       (harness-register-method 'task/session-ids
                                (lambda (&optional filter)
-                                 (unless (equal '("done") (plist-get filter :columns))
+                                 (unless (equal '("done" "cancelled") (plist-get filter :columns))
                                    (list closed))))
       ;; Without `:tasks' only the open one; with it the task's too, but
       ;; not a closed session no current task goes on in.
@@ -550,7 +550,7 @@ though it is still active; the current tasks' sessions are."
       (harness-call 'session/deactivate task)
       (harness-register-method 'task/session-ids
                                (lambda (&optional filter)
-                                 (if (equal '("done") (plist-get filter :columns))
+                                 (if (equal '("done" "cancelled") (plist-get filter :columns))
                                      (list done)
                                    (list task))))
       (should (equal (sort (list open task) #'string<)

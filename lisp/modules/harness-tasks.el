@@ -280,6 +280,9 @@
 ;;                 (unless that session waits on the user: needs-input)
 ;;   active        in progress
 ;;   done          completed
+;;   cancelled     done after the user cancelled it: its turn was stopped
+;;                 (`:outcome' cancelled) and the task marked done by hand,
+;;                 its branch never merged; finished work stays in done
 ;;
 ;; Records are written shortly after every change and on exit; the
 ;; sessions persist as usual.  A git project keeps its tasks inside its
@@ -1193,6 +1196,18 @@ verified the work."
   "Non-nil when TASK's branch is merged."
   (harness-json-true-p (plist-get task :merged)))
 
+(defun harness-tasks--cancelled-p (task)
+  "Non-nil when TASK is done after the user cancelled it, its work unmerged.
+That is a task whose turn was stopped (`task/cancel': its `:outcome' is
+`cancelled') and that was then marked done (`task/complete', which keeps
+the outcome): the cancelled column holds it, apart from the finished
+work of the done column.  A task whose branch merged is finished work
+whatever its last turn did -- a follow-up the user stopped after the
+merge leaves the merge in place -- so it stays done."
+  (and (eq (plist-get task :state) 'done)
+       (equal (format "%s" (plist-get task :outcome)) "cancelled")
+       (not (harness-tasks--merged-p task))))
+
 (defun harness-tasks--cannot-continue-p (task)
   "Non-nil when TASK's round said it cannot continue (hand_in).
 Its session recorded the report with `:cannot-continue', and the task
@@ -1482,7 +1497,9 @@ repository stores."
 
 (defun harness-tasks--column (task)
   "Return the kanban column of TASK, a symbol.
-That is pending, backlog, needs-input, review, merging, active or done.
+That is pending, backlog, needs-input, review, merging, active, done or
+cancelled.  A done task the user cancelled (`harness-tasks--cancelled-p')
+is cancelled, not done: the done column holds finished work only.
 A backlog task (`harness-tasks--backlog-p'), and the write-up an agent
 does for it, show in the backlog: only the user starts one, so it is no
 queued pending task (`harness-tasks--queued-p').  A task whose branch
@@ -1505,6 +1522,7 @@ user."
     ('pending (if (harness-tasks--backlog-p task) 'backlog 'pending))
     ('done (cond ((harness-session-waiting-on-user-p (harness-tasks--session task)) 'needs-input)
                  ((harness-tasks--waking-p task) 'active)
+                 ((harness-tasks--cancelled-p task) 'cancelled)
                  (t 'done)))
     ('review 'review)
     ('refining (let ((session (harness-tasks--session task)))
@@ -5395,7 +5413,10 @@ none, and a model the policy does not allow signals an error (see
 
 (harness-defmethod task/list (&optional cwd)
   "Return the tasks of CWD's project, oldest first; every task without CWD.
-The order the waiting ones start in is `task/queue-order''s."
+Each is a view with its `:column' (`harness-tasks--column').  Without
+CWD it is every project's tasks, which the board of every project
+\(`harness-tasks-all') shows and the mode line counts the ones in review
+of.  The order the waiting ones start in is `task/queue-order''s."
   (harness-tasks--load)
   (let ((project (and cwd (harness-tasks--project cwd))))
     (when project (harness-tasks--open-project project))
@@ -6357,12 +6378,17 @@ A merged task's worktree is removed and its merged branch deleted."
       (harness-tasks--remove-worktree task))
     (harness-tasks--set id :archived (and (not restore) t))))
 
-(harness-defmethod task/archive-done (&optional cwd)
+(harness-defmethod task/archive-done (&optional cwd column)
   "Archive every done task of CWD's project (every project without CWD).
-Return how many were archived."
-  (let ((n 0))
+COLUMN, `done' or `cancelled', keeps to that column of the board: the
+completed tasks, or the cancelled ones (`harness-tasks--cancelled-p');
+without it both are archived.  Return how many were archived."
+  (let ((n 0)
+        (column (and column (intern (format "%s" column)))))
     (dolist (task (harness-call 'task/list cwd) n)
-      (when (and (eq (plist-get task :state) 'done) (not (plist-get task :archived)))
+      (when (and (eq (plist-get task :state) 'done) (not (plist-get task :archived))
+                 (or (null column)
+                     (eq (eq column 'cancelled) (harness-tasks--cancelled-p task))))
         (harness-call 'task/archive (plist-get task :id))
         (cl-incf n)))))
 

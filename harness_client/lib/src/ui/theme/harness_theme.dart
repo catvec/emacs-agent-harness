@@ -50,7 +50,7 @@ class HarnessColors {
           : const Color(0xFF7C7C84),
     'merging' => const Color(0xFF9A6BC9),
     'backlog' => const Color(0xFFB08956),
-    'done' =>
+    'done' || 'cancelled' =>
       brightness == Brightness.dark
           ? const Color(0xFF55555B)
           : const Color(0xFF9B9BA0),

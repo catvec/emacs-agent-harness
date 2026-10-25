@@ -261,7 +261,7 @@ class TaskActions {
             TaskAction.sendBack,
             TaskAction.archive,
           ]);
-        case 'done':
+        case 'done' || 'cancelled':
           actions.addAll([TaskAction.archive, TaskAction.message]);
       }
       // The harness takes a task done by hand in any state, but a task that

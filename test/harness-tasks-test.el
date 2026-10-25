@@ -1023,6 +1023,120 @@ retried."
           (harness-call 'task/complete b)
           (should (eq 'done (harness-tasks-test-state b))))))))
 
+(declare-function harness-tasks--cancelled-p "harness-tasks")
+
+(ert-deftest harness-tasks-column-cancelled-then-done-is-its-own-column ()
+  "A task the user cancelled and then marked done is in the cancelled column.
+Its turn stopped with the outcome `cancelled', which left it needing
+input; marking it done kept the outcome, and the done column holds
+finished work only.  The column is worked out from the record, so a
+task already done that way moves with no migration."
+  (harness-tasks-test-with
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-provider-demo-script-override '((:type wait :seconds 30)))
+          id)
+      (setq id (harness-tasks-test-submit "stopped halfway"))
+      (harness-test-wait (lambda () (harness-call 'agent/running (harness-tasks-test-session-id id)))
+                         5 "its turn to run")
+      (harness-call 'task/cancel id)
+      (harness-test-wait (lambda () (eq 'cancelled (plist-get (harness-tasks-test-task id) :outcome)))
+                         5 "its turn to be cancelled")
+      ;; Stopped, it needs the user: this was always so.
+      (should (eq 'active (harness-tasks-test-state id)))
+      (should (eq 'needs-input (harness-tasks-test--column id)))
+      ;; Marked done, it is over, and it was cancelled.
+      (harness-call 'task/complete id)
+      (should (eq 'done (harness-tasks-test-state id)))
+      (should (eq 'cancelled (plist-get (harness-tasks-test-task id) :outcome)))
+      (should (eq 'cancelled (harness-tasks-test--column id)))
+      (should (eq 'cancelled (plist-get (cl-find id (harness-call 'task/list default-directory)
+                                                 :key (lambda (task) (plist-get task :id)) :test #'equal)
+                                        :column))))))
+
+(ert-deftest harness-tasks-column-done-after-cancelling-only-without-a-merge ()
+  "Only an unmerged task that was cancelled is in the cancelled column.
+Done with another outcome, or merged -- a follow-up the user stopped
+after the merge leaves finished work -- it stays in the done column.
+A session waiting for the user, or a message on its way, still puts the
+task in needs-input or at work first, as for any done task."
+  (harness-tasks-test-with
+    (let* ((sid (harness-tasks-test--session-at 'idle))
+           (project default-directory)
+           (cancelled (harness-tasks-test--hold 'done sid project :outcome 'cancelled))
+           (finished (harness-tasks-test--hold 'done sid project :outcome 'end-turn))
+           (plain (harness-tasks-test--hold 'done sid project))
+           (merged (harness-tasks-test--hold 'done sid project :outcome 'cancelled :merged t))
+           (failed (harness-tasks-test--hold 'done sid project :outcome 'error))
+           (stopped (harness-tasks-test--hold 'active sid project :outcome 'cancelled)))
+      (should (eq 'cancelled (harness-tasks-test--column cancelled)))
+      (should (harness-tasks--cancelled-p (harness-tasks-test-task cancelled)))
+      (dolist (id (list finished plain merged failed))
+        (should (eq 'done (harness-tasks-test--column id)))
+        (should-not (harness-tasks--cancelled-p (harness-tasks-test-task id))))
+      ;; Not done yet: a cancelled task still needs the user.
+      (should (eq 'needs-input (harness-tasks-test--column stopped)))
+      (should-not (harness-tasks--cancelled-p (harness-tasks-test-task stopped)))
+      ;; A message on its way reopens it, at work.
+      (puthash cancelled t harness-tasks--waking)
+      (should (eq 'active (harness-tasks-test--column cancelled)))
+      (clrhash harness-tasks--waking)
+      ;; A session that waits for the user needs input before anything.
+      (let ((pid (harness-tasks-test--ask sid)))
+        (should (eq 'needs-input (harness-tasks-test--column cancelled)))
+        (harness-call 'session/pending-resolve sid pid "carry on"))
+      (should (eq 'cancelled (harness-tasks-test--column cancelled))))))
+
+(ert-deftest harness-tasks-archive-done-takes-the-columns-apart ()
+  "`task/archive-done' archives the completed tasks, the cancelled ones, or both.
+Its second argument is the column of the board: `done' leaves the
+cancelled tasks, and `cancelled' leaves the completed ones, as the
+board's two [Archive all] buttons do; without it both go, as they did."
+  (harness-tasks-test-with
+    (let* ((sid (harness-tasks-test--session-at 'idle))
+           (project default-directory)
+           (done-a (harness-tasks-test--hold 'done sid project :outcome 'end-turn))
+           (done-b (harness-tasks-test--hold 'done sid project :outcome 'end-turn))
+           (cancelled-a (harness-tasks-test--hold 'done sid project :outcome 'cancelled))
+           (cancelled-b (harness-tasks-test--hold 'done sid project :outcome 'cancelled))
+           (archived (lambda (id) (and (plist-get (harness-tasks-test-task id) :archived) t))))
+      (should (= 2 (harness-call 'task/archive-done project 'done)))
+      (should (equal '(t t nil nil) (mapcar archived (list done-a done-b cancelled-a cancelled-b))))
+      (should (= 0 (harness-call 'task/archive-done project 'done)))
+      ;; A column is named in words over the wire.
+      (should (= 2 (harness-call 'task/archive-done project "cancelled")))
+      (should (equal '(t t t t) (mapcar archived (list done-a done-b cancelled-a cancelled-b))))
+      ;; Both, with no column.
+      (dolist (id (list done-a done-b cancelled-a cancelled-b))
+        (harness-call 'task/archive id t))
+      (should (= 4 (harness-call 'task/archive-done project))))))
+
+(ert-deftest harness-tasks-session-ids-keep-the-over-tasks-out-of-a-bulk-change ()
+  "The sessions of completed and of cancelled tasks are the ones a bulk change skips.
+`session/select' with `:tasks' leaves them out, as it leaves out those
+of every task that is over, and `task/session-ids' says which they are
+for the two columns it is asked for: a task cancelled and marked done
+is not touched by a change for every session and task."
+  (harness-tasks-test-with
+    (let* ((sid-for (lambda () (harness-tasks-test--session-at 'idle)))
+           (project default-directory)
+           (done-sid (funcall sid-for))
+           (cancelled-sid (funcall sid-for))
+           (active-sid (funcall sid-for))
+           (cancelled (progn
+                        (harness-tasks-test--hold 'done done-sid project :outcome 'end-turn)
+                        (harness-tasks-test--hold 'active active-sid project)
+                        (harness-tasks-test--hold 'done cancelled-sid project :outcome 'cancelled))))
+      (should (eq 'cancelled (harness-tasks-test--column cancelled)))
+      (should (equal (sort (list done-sid cancelled-sid) #'string<)
+                     (sort (harness-call 'task/session-ids (list :columns '("done" "cancelled"))) #'string<)))
+      (should (equal (list cancelled-sid) (harness-call 'task/session-ids (list :columns '("cancelled")))))
+      (should (equal (list done-sid) (harness-call 'task/session-ids (list :columns '("done")))))
+      (let ((selected (mapcar (lambda (s) (plist-get s :id))
+                              (harness-call 'session/select (list :active t :tasks t)))))
+        (should (member active-sid selected))
+        (should-not (member done-sid selected))
+        (should-not (member cancelled-sid selected))))))
+
 (ert-deftest harness-tasks-done-event-says-how ()
   "`task/done' fires once a task becomes done, saying what completed it."
   (harness-tasks-test-with

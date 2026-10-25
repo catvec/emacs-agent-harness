@@ -233,6 +233,28 @@ for the user, never is."
         (harness-call 'session/deactivate done)
         (should (funcall finished done))))))
 
+(ert-deftest harness-session-tmp-finished-p-counts-a-cancelled-task-as-over ()
+  "A task in the cancelled column is over like one in the done column.
+The user stopped it and marked it done: nothing needs its session's
+files any longer than a finished task's, and its sub-agents' go with
+them.  A task stopped part way, still needing the user, is not over."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (tasks nil)
+           (finished (lambda (id) (and (harness-session--tmp-finished-p (harness-session--get id)) t))))
+      (harness-register-method 'task/for-session
+                               (lambda (id) (when-let* ((c (cdr (assoc id tasks)))) (list :id "t-1" :column c))))
+      (let* ((cancelled (harness-session-test--make cwd))
+             (kid (harness-session-test--make cwd :kind 'subagent :parent-id cancelled))
+             (stopped (harness-session-test--make cwd)))
+        (setq tasks (list (cons cancelled 'cancelled) (cons stopped 'needs-input)))
+        (should (funcall finished cancelled))
+        (should (funcall finished kid))
+        (should-not (funcall finished stopped))
+        ;; At work, or waiting on the user: never.
+        (harness-call 'session/set-status cancelled 'running)
+        (should-not (funcall finished cancelled))))))
+
 (ert-deftest harness-session-tmp-sweep-deletes-the-directories-of-finished-sessions ()
   "A sweep deletes the temporary directory of each session that is over and
 has been quiet long enough, at once, and what was in it in the
@@ -663,7 +685,7 @@ while the rest is swept."
       (harness-call 'session/deactivate task)
       (harness-register-method 'task/session-ids
                                (lambda (&optional filter)
-                                 (unless (equal '("done") (plist-get filter :columns)) (list task))))
+                                 (unless (equal '("done" "cancelled") (plist-get filter :columns)) (list task))))
       (should (equal (list b) (harness-session-test-ids
                                (harness-call 'session/select (list :ids (list b) :active t :tasks t)))))
       (should (equal (sort (list b task) #'string<)
@@ -705,7 +727,7 @@ asked for a false."
       (harness-call 'session/deactivate left)
       (harness-register-method 'task/session-ids
                                (lambda (&optional filter)
-                                 (unless (equal '("done") (plist-get filter :columns))
+                                 (unless (equal '("done" "cancelled") (plist-get filter :columns))
                                    (list task skip "gone"))))
       (should (equal (sort (list open skip task) #'string<)
                      (sort (mapcar (lambda (s) (plist-get s :id))
@@ -732,7 +754,7 @@ every project; the current tasks' sessions stay in."
       (harness-call 'session/deactivate task)
       (harness-register-method 'task/session-ids
                                (lambda (&optional filter)
-                                 (if (equal '("done") (plist-get filter :columns))
+                                 (if (equal '("done" "cancelled") (plist-get filter :columns))
                                      (list done)
                                    (list task))))
       (should (equal (sort (list open task) #'string<)

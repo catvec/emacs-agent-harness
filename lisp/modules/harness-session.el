@@ -1179,11 +1179,11 @@ of no task."
   "Return when session S was over, or nil while it is not.
 Over means nothing needs its temporary directory any more.  A session at
 work (running) or waiting on the user (blocked) is not.  One that works
-on a task is over when the task is done, in the done column of the
-board, whatever the session itself does (closed, or idle after the
-merge); so is a sub-agent of such a task.  One that belongs to no task is
-over when it is closed (inactive): an open conversation, idle as it may
-be, is one the user can come back to.
+on a task is over when the task is done, in the done or cancelled
+column of the board, whatever the session itself does (closed, or idle
+after the merge); so is a sub-agent of such a task.  One that belongs
+to no task is over when it is closed (inactive): an open conversation,
+idle as it may be, is one the user can come back to.
 
 The time is the latest of the session's last change and, for a task's, the
 time the task was finished and the time the user verified it: a task
@@ -1193,7 +1193,9 @@ whole of `harness-session-tmp-retention-days'."
   (let ((status (harness-session-status s)))
     (unless (memq status '(running blocked))
       (let* ((task (harness-session--family-task s))
-             (over (if task (eq (plist-get task :column) 'done) (eq status 'inactive))))
+             (over (if task
+                       (and (memq (plist-get task :column) '(done cancelled)) t)
+                     (eq status 'inactive))))
         (when over
           (apply #'max (or (harness-session-updated s) 0)
                  (cl-remove-if-not #'numberp (list (plist-get task :finished)
@@ -1583,8 +1585,9 @@ FILTER is `session/list''s filter (`:project' `:status' `:kind'
 leave out, and `:tasks': non-nil adds the sessions of the current tasks
 of every project (`task/session-ids'), whatever the other keys say, so
 an inactive session a task goes on in is not missed, and leaves out
-the sessions of completed tasks, the done column of the board, even an
-active one: a bulk change must not reach a task that is over.  `:ids'
+the sessions of completed and cancelled tasks, the done and cancelled
+columns of the board, even an active one: a bulk change must not reach
+a task that is over.  `:ids'
 limits even that: a session it does not name is never selected.  An
 internal session (see `session/internal-start') is selected only when
 `:kind' asks for kind `internal', even when `:ids' names it: it records
@@ -1597,7 +1600,7 @@ handoff's `handoff/check-all' and `handoff/switch-all'."
          (ids (plist-get filter :ids))
          (internal (eq (plist-get filter :kind) 'internal))
          (done (when (and tasks (harness-method-exists-p 'task/session-ids))
-                 (harness-call 'task/session-ids (list :columns '("done")))))
+                 (harness-call 'task/session-ids (list :columns '("done" "cancelled")))))
          (selected (harness-call 'session/list (harness-plist-remove filter :except :tasks))))
     (when (and tasks (harness-method-exists-p 'task/session-ids))
       (let ((have (mapcar (lambda (s) (plist-get s :id)) selected))

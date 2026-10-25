@@ -198,6 +198,7 @@ class HarnessTask {
     'pending' => 4,
     'backlog' => 5,
     'done' => 7,
+    'cancelled' => 8,
     _ => 6,
   };
 
@@ -208,7 +209,15 @@ class HarnessTask {
   bool get isBacklog => columnName == 'backlog';
   bool get isMerging => columnName == 'merging';
   bool get isDone => columnName == 'done';
-  bool get isStopped => outcome != null && !isDone;
+
+  /// Stopped by the user, then marked done, its work never merged: the
+  /// harness gives it a column of its own, apart from finished work.
+  bool get isCancelled => columnName == 'cancelled';
+
+  /// Over: finished work, or cancelled work.  Neither is stopped part way,
+  /// and both are archived, not completed again.
+  bool get isClosed => isDone || isCancelled;
+  bool get isStopped => outcome != null && !isClosed;
 
   /// Whether an agent writes the task up for the backlog, or stopped part
   /// way (see [outcome]).
