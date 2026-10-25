@@ -578,8 +578,13 @@ class ToolAttachments extends StatelessWidget {
   }
 }
 
-/// What a `hand_in` call handed in, drawn as the report it is: the problem,
-/// the summary as it was written, how to see it, and the evidence.
+/// What a task's work was handed in with, drawn as the report it is: the
+/// problem, the summary as it was written, how to see it, and the evidence.
+/// It is the one drawing of a report: the card of the `hand_in` call in a
+/// transcript, the page the report is read on (`HandInReportScreen`) and so
+/// the board's "View report" all show it, from the same [HandInReport].  A
+/// round of work that handed none in is drawn as what it is: not handed in,
+/// and the last message of the session.
 class HandInReportView extends StatelessWidget {
   const HandInReportView({
     super.key,
@@ -607,7 +612,18 @@ class HandInReportView extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (report.cannotContinue || report.noMerge)
+        // Said first, so that nobody takes the work for reported on the
+        // strength of a report that was never written.
+        if (report.missing)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: HarnessStatusLabel(
+              label: 'No report was handed in',
+              color: HarnessColors.amber,
+              icon: Icons.error_outline_rounded,
+            ),
+          )
+        else if (report.cannotContinue || report.noMerge)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: HarnessStatusLabel(
@@ -629,8 +645,22 @@ class HandInReportView extends StatelessWidget {
           ),
         if (report.summary.isNotEmpty)
           section(
-            'SUMMARY',
+            // What a round that handed nothing in has is not a summary of
+            // its work: it is what the session said last.
+            report.missing ? 'LAST MESSAGE' : 'SUMMARY',
             HarnessMarkdown(text: report.summary, compact: true),
+          )
+        else if (report.missing)
+          section(
+            'LAST MESSAGE',
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                'The session wrote none.',
+                style: HarnessText.caption(context)
+                    .copyWith(fontStyle: FontStyle.italic),
+              ),
+            ),
           ),
         if ((report.reproduction ?? '').isNotEmpty)
           section(

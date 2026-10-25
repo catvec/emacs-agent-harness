@@ -6,12 +6,16 @@ import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/tool_body.dart';
+import 'hand_in_report_screen.dart';
 
 /// A tool call on a page of its own: everything it was given and everything
 /// it said, with nothing cut.  What the transcript holds in a card is a
-/// screenful; this is where a long result, a file, a log or a report is read
-/// to its end and copied.  The output is built a screenful at a time, so a
-/// result of any length opens at once.
+/// screenful; this is where a long result, a file or a log is read to its
+/// end and copied.  The output is built a screenful at a time, so a result of
+/// any length opens at once.
+///
+/// The call that handed a task's work in is its report, which has a page of
+/// its own, [HandInReportScreen]: the one the task board opens too.
 class ToolDetailScreen extends StatelessWidget {
   const ToolDetailScreen({super.key, required this.tool});
 
@@ -19,13 +23,16 @@ class ToolDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final report = tool.isRunning || tool.isFailed || tool.isDenied
+        ? null
+        : HandInReport.of(tool);
+    if (report != null) {
+      return HandInReportScreen(report: report, sessionId: tool.sessionId);
+    }
     final theme = Theme.of(context);
     final color = toolColor(context, tool);
     final output = outputOf(tool).text;
     final lines = toolTextLines(output);
-    final report = tool.isRunning || tool.isFailed || tool.isDenied
-        ? null
-        : HandInReport.of(tool);
     final fields = toolFields(tool.input);
     final status = tool.isRunning
         ? 'Running'
@@ -81,68 +88,56 @@ class ToolDetailScreen extends StatelessWidget {
           ],
         ),
       ),
-      if (report != null)
+      if (fields.isNotEmpty)
         _pad(
-          HandInReportView(
-            report: report,
+          ToolSection(
+            label: 'INPUT',
+            trailing: CopyButton(
+              text: inputAsText(fields),
+              label: 'Copy input',
+            ),
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: ToolFieldsView(fields: fields, expanded: true),
+            ),
+          ),
+        ),
+      // What the call handed back, a picture most often, comes before the
+      // words that describe it, which may be a whole file long.
+      if (tool.attachments.isNotEmpty)
+        _pad(
+          ToolAttachments(
+            attachments: tool.attachments,
             sessionId: tool.sessionId,
             expanded: true,
           ),
-        )
-      else ...[
-        if (fields.isNotEmpty)
-          _pad(
-            ToolSection(
-              label: 'INPUT',
-              trailing: CopyButton(
-                text: inputAsText(fields),
-                label: 'Copy input',
-              ),
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: ToolFieldsView(fields: fields, expanded: true),
-              ),
-            ),
-          ),
-        // What the call handed back, a picture most often, comes before the
-        // words that describe it, which may be a whole file long.
-        if (tool.attachments.isNotEmpty)
-          _pad(
-            ToolAttachments(
-              attachments: tool.attachments,
-              sessionId: tool.sessionId,
-              expanded: true,
-            ),
-          ),
-        _pad(
-          ToolSection(
-            label: tool.isDenied
-                ? 'REASON'
-                : tool.isFailed
-                ? 'ERROR'
-                : 'OUTPUT',
-            color: tool.isDenied || tool.isFailed ? color : null,
-            detail: lines.isEmpty ? null : linesLabel(lines.length),
-            trailing: lines.isEmpty
-                ? null
-                : CopyButton(text: output, label: 'Copy output'),
-            child: lines.isEmpty
-                ? Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Text(
-                      tool.isRunning
-                          ? 'Waiting for the result…'
-                          : '(no output)',
-                      style: HarnessText.caption(context)
-                          .copyWith(fontStyle: FontStyle.italic),
-                    ),
-                  )
-                : const SizedBox.shrink(),
-          ),
         ),
-      ],
+      _pad(
+        ToolSection(
+          label: tool.isDenied
+              ? 'REASON'
+              : tool.isFailed
+              ? 'ERROR'
+              : 'OUTPUT',
+          color: tool.isDenied || tool.isFailed ? color : null,
+          detail: lines.isEmpty ? null : linesLabel(lines.length),
+          trailing: lines.isEmpty
+              ? null
+              : CopyButton(text: output, label: 'Copy output'),
+          child: lines.isEmpty
+              ? Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    tool.isRunning ? 'Waiting for the result…' : '(no output)',
+                    style: HarnessText.caption(context)
+                        .copyWith(fontStyle: FontStyle.italic),
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
+      ),
     ];
-    final chunks = report != null ? const <String>[] : toolTextChunks(output);
+    final chunks = toolTextChunks(output);
     final tint = tool.isDenied || tool.isFailed ? color : null;
     final label = toolLabel(tool);
     return HarnessPage(

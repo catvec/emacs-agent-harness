@@ -7,6 +7,7 @@ library;
 import 'dart:convert';
 
 import '../acp/acp_message.dart';
+import 'session.dart' show parseTime;
 import 'transcript.dart';
 
 final _ansi = RegExp(r'\x1B\[[0-9;?]*[ -/]*[@-~]');
@@ -440,29 +441,87 @@ String truncateLine(String text, {int max = 90}) {
   return first.length <= max ? first : '${first.substring(0, max - 1)}…';
 }
 
-/// What a `hand_in` call handed in: why, what was done, how to see it, and
-/// the evidence.  It is the report on the call's result when the harness
-/// kept one there (it has resolved the evidence by then), else what the
-/// call asked for.
+/// What a task's work was handed in with: why, what was done, how to see it,
+/// and the evidence.
+///
+/// The harness writes one record for it and keeps it in two places: on the
+/// task (`report`, which the board's "View report" reads) and on the result
+/// of the `hand_in` call that handed it in (`meta.report`, which the
+/// session's card and its full view read).  Both are read into this, and
+/// both are drawn by the same widgets (`HandInReportView`,
+/// `HandInReportScreen`), so a task's report looks the same wherever it is
+/// opened from.
 class HandInReport {
   const HandInReport({
-    required this.problem,
-    required this.summary,
+    this.problem = '',
+    this.summary = '',
     this.reproduction,
     this.evidence = const [],
     this.cannotContinue = false,
     this.noMerge = false,
+    this.missing = false,
+    this.at,
   });
 
+  /// The report in [wire]: the record the harness keeps on a task, or on the
+  /// result of the call that handed it in (it has resolved the evidence by
+  /// then), or the input of a call that asked for one (the evidence is
+  /// written as the call gave it; [input] is then the call's input too).
+  /// The flags are on the report when it is resolved (the harness writes its
+  /// keys in kebab case) and in the call's input when it asked for them.
+  factory HandInReport.fromWire(JsonMap wire, {JsonMap input = const {}}) {
+    bool flag(String snake) {
+      final kebab = snake.replaceAll('_', '-');
+      final camel = snake.replaceAllMapped(
+        RegExp(r'_([a-z])'),
+        (match) => match[1]!.toUpperCase(),
+      );
+      return asBool(
+        wire[kebab] ??
+            wire[camel] ??
+            wire[snake] ??
+            input[snake] ??
+            input[kebab] ??
+            input[camel],
+      );
+    }
+
+    return HandInReport(
+      problem: asStringOr(wire['problem'], '').trim(),
+      summary: asStringOr(wire['summary'], '').trim(),
+      reproduction: asString(wire['reproduction'])?.trim(),
+      evidence: [
+        for (final item in asList(wire['evidence']))
+          if (EvidenceItem.fromWire(item) case final EvidenceItem found) found,
+      ],
+      cannotContinue: flag('cannot_continue'),
+      noMerge: flag('no_merge'),
+      missing: asBool(wire['missing']),
+      at: parseTime(wire['at']),
+    );
+  }
+
   final String problem;
+
+  /// What was done and how it was checked, as the session wrote it.  For a
+  /// report that is [missing], the last message the session wrote.
   final String summary;
   final String? reproduction;
   final List<EvidenceItem> evidence;
   final bool cannotContinue;
   final bool noMerge;
 
+  /// The round of work ended without `hand_in`: the harness recorded this
+  /// instead, with the session's last message as the [summary] and no
+  /// evidence.  The views say the work was not reported.
+  final bool missing;
+
+  /// When it was handed in (or, for a report that is [missing], recorded).
+  final DateTime? at;
+
   /// Whether there is anything of it to show.
   bool get isEmpty =>
+      !missing &&
       problem.isEmpty &&
       summary.isEmpty &&
       (reproduction ?? '').isEmpty &&
@@ -475,35 +534,7 @@ class HandInReport {
     final input = asMap(tool.input);
     final from = resolved.isNotEmpty ? resolved : input;
     if (from.isEmpty) return null;
-    // The flags are on the report when it is resolved (the harness writes
-    // its keys in kebab case), in the call's input when it asked for them.
-    bool flag(String snake) {
-      final kebab = snake.replaceAll('_', '-');
-      final camel = snake.replaceAllMapped(
-        RegExp(r'_([a-z])'),
-        (match) => match[1]!.toUpperCase(),
-      );
-      return asBool(
-        from[kebab] ??
-            from[camel] ??
-            from[snake] ??
-            input[snake] ??
-            input[kebab] ??
-            input[camel],
-      );
-    }
-
-    final report = HandInReport(
-      problem: asStringOr(from['problem'], '').trim(),
-      summary: asStringOr(from['summary'], '').trim(),
-      reproduction: asString(from['reproduction'])?.trim(),
-      evidence: [
-        for (final item in asList(from['evidence']))
-          if (EvidenceItem.fromWire(item) case final EvidenceItem found) found,
-      ],
-      cannotContinue: flag('cannot_continue'),
-      noMerge: flag('no_merge'),
-    );
+    final report = HandInReport.fromWire(from, input: input);
     return report.isEmpty ? null : report;
   }
 }

@@ -1,8 +1,10 @@
 // The pictures of the harness's machine, through the whole client: the
 // screenshots a task handed in, the image a `read_file` call read, and the
-// report in the task's sheet, asked of the harness by the path they are named
-// by (`_harness/session/image`) and drawn where they are named.  A harness
-// that gives no pictures, and a picture that is gone, leave the page readable.
+// report of a task read from the task board, asked of the harness by the path
+// they are named by (`_harness/session/image`) and drawn where they are named.
+// A harness that gives no pictures, and a picture that is gone, leave the page
+// readable.  (That the report reads the same from the board and from the
+// session is `hand_in_report_test.dart`'s.)
 import 'dart:convert';
 import 'dart:io';
 
@@ -149,6 +151,48 @@ void main() {
     expect(_drawn, findsOneWidget);
   });
 
+  testWidgets('the report a task board opens shows its screenshots', (
+    tester,
+  ) async {
+    final harness = FakeHarness();
+    // The task in review has a session, as every task does.
+    harness.tasks['task-2']!['session'] = 's-review';
+    harness.pictureFiles['screenshots/android-chat.png'] = (
+      mime: 'image/png',
+      bytes: _screenshot,
+    );
+    // On a tablet's width: the task board's header does not fit its spend on
+    // a phone's in a test, whose font is wider than any real one.
+    await _open(tester, harness, openSession: false, width: 2100);
+    await tester.tap(find.text('Tasks'));
+    await _settle(tester, 6);
+    await tester.ensureVisible(find.text('Review'));
+    await tester.tap(find.text('Review'));
+    await _settle(tester, 4);
+    await tester.tap(find.text('Review the emulator screenshots'));
+    await _settle(tester, 12);
+    // The sheet leads to the report and draws none of it, pictures included.
+    expect(find.text('REPORT'), findsOneWidget);
+    expect(harness.imageRequests, isEmpty);
+    expect(_drawn, findsNothing);
+    await tester.ensureVisible(find.text('View report'));
+    await tester.pump();
+    await tester.tap(find.text('View report'));
+    await _settle(tester, 12);
+    expect(find.text('Hand-in report'), findsOneWidget);
+    expect(find.text('Chat with a tool card'), findsOneWidget);
+    // The screenshot is asked of the task's session, by the path the report
+    // names it by.
+    expect(harness.imageRequests, [
+      ('s-review', 'screenshots/android-chat.png'),
+    ]);
+    await _decoded(tester);
+    expect(_drawn, findsOneWidget);
+    // The rest of the evidence is as it was.
+    expect(find.text('flutter test: 38 passing'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('what a real harness wrote of a read and a hand-in is drawn', (
     tester,
   ) async {
@@ -246,9 +290,14 @@ void main() {
     await _settle(tester, 4);
     await tester.tap(find.text('Show the chat'));
     await _settle(tester, 12);
+    // The sheet leads to the report; the report is on its page.
     expect(find.text('REPORT'), findsOneWidget);
-    expect(find.text('Screenshot: The chat, as the app draws it'), findsOneWidget);
-    expect(find.text('Screenshot: A diagram'), findsOneWidget);
+    await tester.ensureVisible(find.text('View report'));
+    await tester.pump();
+    await tester.tap(find.text('View report'));
+    await _settle(tester, 12);
+    expect(find.text('The chat, as the app draws it'), findsOneWidget);
+    expect(find.text('A diagram'), findsOneWidget);
     expect(harness.imageRequests, [
       ('s-live', '/work/chat.png'),
       ('s-live', '/work/diagram.svg'),
@@ -259,37 +308,6 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('a report in the task sheet shows its screenshots', (
-    tester,
-  ) async {
-    final harness = FakeHarness();
-    // The task in review has a session, as every task does.
-    harness.tasks['task-2']!['session'] = 's-review';
-    harness.pictureFiles['screenshots/android-chat.png'] = (
-      mime: 'image/png',
-      bytes: _screenshot,
-    );
-    // On a tablet's width: the task board's header does not fit its spend on
-    // a phone's in a test, whose font is wider than any real one.
-    await _open(tester, harness, openSession: false, width: 2100);
-    await tester.tap(find.text('Tasks'));
-    await _settle(tester, 6);
-    await tester.ensureVisible(find.text('Review'));
-    await tester.tap(find.text('Review'));
-    await _settle(tester, 4);
-    await tester.tap(find.text('Review the emulator screenshots'));
-    await _settle(tester, 12);
-    expect(find.text('REPORT'), findsOneWidget);
-    expect(find.text('Screenshot: Chat with a tool card'), findsOneWidget);
-    expect(harness.imageRequests, [
-      ('s-review', 'screenshots/android-chat.png'),
-    ]);
-    await _decoded(tester);
-    expect(_drawn, findsOneWidget);
-    // The rest of the evidence is as it was.
-    expect(find.text('flutter test: 38 passing'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-  });
 
   testWidgets('a harness that gives no pictures has the screenshots named', (
     tester,

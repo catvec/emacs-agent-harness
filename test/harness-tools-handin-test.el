@@ -201,6 +201,73 @@ reports that were recorded."
         (should (string-prefix-p "hand_in needs summary" (plist-get result :content))))
       (should (= 0 asked)))))
 
+;;;; The screenshots a report holds
+
+(ert-deftest harness-tools-handin-the-screenshots-it-records-are-the-pictures-a-phone-is-given ()
+  "The screenshot a task hands in is a picture `session/image' gives its session.
+The report the tool records names it by a whole path, and both places a
+client reads that report from carry it: the task (the board's \"View
+report\") and the result of the call in the transcript (the card's \"Open
+full view\").  Through either, a phone, which cannot open the path, is
+given the bytes.  A file that is evidence but no picture is not given."
+  (harness-tools-handin-test-with
+    (setq harness-tools-handin-test--task (list :id "t1" :worktree "/work/t1/" :base "main")
+          harness-tools-handin-test--handed-in nil)
+    (harness-register-method 'task/for-session (lambda (_sid) harness-tools-handin-test--task))
+    (harness-register-method
+     'task/hand-in
+     (lambda (id report)
+       (push (cons id report) harness-tools-handin-test--handed-in)
+       ;; The task holds what was handed in, as it does.
+       (setq harness-tools-handin-test--task
+             (plist-put (copy-sequence harness-tools-handin-test--task) :report report))
+       t))
+    (harness-add-filter 'permission/decide
+                        (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
+    (let* ((cwd (harness-test-temp-dir))
+           (sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))
+           (png (expand-file-name "shot.png" cwd))
+           (text (expand-file-name "notes.txt" cwd))
+           (coding-system-for-write 'no-conversion))
+      (write-region harness-test-png nil png nil 'silent)
+      (write-region "not a picture\n" nil text nil 'silent)
+      (let* ((result (harness-test-await
+                      (harness-call 'tools/execute sid
+                                    (list :id "h1" :name "hand_in"
+                                          :input (list :problem "The page" :summary "# Done"
+                                                       :evidence (list (list :image "shot.png" :caption "The page")
+                                                                       (list :file "notes.txt")))))))
+             (report (cdar harness-tools-handin-test--handed-in))
+             (shot (nth 0 (plist-get report :evidence)))
+             (notes (nth 1 (plist-get report :evidence))))
+        (should-not (plist-get result :is-error))
+        ;; Recorded as a whole path, with its caption.
+        (should (equal "image" (plist-get shot :kind)))
+        (should (equal "The page" (plist-get shot :caption)))
+        (should (file-name-absolute-p (plist-get shot :path)))
+        (should (file-equal-p png (plist-get shot :path)))
+        ;; Through the task's report: the board.
+        (should (equal harness-test-png
+                       (base64-decode-string
+                        (plist-get (harness-call 'session/image sid (plist-get shot :path)) :data))))
+        (should (equal "image/png"
+                       (plist-get (harness-call 'session/image sid (plist-get shot :path)) :mime)))
+        ;; Evidence, and so shown, but no picture: refused for what it is.
+        (should (string-match-p "notes.txt is not a picture"
+                                (cadr (should-error (harness-call 'session/image sid (plist-get notes :path))))))
+        ;; Through the result of the call in the transcript, with no task to
+        ;; say so: the card.
+        (setq harness-tools-handin-test--task nil)
+        (should (string-match-p "shows no file"
+                                (cadr (should-error (harness-call 'session/image sid (plist-get shot :path))))))
+        (harness-call 'session/append sid (list :kind 'tool-call :tool "hand_in" :call-id "h1" :input nil))
+        (harness-call 'session/append sid (list :kind 'tool-result :call-id "h1"
+                                                :output (plist-get result :content)
+                                                :meta (plist-get result :meta)))
+        (should (equal harness-test-png
+                       (base64-decode-string
+                        (plist-get (harness-call 'session/image sid (plist-get shot :path)) :data))))))))
+
 (ert-deftest harness-tools-handin-knows-no-project ()
   "Nothing of any project is in the tool: no app, no SDK, no licence."
   (harness-tools-handin-test-with

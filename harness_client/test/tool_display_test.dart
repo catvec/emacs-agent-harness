@@ -300,44 +300,163 @@ void main() {
     });
   });
 
-  group('the evidence in a task\'s report', () {
-    test('reads the same as the harness writes it and as it was asked for', () {
-      final written = TaskReport.fromWire({
-        'summary': 'Done',
-        'evidence': [
-          {'kind': 'image', 'path': '/tmp/s/shot.png', 'caption': 'A shot'},
-          {'kind': 'image', 'path': '/tmp/s/other.png'},
-          {'kind': 'video', 'path': '/tmp/s/run.mp4', 'caption': 'A run'},
-          {'kind': 'file', 'path': '/tmp/s/notes.txt'},
-          {'kind': 'code', 'code': 'ok', 'caption': 'The analyzer'},
-          {'kind': 'code', 'code': 'ok'},
-          {'kind': 'tool-call', 'tool': 'bash', 'caption': 'The tests'},
-          {'kind': 'note', 'text': 'Checked by hand'},
-        ],
-      });
-      expect(written.evidenceLines, [
-        'Screenshot: A shot',
-        'Screenshot: other.png',
-        'Video: A run',
-        'File: notes.txt',
-        'Code: The analyzer',
-        'Code: snippet',
-        'Tool call: The tests',
+  group('the report of a task', () {
+    // The harness keeps one record of what a task's work was handed in with:
+    // on the task, and on the result of the call that handed it in.
+    final record = <String, Object?>{
+      'problem': 'The cards are hard to read',
+      'summary': '## Done\n\nIt reads.',
+      'reproduction': 'Open a task',
+      'evidence': [
+        {'kind': 'image', 'path': '/tmp/s/shot.png', 'caption': 'A shot'},
+        {'kind': 'tool-call', 'tool': 'bash', 'caption': 'The tests'},
+        {'kind': 'note', 'text': 'Checked by hand'},
+      ],
+      'at': 1790000000.5,
+      'call-id': 'call-hand-in',
+    };
+
+    /// What a person can tell of a report, to compare two reports by.
+    Map<String, Object?> describe(HandInReport report) => {
+      'problem': report.problem,
+      'summary': report.summary,
+      'reproduction': report.reproduction,
+      'evidence': [
+        for (final item in report.evidence) '${item.kind}: ${item.label}',
+      ],
+      'cannotContinue': report.cannotContinue,
+      'noMerge': report.noMerge,
+      'missing': report.missing,
+      'at': report.at,
+    };
+
+    test('is read the way the call that handed it in has it', () {
+      final onTask = HarnessTask.fromWire({'id': 't1', 'report': record});
+      final onCall = HandInReport.of(
+        _tool(tool: 'hand_in', meta: {'report': record}),
+      );
+      expect(onTask.report, isNotNull);
+      expect(onCall, isNotNull);
+      // One record, two readers: whatever the board and the session draw of
+      // it, they draw of the same thing.
+      expect(describe(onTask.report!), describe(onCall!));
+      expect(onTask.report!.problem, 'The cards are hard to read');
+      expect(onTask.report!.reproduction, 'Open a task');
+      expect(onTask.report!.evidence.map((item) => item.label), [
+        'A shot',
+        'The tests',
         'Checked by hand',
       ]);
-      final asked = TaskReport.fromWire({
-        'evidence': [
-          {'image': 'screenshots/chat.png', 'caption': 'Chat'},
-          {'tool_call': 'bash#2'},
-          {'note': 'flutter test: 38 passing'},
-          {'caption': 'says nothing'},
-        ],
+      expect(
+        onTask.report!.at,
+        DateTime.fromMillisecondsSinceEpoch(1790000000500),
+      );
+    });
+
+    test(
+      'keeps the evidence as the harness writes it and as it was asked for',
+      () {
+        final written = HandInReport.fromWire({
+          'summary': 'Done',
+          'evidence': [
+            {'kind': 'image', 'path': '/tmp/s/shot.png', 'caption': 'A shot'},
+            {'kind': 'image', 'path': '/tmp/s/other.png'},
+            {'kind': 'video', 'path': '/tmp/s/run.mp4', 'caption': 'A run'},
+            {'kind': 'file', 'path': '/tmp/s/notes.txt'},
+            {'kind': 'code', 'code': 'ok', 'caption': 'The analyzer'},
+            {'kind': 'code', 'code': 'ok'},
+            {'kind': 'tool-call', 'tool': 'bash', 'caption': 'The tests'},
+            {'kind': 'note', 'text': 'Checked by hand'},
+          ],
+        });
+        expect(describe(written)['evidence'], [
+          'image: A shot',
+          'image: other.png',
+          'video: A run',
+          'file: notes.txt',
+          'code: The analyzer',
+          'code: Code',
+          'tool-call: The tests',
+          'note: Checked by hand',
+        ]);
+        final asked = HandInReport.fromWire({
+          'evidence': [
+            {'image': 'screenshots/chat.png', 'caption': 'Chat'},
+            {'tool_call': 'bash#2'},
+            {'note': 'flutter test: 38 passing'},
+            'A bare note',
+            {'caption': 'says nothing'},
+          ],
+        });
+        expect(describe(asked)['evidence'], [
+          'image: Chat',
+          'tool-call: bash#2',
+          'note: flutter test: 38 passing',
+          'note: A bare note',
+        ]);
+      },
+    );
+
+    test('says what the task cannot do however the key is written', () {
+      for (final (key, cannot, noMerge) in [
+        ('cannot_continue', true, false),
+        ('cannot-continue', true, false),
+        ('cannotContinue', true, false),
+        ('no_merge', false, true),
+        ('no-merge', false, true),
+        ('noMerge', false, true),
+      ]) {
+        final report = HarnessTask.fromWire({
+          'id': 't1',
+          'report': {'summary': 'Stuck', key: true},
+        }).report!;
+        expect(report.cannotContinue, cannot, reason: key);
+        expect(report.noMerge, noMerge, reason: key);
+      }
+    });
+
+    test('is there when the task has one, and only then', () {
+      expect(HarnessTask.fromWire({'id': 't1'}).report, isNull);
+      expect(HarnessTask.fromWire({'id': 't1', 'report': {}}).report, isNull);
+      // A record that says nothing is no report to open.
+      expect(
+        HarnessTask.fromWire({
+          'id': 't1',
+          'report': {'at': 1790000000.5},
+        }).report,
+        isNull,
+      );
+    });
+
+    test('says when the round handed none in, and what the session said', () {
+      final task = HarnessTask.fromWire({
+        'id': 't1',
+        'report': {
+          'summary': 'I could not run the tests, so nothing was handed in.',
+          'at': 1790000000.5,
+          'missing': true,
+        },
       });
-      expect(asked.evidenceLines, [
-        'Screenshot: Chat',
-        'Tool call: bash#2',
-        'flutter test: 38 passing',
-      ]);
+      final report = task.report!;
+      expect(report.missing, isTrue);
+      expect(report.summary, startsWith('I could not run the tests'));
+      expect(report.evidence, isEmpty);
+      expect(report.isEmpty, isFalse);
+      // Even a round that said nothing at all has this to show.
+      final silent = HarnessTask.fromWire({
+        'id': 't2',
+        'report': {'missing': true, 'at': 1790000000.5},
+      }).report;
+      expect(silent, isNotNull);
+      expect(silent!.missing, isTrue);
+      expect(silent.summary, isEmpty);
+      expect(HandInReport.fromWire(record).missing, isFalse);
+    });
+
+    test('is kept when the board hears of the task again without it', () {
+      final first = HarnessTask.fromWire({'id': 't1', 'report': record});
+      final later = HarnessTask.fromWire({'id': 't1', 'state': 'review'});
+      expect(first.merge(later).report, same(first.report));
     });
   });
 

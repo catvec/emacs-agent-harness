@@ -47,7 +47,8 @@ time it opens. It asks again only when the harness does.
   in as what they are, and what the call said, a screenful at a time, with
   *Show all* and a page of its own for the whole of it. A call that failed, or
   that the permission system refused, says so under its title. The call that
-  hands a task's work in shows its report. A stretch of quiet calls, the reads
+  hands a task's work in shows its report, and the task board's *View report*
+  opens the same report on the same page. A stretch of quiet calls, the reads
   and the commands among them, is one line, "3 tool calls: Read file ×2,
   Search files", which opens to the calls: the tools that fold are the harness's
   own allow list, the one its Emacs chat folds by. See
@@ -873,9 +874,9 @@ opened (`ToolCard`, `lib/src/ui/widgets/tool_card.dart`).
 | How it ended | Running: a spinner. Went well: a check. Failed: *Failed*, in red, and the line of its output that says what went wrong under its title. Refused by the permission system: *Denied*, in amber, with the reason; it never ran, so it is not a failure. A failed call can be closed like any other. |
 | What it was given | The fields of its input, not JSON (`toolFields`): a command after its prompt, a path or a flag on one line, the text an edit takes out in red and puts in in green, a file's content as it is, prose (a summary, a prompt) as markdown. Line breaks are line breaks, not `\n` in quotes. |
 | What it said | Selectable text, its escape sequences and progress-bar rewrites taken out (`cleanToolText`), with how many lines it is. Long text is cut to a screenful, in the card and not in a box that scrolls inside the page, with *Show all 35 lines* / *Show less*. *(no output)* when it said nothing, *Waiting for the result…* while it runs. Both input and output can be copied. |
-| All of it | *Open full view* (offered when something is cut, and on a report) opens the call on a page of its own (`ToolDetailScreen`): the whole title, every field, the output built a screenful at a time, so that a result of any length opens at once and is copied whole. |
-| What it handed back | A picture (`read_file` on a PNG, a JPEG, a GIF, a WebP, a BMP or an SVG) is drawn under *PICTURE*, above the words that describe it, and tapped it is shown larger. A video or a file is named under *ATTACHMENTS*. See *Pictures* below. |
-| The hand-in call | Its report, not its input (`HandInReport`): the problem, the summary as markdown, how to reproduce it, and the evidence, one line each. A note, some code or a call the report quotes opens to what it holds; a screenshot is drawn under its line (see *Pictures* below); a video or a file is on the harness's machine, so it is named. *Cannot continue* and *no merge* are said. A hand-in the harness refused shows its error and what was asked for. |
+| All of it | *Open full view* (offered when something is cut, and on a report) opens the call on a page of its own (`ToolDetailScreen`): the whole title, every field, the output built a screenful at a time, so that a result of any length opens at once and is copied whole. The call that handed a task's work in opens on the page of its report instead ([The report of a task](#the-report-of-a-task)). |
+| What it handed back | A picture (`read_file` on a PNG, a JPEG, a GIF, a WebP, a BMP or an SVG) is drawn under *PICTURE*, above the words that describe it, and tapped it is shown larger. A video or a file is named under *ATTACHMENTS*. See [Pictures](#pictures). |
+| The hand-in call | Its report, not its input (`HandInReport`): the problem, the summary as markdown, how to reproduce it, and the evidence, one line each. A note, some code or a call the report quotes opens to what it holds; a screenshot is drawn under its line ([Pictures](#pictures)); a video or a file is on the harness's machine, so it is named. *Cannot continue* and *no merge* are said. A hand-in the harness refused shows its error and what was asked for. |
 | Where it is | A card that is opened is brought into view: the last call of a task, the one that hands its work in, grows below the screen, so the page follows it (a card taller than the screen is shown from its top). A card that was opened stays open while the page is scrolled past it. |
 
 The harness writes what the client needs on the call's result node: its
@@ -885,6 +886,30 @@ evidence resolved. A call replayed from `session/nodes` and one that arrives
 as `tool_call` / `tool_call_update` / `_harness/node` end up the same
 `ToolView`.
 
+### The report of a task
+
+What a task's work was handed in with is one record, which the harness keeps
+in two places: on the task (`report`) and on the result of the `hand_in` call
+that handed it in (`meta.report`). The app reads both into one model,
+`HandInReport` (`models/tool_display.dart`), and draws both with one widget,
+`HandInReportView`, on one page, `HandInReportScreen`, so a report looks the
+same whichever way it is come to:
+
+| From | How |
+|---|---|
+| The task board | Tap the task. Its sheet has a *Report* card -- when the work was handed in and how many pieces of evidence came with it -- and *View report*. The sheet draws none of the report itself. |
+| The task's session | Open the call that handed the work in: its card shows the report, and *Open full view* opens the page. |
+
+The page reads the report to its end: the problem first, then the summary as
+markdown, how to reproduce it, and every piece of evidence, the calls it quotes
+open to what they said. A round of work that ended without `hand_in` has a
+report the harness marked `missing`: it is said first (*No report was handed
+in*), with the last message the session wrote under it, and nothing else.
+
+The screenshots among the evidence are drawn on that page, under their lines,
+the same whichever way the page was come to: both hand the page the session
+the work was done in, whose harness gives the pictures ([Pictures](#pictures)).
+
 ### Pictures
 
 A result and a hand-in name the pictures they show by paths on the harness's
@@ -892,8 +917,10 @@ machine, which a phone cannot open: a `read_file` call on an image brings
 `attachments` (`{path, mime, size, name}`), a task's report lists its evidence
 as `{kind: "image", path, caption}`. The app asks the harness for the bytes
 (`session/image`, of the session whose transcript shows the file) and draws
-them, in the opened card of a `read_file` call, under the line of a hand-in's
-evidence (in the card, in its full view and in the task's sheet).
+them, in the opened card of a `read_file` call and under the line of a hand-in's
+evidence: in the card of the `hand_in` call and on the page of the report
+(`HandInReportScreen`), which the call's full view and the task board's *View
+report* both open.
 
 - While a picture comes there is a placeholder of its own size; once it has,
   it is drawn no larger than it is and no taller than a screenful, and decoded
@@ -1051,6 +1078,22 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   message; nothing overflows at 320 points or at one and a half times the
   text; and the whole path from the harness's nodes (`call-id`, `is-error`, a
   result's `meta`) to the page
+- the report of a task (`test/hand_in_report_test.dart`,
+  `test/tool_display_test.dart`): the board's *View report* and the session's
+  *Open full view* open the same page, with the same words in the same order
+  and the same pixels (the test compares every pixel of the app); the sheet of
+  a task leads to its report and draws none of it; a round that handed none in
+  says so, with the last message of its session; a task that has handed
+  nothing in has no *View report*; the report of a task and that of its call
+  are read the same; the screenshots among the evidence are drawn on the page
+  (asked of the harness for the session of the task, by the path the report
+  names them by), the same from both ways to it, shown larger when tapped,
+  named by a harness that gives none, and said to be gone where they are; the
+  page, and the report card of the sheet, fit 320
+  points and one and a half times the text, the page in either style
+  (`test/hand_in_report_screenshots_test.dart`: pictures of it, from the top
+  of the page, from where its evidence begins, a screen further on and at its
+  end, written where `HARNESS_SHOTS` says)
 - runs of calls (`test/tool_runs_test.dart`, `tool_run_view_test.dart`,
   `tool_flow_test.dart`): the allow list is the harness's, read from
   `tools/list` (`test/support/harness_tools.json` is the real one, and a suite

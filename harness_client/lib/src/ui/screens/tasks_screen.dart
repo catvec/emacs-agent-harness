@@ -5,22 +5,20 @@ import 'package:flutter/material.dart';
 
 import '../../models/task.dart';
 import '../../models/task_actions.dart';
+import '../../models/tool_display.dart';
 import '../../state/app_controller.dart';
 import '../../state/drafts.dart';
 import '../../state/prompt_attachment.dart';
-import '../../state/settings_controller.dart';
 import '../../state/task_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
-import '../widgets/harness_picture.dart';
 import '../widgets/image_attachments.dart';
-import '../widgets/markdown_view.dart';
 import '../widgets/quota_widgets.dart';
 import '../widgets/task_action_runner.dart';
-import '../widgets/tool_body.dart';
+import 'hand_in_report_screen.dart';
 
 class TasksScreen extends StatefulWidget {
   const TasksScreen({
@@ -1175,13 +1173,10 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
   late final TextEditingController _prompt;
   late final TextEditingController _cwd;
   String? _project;
-
-  /// The four choices below the description.  The sheet starts them as they
-  /// were left, which the settings keep (see [_setChoice]).
-  late String _priority;
-  late bool _refine;
-  late bool _plan;
-  late bool _mainTree;
+  String _priority = 'medium';
+  bool _refine = false;
+  bool _plan = false;
+  bool _mainTree = false;
   bool _busy = false;
   String? _error;
 
@@ -1206,14 +1201,13 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
     final start = widget.app.tasks?.project ?? widget.app.selectedProject;
     _cwd = TextEditingController(text: resumed ? draft.cwd : start ?? '');
     _project = resumed ? draft.project : start;
-    if (resumed) _attachments.addAll(draft.attachments);
-    // How the last task was set, not the defaults: whoever files high
-    // priority tasks for the main tree does not pick them again each time.
-    final choices = widget.app.settings.newTaskChoices;
-    _priority = choices.priority;
-    _refine = choices.refine;
-    _plan = choices.plan;
-    _mainTree = choices.mainTree;
+    if (resumed) {
+      _priority = draft.priority;
+      _refine = draft.refine;
+      _plan = draft.plan;
+      _mainTree = draft.mainTree;
+      _attachments.addAll(draft.attachments);
+    }
     _prompt.addListener(_keepDraft);
     _cwd.addListener(_keepDraft);
   }
@@ -1223,6 +1217,10 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
       ..prompt = _prompt.text
       ..cwd = _cwd.text
       ..project = _project
+      ..priority = _priority
+      ..refine = _refine
+      ..plan = _plan
+      ..mainTree = _mainTree
       ..attachments = List.of(_attachments);
   }
 
@@ -1294,26 +1292,6 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
   void _choose(VoidCallback change) {
     setState(change);
     _keepDraft();
-  }
-
-  /// Change the priority, or one of the three switches, and keep how they
-  /// are set, where the next sheet and the next run of the app start from
-  /// them.  They are kept as they change, not only when a task is sent: a
-  /// sheet that is closed after a switch was turned opens with it turned.  A
-  /// write that fails is for the settings to say
-  /// (`SettingsController.persistenceProblem`), not for the sheet to stop on.
-  void _setChoice(VoidCallback change) {
-    setState(change);
-    unawaited(
-      widget.app.settings.setNewTaskChoices(
-        NewTaskChoices(
-          priority: _priority,
-          refine: _refine,
-          plan: _plan,
-          mainTree: _mainTree,
-        ),
-      ),
-    );
   }
 
   @override
@@ -1429,41 +1407,37 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
             Text('PRIORITY', style: HarnessText.label(context)),
             const SizedBox(height: 7),
             HarnessSegmented<String>(
-              key: const Key('task-priority'),
               options: const [
                 ('low', 'Low'),
                 ('medium', 'Medium'),
                 ('high', 'High'),
               ],
               value: _priority,
-              onChanged: (value) => _setChoice(() => _priority = value),
+              onChanged: (value) => _choose(() => _priority = value),
             ),
             const SizedBox(height: 14),
             _ToggleRow(
-              key: const Key('task-refine'),
               icon: Icons.edit_note_rounded,
               title: 'Write it up first',
               subtitle:
                   'Wait in the backlog; refines the prompt before it starts.',
               value: _refine,
-              onChanged: (value) => _setChoice(() => _refine = value),
+              onChanged: (value) => _choose(() => _refine = value),
             ),
             _ToggleRow(
-              key: const Key('task-plan'),
               icon: Icons.map_outlined,
               title: 'Plan first',
               subtitle: 'A strong model plans; a medium model carries it out.',
               value: _plan,
-              onChanged: (value) => _setChoice(() => _plan = value),
+              onChanged: (value) => _choose(() => _plan = value),
             ),
             _ToggleRow(
-              key: const Key('task-main-tree'),
               icon: Icons.account_tree_outlined,
               title: 'Work in the main tree',
               subtitle:
                   'No worktree or branch; changes land in the checkout itself.',
               value: _mainTree,
-              onChanged: (value) => _setChoice(() => _mainTree = value),
+              onChanged: (value) => _choose(() => _mainTree = value),
             ),
             if (_error != null) ...[
               const SizedBox(height: 10),
@@ -1547,7 +1521,6 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
 
 class _ToggleRow extends StatelessWidget {
   const _ToggleRow({
-    super.key,
     required this.icon,
     required this.title,
     required this.subtitle,
@@ -1770,11 +1743,11 @@ class _TaskDetail extends StatelessWidget {
                     ),
                   ),
                 ],
-                if (task.report case final TaskReport report) ...[
+                if (task.report case final HandInReport report) ...[
                   const SizedBox(height: HarnessSpace.md),
                   _DetailSection(
                     title: 'Report',
-                    child: _ReportBody(report: report, sessionId: task.sessionId),
+                    child: _ReportEntry(report: report, sessionId: task.sessionId),
                   ),
                 ],
                 if (task.feedback.isNotEmpty) ...[
@@ -1966,36 +1939,53 @@ class _DetailActions extends StatelessWidget {
   }
 }
 
-/// The report a task was handed in with, drawn as the report it is: the
-/// problem, the summary, how to see it and the evidence, all of it Markdown,
-/// the way the card of the `hand_in` call in the task's session draws it.  A
-/// round of work that handed none in has only the last message of its
-/// session: the report says so, and draws that message.
-class _ReportBody extends StatelessWidget {
-  const _ReportBody({required this.report, this.sessionId});
+/// What the sheet says of a task's report, and the way to read it.  The
+/// report is not drawn here: it is read on the page of its own that the
+/// `hand_in` call of the task's session opens as its full view, so it looks
+/// the same from both ([HandInReportScreen]).
+class _ReportEntry extends StatelessWidget {
+  const _ReportEntry({required this.report, this.sessionId});
 
-  final TaskReport report;
+  final HandInReport report;
+
+  /// The task's session, whose harness gives the pictures of the evidence
+  /// (the page draws them).
   final String? sessionId;
 
   @override
   Widget build(BuildContext context) {
-    final handIn = report.handIn;
+    final when = report.at;
+    final pieces = report.evidence.length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (report.missing) ...[
-          Padding(
-            padding: const EdgeInsets.only(bottom: 6),
-            child: Text(
-              'No report was handed in; this is the last message.',
-              style: HarnessText.caption(context)
-                  .copyWith(color: HarnessColors.amber),
-            ),
-          ),
-          if (handIn.summary.isNotEmpty)
-            HarnessMarkdown(text: handIn.summary, compact: true),
-        ] else
-          HandInReportView(report: handIn, sessionId: sessionId),
+        HarnessMetaLine(
+          maxLines: 2,
+          parts: [
+            if (report.missing)
+              const HarnessMetaPart(
+                'No report was handed in',
+                color: HarnessColors.amber,
+                weight: FontWeight.w700,
+              )
+            else
+              when == null
+                  ? 'Handed in'
+                  : 'Handed in ${HandInReportScreen.whenLabel(when)}',
+            if (pieces > 0)
+              pieces == 1
+                  ? '1 piece of evidence'
+                  : '$pieces pieces of evidence',
+          ],
+        ),
+        const SizedBox(height: HarnessSpace.md),
+        HarnessSecondaryButton(
+          label: 'View report',
+          icon: Icons.assignment_turned_in_outlined,
+          expand: true,
+          onPressed: () =>
+              HandInReportScreen.show(context, report, sessionId: sessionId),
+        ),
       ],
     );
   }

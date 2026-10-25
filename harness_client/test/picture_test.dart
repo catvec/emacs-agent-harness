@@ -9,7 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/acp/acp_client.dart';
 import 'package:harness_client/src/acp/capabilities.dart';
 import 'package:harness_client/src/models/picture.dart';
-import 'package:harness_client/src/models/task.dart';
+import 'package:harness_client/src/models/tool_display.dart';
 import 'package:harness_client/src/models/transcript.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/pictures.dart';
@@ -191,7 +191,7 @@ void main() {
   });
 
   group('the evidence of a report', () {
-    final report = TaskReport.fromWire({
+    final report = HandInReport.fromWire({
       'summary': 'Done.',
       'evidence': [
         {'kind': 'image', 'path': _shot, 'caption': 'The chat'},
@@ -203,25 +203,24 @@ void main() {
       ],
     });
 
-    test('is read as items, those that say nothing left out', () {
-      expect(report.items.map((item) => item.kind), [
+    test('is read as items, those that cannot be read left out', () {
+      expect(report.evidence.map((item) => item.kind), [
         'image',
         'image',
         'note',
         'note',
         'tool-call',
       ]);
-      expect(report.items.first.path, _shot);
+      expect(report.evidence.first.path, _shot);
     });
 
-    test('is a line for each, as the task sheet has it', () {
-      expect(report.evidenceLines, [
-        'Screenshot: The chat',
-        'Screenshot: other.png',
-        'Checked by hand',
-        'Tool call: bash#2',
-      ]);
-      expect(TaskReport.evidenceLine(report.items[3]), '');
+    test('is a picture to draw when it is an image the app can draw', () {
+      expect(
+        report.evidence.map((item) => item.path).whereType<String>().map(
+          (path) => isDrawablePicture(null, path),
+        ),
+        [true, true],
+      );
     });
   });
 

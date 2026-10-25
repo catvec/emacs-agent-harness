@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/app.dart';
 import 'package:harness_client/src/models/task.dart';
+import 'package:harness_client/src/models/tool_display.dart';
 import 'package:harness_client/src/models/transcript.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
@@ -169,9 +170,7 @@ Future<void> main() async {
 
   group('the report of a task', () {
     test('keeps its problem, and is the record the hand-in card draws', () {
-      final report = TaskReport.fromWire(_report());
-      expect(report.problem, _problem);
-      final handIn = report.handIn;
+      final handIn = HandInReport.fromWire(_report());
       expect(handIn.problem, _problem);
       expect(handIn.summary, _summary.trim());
       expect(handIn.reproduction, _reproduction);
@@ -185,11 +184,9 @@ Future<void> main() async {
     });
 
     test('has none of what a harness from before it did not write', () {
-      final report = TaskReport.fromWire({'summary': ' Done. '});
-      expect(report.problem, '');
-      expect(report.reproduction, isNull);
-      final handIn = report.handIn;
+      final handIn = HandInReport.fromWire({'summary': ' Done. '});
       expect(handIn.problem, '');
+      expect(handIn.reproduction, isNull);
       expect(handIn.summary, 'Done.');
       expect(handIn.evidence, isEmpty);
     });
@@ -197,7 +194,7 @@ Future<void> main() async {
     test('is read from the task as the harness lists it', () {
       final task = HarnessTask.fromWire(_task(report: _report()));
       expect(task.report?.problem, _problem);
-      expect(task.report?.summary, _summary);
+      expect(task.report?.summary, _summary.trim());
     });
   });
 

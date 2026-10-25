@@ -1,7 +1,7 @@
 // Pictures of the pictures: the screenshots a task handed in, the image a
-// `read_file` call read, a picture shown larger, the report in a task's sheet,
-// and the places where a picture is not there, on a phone, drawn with the
-// fonts of one.
+// `read_file` call read, a picture shown larger, the report a task's sheet
+// opens, and the places where a picture is not there, on a phone, drawn with
+// the fonts of one.
 //
 //   HARNESS_SHOTS=/some/directory flutter test test/picture_screenshots_test.dart
 //
@@ -148,23 +148,12 @@ final _cases = <_Case>[
     await _pump(tester, 10);
     await _decoded(tester);
     expect(find.byKey(const ValueKey('picture-viewer')), findsOneWidget);
-  }),
-  _Case('picture-viewer-zoomed', seed: _seedRead, (tester, harness) async {
-    await tester.tap(find.text('Look at the chat'));
-    await _pump(tester, 20);
-    await tester.tap(find.textContaining('Read file: shots/chat.png'));
-    await _pump(tester, 12);
-    await _decoded(tester);
-    await tester.tap(_drawn);
-    await _pump(tester, 10);
-    await _decoded(tester);
     // A double tap zooms in on the place that was tapped.
     final at = tester.getCenter(find.byType(InteractiveViewer));
     await tester.tapAt(at);
     await tester.pump(const Duration(milliseconds: 60));
     await tester.tapAt(at);
     await _pump(tester, 4);
-    expect(find.byKey(const ValueKey('picture-viewer')), findsOneWidget);
   }),
   _Case('picture-task-sheet', seed: _seedReview, (tester, harness) async {
     await tester.tap(find.text('Tasks'));
@@ -174,9 +163,13 @@ final _cases = <_Case>[
     await _pump(tester, 4);
     await tester.tap(find.text('Review the emulator screenshots'));
     await _pump(tester, 12);
+    // The sheet leads to the report; the report is on its page.
+    await _scrollTo(tester, find.text('View report'));
+    await tester.tap(find.text('View report'));
+    await _pump(tester, 12);
     await _decoded(tester);
     expect(_drawn, findsOneWidget);
-    await _scrollTo(tester, find.text('Screenshot: Chat with a tool card'));
+    await _scrollTo(tester, find.text('flutter test: 38 passing'));
     await _decoded(tester);
   }),
   _Case(

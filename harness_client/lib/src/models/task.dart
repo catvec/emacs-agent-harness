@@ -50,6 +50,7 @@ class HarnessTask {
 
   factory HarnessTask.fromWire(JsonMap wire) {
     final report = asMap(wire['report']);
+    final handedIn = report.isEmpty ? null : HandInReport.fromWire(report);
     return HarnessTask(
       id: asStringOr(wire['id'], ''),
       name: _blankToNull(asString(wire['name'] ?? wire['title'])),
@@ -71,7 +72,7 @@ class HarnessTask {
       verifiedAt: parseTime(wire['verifiedAt'] ?? wire['verified-at']),
       outcome: asString(wire['outcome']),
       error: asString(wire['error']),
-      report: report.isEmpty ? null : TaskReport.fromWire(report),
+      report: handedIn == null || handedIn.isEmpty ? null : handedIn,
       feedback: [
         for (final item in asMapList(wire['feedback']))
           TaskFeedback(
@@ -135,7 +136,11 @@ class HarnessTask {
   final DateTime? verifiedAt;
   final String? outcome;
   final String? error;
-  final TaskReport? report;
+
+  /// What the task's work was handed in with, when it was: the same record
+  /// as the report of the `hand_in` call in the task's session, which is
+  /// read and drawn the same way ([HandInReport]).
+  final HandInReport? report;
   final List<TaskFeedback> feedback;
   final String? mergeStatus;
   final List<String> conflicts;
@@ -370,83 +375,6 @@ class TaskHold {
 
   /// Whether [until] is a guess.
   final bool guess;
-}
-
-class TaskReport {
-  const TaskReport({
-    this.summary = '',
-    this.problem = '',
-    this.evidence = const [],
-    this.reproduction,
-    this.noMerge = false,
-    this.cannotContinue = false,
-    this.missing = false,
-    this.at,
-  });
-
-  static TaskReport fromWire(JsonMap wire) => TaskReport(
-    summary: asStringOr(wire['summary'], ''),
-    problem: asStringOr(wire['problem'], ''),
-    evidence: asMapList(wire['evidence']),
-    reproduction: asString(wire['reproduction']),
-    noMerge: asBool(wire['noMerge'] ?? wire['no-merge']),
-    cannotContinue: asBool(wire['cannotContinue'] ?? wire['cannot-continue']),
-    missing: asBool(wire['missing']),
-    at: parseTime(wire['at']),
-  );
-
-  /// What the summary says, Markdown as the session wrote it.  For a report
-  /// that is [missing] it is the last message the session wrote.
-  final String summary;
-
-  /// What must be fixed and how to see it, Markdown: the review shows it at
-  /// the top, where the name of the task alone would not say what the work
-  /// was for.  A report from before the field has none.
-  final String problem;
-  final List<JsonMap> evidence;
-  final String? reproduction;
-  final bool noMerge;
-  final bool cannotContinue;
-  final bool missing;
-  final DateTime? at;
-
-  /// The words of the report as the card of the `hand_in` call in the task's
-  /// session draws them (`HandInReportView`), so that a report reads the same
-  /// on the board and in the session.  The flags are left out: the sheet of
-  /// the task says them itself.
-  HandInReport get handIn => HandInReport(
-    problem: problem.trim(),
-    summary: summary.trim(),
-    reproduction: reproduction?.trim(),
-    evidence: items,
-  );
-
-  /// The pieces of evidence, each read as the report has it (a `kind`, and
-  /// what the harness resolved: the file, the call as it was), or as the
-  /// call asked for it (exactly one of `image`, `video`, `file`, `code`,
-  /// `note`, `tool_call`): both read the same (`EvidenceItem`).  What
-  /// cannot be read as evidence is left out.
-  List<EvidenceItem> get items => [
-    for (final wire in evidence)
-      if (EvidenceItem.fromWire(wire) case final EvidenceItem item) item,
-  ];
-
-  /// The line an evidence item is in the task sheet; empty for one that
-  /// says nothing.
-  static String evidenceLine(EvidenceItem item) => switch (item.kind) {
-    'image' => 'Screenshot: ${item.label}',
-    'video' => 'Video: ${item.label}',
-    'file' => 'File: ${item.label}',
-    'code' =>
-      'Code: ${(item.caption ?? '').trim().isEmpty ? 'snippet' : item.caption!.trim()}',
-    'tool-call' => 'Tool call: ${item.label}',
-    _ => (item.text ?? '').trim(),
-  };
-
-  /// Evidence items rendered as compact lines in the task sheet.
-  List<String> get evidenceLines =>
-      [for (final item in items) evidenceLine(item)]
-        ..removeWhere((line) => line.trim().isEmpty);
 }
 
 class TaskFeedback {
