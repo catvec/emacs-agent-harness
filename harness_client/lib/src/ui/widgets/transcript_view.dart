@@ -386,7 +386,7 @@ class TranscriptEntry extends StatelessWidget {
       case TranscriptKind.hint:
         return _HintLine(text: item.text);
       case TranscriptKind.compaction:
-        return _CompactionNote(text: item.text);
+        return _CompactionNote(item: item);
       case TranscriptKind.plan:
         return _PlanMessage(item: item);
       case TranscriptKind.unknown:
@@ -693,13 +693,64 @@ class _ThinkingBlockState extends State<_ThinkingBlock> {
   }
 }
 
-class _HintLine extends StatelessWidget {
+/// A system note the harness wrote into the conversation: "non-interactive
+/// on", "Handed in for review".  Most are a line or two and are shown whole.
+/// A long one (what the tool slots did while the machine was busy, an error
+/// with all that the provider said) is cut to its first lines until it is
+/// opened, so that a note is never most of a screen.
+class _HintLine extends StatefulWidget {
   const _HintLine({required this.text});
   final String text;
 
   @override
+  State<_HintLine> createState() => _HintLineState();
+}
+
+class _HintLineState extends State<_HintLine>
+    with AutomaticKeepAliveClientMixin {
+  /// How many lines of a long note show while it is cut.
+  static const _cutLines = 3;
+
+  bool _open = false;
+
+  /// A note that was opened stays open while the list scrolls past it and
+  /// back, as an opened call does.
+  @override
+  bool get wantKeepAlive => _open;
+
+  void _toggle() {
+    setState(() => _open = !_open);
+    updateKeepAlive();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    super.build(context);
     final theme = Theme.of(context);
+    final long = isLongNote(widget.text);
+    final cut = long && !_open;
+    final words = Text.rich(
+      TextSpan(
+        children: [
+          WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: Icon(
+                Icons.info_outline_rounded,
+                size: 13,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          TextSpan(text: widget.text),
+        ],
+      ),
+      textAlign: TextAlign.center,
+      maxLines: cut ? _cutLines : null,
+      overflow: cut ? TextOverflow.ellipsis : TextOverflow.clip,
+      style: HarnessText.caption(context).copyWith(fontStyle: FontStyle.italic),
+    );
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 8, 24, 8),
       child: DecoratedBox(
@@ -707,156 +758,197 @@ class _HintLine extends StatelessWidget {
           color: theme.colorScheme.surfaceContainerLow.withValues(alpha: 0.7),
           borderRadius: BorderRadius.circular(9),
         ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-          child: Text.rich(
-            TextSpan(
-              children: [
-                WidgetSpan(
-                  alignment: PlaceholderAlignment.middle,
+        child: !long
+            ? Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 7,
+                ),
+                child: words,
+              )
+            : Semantics(
+                button: true,
+                expanded: _open,
+                child: HarnessTap(
+                  onTap: _toggle,
+                  borderRadius: BorderRadius.circular(9),
                   child: Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: Icon(
-                      Icons.info_outline_rounded,
-                      size: 13,
-                      color: theme.colorScheme.onSurfaceVariant,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 7,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        words,
+                        const SizedBox(height: 4),
+                        Text(
+                          _open ? 'Show less' : 'Show more',
+                          textAlign: TextAlign.center,
+                          style: HarnessText.meta(context).copyWith(
+                            color: theme.colorScheme.primary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                TextSpan(text: text),
-              ],
-            ),
-            textAlign: TextAlign.center,
-            style: HarnessText.caption(context)
-                .copyWith(fontStyle: FontStyle.italic),
-          ),
-        ),
+              ),
       ),
     );
   }
 }
 
-/// The line where the conversation was compacted.  A short note stays on the
-/// line.  What a compaction leaves of the conversation is a summary, Markdown
-/// and a page long: the line says how long, and opens to the summary, drawn.
+/// A compaction: the conversation up to here was replaced by a summary of
+/// it.  The summary can be thousands of words, a page of text in the middle
+/// of the conversation that the person did not ask for and that says again
+/// what the messages around it said (one made right after a hand-in
+/// repeats the report), so it is folded under a line that says what was
+/// done and how much there is of it, and opens to the summary, as the
+/// markdown it was written in, when it is tapped.  The Emacs chat folds it
+/// the same way.  A note that is a line long stays on its line.
 class _CompactionNote extends StatefulWidget {
-  const _CompactionNote({required this.text});
-
-  final String text;
+  const _CompactionNote({required this.item});
+  final TranscriptItem item;
 
   @override
   State<_CompactionNote> createState() => _CompactionNoteState();
 }
 
-class _CompactionNoteState extends State<_CompactionNote> {
+class _CompactionNoteState extends State<_CompactionNote>
+    with AutomaticKeepAliveClientMixin {
+  /// The longest a note is that stays on its line, in characters.
+  static const _lineLength = 90;
+
   bool _open = false;
 
+  /// A summary that was opened stays open while the list scrolls past it
+  /// and back: what was read in it is not shut behind the person.
   @override
-  Widget build(BuildContext context) {
-    final text = widget.text.trim();
-    // A line is the note; more than a line is a summary to open.
-    if (!text.contains('\n') && text.length <= 90) {
-      return _DividerNote(
-        icon: Icons.compress_rounded,
-        text: text.isEmpty ? 'Context compacted' : text,
-      );
-    }
-    final theme = Theme.of(context);
-    final words = text.split(RegExp(r'\s+')).length;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Semantics(
-          button: true,
-          expanded: _open,
-          child: HarnessTap(
-            onTap: () => setState(() => _open = !_open),
-            child: _DividerNote(
-              icon: Icons.compress_rounded,
-              text: 'Context compacted · $words words',
-              open: _open,
-            ),
-          ),
-        ),
-        if (_open)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
-            child: Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerLow.withValues(
-                  alpha: 0.6,
-                ),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: theme.colorScheme.outlineVariant),
-              ),
-              child: HarnessMarkdown(text: text, compact: true),
-            ),
-          ),
-      ],
-    );
-  }
-}
+  bool get wantKeepAlive => _open;
 
-class _DividerNote extends StatelessWidget {
-  const _DividerNote({required this.icon, required this.text, this.open});
-  final IconData icon;
-  final String text;
+  void _toggle() {
+    setState(() => _open = !_open);
+    updateKeepAlive();
+  }
 
   /// Whether what the line opens to is open; null when it opens to nothing.
   final bool? open;
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 10, 24, 10),
-      child: Row(
-        children: [
-          Expanded(child: Divider(color: theme.colorScheme.outlineVariant)),
-          Flexible(
-            flex: 5,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              child: Text.rich(
-                TextSpan(
-                  children: [
-                    WidgetSpan(
-                      alignment: PlaceholderAlignment.middle,
-                      child: Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: Icon(
-                          icon,
-                          size: 14,
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                    TextSpan(text: text),
-                    if (open != null)
+    final text = widget.item.text.trim();
+    // A summary of more than a line is folded and opens.  What is a line says
+    // all there is on its line (a plain agent's "Context compacted from 214k
+    // tokens to 52k."), and a compaction that kept no words is the line of
+    // what was done.
+    final foldable = text.contains('\n') || text.length > _lineLength;
+    final title = foldable || text.isEmpty
+        ? compactionTitle(widget.item.node)
+        : text;
+    final line = Row(
+      children: [
+        Expanded(child: Divider(color: theme.colorScheme.outlineVariant)),
+        Flexible(
+          flex: 5,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text.rich(
+                  TextSpan(
+                    children: [
                       WidgetSpan(
                         alignment: PlaceholderAlignment.middle,
                         child: Padding(
-                          padding: const EdgeInsets.only(left: 4),
+                          padding: const EdgeInsets.only(right: 6),
                           child: Icon(
-                            open!
-                                ? Icons.expand_less_rounded
-                                : Icons.expand_more_rounded,
-                            size: 16,
+                            Icons.compress_rounded,
+                            size: 14,
                             color: theme.colorScheme.onSurfaceVariant,
                           ),
                         ),
                       ),
-                  ],
+                      TextSpan(text: title),
+                    ],
+                  ),
+                  textAlign: TextAlign.center,
+                  style: HarnessText.caption(context),
                 ),
-                textAlign: TextAlign.center,
-                style: HarnessText.caption(context),
-              ),
+                if (foldable)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          wordCount(text),
+                          style: HarnessText.meta(context).copyWith(
+                            color: theme.colorScheme.primary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Icon(
+                          _open
+                              ? Icons.expand_less_rounded
+                              : Icons.expand_more_rounded,
+                          size: 16,
+                          color: theme.colorScheme.primary,
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
             ),
           ),
-          Expanded(child: Divider(color: theme.colorScheme.outlineVariant)),
-        ],
-      ),
+        ),
+        Expanded(child: Divider(color: theme.colorScheme.outlineVariant)),
+      ],
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 10, 24, 10),
+          child: foldable
+              ? Semantics(
+                  button: true,
+                  expanded: _open,
+                  child: HarnessTap(
+                    onTap: _toggle,
+                    borderRadius: BorderRadius.circular(10),
+                    child: line,
+                  ),
+                )
+              : line,
+        ),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: foldable && _open
+              ? Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: theme.colorScheme.outlineVariant,
+                      ),
+                    ),
+                    child: HarnessMarkdown(text: text, compact: true),
+                  ),
+                )
+              : const SizedBox(width: double.infinity),
+        ),
+      ],
     );
   }
 }

@@ -309,6 +309,146 @@ extension data, for a client that reads chunks rather than nodes."
             (should (string-match-p "look at the project" (plist-get (plist-get chunk :content) :text)))))
         (harness-acp-close other)))))
 
+;;;; What is made while a session loads
+
+;; The replay of a long session to a client that reads slowly waits for room
+;; in the socket, and Emacs runs its timers and filters meanwhile: what they
+;; write to the client comes between two lines of the replay.  A client of
+;; another transport has a writer called for each message, and the writer is
+;; where these tests make the changes, as a timer would make them.  Such a
+;; client is made after the conversation it loads, so that it is sent the
+;; replay and not the nodes as they were appended.
+
+(defun harness-acp-test-wire-client (&optional on-message)
+  "Return (CLIENT . LOG): a client of another transport and the texts it was sent.
+LOG is a cons whose car is those texts, newest first.  ON-MESSAGE, when
+non-nil, is called with each text as it goes out."
+  (let* ((log (list nil))
+         (client (harness-acp-add-client
+                  'test :writer (lambda (_client text)
+                                  (push text (car log))
+                                  (when on-message (funcall on-message text))))))
+    (cons client log)))
+
+(defun harness-acp-test-wire-messages (wire)
+  "Return what WIRE, a `harness-acp-test-wire-client', was sent, as plists, oldest first."
+  (mapcar #'harness-json-parse (reverse (car (cdr wire)))))
+
+(defun harness-acp-test-wire-load (wire sid)
+  "Have the client of WIRE load session SID, and wait for the answer.
+Return what it was sent, as `harness-acp-test-wire-messages' says."
+  (harness-acp-client-receive
+   (car wire) (harness-json-encode (list :jsonrpc "2.0" :id 7 :method "session/load"
+                                         :params (list :sessionId sid))))
+  (harness-test-wait (lambda () (cl-some (lambda (m) (equal 7 (plist-get m :id)))
+                                         (harness-acp-test-wire-messages wire)))
+                     5 "the answer to session/load")
+  (harness-acp-test-wire-messages wire))
+
+(defun harness-acp-test-wire-trace (messages)
+  "Return what MESSAGES say of the transcript, oldest first, a string each.
+A node update is \"node TEXT\", TEXT the node's content or tool, the
+record of the session is \"session\" and the answer to a request is
+\"answer\"; the chunks that go with the nodes are left out."
+  (cl-loop for m in messages
+           for update = (plist-get (plist-get m :params) :update)
+           for kind = (plist-get update :sessionUpdate)
+           when (equal kind "_harness/node")
+           collect (let ((node (plist-get update :node)))
+                     (format "node %s" (or (plist-get node :content) (plist-get node :tool))))
+           else when (equal kind "_harness/session") collect "session"
+           else when (and (not (plist-get m :method)) (plist-member m :result)) collect "answer"))
+
+(ert-deftest harness-acp-load-sends-what-is-made-while-it-replays-after-it ()
+  "A mode toggled while a session's replay goes out is announced after the replay.
+Written into the middle of the replay it would stand among nodes older
+than it, which a client that takes updates as they come shows there."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (fired nil))
+      (harness-call 'session/append sid (list :kind 'user :content "first"))
+      (harness-call 'session/hint sid "a note from before")
+      (harness-call 'session/append sid (list :kind 'assistant :content "second"))
+      (let* ((wire (harness-acp-test-wire-client
+                    (lambda (text)
+                      ;; Written while the first node goes out: the toggles of
+                      ;; a timer that runs while that write waits for room.
+                      (when (and (not fired)
+                                 (string-match-p "\"content\":\"first\"" text)
+                                 (string-match-p "_harness/node" text))
+                        (setq fired t)
+                        (harness-call 'session/update sid :non-interactive t)
+                        (harness-call 'session/update sid :non-interactive :false)))))
+             (messages (harness-acp-test-wire-load wire sid))
+             (trace (harness-acp-test-wire-trace messages)))
+        (should fired)
+        ;; The replay in the order of the transcript, the record it ends
+        ;; with, then what was made during it in the order it was made, and
+        ;; the answer last.
+        (should (equal '("node first" "node a note from before" "node second" "session"
+                         "node non-interactive on" "node non-interactive off" "answer")
+                       trace))
+        ;; The transcript has them where they were made: after the rest.
+        (should (equal '("first" "a note from before" "second" "non-interactive on" "non-interactive off")
+                       (mapcar (lambda (n) (plist-get n :content)) (harness-call 'session/nodes sid))))
+        ;; Nothing is held for good: what is made afterwards goes out at once.
+        (harness-call 'session/hint sid "after the load")
+        (should (equal "node after the load"
+                       (car (last (harness-acp-test-wire-trace (harness-acp-test-wire-messages wire))))))))))
+
+(ert-deftest harness-acp-load-holds-back-only-the-session-it-replays-for-that-client ()
+  "Another session's updates, and other clients', do not wait for a replay."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (other (harness-acp-test-new-session conn))
+           (fired nil))
+      (harness-call 'session/append sid (list :kind 'user :content "first"))
+      (harness-call 'session/append sid (list :kind 'assistant :content "second"))
+      (let* ((bystander (harness-acp-test-wire-client))
+             (wire (harness-acp-test-wire-client
+                    (lambda (text)
+                      (when (and (not fired)
+                                 (string-match-p "\"content\":\"first\"" text)
+                                 (string-match-p "_harness/node" text))
+                        (setq fired t)
+                        (harness-call 'session/hint other "elsewhere")
+                        (harness-call 'session/hint sid "here")))))
+             (messages (harness-acp-test-wire-load wire sid)))
+        (should fired)
+        ;; The other session's note went out at once, in the middle of the
+        ;; replay; this session's came after it.
+        (should (equal '("node first" "node elsewhere" "node second" "session" "node here" "answer")
+                       (harness-acp-test-wire-trace messages)))
+        ;; A client that was not loading got both as they were made.
+        (should (equal '("node elsewhere" "node here")
+                       (harness-acp-test-wire-trace (harness-acp-test-wire-messages bystander))))))))
+
+(ert-deftest harness-acp-load-lets-go-of-what-it-holds-when-the-replay-fails ()
+  "A replay that goes wrong still sends what was held, and holds nothing after."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (harness-call 'session/append sid (list :kind 'user :content "first"))
+      (let* ((wire (harness-acp-test-wire-client))
+             (updates (symbol-function 'harness-acp--node-updates)))
+        (cl-letf (((symbol-function 'harness-acp--node-updates)
+                   (lambda (node live)
+                     (if live
+                         (funcall updates node live)
+                       ;; Made during the replay, which then fails.
+                       (harness-call 'session/hint sid "made during it")
+                       (error "No replay today")))))
+          (should-error (funcall (gethash "session/load" harness-acp--standard-methods)
+                                 (car wire) (list :sessionId sid))))
+        (should (equal '("node made during it")
+                       (harness-acp-test-wire-trace (harness-acp-test-wire-messages wire))))
+        (should-not (harness-acp--client-get (car wire) 'replaying))
+        (harness-call 'session/hint sid "later")
+        (should (equal '("node made during it" "node later")
+                       (harness-acp-test-wire-trace (harness-acp-test-wire-messages wire))))))))
+
 ;;;; ACP's session/list
 
 ;; The standard method, which a client written for ACP calls; the harness's

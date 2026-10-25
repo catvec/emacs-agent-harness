@@ -304,6 +304,45 @@ time it opens. It asks again only when the harness does.
   that has not begun -- the one that waits for a compaction, or for the
   answer to the question about a cold prompt cache -- listed there too, so
   it shows *Queued* until it is delivered.
+- **Keeps a conversation in the order the harness recorded it.** Every node
+  the harness records says which node it follows (`parent`), and the app
+  stands each message, call and system note after the one it follows, however
+  the updates come in. They do not always come in order. A phone that was
+  away (asleep, or out of range) misses what the harness records meanwhile --
+  a mode switched on (*non-interactive on*), a note of the tool slots
+  changing, the messages after them -- and is announced the newest messages
+  as soon as the connection is back, before it has read the conversation
+  again; what it missed was then added under them, as a block at the bottom,
+  and a note stood below messages that came after it instead of between the
+  messages around it. The same came of a conversation read by `session/load`,
+  a run of updates, that a note the harness wrote while it was on its way
+  reached in the middle (or before). An item never stands before the item of
+  a node it follows: one that came first waits for it, and stands right after
+  it. The harness also holds what it records back until the replay it is
+  sending has gone out, but the app does not rely on that: an older harness,
+  and the stretch between the connection coming back and the replay
+  starting, still come in any order. Where nodes name no parent (an agent
+  that is no harness, an older harness) the order the updates came in is the
+  order. See `displayItems` of `TranscriptState` and
+  `test/transcript_order_test.dart`.
+- **Keeps what the harness says to itself short.** A compaction replaces the
+  conversation up to it with a summary of it, which can be thousands of words
+  and says again what the messages around it said: one made right after a task
+  was handed in repeats the report, and a session that is opened on its last
+  message opened on the end of it, a page of small centred text with the
+  markdown showing. It is one line now, *Context compacted into a brief
+  summary by haiku, before the prompt cache lapsed*, with how many words
+  there are under it, and opens to the summary as the markdown it was
+  written in when it is tapped, as it does in the Emacs chat (the
+  header says the same there). A note that is only a line (the *Context
+  compacted from 214k tokens to 52k.* of an agent that is no harness) stays on
+  its line. A hint of more than five lines, or four
+  hundred characters (what the tool slots did while the machine was busy, an
+  error with all that the provider said), is cut to its first three lines
+  with *Show more*; the usual hint of a line or two is shown whole. What was
+  opened stays open while the list scrolls past it. See `compactionTitle`
+  and `isLongNote` in `lib/src/ui/format.dart` and
+  `test/system_note_test.dart`.
 - **Takes pictures with a new task.** The New task sheet attaches up to four
   images to the description, as a message does. A phone can name no file of
   the harness's machine, so the bytes go with `task/submit`
@@ -913,6 +952,30 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
 - the new task sheet's project row against a harness that lists worktrees and
   scratch directories as projects
 - transcript replay, streaming, thought blocks and plan
+- the order of a transcript (`test/transcript_order_test.dart`): a system note
+  such as *non-interactive on* stands between the messages around it while the
+  conversation goes on, when it is read again, when the app was away from it
+  and the newest message came before the conversation was read again, and when
+  it was recorded while the replay of the conversation was on its way, at
+  every point of the run, or came before it; a result that comes before its
+  call is one card; a note that is added to stays where it is; nodes that name
+  no parent, a parent that is not there, a second branch and a loop of parents
+  stay in the order they came; a message held for the turn stays last and
+  stands after what it followed once taken; and the app reads such
+  conversations from a harness that writes a note into the middle of the
+  replay, and after it was out of touch
+  (`test/transcript_order_view_test.dart`: the same transcripts drawn as their
+  updates came and as the harness recorded them, with pictures written where
+  `HARNESS_SHOTS` says)
+- the notes the harness writes for itself (`test/system_note_test.dart`): what
+  a compaction says of itself (how, who wrote it, why then); a compaction is
+  one line with its word count, builds none of the summary and leaves the end
+  of a handed-in session on one screen; it opens to the summary as markdown,
+  folds again and stays open while the list scrolls away and back, in the
+  style of Android and of an iPhone; one that kept no words has nothing to
+  open, and one that is a line long stays on its line; a hint of a line or
+  two is whole, a long one, or a long line, is cut
+  and opens and cuts again (pictures written where `HARNESS_SHOTS` says)
 - Markdown (`test/markdown_preview_test.dart`, `markdown_rendering_test.dart`,
   `markdown_screenshots_test.dart`): the report a task was handed in with is
   drawn as Markdown on the board -- its card has the words of the summary

@@ -322,6 +322,21 @@ class FakeHarness {
   FakeTransport? transport;
   final Map<String, Map<String, Object?>> sessions = {};
   final Map<String, List<Map<String, Object?>>> nodes = {};
+
+  /// Called while a replay (`session/load`) is going out, after each node of
+  /// it, with the session's id and how many nodes have gone: the test makes
+  /// the harness write something then ([stream], say), as a harness does
+  /// that is busy sending a long replay to a client that reads slowly, whose
+  /// timers run while the write waits for room.  What it writes reaches the
+  /// client in the middle of the replay, which is the nodes as they were
+  /// when it began.
+  void Function(String sid, int sent)? whileReplaying;
+
+  /// Answer `_harness/session/nodes` as the real harness does when it is
+  /// asked as the app asks (with `limit`): that no such parameter is known.
+  /// The nodes come only to the app that asks without it.  Off, the fake
+  /// serves them to anyone, as it always did.
+  bool strictNodeParams = false;
   final Map<String, Map<String, Object?>> tasks = {};
 
   /// The projects whose pending queue is suspended, and those whose backlog
@@ -1375,6 +1390,18 @@ class FakeHarness {
       }
       if (method == '_harness/session/nodes') {
         final sid = asString(params['id']);
+        final unknown = [
+          for (final key in params.keys)
+            if (key != 'id') key,
+        ];
+        if (strictNodeParams && unknown.isNotEmpty) {
+          _respondError(
+            id,
+            -32602,
+            'Invalid params: unknown parameter(s) ${unknown.join(', ')}',
+          );
+          return;
+        }
         _respond(id, nodes[sid] ?? const <Object?>[]);
         return;
       }
@@ -2019,10 +2046,14 @@ class FakeHarness {
       'sessionId': sid,
       'update': _sessionUpdate(session),
     });
-    for (final node in nodes[sid] ?? const <Map<String, Object?>>[]) {
+    // The nodes as they are when the replay begins: what is recorded while it
+    // goes out is no part of it.
+    var sent = 0;
+    for (final node in List.of(nodes[sid] ?? const <Map<String, Object?>>[])) {
       for (final update in _updatesForNode(node, replay: true)) {
         _send('session/update', {'sessionId': sid, 'update': update});
       }
+      whileReplaying?.call(sid, ++sent);
     }
     if (enhanced) {
       _send('session/update', {

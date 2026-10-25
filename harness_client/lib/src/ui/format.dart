@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../acp/acp_message.dart';
 import '../models/project_roots.dart';
 
 String relativeTime(DateTime? time) {
@@ -102,6 +103,70 @@ String truncate(String text, int max) {
   return singleLine.length <= max
       ? singleLine
       : '${singleLine.substring(0, max - 1)}…';
+}
+
+/// What a compaction note says about itself, in a line.  It is what the Emacs
+/// chat's header for the note says, so the same note reads the same in both:
+/// that the conversation was compacted, how (a brief summary, and who wrote
+/// it; a transcript file; a fresh start; the oldest of it cut away; a handoff
+/// to a model of another provider) and, for the notes that were made for a
+/// reason of their own, why then: the prompt cache was cold or about to
+/// lapse, or the turn outgrew its context window.  [node] is the node the
+/// harness recorded (its `meta` says how); without one it is just "Context
+/// compacted".
+String compactionTitle(JsonMap? node) {
+  final meta = asMap(node?['meta']);
+  final handoff = asMap(meta['handoff']);
+  // A compaction from before there were kinds is a summary; one whose
+  // context was a sample of the conversation is a brief one.
+  final kind =
+      asString(meta['compaction']) ??
+      (asString(meta['context']) == 'sample' ? 'brief' : null);
+  final model = (asString(meta['model']) ?? '').trim();
+  final how = handoff.isNotEmpty
+      ? ' to hand over to ${modelName(asString(handoff['to']))}'
+      : switch (kind) {
+          'brief' =>
+            model.isEmpty
+                ? ' into a brief summary'
+                : ' into a brief summary by ${modelName(model)}',
+          'transcript' => ' into a transcript file',
+          'fresh' => ' to start afresh',
+          'truncate' => ' by cutting its oldest context away',
+          _ => '',
+        };
+  final why = asMap(meta['cowboy']).isNotEmpty
+      ? ', the prompt cache being cold'
+      : asMap(meta['precompact']).isNotEmpty
+      ? ', before the prompt cache lapsed'
+      : asBool(meta['mid-turn'] ?? meta['midTurn'])
+      ? ', in the middle of a turn'
+      : '';
+  return 'Context compacted$how$why';
+}
+
+/// How many words [text] has, as a count: "1,438 words", "1 word".
+String wordCount(String text) {
+  final words = RegExp(r'\S+').allMatches(text).length;
+  return '${NumberFormat.decimalPattern().format(words)} '
+      'word${words == 1 ? '' : 's'}';
+}
+
+/// A system note (a hint) of more than this many lines is long.
+const longNoteLines = 5;
+
+/// A system note of more characters than this is long, however it breaks.
+const longNoteCharacters = 400;
+
+/// Whether [text], the words of a system note, is long enough to be cut to its
+/// first lines until the person asks for the rest.  Most notes are a line or
+/// two ("non-interactive on", "Handed in for review") and are always shown
+/// whole; the ones that are not are the list of what the tool slots did while
+/// the machine was busy, and an error that carries what the provider said.
+bool isLongNote(String text) {
+  final trimmed = text.trim();
+  return trimmed.length > longNoteCharacters ||
+      '\n'.allMatches(trimmed).length + 1 > longNoteLines;
 }
 
 // The syntax `markdownPreview` takes off.  Block syntax is read a line at a

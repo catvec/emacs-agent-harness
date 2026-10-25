@@ -291,7 +291,8 @@ session to end.")
   writer                             ; (CLIENT JSON-TEXT) for other transports
   remote                             ; plist of a client on another device, else nil
   active                             ; `float-time' of its last request or notification
-  hello)                             ; the `clientInfo' (name, title, version) it gave `initialize'
+  hello                              ; the `clientInfo' (name, title, version) it gave `initialize'
+  replaying)                         ; (SESSION-ID DEPTH . HELD) for each session `session/load' is sending it, see `harness-acp--replay-begin'
 
 (cl-defstruct (harness-acp-error-value (:constructor harness-acp--make-error-value)
                                        (:copier nil))
@@ -614,10 +615,57 @@ session update, no event, no permission request."
   (dolist (client (harness-acp--serving-clients))
     (harness-acp--client-notify client method params)))
 
+;; A client that loads a session (`session/load') is sent its transcript
+;; as a run of updates, oldest node first.  Writing a long one to a client
+;; that reads slowly, a phone decoding JSON over a mobile network, waits for
+;; room in the socket, and Emacs runs its timers and process filters
+;; meanwhile: a node appended then is announced at once, and would reach
+;; the client between two lines of the replay, in the middle of nodes that
+;; are older than it.  A client cannot tell such an update from a replayed
+;; one, and takes things in the order they come, so a system note written
+;; while it loaded stood in the middle of the conversation.  So the
+;; updates of a session that are made while its replay goes to a client
+;; wait, for that client, and go out right after it, in the order they
+;; were made.
+
+(defun harness-acp--replay-begin (client sid)
+  "Hold back the updates of session SID for CLIENT: its replay is going out.
+Replays nest (a second `session/load' of the same session can run inside
+the wait of the first): the updates go out when the last one ends, see
+`harness-acp--replay-end'."
+  (let ((entry (assoc sid (harness-acp--client-get client 'replaying))))
+    (if entry
+        (cl-incf (cadr entry))
+      (harness-acp--client-set client 'replaying
+                               (cons (list sid 1) (harness-acp--client-get client 'replaying))))))
+
+(defun harness-acp--replay-end (client sid)
+  "End a replay of session SID to CLIENT, and send what was held back for it.
+The updates go out in the order they were made, once the last of the
+replays of SID that are going out ends.  Those made while they go out
+wait behind them, so nothing overtakes anything."
+  (when-let* ((entry (assoc sid (harness-acp--client-get client 'replaying))))
+    (when (<= (cl-decf (cadr entry)) 0)
+      (unwind-protect
+          (while (cddr entry)
+            (let ((held (nreverse (cddr entry))))
+              (setf (cddr entry) nil)
+              (dolist (update held)
+                (harness-acp--client-notify client "session/update"
+                                            (list :sessionId sid :update update)))))
+        (harness-acp--client-set client 'replaying
+                                 (delq entry (harness-acp--client-get client 'replaying)))))))
+
 (defun harness-acp--broadcast-update (sid update)
-  "Send `session/update' UPDATE for session SID to every client."
+  "Send `session/update' UPDATE for session SID to every client.
+A client that is being sent the transcript of SID gets UPDATE after it,
+see `harness-acp--replay-begin'."
   (when harness-acp--clients
-    (harness-acp--broadcast "session/update" (list :sessionId sid :update update))))
+    (dolist (client (harness-acp--serving-clients))
+      (if-let* ((entry (assoc sid (harness-acp--client-get client 'replaying))))
+          (setf (cddr entry) (cons update (cddr entry)))
+        (harness-acp--client-notify client "session/update"
+                                    (list :sessionId sid :update update))))))
 
 (defun harness-acp--request-clients (method params on-answer)
   "Send request METHOD PARAMS to all clients; ON-ANSWER gets the first result.
@@ -1251,12 +1299,20 @@ machine: a device elsewhere may not use it (see
     (if (harness-acp--virtual-session-p sid)
         (harness-acp--load-virtual client sid params)
       (let ((session (harness-call 'session/resume sid)))
-        (dolist (node (harness-call 'session/nodes sid))
-          (dolist (update (harness-acp--node-updates node nil))
-            (harness-acp--client-notify client "session/update" (list :sessionId sid :update update))))
-        (harness-acp--client-notify client "session/update"
-                                    (list :sessionId sid
-                                          :update (list :sessionUpdate "_harness/session" :session session)))
+        ;; The nodes as they are now, and what is made while they go out
+        ;; waits for them (see `harness-acp--replay-begin').
+        (harness-acp--replay-begin client sid)
+        (unwind-protect
+            (progn
+              (dolist (node (harness-call 'session/nodes sid))
+                (dolist (update (harness-acp--node-updates node nil))
+                  (harness-acp--client-notify client "session/update" (list :sessionId sid :update update))))
+              ;; The record as it was when the replay began: what was made
+              ;; since is held, and newer.
+              (harness-acp--client-notify client "session/update"
+                                          (list :sessionId sid
+                                                :update (list :sessionUpdate "_harness/session" :session session))))
+          (harness-acp--replay-end client sid))
         :empty))))
 
 ;; ACP's `session/list' (https://agentclientprotocol.com/protocol/v1/session-list)

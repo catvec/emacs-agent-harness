@@ -10453,7 +10453,12 @@ the request came goes through the bus method that answers it
 Wire: JSON-RPC 2.0, one message per line.  Standard ACP methods:
 `initialize` (advertises `sessionCapabilities.list`), `authenticate`,
 `session/new {cwd}` → `{sessionId}`,
-`session/load {sessionId}` (replays the transcript as updates),
+`session/load {sessionId}` (replays the transcript as updates; what the
+session records while the replay goes out, which a slow reader keeps the
+harness waiting to write, waits for that client and follows the replay, its
+`_harness/session` first, in the order it was made: a client takes updates
+as they come, and a note written into the middle of the replay stood among
+nodes older than itself),
 `session/list {cwd?, cursor?}` → `{sessions:[{sessionId, cwd, title,
 updatedAt, _meta}], nextCursor?}` (the real sessions, and on the first
 page the virtual ones; below),

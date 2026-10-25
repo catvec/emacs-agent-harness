@@ -10,17 +10,33 @@ class TranscriptLog {
   final transcript = TranscriptState();
   int _n = 0;
 
+  /// The node written last: the one the next follows (`parent`), as the
+  /// harness's nodes each say which they follow.
+  String? _last;
+
   /// The nodes written so far, oldest first: what a harness holds of the
   /// session, to serve it or to send it as it grows.
   final List<Map<String, Object?>> nodes = [];
 
-  /// The items of the transcript so far; the list grows as the log does, as
-  /// the app's does.
+  /// The items of the transcript so far, in the order they came in; the list
+  /// grows as the log does, as the app's does.
   List<TranscriptItem> get items => transcript.items;
+
+  /// What the screen shows of the transcript so far: [items] in the order
+  /// the harness recorded them.
+  List<TranscriptItem> get displayItems => transcript.displayItems;
 
   /// Write a node: it is kept, and read into the transcript.
   void _write(String kind, Map<String, Object?> rest) {
-    final node = {'id': 'n${++_n}', 'kind': kind, 'ts': 1.0 + _n, ...rest};
+    final id = 'n${++_n}';
+    final node = {
+      'id': id,
+      'kind': kind,
+      'ts': 1.0 + _n,
+      'parent': _last,
+      ...rest,
+    };
+    _last = id;
     nodes.add(node);
     transcript.applyNode(node);
   }

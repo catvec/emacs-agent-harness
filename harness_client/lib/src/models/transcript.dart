@@ -156,11 +156,21 @@ class TranscriptItem {
 /// they are merged heuristically: assistant and thought chunks continue the
 /// last streamed message, while each user chunk is its own message (which is
 /// how `session/load` replays history).
+///
+/// [items] are in the order the updates came in.  What the screen shows is
+/// [displayItems], which stands them in the order the harness recorded them:
+/// the updates do not always come in it (see [displayItems]).
 class TranscriptState {
   final List<TranscriptItem> items = <TranscriptItem>[];
   final List<PlanEntry> plan = <PlanEntry>[];
   final List<String> availableCommands = <String>[];
   final Map<String, ToolView> toolsByCallId = <String, ToolView>{};
+
+  /// The node each node follows, by id, as the harness recorded them (`parent`
+  /// on a node; null for the first of a conversation), every node it has told
+  /// of, including a result that joined its call and so has no item.  Empty
+  /// for an agent that is no harness, whose items are read as they came.
+  final Map<String, String?> _parents = <String, String?>{};
   int _counter = 0;
   String? _lastAssistantKey;
   String? _lastThinkingKey;
@@ -178,6 +188,7 @@ class TranscriptState {
     plan.clear();
     availableCommands.clear();
     toolsByCallId.clear();
+    _parents.clear();
     _lastAssistantKey = null;
     _lastThinkingKey = null;
     _counter = 0;
@@ -203,14 +214,122 @@ class TranscriptState {
     if (item.localEcho) items.remove(item);
   }
 
-  /// What the screen shows, top to bottom: the transcript, then the messages
-  /// the turn has not taken yet ([TranscriptItem.pending]), pinned last.
+  /// What the screen shows, top to bottom: the transcript in the order the
+  /// harness recorded it, then the messages the turn has not taken yet
+  /// ([TranscriptItem.pending]), pinned last.
+  ///
+  /// Every node the harness records says which node it follows (`parent`),
+  /// so a transcript has an order of its own, whatever order its updates
+  /// come in.  They do not always come in it.  A phone that was away misses
+  /// what the harness records meanwhile -- a system note such as
+  /// "non-interactive on", the messages after it -- and is announced the
+  /// newest ones when the connection is back, before it reads the
+  /// conversation again: what it missed comes under them, and stands as a
+  /// block at the bottom.  A conversation is read by `session/load`, a run
+  /// of updates oldest first, and what the harness writes while that run is
+  /// on its way can reach the app in the middle of it, as one that came
+  /// before the run began stands before all of it.  Shown as it came, a note
+  /// stands among messages that are not the ones around it.
+  ///
+  /// So an item never stands before the item of a node it follows: one that
+  /// came first waits for it, and stands right after it, followed in turn by
+  /// what waited for it.  While a conversation that has its first node is
+  /// still being read, a node that follows one nothing is known of yet waits
+  /// at the end, for the nodes of the replay that lead to it, instead of
+  /// standing where it came.  Everything else stays where it came, so a
+  /// transcript whose nodes name no parent (an agent that is no harness, an
+  /// older harness) is read as it was sent, and so is one read from the
+  /// middle, a window of its nodes, whose first node follows one it does not
+  /// hold.
   List<TranscriptItem> get displayItems {
-    if (!items.any((item) => item.pending)) return items;
+    final recorded = _inRecordedOrder();
+    if (!recorded.any((item) => item.pending)) return recorded;
     return [
-      ...items.where((item) => !item.pending),
-      ...items.where((item) => item.pending),
+      ...recorded.where((item) => !item.pending),
+      ...recorded.where((item) => item.pending),
     ];
+  }
+
+  /// [items] in the order the harness recorded their nodes (see
+  /// [displayItems]); [items] itself when no node has said what it follows.
+  List<TranscriptItem> _inRecordedOrder() {
+    if (_parents.isEmpty) return items;
+    // The item of each node that has one: a result that joined its call has
+    // none, and a node nothing has been heard of yet has none either.
+    final own = <String, TranscriptItem>{};
+    for (final item in items) {
+      final id = item.nodeId;
+      if (id != null) own.putIfAbsent(id, () => item);
+    }
+    // Whether the first node of the conversation is here.  Then every other
+    // node leads back to it, and one whose parent has not been heard of is
+    // one the rest of the replay has yet to bring.  Without it, the
+    // transcript is read from the middle, and such a node is where it began.
+    final fromTheStart = _parents.values.any((parent) => parent == null);
+    // The item that [item] has to stand after: that of the nearest node
+    // before its own that has one, through the nodes that joined another's.
+    // Whether the nodes before it lead to one nothing is known of.
+    (TranscriptItem?, bool) follows(TranscriptItem item) {
+      final nodeId = item.nodeId;
+      var id = nodeId == null ? null : _parents[nodeId];
+      // A node's parents lead to the first node, unless the harness told of
+      // a loop: never walk further than the nodes there are.
+      for (var steps = 0; id != null && steps <= _parents.length; steps++) {
+        final found = own[id];
+        if (found != null && !identical(found, item)) return (found, false);
+        if (!_parents.containsKey(id)) return (null, true);
+        id = _parents[id];
+      }
+      return (null, false);
+    }
+
+    final ordered = <TranscriptItem>[];
+    final placed = Set<TranscriptItem>.identity();
+    final waiting = Map<TranscriptItem, List<TranscriptItem>>.identity();
+    // Stand [first] where it belongs, then what waited for it, each followed
+    // by what waited for that: the one that came first first.
+    void place(TranscriptItem first) {
+      final pending = <TranscriptItem>[first];
+      while (pending.isNotEmpty) {
+        final item = pending.removeLast();
+        ordered.add(item);
+        placed.add(item);
+        final followers = waiting.remove(item);
+        if (followers != null) pending.addAll(followers.reversed);
+      }
+    }
+
+    final unheard = <TranscriptItem>[];
+    for (final item in items) {
+      final (before, lost) = follows(item);
+      if (lost && fromTheStart) {
+        unheard.add(item);
+      } else if (before != null && !placed.contains(before)) {
+        (waiting[before] ??= <TranscriptItem>[]).add(item);
+      } else {
+        place(item);
+      }
+    }
+    // What follows a node nothing is known of stands last, in the order it
+    // came, with what waits for it: the replay has not reached its parent.
+    unheard.forEach(place);
+    // What is still waiting follows an item that never stood anywhere, which
+    // a loop in the nodes' parents can do: it stays where it came.
+    if (ordered.length < items.length) {
+      for (final item in items) {
+        if (!placed.contains(item)) ordered.add(item);
+      }
+    }
+    return ordered;
+  }
+
+  /// Remember which node [node], one the harness recorded, follows.  A later
+  /// word of the same node that names no parent (a note that was added to)
+  /// leaves what is known as it is.
+  void _noteParent(String nodeId, JsonMap node) {
+    if (!node.containsKey('parent') && _parents.containsKey(nodeId)) return;
+    final parent = asString(node['parent']);
+    _parents[nodeId] = parent == null || parent.isEmpty ? null : parent;
   }
 
   /// Take [held], the messages the harness says it holds for the running
@@ -442,14 +561,16 @@ class TranscriptState {
       ..input = update['rawInput'] ?? tool.input
       ..sender = formatSender(harness['from']) ?? tool.sender;
     toolsByCallId[callId] = tool;
-    final existing = nodeId != null
-        ? itemForNode(nodeId)
-        : _itemForTool(callId);
+    // The call's own item, or the one its result made when that came first
+    // (see [applyNode]): the item stands for the call from now on.
+    final existing =
+        (nodeId != null ? itemForNode(nodeId) : null) ?? _itemForTool(callId);
     if (existing != null) {
       existing
         ..tool = tool
         ..kind = TranscriptKind.tool
         ..streaming = tool.isRunning;
+      if (nodeId != null) existing.nodeId = nodeId;
       return;
     }
     final item = TranscriptItem(
@@ -512,6 +633,9 @@ class TranscriptState {
     final sender = formatSender(meta['from']);
     final timestamp = parseTimeForTranscript(node['ts']);
     if (nodeId == null) return;
+    // Every node, whether or not it has an item of its own: the nodes after
+    // it are placed by it (see [displayItems]).
+    _noteParent(nodeId, node);
     switch (kind) {
       case 'user':
         final existing = itemForNode(nodeId);
