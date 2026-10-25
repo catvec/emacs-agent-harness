@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:harness_client/src/acp/acp_message.dart';
 import 'package:harness_client/src/acp/acp_transport.dart';
@@ -84,6 +85,7 @@ class FakeHarness {
     this.taskControls = true,
     this.quota = true,
     this.toolCatalogue = true,
+    this.sessionPictures = true,
     Set<String>? knownSecrets,
   }) : knownSecrets = knownSecrets ?? <String>{} {
     if (enhanced) {
@@ -104,6 +106,7 @@ class FakeHarness {
         'question/answer',
         'question/image',
         'question/cancel',
+        if (sessionPictures) 'session/image',
         'task/list',
         'task/get',
         'task/submit',
@@ -231,6 +234,23 @@ class FakeHarness {
 
   /// Make `tools/list` fail, as a harness that goes wrong does.
   bool failToolList = false;
+
+  /// Whether the harness gives the pictures a transcript shows
+  /// (`session/image`): the screenshots a task handed in, the image a
+  /// `read_file` call read.  An older harness does not.
+  final bool sessionPictures;
+
+  /// The picture files of the harness's machine it can read, by path.  A
+  /// path that is not here is a file that is gone, as a finished task's
+  /// worktree is.
+  final Map<String, ({String mime, List<int> bytes})> pictureFiles = {};
+
+  /// The `session/image` requests the client made, as (session, path).
+  final List<(String, String)> imageRequests = [];
+
+  /// Make `session/image` fail with these words, as a harness that goes
+  /// wrong does.
+  String? failImagesWith;
 
   /// Where git worktrees that are not in the `.worktrees` of their checkout
   /// are, as a repository's `.git` says it: worktree -> checkout.  An older
@@ -1101,6 +1121,25 @@ class FakeHarness {
     nodes[toolShowcaseId] = toolShowcaseNodes();
   }
 
+  /// The pictures the showcase's hand-in names, which the harness gives on
+  /// request (`session/image`): screenshots of the app itself, from
+  /// [screenshots], as a task that changed the app hands in.  One that is
+  /// not there is a picture that is gone.  Run from `harness_client`, as
+  /// the tests and the preview server are.
+  void seedShowcasePictures({String screenshots = 'screenshots'}) {
+    for (final (name, from) in const [
+      ('android-tool-call.png', 'android-tool-call.png'),
+      ('android-hand-in.png', 'android-hand-in-phone.png'),
+    ]) {
+      final file = File('$screenshots/$from');
+      if (!file.existsSync()) continue;
+      pictureFiles['$toolShowcasePictures/$name'] = (
+        mime: 'image/png',
+        bytes: file.readAsBytesSync(),
+      );
+    }
+  }
+
   /// The agent adds [node] to session [sid]'s transcript while a client is
   /// open on it, and the client is sent it as the harness sends a live node:
   /// the ACP update, and the whole node beside it.
@@ -1496,6 +1535,31 @@ class FakeHarness {
           _resolve(sid, pid, null);
         }
         _respond(id, true);
+        return;
+      }
+      if (method == '_harness/session/image') {
+        final sid = asString(params['id']) ?? '';
+        final path = asString(params['path']) ?? '';
+        imageRequests.add((sid, path));
+        final failure = failImagesWith;
+        final file = pictureFiles[path];
+        final name = path.split('/').last;
+        if (failure != null) {
+          _respondError(id, -32603, failure);
+        } else if (file == null) {
+          _respondError(
+            id,
+            -32603,
+            '$name is gone from the harness\u2019s machine, or cannot be read',
+          );
+        } else {
+          _respond(id, {
+            'mime': file.mime,
+            'name': name,
+            'size': file.bytes.length,
+            'data': base64Encode(file.bytes),
+          });
+        }
         return;
       }
       if (method == '_harness/question/image') {
@@ -2108,7 +2172,9 @@ class FakeHarness {
               ? 'failed'
               : 'completed',
           'rawOutput': node['output'],
-          '_harness': harness,
+          // The files a tool showed (`read_file` of an image), beside the
+          // result, as the harness sends them (null when there are none).
+          '_harness': {...harness, 'attachments': node['attachments']},
         });
       case 'hint':
         list.add({

@@ -2457,6 +2457,72 @@ the return value says what was removed."
   "Append a system hint TEXT to session ID."
   (harness-call 'session/append id (list :kind 'hint :content text)))
 
+;;;; Methods: pictures
+
+(defcustom harness-session-image-max-bytes (* 16 1024 1024)
+  "Largest picture file, in bytes, that `session/image' sends."
+  :type 'integer :group 'harness)
+
+(defun harness-session--shown-files (id)
+  "Return the absolute names of the files the transcript of session ID shows.
+They are the files its tool results hand the user (`:attachments', which
+read_file fills with the picture or the video it read), the files the
+report of a hand_in call names (the evidence on its result's `:meta')
+and those of the report its task holds now.  A file that is none of
+these is not shown, whoever asks for it."
+  (let (files)
+    (cl-flet ((note (item)
+                (let ((path (and (consp item) (plist-get item :path))))
+                  (when (and (stringp path) (not (string-empty-p path)))
+                    (push (expand-file-name path) files)))))
+      (dolist (node (harness-session--path (harness-session--get id)))
+        (mapc #'note (append (plist-get node :attachments) nil))
+        (mapc #'note (append (plist-get (plist-get (plist-get node :meta) :report) :evidence) nil)))
+      (when-let* (((harness-method-exists-p 'task/for-session))
+                  (task (harness-call 'task/for-session id)))
+        (mapc #'note (append (plist-get (plist-get task :report) :evidence) nil))))
+    files))
+
+(harness-defmethod session/image (id path)
+  "Return the picture PATH, a file session ID's transcript shows, as data.
+The value is (:mime MIME :name NAME :size BYTES :data BASE64): the file's
+bytes, read here, where the harness runs.  It is for a client that cannot
+read PATH itself, a phone or any UI on another machine, and so could not
+draw the screenshot a hand_in call handed in, nor the picture read_file
+showed, which the transcript names by a path on this machine.
+
+It is no way to read this machine.  Only a file the transcript shows is
+given (`harness-session--shown-files'), by the name it is shown by; and
+only a picture: its bytes must say so (`harness-image-mime-of-bytes'),
+whatever its name claims, so that a link made to look like one gives
+nothing away.  MIME is the type those bytes say.
+
+Signal an error, in words for the person who sees it, when the session
+shows no such file, the file is gone or cannot be read, is no picture, or
+is larger than `harness-session-image-max-bytes'."
+  (harness-session--get id)
+  (let ((file (and (stringp path) (file-name-absolute-p path) (expand-file-name path))))
+    (cond
+     ((not (and file (member file (harness-session--shown-files id))))
+      (error "Session %s shows no file %s" id path))
+     ((not (and (file-regular-p file) (file-readable-p file)))
+      (error "%s is gone from the harness's machine, or cannot be read" (file-name-nondirectory file)))
+     (t
+      (let ((size (harness-file-size (file-truename file)))
+            (name (file-name-nondirectory file)))
+        (when (and size (> size harness-session-image-max-bytes))
+          (error "%s is %s, larger than the %s a picture may be"
+                 name (harness-format-bytes size) (harness-format-bytes harness-session-image-max-bytes)))
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (insert-file-contents-literally file)
+          (let ((mime (harness-image-mime-of-bytes
+                       (buffer-substring-no-properties (point-min) (min (point-max) 4097)))))
+            (unless mime
+              (error "%s is not a picture of a type clients draw (PNG, JPEG, GIF, WebP, BMP or SVG)" name))
+            (base64-encode-region (point-min) (point-max) t)
+            (list :mime mime :name name :size size :data (buffer-string)))))))))
+
 ;;;; Methods: queue, pending, usage, todos, plan
 
 (harness-defmethod session/queue (id text &optional attachments from)

@@ -1324,6 +1324,35 @@ and when the file cannot be read."
                         (harness--image-header-size)))))
     (error nil)))
 
+(defun harness--bmp-head-p (head)
+  "Non-nil when HEAD, the start of a file as a unibyte string, is a BMP's.
+\"BM\" alone is no proof: the file header's reserved fields are zero, and
+the header after it has one of the sizes a bitmap's has."
+  (and (>= (length head) 26)
+       (string-prefix-p "BM" head)
+       (= 0 (aref head 6) (aref head 7) (aref head 8) (aref head 9))
+       (= 0 (aref head 16) (aref head 17))
+       (memq (+ (aref head 14) (ash (aref head 15) 8)) '(12 40 52 56 64 108 124))
+       t))
+
+(defun harness-image-mime-of-bytes (head)
+  "Return the media type of the picture that starts with the bytes HEAD, or nil.
+HEAD is a unibyte string, the start of a file.  Give it a few KiB: an
+SVG is known by its `<svg' tag, which may come after a prolog.  PNG,
+JPEG, GIF, WebP and BMP are known by their headers (a text that begins
+with \"BM\" is no bitmap).  Nil for anything else, a file named for a
+picture that is none included: this says what the bytes are, not what
+the name claims."
+  (let ((case-fold-search nil))
+    (cond ((string-prefix-p "\211PNG\r\n\032\n" head) "image/png")
+          ((string-prefix-p "\377\330\377" head) "image/jpeg")
+          ((or (string-prefix-p "GIF87a" head) (string-prefix-p "GIF89a" head)) "image/gif")
+          ((and (>= (length head) 12) (string-prefix-p "RIFF" head)
+                (equal (substring head 8 12) "WEBP"))
+           "image/webp")
+          ((harness--bmp-head-p head) "image/bmp")
+          ((string-match-p "<svg[ \t\r\n/>]" head) "image/svg+xml"))))
+
 ;;;; Strings
 
 (defun harness-fuzzy-score (query candidate)

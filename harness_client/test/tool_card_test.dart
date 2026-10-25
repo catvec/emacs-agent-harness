@@ -415,7 +415,7 @@ void main() {
       expect(find.text('android-tool-call.png'), findsOneWidget);
       expect(find.text('The analyzer'), findsOneWidget);
       expect(
-        find.textContaining('The images are on the harness machine'),
+        find.textContaining('The pictures are on the harness machine'),
         findsOneWidget,
       );
     });

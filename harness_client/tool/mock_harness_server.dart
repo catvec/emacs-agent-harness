@@ -16,7 +16,9 @@
 // the answer hands a client that keeps secrets that secret.  With --tools
 // there is one more session, "Tidy the tool cards": a task's session that
 // has done some work, with its tool calls of every kind, a failed one, a
-// refused one and the `hand_in` call that handed the work in.
+// refused one and the `hand_in` call that handed the work in, whose
+// screenshots the server gives on request (they are the app's own, from
+// screenshots/).
 
 import 'dart:async';
 import 'dart:io';
@@ -81,7 +83,11 @@ Future<void> main(List<String> arguments) async {
       issueSecret: token,
       knownSecrets: token == null ? null : {token},
     );
-    if (tools) harness.seedToolShowcase();
+    if (tools) {
+      harness
+        ..seedToolShowcase()
+        ..seedShowcasePictures();
+    }
     harness.authenticated = token == null || presented;
     harness.writer = socket.add;
     socket.listen(

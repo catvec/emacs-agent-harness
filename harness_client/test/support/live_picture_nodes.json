@@ -1,0 +1,325 @@
+{
+  "about": "What a real harness wrote for a session in which the model read a screenshot with read_file and handed the work in with hand_in: its nodes, the tool_call and tool_call_update it sent as they happened, and the task as task/list answers.  Captured from a live harness (a demo-provider turn through the real agent loop); only the paths, the session's id and the task's are renamed.",
+  "nodes": [
+    {
+      "kind": "hint",
+      "content": "Context window capped at 384k tokens (harness-tasks-context-limit)",
+      "id": "n-xzubb9jrmr",
+      "session": "s-live",
+      "ts": 1792809905.8133342,
+      "parent": null
+    },
+    {
+      "kind": "user",
+      "content": "Show me what the chat looks like.",
+      "blocks": null,
+      "id": "n-vvjza82m87",
+      "session": "s-live",
+      "ts": 1792809905.8562233,
+      "parent": "n-xzubb9jrmr"
+    },
+    {
+      "kind": "assistant",
+      "content": "Let me look at the screenshot first.\n",
+      "id": "n-go1zz7e07t",
+      "session": "s-live",
+      "ts": 1792809905.8686743,
+      "parent": "n-vvjza82m87",
+      "meta": {
+        "model": "demo:scripted",
+        "usage": null
+      }
+    },
+    {
+      "kind": "tool-call",
+      "tool": "read_file",
+      "call-id": "demo-read",
+      "input": {
+        "path": "/work/chat.png"
+      },
+      "title": "Read file: /work/chat.png",
+      "meta": {
+        "model": "demo:scripted"
+      },
+      "id": "n-x3goyd2v8a",
+      "session": "s-live",
+      "ts": 1792809905.9069853,
+      "parent": "n-go1zz7e07t"
+    },
+    {
+      "kind": "tool-result",
+      "call-id": "demo-read",
+      "output": "Image chat.png (image/png, 217 KiB, 1082x2402 px), downscaled to 901x2000 px to show you.",
+      "is-error": null,
+      "attachments": [
+        {
+          "path": "/work/chat.png",
+          "mime": "image/png",
+          "size": 222336,
+          "name": "chat.png"
+        }
+      ],
+      "images": [
+        {
+          "path": "/state/model-images/1b854f6d9fd22b5aa6c931ba928059fd3c385e6d.png",
+          "mime": "image/png"
+        }
+      ],
+      "meta": {
+        "duration": 0.17219042778015137,
+        "denied": null,
+        "truncated": null
+      },
+      "id": "n-oeh211r6yk",
+      "session": "s-live",
+      "ts": 1792809906.0788925,
+      "parent": "n-x3goyd2v8a"
+    },
+    {
+      "kind": "assistant",
+      "content": "The picture looks right; handing the work in.\n",
+      "id": "n-ehs7bh2rd4",
+      "session": "s-live",
+      "ts": 1792809906.157143,
+      "parent": "n-oeh211r6yk",
+      "meta": {
+        "model": "demo:scripted",
+        "usage": {
+          "type": "usage",
+          "input": 100,
+          "output": 10,
+          "cache-read": 0,
+          "cache-write": 0,
+          "cost": 0.0001,
+          "context": 200
+        }
+      }
+    },
+    {
+      "kind": "tool-call",
+      "tool": "hand_in",
+      "call-id": "demo-hand-in",
+      "input": {
+        "problem": "The app showed no pictures.",
+        "summary": "Pictures are drawn now.",
+        "reproduction": "Open the hand-in card.",
+        "evidence": [
+          {
+            "image": "/work/chat.png",
+            "caption": "The chat, as the app draws it"
+          },
+          {
+            "image": "/work/diagram.svg",
+            "caption": "A diagram"
+          },
+          {
+            "note": "Checked on a live harness"
+          }
+        ]
+      },
+      "title": "Hand in the finished work: The app showed no pictures.",
+      "meta": {
+        "model": "demo:scripted"
+      },
+      "id": "n-527g1ne3z2",
+      "session": "s-live",
+      "ts": 1792809906.1682694,
+      "parent": "n-ehs7bh2rd4"
+    },
+    {
+      "kind": "hint",
+      "content": "Handed in for review",
+      "id": "n-kc09lxs8kb",
+      "session": "s-live",
+      "ts": 1792809906.1707628,
+      "parent": "n-527g1ne3z2"
+    },
+    {
+      "kind": "tool-result",
+      "call-id": "demo-hand-in",
+      "output": "Handed in: Pictures are drawn now.\n\n3 pieces of evidence; the task now waits for the user's review, and this turn ends.",
+      "is-error": null,
+      "attachments": null,
+      "meta": {
+        "duration": 0.003480672836303711,
+        "denied": null,
+        "truncated": null,
+        "report": {
+          "summary": "Pictures are drawn now.",
+          "problem": "The app showed no pictures.",
+          "reproduction": "Open the hand-in card.",
+          "evidence": [
+            {
+              "kind": "image",
+              "path": "/work/chat.png",
+              "extension": "png",
+              "caption": "The chat, as the app draws it"
+            },
+            {
+              "kind": "image",
+              "path": "/work/diagram.svg",
+              "extension": "svg",
+              "caption": "A diagram"
+            },
+            {
+              "kind": "note",
+              "text": "Checked on a live harness"
+            }
+          ],
+          "at": 1792809906.1704874,
+          "call-id": "demo-hand-in"
+        },
+        "task-id": "t-live"
+      },
+      "id": "n-8jnl8boky5",
+      "session": "s-live",
+      "ts": 1792809906.171338,
+      "parent": "n-kc09lxs8kb"
+    }
+  ],
+  "updates": [
+    {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "demo-read",
+      "title": "Read file: /work/chat.png",
+      "kind": "read",
+      "status": "in_progress",
+      "rawInput": {
+        "path": "/work/chat.png"
+      },
+      "_harness": {
+        "nodeId": "n-x3goyd2v8a",
+        "tool": "read_file"
+      }
+    },
+    {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "demo-read",
+      "status": "completed",
+      "content": [
+        {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "Image chat.png (image/png, 217 KiB, 1082x2402 px), downscaled to 901x2000 px to show you."
+          }
+        }
+      ],
+      "rawOutput": "Image chat.png (image/png, 217 KiB, 1082x2402 px), downscaled to 901x2000 px to show you.",
+      "_harness": {
+        "nodeId": "n-oeh211r6yk",
+        "attachments": [
+          {
+            "path": "/work/chat.png",
+            "mime": "image/png",
+            "size": 222336,
+            "name": "chat.png"
+          }
+        ]
+      }
+    },
+    {
+      "sessionUpdate": "tool_call",
+      "toolCallId": "demo-hand-in",
+      "title": "Hand in the finished work: The app showed no pictures.",
+      "kind": "other",
+      "status": "in_progress",
+      "rawInput": {
+        "problem": "The app showed no pictures.",
+        "summary": "Pictures are drawn now.",
+        "reproduction": "Open the hand-in card.",
+        "evidence": [
+          {
+            "image": "/work/chat.png",
+            "caption": "The chat, as the app draws it"
+          },
+          {
+            "image": "/work/diagram.svg",
+            "caption": "A diagram"
+          },
+          {
+            "note": "Checked on a live harness"
+          }
+        ]
+      },
+      "_harness": {
+        "nodeId": "n-527g1ne3z2",
+        "tool": "hand_in"
+      }
+    },
+    {
+      "sessionUpdate": "tool_call_update",
+      "toolCallId": "demo-hand-in",
+      "status": "completed",
+      "content": [
+        {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "Handed in: Pictures are drawn now.\n\n3 pieces of evidence; the task now waits for the user's review, and this turn ends."
+          }
+        }
+      ],
+      "rawOutput": "Handed in: Pictures are drawn now.\n\n3 pieces of evidence; the task now waits for the user's review, and this turn ends.",
+      "_harness": {
+        "nodeId": "n-8jnl8boky5",
+        "attachments": null
+      }
+    }
+  ],
+  "task": {
+    "id": "t-live",
+    "project": "/work/",
+    "cwd": "/work/",
+    "prompt": "Show the chat",
+    "session": "s-live",
+    "adopted": true,
+    "worktree": null,
+    "state": "review",
+    "outcome": "end-turn",
+    "created": 1792809905.7699437,
+    "started": 1792809905.7699437,
+    "error": null,
+    "finished": 1792809906.1725824,
+    "merged": null,
+    "archived": null,
+    "returned": null,
+    "return-reason": null,
+    "preempted-by": null,
+    "verified": null,
+    "verified-at": null,
+    "report": {
+      "summary": "Pictures are drawn now.",
+      "problem": "The app showed no pictures.",
+      "reproduction": "Open the hand-in card.",
+      "evidence": [
+        {
+          "kind": "image",
+          "path": "/work/chat.png",
+          "extension": "png",
+          "caption": "The chat, as the app draws it"
+        },
+        {
+          "kind": "image",
+          "path": "/work/diagram.svg",
+          "extension": "svg",
+          "caption": "A diagram"
+        },
+        {
+          "kind": "note",
+          "text": "Checked on a live harness"
+        }
+      ],
+      "at": 1792809906.1704874,
+      "call-id": "demo-hand-in"
+    },
+    "report-at": 1792809906.1705048,
+    "cannot-continue": false,
+    "no-merge": false,
+    "merge-status": null,
+    "conflicts": null,
+    "sent-back": null,
+    "column": "review",
+    "priority": "medium"
+  }
+}

@@ -9616,10 +9616,11 @@ to be retried.
 `read_file` returns an image or a video as an `:attachments` entry the
 chat shows the user: the picture of an image (an SVG is read as text
 from its top and also shown), and a video as a poster, its thumbnail
-under a play button, which plays it.  A video is something the model
-cannot see: it is told what the file is and to inspect it with
-`ffmpeg`.  Text behind a video's extension (TypeScript's `.ts`) is
-still read as text.
+under a play button, which plays it.  A client on another machine, the
+phone's app, gets an image's bytes with `session/image` (see acp).  A
+video is something the model cannot see: it is told what the file is and
+to inspect it with `ffmpeg`.  Text behind a video's extension
+(TypeScript's `.ts`) is still read as text.
 
 An image is also the model's to see, in `:images`, a list of `(:path
 PATH :mime MIME)` -- MIME one of `image/png`, `image/jpeg`, `image/gif`
@@ -10525,6 +10526,26 @@ wanting to block on a remote host), asks for the image:
 read by the harness, for a question still pending; an error when there
 is none, or the file is gone or larger than
 `harness-tools-question-image-max-bytes`, 16 MiB).
+
+A tool result and a hand-in name the pictures they show by paths on the
+harness's machine, never by their bytes: `tool_call_update` carries
+`_harness.attachments`, `[{path, mime, size, name}]` (the image or video
+`read_file` read), and the report a `hand_in` call handed in (`meta.report`
+of its result's `_harness/node`, and the `report` of its task) lists its
+evidence as `{kind: "image", path, caption}`.  A client that cannot read
+a path, being on another machine, asks for the picture:
+`_harness/session/image {id, path}` → `{mime, name, size, data}`
+(`session/image ID PATH`: the file's bytes in base64, `mime` told by the
+bytes themselves, not the name).  Only a file the session's transcript
+shows is given, by the name it is shown by (an attachment, the evidence of
+a hand-in report, or of its task's report), and only if its bytes are a
+picture (PNG, JPEG, GIF, WebP, BMP or SVG): it is no way to read the
+machine.  The answer is an error, in words for the person who sees it,
+when the session shows no such file, the file is gone (the worktree of a
+finished task goes with its task) or cannot be read, is no picture, or is
+larger than `harness-session-image-max-bytes` (16 MiB).  `initialize`
+lists the method in `_harness.methods`; a client that does not find it
+(an older harness) draws the picture's name and nothing more.
 
 `initialize` answers `protocolVersion`, `agentCapabilities`
 (`loadSession`, `promptCapabilities` and, while the bus has

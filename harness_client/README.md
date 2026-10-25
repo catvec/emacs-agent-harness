@@ -563,6 +563,7 @@ The client never assumes a method because the agent calls itself a harness.
 | Usage | `usage/totals` or `usage/summary` |
 | Plan quota | `provider/quota` and `provider/list`, which says which providers report one |
 | Question diagrams | `question/image` for images; ASCII comes with the request |
+| Pictures of a transcript: the screenshots a task handed in, an image `read_file` read | `session/image`; without it they are named, not drawn |
 | Project picker | `insights/projects` (and `project/mains`, to fold worktrees and scratch directories) |
 | Rename, fork, delete | `session/update`, `session/fork`, `session/delete` |
 | Priority | `priority/set` |
@@ -623,6 +624,12 @@ Everything beyond that is under `_harness/` and is optional.
   calls were paid.
 - Server: `harness/version`, `harness/modules`, `insights/projects`,
   `project/mains`, `provider/list`, `provider/models`, `config/describe`.
+- Pictures: `session/image` (`{id, path}` → `{mime, name, size, data}`, `data`
+  in base64). A tool result and a hand-in name their pictures by a path on the
+  harness's machine (`_harness.attachments` of a result, `{kind: "image",
+  path}` in a report's evidence), which a phone cannot open; the harness gives
+  the bytes of a file the session's transcript shows, and only if they are a
+  picture. See *Pictures* below.
 - Questions: `_harness/ask_user` request, `question/pending`,
   `question/answer`, `question/cancel`, `question/image`; a question of several
   choices comes with `allowMultiple: true` in the request, and as
@@ -851,7 +858,8 @@ opened (`ToolCard`, `lib/src/ui/widgets/tool_card.dart`).
 | What it was given | The fields of its input, not JSON (`toolFields`): a command after its prompt, a path or a flag on one line, the text an edit takes out in red and puts in in green, a file's content as it is, prose (a summary, a prompt) as markdown. Line breaks are line breaks, not `\n` in quotes. |
 | What it said | Selectable text, its escape sequences and progress-bar rewrites taken out (`cleanToolText`), with how many lines it is. Long text is cut to a screenful, in the card and not in a box that scrolls inside the page, with *Show all 35 lines* / *Show less*. *(no output)* when it said nothing, *Waiting for the result…* while it runs. Both input and output can be copied. |
 | All of it | *Open full view* (offered when something is cut, and on a report) opens the call on a page of its own (`ToolDetailScreen`): the whole title, every field, the output built a screenful at a time, so that a result of any length opens at once and is copied whole. |
-| The hand-in call | Its report, not its input (`HandInReport`): the problem, the summary as markdown, how to reproduce it, and the evidence, one line each. A note, some code or a call the report quotes opens to what it holds; a picture or a file is on the harness's machine, so it is named, not drawn. *Cannot continue* and *no merge* are said. A hand-in the harness refused shows its error and what was asked for. |
+| What it handed back | A picture (`read_file` on a PNG, a JPEG, a GIF, a WebP, a BMP or an SVG) is drawn under *PICTURE*, above the words that describe it, and tapped it is shown larger. A video or a file is named under *ATTACHMENTS*. See *Pictures* below. |
+| The hand-in call | Its report, not its input (`HandInReport`): the problem, the summary as markdown, how to reproduce it, and the evidence, one line each. A note, some code or a call the report quotes opens to what it holds; a screenshot is drawn under its line (see *Pictures* below); a video or a file is on the harness's machine, so it is named. *Cannot continue* and *no merge* are said. A hand-in the harness refused shows its error and what was asked for. |
 | Where it is | A card that is opened is brought into view: the last call of a task, the one that hands its work in, grows below the screen, so the page follows it (a card taller than the screen is shown from its top). A card that was opened stays open while the page is scrolled past it. |
 
 The harness writes what the client needs on the call's result node: its
@@ -860,6 +868,35 @@ permission system refused the call) and, for `hand_in`, the `report` with its
 evidence resolved. A call replayed from `session/nodes` and one that arrives
 as `tool_call` / `tool_call_update` / `_harness/node` end up the same
 `ToolView`.
+
+### Pictures
+
+A result and a hand-in name the pictures they show by paths on the harness's
+machine, which a phone cannot open: a `read_file` call on an image brings
+`attachments` (`{path, mime, size, name}`), a task's report lists its evidence
+as `{kind: "image", path, caption}`. The app asks the harness for the bytes
+(`session/image`, of the session whose transcript shows the file) and draws
+them, in the opened card of a `read_file` call, under the line of a hand-in's
+evidence (in the card, in its full view and in the task's sheet).
+
+- While a picture comes there is a placeholder of its own size; once it has,
+  it is drawn no larger than it is and no taller than a screenful, and decoded
+  for the width it is drawn at (a screenshot of a whole display is not held
+  at its own size). An SVG is drawn on white.
+- Tapped, it is shown on a page of its own (`PictureViewerScreen`): pinch to
+  zoom, drag to move about it, double-tap to zoom in on a place and again to
+  come back.
+- A picture the harness cannot give says why, in the harness's words (it is
+  gone: the worktree of a finished task goes with its task; it is larger than
+  16 MiB; it is no picture), with *Try again*. The rest of the page reads as
+  it did.
+- A harness without `session/image` is no error: the pictures are named, as
+  they were before they were drawn. So is a picture of a type the app cannot
+  draw (a TIFF), a video and a file. Playing a video needs a player the app
+  does not have.
+- The app keeps what it fetched while it is looked at (`HarnessPictures`: once
+  for each file of a session, the newest 64 MiB, a failure not kept) and
+  forgets it with the connection.
 
 ### Runs of calls
 
@@ -1033,6 +1070,17 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   (`test/question_task_board_test.dart`: the task board's *Answer* opens that
   conversation; `test/question_screenshots_test.dart`: pictures of the card,
   drawn with the fonts of a phone, written where `HARNESS_SHOTS` says)
+- pictures of the harness's machine (`test/picture_test.dart`: what the
+  harness answers, which files the app draws, how the app keeps them;
+  `test/picture_widget_test.dart`: a picture while it comes, once it has, when
+  it cannot and shown larger, in a `read_file` card, in a hand-in and in its
+  full view; `test/picture_flow_test.dart`: the same through the whole client
+  against the fake harness, and in the task's sheet, with a harness that gives
+  none and with a picture that is gone, and on the nodes and the task a real
+  harness wrote for a `read_file` and a `hand_in`
+  (`test/support/live_picture_nodes.json`, captured from a live harness, so
+  that the app is tried on the shapes it gives); `test/picture_screenshots_test.dart`:
+  pictures of those, written where `HARNESS_SHOTS` says)
 - creating a session and opening the new-task sheet / submitting a task, with
   pictures (`test/new_task_images_test.dart`: attached, removed, kept in the
   draft, limited to four, refused by type and size, hidden from a harness that

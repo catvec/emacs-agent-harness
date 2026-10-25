@@ -14,6 +14,7 @@ import '../adaptive/layout_widgets.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
+import '../widgets/harness_picture.dart';
 import '../widgets/image_attachments.dart';
 import '../widgets/markdown_view.dart';
 import '../widgets/quota_widgets.dart';
@@ -1747,7 +1748,7 @@ class _TaskDetail extends StatelessWidget {
                   const SizedBox(height: HarnessSpace.md),
                   _DetailSection(
                     title: 'Report',
-                    child: _ReportBody(report: report),
+                    child: _ReportBody(report: report, sessionId: task.sessionId),
                   ),
                 ],
                 if (task.feedback.isNotEmpty) ...[
@@ -1945,9 +1946,10 @@ class _DetailActions extends StatelessWidget {
 /// round of work that handed none in has only the last message of its
 /// session: the report says so, and draws that message.
 class _ReportBody extends StatelessWidget {
-  const _ReportBody({required this.report});
+  const _ReportBody({required this.report, this.sessionId});
 
   final TaskReport report;
+  final String? sessionId;
 
   @override
   Widget build(BuildContext context) {
@@ -1967,7 +1969,7 @@ class _ReportBody extends StatelessWidget {
           if (handIn.summary.isNotEmpty)
             HarnessMarkdown(text: handIn.summary, compact: true),
         ] else
-          HandInReportView(report: handIn),
+          HandInReportView(report: handIn, sessionId: sessionId),
       ],
     );
   }

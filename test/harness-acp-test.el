@@ -735,6 +735,38 @@ and has no next page; a page past the last session lists none."
 
 ;;;; Extension methods
 
+(ert-deftest harness-acp-session-image-gives-a-client-the-pictures-a-transcript-shows ()
+  "A client that cannot open a path asks for the picture a tool result or a
+hand-in names: `initialize' lists `session/image', `_harness/session/image'
+answers with the bytes in base64, and refuses what the transcript does not
+show, with words for the person."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (init (harness-test-await (harness-acp-initialize conn)))
+           (sid (harness-acp-test-new-session conn))
+           (cwd (plist-get (harness-call 'session/get sid) :cwd))
+           (shot (expand-file-name "shot.png" cwd))
+           (other (expand-file-name "other.png" cwd)))
+      (should (member "session/image" (append (plist-get (plist-get init :_harness) :methods) nil)))
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region harness-test-png nil shot nil 'silent)
+        (write-region harness-test-png nil other nil 'silent))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "c1" :output "Image shot.png"
+                                              :attachments (list (list :path shot :mime "image/png"
+                                                                       :size (length harness-test-png)
+                                                                       :name "shot.png"))))
+      (let ((answer (harness-acp-test-request conn "_harness/session/image" (list :id sid :path shot))))
+        (should (equal "image/png" (plist-get answer :mime)))
+        (should (equal "shot.png" (plist-get answer :name)))
+        (should (= (length harness-test-png) (plist-get answer :size)))
+        (should (equal harness-test-png (base64-decode-string (plist-get answer :data)))))
+      ;; A file the transcript does not show is not given, however real.
+      (let ((e (harness-acp-test-error conn "_harness/session/image" (list :id sid :path other))))
+        (should (= -32603 (car e)))
+        (should (string-match-p (format "Session %s shows no file %s" sid (regexp-quote other)) (cadr e))))
+      ;; Nor with a missing parameter: that is the client's mistake.
+      (should (= -32602 (car (harness-acp-test-error conn "_harness/session/image" (list :id sid))))))))
+
 (ert-deftest harness-acp-local-extension-calls ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))

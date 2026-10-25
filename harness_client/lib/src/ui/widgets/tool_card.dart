@@ -230,7 +230,11 @@ class _ToolCardState extends State<ToolCard>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (report != null)
-            HandInReportView(report: report, onOpenFull: _openFull)
+            HandInReportView(
+              report: report,
+              sessionId: tool.sessionId,
+              onOpenFull: _openFull,
+            )
           else ...[
             if (fields.isNotEmpty)
               ToolSection(
@@ -244,9 +248,14 @@ class _ToolCardState extends State<ToolCard>
                   child: ToolFieldsView(fields: fields, onOpenFull: _openFull),
                 ),
               ),
-            ToolOutputView(tool: tool, onOpenFull: _openFull),
+            // What the call handed back, a picture most often, comes before
+            // the words that describe it.
             if (tool.attachments.isNotEmpty)
-              ToolAttachments(attachments: tool.attachments),
+              ToolAttachments(
+                attachments: tool.attachments,
+                sessionId: tool.sessionId,
+              ),
+            ToolOutputView(tool: tool, onOpenFull: _openFull),
           ],
           if (report != null || _hasMore(tool, fields))
             Align(

@@ -82,7 +82,13 @@ class ToolDetailScreen extends StatelessWidget {
         ),
       ),
       if (report != null)
-        _pad(HandInReportView(report: report, expanded: true))
+        _pad(
+          HandInReportView(
+            report: report,
+            sessionId: tool.sessionId,
+            expanded: true,
+          ),
+        )
       else ...[
         if (fields.isNotEmpty)
           _pad(
@@ -96,6 +102,16 @@ class ToolDetailScreen extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: 8),
                 child: ToolFieldsView(fields: fields, expanded: true),
               ),
+            ),
+          ),
+        // What the call handed back, a picture most often, comes before the
+        // words that describe it, which may be a whole file long.
+        if (tool.attachments.isNotEmpty)
+          _pad(
+            ToolAttachments(
+              attachments: tool.attachments,
+              sessionId: tool.sessionId,
+              expanded: true,
             ),
           ),
         _pad(

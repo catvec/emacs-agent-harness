@@ -105,6 +105,11 @@ class HarnessCapabilities {
   bool get renameSession => has('session/update');
   bool get config => has('config/describe');
   bool get questionImages => has('question/image');
+
+  /// The harness gives the pictures a transcript shows, which it names by a
+  /// path on its machine (`session/image`): the screenshots of a hand-in and
+  /// the images `read_file` read.  Without it they are named, not drawn.
+  bool get sessionImages => has('session/image');
   bool get harnessInfo => has('harness/version') || has('harness/api');
   bool get modules => has('harness/modules');
   bool get setMode => has('session/set_mode');
@@ -166,6 +171,11 @@ class HarnessCapabilities {
       'Question images',
       'Show the diagrams an ask_user question carries',
       questionImages,
+    ),
+    CapabilityFeature(
+      'Pictures',
+      'Show the screenshots a task hands in and the images a tool read',
+      sessionImages,
     ),
     CapabilityFeature(
       'Session search',

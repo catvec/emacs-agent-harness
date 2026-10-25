@@ -14,6 +14,9 @@ import 'dart:convert';
 const toolShowcaseId = 's-tools';
 const toolShowcaseName = 'Tidy the tool cards';
 
+/// Where the pictures the hand-in names are, on the harness's machine.
+const toolShowcasePictures = '/tmp/harness-1000/$toolShowcaseId/shots';
+
 /// The directory the session works in, a task's worktree.
 const toolShowcaseCwd =
     '/Users/noah/Code/emacs-agent-harness/.worktrees/task-tool-cards/';
@@ -222,12 +225,11 @@ List<Map<String, Object?>> toolShowcaseNodes() {
     'reproduction': _reproduction,
     'evidence': [
       {
-        'image':
-            '/tmp/harness-1000/$toolShowcaseId/shots/android-tool-call.png',
+        'image': '$toolShowcasePictures/android-tool-call.png',
         'caption': 'A bash call opened: the command, and its output cut to a screenful',
       },
       {
-        'image': '/tmp/harness-1000/$toolShowcaseId/shots/android-hand-in.png',
+        'image': '$toolShowcasePictures/android-hand-in.png',
         'caption': 'The hand-in call opened: the report, then the evidence',
       },
       {
@@ -241,8 +243,8 @@ List<Map<String, Object?>> toolShowcaseNodes() {
       },
       {
         'note':
-            'The images are on the harness machine, so the app names them; '
-            'it cannot draw them.',
+            'The pictures are on the harness machine: the app asks it for '
+            'them, and draws what it is given.',
       },
     ],
   };
@@ -253,13 +255,13 @@ List<Map<String, Object?>> toolShowcaseNodes() {
     'evidence': [
       {
         'kind': 'image',
-        'path': '/tmp/harness-1000/$toolShowcaseId/shots/android-tool-call.png',
+        'path': '$toolShowcasePictures/android-tool-call.png',
         'extension': 'png',
         'caption': 'A bash call opened: the command, and its output cut to a screenful',
       },
       {
         'kind': 'image',
-        'path': '/tmp/harness-1000/$toolShowcaseId/shots/android-hand-in.png',
+        'path': '$toolShowcasePictures/android-hand-in.png',
         'extension': 'png',
         'caption': 'The hand-in call opened: the report, then the evidence',
       },
@@ -284,8 +286,8 @@ List<Map<String, Object?>> toolShowcaseNodes() {
       {
         'kind': 'note',
         'text':
-            'The images are on the harness machine, so the app names them; '
-            'it cannot draw them.',
+            'The pictures are on the harness machine: the app asks it for '
+            'them, and draws what it is given.',
       },
     ],
     'at': DateTime.now().millisecondsSinceEpoch / 1000,

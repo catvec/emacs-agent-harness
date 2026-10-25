@@ -3,12 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../acp/acp_message.dart';
+import '../../models/picture.dart';
 import '../../models/tool_display.dart';
 import '../../models/transcript.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
+import 'harness_picture.dart';
 import 'markdown_view.dart';
 
 // The pieces a tool call is made of once it is opened: what it was given, what
@@ -503,30 +506,71 @@ class ToolOutputView extends StatelessWidget {
   }
 }
 
-/// The files a call handed back, by name.
+/// The files a call handed back: a picture is drawn, where the app can have
+/// it from the harness ([canDrawPictures]), and anything else (a video, a
+/// file) is named.
 class ToolAttachments extends StatelessWidget {
-  const ToolAttachments({super.key, required this.attachments});
+  const ToolAttachments({
+    super.key,
+    required this.attachments,
+    this.sessionId,
+    this.expanded = false,
+  });
 
   final List<Map<String, Object?>> attachments;
+
+  /// The session the call was made in, whose harness gives the pictures.
+  final String? sessionId;
+
+  /// The call on a page of its own: its pictures are drawn larger.
+  final bool expanded;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final draw = canDrawPictures(context, sessionId);
+    final pictures = <Widget>[];
+    final named = <Widget>[];
+    for (final attachment in attachments) {
+      final path = asString(attachment['path']);
+      final name =
+          '${attachment['name'] ?? attachment['path'] ?? 'attachment'}';
+      if (draw &&
+          path != null &&
+          isDrawablePicture(asString(attachment['mime']), name)) {
+        pictures.add(
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: HarnessPicture(
+              sessionId: sessionId!,
+              path: path,
+              name: name,
+              maxHeight: expanded ? 520 : 320,
+            ),
+          ),
+        );
+      } else {
+        named.add(
+          HarnessStatusPill(
+            label: name,
+            color: theme.colorScheme.primary,
+            icon: Icons.attach_file_rounded,
+          ),
+        );
+      }
+    }
     return ToolSection(
-      label: 'ATTACHMENTS',
+      label: named.isEmpty
+          ? (pictures.length == 1 ? 'PICTURE' : 'PICTURES')
+          : 'ATTACHMENTS',
       child: Padding(
         padding: const EdgeInsets.only(bottom: 2),
-        child: Wrap(
-          spacing: 6,
-          runSpacing: 6,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            for (final attachment in attachments)
-              HarnessStatusPill(
-                label:
-                    '${attachment['name'] ?? attachment['path'] ?? 'attachment'}',
-                color: theme.colorScheme.primary,
-                icon: Icons.attach_file_rounded,
-              ),
+            ...pictures,
+            if (named.isNotEmpty)
+              Wrap(spacing: 6, runSpacing: 6, children: named),
           ],
         ),
       ),
@@ -540,11 +584,16 @@ class HandInReportView extends StatelessWidget {
   const HandInReportView({
     super.key,
     required this.report,
+    this.sessionId,
     this.expanded = false,
     this.onOpenFull,
   });
 
   final HandInReport report;
+
+  /// The session that handed the work in, whose harness gives the pictures
+  /// of the evidence (see [EvidenceRow]).
+  final String? sessionId;
   final bool expanded;
   final VoidCallback? onOpenFull;
 
@@ -597,6 +646,7 @@ class HandInReportView extends StatelessWidget {
                 for (final item in report.evidence)
                   EvidenceRow(
                     item: item,
+                    sessionId: sessionId,
                     expanded: expanded,
                     onOpenFull: onOpenFull,
                   ),
@@ -610,17 +660,23 @@ class HandInReportView extends StatelessWidget {
 }
 
 /// One piece of evidence: what it is, in a line; a note, a code block or a
-/// quoted call opens to what it holds.  A picture or a file is on the
-/// harness's machine, so it is named, not drawn.
+/// quoted call opens to what it holds.  A picture is on the harness's
+/// machine: it is drawn under its line when the harness gives it
+/// ([canDrawPictures]) and named, as a video or a file is, when it does not.
 class EvidenceRow extends StatefulWidget {
   const EvidenceRow({
     super.key,
     required this.item,
+    this.sessionId,
     this.expanded = false,
     this.onOpenFull,
   });
 
   final EvidenceItem item;
+
+  /// The session that handed the evidence in, whose harness gives its
+  /// pictures.
+  final String? sessionId;
   final bool expanded;
   final VoidCallback? onOpenFull;
 
@@ -669,6 +725,7 @@ class _EvidenceRowState extends State<EvidenceRow> {
     final muted = theme.colorScheme.onSurfaceVariant;
     final color = item.isError ? theme.colorScheme.error : muted;
     final detail = _detail;
+    final picture = evidencePicturePath(context, item, widget.sessionId);
     final header = Padding(
       padding: const EdgeInsets.symmetric(vertical: 7),
       child: Row(
@@ -730,6 +787,16 @@ class _EvidenceRowState extends State<EvidenceRow> {
                 ),
               )
             : header,
+        if (picture != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 27, bottom: 10),
+            child: HarnessPicture(
+              sessionId: widget.sessionId!,
+              path: picture,
+              name: baseName(picture),
+              maxHeight: widget.expanded ? 520 : 320,
+            ),
+          ),
         if (_open && _hasBody)
           Padding(
             padding: const EdgeInsets.only(left: 27, bottom: 8),

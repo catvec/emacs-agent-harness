@@ -3,6 +3,7 @@ import 'dart:async';
 import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../acp/capabilities.dart';
+import '../models/picture.dart';
 import '../models/quota.dart';
 import '../models/server_info.dart';
 import '../models/session.dart';
@@ -673,6 +674,22 @@ class HarnessApi {
     'pid': requestId,
     'index': index,
   });
+
+  /// The picture [path], a file of the harness's machine that session
+  /// [sessionId]'s transcript shows (`session/image`): a screenshot a task
+  /// handed in, or an image `read_file` read.  The transcript names it by
+  /// its path, which only the harness can open, so the harness reads it.
+  /// It answers only for a file the transcript shows, and only for a
+  /// picture; the [AcpException] it fails with says why in words for a
+  /// person (the file is gone, it is too large).  A picture can be large
+  /// and the connection a phone's, so the wait is longer than a request's.
+  Future<Picture> sessionImage(String sessionId, String path) async {
+    final result = await extension('session/image', {
+      'id': sessionId,
+      'path': path,
+    }, const Duration(seconds: 90));
+    return Picture.fromWire(result);
+  }
 
   Future<void> permissionAnswer(
     String sessionId,

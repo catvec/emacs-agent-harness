@@ -1458,6 +1458,15 @@ installed) or, failing those, the desktop's own player; the poster then
 shows Stop. A video `read_file` reads is shown to you and told to the
 model, which cannot see it and inspects it with `ffmpeg` instead.
 
+The phone's app cannot open a path on this machine, so it asks the
+harness for the picture (`session/image`): the image `read_file` read, in
+the card of the call, and the screenshots a task handed in, in the report
+(the call's card, its full view and the task's sheet).  The harness gives
+only a file the session's transcript shows, and only a picture (PNG, JPEG,
+GIF, WebP, BMP or SVG) of at most `harness-session-image-max-bytes`
+(16 MiB); the worktree of a finished task is removed with the task, and
+its screenshots with it.
+
 A model that reads images sees an image `read_file` reads too, not only
 you. It gets the file itself when it is a PNG, JPEG, GIF or WebP of at
 most `harness-tools-fs-image-max-bytes` (3.75 MiB) and

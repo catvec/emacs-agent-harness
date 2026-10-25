@@ -418,31 +418,35 @@ class TaskReport {
     problem: problem.trim(),
     summary: summary.trim(),
     reproduction: reproduction?.trim(),
-    evidence: [
-      for (final wire in evidence)
-        if (EvidenceItem.fromWire(wire) case final EvidenceItem item) item,
-    ],
+    evidence: items,
   );
 
-  /// Evidence items as one short line of text each, for a place with room for
-  /// no more (the sheet of a task draws them as they are in the session, from
-  /// [handIn]).  The harness writes each with a `kind` (what it resolved the
-  /// call's item to); a report from before that, or a call's own input, has
-  /// the one of `image`, `video`, `file`, `code`, `note`, `tool_call` it was
-  /// asked for: both read the same (`EvidenceItem`).
-  List<String> get evidenceLines => [
+  /// The pieces of evidence, each read as the report has it (a `kind`, and
+  /// what the harness resolved: the file, the call as it was), or as the
+  /// call asked for it (exactly one of `image`, `video`, `file`, `code`,
+  /// `note`, `tool_call`): both read the same (`EvidenceItem`).  What
+  /// cannot be read as evidence is left out.
+  List<EvidenceItem> get items => [
     for (final wire in evidence)
-      if (EvidenceItem.fromWire(wire) case final EvidenceItem item)
-        switch (item.kind) {
-          'image' => 'Screenshot: ${item.label}',
-          'video' => 'Video: ${item.label}',
-          'file' => 'File: ${item.label}',
-          'code' =>
-            'Code: ${(item.caption ?? '').trim().isEmpty ? 'snippet' : item.caption!.trim()}',
-          'tool-call' => 'Tool call: ${item.label}',
-          _ => (item.text ?? '').trim(),
-        },
-  ]..removeWhere((line) => line.trim().isEmpty);
+      if (EvidenceItem.fromWire(wire) case final EvidenceItem item) item,
+  ];
+
+  /// The line an evidence item is in the task sheet; empty for one that
+  /// says nothing.
+  static String evidenceLine(EvidenceItem item) => switch (item.kind) {
+    'image' => 'Screenshot: ${item.label}',
+    'video' => 'Video: ${item.label}',
+    'file' => 'File: ${item.label}',
+    'code' =>
+      'Code: ${(item.caption ?? '').trim().isEmpty ? 'snippet' : item.caption!.trim()}',
+    'tool-call' => 'Tool call: ${item.label}',
+    _ => (item.text ?? '').trim(),
+  };
+
+  /// Evidence items rendered as compact lines in the task sheet.
+  List<String> get evidenceLines =>
+      [for (final item in items) evidenceLine(item)]
+        ..removeWhere((line) => line.trim().isEmpty);
 }
 
 class TaskFeedback {

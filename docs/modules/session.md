@@ -143,6 +143,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/fork` (id &rest plist) — Fork session ID; return a promise of the new session plist.
 - `session/get` (id) — Return the public plist of session ID.
 - `session/hint` (id text) — Append a system hint TEXT to session ID.
+- `session/image` (id path) — Return the picture PATH, a file session ID's transcript shows, as data.
 - `session/internal-finish` (id &rest plist) — Finish internal session ID, recording how its model call ended.
 - `session/internal-start` (&rest plist) — Start an internal session, the record of one model call; return its id.
 - `session/interrupted` — Return the sessions the start of this harness found cut short.
@@ -221,6 +222,7 @@ take it in.  The session list hides internal sessions unless asked.
 
 ### Options
 
+- `harness-session-image-max-bytes` — Largest picture file, in bytes, that `session/image` sends.
 - `harness-session-tmp-directory` — Directory the sessions' temporary directories are made in, or nil.
 - `harness-session-tmp-retention-days` — Days a finished session's temporary directory is kept, or nil to keep it.
 

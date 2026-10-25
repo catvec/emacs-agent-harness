@@ -3646,5 +3646,179 @@ that answers no call becomes text, which has no image."
         (should-not (cl-some (lambda (b) (plist-member b :images)) (cdr blocks)))))))
 
 (provide 'harness-session-test)
+;;;; session/image: the pictures a transcript shows, for a client that cannot read the path
+
+(defun harness-session-test-write (dir name content)
+  "Write CONTENT, bytes, to NAME in DIR; return the absolute name of the file."
+  (let ((file (expand-file-name name dir))
+        (coding-system-for-write 'no-conversion))
+    (write-region content nil file nil 'silent)
+    file))
+
+(defconst harness-session-test-svg
+  "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>\n"
+  "A tiny SVG, with the prolog an editor writes.")
+
+(defun harness-session-test-image (id path)
+  "Return what `session/image' gives session ID for PATH."
+  (harness-call 'session/image id path))
+
+(ert-deftest harness-session-image-gives-the-files-a-result-and-a-hand-in-show ()
+  "A picture a tool result hands the user (read_file's `:attachments') and one
+the report of a hand_in names come as their bytes in base64, with the type
+the bytes say, the name and the size."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (png (harness-session-test-write cwd "shot.png" harness-test-png))
+           (svg (harness-session-test-write cwd "chart.svg" harness-session-test-svg)))
+      (harness-call 'session/append id '(:kind user :content "look"))
+      (harness-call 'session/append id (list :kind 'tool-call :tool "read_file" :call-id "c1" :input (list :path png)))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c1" :output "Image shot.png"
+                                             :attachments (list (list :path png :mime "image/png"
+                                                                      :size (length harness-test-png)
+                                                                      :name "shot.png"))))
+      (harness-call 'session/append id (list :kind 'tool-call :tool "hand_in" :call-id "c2" :input nil))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c2" :output "Handed in"
+                                             :meta (list :report (list :summary "Done."
+                                                                       :evidence (list (list :kind "note" :text "hi")
+                                                                                       (list :kind "image" :path svg
+                                                                                             :caption "The chart"))))))
+      (let ((shot (harness-session-test-image id png)))
+        (should (equal "image/png" (plist-get shot :mime)))
+        (should (equal "shot.png" (plist-get shot :name)))
+        (should (= (length harness-test-png) (plist-get shot :size)))
+        (should (equal harness-test-png (base64-decode-string (plist-get shot :data)))))
+      (let ((chart (harness-session-test-image id svg)))
+        (should (equal "image/svg+xml" (plist-get chart :mime)))
+        (should (equal "chart.svg" (plist-get chart :name)))
+        (should (equal harness-session-test-svg (base64-decode-string (plist-get chart :data)))))
+      ;; The same after a restart: the nodes are read back from the log.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal "image/png" (plist-get (harness-session-test-image id png) :mime)))
+      (should (equal "image/svg+xml" (plist-get (harness-session-test-image id svg) :mime))))))
+
+(ert-deftest harness-session-image-gives-the-files-of-the-tasks-report ()
+  "The report its task holds now names files too: the board shows it, so the
+files it names are given even when no node of the session says so."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (png (harness-session-test-write cwd "shot.png" harness-test-png))
+           (task nil))
+      ;; No task module here: the session has no task, so nothing is shown.
+      (should (string-match-p "shows no file" (cadr (should-error (harness-session-test-image id png)))))
+      (harness-defmethod task/for-session (session-id)
+        "The task of SESSION-ID, nil for none."
+        (and (equal session-id id) task))
+      (should (string-match-p "shows no file" (cadr (should-error (harness-session-test-image id png)))))
+      (setq task (list :id "t-1" :session id
+                       :report (list :summary "Done."
+                                     :evidence (list (list :kind "image" :path png)))))
+      (should (equal harness-test-png
+                     (base64-decode-string (plist-get (harness-session-test-image id png) :data)))))))
+
+(ert-deftest harness-session-image-gives-only-what-the-transcript-shows ()
+  "A client cannot read the machine through it: a file no node of the session
+shows, one only another session shows, a relative name and what is no name
+are refused, the file's name in the words of the error."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (other (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (shown (harness-session-test-write cwd "shown.png" harness-test-png))
+           (hidden (harness-session-test-write cwd "hidden.png" harness-test-png)))
+      (dolist (sid (list id other))
+        (harness-call 'session/append sid '(:kind user :content "look")))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c1" :output "x"
+                                             :attachments (list (list :path shown :mime "image/png"))))
+      (should (plist-get (harness-session-test-image id shown) :data))
+      ;; Not shown by this session, however real the file is.
+      (should (string-match-p (format "Session %s shows no file %s" id (regexp-quote hidden))
+                              (cadr (should-error (harness-session-test-image id hidden)))))
+      (should (string-match-p "shows no file" (cadr (should-error (harness-session-test-image other shown)))))
+      ;; A name is the file's whole name: a relative one is none, and one
+      ;; that spells the same file another way is that file.
+      (let ((default-directory cwd))
+        (should-error (harness-session-test-image id "shown.png")))
+      (should (plist-get (harness-session-test-image id (concat cwd "sub/../shown.png")) :data))
+      (should-error (harness-session-test-image id (concat cwd "sub/../hidden.png")))
+      (should-error (harness-session-test-image id nil))
+      (should-error (harness-session-test-image id ""))
+      (should-error (harness-session-test-image id 42))
+      (should-error (harness-session-test-image "nope" shown)))))
+
+(ert-deftest harness-session-image-gives-only-pictures-within-the-limit ()
+  "What a transcript names is given only when its bytes are a picture, whatever
+its name claims; a file that is gone, one that is too large and one a link
+leads to a secret from say so."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (secret (harness-session-test-write cwd "secret.txt" "password = hunter2\n"))
+           (fake (harness-session-test-write cwd "fake.png" "not a picture at all"))
+           (link (expand-file-name "link.png" cwd))
+           (png (harness-session-test-write cwd "shot.png" harness-test-png))
+           (gone (harness-session-test-write cwd "gone.png" harness-test-png))
+           (big (harness-session-test-write cwd "big.png" (concat harness-test-png (make-string 64 ?x)))))
+      (make-symbolic-link secret link)
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c1" :output "x"
+                                             :attachments (mapcar (lambda (f) (list :path f))
+                                                                  (list fake link png gone big))))
+      (delete-file gone)
+      ;; Its bytes say what it is, not its name.
+      (dolist (f (list fake link))
+        (let ((message (cadr (should-error (harness-session-test-image id f)))))
+          (should (string-match-p "is not a picture" message))
+          (should (string-match-p (regexp-quote (file-name-nondirectory f)) message))
+          ;; Nothing of what is inside goes out in the error.
+          (should-not (string-match-p "hunter2" message))))
+      (should (string-match-p "gone.png is gone from the harness.s machine"
+                              (cadr (should-error (harness-session-test-image id gone)))))
+      (let ((harness-session-image-max-bytes 100))
+        (should (string-match-p "big.png is 138 B, larger than the 100 B a picture may be"
+                                (cadr (should-error (harness-session-test-image id big)))))
+        (should (plist-get (harness-session-test-image id png) :data)))
+      (should (plist-get (harness-session-test-image id big) :data)))))
+
+(ert-deftest harness-session-image-types-follow-the-bytes ()
+  "The type of a picture is told by its first bytes."
+  (let ((bmp (concat "BM" (make-string 8 0) (unibyte-string 54 0 0 0)
+                     ;; The 40 bytes of a bitmap's info header: 3 by 2, one plane, 24 bits.
+                     (unibyte-string 40 0 0 0 3 0 0 0 2 0 0 0 1 0 24 0) (make-string 24 0))))
+    (dolist (case `(("image/png" . ,harness-test-png)
+                    ("image/jpeg" . "\377\330\377\340\0\20JFIF")
+                    ("image/gif" . "GIF89a\1\0\1\0")
+                    ("image/webp" . "RIFF\0\0\0\0WEBPVP8 ")
+                    ("image/bmp" . ,bmp)
+                    ("image/svg+xml" . ,harness-session-test-svg)
+                    ("image/svg+xml" . "<svg\nwidth=\"1\"/>")
+                    (nil . "BM is a text that starts like a bitmap")
+                    (nil . "<html><body>no picture</body></html>")
+                    (nil . "")))
+      (should (equal (car case) (harness-image-mime-of-bytes (cdr case)))))))
+
+(ert-deftest harness-session-image-over-acp ()
+  "A client calls it as `_harness/session/image' with the session's id and the
+path, and an error comes back as the words it carries."
+  (harness-session-test-with
+    (harness-test-load-module 'acp)
+    (let* ((cwd (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (png (harness-session-test-write cwd "shot.png" harness-test-png)))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c1" :output "x"
+                                             :attachments (list (list :path png :mime "image/png"))))
+      (should (member "session/image" (harness-acp--extension-methods)))
+      (let ((answer (harness-acp--call-extension "session/image" (list :id id :path png))))
+        (should (equal "image/png" (plist-get answer :mime)))
+        (should (equal harness-test-png (base64-decode-string (plist-get answer :data)))))
+      (let ((triplet (harness-acp--error-triplet
+                      (should-error (harness-acp--call-extension
+                                     "session/image" (list :id id :path (concat cwd "other.png")))))))
+        (should (string-match-p "shows no file" (nth 1 triplet)))))))
+
+
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here

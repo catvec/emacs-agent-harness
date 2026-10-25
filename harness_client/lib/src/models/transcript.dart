@@ -47,11 +47,17 @@ class ToolView {
     this.isError = false,
     this.nodeId,
     this.sender,
+    this.sessionId,
     this.attachments = const [],
     this.meta = const {},
   });
 
   final String callId;
+
+  /// The session the call was made in: what a file the call shows, a path
+  /// on the harness's machine, is asked of.  Null for a call whose session
+  /// is not known.
+  final String? sessionId;
   String? tool;
   String? title;
   String? kind;
@@ -161,6 +167,12 @@ class TranscriptItem {
 /// [displayItems], which stands them in the order the harness recorded them:
 /// the updates do not always come in it (see [displayItems]).
 class TranscriptState {
+  /// [sessionId] is the session this is the transcript of: the calls in it
+  /// know it ([ToolView.sessionId]), to ask the harness for the pictures
+  /// they show.
+  TranscriptState({this.sessionId});
+
+  final String? sessionId;
   final List<TranscriptItem> items = <TranscriptItem>[];
   final List<PlanEntry> plan = <PlanEntry>[];
   final List<String> availableCommands = <String>[];
@@ -552,7 +564,8 @@ class TranscriptState {
   void _applyToolCall(JsonMap update, String? nodeId, JsonMap harness) {
     final callId = asStringOr(update['toolCallId'], 'call-${_counter++}');
     final tool =
-        toolsByCallId[callId] ?? ToolView(callId: callId, nodeId: nodeId);
+        toolsByCallId[callId] ??
+        ToolView(callId: callId, nodeId: nodeId, sessionId: sessionId);
     tool
       ..tool = asString(harness['tool']) ?? tool.tool
       ..title = asString(update['title']) ?? tool.title
@@ -588,7 +601,8 @@ class TranscriptState {
   void _applyToolUpdate(JsonMap update, JsonMap harness) {
     final callId = asString(update['toolCallId']);
     if (callId == null) return;
-    final tool = toolsByCallId[callId] ?? ToolView(callId: callId);
+    final tool =
+        toolsByCallId[callId] ?? ToolView(callId: callId, sessionId: sessionId);
     tool
       ..status = asStringOr(update['status'], tool.status)
       ..isError = tool.isError || asString(update['status']) == 'failed'
@@ -699,7 +713,9 @@ class TranscriptState {
       case 'tool-call':
         final callId = asStringOr(node['callId'] ?? node['call-id'], '');
         if (callId.isEmpty) return;
-        final tool = toolsByCallId[callId] ?? ToolView(callId: callId);
+        final tool =
+            toolsByCallId[callId] ??
+            ToolView(callId: callId, sessionId: sessionId);
         tool
           ..tool = asString(node['tool']) ?? tool.tool
           ..title = asString(node['title']) ?? tool.title
@@ -731,7 +747,9 @@ class TranscriptState {
       case 'tool-result':
         final callId = asStringOr(node['callId'] ?? node['call-id'], '');
         if (callId.isEmpty) return;
-        final tool = toolsByCallId[callId] ?? ToolView(callId: callId);
+        final tool =
+            toolsByCallId[callId] ??
+            ToolView(callId: callId, sessionId: sessionId);
         tool
           ..output = asString(node['output']) ?? tool.output
           ..isError = asBool(node['isError'] ?? node['is-error'])

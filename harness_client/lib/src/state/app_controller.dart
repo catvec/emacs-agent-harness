@@ -16,6 +16,7 @@ import '../models/task.dart';
 import '../services/harness_api.dart';
 import '../services/device_name.dart';
 import '../state/drafts.dart';
+import '../state/pictures.dart';
 import '../state/quota_controller.dart';
 import '../state/session_controller.dart';
 import '../state/settings_controller.dart';
@@ -115,6 +116,11 @@ class AppController extends ChangeNotifier {
   final QuickSearchHistory quickSearchHistory = QuickSearchHistory();
   AcpClient? _client;
   HarnessApi? api;
+
+  /// The pictures of the harness's machine that the conversations and the
+  /// task sheets show (screenshots handed in, images a tool read): fetched
+  /// from the harness when they are looked at, and kept while they are.
+  late final HarnessPictures pictures = HarnessPictures(() => api);
   HarnessCapabilities? capabilities;
   ConnectionPhase phase = ConnectionPhase.disconnected;
   String? error;
@@ -1636,6 +1642,7 @@ class AppController extends ChangeNotifier {
     _client = null;
     api?.dispose();
     api = null;
+    pictures.clear();
     capabilities = null;
     signingInWith = null;
     for (final controller in _sessions.values) {

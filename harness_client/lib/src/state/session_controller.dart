@@ -37,7 +37,7 @@ class SessionController extends ChangeNotifier {
   /// have been sent goes back there.
   final DraftStore? drafts;
   SessionSummary? summary;
-  final TranscriptState transcript = TranscriptState();
+  late final TranscriptState transcript = TranscriptState(sessionId: sessionId);
 
   /// The harness's tools: what people call them, and the allow list of the
   /// calls that fold into a run in the transcript.  Empty until the harness
