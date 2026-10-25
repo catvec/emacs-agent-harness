@@ -221,14 +221,16 @@ async function run() {
     await page.getByRole('button', { name: 'Submit task', exact: true }).click();
     await page.waitForTimeout(1600);
     await shot(page, 'android-task-created');
-    // The task names the pictures it was sent with.
+    // A tap on the task opens its conversation, where it says how many
+    // pictures it was sent with.
     await page
       .getByRole('button', { name: /Add a small native settings screenshot flow/ })
       .first()
       .click();
-    await page.getByText('ATTACHMENTS', { exact: true }).waitFor({ timeout: 8000 });
+    await page.getByText(/2 attachments/).first().waitFor({ timeout: 8000 });
+    await page.waitForTimeout(500);
     await shot(page, 'android-task-pictures');
-    await clickButton(page, 'Close');
+    await goBack(page);
     await page.waitForTimeout(500);
     await page
       .locator('flt-semantics[role=button]')
@@ -238,16 +240,19 @@ async function run() {
       .click();
     await page.waitForTimeout(500);
     await shot(page, 'android-tasks-review');
+    // The task in review opens its conversation too: the report it handed in,
+    // then the bar, where it is verified.
     await page
       .getByRole('button', { name: /Review the emulator screenshots/ })
       .first()
       .click();
     await page.getByText('Verify and merge', { exact: true }).waitFor({ timeout: 10000 });
-    await shot(page, 'android-task-detail');
+    await page.waitForTimeout(500);
+    await shot(page, 'android-task-review');
     await clickButton(page, 'Verify and merge');
     await page.waitForTimeout(1200);
     await shot(page, 'android-task-verified');
-    await clickButton(page, 'Close');
+    await goBack(page);
     await page.waitForTimeout(500);
 
     await nav(page, 'Usage');

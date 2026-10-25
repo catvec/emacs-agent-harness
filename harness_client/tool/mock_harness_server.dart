@@ -5,6 +5,7 @@
 //   dart run tool/mock_harness_server.dart [--port 4277] [--standard]
 //                                          [--token hs1_SECRET]
 //                                          [--approve-after 3] [--tools]
+//                                          [--task-sessions]
 //
 // The client connects to ws://127.0.0.1:PORT/acp.  With --token the server
 // behaves like the real harness's listener for other devices: an upgrade that
@@ -18,7 +19,9 @@
 // has done some work, with its tool calls of every kind, a failed one, a
 // refused one and the `hand_in` call that handed the work in, whose
 // screenshots the server gives on request (they are the app's own, from
-// screenshots/).
+// screenshots/).  With --task-sessions the tasks that the seed leaves without
+// a conversation have one (the task in review has the showcase session's), as
+// every task of the real harness does: a task is handled in its conversation.
 
 import 'dart:async';
 import 'dart:io';
@@ -30,6 +33,7 @@ Future<void> main(List<String> arguments) async {
   var enhanced = true;
   var approveAfter = 3;
   var tools = false;
+  var taskSessions = false;
   String? token;
   for (var index = 0; index < arguments.length; index++) {
     final argument = arguments[index];
@@ -43,11 +47,13 @@ Future<void> main(List<String> arguments) async {
       enhanced = false;
     } else if (argument == '--tools') {
       tools = true;
+    } else if (argument == '--task-sessions') {
+      taskSessions = true;
     } else if (argument == '--help' || argument == '-h') {
       stdout.writeln(
         'usage: dart run tool/mock_harness_server.dart '
         '[--port 4277] [--standard] [--token hs1_SECRET] [--approve-after 3] '
-        '[--tools]',
+        '[--tools] [--task-sessions]',
       );
       return;
     }
@@ -83,10 +89,15 @@ Future<void> main(List<String> arguments) async {
       issueSecret: token,
       knownSecrets: token == null ? null : {token},
     );
-    if (tools) {
-      harness
-        ..seedToolShowcase()
-        ..seedShowcasePictures();
+    if (taskSessions) {
+      harness.seedTaskSessions();
+    } else if (tools) {
+      harness.seedToolShowcase();
+    }
+    // The showcase's hand-in names pictures, whichever seed made the session
+    // (the task in review has it with --task-sessions too).
+    if (tools || taskSessions) {
+      harness.seedShowcasePictures();
     }
     harness.authenticated = token == null || presented;
     harness.writer = socket.add;

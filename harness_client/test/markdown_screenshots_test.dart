@@ -1,7 +1,8 @@
 // Pictures of what is written in Markdown, as the app draws it on a phone: a
-// finished task on the board (the preview on its card, the report in its
-// sheet) and a conversation (what is sent to it, what it answers, the summary
-// a compaction leaves).  Drawn with the fonts of a phone.
+// finished task on the board (the preview on its card) and a conversation
+// (what is sent to it, what it answers, the summary a compaction leaves, and
+// the report the task was handed in with, which is read in the task's
+// conversation).  Drawn with the fonts of a phone.
 //
 //   HARNESS_SHOTS=/some/directory flutter test test/markdown_screenshots_test.dart
 //
@@ -19,6 +20,7 @@ import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support/fake_harness.dart';
+import 'support/phone_fonts.dart';
 import 'support/real_fonts.dart';
 
 const _problem =
@@ -32,7 +34,7 @@ The task board showed a handed-in report as plain text: its headings were lines 
 
 ## What I changed
 
-- **The sheet** draws the problem, the summary, how to reproduce it and the evidence as Markdown
+- **The report** draws the problem, the summary, how to reproduce it and the evidence as Markdown
 - **The card** shows the words of the summary, without their syntax
 - see [the review notes](https://example.com/review) for the pictures
 
@@ -71,12 +73,13 @@ class _Case {
 
 const _cases = [
   _Case('markdown-board-card', 'board'),
-  // The sheet of the task, tall enough to show the whole report.
-  _Case('markdown-task-report', 'sheet', height: 1560),
+  // The conversation of the task, its hand-in open: tall enough to show the
+  // whole report.
+  _Case('markdown-task-report', 'report', height: 1560),
   _Case('markdown-conversation', 'session', height: 1100),
   _Case('markdown-compaction-open', 'compaction', height: 1100),
   _Case('markdown-conversation-ios', 'session', height: 1100, apple: true),
-  _Case('markdown-task-report-dark', 'sheet', height: 1560, dark: true),
+  _Case('markdown-task-report-dark', 'report', height: 1560, dark: true),
   _Case(
     'markdown-compaction-open-dark',
     'compaction',
@@ -191,7 +194,7 @@ List<Map<String, Object?>> _nodes() {
     node(
       'user',
       'Please **fix** the `task board`: it shows the report of a finished '
-          'task as it was typed.\n\n- the cards\n- the [sheet](https://example.com/s)',
+          'task as it was typed.\n\n- the cards\n- the [report](https://example.com/s)',
     ),
     node(
       'assistant',
@@ -243,6 +246,11 @@ Future<void> main() async {
         ..clear()
         ..['task-md'] = _task(now)
         ..['task-md2'] = _otherTask(now);
+      // The conversation of the task ends with the hand-in.
+      harness.seedHandIn(
+        'task-md',
+        harness.tasks['task-md']!['report']! as Map<String, Object?>,
+      );
       harness.sessions[_sessionId] = _session(now);
       harness.nodes[_sessionId] = _nodes();
       final app = AppController(
@@ -278,19 +286,27 @@ Future<void> main() async {
       await tester.pumpWidget(
         RepaintBoundary(
           key: boundary,
-          child: HarnessApp(settings: settings, appController: app),
+          child: HarnessApp(
+            settings: settings,
+            appController: app,
+            themeBuilder: phoneFonts,
+          ),
         ),
       );
       await tester.pump();
       await settle(10);
 
       switch (shot.where) {
-        case 'board' || 'sheet':
+        case 'board' || 'report':
           await tester.tap(find.text('Tasks'));
           await settle();
           expect(find.text('Render the hand-in'), findsOneWidget);
-          if (shot.where == 'sheet') {
+          if (shot.where == 'report') {
+            // A tap on the task opens its conversation, which ends with the
+            // hand-in: a card that opens to the report.
             await tester.tap(find.text('Render the hand-in'));
+            await settle(10);
+            await tester.tap(find.textContaining('Hand in the finished work'));
             await settle();
             expect(find.text('What was wrong'), findsOneWidget);
             expect(find.text('PROBLEM'), findsOneWidget);

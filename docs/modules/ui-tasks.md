@@ -83,11 +83,13 @@ board, answers a task's question (m or [Answer]) and takes the
 feedback that sends a task back from review (R, or m: any message you
 send a task in review sends it back); C-g leaves such a box for a new task
 again, the question still waiting.
-RET or a click on a task opens its session in full.  F gives the board
-the fullscreen layout: the board stays on the left of the frame and
-the sessions it opens show beside it, until q on the board ends it
-(`harness-fullscreen`).  The board's letters type in the box, so
-C-c . and a letter (C-c . F) presses a board key from there
+RET or a click on a task opens its session in full, in whatever column
+the task is, and so does a click on the task's notification: a task is
+handled in its session (below), and the board is the list to pick one
+from.  F gives the board the fullscreen layout: the board stays on the
+left of the frame and the sessions it opens show beside it, until q on
+the board ends it (`harness-fullscreen`).  The board's letters type in
+the box, so C-c . and a letter (C-c . F) presses a board key from there
 (`harness-compose-panel-key`; the keys for a task act on a card, which
 the box has none of).  @ on a card attaches its task to the box: the
 message tells the model what the task is, and @task:ID goes into the
@@ -109,6 +111,20 @@ which the message stops; feedback on the write-up is the board's
 [Refine].  [Start now] supersedes a write-up that runs the same way:
 it stops it and starts the task with the write-up it has when the
 turn has ended.
+
+A task is handled in its session, whatever its state.  In review it
+has the review banner (harness-ui-review.el: [Verify], [Send back],
+the report and the changes); in the backlog, the banner above.  In
+every other state its session has a panel above the compose box: the
+column the task is in, in the board's words, and a button for each
+action its card has there that the session can do -- start it now,
+pause or resume it, drop or stop it, retry it, merge it again, mark
+it done, archive it or restore it (`harness-ui-tasks--state-panel`).
+The actions are the card's (`harness-ui-tasks--actions`), so a state
+the board gives another action gives the session the same; each runs a
+command of the session (`harness-ui-tasks-session-pause` and its kind,
+`harness-ui-tasks--session-commands`) that asks the harness for what
+the board's does.  The board keeps its keys and buttons.
 
 Priority: a task is low, medium (the default) or high priority, and
 that priority is its session's -- every task has its session from
@@ -309,8 +325,15 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-resume` — Resume the paused task at point: the queue starts it when its turn comes.
 - `harness-ui-tasks-retry` — Have the task at point, which stopped part way, work on it again.
 - `harness-ui-tasks-search` — Find tasks, sessions and commands from the board, or act on tasks, in words.
+- `harness-ui-tasks-session-archive` — Archive this session's task, or restore it when it is archived.
+- `harness-ui-tasks-session-cancel` — Stop this session's task, or drop it when it is still pending.
+- `harness-ui-tasks-session-complete` — Mark this session's task completed.
+- `harness-ui-tasks-session-merge` — Send the branch of this session's task through the merge queue again.
+- `harness-ui-tasks-session-pause` — Pause this session's task: back in the pending queue, held there until resumed.
 - `harness-ui-tasks-session-queue` — Put this session's backlog task in the pending queue.
-- `harness-ui-tasks-session-start` — Start the backlog task of this session now, even with every slot busy.
+- `harness-ui-tasks-session-resume` — Resume this session's paused task: the queue starts it when its turn comes.
+- `harness-ui-tasks-session-retry` — Have this session's task, which stopped part way, work on it again.
+- `harness-ui-tasks-session-start` — Start this session's task now, even with every slot busy.
 - `harness-ui-tasks-set-max-running` — Let N of each project's tasks work at once; N nil means no limit.
 - `harness-ui-tasks-show-all` — Show every task of the section at point, however tall it makes the board.
 - `harness-ui-tasks-show-fewer` — Let the section at point fit the window again.
@@ -380,6 +403,7 @@ the chevron that folds a card's recap, which only draws the card again.
 
 ### Hooks it adds to
 
+- `harness-chat-panel-functions` → `harness-ui-tasks--state-panel`
 - `harness-chat-panel-functions` → `harness-ui-tasks--backlog-panel`
 - `harness-ui-connected-hook` → `harness-ui-tasks--fetch-review`
 - `harness-ui-event-functions` → `harness-ui-tasks--on-review-event`

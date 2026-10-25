@@ -13,10 +13,21 @@ import 'src/ui/screens/home_shell.dart';
 import 'src/ui/theme/harness_theme.dart';
 
 class HarnessApp extends StatefulWidget {
-  const HarnessApp({super.key, required this.settings, this.appController});
+  const HarnessApp({
+    super.key,
+    required this.settings,
+    this.appController,
+    this.themeBuilder,
+  });
 
   final SettingsController settings;
   final AppController? appController;
+
+  /// Changes the theme before the app uses it, for a test that draws the app
+  /// with a font of its own: what names no font is drawn by the test engine
+  /// in squares, as the buttons' labels do.  The app does not use it.
+  @visibleForTesting
+  final ThemeData Function(ThemeData theme)? themeBuilder;
 
   @override
   State<HarnessApp> createState() => _HarnessAppState();
@@ -114,6 +125,9 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  ThemeData _themed(ThemeData theme) =>
+      widget.themeBuilder?.call(theme) ?? theme;
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -131,8 +145,8 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
               navigatorKey: _navigator,
               title: 'Harness',
               debugShowCheckedModeBanner: false,
-              theme: HarnessTheme.material(Brightness.light),
-              darkTheme: HarnessTheme.material(Brightness.dark),
+              theme: _themed(HarnessTheme.material(Brightness.light)),
+              darkTheme: _themed(HarnessTheme.material(Brightness.dark)),
               themeMode: widget.settings.themeMode,
               locale: const Locale('en'),
               supportedLocales: const [Locale('en')],

@@ -37,6 +37,17 @@ class TaskController extends ChangeNotifier {
   /// is not shown as the board.
   int _loads = 0;
 
+  /// The task each session belongs to, as last heard.  A session's own
+  /// screen is where its task is handled, and it shows the task whatever
+  /// the board shows: a board narrowed to another project does not list it,
+  /// and a session opened from the list of sessions may not be on the board
+  /// at all yet.
+  final Map<String, HarnessTask> _bySession = {};
+
+  /// The sessions [lookUp] asked the harness about already, a session that is
+  /// no task's among them: it asks once.
+  final Set<String> _asked = {};
+
   List<String> get columns {
     const order = [
       'needs-input',
@@ -80,6 +91,44 @@ class TaskController extends ChangeNotifier {
 
   int get needsAttention => tasks.where((task) => task.needsInput).length;
 
+  /// The task [sessionId] is the session of, or null for a session that is
+  /// none's (or whose task is not known yet: see [lookUp]).
+  HarnessTask? forSession(String? sessionId) {
+    if (sessionId == null || sessionId.isEmpty) return null;
+    for (final task in tasks) {
+      if (task.sessionId == sessionId) return task;
+    }
+    return _bySession[sessionId];
+  }
+
+  /// Ask the harness which task [sessionId] belongs to, for a session opened
+  /// from somewhere else than the board whose task the board does not list.
+  /// The answer is kept for [forSession] and listeners are told; a session
+  /// that is no task's is not asked about again.  A harness that cannot say
+  /// (an older one) leaves the session without a task, which is no failure.
+  Future<void> lookUp(String sessionId) async {
+    if (sessionId.isEmpty || forSession(sessionId) != null) return;
+    if (!api.can('task/for-session') || !_asked.add(sessionId)) return;
+    try {
+      final task = await api.taskOfSession(sessionId);
+      if (task == null) return;
+      _keep(task);
+      notifyListeners();
+    } on AcpException {
+      // Not a failure of the board: the session simply shows no task.
+    }
+  }
+
+  /// Remember [task] under its session, merged into what was known.
+  void _keep(HarnessTask task) {
+    final session = task.sessionId;
+    if (session == null || session.isEmpty) return;
+    final known = _bySession[session];
+    _bySession[session] = known != null && known.id == task.id
+        ? known.merge(task)
+        : task;
+  }
+
   /// Read the board of [project], every project's when it is null, and
   /// keep the board narrowed to it from now on.  [keepError] keeps what was
   /// said of the last failure on show: the board is read again after an
@@ -102,6 +151,7 @@ class TaskController extends ChangeNotifier {
       final loaded = await api.tasks(cwd: project);
       if (overtaken()) return;
       tasks = loaded;
+      loaded.forEach(_keep);
       // The queue and the settings are a project's: with the board on every
       // project they are those of the first one, which is what a task
       // sheet's defaults come from, not what the board shows.
@@ -156,14 +206,20 @@ class TaskController extends ChangeNotifier {
         final wire = args.isEmpty ? null : args.first;
         if (wire is Map) {
           final task = HarnessTask.fromWire(asMap(wire));
+          _keep(task);
           // The harness tells of every project's tasks; a board narrowed to
-          // one has no place for the others'.
-          if (_onBoard(task)) _upsert(task);
+          // one has no place for the others'.  Its session's screen has.
+          if (_onBoard(task)) {
+            _upsert(task);
+          } else if (task.sessionId != null) {
+            notifyListeners();
+          }
         }
       case 'task/deleted':
         final id = args.isEmpty ? null : asString(args.first);
         if (id != null) {
           tasks = tasks.where((task) => task.id != id).toList();
+          _bySession.removeWhere((_, task) => task.id == id);
           notifyListeners();
         }
       case 'task/queue':
@@ -246,8 +302,8 @@ class TaskController extends ChangeNotifier {
   }
 
   /// A refusal usually means the board was behind the harness (the task was
-  /// verified in Emacs while the sheet was open, say): read it again, so the
-  /// board shows what is so, with the harness's words still on it.
+  /// verified in Emacs while its conversation was open, say): read it again,
+  /// so the board shows what is so, with the harness's words still on it.
   Future<void> _readAfterFailure() =>
       load(project: project, showSpinner: false, keepError: true);
 

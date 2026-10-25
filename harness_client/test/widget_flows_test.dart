@@ -335,24 +335,6 @@ void main() {
     expect(rig.harness.tasks.length, 7);
   });
 
-  testWidgets('task board opens a task and verifies it', (tester) async {
-    final rig = await _rig();
-    await _pump(tester, rig);
-    await tester.tap(find.text('Tasks'));
-    await _settle(tester, 6);
-    expect(find.text('Answer the permission'), findsOneWidget);
-    await tester.ensureVisible(find.text('Review'));
-    await tester.tap(find.text('Review'));
-    await _settle(tester, 4);
-    expect(find.text('Review the emulator screenshots'), findsOneWidget);
-    await tester.tap(find.text('Review the emulator screenshots'));
-    await _settle(tester, 6);
-    expect(find.text('Verify and merge'), findsOneWidget);
-    await tester.tap(find.text('Verify and merge'));
-    await _settle(tester, 8);
-    expect(rig.harness.tasks['task-2']!['state'], 'done');
-  });
-
   testWidgets('usage and server views expose the harness extensions', (
     tester,
   ) async {

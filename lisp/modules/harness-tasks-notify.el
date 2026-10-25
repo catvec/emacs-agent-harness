@@ -21,7 +21,8 @@
 ;; `harness-tasks-notify-events' picks which of these notify, and
 ;; `harness-tasks-notify-providers' where they go.  Every notification
 ;; names its task, session and project, so clicking a desktop
-;; notification opens the task on its board.
+;; notification opens the task's session, where it is handled, or the
+;; task on its board when there is no session to show.
 
 ;;; Code:
 

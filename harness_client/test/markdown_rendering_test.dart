@@ -4,9 +4,10 @@
 // typed with (`##`, `**`, backticks, `](url)`).
 //
 // Two places drew it as typed: a finished task on the board (the preview on its
-// card, the report in its sheet) and, in a conversation, the messages the
-// person and the harness send and the summary a compaction leaves.  The
-// harness sends the Markdown itself, untouched.
+// card) and, in a conversation, the messages the person and the harness send,
+// the summary a compaction leaves and the report a task was handed in with (the
+// `hand_in` card of the task's conversation, which is where a task is read).
+// The harness sends the Markdown itself, untouched.
 //
 // Drawn with the fonts of a phone, since the test font's wide letters squeeze
 // the board's header.
@@ -155,6 +156,10 @@ Future<void> main() async {
     harness.tasks
       ..clear()
       ..['task-md'] = task;
+    // The task has its conversation, which ends with the hand-in.
+    if (task['report'] case final Map<String, Object?> report) {
+      harness.seedHandIn('task-md', report);
+    }
     final app = AppController(settings: settings, connector: harness.connector);
     await app.connect('ws://memory/acp');
     tester.view.physicalSize = const Size(1170, 2532);
@@ -198,7 +203,7 @@ Future<void> main() async {
     });
   });
 
-  group('a finished task on the board', () {
+  group('a finished task', () {
     testWidgets('has the words of its summary on its card, not the syntax', (
       tester,
     ) async {
@@ -216,15 +221,18 @@ Future<void> main() async {
       _expectNoSyntax();
     });
 
-    testWidgets('has its report in its sheet drawn as Markdown', (
+    testWidgets('has its report in its conversation drawn as Markdown', (
       tester,
     ) async {
       await openBoard(tester, _task(report: _report()));
+      // A tap on the task opens its conversation, whose last word is the
+      // hand-in: a card that opens to the report.
       await tester.tap(find.text('Render the hand-in'));
-      await _settle(tester, 8);
+      await _settle(tester, 10);
+      await tester.tap(find.textContaining('Hand in the finished work'));
+      await _settle(tester, 6);
 
       // What the report says, in the order it says it.
-      expect(find.text('REPORT'), findsOneWidget);
       for (final label in ['PROBLEM', 'SUMMARY', 'TO REPRODUCE', 'EVIDENCE']) {
         expect(find.text(label), findsOneWidget, reason: label);
       }
@@ -267,6 +275,7 @@ Future<void> main() async {
       // A piece of code opens to the code, as it does in the session.
       expect(find.text('No issues found!'), findsNothing);
       await tester.ensureVisible(find.text('The analyzer'));
+      await _settle(tester, 2);
       await tester.tap(find.text('The analyzer'));
       await _settle(tester, 4);
       expect(find.text('No issues found!'), findsOneWidget);
@@ -293,7 +302,9 @@ Future<void> main() async {
         findsOneWidget,
       );
       await tester.tap(find.text('Render the hand-in'));
-      await _settle(tester, 8);
+      await _settle(tester, 10);
+      // The conversation draws that last message, and its bar says that it is
+      // all there is: no report was handed in.
       expect(find.textContaining('No report was handed in'), findsOneWidget);
       _expectNoSyntax();
       expect(_run('finished').style?.fontWeight, FontWeight.w700);
@@ -302,13 +313,20 @@ Future<void> main() async {
 
     testWidgets('has a report that is only a summary', (tester) async {
       // A harness from before the problem field has none, and an old task
-      // has no evidence: the report is the summary, drawn.
+      // has no evidence: the report is the summary, and the card has its
+      // words.
       await openBoard(
         tester,
         _task(report: {'summary': 'Plain **words** only.'}),
       );
+      expect(find.textContaining('Plain words only.'), findsOneWidget);
+      _expectNoSyntax();
+      // In the conversation it is the hand-in card, with a summary and
+      // nothing else.
       await tester.tap(find.text('Render the hand-in'));
-      await _settle(tester, 8);
+      await _settle(tester, 10);
+      await tester.tap(find.textContaining('Hand in the finished work'));
+      await _settle(tester, 6);
       expect(find.text('PROBLEM'), findsNothing);
       expect(find.text('TO REPRODUCE'), findsNothing);
       expect(find.text('EVIDENCE'), findsNothing);

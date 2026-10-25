@@ -72,11 +72,13 @@
 ;; feedback that sends a task back from review (R, or m: any message you
 ;; send a task in review sends it back); C-g leaves such a box for a new task
 ;; again, the question still waiting.
-;; RET or a click on a task opens its session in full.  F gives the board
-;; the fullscreen layout: the board stays on the left of the frame and
-;; the sessions it opens show beside it, until q on the board ends it
-;; (`harness-fullscreen').  The board's letters type in the box, so
-;; C-c . and a letter (C-c . F) presses a board key from there
+;; RET or a click on a task opens its session in full, in whatever column
+;; the task is, and so does a click on the task's notification: a task is
+;; handled in its session (below), and the board is the list to pick one
+;; from.  F gives the board the fullscreen layout: the board stays on the
+;; left of the frame and the sessions it opens show beside it, until q on
+;; the board ends it (`harness-fullscreen').  The board's letters type in
+;; the box, so C-c . and a letter (C-c . F) presses a board key from there
 ;; (`harness-compose-panel-key'; the keys for a task act on a card, which
 ;; the box has none of).  @ on a card attaches its task to the box: the
 ;; message tells the model what the task is, and @task:ID goes into the
@@ -98,6 +100,20 @@
 ;; [Refine].  [Start now] supersedes a write-up that runs the same way:
 ;; it stops it and starts the task with the write-up it has when the
 ;; turn has ended.
+;;
+;; A task is handled in its session, whatever its state.  In review it
+;; has the review banner (harness-ui-review.el: [Verify], [Send back],
+;; the report and the changes); in the backlog, the banner above.  In
+;; every other state its session has a panel above the compose box: the
+;; column the task is in, in the board's words, and a button for each
+;; action its card has there that the session can do -- start it now,
+;; pause or resume it, drop or stop it, retry it, merge it again, mark
+;; it done, archive it or restore it (`harness-ui-tasks--state-panel').
+;; The actions are the card's (`harness-ui-tasks--actions'), so a state
+;; the board gives another action gives the session the same; each runs a
+;; command of the session (`harness-ui-tasks-session-pause' and its kind,
+;; `harness-ui-tasks--session-commands') that asks the harness for what
+;; the board's does.  The board keeps its keys and buttons.
 ;;
 ;; Priority: a task is low, medium (the default) or high priority, and
 ;; that priority is its session's -- every task has its session from
@@ -3181,16 +3197,26 @@ does, the board opens, point going to the card once it shows
   (harness-ui-tasks-show-task id project))
 
 (defun harness-ui-tasks--on-notification (notification)
-  "Open the board on the task NOTIFICATION, a clicked notification, is about.
-The click switches to the task's project first
-\(`harness-ui-tasks-visit-task'), the project of the session the
-notification names when the harness still has it.  On
-`harness-ui-notification-functions': non-nil when it was a task's."
+  "Show the task NOTIFICATION, a clicked notification, is about.
+A task is looked at and handled in its session's chat, so the click
+opens that session -- in the task's project, which it switches to first
+\(`harness-ui-visit-session') -- when the notification names one the
+harness still has and a chat module can show it.  A task with no session
+to show opens its card on the board of its project instead
+\(`harness-ui-tasks-visit-task').  On `harness-ui-notification-functions':
+non-nil when it was a task's."
   (let ((id (plist-get notification :task))
-        (project (plist-get notification :project)))
-    (when (and (stringp id) (stringp project) (not (string-empty-p project)))
-      (harness-ui-tasks-visit-task id project (plist-get notification :session))
-      t)))
+        (project (plist-get notification :project))
+        (session (plist-get notification :session)))
+    (cond
+     ((and (stringp id) (stringp session) (not (string-empty-p session))
+           harness-ui-open-session-function
+           (harness-ui-session session))
+      (harness-ui-visit-session session)
+      t)
+     ((and (stringp id) (stringp project) (not (string-empty-p project)))
+      (harness-ui-tasks-visit-task id project session)
+      t))))
 
 (add-hook 'harness-ui-notification-functions #'harness-ui-tasks--on-notification)
 
@@ -5343,6 +5369,19 @@ review, merging, refining, in the backlog or done cannot be paused."
                 (not (harness-ui-tasks--backlog-p task))
                 (not (harness-ui-tasks--paused-p task))))))
 
+(defun harness-ui-tasks--require-pausable (task)
+  "Signal a user error unless TASK can be paused (`harness-ui-tasks--pausable-p').
+The board's Pause and the one in the task's session say the same."
+  (unless (harness-ui-tasks--pausable-p task)
+    (user-error "Only a task at work or waiting for a slot can be paused; this one is %s"
+                (if (harness-ui-tasks--paused-p task) "paused" (harness-ui-tasks--column task)))))
+
+(defun harness-ui-tasks--require-paused (task)
+  "Signal a user error unless TASK is paused (`harness-ui-tasks--paused-p').
+The board's Resume and the one in the task's session say the same."
+  (unless (harness-ui-tasks--paused-p task)
+    (user-error "Only a paused task can be resumed; this one is %s" (harness-ui-tasks--column task))))
+
 (defun harness-ui-tasks-pause ()
   "Pause the task at point: back in the pending queue, held there until resumed.
 The card calls this Pause.  A task at work has its turn stopped, and the
@@ -5358,9 +5397,7 @@ other waiting tasks, and is not suspending the queue
 that are not paused.  A pause is kept across a restart."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
-    (unless (harness-ui-tasks--pausable-p task)
-      (user-error "Only a task at work or waiting for a slot can be paused; this one is %s"
-                  (if (harness-ui-tasks--paused-p task) "paused" (harness-ui-tasks--column task))))
+    (harness-ui-tasks--require-pausable task)
     (harness-ui-tasks--request-then "_harness/task/pause" (list :id (plist-get task :id))
                                     "Pausing the task")
     (message "Paused")))
@@ -5375,8 +5412,7 @@ while the queue is suspended (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-
 budget; it carries on where it stopped.  \\[harness-ui-tasks-start] starts it at once instead."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
-    (unless (harness-ui-tasks--paused-p task)
-      (user-error "Only a paused task can be resumed; this one is %s" (harness-ui-tasks--column task)))
+    (harness-ui-tasks--require-paused task)
     (harness-ui-tasks--request-then "_harness/task/resume" (list :id (plist-get task :id))
                                     "Resuming the task")
     (message "Resumed")))
@@ -5555,15 +5591,22 @@ their n."
   (interactive)
   (harness-ui-tasks--permission "deny-once"))
 
+(defun harness-ui-tasks--cancel-confirmed-p (task)
+  "Non-nil when TASK may be stopped or dropped now.
+One that has not started, or whose write-up stopped, is dropped for good,
+so it asks first; one at work is only stopped.  The board's Stop and the
+one in the task's session ask the same."
+  (or (not (or (equal (plist-get task :state) "pending")
+               (and (harness-ui-tasks--refining-p task) (not (harness-ui-tasks--writing-p task)))))
+      (y-or-n-p (format "Drop pending task “%s”? " (harness-ui-tasks--title task)))))
+
 (defun harness-ui-tasks-cancel ()
   "Stop the task at point, or drop it when it is still pending.
 An agent writing a task up stops; once stopped, the task is dropped,
 and with a backlog task the session that wrote it up."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
-    (when (or (not (or (equal (plist-get task :state) "pending")
-                       (and (harness-ui-tasks--refining-p task) (not (harness-ui-tasks--writing-p task)))))
-              (y-or-n-p (format "Drop pending task “%s”? " (harness-ui-tasks--title task))))
+    (when (harness-ui-tasks--cancel-confirmed-p task)
       (harness-ui-tasks--request-then "_harness/task/cancel" (list :id (plist-get task :id)) "Stopping the task"))))
 
 (defun harness-ui-tasks-merge ()
@@ -6147,43 +6190,246 @@ or whose task has started, and until the task is known."
       (user-error "This session's task is not waiting in the backlog"))
     task))
 
-(defun harness-ui-tasks-session-start ()
-  "Start the backlog task of this session now, even with every slot busy.
-The task starts with its write-up; a write-up still running is stopped
-first, and the task starts once it has ended.  This is the [Start now]
-of the banner above the session's compose box, as the card's."
-  (interactive)
-  (let* ((task (harness-ui-tasks--session-backlog-task))
-         (id (plist-get task :id))
-         (sid (or (plist-get task :session) harness-ui-session-id)))
+(defun harness-ui-tasks--session-unstarted-task ()
+  "Return this session's task, which has to wait to start.
+That is a task in the backlog, being written up, or queued for a slot."
+  (let ((task (harness-ui-tasks--session-task harness-ui-session-id)))
+    (unless (and task
+                 (not (harness-ui-tasks--archived-p task))
+                 (harness-ui-tasks--unstarted-p task))
+      (user-error "This session's task is not waiting to start"))
+    task))
+
+(defun harness-ui-tasks--session-task-or-error ()
+  "Return this chat's task, the task of its session, or signal that it has none."
+  (or (harness-ui-tasks--session-task harness-ui-session-id)
+      (user-error "This session is not a task's")))
+
+(defun harness-ui-tasks--session-request (task method what &optional params done)
+  "Ask the harness for task METHOD on TASK, the task of this chat's session.
+PARAMS follow the task's id, as the board's command of the same name
+sends them.  The task the harness answers with becomes the session's, so
+the chat draws its panels for it at once, and DONE, a string, is said.
+A refusal is said as failing to WHAT."
+  (let ((sid (or (plist-get task :session) harness-ui-session-id)))
     (harness-ui-call
-     "_harness/task/start" (list :id id)
+     (concat "_harness/task/" method) (append (list :id (plist-get task :id)) params)
      (lambda (view)
-       (when (and view (plist-get view :id))
+       (when (and (consp view) (plist-get view :id))
          (puthash sid view harness-ui-tasks--session-tasks))
        (harness-ui-tasks--redraw-session sid)
-       (message "Starting the task"))
-     (lambda (e) (message "Could not start the task: %s" (harness-error-message e))))))
+       (when done (message "%s" done)))
+     (lambda (e) (message "Could not %s: %s" what (harness-error-message e))))))
+
+(defun harness-ui-tasks-session-start ()
+  "Start this session's task now, even with every slot busy.
+A backlog task starts with its write-up; a write-up still running is
+stopped first, and the task starts once it has ended.  One waiting in
+the queue, or held there, starts at once.  This is the [Start now] of
+the banner above the session's compose box, as the card's."
+  (interactive)
+  (harness-ui-tasks--session-request (harness-ui-tasks--session-unstarted-task)
+                                     "start" "start the task" nil "Starting the task"))
 
 (defun harness-ui-tasks-session-queue ()
   "Put this session's backlog task in the pending queue.
 It starts on its own as soon as its project has a free slot; the
 banner's [Start now] starts it at once instead."
   (interactive)
-  (let* ((task (harness-ui-tasks--session-backlog-task))
-         (id (plist-get task :id))
-         (sid (or (plist-get task :session) harness-ui-session-id)))
+  (let ((task (harness-ui-tasks--session-backlog-task)))
     (unless (and (equal (plist-get task :state) "pending")
                  (harness-ui-tasks--backlog-p task))
       (user-error "Only a task waiting in the backlog can be queued; start this one now instead"))
-    (harness-ui-call
-     "_harness/task/queue" (list :id id)
-     (lambda (view)
-       (when (and view (plist-get view :id))
-         (puthash sid view harness-ui-tasks--session-tasks))
-       (harness-ui-tasks--redraw-session sid)
-       (message "Queued"))
-     (lambda (e) (message "Could not queue the task: %s" (harness-error-message e))))))
+    (harness-ui-tasks--session-request task "queue" "queue the task" nil "Queued")))
+
+;;;; A task's state in its session
+;;
+;; The banners above handle the two states a task waits for you in:
+;; the backlog here, review in harness-ui-review.el.  Every other state
+;; shows a panel of its own above the compose box -- the column the task
+;; is in, in the board's words, and a button for what the card offers
+;; there: pause it, stop it, retry it, merge it again, mark it done,
+;; archive it.  The board does the same things on a card; the buttons and
+;; commands here do them from the task's own session, so the chat is
+;; where a task is handled, and the board a list to pick one from.
+;;
+;; The actions are the card's own (`harness-ui-tasks--actions'), so a
+;; state the board gives another action gives the chat the same; the ones
+;; that need the board -- Edit, Refine and Reply use its compose box,
+;; Allow and Answer the session's own pending panel -- are left out.
+;; `harness-ui-tasks--session-commands' names the command that does each
+;; of the rest from the session.
+
+(defconst harness-ui-tasks--session-commands
+  '((harness-ui-tasks-start harness-ui-tasks-session-start
+     "Start the task now, even with every slot busy")
+    (harness-ui-tasks-queue harness-ui-tasks-session-queue
+     "Put the task in the pending queue, to start when a slot frees")
+    (harness-ui-tasks-pause harness-ui-tasks-session-pause
+     "Pause the task: back in the pending queue, held there until resumed")
+    (harness-ui-tasks-resume harness-ui-tasks-session-resume
+     "Resume the paused task: the queue starts it when its turn comes")
+    (harness-ui-tasks-retry harness-ui-tasks-session-retry
+     "Have the task, which stopped part way, work on it again")
+    (harness-ui-tasks-merge harness-ui-tasks-session-merge
+     "Send the task's branch through the merge queue again")
+    (harness-ui-tasks-complete harness-ui-tasks-session-complete
+     "Mark the task completed")
+    (harness-ui-tasks-archive harness-ui-tasks-session-archive
+     "Archive the task, or restore it when it is archived")
+    (harness-ui-tasks-cancel harness-ui-tasks-session-cancel
+     "Stop the task, or drop it when it has not started"))
+  "Each board command, its twin in the task's session, and the twin's tooltip.
+The twin is the command that does the same from the session's own chat.  A
+board action without one has no button in the session's panel.")
+
+(defun harness-ui-tasks-session-pause ()
+  "Pause this session's task: back in the pending queue, held there until resumed.
+This is the card's Pause (`harness-ui-tasks-pause'), from the task's
+own session: a task at work has its turn stopped, one waiting for a slot
+is held where it is, and either carries on where it stopped once
+resumed or started."
+  (interactive)
+  (let ((task (harness-ui-tasks--session-task-or-error)))
+    (harness-ui-tasks--require-pausable task)
+    (harness-ui-tasks--session-request task "pause" "pause the task" nil "Paused")))
+
+(defun harness-ui-tasks-session-resume ()
+  "Resume this session's paused task: the queue starts it when its turn comes.
+This is the card's Resume (`harness-ui-tasks-resume'), from the task's
+own session."
+  (interactive)
+  (let ((task (harness-ui-tasks--session-task-or-error)))
+    (harness-ui-tasks--require-paused task)
+    (harness-ui-tasks--session-request task "resume" "resume the task" nil "Resumed")))
+
+(defun harness-ui-tasks-session-retry ()
+  "Have this session's task, which stopped part way, work on it again.
+This is the card's Retry (`harness-ui-tasks-retry'), from the task's own
+session: a task whose turn ended with an error, was cancelled,
+interrupted by a restart or ran out of output tokens carries on, and a
+merge that failed is queued again."
+  (interactive)
+  (harness-ui-tasks--session-request (harness-ui-tasks--session-task-or-error)
+                                     "retry" "retry the task" nil "Retried"))
+
+(defun harness-ui-tasks-session-merge ()
+  "Send the branch of this session's task through the merge queue again.
+This is the card's Retry merge (`harness-ui-tasks-merge'), from the task's
+own session."
+  (interactive)
+  (harness-ui-tasks--session-request (harness-ui-tasks--session-task-or-error)
+                                     "merge" "queue the merge" nil "Merge queued"))
+
+(defun harness-ui-tasks-session-complete ()
+  "Mark this session's task completed.
+This is the card's Mark done (`harness-ui-tasks-complete'), from the
+task's own session."
+  (interactive)
+  (harness-ui-tasks--session-request (harness-ui-tasks--session-task-or-error)
+                                     "complete" "complete the task" nil "Completed"))
+
+(defun harness-ui-tasks-session-archive ()
+  "Archive this session's task, or restore it when it is archived.
+This is the card's Archive (`harness-ui-tasks-archive'), from the task's
+own session."
+  (interactive)
+  (let* ((task (harness-ui-tasks--session-task-or-error))
+         (restore (harness-ui-tasks--archived-p task)))
+    (harness-ui-tasks--session-request task "archive" "archive the task"
+                                       (list :restore restore) (if restore "Restored" "Archived"))))
+
+(defun harness-ui-tasks-session-cancel ()
+  "Stop this session's task, or drop it when it is still pending.
+This is the card's Stop or Drop (`harness-ui-tasks-cancel'), from the
+task's own session; a task that has not started asks first."
+  (interactive)
+  (let ((task (harness-ui-tasks--session-task-or-error)))
+    (when (harness-ui-tasks--cancel-confirmed-p task)
+      (harness-ui-tasks--session-request task "cancel" "stop the task" nil "Stopped"))))
+
+(defun harness-ui-tasks--state-panel-p (task)
+  "Non-nil when TASK's session shows the panel of its state.
+Not for a task in review that is not archived, nor for one waiting in
+the backlog or being written up: the banners of the review
+\(`harness-ui-review--reviewing-p') and of the backlog
+\(`harness-ui-tasks--backlog-session-p') are theirs."
+  (and (not (harness-ui-tasks--backlog-session-p task))
+       (not (and (equal (plist-get task :state) "review")
+                 (not (harness-ui-tasks--archived-p task))))))
+
+(defun harness-ui-tasks--session-actions (task)
+  "Return (LABEL COMMAND HELP) for what TASK's session offers: the card's actions.
+LABEL is the card's, COMMAND the session's own and HELP its tooltip
+\(`harness-ui-tasks--session-commands'); an action of the card with no
+twin there is left out, and so is a twin it has twice."
+  (let (actions)
+    (pcase-dolist (`(,label ,command) (harness-ui-tasks--actions task t))
+      (when-let* ((twin (cdr (assq command harness-ui-tasks--session-commands)))
+                  ((not (cl-find (car twin) actions :key #'cadr))))
+        (push (cons label twin) actions)))
+    (nreverse actions)))
+
+(defun harness-ui-tasks--state-note (task column session)
+  "Say a little of where TASK stands in COLUMN, for the panel of its SESSION.
+Nil when there is nothing to add to the column's name."
+  (let ((parts
+         (list (pcase column
+                 ('pending (cond ((plist-get task :hold) (harness-ui-tasks--hold-text (plist-get task :hold)))
+                                 ((plist-get task :returned) (harness-ui-tasks--returned-why task))
+                                 (t "waiting for a slot")))
+                 ('active (or (nth 2 (harness-ui-tasks--todos session))
+                              (if (equal (plist-get session :status) "running") "working…" "starting…")))
+                 ((or 'needs-input 'merging) (harness-ui-tasks--detail task column session nil))
+                 ('done (string-join
+                         (delq nil (list (cond ((harness-json-true-p (plist-get task :merged))
+                                                (format "merged into %s" (harness-ui-tasks--base task)))
+                                               ((harness-ui-tasks--no-merge-p task) "nothing to merge"))
+                                         (harness-ui-tasks--took task)))
+                         (concat " " harness-ui-tasks--dot " "))))
+               (and (harness-ui-tasks--archived-p task) "archived"))))
+    (setq parts (cl-remove-if (lambda (part) (or (null part) (string-empty-p part))) parts))
+    (and parts (string-join parts (concat " " harness-ui-tasks--dot " ")))))
+
+(defun harness-ui-tasks--state-banner (task actions)
+  "Return the panel of TASK, whose session offers ACTIONS.
+ACTIONS are (LABEL COMMAND HELP) each.  Two lines: the column the task
+is in, in the board's words and with its mark, then a little of where it
+stands; and a button for each action."
+  (let* ((column (harness-ui-tasks--column task))
+         (session (harness-ui-tasks--session task))
+         (heading (or (cadr (assq column harness-ui-tasks--columns))
+                      (capitalize (symbol-name column))))
+         (note (harness-ui-tasks--state-note task column session)))
+    (propertize
+     (concat " " (harness-ui-tasks--icon task column session) " "
+             (propertize heading 'face (if (eq column 'needs-input)
+                                           '(harness-task-attention-face harness-task-section-face)
+                                         'harness-task-section-face))
+             (if note
+                 (concat " " harness-ui-tasks--dot " " (harness-ui-tasks--with-face note 'harness-dim-face))
+               "")
+             "\n   "
+             (mapconcat (lambda (action)
+                          (pcase-let ((`(,label ,command ,help) action))
+                            (harness-ui-tasks--chat-button
+                             (format "[%s]" label)
+                             (lambda () (call-interactively command))
+                             help)))
+                        actions " ")
+             "\n")
+     'wrap-prefix "   ")))
+
+(defun harness-ui-tasks--state-panel ()
+  "Return the panel of this session's task when it has an action to offer.
+On `harness-chat-panel-functions': nil for a session that is no task's,
+for a task whose banner is another's (`harness-ui-tasks--state-panel-p'),
+for one with nothing to do from here, and until the task is known."
+  (when (bound-and-true-p harness-ui-session-id)
+    (when-let* ((task (harness-ui-tasks--session-task harness-ui-session-id))
+                ((harness-ui-tasks--state-panel-p task))
+                (actions (harness-ui-tasks--session-actions task)))
+      (harness-ui-tasks--state-banner task actions))))
 
 ;;;; Ready for review, in the mode line
 
@@ -6329,9 +6575,11 @@ The board is the current project's when that project has tasks waiting
 for review, else the board of the project whose task came to review
 last; point goes to the card of its task that came to review last, at
 the top of Ready for review.  The board's project becomes current
-first, as a click on a task's notification makes it
-\(`harness-ui-tasks-visit-task').  A click on the count of tasks in
-review, in the mode line notifier, runs this."
+first, as visiting a session makes it (`harness-ui-tasks-visit-task').
+A click on the count of tasks in review, in the mode line notifier,
+runs this: a board-level shortcut, the list to pick the task to look at
+from; RET or a click on its card opens its session, where it is verified
+or sent back."
   (interactive)
   (let ((projects (harness-ui-tasks--review-projects)))
     (unless projects
@@ -6354,11 +6602,14 @@ none (`harness-ui-tasks--board-key').  The mode line notifier counts
 the tasks ready for review, every project's, which the UI asks for as
 it connects and, started while connected, at once
 \(`harness-ui-tasks--fetch-review'); the count comes after the
-notifier's other segments, such as the version page's nag."
+notifier's other segments, such as the version page's nag.  A task's
+session shows its backlog banner, or the panel of its state, above
+its compose box."
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-session-task-event)
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-review-event)
   (add-hook 'harness-chat-panel-functions #'harness-ui-tasks--backlog-panel)
+  (add-hook 'harness-chat-panel-functions #'harness-ui-tasks--state-panel)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
   (add-hook 'harness-ui-quota-functions #'harness-ui-tasks--on-quota)
@@ -6378,9 +6629,13 @@ notifier's other segments, such as the version page's nag."
 
 (defun harness-ui-tasks--shutdown ()
   "Stop the timer that redraws the boards' elapsed times.
-The mode line notifier stops counting the tasks ready for review."
+The mode line notifier stops counting the tasks ready for review, and the
+chat of a task's session stops showing its backlog banner and the panel
+of its state."
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
   (setq harness-ui-tasks--timer nil)
+  (remove-hook 'harness-chat-panel-functions #'harness-ui-tasks--backlog-panel)
+  (remove-hook 'harness-chat-panel-functions #'harness-ui-tasks--state-panel)
   (remove-hook 'harness-ui-event-functions #'harness-ui-tasks--on-review-event)
   (remove-hook 'harness-ui-connected-hook #'harness-ui-tasks--fetch-review)
   (remove-hook 'harness-ui-notify-segment-functions #'harness-ui-tasks--notify-segment)

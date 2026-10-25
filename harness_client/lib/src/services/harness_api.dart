@@ -332,6 +332,14 @@ class HarnessApi {
   Future<HarnessTask> task(String id) async =>
       HarnessTask.fromWire(await extension('task/get', {'id': id}));
 
+  /// The task [sessionId] is the session of, or null for a session that is
+  /// no task's (`task/for-session` answers nothing for it).
+  Future<HarnessTask?> taskOfSession(String sessionId) async {
+    final wire = await extension('task/for-session', {'session-id': sessionId});
+    final task = HarnessTask.fromWire(wire);
+    return task.id.isEmpty ? null : task;
+  }
+
   Future<HarnessTask> submitTask({
     required String cwd,
     required String prompt,

@@ -1,7 +1,8 @@
 // The report a task's work was handed in with is read on one page, whichever
 // way it is come to: the "Open full view" of the `hand_in` call in the task's
-// session, and the "View report" of the task on the board.  The two used to be
-// drawn by two pieces of code (the board's sheet drew the summary, how to
+// session, and the "View report" on the bar of the task's conversation (a tap
+// on the task, on the board, opens the conversation; there is no sheet).  The
+// two used to be drawn by two pieces of code (a sheet drew the summary, how to
 // reproduce it and a line a piece of evidence, and left the problem out; the
 // session's page drew the report), so the same report looked like two.  These
 // open both and look at what is drawn: the same words, in the same order, and
@@ -70,14 +71,14 @@ Future<void> main() async {
   await loadRealFonts();
 
   group('the report of a task\'s work', () {
-    testWidgets('is the same page from the board and from the session', (
+    testWidgets('is the same page from the task and from the session', (
       tester,
     ) async {
-      // From the board: the task, its sheet, "View report".
+      // From the task: its conversation, and "View report" on its bar.
       var frame = await openApp(tester, seed: seedHandedInTask);
       await viewReport(tester, handedInTaskName);
       expect(find.byType(ToolDetailScreen), findsNothing);
-      final fromBoard = await readPage(tester, frame);
+      final fromTask = await readPage(tester, frame);
 
       // From the session of the task: the call that handed the work in,
       // opened, and its "Open full view".  A new app, so that nothing of the
@@ -90,7 +91,7 @@ Future<void> main() async {
       // The page says what was handed in: the problem comes first, which the
       // sheet of the board used to leave out.
       expect(
-        fromBoard.words.where((words) => words.contains('Tool call results')),
+        fromTask.words.where((words) => words.contains('Tool call results')),
         isNotEmpty,
         reason: 'the problem is on the page',
       );
@@ -103,9 +104,9 @@ Future<void> main() async {
         expect(find.text(heading), findsOneWidget, reason: heading);
       }
       // The same words in the same order, and the same picture.
-      expect(fromBoard.words, fromSession.words);
+      expect(fromTask.words, fromSession.words);
       expect(
-        fromBoard.differences(fromSession),
+        fromTask.differences(fromSession),
         0,
         reason: 'the two pages are not drawn the same',
       );
@@ -123,27 +124,27 @@ Future<void> main() async {
       expect(find.text('Open full view'), findsNothing);
     });
 
-    testWidgets('has a sheet that leads to it and draws none of it', (
-      tester,
-    ) async {
+    testWidgets('has a line on the task\'s bar that leads to it and draws none '
+        'of it', (tester) async {
       await openApp(tester, seed: seedHandedInTask);
-      await openSheet(tester, handedInTaskName);
-      final sheet = find.byType(BottomSheet);
-      expect(sheet, findsOneWidget);
-      Finder inSheet(Finder finder) =>
-          find.descendant(of: sheet, matching: finder);
-      // A card with what there is to say of the report, and the way to read it.
-      expect(inSheet(find.text('REPORT')), findsOneWidget);
+      await openTask(tester, handedInTaskName);
+      // The task opens to its conversation, not to a sheet.
+      expect(find.byType(BottomSheet), findsNothing);
+      final bar = find.byKey(const Key('task-bar'));
+      expect(bar, findsOneWidget);
+      Finder inBar(Finder finder) =>
+          find.descendant(of: bar, matching: finder);
+      // What there is to say of the report, and the way to read it.
       expect(
-        inSheet(find.textContaining('Handed in')),
+        inBar(find.textContaining('Handed in')),
         findsOneWidget,
         reason: 'when it was handed in',
       );
       expect(
-        inSheet(find.textContaining('5 pieces of evidence')),
+        inBar(find.textContaining('5 pieces of evidence')),
         findsOneWidget,
       );
-      expect(inSheet(find.text('View report')), findsOneWidget);
+      expect(inBar(find.text('View report')), findsOneWidget);
       // The report itself is not drawn here: no heading of it, none of its
       // words.
       for (final heading in [
@@ -152,16 +153,16 @@ Future<void> main() async {
         'TO REPRODUCE',
         'EVIDENCE',
       ]) {
-        expect(inSheet(find.text(heading)), findsNothing, reason: heading);
+        expect(inBar(find.text(heading)), findsNothing, reason: heading);
       }
       expect(
-        inSheet(find.textContaining('Tool call results are hard to read')),
+        inBar(find.textContaining('Tool call results are hard to read')),
         findsNothing,
       );
-      expect(inSheet(find.textContaining('What was wrong')), findsNothing);
+      expect(inBar(find.textContaining('What was wrong')), findsNothing);
 
-      // The page opens over the sheet, and closing it leaves the sheet as it
-      // was, with the actions of the review in reach.
+      // The page opens over the conversation, and closing it leaves the bar
+      // as it was, with the actions of the review in reach.
       await tester.ensureVisible(find.text('View report'));
       await tester.pump();
       await tester.tap(find.text('View report'));
@@ -176,7 +177,7 @@ Future<void> main() async {
 
     for (final (width, scale) in [(320.0, 1.0), (320.0, 1.5)]) {
       testWidgets(
-        'has a sheet whose report card fits a phone $width points wide, '
+        'has a bar whose report line fits a phone $width points wide, '
         'text at $scale×',
         (tester) async {
           tester.platformDispatcher.textScaleFactorTestValue = scale;
@@ -187,11 +188,11 @@ Future<void> main() async {
             width: width,
             height: 640,
           );
-          await openSheet(tester, handedInTaskName);
+          await openTaskSession(tester, toolShowcaseId);
           await tester.ensureVisible(find.text('View report'));
           await tester.pump();
           final button = tester.getRect(
-            find.widgetWithText(OutlinedButton, 'View report'),
+            find.widgetWithText(TextButton, 'View report'),
           );
           expect(button.left, greaterThanOrEqualTo(0));
           expect(button.right, lessThanOrEqualTo(width));
@@ -209,8 +210,8 @@ Future<void> main() async {
 
     testWidgets('says when the round of work handed none in', (tester) async {
       await openApp(tester, seed: seedUnreportedTask);
-      await openSheet(tester, unreportedTaskName);
-      // The sheet says so before the report is opened.
+      await openTask(tester, unreportedTaskName);
+      // The bar says so before the report is opened.
       expect(find.text('No report was handed in'), findsOneWidget);
       expect(find.textContaining('piece'), findsNothing);
       await tester.ensureVisible(find.text('View report'));
@@ -253,11 +254,12 @@ Future<void> main() async {
             'created': DateTime.now().millisecondsSinceEpoch / 1000,
             'updated': DateTime.now().millisecondsSinceEpoch / 1000,
           };
+          harness.seedTaskSession('task-working');
         },
       );
-      await openSheet(tester, 'Still at work');
+      await openTask(tester, 'Still at work');
       expect(find.text('Verify and merge'), findsOneWidget);
-      expect(find.text('REPORT'), findsNothing);
+      expect(find.textContaining('Handed in'), findsNothing);
       expect(find.text('View report'), findsNothing);
     });
   });
@@ -281,7 +283,7 @@ Future<void> main() async {
       seedHandedInTask(h);
     }
 
-    testWidgets('are drawn on the page, the same from the board and the session', (
+    testWidgets('are drawn on the page, the same from the task and the session', (
       tester,
     ) async {
       var frame = await openApp(tester, seed: seedWithPictures);
@@ -296,7 +298,7 @@ Future<void> main() async {
         (toolShowcaseId, shots[0]),
         (toolShowcaseId, shots[1]),
       ]);
-      final fromBoard = await readPage(tester, frame);
+      final fromTask = await readPage(tester, frame);
 
       await tester.pumpWidget(const SizedBox());
       frame = await openApp(tester, seed: seedWithPictures);
@@ -311,9 +313,9 @@ Future<void> main() async {
       ]);
       final fromSession = await readPage(tester, frame);
 
-      expect(fromBoard.words, fromSession.words);
+      expect(fromTask.words, fromSession.words);
       expect(
-        fromBoard.differences(fromSession),
+        fromTask.differences(fromSession),
         0,
         reason: 'the two pages are not drawn the same',
       );
@@ -360,7 +362,7 @@ Future<void> main() async {
       // As the app showed them before pictures were drawn: by name.
       expect(find.text('android-tool-call.png'), findsOneWidget);
       expect(find.text('android-hand-in.png'), findsOneWidget);
-      final fromBoard = await readPage(tester, frame);
+      final fromTask = await readPage(tester, frame);
 
       await tester.pumpWidget(const SizedBox());
       frame = await openApp(
@@ -373,8 +375,8 @@ Future<void> main() async {
       expect(drawnPictures, findsNothing);
       final fromSession = await readPage(tester, frame);
 
-      expect(fromBoard.words, fromSession.words);
-      expect(fromBoard.differences(fromSession), 0);
+      expect(fromTask.words, fromSession.words);
+      expect(fromTask.differences(fromSession), 0);
       expect(tester.takeException(), isNull);
     });
 
@@ -397,7 +399,7 @@ Future<void> main() async {
       // The rest of the page reads as it did.
       expect(find.text('PROBLEM'), findsOneWidget);
       expect(find.text('EVIDENCE'), findsOneWidget);
-      final fromBoard = await readPage(tester, frame);
+      final fromTask = await readPage(tester, frame);
 
       await tester.pumpWidget(const SizedBox());
       frame = await openApp(tester, seed: seedWithoutFiles);
@@ -405,8 +407,8 @@ Future<void> main() async {
       await settle(tester, 6);
       expect(failedPictures, findsNWidgets(2));
       final fromSession = await readPage(tester, frame);
-      expect(fromBoard.words, fromSession.words);
-      expect(fromBoard.differences(fromSession), 0);
+      expect(fromTask.words, fromSession.words);
+      expect(fromTask.differences(fromSession), 0);
 
       // The file is back: the person asks again.
       harness.seedShowcasePictures();

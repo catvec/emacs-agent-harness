@@ -4,11 +4,11 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/task.dart';
-import '../../models/task_actions.dart';
-import '../../models/tool_display.dart';
+import '../../models/task_chat.dart';
 import '../../state/app_controller.dart';
 import '../../state/drafts.dart';
 import '../../state/prompt_attachment.dart';
+import '../../state/settings_controller.dart';
 import '../../state/task_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
@@ -18,7 +18,6 @@ import '../widgets/connection_banner.dart';
 import '../widgets/image_attachments.dart';
 import '../widgets/quota_widgets.dart';
 import '../widgets/task_action_runner.dart';
-import 'hand_in_report_screen.dart';
 
 class TasksScreen extends StatefulWidget {
   const TasksScreen({
@@ -36,6 +35,9 @@ class TasksScreen extends StatefulWidget {
 
 class _TasksScreenState extends State<TasksScreen> {
   String? _column;
+
+  /// Why a tap on a task opened nothing, until it is dismissed.
+  String? _notice;
 
   static const _columns = [
     'needs-input',
@@ -105,6 +107,11 @@ class _TasksScreenState extends State<TasksScreen> {
                   message: controller.error!,
                   onDismiss: () => controller.reload(),
                 ),
+              if (_notice != null)
+                HarnessErrorBanner(
+                  message: _notice!,
+                  onDismiss: () => setState(() => _notice = null),
+                ),
               if (controller.loading && controller.tasks.isEmpty)
                 const Expanded(
                   child: Center(child: HarnessActivity(radius: 10)),
@@ -133,8 +140,7 @@ class _TasksScreenState extends State<TasksScreen> {
                     columns: _columns,
                     onSelectColumn: (column) =>
                         setState(() => _column = column),
-                    onOpen: (task) => _showTask(context, task),
-                    onOpenSession: widget.onOpenSession,
+                    onOpen: _openTask,
                   ),
                 ),
             ],
@@ -181,18 +187,17 @@ class _TasksScreenState extends State<TasksScreen> {
     }
   }
 
-  Future<void> _showTask(BuildContext context, HarnessTask task) async {
-    final controller = widget.app.tasks;
-    if (controller == null) return;
-    await showHarnessSheet<void>(
-      context: context,
-      builder: (sheetContext) => _TaskDetail(
-        app: widget.app,
-        controller: controller,
-        taskId: task.id,
-        onOpenSession: widget.onOpenSession,
-      ),
-    );
+  /// A task is handled in its conversation: the board only leads there.
+  /// Where it is verified, sent back, started or tried again is the
+  /// conversation's bar (`SessionTaskBar`), not a sheet or buttons here.
+  void _openTask(HarnessTask task) {
+    final session = task.sessionId;
+    if (session == null || session.isEmpty) {
+      setState(() => _notice = '“${task.title}” has no conversation to open.');
+      return;
+    }
+    if (_notice != null) setState(() => _notice = null);
+    widget.onOpenSession(session);
   }
 }
 
@@ -728,7 +733,6 @@ class _TaskBoard extends StatelessWidget {
     required this.columns,
     required this.onSelectColumn,
     required this.onOpen,
-    required this.onOpenSession,
   });
 
   final AppController app;
@@ -737,7 +741,6 @@ class _TaskBoard extends StatelessWidget {
   final List<String> columns;
   final ValueChanged<String> onSelectColumn;
   final ValueChanged<HarnessTask> onOpen;
-  final ValueChanged<String> onOpenSession;
 
   @override
   Widget build(BuildContext context) {
@@ -756,9 +759,7 @@ class _TaskBoard extends StatelessWidget {
               column: column,
               tasks: controller.forColumn(column),
               app: app,
-              controller: controller,
               onOpen: onOpen,
-              onOpenSession: onOpenSession,
             ),
           );
         },
@@ -809,9 +810,7 @@ class _TaskBoard extends StatelessWidget {
                           child: TaskCard(
                             task: task,
                             app: app,
-                            controller: controller,
                             onTap: () => onOpen(task),
-                            onOpenSession: onOpenSession,
                           ),
                         ),
                       if (controller.countFor(selected) == 0)
@@ -838,17 +837,13 @@ class _TaskColumn extends StatelessWidget {
     required this.column,
     required this.tasks,
     required this.app,
-    required this.controller,
     required this.onOpen,
-    required this.onOpenSession,
   });
 
   final String column;
   final List<HarnessTask> tasks;
   final AppController app;
-  final TaskController controller;
   final ValueChanged<HarnessTask> onOpen;
-  final ValueChanged<String> onOpenSession;
 
   @override
   Widget build(BuildContext context) {
@@ -893,9 +888,7 @@ class _TaskColumn extends StatelessWidget {
                     child: TaskCard(
                       task: task,
                       app: app,
-                      controller: controller,
                       onTap: () => onOpen(task),
-                      onOpenSession: onOpenSession,
                     ),
                   ),
                 if (tasks.isEmpty)
@@ -914,21 +907,20 @@ class _TaskColumn extends StatelessWidget {
   }
 }
 
+/// A task on the board: what it is, where it stands, and a way in.  Tapping
+/// it opens its conversation, where it is handled (see `SessionTaskBar`):
+/// the board is a list to choose from, with nothing to push on a card.
 class TaskCard extends StatelessWidget {
   const TaskCard({
     super.key,
     required this.task,
     required this.app,
-    required this.controller,
     required this.onTap,
-    required this.onOpenSession,
   });
 
   final HarnessTask task;
   final AppController app;
-  final TaskController controller;
   final VoidCallback onTap;
-  final ValueChanged<String> onOpenSession;
 
   @override
   Widget build(BuildContext context) {
@@ -981,65 +973,49 @@ class TaskCard extends StatelessWidget {
                   ),
                 ),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              task.title,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: HarnessText.rowTitle(context),
-                            ),
-                            const SizedBox(height: 3),
-                            meta,
-                            if (report != null &&
-                                report.summary.isNotEmpty) ...[
-                              const SizedBox(height: 8),
-                              // The words of the summary, which is Markdown: a
-                              // card has no room for its syntax.
-                              Text(
-                                markdownPreview(report.summary),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: HarnessText.subtitle(context),
-                              ),
-                            ],
-                            if (task.error != null &&
-                                task.error!.isNotEmpty) ...[
-                              const SizedBox(height: 8),
-                              Text(
-                                truncate(task.error!, 100),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: HarnessText.caption(context)
-                                    .copyWith(color: theme.colorScheme.error),
-                              ),
-                            ],
-                          ],
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 12, 4, 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          task.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: HarnessText.rowTitle(context),
                         ),
-                      ),
-                      // The buttons are a little further out than the text
-                      // above: their icon, not their padding, lines up.
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(4, 2, 4, 4),
-                        child: _TaskActions(
-                          task: task,
-                          controller: controller,
-                          actions: taskActionsOf(app, controller, task),
-                          runner: TaskActionRunner(
-                            controller: controller,
-                            onOpenSession: onOpenSession,
+                        const SizedBox(height: 3),
+                        meta,
+                        if (report != null && report.summary.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          // The words of the summary, which is Markdown: a
+                          // card has no room for its syntax.
+                          Text(
+                            markdownPreview(report.summary),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: HarnessText.subtitle(context),
                           ),
-                          onReview: onTap,
-                        ),
-                      ),
-                    ],
+                        ],
+                        if (task.error != null && task.error!.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            truncate(task.error!, 100),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: HarnessText.caption(
+                              context,
+                            ).copyWith(color: theme.colorScheme.error),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
+                ),
+                // The way in: the conversation of the task.
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: Center(child: adaptiveChevron(context)),
                 ),
               ],
             ),
@@ -1047,117 +1023,6 @@ class TaskCard extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-/// The buttons under a card: the one thing to do, the quickest way to stop
-/// or accept, and a menu of everything that applies.
-class _TaskActions extends StatelessWidget {
-  const _TaskActions({
-    required this.task,
-    required this.controller,
-    required this.actions,
-    required this.runner,
-    required this.onReview,
-  });
-
-  final HarnessTask task;
-  final TaskController controller;
-  final TaskActions actions;
-  final TaskActionRunner runner;
-  final VoidCallback onReview;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final busy = controller.busy;
-    final primary = actions.primary;
-    void run(TaskAction action) => runner.run(context, action, task);
-    Widget? lead;
-    if (task.isReview && !task.archived) {
-      // The work is looked at in the sheet, where the report is.
-      lead = HarnessTextButton(
-        label: 'Review',
-        icon: Icons.rate_review_outlined,
-        dense: true,
-        onPressed: onReview,
-      );
-    } else if (primary != null) {
-      lead = HarnessTextButton(
-        label: primary.labelFor(task),
-        icon: taskActionIcon(primary),
-        dense: true,
-        onPressed: busy ? null : () => run(primary),
-      );
-    } else if (actions.contains(TaskAction.openSession)) {
-      lead = HarnessTextButton(
-        label: 'Open',
-        icon: Icons.open_in_new_rounded,
-        dense: true,
-        onPressed: () => run(TaskAction.openSession),
-      );
-    }
-    // The quickest way out: accept the work, or stop what is going on.
-    final quick = task.isReview && actions.contains(TaskAction.verify)
-        ? TaskAction.verify
-        : actions.contains(TaskAction.drop)
-        ? TaskAction.drop
-        : actions.contains(TaskAction.stop)
-        ? TaskAction.stop
-        : null;
-    return Row(
-      children: [
-        if (lead != null) lead,
-        const Spacer(),
-        if (quick != null)
-          HarnessIconButton(
-            icon: switch (quick) {
-              TaskAction.verify => Icons.check_circle_outline_rounded,
-              TaskAction.stop => Icons.stop_circle_outlined,
-              _ => taskActionIcon(quick),
-            },
-            label: switch (quick) {
-              TaskAction.verify => 'Verify task',
-              TaskAction.stop => 'Stop task',
-              _ => 'Drop task',
-            },
-            size: 18,
-            color: quick == TaskAction.verify
-                ? HarnessColors.moss
-                : theme.colorScheme.onSurfaceVariant,
-            onPressed: busy ? null : () => run(quick),
-          ),
-        HarnessIconButton(
-          icon: Icons.more_horiz_rounded,
-          label: 'Task actions',
-          size: 18,
-          onPressed: () => _showActions(context),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _showActions(BuildContext context) async {
-    // What stops work or throws the task away is last, as in any menu.
-    final ordered = [
-      ...actions.all.where((action) => !action.destructive),
-      ...actions.all.where((action) => action.destructive),
-    ];
-    final action = await showHarnessMenu<TaskAction>(
-      context: context,
-      title: task.title,
-      items: [
-        for (final action in ordered)
-          HarnessMenuItem(
-            value: action,
-            label: taskActionMenuLabel(action, task),
-            icon: taskActionIcon(action),
-            destructive: action.destructive,
-          ),
-      ],
-    );
-    if (action == null || !context.mounted) return;
-    await runner.run(context, action, task);
   }
 }
 
@@ -1173,10 +1038,13 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
   late final TextEditingController _prompt;
   late final TextEditingController _cwd;
   String? _project;
-  String _priority = 'medium';
-  bool _refine = false;
-  bool _plan = false;
-  bool _mainTree = false;
+
+  /// The four choices below the description.  The sheet starts them as they
+  /// were left, which the settings keep (see [_setChoice]).
+  late String _priority;
+  late bool _refine;
+  late bool _plan;
+  late bool _mainTree;
   bool _busy = false;
   String? _error;
 
@@ -1201,13 +1069,14 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
     final start = widget.app.tasks?.project ?? widget.app.selectedProject;
     _cwd = TextEditingController(text: resumed ? draft.cwd : start ?? '');
     _project = resumed ? draft.project : start;
-    if (resumed) {
-      _priority = draft.priority;
-      _refine = draft.refine;
-      _plan = draft.plan;
-      _mainTree = draft.mainTree;
-      _attachments.addAll(draft.attachments);
-    }
+    if (resumed) _attachments.addAll(draft.attachments);
+    // How the last task was set, not the defaults: whoever files high
+    // priority tasks for the main tree does not pick them again each time.
+    final choices = widget.app.settings.newTaskChoices;
+    _priority = choices.priority;
+    _refine = choices.refine;
+    _plan = choices.plan;
+    _mainTree = choices.mainTree;
     _prompt.addListener(_keepDraft);
     _cwd.addListener(_keepDraft);
   }
@@ -1217,10 +1086,6 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
       ..prompt = _prompt.text
       ..cwd = _cwd.text
       ..project = _project
-      ..priority = _priority
-      ..refine = _refine
-      ..plan = _plan
-      ..mainTree = _mainTree
       ..attachments = List.of(_attachments);
   }
 
@@ -1292,6 +1157,26 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
   void _choose(VoidCallback change) {
     setState(change);
     _keepDraft();
+  }
+
+  /// Change the priority, or one of the three switches, and keep how they
+  /// are set, where the next sheet and the next run of the app start from
+  /// them.  They are kept as they change, not only when a task is sent: a
+  /// sheet that is closed after a switch was turned opens with it turned.  A
+  /// write that fails is for the settings to say
+  /// (`SettingsController.persistenceProblem`), not for the sheet to stop on.
+  void _setChoice(VoidCallback change) {
+    setState(change);
+    unawaited(
+      widget.app.settings.setNewTaskChoices(
+        NewTaskChoices(
+          priority: _priority,
+          refine: _refine,
+          plan: _plan,
+          mainTree: _mainTree,
+        ),
+      ),
+    );
   }
 
   @override
@@ -1407,37 +1292,41 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
             Text('PRIORITY', style: HarnessText.label(context)),
             const SizedBox(height: 7),
             HarnessSegmented<String>(
+              key: const Key('task-priority'),
               options: const [
                 ('low', 'Low'),
                 ('medium', 'Medium'),
                 ('high', 'High'),
               ],
               value: _priority,
-              onChanged: (value) => _choose(() => _priority = value),
+              onChanged: (value) => _setChoice(() => _priority = value),
             ),
             const SizedBox(height: 14),
             _ToggleRow(
+              key: const Key('task-refine'),
               icon: Icons.edit_note_rounded,
               title: 'Write it up first',
               subtitle:
                   'Wait in the backlog; refines the prompt before it starts.',
               value: _refine,
-              onChanged: (value) => _choose(() => _refine = value),
+              onChanged: (value) => _setChoice(() => _refine = value),
             ),
             _ToggleRow(
+              key: const Key('task-plan'),
               icon: Icons.map_outlined,
               title: 'Plan first',
               subtitle: 'A strong model plans; a medium model carries it out.',
               value: _plan,
-              onChanged: (value) => _choose(() => _plan = value),
+              onChanged: (value) => _setChoice(() => _plan = value),
             ),
             _ToggleRow(
+              key: const Key('task-main-tree'),
               icon: Icons.account_tree_outlined,
               title: 'Work in the main tree',
               subtitle:
                   'No worktree or branch; changes land in the checkout itself.',
               value: _mainTree,
-              onChanged: (value) => _choose(() => _mainTree = value),
+              onChanged: (value) => _setChoice(() => _mainTree = value),
             ),
             if (_error != null) ...[
               const SizedBox(height: 10),
@@ -1521,6 +1410,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
 
 class _ToggleRow extends StatelessWidget {
   const _ToggleRow({
+    super.key,
     required this.icon,
     required this.title,
     required this.subtitle,
@@ -1564,466 +1454,7 @@ class _ToggleRow extends StatelessWidget {
   }
 }
 
-class _TaskDetail extends StatelessWidget {
-  const _TaskDetail({
-    required this.app,
-    required this.controller,
-    required this.taskId,
-    required this.onOpenSession,
-  });
-
-  final AppController app;
-  final TaskController controller;
-  final String taskId;
-  final ValueChanged<String> onOpenSession;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) {
-        HarnessTask? task;
-        for (final item in controller.tasks) {
-          if (item.id == taskId) task = item;
-        }
-        if (task == null) {
-          return const Padding(
-            padding: EdgeInsets.all(30),
-            child: Center(child: Text('This task is no longer on the board.')),
-          );
-        }
-        final theme = Theme.of(context);
-        final muted = theme.colorScheme.onSurfaceVariant;
-        final color = HarnessColors.column(task.columnName, theme.brightness);
-        final session = task.sessionId == null
-            ? null
-            : app.summaryFor(task.sessionId!);
-        final actions = taskActionsOf(app, controller, task);
-        return Padding(
-          padding: EdgeInsets.only(
-            left: HarnessSpace.sheetGutter,
-            right: HarnessSpace.sheetGutter,
-            top: 2,
-            bottom: MediaQuery.viewInsetsOf(context).bottom + 22,
-          ),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Where the task stands: its column and its priority, then
-                // its name, then where it lives.
-                Row(
-                  children: [
-                    HarnessStatusLabel(
-                      label: _columnLabel(task.columnName),
-                      color: color,
-                      style: HarnessText.subtitle(context),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: HarnessMetaLine(
-                        parts: [
-                          if (task.priority == 'high')
-                            const HarnessMetaPart(
-                              'High priority',
-                              color: HarnessColors.oxide,
-                              weight: FontWeight.w700,
-                            )
-                          else
-                            '${task.priorityLabel} priority',
-                        ],
-                      ),
-                    ),
-                    HarnessIconButton(
-                      icon: Icons.close_rounded,
-                      label: 'Close',
-                      onPressed: () => Navigator.of(context).maybePop(),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  task.title,
-                  style: HarnessText.sheetTitle(context)
-                      .copyWith(fontSize: 24, letterSpacing: -0.5),
-                ),
-                const SizedBox(height: 6),
-                HarnessMetaLine(
-                  maxLines: 3,
-                  parts: [
-                    projectName(app.projectOfTask(task)),
-                    task.branch,
-                    if (session != null)
-                      'Session ${statusLabel(session.status)}',
-                    if (task.verified)
-                      const HarnessMetaPart(
-                        'Verified',
-                        color: HarnessColors.moss,
-                        weight: FontWeight.w700,
-                      ),
-                    if (task.noMerge) 'No merge',
-                    if (task.cannotContinue)
-                      const HarnessMetaPart(
-                        'Cannot continue',
-                        color: HarnessColors.amber,
-                        weight: FontWeight.w700,
-                      ),
-                    ...taskStateParts(task),
-                  ],
-                ),
-                if (task.sessionId != null) ...[
-                  const SizedBox(height: HarnessSpace.lg),
-                  // A task that waits for an answer is answered in its
-                  // session: that is the one thing to do here.
-                  if (actions.contains(TaskAction.answer))
-                    HarnessPrimaryButton(
-                      label: 'Answer in the task’s session',
-                      icon: Icons.front_hand_outlined,
-                      expand: true,
-                      onPressed: () {
-                        Navigator.of(context).maybePop();
-                        onOpenSession(task!.sessionId!);
-                      },
-                    )
-                  else
-                    HarnessSecondaryButton(
-                      label: 'Open the task’s session',
-                      icon: Icons.open_in_new_rounded,
-                      expand: true,
-                      onPressed: () {
-                        Navigator.of(context).maybePop();
-                        onOpenSession(task!.sessionId!);
-                      },
-                    ),
-                ],
-                if (task.error != null && task.error!.isNotEmpty) ...[
-                  const SizedBox(height: HarnessSpace.md),
-                  HarnessErrorBanner(
-                    message: task.error!,
-                    margin: EdgeInsets.zero,
-                  ),
-                ],
-                const SizedBox(height: HarnessSpace.lg),
-                _DetailSection(
-                  title: 'Prompt',
-                  child: Text(
-                    task.prompt.trim().isEmpty
-                        ? 'No prompt recorded.'
-                        : task.prompt,
-                    style: HarnessText.body(context).copyWith(height: 1.5),
-                  ),
-                ),
-                if (task.attachments.isNotEmpty) ...[
-                  const SizedBox(height: 16),
-                  _DetailSection(
-                    title: 'Attachments',
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        for (final name in task.attachments)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 4),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.image_outlined, size: 14),
-                                const SizedBox(width: 6),
-                                Expanded(
-                                  child: Text(
-                                    name,
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      fontSize: 12.5,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ],
-                if (task.report case final HandInReport report) ...[
-                  const SizedBox(height: HarnessSpace.md),
-                  _DetailSection(
-                    title: 'Report',
-                    child: _ReportEntry(report: report, sessionId: task.sessionId),
-                  ),
-                ],
-                if (task.feedback.isNotEmpty) ...[
-                  const SizedBox(height: HarnessSpace.md),
-                  _DetailSection(
-                    title: 'Feedback rounds',
-                    child: Column(
-                      children: [
-                        for (final round in task.feedback)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 2),
-                                  child: Icon(
-                                    Icons.reply_rounded,
-                                    size: 15,
-                                    color: muted,
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    round.text,
-                                    style: HarnessText.subtitle(context)
-                                        .copyWith(
-                                          color: theme.colorScheme.onSurface,
-                                        ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ],
-                if (task.conflicts.isNotEmpty) ...[
-                  const SizedBox(height: HarnessSpace.md),
-                  _DetailSection(
-                    title: 'Merge conflicts',
-                    child: Text(
-                      task.conflicts.join('\n'),
-                      style: HarnessText.mono(context),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: HarnessSpace.xl),
-                // What the harness said of the last thing done, where the
-                // person is looking: this sheet covers the board's banner.
-                if (controller.error != null) ...[
-                  HarnessErrorBanner(
-                    message: controller.error!,
-                    margin: EdgeInsets.zero,
-                    onDismiss: () => controller.reload(),
-                  ),
-                  const SizedBox(height: HarnessSpace.md),
-                ],
-                _DetailActions(
-                  task: task,
-                  controller: controller,
-                  actions: actions,
-                  runner: TaskActionRunner(
-                    controller: controller,
-                    // The conversation opens over the sheet's page: the
-                    // sheet goes, as it does for the button above.
-                    onOpenSession: (id) {
-                      Navigator.of(context).maybePop();
-                      onOpenSession(id);
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// What can be done with the task.  The one action to take is full width;
-/// the others share rows, in equal parts: no ragged edge, and a thumb can
-/// find them in the same place every time.  Then the priority, and last what
-/// stops the task or throws it away.
-class _DetailActions extends StatelessWidget {
-  const _DetailActions({
-    required this.task,
-    required this.controller,
-    required this.actions,
-    required this.runner,
-  });
-
-  final HarnessTask task;
-  final TaskController controller;
-  final TaskActions actions;
-  final TaskActionRunner runner;
-
-  @override
-  Widget build(BuildContext context) {
-    final busy = controller.busy;
-    final primary = actions.primary;
-    Future<void> run(TaskAction action) async {
-      await runner.run(context, action, task);
-      if (!context.mounted) return;
-      // A task that is gone, dropped or deleted, leaves nothing to look at.
-      if (!controller.tasks.any((other) => other.id == task.id)) {
-        unawaited(Navigator.of(context).maybePop());
-      }
-    }
-
-    // Opening the session has its own button above; answering is that.
-    final secondary = [
-      for (final action in actions.secondary)
-        HarnessSecondaryButton(
-          label: action.labelFor(task),
-          icon: taskActionIcon(action),
-          expand: true,
-          onPressed: busy ? null : () => run(action),
-        ),
-    ];
-    final dangerous = actions.dangerous;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (primary != null) ...[
-          HarnessPrimaryButton(
-            label: primary.labelFor(task),
-            icon: taskActionIcon(primary),
-            expand: true,
-            onPressed: busy ? null : () => run(primary),
-          ),
-          const SizedBox(height: HarnessSpace.sm),
-        ],
-        // Two to a row, the last alone if there is an odd one: the same
-        // width everywhere, whatever is offered.
-        for (var index = 0; index < secondary.length; index += 2) ...[
-          if (index > 0) const SizedBox(height: HarnessSpace.sm),
-          Row(
-            children: [
-              Expanded(child: secondary[index]),
-              const SizedBox(width: HarnessSpace.sm),
-              Expanded(
-                child: index + 1 < secondary.length
-                    ? secondary[index + 1]
-                    : const SizedBox.shrink(),
-              ),
-            ],
-          ),
-        ],
-        if (actions.canSetPriority) ...[
-          const SizedBox(height: HarnessSpace.lg),
-          Text('PRIORITY', style: HarnessText.label(context)),
-          const SizedBox(height: 7),
-          HarnessSegmented<String>(
-            options: const [
-              ('low', 'Low'),
-              ('medium', 'Medium'),
-              ('high', 'High'),
-            ],
-            value: task.priority ?? 'medium',
-            onChanged: (value) {
-              if (busy || value == (task.priority ?? 'medium')) return;
-              controller.setPriority(task, value);
-            },
-          ),
-        ],
-        if (dangerous.isNotEmpty) ...[
-          const SizedBox(height: HarnessSpace.md),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              for (final action in dangerous)
-                HarnessTextButton(
-                  label: action == TaskAction.delete
-                      ? 'Delete task'
-                      : action.labelFor(task),
-                  icon: taskActionIcon(action),
-                  destructive: true,
-                  onPressed: busy ? null : () => run(action),
-                ),
-            ],
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-/// What the sheet says of a task's report, and the way to read it.  The
-/// report is not drawn here: it is read on the page of its own that the
-/// `hand_in` call of the task's session opens as its full view, so it looks
-/// the same from both ([HandInReportScreen]).
-class _ReportEntry extends StatelessWidget {
-  const _ReportEntry({required this.report, this.sessionId});
-
-  final HandInReport report;
-
-  /// The task's session, whose harness gives the pictures of the evidence
-  /// (the page draws them).
-  final String? sessionId;
-
-  @override
-  Widget build(BuildContext context) {
-    final when = report.at;
-    final pieces = report.evidence.length;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        HarnessMetaLine(
-          maxLines: 2,
-          parts: [
-            if (report.missing)
-              const HarnessMetaPart(
-                'No report was handed in',
-                color: HarnessColors.amber,
-                weight: FontWeight.w700,
-              )
-            else
-              when == null
-                  ? 'Handed in'
-                  : 'Handed in ${HandInReportScreen.whenLabel(when)}',
-            if (pieces > 0)
-              pieces == 1
-                  ? '1 piece of evidence'
-                  : '$pieces pieces of evidence',
-          ],
-        ),
-        const SizedBox(height: HarnessSpace.md),
-        HarnessSecondaryButton(
-          label: 'View report',
-          icon: Icons.assignment_turned_in_outlined,
-          expand: true,
-          onPressed: () =>
-              HandInReportScreen.show(context, report, sessionId: sessionId),
-        ),
-      ],
-    );
-  }
-}
-
-class _DetailSection extends StatelessWidget {
-  const _DetailSection({required this.title, required this.child});
-  final String title;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return HarnessCard(
-      padding: const EdgeInsets.all(HarnessSpace.lg),
-      radius: 14,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title.toUpperCase(), style: HarnessText.label(context)),
-          const SizedBox(height: HarnessSpace.sm),
-          child,
-        ],
-      ),
-    );
-  }
-}
-
-String _columnLabel(String column) => switch (column) {
-  'needs-input' => 'Needs input',
-  'active' => 'Active',
-  'review' => 'Review',
-  'pending' => 'Pending',
-  'merging' => 'Merging',
-  'backlog' => 'Backlog',
-  'done' => 'Done',
-  'cancelled' => 'Cancelled',
-  _ => column,
-};
+String _columnLabel(String column) => taskColumnLabel(column);
 
 extension _FirstOrNull<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;

@@ -47,8 +47,8 @@ time it opens. It asks again only when the harness does.
   in as what they are, and what the call said, a screenful at a time, with
   *Show all* and a page of its own for the whole of it. A call that failed, or
   that the permission system refused, says so under its title. The call that
-  hands a task's work in shows its report, and the task board's *View report*
-  opens the same report on the same page. A stretch of quiet calls, the reads
+  hands a task's work in shows its report, and the *View report* on the bar of
+  the task's conversation opens the same report on the same page. A stretch of quiet calls, the reads
   and the commands among them, is one line, "3 tool calls: Read file ×2,
   Search files", which opens to the calls: the tools that fold are the harness's
   own allow list, the one its Emacs chat folds by. See
@@ -97,14 +97,38 @@ time it opens. It asks again only when the harness does.
   pull-to-refresh, and as the harness's records of a session arrive. What the
   harness says of a session replaces what the app knew of it, so *Needs you*,
   the count on its tab and the notice that sessions need an answer match what
-  Emacs shows. The task board's *Answer* opens the conversation of the task
-  that waits.
+  Emacs shows. A tap on a task that waits opens its conversation, where the
+  question it asks is answered.
 - **Shows the rest of the harness.** The task board (all seven columns, queue
-  state and slot use, backlog mode, and everything that can be done with a
-  task, below; a finished task's card has the words of its summary and its
-  sheet the whole report, drawn as Markdown), spend, tokens, live sessions, daily spend, per-model and
-  per-project breakdowns, budgets, the plan quota of the providers that report
-  one, the model catalogue, harness modules and the full ACP capability report.
+  state and slot use, backlog mode, submit; a finished task's card has the
+  words of its summary, without the Markdown it was written in), spend,
+  tokens, live sessions, daily spend, per-model and per-project breakdowns,
+  budgets, the plan quota of the providers that report one, the model
+  catalogue, harness modules and the full ACP capability report.
+- **Handles a task in its conversation.** The board is a list to choose from:
+  a tap on a task, in any column, opens the conversation of its session (a
+  page on a phone, the pane beside the list on a wide screen), and nothing on
+  a card changes the task. Above the message box the conversation has a bar
+  that says where the task stands (its column, priority and branch, what went
+  wrong, the files that conflict) and offers what can be done about it:
+  *Verify and merge* and *Send back* for a task in review, *Start now* and
+  *Queue it* in the backlog, *Start now* (or *Resume*) for one that waits for
+  a slot, *Retry* (or *Retry merge*) for one that stopped, *Archive* for one
+  that is done, and in its menu *Stop*, *Drop*, *Delete task* and *Mark
+  complete*, which ask first. *Send back* is feedback, typed in the message
+  box under it: the harness takes any message the person sends the session
+  of a task in review for the feedback that sends it back (and one sent to a
+  task in the backlog for its start), so the box says so (*Feedback · sending
+  it sends the task back*), and the bar gives its room to the keyboard while
+  it is typed. What the old detail sheet showed is in the conversation: the
+  prompt is the first message, the report is the `hand_in` card (its problem,
+  summary, how to reproduce it and evidence, drawn as Markdown) and, on the
+  bar, a line that says when it was handed in and has *View report*, which
+  opens its page, the rounds of feedback are the messages that followed, and
+  the bar names the rest, among it that no report was handed in. The bar follows the harness's
+  `task/*` events for the task of the open session, whatever project the
+  board is narrowed to, and asks `task/for-session` for a task it has not
+  heard of.
 - **Shows who pays, and how much of the plan is left.** As the harness's Emacs
   does in its header lines, a session, the task board and the session list read
   `$1.20` when calls are billed per token and `Max` when a subscription pays
@@ -155,41 +179,47 @@ time it opens. It asks again only when the harness does.
   out of reach. The app does not read all the sessions again when the harness
   makes or ends a record of a model call of its own (an `internal` session),
   which it does every few seconds.
-- **Manages a task as fully as the board in Emacs does.** A task's card (its
-  buttons and its *…* menu) and its sheet offer what the harness will take for
-  it where it stands, the same sets as the cards of the board in Emacs
-  (`harness-ui-tasks--actions`) and the actions of the `task_control` tool, and
-  no others:
+- **Offers everything the board in Emacs does, in the conversation.** The bar
+  of a task's conversation offers what the harness will take for the task
+  where it stands, the same sets as the cards of the board in Emacs
+  (`harness-ui-tasks--actions`) and the actions of the `task_control` tool,
+  and no others.  The conversation is *Open session*, *Answer* (the question
+  it asks) and *Message* (the message box), so the bar has the rest:
 
   | Where it is | What is offered |
   |---|---|
-  | Pending | *Start now*; *Pause* (the task is put back in the queue and held there: *Resume*, which a paused task offers first, lets the queue have it again); *Message* for a task that was put back in the queue after it worked; *Drop* |
-  | Backlog | *Start now*, *Queue it*, *Message* (feedback on the write-up, or steering while it is written), *Drop* |
-  | Needs input | *Answer*, which opens the task's session, and *Stop*, for a question or a permission; for a task that stopped part way *Retry* (*Retry merge* after a merge that failed), *Pause*, *Message*, *Mark complete* |
-  | Active | *Message* (steering), *Pause*, *Return to queue* (`task/return-to-pending`: the task goes back in the queue, to start again where it stopped), *Stop*, *Mark complete* |
-  | Merging | *Message*, *Stop*, *Mark complete* |
-  | Review | *Verify and merge*, *Send back* (with feedback), *Mark complete*, *Archive* |
-  | Done | *Archive*, *Message* (the session takes it up again) |
+  | Pending | *Start now*; *Pause* (the task is put back in the queue and held there: *Resume*, which a paused task offers first, lets the queue have it again); *Drop* |
+  | Backlog | *Start now*, *Queue it*, *Drop*; a message steers or starts it |
+  | Needs input | *Stop*, for a question or a permission; for a task that stopped part way *Retry* (*Retry merge* after a merge that failed), *Pause*, *Mark complete* |
+  | Active | *Pause*, *Return to queue* (`task/return-to-pending`: the task goes back in the queue, to start again where it stopped), *Stop*, *Mark complete* |
+  | Merging | *Stop*, *Mark complete* |
+  | Review | *Verify and merge*, *Send back* (the feedback is typed in the message box), *Mark complete*, *Archive* |
+  | Done | *Archive*; a message makes the session take it up again |
 
-  Every task that has a session also has *Open session*, and its *Priority*
-  (low, medium or high, which is its session's: a sheet has a control for it,
-  a menu a choice of the other two), and every task *Delete task*.  A task that
-  was archived is out of sight until *Show archived tasks*, and *Unarchive*
-  brings it back.  The harness does the work and checks the state of the task
-  each time (`test/task_actions_test.dart` has the table of what is offered
-  where); the app keeps no rules of its own about what may happen, and shows
-  what the harness says when it refuses, on the sheet, which covers the board's
-  own banner, and reads the board again, since a refusal usually means the
-  board was behind (it was verified in Emacs while the sheet was open).
-  What stops work or throws it away is asked first: *Stop*, *Drop*, *Delete task*
-  (which also asks whether the session goes too, for a task that has one worth
-  keeping) and *Mark complete*; a message and the feedback of *Send back* are
-  written in a dialog of their own, and an empty one sends nothing.  The
-  priority is shown at once and goes back if the harness refuses it.  An action
-  whose method the harness lacks (an older one) is not offered.
+  The bar shows the main one wide (*Verify and merge*, *Start now*, *Resume*,
+  *Retry*), up to two quick ways to go on beside it (*Send back*, *Queue it*,
+  *Pause*), and keeps the others behind its *…* menu, with what stops work or
+  throws it away last.  Every task that has a session also has its *Priority*
+  (low, medium or high, which is its session's: the menu offers the other
+  two), and every task *Delete task*.  A task that was archived is out of
+  sight until *Show archived tasks*, and *Unarchive* brings it back.  The
+  harness does the work and checks the state of the task each time
+  (`test/task_actions_test.dart` has the table of what is offered where); the
+  app keeps no rules of its own about what may happen, and shows what the
+  harness says when it refuses, in the bar, and reads the board again, since a
+  refusal usually means the board was behind (it was verified in Emacs while
+  the conversation was open).  What stops work or throws it away is asked
+  first: *Stop*, *Drop*, *Delete task* (which also asks whether the session
+  goes too, for a task that has one worth keeping) and *Mark complete*.  A
+  message, and the feedback of *Send back*, are typed in the message box of
+  the conversation, which says what sending does (*Feedback · sending it sends
+  the task back*), and an empty one sends nothing.  The priority is shown at
+  once and goes back if the harness refuses it.  An action whose method the
+  harness lacks (an older one) is not offered.
 
-  The queue of a project is *set*, never toggled, from the line under the
-  project's name: *Pause the queue* and *Queue the backlog automatically*
+  The queue of a project stays on the board, as it is the board's and not a
+  task's.  It is *set*, never toggled, from the line under the project's name:
+  *Pause the queue* and *Queue the backlog automatically*
   (`task/suspend-queue`, `task/resume-queue`, `task/set-backlog-mode`), so a
   phone that is a moment behind cannot turn a queue the other way from the one
   asked for.  *Pause all* and *Resume all* do the same to every task of the
@@ -199,10 +229,11 @@ time it opens. It asks again only when the harness does.
   follows a queue that is paused in Emacs, or by an agent, as the harness says
   so (`task/queue`, `task/backlog-mode`).
 
-  | The menu of a card | The sheet of a task | What is asked first |
+  | A task in review | The menu of the bar | What is asked first |
   |---|---|---|
-  | ![The menu of a task at work](screenshots/android-task-card-menu.png) | ![The sheet of a task at work: message, pause, return to the queue, mark complete, priority, stop and delete](screenshots/android-task-sheet-actions.png) | ![Stopping a task asks first](screenshots/android-task-stop-asks.png) |
-  | ![A task that is paused waits in Pending, to be resumed](screenshots/android-task-paused.png) | ![The queue of a project: paused, with every task paused](screenshots/android-task-queue-paused.png) | ![The sheet of a task in review on an iPhone](screenshots/ios-task-sheet-review.png) |
+  | ![The bar of a task in review: the report above it, Verify and merge and Send back in it](screenshots/android-task-review.png) | ![The menu of a task at work: return to queue, mark complete, priority, stop and delete](screenshots/android-task-bar-menu.png) | ![Stopping a task asks first](screenshots/android-task-stop-asks.png) |
+  | ![A task that is paused waits in Pending, to be resumed](screenshots/android-task-paused.png) | ![The queue of a project: paused, with every task paused](screenshots/android-task-queue-paused.png) | ![Send back: the feedback is typed in the box, which makes room for the keyboard](screenshots/android-task-feedback.png) |
+
  **Detects extensions per feature.** `initialize` is read for standard ACP
   capabilities and for the harness's `_harness.methods` and `_harness.events`.
   Each screen asks for the exact methods it needs. A missing method turns off
@@ -349,11 +380,12 @@ time it opens. It asks again only when the harness does.
   the harness's machine, so the bytes go with `task/submit`
   (`opts.attachments`, each `{mime, name, data}` with `data` in base64) and the
   harness keeps each as a file of the task's own, which its session is handed
-  and its detail view lists. The type is read from the bytes (PNG, JPEG, GIF
-  or WebP; anything else is refused on the sheet, as is a picture over 10 MB),
-  the pictures stay with the description if the sheet is closed or the
-  connection lost, and the button shows only when the harness's `task/settings`
-  say it takes them (`inlineAttachments`): an older harness would lose them.
+  and the bar of its conversation counts. The type is read from the bytes
+  (PNG, JPEG, GIF or WebP; anything else is refused on the sheet, as is a
+  picture over 10 MB), the pictures stay with the description if the sheet is
+  closed or the connection lost, and the button shows only when the harness's
+  `task/settings` say it takes them (`inlineAttachments`): an older harness
+  would lose them.
 - **Starts a new task as the last one was set.** The New task sheet's
   priority and its three switches (*Write it up first*, *Plan first*, *Work in
   the main tree*) are kept as they were left, so a person who files the same
@@ -897,7 +929,7 @@ same whichever way it is come to:
 
 | From | How |
 |---|---|
-| The task board | Tap the task. Its sheet has a *Report* card -- when the work was handed in and how many pieces of evidence came with it -- and *View report*. The sheet draws none of the report itself. |
+| The task | Tap it on the board: its conversation opens, and the bar above the message box has a line for the report -- when the work was handed in and how many pieces of evidence came with it -- and *View report*. The bar draws none of the report itself. A round of work that handed none in has no call to open, so the bar's line is the way to its page. |
 | The task's session | Open the call that handed the work in: its card shows the report, and *Open full view* opens the page. |
 
 The page reads the report to its end: the problem first, then the summary as
@@ -919,8 +951,8 @@ as `{kind: "image", path, caption}`. The app asks the harness for the bytes
 (`session/image`, of the session whose transcript shows the file) and draws
 them, in the opened card of a `read_file` call and under the line of a hand-in's
 evidence: in the card of the `hand_in` call and on the page of the report
-(`HandInReportScreen`), which the call's full view and the task board's *View
-report* both open.
+(`HandInReportScreen`), which the call's full view and the *View report* of the
+task's bar both open.
 
 - While a picture comes there is a placeholder of its own size; once it has,
   it is drawn no larger than it is and no taller than a screenful, and decoded
@@ -983,7 +1015,7 @@ the way.
 |---|---|
 | A conversation | What the agent answers, and a plan; the messages sent to it, whoever sends them, in their bubble (the text takes the bubble's colour, and the bubble hugs it); the summary a compaction leaves, which is a page long, under the line "Context compacted · N words" that opens to it (a note of one line stays on its line). Thoughts, hints and nodes the app does not know are shown as they are, as in the Emacs chat. |
 | A tool call | The prose in its input (a summary, a prompt, a question, a body) and, for the hand-in call, the problem, the summary, how to reproduce it and the notes among the evidence. |
-| The task board, the sheet of a task | The report the task was handed in with, by the same `HandInReportView` as the hand-in call's card and from the same record (`TaskReport.handIn`), so that a report reads the same on the board and in the session: the problem, the summary, how to reproduce it and the evidence. A round of work that handed none in says so, and draws the last message of its session. |
+| A task's conversation | The report the task was handed in with: the card of the `hand_in` call opens to the problem, the summary, how to reproduce it and the evidence (`HandInReportView`), and the bar above the message box has a line for it with *View report*, which says when a round of work handed none in (the last message of the session, which the conversation draws, is all there is, and the page shows it as such). |
 | The task board, a card | The first words of the summary, without its syntax (`markdownPreview` in `lib/src/ui/format.dart`): a heading, a paragraph and an item of a list are told apart by a dot, a link is its text, a code span its code, and words that only look like syntax (`snake_case`, `2 * 3`, `List<String>`) stay. A row of a list has no room for a heading. |
 | A question | The question of the card that asks one. |
 
@@ -1029,6 +1061,16 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   (`test/task_scope_test.dart`, `task_board_widget_test.dart`); the sessions
   that internal sessions do not make the app read again
   (`test/session_events_test.dart`)
+- a task handled in its conversation: a tap on a task of any column opens its
+  session, a card has nothing to push, and the bar of the conversation
+  verifies, sends back (by typing), starts, queues, retries, stops, completes
+  and archives, says why the harness refused, follows the task's events and
+  gives its room to the keyboard (`test/task_bar_test.dart`); what each state
+  offers, as a table (`test/task_chat_test.dart`); which task a session is the
+  session of, for a board narrowed to another project and for a task it has
+  not heard of (`test/task_session_test.dart`); pictures of the board and of
+  the conversation, drawn with the fonts of a phone and written where
+  `HARNESS_SHOTS` says (`test/task_bar_screenshots_test.dart`)
 - the new task sheet's project row against a harness that lists worktrees and
   scratch directories as projects
 - transcript replay, streaming, thought blocks and plan
@@ -1058,14 +1100,15 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   and opens and cuts again (pictures written where `HARNESS_SHOTS` says)
 - Markdown (`test/markdown_preview_test.dart`, `markdown_rendering_test.dart`,
   `markdown_screenshots_test.dart`): the report a task was handed in with is
-  drawn as Markdown on the board -- its card has the words of the summary
-  without the syntax (`markdownPreview`), its sheet the problem, the summary,
-  how to reproduce it and the evidence, with headings, bold, code, lists and
-  links -- and so are the messages sent to a conversation and the summary a
-  compaction leaves, which is folded under its line; what the agent writes and
-  a plan were drawn already, and are kept so; thoughts and hints stay as they
-  are; pictures of them, in both styles and both themes, are written where
-  `HARNESS_SHOTS` says
+  drawn as Markdown -- the card of the task on the board has the words of the
+  summary without the syntax (`markdownPreview`), and the `hand_in` card of
+  its conversation the problem, the summary, how to reproduce it and the
+  evidence, with headings, bold, code, lists and links -- and so are the
+  messages sent to a conversation and the summary a compaction leaves, which
+  is folded under its line; what the agent writes and a plan were drawn
+  already, and are kept so; thoughts and hints stay as they are; pictures of
+  them, in both styles and both themes, are written where `HARNESS_SHOTS`
+  says
 - tool calls (`test/tool_display_test.dart`, `test/tool_card_test.dart`,
   `test/tool_flow_test.dart`): a call is closed and builds nothing of its
   body until it is opened; its input is the text it was, never `\n` in quotes;
@@ -1079,17 +1122,18 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   text; and the whole path from the harness's nodes (`call-id`, `is-error`, a
   result's `meta`) to the page
 - the report of a task (`test/hand_in_report_test.dart`,
-  `test/tool_display_test.dart`): the board's *View report* and the session's
+  `test/tool_display_test.dart`): the task's *View report* and the session's
   *Open full view* open the same page, with the same words in the same order
-  and the same pixels (the test compares every pixel of the app); the sheet of
-  a task leads to its report and draws none of it; a round that handed none in
+  and the same pixels (the test compares every pixel of the app); the bar of
+  a task's conversation leads to its report and draws none of it, a tap on the
+  task opening the conversation and no sheet; a round that handed none in
   says so, with the last message of its session; a task that has handed
   nothing in has no *View report*; the report of a task and that of its call
   are read the same; the screenshots among the evidence are drawn on the page
   (asked of the harness for the session of the task, by the path the report
   names them by), the same from both ways to it, shown larger when tapped,
   named by a harness that gives none, and said to be gone where they are; the
-  page, and the report card of the sheet, fit 320
+  page, and the report line of the bar, fit 320
   points and one and a half times the text, the page in either style
   (`test/hand_in_report_screenshots_test.dart`: pictures of it, from the top
   of the page, from where its evidence begins, a screen further on and at its
@@ -1126,7 +1170,7 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   diagram of the option tapped last, starts again with nothing ticked for the
   next question and keeps its ticks while the card is laid out again, and is
   as whole on those phones as a question of one choice
-  (`test/question_task_board_test.dart`: the task board's *Answer* opens that
+  (`test/question_task_board_test.dart`: a tap on the task that asks opens that
   conversation; `test/question_screenshots_test.dart`: pictures of the card,
   drawn with the fonts of a phone, written where `HARNESS_SHOTS` says)
 - pictures of the harness's machine (`test/picture_test.dart`: what the
@@ -1134,7 +1178,7 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   `test/picture_widget_test.dart`: a picture while it comes, once it has, when
   it cannot and shown larger, in a `read_file` card, in a hand-in and in its
   full view; `test/picture_flow_test.dart`: the same through the whole client
-  against the fake harness, and in the task's sheet, with a harness that gives
+  against the fake harness, and from the task's conversation, with a harness that gives
   none and with a picture that is gone, and on the nodes and the task a real
   harness wrote for a `read_file` and a `hand_in`
   (`test/support/live_picture_nodes.json`, captured from a live harness, so
@@ -1144,7 +1188,8 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   pictures (`test/new_task_images_test.dart`: attached, removed, kept in the
   draft, limited to four, refused by type and size, hidden from a harness that
   does not take them, listed on the task), and the message composer still
-  attaching as it did
+  attaching as it did; the bar of a task's conversation counts the pictures it
+  was sent with (`test/task_bar_test.dart`)
 - the new-task sheet's priority and switches (`test/new_task_choices_test.dart`,
   and `settings_controller_test.dart` for the store): the first sheet starts
   from the defaults, the next from how the last was set, sent or only closed,
@@ -1157,8 +1202,8 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   leaves them. With `HARNESS_SHOTS=DIR` the same file draws the sheet as it
   opens, with the choices made and opened again, as Android and as iPhone
   pictures (the Material buttons' labels are squares in the test font)
-- task review and verification, usage (a row per project, worktrees added),
-  server capability table and project list
+- usage (a row per project, worktrees added), server capability table and
+  project list
 - what can be done with a task (`test/task_actions_test.dart`,
   `task_controller_actions_test.dart`, `task_actions_widget_test.dart`): the
   actions offered for a task in each column and state, as the board in Emacs
@@ -1167,12 +1212,12 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   only toggle is toggled only when the queue is not as asked); that every
   action offered is one the harness takes, tried on a task in each state
   against a harness that checks the state as the real one does; what is asked
-  before a task is stopped, dropped, deleted or marked complete; the message
-  and the feedback; the priority, shown at once and taken back when refused;
-  the harness's words on the sheet when it refuses, and the board read again;
-  the queue and the backlog mode set from their switches, and followed when
-  Emacs changes them; archived tasks hidden and brought back; and a harness
-  from before the controls, which is offered none of them
+  before a task is stopped, dropped, deleted or marked complete; the feedback
+  typed in the message box; the priority, shown at once and taken back when
+  refused; the harness's words in the bar when it refuses, and the board read
+  again; the queue and the backlog mode set from their switches, and followed
+  when Emacs changes them; archived tasks hidden and brought back; and a
+  harness from before the controls, which is offered none of them
 - plain ACP fallback (three tabs, working chat, standard notice)
 - Cupertino rendering of the shell
 - layout (`test/layout_test.dart`): the notice that a session needs an answer
@@ -1278,15 +1323,20 @@ with no form and no second approval (the mock would take six seconds), and
 again with the harness cut off (the browser's WebSocket is closed by
 Playwright) it must show the reconnecting card and, once the harness is back,
 get in by itself. `e2e/run_task_actions.mjs` then does what a person does with
-a task -- the menu of a card, the sheet with its actions and priority, what
-is asked before a task is stopped or deleted, a task paused and resumed, one
-archived and brought back, the queue of a project paused -- on both styles, and
-writes a screenshot for each.  The screenshots in this README are the output.
+a task, from its conversation -- the bar and its menu, what is asked before a
+task is stopped or deleted, a task paused and resumed, one in review sent back
+with feedback typed in the box, one archived and brought back, the queue of a
+project paused -- on both styles, and writes a screenshot for each.  The
+screenshots in this README are the output, but the ones of the task board and
+of a task's conversation (`android-tasks*.png`, `android-task-review.png`,
+`-feedback`, `-backlog`, `-stopped`, `-bar-menu`, `-stop-asks`, `-paused` and
+`-queue-paused`), which are drawn by `test/task_bar_screenshots_test.dart`
+with the fonts of a phone until the next run of the flows draws them again.
 
 | | |
 |---|---|
 | ![Question with an ASCII diagram](screenshots/ios-question.png) | ![Permission request](screenshots/ios-permission.png) |
-| ![Task review](screenshots/android-task-detail.png) | ![Server capabilities](screenshots/android-server.png) |
+| ![A task in review, in its conversation](screenshots/android-task-review.png) | ![Server capabilities](screenshots/android-server.png) |
 | ![New task](screenshots/android-new-task-sheet.png) | ![Standard ACP fallback](screenshots/android-standard-sessions.png) |
 
 The environment used to build this had no KVM, so the emulator is Chromium's

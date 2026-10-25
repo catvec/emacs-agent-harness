@@ -21,7 +21,9 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
   "$FLUTTER" build web --release --dart-define=E2E=true
 fi
 
-"$DART" run tool/mock_harness_server.dart --port "$ACP_PORT" > "$LOG_DIR/mock.log" 2>&1 &
+# The one the flows walk: its tasks have their conversations, where a task is
+# handled (verified, sent back, started).
+"$DART" run tool/mock_harness_server.dart --port "$ACP_PORT" --task-sessions > "$LOG_DIR/mock.log" 2>&1 &
 MOCK=$!
 "$DART" run tool/mock_harness_server.dart --port "$STANDARD_PORT" --standard > "$LOG_DIR/mock-standard.log" 2>&1 &
 MOCK_STANDARD=$!

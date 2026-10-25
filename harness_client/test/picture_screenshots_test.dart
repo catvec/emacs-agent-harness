@@ -1,7 +1,7 @@
 // Pictures of the pictures: the screenshots a task handed in, the image a
-// `read_file` call read, a picture shown larger, the report a task's sheet
-// opens, and the places where a picture is not there, on a phone, drawn with
-// the fonts of one.
+// `read_file` call read, a picture shown larger, the report a task's
+// conversation opens, and the places where a picture is not there, on a
+// phone, drawn with the fonts of one.
 //
 //   HARNESS_SHOTS=/some/directory flutter test test/picture_screenshots_test.dart
 //
@@ -69,9 +69,12 @@ void _seedRead(FakeHarness harness) {
 
 void _seedShowcase(FakeHarness harness) => harness.seedToolShowcase();
 
-/// The task in review has a session, as every task does.
-void _seedReview(FakeHarness harness) =>
-    harness.tasks['task-2']!['session'] = 's-review';
+/// The task in review has a session, as every task does: a tap on the task
+/// opens that conversation.
+void _seedReview(FakeHarness harness) {
+  harness.tasks['task-2']!['session'] = 's-review';
+  harness.seedTaskSession('task-2');
+}
 
 /// A phone's screen, in points.
 const _width = 390.0;
@@ -155,15 +158,16 @@ final _cases = <_Case>[
     await tester.tapAt(at);
     await _pump(tester, 4);
   }),
-  _Case('picture-task-sheet', seed: _seedReview, (tester, harness) async {
+  _Case('picture-task-report', seed: _seedReview, (tester, harness) async {
     await tester.tap(find.text('Tasks'));
     await _pump(tester, 6);
     await tester.ensureVisible(find.text('Review'));
     await tester.tap(find.text('Review'));
     await _pump(tester, 4);
     await tester.tap(find.text('Review the emulator screenshots'));
-    await _pump(tester, 12);
-    // The sheet leads to the report; the report is on its page.
+    await _pump(tester, 20);
+    // The bar of the conversation leads to the report; the report is on its
+    // page.
     await _scrollTo(tester, find.text('View report'));
     await tester.tap(find.text('View report'));
     await _pump(tester, 12);

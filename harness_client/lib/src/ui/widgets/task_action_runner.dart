@@ -76,12 +76,13 @@ String taskActionMenuLabel(TaskAction action, HarnessTask task) =>
 
 /// Does what a person chose to do with a task: asks first where the action
 /// stops work or throws it away, or needs words, then has the board's
-/// [TaskController] do it.  The card's menu and the task's sheet both go
-/// through here, so a task is handled the same way wherever it is touched.
+/// [TaskController] do it.  The bar of a task's conversation
+/// (`SessionTaskBar`) is where a task is handled, and goes through here, so a
+/// task is handled the same way wherever it is touched.
 ///
 /// A failure is the controller's to say ([TaskController.error], which the
-/// board and the sheet show): the harness checks every action against the
-/// task as it is now, and its words are the explanation.
+/// conversation's bar and the board show): the harness checks every action
+/// against the task as it is now, and its words are the explanation.
 class TaskActionRunner {
   const TaskActionRunner({
     required this.controller,

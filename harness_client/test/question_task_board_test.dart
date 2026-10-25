@@ -1,7 +1,8 @@
-// A task whose agent asks a question waits on the task board with an
-// "Answer" button.  The question is not on the board: it is in the
-// conversation of the task, so that is where the button has to take the
-// person (it used to open the task's detail, which has nowhere to answer).
+// A task whose agent asks a question waits on the task board, and the question
+// is not on the board: it is in the conversation of the task.  So a tap on the
+// task, which opens that conversation, is the way to answer it (it used to
+// open a detail with nowhere to answer, then a button took the person to the
+// conversation).
 //
 // Drawn with the fonts of a phone: the board's header holds a spend chip,
 // which the test font, with its wide letters, squeezes out of its row.
@@ -49,7 +50,7 @@ Future<void> main() async {
     return harness;
   }
 
-  testWidgets('"Answer" opens the conversation of the task that asks', (
+  testWidgets('a tap on the task that asks opens its conversation', (
     tester,
   ) async {
     // The agent of "Answer the permission" asked a question instead: the
@@ -66,8 +67,9 @@ Future<void> main() async {
       },
     );
     expect(find.text('Answer the permission'), findsOneWidget);
-    await tester.ensureVisible(find.text('Answer'));
-    await tester.tap(find.text('Answer'));
+    // Nothing on the card to push: the card is the way in.
+    expect(find.text('Answer'), findsNothing);
+    await tester.tap(find.text('Answer the permission'));
     await _settle(tester, 10);
 
     // The conversation of the task is open, with what it asks to answer.
@@ -86,7 +88,7 @@ Future<void> main() async {
     expect(find.byType(InteractionCard), findsNothing);
   });
 
-  testWidgets('the detail of the task leads to the conversation too', (
+  testWidgets('the answer can be typed in the conversation it leads to', (
     tester,
   ) async {
     final harness = await open(
@@ -101,12 +103,10 @@ Future<void> main() async {
       },
     );
     await tester.tap(find.text('Answer the permission'));
-    await _settle(tester, 8);
-    // A task that waits for an answer says where it is answered.
-    expect(find.text('Answer in the task’s session'), findsOneWidget);
-    await tester.ensureVisible(find.text('Answer in the task’s session'));
-    await tester.tap(find.text('Answer in the task’s session'));
     await _settle(tester, 10);
+    // No detail on the way: the task's own conversation is what opens, and
+    // the answer is given there.
+    expect(find.text('Answer in the task’s session'), findsNothing);
     expect(find.byType(InteractionCard), findsOneWidget);
     await tester.enterText(
       find.byKey(const Key('question-answer-field')),

@@ -2,10 +2,11 @@
 //
 //   HARNESS_SHOTS=/some/directory flutter test test/hand_in_report_screenshots_test.dart
 //
-// writes a PNG for each case there: the sheet of a task on the board with its
-// report card, the page "View report" opens, the page the session's "Open
-// full view" opens (the same page, drawn the same, the screenshots the task
-// handed in among its evidence drawn), the two side by side from their top,
+// writes a PNG for each case there: the conversation of a task, tapped on the
+// board, with the report line on its bar, the page "View report" opens, the
+// page the session's "Open full view" opens (the same page, drawn the same,
+// the screenshots the task handed in among its evidence drawn), the two side
+// by side from their top,
 // from where their evidence begins (the screenshots), a screen further on
 // (the second screenshot) and from their end, the report of work that handed
 // none in, the page where a screenshot is gone, and the page in the style of
@@ -171,14 +172,14 @@ Future<void> main() async {
     expect(tester.takeException(), isNull);
   }
 
-  testWidgets('draws the sheet of a task with its report card', (tester) async {
+  testWidgets('draws the bar of a task with its report line', (tester) async {
     final frame = await open(tester);
-    await openSheet(tester, handedInTaskName);
+    await openTask(tester, handedInTaskName);
     await tester.ensureVisible(find.text('View report'));
     await settle(tester, 4);
     expect(find.text('View report'), findsOneWidget);
     if (shots != null) {
-      await _write(tester, await _picture(tester, frame), path('report-sheet'));
+      await _write(tester, await _picture(tester, frame), path('report-bar'));
     }
   });
 
@@ -212,12 +213,12 @@ Future<void> main() async {
     );
   }
 
-  testWidgets('draws the report from the board and from the session', (
+  testWidgets('draws the report from the task and from the session', (
     tester,
   ) async {
     var frame = await open(tester);
     await viewReport(tester, handedInTaskName);
-    final board = await readWhole(tester, frame);
+    final fromTask = await readWhole(tester, frame);
 
     await tester.pumpWidget(const SizedBox());
     frame = await open(tester);
@@ -228,14 +229,14 @@ Future<void> main() async {
     final session = await readWhole(tester, frame);
 
     // The same words, and the same pixels, from the top and at the end.
-    expect(board.read.words, session.read.words);
-    expect(board.read.differences(session.read), 0);
+    expect(fromTask.read.words, session.read.words);
+    expect(fromTask.read.differences(session.read), 0);
 
     if (shots != null) {
-      await _write(tester, board.top, path('report-from-board'));
-      await _write(tester, board.evidence, path('report-from-board-evidence'));
-      await _write(tester, board.more, path('report-from-board-evidence-more'));
-      await _write(tester, board.end, path('report-from-board-end'));
+      await _write(tester, fromTask.top, path('report-from-task'));
+      await _write(tester, fromTask.evidence, path('report-from-task-evidence'));
+      await _write(tester, fromTask.more, path('report-from-task-evidence-more'));
+      await _write(tester, fromTask.end, path('report-from-task-end'));
       await _write(tester, session.top, path('report-from-session'));
       await _write(
         tester,
@@ -249,7 +250,7 @@ Future<void> main() async {
       );
       await _write(tester, session.end, path('report-from-session-end'));
       await _write(tester, card, path('report-session-card'));
-      const boardWay = 'Tasks > the task > View report';
+      const taskWay = 'Tasks > the task > View report';
       const sessionWay =
           'Sessions > the task\'s session > hand-in > Open full view';
       Future<void> both(String name, ui.Image left, ui.Image right) async {
@@ -258,7 +259,7 @@ Future<void> main() async {
           await _sideBySide(
             tester,
             left: left,
-            leftLabel: boardWay,
+            leftLabel: taskWay,
             right: right,
             rightLabel: sessionWay,
           ),
@@ -266,18 +267,18 @@ Future<void> main() async {
         );
       }
 
-      await both('report-both-entry-points', board.top, session.top);
+      await both('report-both-entry-points', fromTask.top, session.top);
       await both(
         'report-both-entry-points-evidence',
-        board.evidence,
+        fromTask.evidence,
         session.evidence,
       );
       await both(
         'report-both-entry-points-evidence-more',
-        board.more,
+        fromTask.more,
         session.more,
       );
-      await both('report-both-entry-points-end', board.end, session.end);
+      await both('report-both-entry-points-end', fromTask.end, session.end);
     }
   });
 
@@ -318,7 +319,7 @@ Future<void> main() async {
 
   testWidgets('draws the report in the style of an iPhone', (tester) async {
     final frame = await open(tester, apple: true);
-    await openSheet(tester, handedInTaskName);
+    await openTask(tester, handedInTaskName);
     tester.takeException();
     await tester.ensureVisible(find.text('View report'));
     await settle(tester, 4);
@@ -326,7 +327,7 @@ Future<void> main() async {
       await _write(
         tester,
         await _picture(tester, frame),
-        path('report-sheet-ios'),
+        path('report-bar-ios'),
       );
     }
     await tester.tap(find.text('View report'));
@@ -345,7 +346,7 @@ Future<void> main() async {
       await _write(
         tester,
         await _picture(tester, frame),
-        path('report-from-board-ios'),
+        path('report-from-task-ios'),
       );
     }
   });

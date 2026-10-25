@@ -1,7 +1,10 @@
 // The two ways to a task's report, driven the way a person drives them, and
 // the means to compare what they end on: the words of a page and every pixel
-// of the app.  The tests of the report (`hand_in_report_test.dart`) and its
-// pictures (`hand_in_report_screenshots_test.dart`) share them.
+// of the app.  One is the task's: tap it on the board, and *View report* is on
+// the bar of its conversation.  The other is the session's: the call that
+// handed the work in, opened, and its *Open full view*.  The tests of the
+// report (`hand_in_report_test.dart`) and its pictures
+// (`hand_in_report_screenshots_test.dart`) share them.
 //
 // Drawn with the fonts of a phone (`loadRealFonts`): the board's header holds
 // a spend chip, which the test font, with its wide letters, squeezes out of
@@ -16,6 +19,7 @@ import 'package:harness_client/app.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/ui/screens/hand_in_report_screen.dart';
+import 'package:harness_client/src/ui/screens/tasks_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fake_harness.dart';
@@ -84,17 +88,37 @@ Future<GlobalKey> openApp(
   return frame;
 }
 
-/// The sheet of the task [name] on the board.
-Future<void> openSheet(WidgetTester tester, String name) async {
+/// The conversation of the task [name], opened from the board: a tap on a
+/// task opens the session it works in, with the bar that handles the task
+/// above its message box.
+Future<void> openTask(WidgetTester tester, String name) async {
   await tester.tap(find.text('Tasks'));
   await settle(tester, 6);
   await tester.tap(find.text(name));
-  await settle(tester, 8);
+  await settle(tester, 30);
 }
 
-/// "View report", on the sheet of the task [name]: the board's way.
+/// The conversation of the session [sessionId], opened as a tap on its task
+/// opens it, without the tap: for a phone so narrow, or text so large, that
+/// the board of a test has no room left for the card to tap.  What the board
+/// says of itself in the meantime (an overflow of its header) is no concern of
+/// what is looked at here, and is let go.
+Future<void> openTaskSession(WidgetTester tester, String sessionId) async {
+  await tester.tap(find.text('Tasks'));
+  await settle(tester, 6);
+  tester.takeException();
+  tester.widget<TasksScreen>(find.byType(TasksScreen)).onOpenSession(sessionId);
+  for (var i = 0; i < 30; i++) {
+    await tester.pump(const Duration(milliseconds: 120));
+    // The board is still drawn while the page opens over it.
+    if (i < 6) tester.takeException();
+  }
+}
+
+/// "View report", on the bar of the conversation of the task [name]: the
+/// task's way.
 Future<void> viewReport(WidgetTester tester, String name) async {
-  await openSheet(tester, name);
+  await openTask(tester, name);
   await tester.ensureVisible(find.text('View report'));
   await tester.pump();
   await tester.tap(find.text('View report'));

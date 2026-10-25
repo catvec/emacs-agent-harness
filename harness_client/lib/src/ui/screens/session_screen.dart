@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../../models/activity.dart';
 import '../../models/session.dart';
-import '../../models/task.dart';
+import '../../models/task_chat.dart';
 import '../../models/transcript.dart';
 import '../../models/usage.dart';
 import '../../state/app_controller.dart';
@@ -23,6 +23,7 @@ import '../widgets/connection_banner.dart';
 import '../widgets/interaction_card.dart';
 import '../widgets/message_composer.dart';
 import '../widgets/quota_widgets.dart';
+import '../widgets/task_bar.dart';
 import '../widgets/transcript_view.dart';
 
 class SessionScreen extends StatefulWidget {
@@ -44,6 +45,10 @@ class _SessionScreenState extends State<SessionScreen> {
   late SessionController _controller;
   bool _bound = false;
   int _scrollTick = 0;
+
+  /// The focus of the message box, for what asks for something to be typed
+  /// in it: a task's *Send back* is feedback, written there.
+  final _composerFocus = FocusNode();
 
   @override
   void didChangeDependencies() {
@@ -75,6 +80,7 @@ class _SessionScreenState extends State<SessionScreen> {
     if (!widget.embedded && _bound) {
       _app.closeSession();
     }
+    _composerFocus.dispose();
     super.dispose();
   }
 
@@ -324,7 +330,14 @@ class _SessionScreenState extends State<SessionScreen> {
     // body is given what the keyboard leaves, and is told nothing of it.
     final typing = MediaQuery.viewInsetsOf(context).bottom > 0;
     return AnimatedBuilder(
-      animation: Listenable.merge([_controller, _app.settings, _app]),
+      // The task board too: a task's state is in this conversation (what its
+      // bar offers, what its message box says a message does).
+      animation: Listenable.merge([
+        _controller,
+        _app.settings,
+        _app,
+        _app.tasks,
+      ]),
       builder: (context, _) {
         final summary =
             _controller.summary ?? _app.summaryFor(widget.sessionId);
@@ -480,9 +493,23 @@ class _SessionScreenState extends State<SessionScreen> {
             },
           ),
         ),
+        // A task's conversation is where the task is handled: where it
+        // stands and what can be done about it, over the box that sends
+        // feedback.  What waits on an answer has the room for that.
+        if (interaction == null)
+          SessionTaskBar(
+            app: _app,
+            sessionId: widget.sessionId,
+            compact: typing,
+            onSendBack: _composerFocus.requestFocus,
+          ),
         Offstage(
           offstage: question,
           child: MessageComposer(
+            focusNode: _composerFocus,
+            // What a message does here, where it is not the usual: for a task
+            // in review it is the feedback that sends the task back.
+            hint: taskMessageHint(_app.tasks?.forSession(widget.sessionId)),
             running: controller.promptInFlight,
             cancelling: controller.cancelling,
             canAttach: _app.capability?.promptImages == true,
@@ -617,7 +644,7 @@ class _SessionContext extends StatelessWidget {
     final waiting = controller.currentInteraction != null;
     final status = waiting ? 'blocked' : summary.status;
     final color = HarnessColors.status(status, theme.brightness);
-    final task = _taskForSession(app, summary.id);
+    final task = app.tasks?.forSession(summary.id);
     final project = app.projectOfSession(summary) ?? summary.project;
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -641,14 +668,6 @@ class _SessionContext extends StatelessWidget {
         ),
       ],
     );
-  }
-
-  HarnessTask? _taskForSession(AppController app, String? id) {
-    if (id == null) return null;
-    for (final task in app.tasks?.tasks ?? const <HarnessTask>[]) {
-      if (task.sessionId == id) return task;
-    }
-    return null;
   }
 }
 

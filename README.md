@@ -3863,8 +3863,10 @@ with), `recap` writes the recaps on the cards,
   many each project has. A click (`M-x harness-tasks-review`) opens the
   board of the current project when it has tasks waiting for review,
   else of the project whose task came to review last, with point on
-  the newest card; the board's project becomes current first, as for a
-  click on a task's notification.
+  the newest card; the board's project becomes current first, as
+  visiting a session makes it. The board is the list to pick from;
+  `RET` or a click on a card opens the task's session, where it is
+  verified or sent back.
 - **Every project** has a board of its own: `C-c h G` (`M-x
   harness-tasks-all`), `G` on a project's board, or its header's **[All
   projects]** opens the same board over the tasks of every project, in the
@@ -4286,10 +4288,22 @@ with), `recap` writes the recaps on the cards,
   to open the usage dashboard. A narrow window keeps it after most
   buttons are gone. The header does not count the tasks: each column's
   heading counts its own.
-- `RET` opens the session of the task at point. From that session,
-  `C-c h a` leads back to the board. `F` lays the board out fullscreen,
-  with that session beside it (see
-  [Fullscreen overviews](#fullscreen-overviews)).
+- `RET` opens the session of the task at point, and so does a click on
+  a card (not on one of its buttons), in whatever column the task is,
+  and a click on the task's notification. A task is handled in its
+  session, the board being a list to pick one from: above the compose
+  box a task in review has its banner (`[Verify]`, `[Send back]`, with
+  the report and the changes), a task in the backlog its own
+  (`[Start now]`, `[Queue it]`), and a task in any other state a panel
+  with its column, in the board's words, and a button for each action
+  its card has there that the session can do: `[Start now]`, `[Pause]`
+  or `[Resume]`, `[Drop]` or `[Stop]`, `[Retry]`, `[Retry merge]`,
+  `[Mark done]`, `[Archive]` or `[Unarchive]`. The same commands run
+  with `M-x` (`harness-ui-tasks-session-pause` and the rest of
+  `harness-ui-tasks-session-…`). The board's own keys and buttons
+  do the same from the card. From that session, `C-c h a` leads back to
+  the board. `F` lays the board out fullscreen, with that session beside
+  it (see [Fullscreen overviews](#fullscreen-overviews)).
 - Typing on the board goes to the compose box, like in a chat: any
   letter that is not one of the board's keys, and a key for the task at
   point (`s`, `e`, `m`, `v`, ...) typed off a card, which has no task to
@@ -4524,9 +4538,12 @@ The harness tells you when a task's work waits for your review and
 when a task is done, so you can leave it working:
 
 - A desktop notification, shown by your Emacs. Clicking it opens the
-  task board on that task. It uses `notify-send` on GNU/Linux (or
-  Emacs's D-Bus support) and `terminal-notifier` on macOS (see below);
-  set `harness-notifications-desktop-backend` to choose.
+  task's session, in its project: where its work is read and verified or
+  sent back, and the task started, paused or stopped (the task board
+  opens on the task only when it has no session to show). It uses
+  `notify-send` on GNU/Linux (or Emacs's D-Bus support) and
+  `terminal-notifier` on macOS (see below); set
+  `harness-notifications-desktop-backend` to choose.
 - A push through [Gotify](https://gotify.net), for your phone, once it
   is set up. Create an application in Gotify and give the harness its
   address and token:
@@ -4563,8 +4580,9 @@ are in place:
   `(server-start)` in your init file, or `M-x server-start`. Doom Emacs
   starts it already.
 
-A click then brings Emacs to the front and opens the session, or the
-task board on the task. A notification clicked after Emacs restarted,
+A click then brings Emacs to the front and opens the session -- a
+task's session, for a task's notification, or the task board on the
+task when it has no session to show. A notification clicked after Emacs restarted,
 from the Notification Center, lists the sessions waiting for you, as
 clicking the mode line's notifier does. Without the server a click only
 brings Emacs to the front; Emacs says so once, in the echo area and in

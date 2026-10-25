@@ -324,26 +324,6 @@ void main() {
     },
   );
 
-  testWidgets('the task sheet shows the pictures a task was sent with', (
-    tester,
-  ) async {
-    final rig = await _rig();
-    _picker(() => [pickedImage('shown.png', onePixelPng)]);
-    await _pump(tester, rig);
-    await _openSheet(tester);
-    await tester.ensureVisible(_attach);
-    await tester.tap(_attach);
-    await _settle(tester, 6);
-    await tester.enterText(_promptField, 'Show me');
-    await tester.pump();
-    await _submit(tester);
-
-    await tester.tap(find.text('Show me').first);
-    await _settle(tester, 6);
-    expect(find.text('ATTACHMENTS'), findsOneWidget);
-    expect(find.text('shown.png'), findsOneWidget);
-  });
-
   testWidgets('the message composer attaches pictures as it did', (
     tester,
   ) async {

@@ -24,6 +24,8 @@ class MessageComposer extends StatefulWidget {
     this.drafts,
     this.draftKey = '',
     this.footer,
+    this.focusNode,
+    this.hint,
   });
 
   /// Takes the message to send.  Whether it was taken: where it was not
@@ -52,6 +54,17 @@ class MessageComposer extends StatefulWidget {
   /// and how the conversation stands.  Without one, a line of help.
   final Widget? footer;
 
+  /// The field's focus, for a caller that has to give it: a button that asks
+  /// for something to be typed (a task's *Send back*) puts the cursor here.
+  /// Without one the field keeps a focus of its own.
+  final FocusNode? focusNode;
+
+  /// What the empty field says a message does in this conversation, in place
+  /// of the usual line: that it sends a task in review back, say.  What is
+  /// so before it (no connection, an answer to give, a turn at work) is
+  /// still said first.
+  final String? hint;
+
   @override
   State<MessageComposer> createState() => _MessageComposerState();
 }
@@ -60,7 +73,8 @@ class _MessageComposerState extends State<MessageComposer> {
   late final TextEditingController _text = TextEditingController(
     text: widget.drafts?.text(widget.draftKey) ?? '',
   );
-  final _focus = FocusNode();
+  FocusNode? _ownFocus;
+  FocusNode get _focus => widget.focusNode ?? (_ownFocus ??= FocusNode());
   final _attachments = <PromptAttachment>[];
   String? _attachmentError;
   bool _picking = false;
@@ -93,7 +107,7 @@ class _MessageComposerState extends State<MessageComposer> {
     widget.drafts?.removeListener(_followDraft);
     _text.removeListener(_rememberDraft);
     _text.dispose();
-    _focus.dispose();
+    _ownFocus?.dispose();
     super.dispose();
   }
 
@@ -318,9 +332,10 @@ class _MessageComposerState extends State<MessageComposer> {
                             ? 'Answer above to continue'
                             : widget.running
                             ? 'The agent is working…'
-                            : _keyboardHint
-                            ? 'Message the harness · Enter to send'
-                            : 'Message the harness',
+                            : widget.hint ??
+                                  (_keyboardHint
+                                      ? 'Message the harness · Enter to send'
+                                      : 'Message the harness'),
                         maxLines: 5,
                         minLines: 1,
                         keyboardType: TextInputType.multiline,

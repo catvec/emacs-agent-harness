@@ -37,7 +37,10 @@ Future<(SettingsController, FakeHarness, AppController)> _rig() async {
   SharedPreferences.setMockInitialValues({});
   final settings = SettingsController();
   await settings.load();
-  final harness = FakeHarness()..tasks['task-9'] = _cancelled();
+  // Every task has its session, which a tap on it opens.
+  final harness = FakeHarness()
+    ..tasks['task-9'] = _cancelled()
+    ..seedTaskSession('task-9', reply: 'Stopped; nothing is left to do.');
   final app = AppController(settings: settings, connector: harness.connector);
   await app.connect('ws://memory/acp');
   return (settings, harness, app);
@@ -152,8 +155,9 @@ void main() {
     await _settle(tester);
     expect(find.text('Sketch the retry schedule'), findsOneWidget);
     await tester.tap(find.text('Sketch the retry schedule'));
-    await _settle(tester);
-    // Over: it is archived, not completed again, and has nothing to retry.
+    await _settle(tester, 30);
+    // Its conversation opens, with the bar that handles the task.  Over: it is
+    // archived, not completed again, and has nothing to retry.
     expect(find.text('Archive'), findsOneWidget);
     expect(find.text('Mark complete'), findsNothing);
     expect(find.text('Retry'), findsNothing);

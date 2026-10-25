@@ -133,9 +133,11 @@ main checkout (`harness-files-owning-checkout')."
 (ert-deftest harness-ui-notifications-click-switches-to-the-sessions-project ()
   "The session a notification names, when the harness has it, says the project.
 Its project is used rather than the notification's, which may be a task's
-worktree of another directory."
+worktree of another directory.  This is the board a task opens on when no
+chat module can show its session."
   (let* ((events nil) (roots nil)
          (here (file-name-as-directory (expand-file-name default-directory)))
+         (harness-ui-open-session-function nil)
          (harness-ui-switch-project-function (lambda (root) (push root roots))))
     (cl-letf (((symbol-function 'harness-files-owning-checkout)
                (lambda (root) (push (list 'checkout root) events) here))
@@ -183,6 +185,65 @@ worktree of another directory."
             (should (equal '((board "/task-worktree/")) events)))
         (dolist (b (buffer-list))
           (when (string-prefix-p " *task board*" (buffer-name b)) (kill-buffer b)))))))
+
+(ert-deftest harness-ui-notifications-click-opens-the-tasks-session ()
+  "A click on a task's notification opens its session's chat, not the board.
+A task is looked at and handled in its session, which shows in the task's
+project (visiting a session switches to it first); the board is for a task
+with no session to show.  The click goes through the whole chain, the
+task module taking the notification before the default does, so the
+session opens once."
+  (let ((visited nil) (boards nil)
+        (harness-ui-open-session-function (lambda (_id) (current-buffer))))
+    (cl-letf (((symbol-function 'harness-ui-session)
+               (lambda (id) (list :id id :project "/session-project/")))
+              ((symbol-function 'harness-ui-visit-session)
+               (lambda (sid &rest _) (push sid visited)))
+              ((symbol-function 'harness-tasks)
+               (lambda (&rest args) (push args boards) nil)))
+      (should (harness-ui-tasks--on-notification
+               '(:task "t1" :project "/task-worktree/" :session "s1")))
+      (should (equal '("s1") visited))
+      (should-not boards)
+      ;; As the click arrives, with the module's hook installed.
+      (setq visited nil)
+      (harness-ui--notification-clicked
+       '(:title "Ready for review: x" :task "t1" :project "/task-worktree/" :session "s1"))
+      (should (equal '("s1") visited))
+      (should-not boards))))
+
+(ert-deftest harness-ui-notifications-click-opens-the-board-without-a-session-to-show ()
+  "A task's notification opens the board when its session cannot be shown.
+That is a task with no session in the notification, one whose session the
+harness no longer has, and any task when no chat module is loaded to show
+a session; a notification about a session alone is left to the default,
+which opens the session."
+  (let ((visited nil) (boards nil))
+    (cl-letf (((symbol-function 'harness-ui-visit-session)
+               (lambda (sid &rest _) (push sid visited)))
+              ((symbol-function 'harness-ui-tasks-visit-task)
+               (lambda (id project &optional session) (push (list id project session) boards))))
+      ;; No session in the notification.
+      (let ((harness-ui-open-session-function (lambda (_id) (current-buffer))))
+        (cl-letf (((symbol-function 'harness-ui-session) (lambda (id) (list :id id))))
+          (should (harness-ui-tasks--on-notification '(:task "t1" :project "/p/")))
+          ;; A session the harness no longer has.
+          (cl-letf (((symbol-function 'harness-ui-session) (lambda (_id) nil)))
+            (should (harness-ui-tasks--on-notification '(:task "t2" :project "/p/" :session "gone"))))
+          ;; An empty one.
+          (should (harness-ui-tasks--on-notification '(:task "t3" :project "/p/" :session "")))))
+      ;; No chat module to show it.
+      (let ((harness-ui-open-session-function nil))
+        (cl-letf (((symbol-function 'harness-ui-session) (lambda (id) (list :id id))))
+          (should (harness-ui-tasks--on-notification '(:task "t4" :project "/p/" :session "s4")))))
+      (should-not visited)
+      (should (equal '(("t4" "/p/" "s4") ("t3" "/p/" "") ("t2" "/p/" "gone") ("t1" "/p/" nil))
+                     boards))
+      ;; About a session and nothing else: not the task module's to take.
+      (let ((harness-ui-open-session-function (lambda (_id) (current-buffer))))
+        (cl-letf (((symbol-function 'harness-ui-session) (lambda (id) (list :id id))))
+          (should-not (harness-ui-tasks--on-notification '(:session "s5")))))
+      (should (= 4 (length boards))))))
 
 (ert-deftest harness-ui-notifications-summary ()
   (should (equal "system sent (notify-send, in the UI); gotify skipped (not set up); mail failed (refused)"

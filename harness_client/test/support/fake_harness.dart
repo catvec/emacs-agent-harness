@@ -109,6 +109,7 @@ class FakeHarness {
         if (sessionPictures) 'session/image',
         'task/list',
         'task/get',
+        'task/for-session',
         'task/submit',
         'task/start',
         'task/queue',
@@ -382,6 +383,11 @@ class FakeHarness {
 
   /// Make `question/answer` fail, as a harness that goes wrong does.
   bool failQuestionAnswers = false;
+
+  /// Refuse the actions on a task (`task/verify`, `task/start`, ...) with
+  /// this message, as the harness does when the task is not in the state the
+  /// action needs.
+  String? taskActionError;
   final List<String> prompts = [];
   final List<String> requestsByClient = [];
 
@@ -1121,6 +1127,187 @@ class FakeHarness {
     nodes[toolShowcaseId] = toolShowcaseNodes();
   }
 
+  /// The conversations of the tasks the seed leaves without one: the task in
+  /// review has the session that did the work and handed it in (the tool
+  /// showcase), a task that waits for a slot, one in the backlog and one that
+  /// is done have a short conversation each.  Every task of a harness has its
+  /// session from the day it is made; the seed leaves these out so that the
+  /// lists of sessions other tests count stay as they are.
+  void seedTaskSessions() {
+    seedToolShowcase();
+    tasks['task-2']!['session'] = toolShowcaseId;
+    void add(String taskId, String sid, List<Map<String, Object?>> thread) {
+      final task = tasks[taskId]!;
+      task['session'] = sid;
+      sessions[sid] = _taskSessionRecord(
+        task,
+        sid,
+        quiet: const Duration(minutes: 30),
+      );
+      nodes[sid] = thread;
+    }
+
+    add('task-3', 's-pending', [
+      _node('k1', 'user', 'Remember provider/model results for a minute.'),
+      _node(
+        'k2',
+        'assistant',
+        'Understood. I will start when a slot is free.',
+        meta: {'model': 'claude:claude-fable-5-1'},
+      ),
+    ]);
+    add('task-5', 's-backlog', [
+      _node('b1', 'user', 'Write up what moved in the protocol.'),
+      _node(
+        'b2',
+        'assistant',
+        'Written up: the notes list the five methods that changed.',
+        meta: {'model': 'claude:claude-fable-5-1'},
+      ),
+    ]);
+    add('task-6', 's-done', [
+      _node('d1', 'user', 'A native session list.'),
+      _node(
+        'd2',
+        'assistant',
+        'The session list is native, and the work is merged.',
+        meta: {'model': 'claude:claude-fable-5-1'},
+      ),
+    ]);
+  }
+
+  /// The conversation of task [taskId], which ends with the `hand_in` call
+  /// that handed [report] in (the report as the harness keeps it, kebab-case
+  /// keys and evidence resolved), or with the last message the harness kept
+  /// for a report that is `missing`.  The task has the session of its own that
+  /// it had, or one made for it.
+  void seedHandIn(String taskId, Map<String, Object?> report) {
+    final task = tasks[taskId]!;
+    final sid = asString(task['session']) ?? 's-$taskId';
+    task['session'] = sid;
+    sessions.putIfAbsent(
+      sid,
+      () => _taskSessionRecord(task, sid, quiet: const Duration(minutes: 10)),
+    );
+    // A round that ended without `hand_in` has no call, and the report is the
+    // last message of the session, which the harness recorded.
+    if (report['missing'] == true) {
+      nodes[sid] = [
+        _node('hi1', 'user', '${task['prompt']}'),
+        _node(
+          'hi2',
+          'assistant',
+          '${report['summary']}',
+          meta: {'model': 'claude:claude-fable-5-1'},
+        ),
+      ];
+      return;
+    }
+    nodes[sid] = [
+      _node('hi1', 'user', '${task['prompt']}'),
+      _node(
+        'hi2',
+        'tool-call',
+        '',
+        tool: 'hand_in',
+        title: 'Hand in the finished work: ${task['name']}',
+        callId: 'call-hand-in-$taskId',
+        input: {'summary': report['summary'] ?? ''},
+      ),
+      _node(
+        'hi3',
+        'tool-result',
+        '',
+        callId: 'call-hand-in-$taskId',
+        output: 'Handed in; the task waits for the user\'s review.',
+        meta: {'report': report},
+      ),
+    ];
+  }
+
+  /// The conversation of task [taskId]: its prompt, and [reply] when the
+  /// session has said something.  The task has the session of its own that it
+  /// had, or one made for it; every task of a harness has its session from the
+  /// day it is made.
+  void seedTaskSession(String taskId, {String reply = 'On it.'}) {
+    final task = tasks[taskId]!;
+    final sid = asString(task['session']) ?? 's-$taskId';
+    task['session'] = sid;
+    sessions.putIfAbsent(
+      sid,
+      () => _taskSessionRecord(task, sid, quiet: const Duration(minutes: 30)),
+    );
+    nodes[sid] = [
+      _node('w1', 'user', '${task['prompt']}'),
+      if (reply.isNotEmpty)
+        _node(
+          'w2',
+          'assistant',
+          reply,
+          meta: {'model': 'claude:claude-fable-5-1'},
+        ),
+    ];
+  }
+
+  /// The record of the session of [task], idle for [quiet] after its work.
+  Map<String, Object?> _taskSessionRecord(
+    Map<String, Object?> task,
+    String sid, {
+    required Duration quiet,
+  }) {
+    final now = DateTime.now();
+    return {
+      'id': sid,
+      'name': task['name'],
+      'kind': 'main',
+      'project': task['project'],
+      'cwd': task['cwd'],
+      'model': 'claude:claude-fable-5-1',
+      'permissionMode': 'accept-edits',
+      'status': 'idle',
+      'created':
+          now.subtract(const Duration(hours: 2)).millisecondsSinceEpoch / 1000,
+      'updated': now.subtract(quiet).millisecondsSinceEpoch / 1000,
+      'lastMessage': now.subtract(quiet).millisecondsSinceEpoch / 1000,
+      'contextWindow': 200000,
+      'todos': <Object?>[],
+      'pending': <Object?>[],
+      'queue': <Object?>[],
+    };
+  }
+
+  /// The task [sid] is the session of, or null.
+  Map<String, Object?>? _taskOfSession(String? sid) {
+    if (sid == null) return null;
+    for (final task in tasks.values) {
+      if (task['session'] == sid) return task;
+    }
+    return null;
+  }
+
+  /// What the harness does with a message the person sends the session of a
+  /// task (`harness-tasks--on-message`): to a task in review it is the
+  /// feedback that sends the task back, to one that waits in the backlog it
+  /// is the start.  Any other message is only a message.
+  void _taskMessage(String sid, String text) {
+    final task = _taskOfSession(sid);
+    if (task == null) return;
+    if (task['column'] == 'review') {
+      task['verified'] = false;
+      task['feedback'] = [
+        ...(task['feedback'] as List? ?? const []),
+        {'text': text, 'at': DateTime.now().millisecondsSinceEpoch / 1000},
+      ];
+    } else if (task['backlog'] == true) {
+      task['backlog'] = false;
+    } else {
+      return;
+    }
+    task['state'] = 'active';
+    task['column'] = 'active';
+    _event('task/changed', [task]);
+  }
+
   /// The pictures the showcase's hand-in names, which the harness gives on
   /// request (`session/image`): screenshots of the app itself, from
   /// [screenshots], as a task that changed the app hands in.  One that is
@@ -1387,6 +1574,7 @@ class FakeHarness {
           return;
         }
         prompts.add(_promptText(params['prompt']));
+        _taskMessage(sid, _promptText(params['prompt']));
         _streamTurn(sid, _promptText(params['prompt']), id);
         return;
       }
@@ -1586,6 +1774,11 @@ class FakeHarness {
         );
         return;
       }
+      if (method == '_harness/task/for-session') {
+        // The task a session is the session of, nothing for any other.
+        _respond(id, _taskOfSession(asString(params['session-id'])));
+        return;
+      }
       if (method == '_harness/task/slots') {
         final project =
             asString(params['cwd']) ?? '/Users/noah/Code/emacs-agent-harness/';
@@ -1666,6 +1859,28 @@ class FakeHarness {
           if (opts['refine'] == true) 'backlog': true,
           if (attachments.isNotEmpty) 'attachments': attachments,
         };
+        // Every task has its session from the day it is made, with the
+        // task in it as the first message.
+        final sid = 's-$taskId';
+        task['session'] = sid;
+        sessions[sid] = {
+          'id': sid,
+          'name': task['name'],
+          'kind': 'main',
+          'project': task['project'],
+          'cwd': task['cwd'] ?? task['project'],
+          'model': 'claude:claude-fable-5-1',
+          'permissionMode': 'accept-edits',
+          'status': 'idle',
+          'created': task['created'],
+          'updated': task['updated'],
+          'lastMessage': task['updated'],
+          'contextWindow': 200000,
+          'todos': <Object?>[],
+          'pending': <Object?>[],
+          'queue': <Object?>[],
+        };
+        nodes[sid] = [_node('u-$taskId', 'user', '${task['prompt']}')];
         tasks[taskId] = task;
         _event('task/changed', [task]);
         _respond(id, task);
@@ -1676,6 +1891,11 @@ class FakeHarness {
         return;
       }
       if (method.startsWith('_harness/task/')) {
+        // A harness that refuses every action, whatever the task's state.
+        if (taskActionError != null) {
+          _respondError(id, -32603, taskActionError!);
+          return;
+        }
         _taskAction(id, method.substring('_harness/task/'.length), params);
         return;
       }

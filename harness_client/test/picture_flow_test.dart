@@ -151,12 +151,12 @@ void main() {
     expect(_drawn, findsOneWidget);
   });
 
-  testWidgets('the report a task board opens shows its screenshots', (
-    tester,
-  ) async {
+  testWidgets('the report a task opens shows its screenshots', (tester) async {
     final harness = FakeHarness();
-    // The task in review has a session, as every task does.
+    // The task in review has a session, as every task does: a tap on it opens
+    // that conversation.
     harness.tasks['task-2']!['session'] = 's-review';
+    harness.seedTaskSession('task-2');
     harness.pictureFiles['screenshots/android-chat.png'] = (
       mime: 'image/png',
       bytes: _screenshot,
@@ -170,9 +170,10 @@ void main() {
     await tester.tap(find.text('Review'));
     await _settle(tester, 4);
     await tester.tap(find.text('Review the emulator screenshots'));
-    await _settle(tester, 12);
-    // The sheet leads to the report and draws none of it, pictures included.
-    expect(find.text('REPORT'), findsOneWidget);
+    await _settle(tester, 20);
+    // The bar of the conversation leads to the report and draws none of it,
+    // pictures included.
+    expect(find.text('View report'), findsOneWidget);
     expect(harness.imageRequests, isEmpty);
     expect(_drawn, findsNothing);
     await tester.ensureVisible(find.text('View report'));
@@ -271,6 +272,8 @@ void main() {
       'project': harness.tasks['task-2']!['project'],
       'cwd': harness.tasks['task-2']!['cwd'],
     };
+    // A tap on the task opens its conversation, which every task has.
+    harness.seedTaskSession('t-live');
     harness.pictureFiles['/work/chat.png'] = (
       mime: 'image/png',
       bytes: _screenshot,
@@ -289,9 +292,10 @@ void main() {
     await tester.tap(find.text('Review'));
     await _settle(tester, 4);
     await tester.tap(find.text('Show the chat'));
-    await _settle(tester, 12);
-    // The sheet leads to the report; the report is on its page.
-    expect(find.text('REPORT'), findsOneWidget);
+    await _settle(tester, 20);
+    // The bar of the conversation leads to the report; the report is on its
+    // page.
+    expect(find.textContaining('Handed in'), findsOneWidget);
     await tester.ensureVisible(find.text('View report'));
     await tester.pump();
     await tester.tap(find.text('View report'));

@@ -75,18 +75,21 @@ void seedHandedInTaskWithPictures(FakeHarness harness) {
 
 /// [handedInTaskId], and beside it [unreportedTaskId], in review as well,
 /// whose round of work ended without a report: the harness recorded the last
-/// message the session wrote instead (`missing`).
+/// message the session wrote instead (`missing`), and that message is the
+/// last of the conversation the task opens to.
 void seedUnreportedTask(FakeHarness harness) {
   seedHandedInTask(harness);
+  final report = {
+    'summary': unreportedLastMessage,
+    'at': DateTime.now().millisecondsSinceEpoch / 1000,
+    'missing': true,
+  };
   harness.tasks[unreportedTaskId] = _task(
     unreportedTaskId,
     unreportedTaskName,
-    report: {
-      'summary': unreportedLastMessage,
-      'at': DateTime.now().millisecondsSinceEpoch / 1000,
-      'missing': true,
-    },
+    report: report,
   );
+  harness.seedHandIn(unreportedTaskId, report);
 }
 
 Map<String, Object?> _task(

@@ -12893,12 +12893,18 @@ a graphical frame of this Emacs to the front and runs
 returns non-nil has shown what it is about), else opens its session in
 its project (`harness-ui-visit-session`, which switches to the project
 first, as a row of the session list does).  The task board's function
-switches to the task's project first (`harness-ui-switch-to-project`
-with the main checkout of the notification's session, else of its
-`:project`; a switch that fails, or none being configured, does not keep
-the board from opening), then opens the board of the notification's
-`:project` with point on the task's card, once the board shows it
-(within 10 s).  A click on a terminal-notifier notification this Emacs
+opens a task's notification on the task's session, the chat being where
+a task is handled: when the notification names a session the UI knows
+and a chat module can show it, it is `harness-ui-visit-session`, which
+switches to the session's project first.  A task with no session to show
+-- none named, one the harness no longer has, or no chat module -- opens
+on the board instead: the board's function switches to the task's
+project first (`harness-ui-switch-to-project` with the main checkout of
+the notification's session, else of its `:project`; a switch that fails,
+or none being configured, does not keep the board from opening), then
+opens the board of the notification's `:project` with point on the
+task's card, once the board shows it (within 10 s).  A click on a
+terminal-notifier notification this Emacs
 no longer knows (`harness-notifications-desktop-unknown-click-function`,
 set by `harness-ui--init` unless already set) brings a graphical frame
 to the front and lists the sessions waiting for the user
@@ -13102,9 +13108,11 @@ only when the count changes.  Its tooltip says how many each project
 has; a click runs `harness-tasks-review`, which opens the board of the
 current project (`harness-ui-tasks--current-project`) when it has tasks
 in review, else of the project whose task finished last, point on that
-project's newest review card, after switching to the project as a
-notification's click does (`harness-ui-tasks-visit-task`, which both
-share).  The header line holds only what
+project's newest review card, after switching to the project as the
+click on a task's notification does when it has no session to show
+(`harness-ui-tasks-visit-task`, which both share): the board a click on
+the count opens is the list to pick the task from, whose card opens its
+session.  The header line holds only what
 the board does not show: the project, and, as a chat's does for its
 session, what the board's tasks cost and who pays (see Cost display
 below), then the fullest budget that applies to the project, then the
@@ -13127,7 +13135,19 @@ On a narrow board the settings before the button shorten first, down to
 whole.  `config/changed` brings every board the new values.  RET opens the session, and
 `C-c h a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
-the main checkout's board (`harness-files-main-root`).  Redraws, after
+the main checkout's board (`harness-files-main-root`).  A click on a
+card, or RET, opens its task's session in whatever column the task is:
+the session is where a task is handled.  Above its compose box a task in
+review has the review banner, a task waiting in the backlog its own, and
+a task in any other state a panel (`harness-ui-tasks--state-panel`, a
+function of `harness-chat-panel-functions`): the column's name, in the
+board's words, with a little of where the task stands, and a button for
+each action of the task's card that the session can do -- the card's
+list (`harness-ui-tasks--actions`) filtered through
+`harness-ui-tasks--session-commands`, which names for each board command
+the command that runs it from the session (`harness-ui-tasks-session-pause`
+and its kind, each one request of the task's `_harness/task/*` method,
+the answer becoming the session's task at once).  Redraws, after
 every change and on every tick of the clock, leave point and each
 window where they were: on the same line of the same card (its buttons
 are on the second), on the same button, on the same line above the

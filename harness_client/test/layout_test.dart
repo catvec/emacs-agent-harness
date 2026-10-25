@@ -249,35 +249,6 @@ void main() {
       expect(find.text('Queue the backlog automatically'), findsOneWidget);
       expect(find.byType(Switch), findsNWidgets(2));
     });
-
-    testWidgets('has a sheet whose actions are equal parts of one width', (
-      tester,
-    ) async {
-      final rig = await _rig();
-      await _pump(tester, rig);
-      await tester.tap(find.text('Tasks'));
-      await _settle(tester);
-      await tester.ensureVisible(find.text('Review'));
-      await tester.tap(find.text('Review'));
-      await _settle(tester);
-      await tester.tap(find.text('Review the emulator screenshots'));
-      await _settle(tester);
-      final verify = tester.getRect(
-        find.widgetWithText(FilledButton, 'Verify and merge'),
-      );
-      final back = tester.getRect(
-        find.widgetWithText(OutlinedButton, 'Send back'),
-      );
-      final complete = tester.getRect(
-        find.widgetWithText(OutlinedButton, 'Mark complete'),
-      );
-      // The one to take is full width; the others share a row, equally.
-      expect(back.width, closeTo(complete.width, 0.5));
-      expect(back.top, closeTo(complete.top, 0.5));
-      expect(verify.left, closeTo(back.left, 0.5));
-      expect(verify.right, closeTo(complete.right, 0.5));
-      expect(verify.bottom, lessThanOrEqualTo(back.top));
-    });
   });
 
   group('a conversation', () {

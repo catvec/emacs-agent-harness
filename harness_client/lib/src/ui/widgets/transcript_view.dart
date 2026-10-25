@@ -834,9 +834,6 @@ class _CompactionNoteState extends State<_CompactionNote>
     updateKeepAlive();
   }
 
-  /// Whether what the line opens to is open; null when it opens to nothing.
-  final bool? open;
-
   @override
   Widget build(BuildContext context) {
     super.build(context);
