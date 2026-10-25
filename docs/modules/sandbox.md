@@ -107,10 +107,11 @@ with an error.
 
 Seeing only its own directory makes some git commands destructive
 inside the sandbox: `git worktree prune` takes every other worktree
-of the repository for deleted and drops its registration.
-`sandbox/check-command` finds those in a shell command line so the
-permission layer can refuse them (see "Capabilities" and "Git
-worktree commands" below).
+of the repository for deleted and drops its registration.  No command
+line is read to refuse those: the registration of every worktree the
+sandbox does not show is mounted read-only over the writable git
+directory, so those commands change nothing however they are written
+(see "Git worktrees" below).
 
 Linux capabilities: a command in the bwrap sandbox has none at all,
 bwrap drops every one.  `:capabilities` gives it some, by name: one
@@ -128,8 +129,7 @@ and so does bwrap when `--cap-add` would hand out real capabilities
 of the host, being setuid or run by root.  See "Capabilities" below.
 
 Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
-`sandbox/capabilities`, `sandbox/capability-name`,
-`sandbox/check-command`.
+`sandbox/capabilities`, `sandbox/capability-name`.
 
 ## Provides
 
@@ -137,7 +137,6 @@ Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
 
 - `sandbox/capabilities` (cwd) — Say what the jail does about the Linux capabilities of commands run in CWD.
 - `sandbox/capability-name` (value) — Return the canonical name of the Linux capability VALUE names, or nil.
-- `sandbox/check-command` (cwd command &optional own) — Return why the shell COMMAND must not run in the sandbox at CWD, or nil.
 - `sandbox/confined-p` (cwd) — Non-nil when commands run in CWD are confined by a sandbox backend.
 - `sandbox/status` — Return (:backend BACKEND :available (BACKENDS…) :policy POLICY).
 - `sandbox/wrap` (cwd command &rest opts) — Return COMMAND (a list of strings) wrapped to run confined in CWD.

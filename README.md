@@ -28,17 +28,17 @@ OpenAI-compatible APIs and AWS Bedrock.
   minutes, its parent told; and a turn that stops making progress is
   reported to you (see [Persistence](#persistence)).
 - **Built-in tools.** Tools for files (read, write, edit, search), the
-  shell, commands on other hosts over ssh, the user's Emacs (buffers, windows, showing and editing a
-  buffer, saving it, documentation, `*Messages*`, and debugging its
+  shell, commands on other hosts over ssh, the user's Emacs (buffers, windows, reading and searching a
+  buffer, showing and editing it, saving it, documentation, `*Messages*`, and debugging its
   Lisp: describing symbols, finding definitions, tracing functions
-  and variables), Emacs Lisp
-  evaluation in a separate background Emacs (and in your own Emacs,
-  for code a judge model expects to return at once, unless you turn
-  `harness-emacs-eval` off; the judge may look up the functions and
-  variables it does not know before it rules, and the code can read and
-  change the harness's own state with `harness-call`), web search and
-  fetch, sub-agents and skills, plus tools that let an agent inspect and
-  drive other sessions and tasks and watch the harness's events.
+  and variables), Emacs Lisp evaluation in a separate background Emacs
+  that runs in the session's sandbox and can start from a read-only,
+  offline copy of your Emacs's variables and buffers, web search and
+  fetch, sub-agents and skills, plus tools that let an agent inspect
+  and drive other
+  sessions and tasks and watch the harness's events.  Nothing evaluates
+  model-written Lisp in your own Emacs: its tools are a fixed, typed
+  vocabulary (see `docs/trust-model.md`).
 - **Remote hosts.** Agents work on other machines through TRAMP: a
   session in a remote directory, the `ssh` tool, and TRAMP paths given
   to any tool.
@@ -54,7 +54,12 @@ OpenAI-compatible APIs and AWS Bedrock.
   `request_escalation` (a directory, the network, a tool, a Linux
   capability for its commands...), which only you can grant, and gives
   access up with `drop_access`, which never needs to ask (see [A
-  session's access](#a-sessions-access)).
+  session's access](#a-sessions-access)). What keeps a session in its
+  directories is the sandbox, never a reading of what a command means:
+  `bash`, `elisp` and the file tools all run in it, the file tools in a
+  worker started for the session; the tools that take a path are judged by
+  the directories they name before they run, and a permission check that
+  fails refuses the call (see [docs/trust-model.md](docs/trust-model.md)).
 - **Polite with your machine.** The tools that start processes (`bash`,
   `elisp`, `ssh`, and those of plugins, such as the harness
   repository's `open_harness`) hold a slot per machine -- one per
@@ -1717,8 +1722,8 @@ Overview.
   sandbox backend its commands run in (bubblewrap, `systemd-run` or
   MXC), the backends available, the sandbox policy and whether its
   commands here run confined.  Turning the network off takes the web
-  tools, `ssh` and `emacs_eval` (which runs in your Emacs, outside any
-  sandbox) from the session and runs its `bash` and `elisp` offline;
+  tools and `ssh` from the session and runs its `bash` and `elisp`
+  offline;
   where no sandbox can confine them, they go too.  Read-only leaves the
   reading tools and a read-only, offline `bash`, which gets no
   capability.  The capabilities row names the ones held, or says why
@@ -5765,8 +5770,8 @@ with it.
 | Tasks and git | `worktree` | `tasks` `tasks-notify` `tasks-search` `recap` `merge` `patch-review` |
 | Safety | `perms` `sandbox` `access` `readonly` | `tool-slots` `tool-slots-load` `secrets` `redact` `judge` |
 | Providers | `provider` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
-| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-review` `tools-emacs-eval` `tools-dev` `tools-events` `tools-compact` `skills` |
-| Connections | `acp` | `acp-remote` `notifications` |
+| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-review` `tools-dev` `tools-events` `tools-compact` `skills` |
+| Connections | `acp` `mcp` | `acp-remote` `notifications` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-cache-warm` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` `ui-carry` `ui-todo-sync` |
 
 [docs/modules](docs/modules/README.md) has a page for each module,

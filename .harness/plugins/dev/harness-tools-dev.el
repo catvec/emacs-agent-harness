@@ -34,10 +34,21 @@
 ;;
 ;; The tool opens checkouts of the harness only (`harness.el' and
 ;; scripts/dev.sh side by side), and refuses any other directory.
-;; Starting the instance is repeatable and touches nothing of the
-;; session's own, so the plugin puts the tool in
-;; `harness-perms-extra-auto-allow-tools': it needs no approval.  It
-;; starts a whole Emacs, so it holds a slot of the machine
+;;
+;; It runs code outside the sandbox: the checkout's scripts/dev.sh and
+;; the Elisp that daemon loads, as the user.  A task's worktree is the
+;; session's to write, so that is code the agent wrote, run without the
+;; kernel around it.  It is therefore an exec call like bash, decided by
+;; the permission mode like bash (asked in ask and accept-edits mode,
+;; weighed by the judge in auto mode and for an absent user, allowed
+;; in yolo mode), and is not among the tools that need no approval: it
+;; was once, on the ground that it only starts an Emacs in a state
+;; directory of its own, which let a session run any script it had
+;; written in its worktree, unprompted, outside the jail it was
+;; refused in (docs/trust-model.md).  Nothing here is sandboxed, so what
+;; the instance may reach is what the user's Emacs may.  The board's
+;; Open harness is the user's own act and is not decided by the chain.
+;; The tool starts a whole Emacs, so it holds a slot of the machine
 ;; (`harness-tool-slots-tools') as bash does; and the board calls its
 ;; `harness-dev/' methods over ACP (`harness-acp-extra-method-prefixes').
 ;;
@@ -1090,18 +1101,15 @@ the unrecorded ones too.  The promise resolves to the sockets stopped."
 ;; the plugin tells it again.
 
 (defvar harness-acp-extra-method-prefixes)
-(defvar harness-perms-extra-auto-allow-tools)
 (defvar harness-tool-slots-tools)
 
 ;; The board's Open harness calls `harness-dev/open' over ACP.
 (with-eval-after-load 'harness-acp
   (add-to-list 'harness-acp-extra-method-prefixes "harness-dev/"))
 
-;; It only starts an Emacs running a checkout of the harness, in a
-;; state directory of its own, so verifying harness work live needs no
-;; prompt.
-(with-eval-after-load 'harness-perms
-  (add-to-list 'harness-perms-extra-auto-allow-tools harness-tools-dev-tool))
+;; The tool is not among those that need no approval
+;; (`harness-perms-extra-auto-allow-tools'): it runs the checkout's own
+;; scripts, which the agent may have written, outside the sandbox.
 
 ;; It starts a whole Emacs, so a call holds a slot of the machine.
 (with-eval-after-load 'harness-tool-slots

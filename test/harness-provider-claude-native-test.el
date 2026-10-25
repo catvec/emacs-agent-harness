@@ -384,7 +384,7 @@ own would replace the harness's rules."
           (should (= 1 (cl-count "web_search" names :test #'equal)))
           (should (equal (sort (copy-sequence offered) #'string<) (sort (copy-sequence names) #'string<))))
         ;; Only what the provider offers.
-        (should-not (harness-provider-claude--builtin-filter nil session '("emacs_eval")))
+        (should-not (harness-provider-claude--builtin-filter nil session '("ssh")))
         ;; A session on another host keeps the harness's tools: TRAMP names are theirs.
         (should-not (harness-provider-claude--builtin-filter
                      nil '(:id "s" :model "claude:claude-fable-5-1" :cwd "/tmp/" :host "/ssh:box:") offered))
@@ -408,7 +408,7 @@ own would replace the harness's rules."
             (harness-websearch-builtin 'never))
         (should (equal '("web_search") (harness-provider-claude--builtin-filter nil session offered))))
       ;; A list names the tools.
-      (let ((harness-provider-claude-native-tools '("read_file" "grep" "emacs_eval" "no_such_tool")))
+      (let ((harness-provider-claude-native-tools '("read_file" "grep" "ssh" "no_such_tool")))
         (should (equal '("read_file" "grep") (harness-provider-claude--builtin-filter nil session offered)))))))
 
 (ert-deftest harness-provider-claude-native-spawn-key-follows-the-options ()

@@ -13,32 +13,18 @@
   (should (equal '(:name test/add :doc "add" :module nil :params nil)
                  (car (harness-methods)))))
 
-(ert-deftest harness-core-call-fallback-answers-missing-methods ()
+(ert-deftest harness-core-a-missing-method-signals-and-nothing-answers-for-it ()
+  "A method nobody registered signals, here and through the async wrapper.
+There is no fallback to answer for it: code in this Emacs reaches the
+methods registered in it and no others (a harness in another process is
+reached over ACP, as a client does, never through `harness-call')."
   (harness-test-reset-bus)
   (harness-register-method 'test/here (lambda (x) (list 'here x)))
-  (let (seen)
-    (let ((harness-call-fallback-function
-           (lambda (name &rest args) (push (cons name args) seen)
-             (list 'far name args))))
-      ;; A method registered here is still called here.
-      (should (equal '(here 1) (harness-call 'test/here 1)))
-      (should-not seen)
-      ;; A missing one goes to the fallback, with its arguments.
-      (should (equal '(far test/away (1 :k v))
-                     (harness-call 'test/away 1 :k 'v)))
-      (should (equal '((test/away 1 :k v)) seen))
-      ;; The async wrapper goes through it too, errors included.
-      (should (equal '(far test/async nil)
-                     (harness-await (harness-call-async 'test/async))))
-      ;; Existence still means registered here.
-      (should-not (harness-method-exists-p 'test/away)))
-    (let ((harness-call-fallback-function
-           (lambda (name &rest _) (signal 'harness-no-such-method (list name)))))
-      (should-error (harness-call 'test/away) :type 'harness-no-such-method)
-      (should-error (harness-await (harness-call-async 'test/away))
-                    :type 'harness-no-such-method)))
-  ;; Unbound again, a missing method signals as before.
-  (should-error (harness-call 'test/away) :type 'harness-no-such-method))
+  (should (equal '(here 1) (harness-call 'test/here 1)))
+  (should-error (harness-call 'test/away 1 :k 'v) :type 'harness-no-such-method)
+  (should-error (harness-await (harness-call-async 'test/away)) :type 'harness-no-such-method)
+  (should-not (harness-method-exists-p 'test/away))
+  (should-not (boundp 'harness-call-fallback-function)))
 
 (ert-deftest harness-core-call-async-wraps-values-and-errors ()
   (harness-test-reset-bus)
@@ -131,6 +117,56 @@ One that logs does not filter that message again, so it cannot recurse."
   (harness-add-filter 'test/af2 (lambda (v next) (funcall next (plist-put v :final t))) 10)
   (harness-add-filter 'test/af2 (lambda (v next) (funcall next (plist-put v :never t))) 20)
   (should-not (plist-get (harness-await (harness-run-filter-async 'test/af2 nil)) :never)))
+
+(ert-deftest harness-core-async-filter-failures-pass-on-the-value-unless-the-chain-says-otherwise ()
+  "A handler that fails hands its value on, but a chain that guards can say no.
+Most chains only add to what they carry, and one handler failing leaves
+the rest to go on.  A chain that guards (`permission/decide') cannot let
+the failure of the handler that would have refused read as nothing to
+refuse, so it names what a failure hands on, and that can stop the
+chain."
+  (harness-test-reset-bus)
+  (let ((boom (lambda (_v _next) (error "boom")))
+        (rejected (lambda (_v _next) (harness-rejected '(harness-error "rejected"))))
+        (after (lambda (v next) (funcall next (plist-put (copy-sequence v) :after t)))))
+    ;; By default the failure is skipped, and the chain goes on.
+    (dolist (failing (list boom rejected))
+      (harness-remove-filter 'test/fail failing)
+      (harness-add-filter 'test/fail failing 10)
+      (harness-add-filter 'test/fail after 20)
+      (let ((r (harness-await (harness-run-filter-async 'test/fail (list :start t)))))
+        (should (plist-get r :start))
+        (should (plist-get r :after)))
+      (harness-remove-filter 'test/fail failing))
+    ;; A chain that names what a failure hands on gets that, whichever way
+    ;; the handler failed, and a final value stops the chain.
+    (let (seen)
+      (harness-set-filter-failure
+       'test/fail (lambda (value handler err)
+                    (push (list value handler (car-safe err)) seen)
+                    (list :refused t :final t)))
+      (unwind-protect
+          (dolist (failing (list boom rejected))
+            (harness-add-filter 'test/fail failing 10)
+            (let ((r (harness-await (harness-run-filter-async 'test/fail (list :start t)))))
+              (should (plist-get r :refused))
+              (should-not (plist-get r :after)))
+            (harness-remove-filter 'test/fail failing))
+        (harness-clear-filter-failure 'test/fail))
+      (should (= 2 (length seen)))
+      (should (equal '(:start t) (car (nth 0 seen))))
+      (should (eq boom (nth 1 (nth 1 seen))))
+      (should (eq 'error (nth 2 (nth 1 seen))))
+      (should (eq rejected (nth 1 (nth 0 seen)))))
+    ;; The failure function must not fail: if it does, the value goes on.
+    (harness-set-filter-failure 'test/fail (lambda (&rest _) (error "worse")))
+    (unwind-protect
+        (progn
+          (harness-add-filter 'test/fail boom 10)
+          (should (plist-get (harness-await (harness-run-filter-async 'test/fail (list :after t))) :after)))
+      (harness-clear-filter-failure 'test/fail))
+    ;; And a chain with none is what it was.
+    (should-not (gethash 'test/fail harness--filter-failures))))
 
 (ert-deftest harness-core-async-filter-between-runs-some-stages ()
   "`harness-run-filter-async-between' runs the stages whose priority lies

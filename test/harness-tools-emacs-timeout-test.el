@@ -31,9 +31,14 @@ turn it belongs to, pending forever."
   (require 'harness-emacs-endpoint)
   (harness-add-filter 'permission/decide #'harness-tools-emacs-timeout-test--allow 10)
   (let ((conn (harness-acp-connect nil)))
+    ;; An Emacs that lent itself: it serves the MCP handshake, then
+    ;; receives the tool's request and never answers it.
+    (harness-acp-set-handler
+     conn (lambda (method params respond)
+            (unless (and (equal method harness-emacs-endpoint-mcp-method)
+                         (equal (plist-get (plist-get params :message) :method) "tools/call"))
+              (harness-emacs-endpoint-answer method params respond))))
     (harness-test-await (harness-acp-initialize conn (harness-emacs-endpoint-client-capabilities)))
-    ;; An Emacs that lent itself, receives the request and never answers.
-    (harness-acp-set-handler conn (lambda (&rest _) nil))
     (unwind-protect
         (let ((harness-tools--emacs-timeout 0.3)
               ;; Keep the desktop notice out of the test.

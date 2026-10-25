@@ -8,7 +8,7 @@ Layered settings through customize and dir-locals.
 - **Source:** [lisp/modules/harness-config.el](../../lisp/modules/harness-config.el)
 - **Loaded:** by default
 - **Requires:** [project](project.md)
-- **Required by:** [commit-msg](commit-msg.md), [perms](perms.md), [sandbox](sandbox.md)
+- **Required by:** [commit-msg](commit-msg.md), [mcp](mcp.md), [perms](perms.md), [sandbox](sandbox.md)
 - **Brings along:** [ui-config](ui-config.md) (its UI)
 
 ## About

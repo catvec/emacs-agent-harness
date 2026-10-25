@@ -566,7 +566,7 @@ nobody is asked and the auto-mode judge decides."
                                  "Allow the network (N)")
       (harness-ui-access--choice "Off" (not network) (lambda () (harness-ui-access-set-network nil))
                                  "Block the network (N)"))
-     (unless network "No web tools, ssh or emacs_eval · bash and elisp offline"))))
+     (unless network "No web tools or ssh · bash and elisp offline"))))
 
 (defun harness-ui-access--insert-writing (d)
   "Insert the writing row of the settings of the session described as D.

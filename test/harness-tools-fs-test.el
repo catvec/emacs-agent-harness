@@ -615,6 +615,59 @@ appends the arguments of every call to the file calls.log, which
     (should (plist-get (harness-tools-fs-test--call "glob" :pattern "*" :path "nope") :is-error))
     (should (equal "Find files: **/*.el in src" (harness-tool-title "glob" '(:pattern "**/*.el" :path "src"))))))
 
+(ert-deftest harness-tools-fs-glob-stays-inside-its-path ()
+  "A pattern cannot name what lies outside the directory the jail judged.
+The permission jail sees `path'; the pattern is matched below it.  An
+absolute pattern, one with a `..' segment, and one that goes through a
+symbolic link out of the directory would list names the jail never saw,
+so each is refused or finds nothing, and a pattern that names the
+directory itself, or a file in it, still works."
+  (harness-tools-fs-test--setup)
+  (harness-tools-fs-test-in-dir
+    (let ((outside (file-name-as-directory (harness-test-temp-dir))))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "secret.txt" outside) (insert "x"))
+            (harness-tools-fs-test--write "inside.txt" "y")
+            (make-symbolic-link (directory-file-name outside) (expand-file-name "link" root))
+            ;; The ordinary patterns, which must go on working.
+            (should (string-search "inside.txt"
+                                   (plist-get (harness-tools-fs-test--call "glob" :pattern "*.txt") :content)))
+            (should (string-search "inside.txt"
+                                   (plist-get (harness-tools-fs-test--call "glob" :pattern "**/inside.txt") :content)))
+            ;; An absolute pattern names the directory it is in; below `path' it
+            ;; is the same as the relative one.
+            (should (string-search "inside.txt"
+                                   (plist-get (harness-tools-fs-test--call
+                                               "glob" :pattern (expand-file-name "*.txt" root))
+                                              :content)))
+            ;; An absolute pattern outside `path', and `~', which is one.  The
+            ;; answer is an error that says why; it lists nothing.
+            (dolist (pattern (list (concat outside "*") (concat outside "secret.txt")
+                                   "/etc/pass*" "~/*" "/ssh:box.invalid:/etc/*"))
+              (let ((r (harness-tools-fs-test--call "glob" :pattern pattern)))
+                (should (plist-get r :is-error))
+                (should (string-prefix-p "The pattern " (plist-get r :content)))
+                (should (string-search "does not stay inside" (plist-get r :content)))
+                (should-not (string-search "newest first" (plist-get r :content)))))
+            ;; A `..' segment, however it is reached.
+            (dolist (pattern (list (concat (file-relative-name outside root) "*")
+                                   (concat "src/../" (file-relative-name outside root) "*")
+                                   "../*" "*/../../*"))
+              (let ((r (harness-tools-fs-test--call "glob" :pattern pattern)))
+                (should (plist-get r :is-error))
+                (should (string-search "does not stay inside" (plist-get r :content)))
+                (should-not (string-search "newest first" (plist-get r :content)))))
+            ;; A symbolic link in the way is not followed out: the name of the
+            ;; link is listed, nothing below it.
+            (dolist (pattern '("link/*" "li*/secret.txt" "**/secret.txt" "link/**"))
+              (let ((r (harness-tools-fs-test--call "glob" :pattern pattern)))
+                (should-not (plist-get r :is-error))
+                (should (string-search "No files match" (plist-get r :content)))))
+            (should (string-search "link/"
+                                   (plist-get (harness-tools-fs-test--call "glob" :pattern "li*") :content))))
+        (delete-directory outside t)))))
+
 (ert-deftest harness-tools-fs-glob-regexp ()
   (harness-tools-fs-test--setup)
   (let ((rx (harness-tools-fs--glob-regexp "src/**/*.el")))

@@ -218,7 +218,7 @@ reader of the layers skips it (see `harness-config--layered-keys').")
      :doc "What sessions may reach, and what may run without asking you."
      :keys (harness-allowed-directories harness-sandbox-policy harness-perms-rules
             harness-perms-default-cover harness-perms-auto-model
-            harness-perms-summarize harness-perms-summary-model harness-emacs-eval))
+            harness-perms-summarize harness-perms-summary-model))
     (tasks
      :title "Task board"
      :doc "The sessions tasks start with, and when their work counts as done."

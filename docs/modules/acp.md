@@ -52,9 +52,8 @@ the session or agent modules are absent.
 - `acp/stop` — Stop the ACP TCP server and disconnect its TCP clients.
 - `client/request` (method params) — Send request METHOD with PARAMS to the connected clients (the UI).
 - `emacs/attached` — Return the Emacsen lent to the harness, the one `emacs/request` asks first.
-- `emacs/request` (method params) — Send `_harness/emacs/METHOD` with PARAMS to the Emacs lent to the harness.
+- `emacs/request` (method params) — Call the MCP tool METHOD of the Emacs lent to the harness, with PARAMS.
 - `harness/api` — Describe the bus (methods, events, filters, modules) in wire shape.
-- `harness/call` (method args) — Call bus METHOD with the arguments printed in ARGS; return (:value PRINTED).
 - `harness/modules` — Describe every module of the harness, as `harness-module-descriptions` does.
 - `harness/version` — Return the harness and Emacs versions.
 
@@ -108,5 +107,6 @@ the session or agent modules are absent.
 
 ### Hooks it adds to
 
+- `harness-acp-initialized-functions` → `harness-acp--attach-emacs`
 - `harness-corporate-mode-change-hook` → `harness-acp--on-corporate-mode`
 

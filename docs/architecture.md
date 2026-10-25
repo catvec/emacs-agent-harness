@@ -18,7 +18,9 @@ module needs something more, add it here first.
                 notifications, secrets, redact, plugins
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
- Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
+ Tool calls     mcp (the MCP host: tool servers the harness starts in the
+                session's sandbox, and the Emacs a client lends), tools,
+                tools-fs, tools-shell, tools-ssh, tools-emacs,
                 tools-web, tools-agent, tools-question, tools-plan, tools-todo,
                 tools-session-info, tools-sessions, tools-events, tools-notify,
                 tools-handin, tools-compact
@@ -141,27 +143,22 @@ default) the layers above are split across two Emacs processes:
   harness works headless.  The user's Emacs is a resource some tools
   reach, as a TRAMP host is for the file tools: the UI lends it to the
   harness when it connects (`clientCapabilities._harness.emacs` in
-  `initialize`), and the harness sends that one Emacs the small, fixed
-  set of `_harness/emacs/*` requests of lisp/harness-emacs-endpoint.el
-  through `emacs/request` (see the tools and acp sections).  The
-  `emacs_*` tools of tools-emacs ask it for plain data and a few
-  bounded actions (show a buffer, insert text, save one, trace a
-  function or a variable); none evaluates code.  The `elisp` tool
-  evaluates in a child `emacs --batch` (lisp/harness-elisp.el), never
-  in the lent Emacs, and that child runs in the sandbox as a `bash`
-  command does.  Model-written Lisp reaches the lent Emacs only
-  through `emacs_eval` (tools-emacs-eval), which the user can turn off
-  with `harness-emacs-eval` (on by default): the code runs on the UI's
-  only thread, where a blocking call freezes typing and redisplay,
-  so a judge model must expect it to return at once, the permission
-  chain must allow the call as it would a bash command, and the lent
-  Emacs runs it guarded (the user's next key or C-g stops it; it may
-  not prompt; it is stopped once it has waited two seconds).  The lent
-  Emacs checks the setting itself, so it has the last word.  The
-  harness's methods are in the harness process, not in this Emacs, so
-  the code's `harness-call` of one goes there over the connection the
-  request came on (`harness-call-fallback-function`, `harness/call`;
-  see the bus and acp).
+  `initialize`), and what it lends is an MCP server
+  (lisp/harness-emacs-endpoint.el, see the tools and acp sections): one
+  `_harness/emacs/mcp` request carries one MCP message, and the
+  server's tools are a fixed vocabulary of reads and bounded actions
+  (show a buffer, insert text, save one, trace a function or a
+  variable).  None takes code.  The `elisp` tool evaluates in a child
+  `emacs --batch` (lisp/harness-elisp.el), never in the lent Emacs, and
+  that child runs in the sandbox as a `bash` command does; with the
+  `snapshot` input it starts from a copy of the lent Emacs's variables
+  and buffers, taken in slices, the copy and not the Emacs being
+  changed (lisp/harness-snapshot.el, see docs/trust-model.md).  No tool
+  evaluates model-written Lisp anywhere but that child: the tool that
+  did in the user's Emacs (`emacs_eval`, with the `harness/call` bridge
+  back into the harness it needed) was removed, not turned off, because
+  a call to it was a way around every directory the session may not
+  reach (see docs/trust-model.md).
 - Chores of the UI, which any client may do, are asked for with
   `client/request` (below): saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
@@ -215,18 +212,22 @@ local connection.
 (harness-run-filter-async 'permission/decide decision request) ; async decision chain
 ```
 
-`harness-call-fallback-function` (nil) answers `harness-call` for a
-method this Emacs does not have: while it is non-nil and no method NAME
-is registered here, `harness-call` (and so `harness-call-async`)
-returns what `(funcall FN NAME ARGS…)` returns instead of signalling
-`harness-no-such-method`.  A method registered here is still called
-here, and `harness-method-exists-p` and `harness-methods` do not look at
-the function, so a module that asks whether a method exists before it
-uses one sees what it always saw.  The variable is let-bound around code
-that runs away from the bus it calls, never set: the Emacs endpoint
-binds it while it evaluates the code of `emacs_eval`, so that code
-reaches the harness process over the connection its request came on
-(see acp, `harness/call`).
+`harness-call` has no fallback.  It used to have one
+(`harness-call-fallback-function`), by which code the harness sent to
+the lent Emacs reached the harness's methods over the connection its
+request came on; that code, the setting that allowed it and the
+`harness/call` method it used are gone (see docs/trust-model.md).  What
+runs in the harness process calls the methods it has; nothing a model
+writes does.
+
+A handler that fails (signals an error, or returns a promise that is
+rejected) hands its value on unchanged, as if it had passed, unless the
+chain says otherwise: `harness-set-filter-failure NAME FN` makes FN, called
+as (FN VALUE HANDLER ERR), say what the chain hands on, and a `:final`
+value stops it (`harness-clear-filter-failure NAME` takes it away).  That
+is right for a chain that only adds, and wrong for one that guards: the
+handler that failed is the one that would have said no.  The permission
+chain names one (below), so it fails closed.
 
 Async filter gotcha: `harness-run-filter-async` adopts any promise a
 handler returns and calls NEXT with its value.  A handler that stores
@@ -354,6 +355,8 @@ sessions and the turn loop, the Claude Code provider of the default
 model, compaction and retries, session names, the links agents write
 to sessions, messages and threads (`linking`), the file, shell and
 Emacs tools with the permissions and the sandbox that guard them, the
+MCP host that starts tool servers inside that sandbox and attaches the
+Emacs a client lends (`mcp`), the
 question, plan, todo, session info and sub-agent tools (a module
 each), worktrees, usage, and the chat, session list and pending
 requests of the UI.  Everything else is
@@ -2850,11 +2853,22 @@ Several things about plugins made this more than writing a file:
   :description "…"                       ; what the model sees
   :schema '(:type "object" :properties (:path (:type "string" :description "…")) :required ("path"))
   :kind read|write|exec|net|meta          ; permission class
-  :paths (lambda (input) (list …))        ; paths touched, for the jail
+  :paths (lambda (input &optional ctx) (list …)) ; paths touched, for the jail
   :coalescable t                          ; may be folded into a summary block in the UI
   :subject (lambda (input) "x.el")        ; what a call is about, or nil
   :handler (lambda (input ctx) …))        ; → RESULT | string | promise
 ```
+
+`:paths` says which paths a call touches, so the permission jail can judge
+them (see perms); a tool that works somewhere other than the path it is
+given declares that place too.  The function takes the input, and the
+call's context after it when it takes two arguments (`task_submit` needs
+the session's directory to find the main checkout of its project).  The
+paths are made absolute against the session's directory without
+connecting to a host.  A paths function that fails (an argument that is no
+path) does not mean the call touches nothing: the request carries
+`:paths-error` and the call is refused before the chain
+(`harness-tools--unjudgeable-refusal`).
 
 A tool has two names: NAME, the identifier the model calls it by, and
 its `:label`, a short name in sentence case for people ("Read file",
@@ -3015,7 +3029,7 @@ access), 5 dir-request, 5 escalation (the access module:
 `request_directory_access` is, a capability included), 6
 away-request, 6
 session-move (the session tools: the user confirms every
-`session_move`), 7 sandbox-guard, 8 supervisor (the supervisor module,
+`session_move`), 8 supervisor (the supervisor module,
 a plugin's stage: a session in supervisor mode is denied, for good, a
 call to any tool off its allowlist, in every permission mode; see
 supervisor), 10 jail, 20 mode, 25 write-up (the tasks module: a backlog
@@ -3027,6 +3041,19 @@ allowed otherwise, so the judge never rules on a plan; see supervisor),
 pending request and resolves when answered).  A judge denial reaches 90
 as an `ask` in an interactive session, so the user answers it; in a
 non-interactive session it stays a denial.
+
+The chain fails closed.  A stage that signals an error, or whose promise
+is rejected, refuses the call for good
+(`harness-perms--stage-failed`, named with `harness-set-filter-failure`
+when the module starts): "The permission check could not be completed
+(harness-perms--jail failed: …)", with a hint that the call was not
+checked, that it is a fault in the harness and that the user can approve
+that one call.  Handing the decision on as it was, which a chain does by
+default, would let the stages after the failed one decide a call nobody
+checked; with the jail failed, that is a path no one compared with the
+session's directories, allowed in yolo mode and, as a read, in every other.
+The judge, which can fail for a reason that is no fault (a timeout, no
+verdict), settles that itself and hands the call on undecided.
 
 Who decided a call is kept with the decision.  `harness-tools--decide`
 runs the chain traced (`harness-tools-decide-traced`, over
@@ -3073,12 +3100,20 @@ stage's label, else `gate`; the access module's judgements and the
   permission mode, non-interactive mode, allowed directories, the working
   directory and the host, naming the tool that changes them.
 
-- The sandbox guard asks `sandbox/check-command` about every `exec` call
-  whose input has a `:command` (the bash tool), passing the directory it
-  runs in and the session's own worktree (`:worktree`, else `:cwd`).  A
-  refusal is a final deny, in every mode, yolo and standing rules
-  included: the command would do damage only because it runs sandboxed
-  (see sandbox).  A guard that fails lets the chain go on.
+- The chain reads no command line to keep a command from doing damage in
+  the sandbox: there is no stage for it.  What the worktree commands
+  (`prune`, `remove`, `move`, `lock`, `unlock`) would do to the other
+  worktrees there is kept from happening by the sandbox's mounts (see
+  sandbox), so those commands are decided like any other.  The one place
+  the chain allows a shell command because of how it reads the line, a
+  read-only cloud query (`gcloud ... list`, `gsutil ls`) in auto mode or
+  for a user who is away, does so only for a command the sandbox confines
+  (`sandbox/confined-p`); an unconfined one goes on to the judge or the
+  user.  The reading of the command line otherwise serves the prompts
+  (the paths a call is about, the covers a lasting answer offers) and the
+  standing rules the user has made; it is no boundary (see
+  docs/trust-model.md and
+  docs/analysis/command-parsing-audit-2026-10-24.md).
 
 - `permission/answer SESSION-ID PENDING-ID ANSWER` — ANSWER
   `(:behavior allow|deny :scope once|session|always :reason :pattern)`,
@@ -3345,7 +3380,16 @@ stage's label, else `gate`; the access module's judgements and the
   allow-once does for `request_directory_access`), `permission/revoke-dir SESSION-ID DIR`,
   `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|turn|outputs
   :revocable :read-only)` plists, for the access view), `permission/allowed-dirs SESSION-ID`
-  (the full effective root list: the entries a call may write), `permission/rules SESSION-ID`
+  (the full effective root list: the entries a call may write),
+  `permission/once-grants CALL-ID` (the directories the user allowed that call
+  alone, which a tool that runs in a sandbox of its own is shown),
+  `permission/exempt-reads SESSION-ID TOOL PATHS` (those of PATHS that a call
+  that only reads may read outside the roots: the harness itself, skills, files
+  the user's Emacs showed a definition in; a credential is none of them),
+  `permission/path-writable-p SESSION-ID PATH` (non-nil when PATH lies in
+  one of them, by the jail's own rule: links resolved, `..` collapsed,
+  patterns and grants counted; a tool whose call names no path but acts on
+  a file, the one a buffer of the user's Emacs visits, asks it first), `permission/rules SESSION-ID`
   (`(:mode :non-interactive :auto-allow :session :always :roots :inspect :skills)`:
   `:auto-allow` holds the inspection tools too, `:inspect` the
   directories of the harness itself and `:skills` the skills
@@ -3807,8 +3851,8 @@ half `ui-access`, the access view).
 - It is held by the harness, not a prompt: the `permission/dir-entries`
   filter (50) takes the dropped directories out and adds the read-only
   ones (see perms); the `agent/tools` filter (85) takes off the tools
-  turned off and, without the network, those of kind net, `ssh` and
-  `emacs_eval`, and `bash` and `elisp` unless `sandbox/confined-p`
+  turned off and, without the network, those of kind net and `ssh`,
+  and `bash` and `elisp` unless `sandbox/confined-p`
   (the `tools/sandbox-options` filter, 80, then runs them with `:network
   nil`); a read-only profile is a `harness-readonly-register` policy
   (`access`), the reading tools and bash read-only and offline.  The
@@ -4168,7 +4212,8 @@ decisions.
   directory stays hidden.  `sandbox/confined-p CWD` says whether commands run in
   CWD are confined (a backend, a policy other than `off`, a local CWD);
   the perms module refuses a command naming a skills path the sandbox
-  does not show.
+  does not show, and allows a read-only cloud query only when it is
+  confined.
 - A CWD inside a linked git worktree also gets the repository's common
   git directory read-write (its `hooks/` and `config` stay read-only, so
   nothing planted there runs when the harness uses git unconfined; the
@@ -4178,23 +4223,31 @@ decisions.
   the host's `user.name`/`user.email` as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`,
   so worktree sessions can commit.
 - Git in the sandbox sees no other worktree's files, so it takes every
-  other worktree for deleted.  `sandbox/check-command CWD COMMAND
-  &optional OWN` gives nil or `(:reason :hint)`: why a shell command must
-  not run confined in CWD.  It refuses `git worktree prune`, and `git
-  worktree unlock|remove|move` of a worktree that is outside OWN (the
-  session's own worktree, by default the one holding CWD), is OWN itself,
-  is locked by the harness (reason `harness: ...`), or cannot be told
-  (variables, globs, `xargs`).  It reads the command line as the shell
-  does, closely enough: quotes, operators and redirections, `$(...)` and
-  backticks, `sh -c` and `eval` scripts, wrappers (env, timeout, xargs,
-  find...), `cd`, git's global options (`-C`, `-c alias.NAME=...`), and
-  worktrees named by the end of their path, as git allows; a `cd` in a
-  subshell or a pipe does not carry on.  Shell variables, scripts run
-  from files and aliases from git's config are not resolved: the locks
-  protect the harness's worktrees from those.  The reason points to
-  `worktree/prune` and `worktree/remove`, which run outside the sandbox.
-  Commands that run unconfined (no backend, policy `off`, remote CWD)
-  are never refused.  The perms module's sandbox guard calls it.
+  other worktree for deleted: the prune command drops its registration
+  (`GIT/worktrees/NAME`), and `remove`, `move`, `lock` and `unlock` of
+  another worktree change a registration that is not the session's.  No
+  command line is read to refuse any of it.
+  `harness-sandbox--hidden-registrations` lists the registrations of the
+  worktrees the sandbox does not show, and each is mounted read-only over
+  the writable git directory: bwrap `--ro-bind`, after the common
+  directory's bind and its protected paths; systemd-run
+  `BindReadOnlyPaths=` (a path its setting cannot hold is an error, not
+  a registration left writable); MXC one more read-only path.  A
+  worktree is shown when it lies in CWD or in a directory mounted
+  writable as it is recorded in the registration's `gitdir` file, and its
+  real path lies in the source of such a mount; one that is not
+  certainly shown, or whose registration says nothing, is not.  The
+  session's own registration stays writable, so do those of the
+  worktrees it makes in CWD, and a registration whose worktree is really
+  gone from inside CWD is pruned as it should be.  The git directories
+  covered are a linked worktree's common one when CWD is such a
+  worktree, and the `.git` directory at the top of CWD or of a writable
+  mount (the main checkout, a granted repository); a repository further
+  down a granted directory is not looked for, and a worktree another
+  session adds while a command runs is not covered.  Read-only commands
+  need no extra mounts: the whole git directory is read-only.  Reading
+  the `gitdir` files costs twenty milliseconds for 150 registrations
+  each time a command is wrapped.
 - MXC, on macOS (`harness-sandbox--mxc-command`): the wrapped command
   is `PROGRAM --config-base64 B64`, the whole command as JSON (version
   1.0.0, containment `seatbelt`, `nestedPty`, no MXC timeout), which
@@ -4205,9 +4258,11 @@ decisions.
   read-only its `ro` sources, the toolchain directories that exist
   (`harness-sandbox--mxc-system-dirs`: Homebrew, /usr/local, MacPorts,
   Nix, /Applications) and `harness-sandbox-extra-read-only-dirs`, each
-  unless a writable one holds it, and the protected git paths, which
-  stay read-only inside the writable git directory (the deepest rule
-  wins).  MXC's own baseline gives the system (/bin, /usr, /System,
+  unless a writable one holds it, and the protected git paths and the
+  registrations of the worktrees not shown (above), which stay read-only
+  inside the writable git directory (the deepest rule wins; the
+  registrations' rules are written to the configuration and tested
+  there, a macOS host has not run them).  MXC's own baseline gives the system (/bin, /usr, /System,
   /Library, /private/etc…).  `sandbox/wrap` makes a private 0700
   directory the command's `$TMPDIR`, writable, and the command line
   removes it after the command, keeping its status (a command killed by
@@ -5833,8 +5888,8 @@ without a word in the model's conversation or prompt.
 ### judge
 
 One-off questions to a cheap model, whose short reply the asker reads
-as a decision.  emacs_eval's speed judge (tools-emacs-eval) and an
-event watch's classifier (tools-events) both ask through this library,
+as a decision.  An event watch's classifier (tools-events) asks
+through this library,
 so the request, its retry, its time limit and the lookups a judge may
 make before it answers are written once, and a judge differs from
 another only in its prompt, its parser and its tools.  The module keeps
@@ -5903,11 +5958,8 @@ loads on its own.
     `tool_result` blocks).  A retry after the output budget ran out keeps
     the lookups made.  A judge still asking for lookups in its
     (MAX-LOOKUPS + 1)th request gives no value.
-- The users.  emacs_eval's judge answers `{"verdict": …, "reason": …}`,
-  and may first look up what it does not know with emacs_describe and
-  emacs_find_definition (see tools-emacs-eval).  An event watch's
-  classifier answers `{"action": …, "note": …}` and is given no tools
-  (see tools-events).
+- The users.  An event watch's classifier answers
+  `{"action": …, "note": …}` and is given no tools (see tools-events).
 
 ### skills
 
@@ -5966,11 +6018,14 @@ loads on its own.
   and `:missing` (its directory is gone) when they apply.
 - Locks: `worktree/create` locks every worktree it makes (`git worktree
   add --lock --reason "harness: BRANCH"`).  Agents run git in a sandbox
-  that shows only their own worktree, where `git worktree prune` takes
-  every other worktree for deleted and drops its registration: its files
-  stay, without an index, and git fails in them.  Prune never touches a
-  locked worktree, and git removes one only when forced twice.  The
-  harness's locks are those whose reason starts with `harness: `
+  that shows only their own worktree, where the prune command takes
+  every other worktree for deleted: dropping its registration would leave
+  its files without an index, with git failing in them.  The sandbox
+  keeps the registrations of the worktrees it does not show read-only
+  (see sandbox), so an agent's command cannot drop them.  The locks stay
+  as a second line: prune never touches a locked worktree, and git
+  removes one only when forced twice.  The harness's locks are those
+  whose reason starts with `harness: `
   (`harness-worktree-lock-prefix`); other locks are left alone.
   - `worktree/lock` (default reason `harness: BRANCH`; a locked worktree
     keeps its lock) and `worktree/unlock` (lifts only a harness lock,
@@ -6027,9 +6082,6 @@ loads on its own.
     worktree list runs it again with `L` (for worktrees registered again
     by hand after a prune), and `l` locks or unlocks the worktree at
     point.
-  - The sandbox module's `sandbox/check-command`, through the perms
-    module's sandbox guard, refuses `git worktree prune` and touching
-    other worktrees in sandboxed commands (see sandbox).
 - Nothing re-registers a worktree whose registration was pruned anyway;
   that is a repair by hand, after which `L` locks it.
 
@@ -6475,8 +6527,8 @@ priority).
 - Internal jobs and the limit.  The harness's own model calls -- a
   task's title (`naming/title`, and a session's name, `naming/name`
   with `:opening`), a card's recap, the judge of auto mode and of a
-  non-interactive session, emacs_eval's judge, the supervisor's, the
-  pet's and the insights' calls, a compaction's summary, the board's
+  non-interactive session, the supervisor's, the pet's and the
+  insights' calls, a compaction's summary, the board's
   search -- are internal jobs.  They go straight to `provider/complete`:
   none is a turn of an agent, none makes a session or a task of its own,
   and they run with no tools, under the id of the session they are
@@ -9095,7 +9147,56 @@ names its own working and temporary directories.
   session pickers).  The supervisor module forks the workers of its fork
   steps this way, when a plan has two or more on one model.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-question, tools-plan, tools-todo, tools-session-info, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact, tools-review
+### mcp
+
+The MCP host (lisp/modules/harness-mcp.el, with the protocol library
+lisp/harness-mcp-protocol.el) starts the tool servers of a session in its
+sandbox and calls them.  A server is declared with
+`harness-mcp-define-server NAME :command FN :profile FN :events (...)`:
+the program to start, the sandbox profile it runs in (by default the
+mounts a bash command of the session gets, `harness-tools-shell-sandbox-profile`)
+and the harness events it may announce.  `harness-mcp-call-tool SERVER TOOL
+INPUT CTX &optional TIMEOUT META KEY` calls a tool and answers with a
+harness tool RESULT; one process serves one session (or the key a call
+gave, `(SESSION . REST)`, for a call that needs mounts the session's
+profile lacks), is started by its first call, stopped when idle for
+`harness-mcp-idle-seconds` or when the session is deleted, and replaced
+when the session's sandbox changes, since mounts are fixed at start.
+With the policy `required` and no backend a call fails; the host never
+runs a server unconfined then.  The Emacs a client lends is an `:external`
+server the host does not start (see acp).  `mcp/servers` and `mcp/stop` are
+not callable over ACP.
+
+The one server the harness starts itself is `fs`, declared by tools-fs: an
+`emacs --batch` that loads lisp/harness-mcp-fs.el and serves the seven file
+tools by running the handlers of tools-fs, unchanged.  See tools-fs.
+
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web, tools-agent, tools-question, tools-plan, tools-todo, tools-session-info, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact, tools-review
+
+Where the file tools run.  Each is registered with a broker
+(`harness-tools-fs--broker`) for its handler.  A call on a local path where
+a sandbox applies (`sandbox/confined-p` for the session's directory, or the
+policy `required`) goes to the `fs` worker; the handlers it runs are the
+ones the harness runs for any other call, and a test runs the same calls
+both ways and compares.  A path of another host (TRAMP), a policy that is
+`off` or `preferred` with no backend (as for bash), and
+`harness-tools-fs-jail` nil run in the harness process.  With the policy
+`required` and no backend the call is refused.  The worker is shown the
+session's profile, so a path outside the session's directories does not
+exist for it; a grant starts a new worker when the old one is idle.  A call
+that has to reach further on purpose gets a worker of its own with exactly
+those mounts added, found by a key made from them: the harness's own files,
+skills and files the user's Emacs showed a definition in
+(`permission/exempt-reads`, read-only; credentials are not among them), a
+directory allowed for that call alone (`permission/once-grants`) and the
+paths of a call the user approved by hand (`:approved` in the context, set by
+`tools/execute-approved`).  The worker refuses a write outside the
+directories it can really write (its `/tmp` and home are its own and a file
+written there would be gone), sets the options the tools read from the call
+(`harness-tools-max-output-chars`, the image limits, ffmpeg), makes image
+copies in the session's temporary directory, and announces a written file as
+`tools/file-written`.  `outputs/` under the state directory is made before a
+worker starts, so a long output saved later can be read back.
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -9106,21 +9207,20 @@ TRAMP prefixes come from the session host):
 | `write_file` | Write file | path, content | write |
 | `edit_file` | Edit file | path, old_string, new_string, replace_all | write |
 | `list_dir` | List directory | path, depth | read |
-| `glob` | Find files | pattern, path | read |
+| `glob` | Find files | pattern, path | read (the jail judges `path`; the pattern is matched below it, so one that is absolute outside it, begins with `~` or has a `..` segment is refused, and nothing is listed that lies behind a symbolic link out of it) |
 | `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
 | `bash` | Bash | command, timeout, cwd | exec |
 | `ssh` | SSH | host, command, cwd, timeout | exec (tools-ssh; its path is the directory it runs in on the host, or the login's home directory by name, `/ssh:HOST:~/`, when the host decides where that is: no cwd, a relative cwd) |
-| `elisp` | Emacs Lisp | code, timeout | exec |
+| `elisp` | Emacs Lisp | code, timeout, snapshot (start from a copy of the user's Emacs), fresh (renew that copy) | exec (with `snapshot`: read-only, no network, refused without a sandbox) |
 | `emacs_buffers` | List buffers | filter, all | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_windows` | List windows | — | read (needs no approval: `harness-perms--inspection-tools`) |
-| `emacs_buffer` | Read buffer | name, offset, limit | read (needs no approval: `harness-perms--inspection-tools`) |
+| `emacs_buffer` | Read buffer | name, offset, limit, contains (the lines holding any of up to 5 strings, ignoring case, not patterns), tail (from the end) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_open` | Open buffer | name (buffer or path), line | read |
-| `emacs_insert` | Insert text | name, text, position (point/start/end) | write |
-| `emacs_save_buffer` | Save buffer | name | write |
+| `emacs_insert` | Insert text | name, text, position (point/start/end) | write (a buffer that visits a file is that file: the file is asked first and must lie where the session may write, `permission/path-writable-p`, else the change is refused; the Emacs checks the buffer still visits it) |
+| `emacs_save_buffer` | Save buffer | name | write (as emacs_insert) |
 | `emacs_describe` | Describe symbol | symbol, buffer | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_find_definition` | Find definition | symbol, type (function/variable/face) | read (needs no approval: `harness-perms--inspection-tools`; the file of a definition it shows becomes readable, `permission/reveal-file`) |
 | `emacs_trace` | Trace symbol | action (start/stop/list), symbol, type (function/variable), callers, limit | write |
-| `emacs_eval` | Evaluate in Emacs | code | exec (tools-emacs-eval; offered only while `harness-emacs-eval` is on, as it is by default; a judge model, which may look up what it does not know first, must call the code fast first; the code reaches the harness's methods with `harness-call`) |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -9148,14 +9248,14 @@ TRAMP prefixes come from the session host):
 | `watch_events` | Watch events | events (kinds), prompt, actions (default `["wake"]`), session_id, task_id, all_projects, once (default true), timeout_seconds | read (tools-events; registers a watch and returns at once, never waiting; needs no approval: `harness-perms--inspection-tools`) |
 | `unwatch_events` | Stop watching events | watch_id (default: every watch of the session) | read (tools-events; needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done/cancelled), include_archived, all_projects, limit (the most recent); oldest first, each waiting task saying `#N in line` (`task/queue-order`) and why when it was put back, and what holds it (paused, or out of quota / over a hard budget, with the reason), the pending column alone in start order | read (needs no approval: `harness-perms--inspection-tools`) |
-| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
+| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta (its paths are the directory the task works in: `cwd`, and the project's main checkout with `main_tree`, so the jail judges them) |
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/return-to-pending/pause/resume/merge/verify/reject/complete/archive/restore/delete/priority, and on a project with no task_id: suspend-queue/resume-queue, pause-all/resume-all, auto-queue/manual-queue for its backlog mode), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives), cwd (the project of the project actions; default: this session's), all_projects (every project, for suspend-queue/resume-queue/pause-all/resume-all) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review and cancelled, done a cancelled task too, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `review_threads` | Review threads | status (open/closed), task (default: the session's own) | meta (tools-review; task sessions only; lists the threads of the task's review with the comments the user sent, by id; needs no approval: `harness-perms--auto-allow-tools`) |
 | `review_comment` | Review comment | thread (an id, or the start of one), body, status (open/closed), file, line, side (new/old), task (default: the session's own) | meta (tools-review; task sessions only; answers a thread, or starts one on the change or on a file and line, and may close or reopen the thread -- the thread of a reply of the user's in a thread started in the chat is named by the marker after it; the comment records the session, this call and the commit the session is at, and the result keeps which thread and comment on the node, for the chat; needs no approval: `harness-perms--auto-allow-tools`) |
 | `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
-| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; needs no approval: the plugin adds it to `harness-perms-extra-auto-allow-tools`) |
+| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; it runs the checkout's `scripts/dev.sh` and the Elisp that daemon loads outside the sandbox, code the session may have written, so it is an exec call decided by the mode as bash is and is not among the tools that need no approval) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
@@ -9917,7 +10017,7 @@ on the simple tier of the watching session's model, given no tools, so it
 reaches nothing.  Its system prompt
 (`harness-tools-events--classifier-system`) has it read the session's
 prompt and the event as data, each between two lines that carry a tag of
-the question's own, as emacs_eval's judge reads code, so text in either
+the question's own, as every judge reads what it is given, so text in either
 that addresses it is no instruction, and answer one line of JSON,
 `{"action": A, "note": N}`, in 200 output tokens (1024 when those ran
 out) and at most 30 s (`harness-tools-events--classifier-timeout`).  The
@@ -10003,11 +10103,16 @@ tools are about the user's Emacs, which they reach as a resource: their
 handlers check the input, ask the Emacs a client lent to the harness
 for plain data with `harness-tools-ask-emacs METHOD PARAMS` (→ promise;
 `emacs/request` under a deadline, `harness-tools--emacs-timeout'), and
-word the result here.  The lent Emacs answers from
-lisp/harness-emacs-endpoint.el, which knows no tool: `buffers` (every
+word the result here.  The lent Emacs answers with the tools of its
+MCP server (lisp/harness-emacs-endpoint.el): `buffers` (every
 buffer's name, mode, modified flag, size and file), `windows` (the
-window tree, frame by frame), `buffer` (a range of lines, stopping at
-the characters the tool names, so a long buffer comes in ranges),
+window tree, frame by frame), `buffer` (a range of lines, the last
+lines (`tail`), or the lines that hold any of up to five strings
+(`contains`), looked for as they are and ignoring case, never as
+patterns -- a pattern written to backtrack would freeze the Emacs --
+through at most the last 16 MiB of the buffer, saying from which line;
+stopping at the characters the tool names, so a long buffer comes in
+ranges),
 `describe` (a symbol as function, variable and face, as
 `describe-function` and `describe-variable` would: its value printed in
 part, in a buffer the tool names or the user's, where it is
@@ -10015,8 +10120,11 @@ buffer-local, its standard value, watchers, advice, keys, aliases and
 file), `definition` (where a function, variable or face is defined and
 the text of its definition, found as `find-function` finds it but read
 into a temporary buffer, never visited and never macroexpanded, so none
-of its code runs; a buffer visiting the file is read as it stands) and
-`messages`; and it does the few bounded actions the same tools need:
+of its code runs; a buffer visiting the file is read as it stands),
+`messages`, and `snapshot` (the names and values of the variables this
+Emacs has, and the live buffers, as plain data in slices, credentials
+left out by name, for the `elisp` tool to start its child from); and it
+does the few bounded actions the same tools need:
 `open` (show a live buffer, or visit an existing local regular file
 under the size the tool names -- never a directory, a remote path or a
 prompt), `insert` (text into a live editable buffer, left unsaved),
@@ -10044,8 +10152,8 @@ harness on its `load-path', the working directory as its
 overruns (lisp/harness-elisp.el); its result comes back as JSON, in the
 shape `harness-elisp-payload` describes (value, output, messages or
 error).  It never runs in the lent Emacs.  A call that asks for the
-user's Emacs (the old `emacs` input) is refused with that explanation,
-naming `emacs_eval` unless that is off.
+user's Emacs (the old `emacs` input) is refused with that explanation:
+no tool evaluates there.
 
 The child is a command like a `bash` call's, and runs in the sandbox
 the same way (`harness-tools-shell--elisp-command`): it is shown the
@@ -10071,83 +10179,38 @@ child running on this machine.  The harness, outside the sandbox, reads
 the result only from a regular file, never through a symbolic link the
 child left there.
 
-`emacs_eval` (tools-emacs-eval) is the one tool that evaluates
-model-written Lisp in the lent Emacs, so a model can change the Emacs
-the user works in: define or fix a function, set a variable, adjust a
-buffer.  It is on by default, and the user can turn it off with
-`harness-emacs-eval` (in the safety section of the settings page): code
-there runs on the UI's only thread, and code that never waits, such as
-a loop the judge misjudged, holds it until it returns or the user stops
-it.  While it is off the `agent/tools` filter leaves the tool out of every
-session (the catalogue, with no session, still lists it), and a call
-that names it anyway is refused without asking anyone.  A call passes
-three gates before its code runs, in order:
+With `snapshot` (and `fresh` to renew it) the child starts from a copy
+of the user's Emacs, asked of the lent Emacs in slices
+(`harness-snapshot-slice`: about 25 ms and 256 KB a request, a cursor
+between them, so the user's thread is never held), written into the
+call's `io/` directory and read by the child as data before its code
+runs (`harness-elisp-load-snapshot`).  It sets the value of every bound
+variable the copy holds and recreates each live buffer, except what the
+child needs for itself: where it loads from, what it runs, its printer,
+reader and debugger, and every hook and every variable that holds a
+function, which the child would otherwise call by itself; the user's
+value of each of those is still reachable with `harness-user-value`.
+Its manifest says what the copy left out or cut.  The fetch has a
+budget of a few seconds and a copy that is not whole is used as it is,
+saying so; a copy is kept for the session for a minute.  Such a child
+runs with `:read-only t :network nil`, whatever the session otherwise
+has, and is refused where no sandbox can give that, because the copy is
+the user's data.  Credentials are left out by name
+(`harness-snapshot-withheld-regexp`, `harness-snapshot-withheld-buffers-regexp`),
+and the manifest names them; see docs/trust-model.md.
 
-1. The permission chain decides it as any call of kind exec, in every
-   mode (the same approval as bash).
-2. The handler asks a judge model (see judge), as the auto-mode
-   permission judge is asked: `:ephemeral` `provider/complete` requests
-   on the simple tier of the session's model (`provider/tier-model MODEL
-   'simple`, else the model itself), no thinking, 200 output tokens and
-   once more with 2048 when those ran out, at most 45 s in all
-   (`harness-tools-emacs-eval--judge-timeout`, lookups included).  It
-   reads the very code that would run, fenced by a tag of the call's
-   own, and rules on performance and blocking only, answering one JSON
-   line `{"verdict": "fast"|"slow"|"blocking"|"unsure", "reason": ...}`.
-   Only `fast` runs the code, and only when every verdict in the reply
-   says so; any other verdict, no verdict, a failed request, a judge
-   that keeps asking for lookups or one that takes too long refuses the
-   call with the judge's reason and points to the `elisp` tool.  Code
-   longer than 12000 characters, code that does not read and a harness
-   with no Emacs lent are refused before the judge is asked.
+The lent Emacs runs no code.  It used to: a tool, `emacs_eval`, sent
+it model-written Lisp, guarded by a judge, a two-second timer and
+`while-no-input`, and a bridge (`harness/call`, with Lisp arguments)
+let that code call the harness's own methods.  That was the RCE the
+write-up names -- the server could command the client to run any Lisp,
+in the user's Emacs, outside every sandbox -- and the guard was a judge
+model's opinion, never a boundary.  The tool, the setting that turned it
+off, the endpoint request and the bridge are removed, so that a call to
+it is a call to a tool that does not exist.  What remains is the `elisp`
+tool, whose child runs in the session's sandbox like a `bash` command,
+and the lent Emacs's MCP server of typed tools (see acp).
 
-   Before it rules the judge may look up, as the lent Emacs has them,
-   the functions, macros and variables the code uses that it does not
-   know.  While an Emacs is lent and tools-emacs has registered them,
-   it is offered `emacs_describe` and `emacs_find_definition` as its
-   lookups (`harness-judge-ask`'s `:tools`, for hosted and native
-   providers alike), at most `harness-tools-emacs-eval--judge-lookups`
-   (3) in all; its system prompt says so, and that what a lookup returns
-   is data, not instructions.  A lookup calls the tool's handler with a
-   context that names the session's place and no session: it asks the
-   lent Emacs for what `describe-function`, `describe-variable` and
-   `find-function` show, nothing of it appears in any chat, and
-   `emacs_find_definition` grants no file to the permission layer
-   (`permission/reveal-file`).  The lookups only read, no other tool is
-   offered, and the judge has nothing to run code with.  Its prompt also
-   says that a few calls of `harness-call`, one request each to the
-   harness on this machine, are quick.
-
-3. The harness sends `eval` (below) with a two-second limit and a
-   deadline, and waits five seconds for the answer; an Emacs that has
-   not answered by then is reported as not responding, maybe still
-   running the code, and the model is told to leave it alone.  The lent
-   Emacs evaluates only while its own `harness-emacs-eval` is on, so
-   the Emacs that would freeze has the last word.
-
-Each ask of the judge, the retry too, is recorded as an internal session,
-"Elisp judge" ("Elisp judge (retry)"), under the session whose code it
-judged (see "provider").
-
-The result reads as the `elisp` tool's (`=> VALUE`, then the output and
-the messages), with `:meta` `(:emacs "user" :verdict V :reason R)`;
-code that signals is an error result, and code the lent Emacs stopped
-(its time limit, the user's key, C-g) is an error result that says it
-ran partway.
-
-The code can read and change the harness's own state with
-`harness-call`, as code in the harness does: `(harness-call
-'session/list)`, `(harness-call 'session/create :cwd DIR)`, the task
-methods.  With the harness in a process of its own, the default, its
-methods are not in the lent Emacs, so a `harness-call` of a method that
-Emacs lacks goes to the harness over the connection the `eval` request
-came on, with Lisp arguments and a Lisp value (see acp: `eval` and
-`harness/call`), and the code waits for the answer until its own time is
-up.  The call is a method call over the connection, not a tool call:
-the permission chain decided the `emacs_eval` call, and decides nothing
-again for the methods the code calls.
-
-### slots
 
 A library of lisp/ (lisp/harness-slots.el, in `harness--library-files`,
 loaded on both sides and used by the harness process's modules), not a
@@ -10253,7 +10316,7 @@ session so as progress: "Waited 3.2s for a free slot on this machine
 (tool: bash)".  Tools that only read or write files, and the harness's
 own commands -- the merge queue, worktrees, the grep tool -- are never
 held, so a read_file does not queue behind a test run.  Nor are the
-harness's own model calls: the judges (auto mode's, emacs_eval's) are
+harness's own model calls: the judges (auto mode's) are
 `permission/decide` stages, which `tools/execute` runs to the end
 before it runs the handler, where the slot is asked for, so a call has
 been judged by the time it waits and a judge never holds a slot; titles,
@@ -10460,7 +10523,6 @@ Client API used by every UI:
 (harness-acp-connection-p CONN) (harness-acp-connected-p CONN)
 (harness-acp-open-p CONN)                   ; connected, or TCP still connecting
 (harness-acp-call-sync CONN METHOD PARAMS &optional TIMEOUT)  ; blocks, briefly → the result, or signals
-(harness-acp-call-lisp CONN NAME ARGS &optional TIMEOUT)      ; `harness-call' of NAME in the harness at CONN's end
 harness-acp-current-connection              ; the connection a handler's message came on
 ```
 
@@ -10506,14 +10568,11 @@ then rejects it, as it does everything else still pending on it.
 `harness-acp-current-connection` is the connection whose request or
 notification a handler (`harness-acp-set-handler`) is given, bound while
 the handler runs and for what it calls before it returns, so code the
-handler starts can tell which connection the harness spoke on.  The
-Emacs endpoint reads it when `eval` arrives, and keeps it for the code it
-evaluates (see `eval` below).
+handler starts can tell which connection the harness spoke on.
 
 `harness-acp-call-sync` is the one call of this API that blocks, for
 code that must have an answer before it returns and cannot wait for
-input, such as the Lisp the lent Emacs evaluates under
-`inhibit-interaction` and `while-no-input`.  It sends the request, then
+input, such as a UI chore that has to show its result at once.  It sends the request, then
 reads process output in slices of at most `harness-acp--call-sync-slice`
 (0.02 s), running timers as it goes -- a server in the same Emacs
 answers from them, and the evaluation's own timer, or input under
@@ -10715,7 +10774,7 @@ Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`,
 `project/`, `task/`, `plugins/`, `search/`, `notification/`, `sandbox/status`, `harness/api`,
-`harness/modules`, `harness/version`, `harness/reload`, `harness/call`, `acp/remote-`,
+`harness/modules`, `harness/version`, `harness/reload`, `acp/remote-`,
 `pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
 `secrets/`, `commit-msg/`, `patch-review/`, `tool-slots/`, `cache/`, `todo-sync/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
@@ -10733,52 +10792,16 @@ session at once), `.../get` and `.../active-p`,
 and the seed module's `_harness/seed/fork` and `.../list`.
 
 The methods under `secrets/` (see secrets and redact) take secrets: as
-references to where they can be read, which any client may send, or as
-text, which only the Emacs on this machine may.  So their params are
-never logged, the error of handling one answers with its message and
-not its data (`harness-acp--safe-error-text`), and a client on another
-device that sends a param giving a secret as text or as a command
-(`literal`, `command` or `allow-unsafe-sources`, spelled any way and at
-any depth) is refused (-32603): a command would run here, outside the
-permission system, and a text is a secret on the wire
-(`harness-acp--refuse-secret-text`).  A `harness/call` of a `secrets/`
-method is not logged and not quoted either: its `args` can carry the
-secret, which is how the Emacs on this machine sends one it was typed.
-
-`harness/call {method, args}` → `{value}` is `_harness/METHOD` for a
-client that speaks Lisp, which is only the Emacs on this machine (the
-code `emacs_eval` runs there calls it through
-`harness-call-fallback-function`; see `eval` below).  JSON has no
-symbols: what an Emacs sends to `_harness/NAME` arrives with strings
-where it had symbols, but for the values of the keys of
-`harness-acp--enum-keys` (`:status`, `:kind` …), which are made symbols
-again, and the result comes back with its symbols as strings.
-`method` is the name of a bus method a client may call as
-`_harness/METHOD` -- the same prefixes and the same registry, so this
-is no way round either -- and never `harness/call` itself (-32602);
-another is method-not-found.  `args` is a string holding the printed
-list of the method's arguments, in order, as `harness-call` takes them.
-It is read as data and never run: nothing may follow the list, `#N=`
-syntax is refused, and only text, numbers, symbols, and lists and
-vectors of them are accepted, with no function object and no list that
-starts with `lambda` or `closure` at any depth (-32602 otherwise).  The
-method's result, or the value of the promise it returns, comes back
-printed as Lisp in `value`, nothing elided, so symbols, keywords and
-nested plists stay what they were; a result that does not print
-readably, such as one holding a buffer, comes back as `{wire: OBJ}`,
-OBJ in the wire shape the JSON methods give.  A client on another
-device is refused (-32603): Lisp arguments can name any function, and
-only the Emacs on this machine needs them; such a client calls
-`_harness/METHOD`.
-
-`harness-acp-call-lisp CONN NAME ARGS &optional TIMEOUT` is the client's
-side of `harness/call`: it prints ARGS (data that prints readably,
-nothing elided), calls `_harness/harness/call` with
-`harness-acp-call-sync` and reads the value back.  It signals as
-`harness-call` would: `harness-no-such-method` when the harness has no
-method NAME a client may call, `harness-error` with "NAME: MESSAGE",
-the harness's own message, when the method fails, and `harness-error`
-when no answer comes in time.
+references to where they can be read, which any client may send.  Their
+params are never logged, the error of handling one answers with its
+message and not its data (`harness-acp--safe-error-text`), and a client
+on another device that sends a param giving a secret as text or as a
+command (`literal`, `command` or `allow-unsafe-sources`, spelled any way
+and at any depth) is refused (-32603): a command would run here, outside
+the permission system, and a text is a secret on the wire
+(`harness-acp--refuse-secret-text`).  A secret as text had one other way
+in, `harness/call` with Lisp arguments from the Emacs on this machine;
+it went with the tool that needed it (see docs/trust-model.md).
 
 The bus events of `harness-acp--forwarded-events` and
 `harness-acp-extra-events` reach every client as `_harness/event
@@ -10806,98 +10829,47 @@ notification shows (see notifications), or an error.  No tool uses it.
 A client lends its Emacs to the harness by adding `_harness: {emacs:
 {version, pid, host}}` to the `clientCapabilities` of `initialize`
 (`harness-emacs-endpoint-client-capabilities`; the UI does, again after
-a reload).  The bus method `emacs/request METHOD PARAMS` → promise sends
-`_harness/emacs/METHOD` to exactly one such client, never to the rest:
-the most recently active (the last to send a request or notification)
-among those that may call methods, so an unauthenticated client that
-claims an Emacs is not asked.  It rejects at once when none is
-attached, with the Emacs's message when it refuses, and when it
+a reload).  What it lends is an MCP server: this Emacs's side builds
+one from its tool table (`harness-emacs-endpoint-server`), and the
+harness's MCP host attaches it as the `:external` server `emacs`, one
+connection per client keyed by the client
+(`harness-acp--attach-emacs`).  One MCP message goes per
+`_harness/emacs/mcp {message}` request, and the answer is MCP's
+response; the transport is otherwise the ACP connection the client
+already has, and the host's `harness-mcp-receive` reads the answer.
+
+The bus method `emacs/request METHOD PARAMS` → promise calls the
+server's tool METHOD with PARAMS.  Exactly one Emacs is asked, never
+the rest: the most recently active (the last to send a request or
+notification) among those that may call methods, so an unauthenticated
+client that claims an Emacs is not asked.  It rejects at once when none
+is attached, with the Emacs's message when it refuses, and when it
 disconnects first.  `emacs/attached` lists the lent Emacsen, the one
-asked first at the head.  Neither is callable over ACP.  Requests, all
-but `eval` answered at once with plain data or one bounded action
-(lisp/harness-emacs-endpoint.el):
-`buffers {}` → `{buffers: [{name, mode, modified, size, file}]}`;
-`windows {}` → `{windows: [{frame, selected, name, mode, width, height,
-file}]}`; `buffer {name, offset, limit, maxChars}` → `{exists, mode,
-file, modified, total, first, lines, truncated}`; `open {name, path,
-line, maxBytes}` → `{name, mode, size, modified, file, visited}`;
-`insert {name, text, position, maxChars}` → `{name, inserted, line}`;
-`save {name}` → `{name, path, size}`; `describe {symbol, buffer,
-maxValueChars}` → `{known, function: {kind, signature, definition,
+asked first at the head.  Neither is callable over ACP.
+
+The tools are a fixed vocabulary, each answered at once with plain data
+or one bounded action (lisp/harness-emacs-endpoint.el):
+`buffers {}` -> `{buffers: [{name, mode, modified, size, file}]}`;
+`windows {}` -> `{windows: [{frame, selected, name, mode, width, height,
+file}]}`; `buffer {name, offset, limit, maxChars, contains, tail}` ->
+`{exists, mode, file, modified, total, first, lines, truncated}`, or with
+`contains` `{exists, mode, file, modified, total, matches: [{line, text}],
+matchCount, searchedFrom, terms, tail, truncated}`; `open {name, path,
+line, maxBytes}` -> `{name, mode, size, modified, file, visited}`;
+`insert {name, text, position, maxChars}` -> `{name, inserted, line}`;
+`save {name}` -> `{name, path, size}`; `describe {symbol, buffer,
+maxValueChars}` -> `{known, function: {kind, signature, definition,
 aliases, file, advice, keys, doc}, variable: {kind, value, buffer,
 local, global, locals, localCount, standard, watchers, file, doc},
-face: {doc, file}}`; `definition {symbol, type, maxChars}` → `{known,
+face: {doc, file}}`; `definition {symbol, type, maxChars}` -> `{known,
 type, name, aliases, kind, advised, loaded, native, autoload, file,
 visiting, modified, line, endLine, lines, truncated, printed, note}`;
-`trace {action, symbol, type, limit, callers}` → `{started: {symbol,
+`trace {action, symbol, type, limit, callers}` -> `{started: {symbol,
 type, count, limit, callers}, line, stopped: [...], traces: [...],
-buffer, lines}`; `messages {count}` → `{text}`.
-
-`eval {code, timeout, deadline, host, maxChars}` → `{value, output,
-messages, error, stopped, seconds}` is the one request that evaluates
-model-written code, emacs_eval's, and the lent Emacs refuses it while
-its own `harness-emacs-eval` is off (on by default; the global value
-counts, a buffer-local one does not).  It is answered once the code ran
-(`harness-emacs-endpoint--deferred-methods`), and runs it guarded:
-
-- The code is read whole first, so code that does not read runs not at
-  all; it is evaluated form by form with lexical binding.
-- It never starts while the user is typing or while another evaluation
-  runs (code that waits lets requests in, and evaluations never nest):
-  it looks again every 0.05 s, and fails, having run nothing, once
-  `deadline` is near.  `deadline` is by the harness's clock, so it
-  counts only when `host` names this Emacs's `system-name`; elsewhere
-  `timeout` from the request's arrival stands in for it.
-- It runs under `while-no-input` with quitting allowed: the user's next
-  key stops it (`stopped: "input"`), and so does C-g (`"quit"`), whose
-  `quit-flag` is cleared after so nothing else quits.  Requests arrive
-  in a process filter or a timer, where quitting is inhibited; this is
-  the only place it is allowed.
-- A timer of its own, under a tag of the call's own that no `catch` or
-  `with-timeout` in the code can take, stops it once it has waited
-  `timeout` seconds (default 2, at most 10) or what is left until
-  `deadline` (`"timeout"`).
-- It may not prompt (`inhibit-interaction`) or enter the debugger, and
-  its messages are logged, not shown.  The value, the output and the
-  messages are each cut at `maxChars`.
-
-The code's `harness-call`s reach the harness that sent the request.
-The endpoint reads `harness-acp-current-connection` when the request
-arrives and keeps it for the evaluation; while the code runs,
-`harness-call-fallback-function` is a function
-(`harness-emacs-endpoint--forwarder`) that sends a call of a method this
-Emacs has none of to the harness at the other end of that connection,
-with `harness-acp-call-lisp`.  A method this Emacs has is called here,
-as ever, and the call is no tool call: the permission chain does not
-decide it again.
-
-- Values: the arguments go as printed Lisp and the value comes back as
-  such (`harness/call`), so symbols, keywords and nested plists stay
-  what they are where `_harness/NAME`'s JSON would make them strings; a
-  value that does not print readably comes back in wire shape, and
-  arguments must be data, with no function.
-- Time: the code waits for the answer until its own time is up, but at
-  least `harness-emacs-endpoint--forward-min-wait` (0.1 s) for a call it
-  makes at the last moment.  The wait is `harness-acp-call-sync`'s: it
-  reads process output only, under the guards above (the user's key, C-g
-  and the evaluation's own timer still stop the code), and what else
-  arrives meanwhile, such as another request, is handled once it is
-  over.  A method that needs this Emacs to answer first, as the tools
-  about it do (`emacs/request`), therefore gets no answer in time.
-- Errors are signalled in the code as `harness-call` signals them, for
-  it to handle: `harness-no-such-method` for a method the harness has
-  none of that a client may call, and `harness-error` when the method
-  fails ("NAME: MESSAGE", the harness's own message) or gives no answer
-  in time.
-- With no connection to forward over -- the evaluation was started for
-  none, or the connection closed -- nothing is forwarded, and a call of
-  a method this Emacs lacks signals `harness-no-such-method` as in any
-  Emacs.
-
-Code that never waits (a loop that does not yield) can still hold the
-Emacs until it returns or the user stops it: nothing preempts Lisp on
-its thread.  Keeping such code out is the judge's work; a user who
-would rather not take the risk turns `harness-emacs-eval` off.
+buffer, lines}`; `messages {count}` -> `{text}`.  None takes code, and a
+`tools/call` of a name that is not one of these is an error of the
+protocol: what an agent can do in this Emacs is the list, whatever a
+message calls itself.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token
@@ -11089,8 +11061,7 @@ sees the process die while `harness-acp-remote--server` still names it, which
 
 What a device may call is what a client in this Emacs may, except that
 `_harness/acp/remote-*` is refused it (`harness-acp-remote--local-caller-only`):
-serving other devices is managed from this machine, and `harness/call` is
-refused too.  Its connection goes through the same dispatch
+serving other devices is managed from this machine.  Its connection goes through the same dispatch
 (`harness-acp--invoke`), with no table of methods of its own: `initialize`
 lists for it the same extension methods (`harness-acp--extension-methods`) and
 the same capabilities as for a local client, ACP's `session/list` among them
@@ -11511,7 +11482,7 @@ out of its run until answered (below), and one that was refused or
 failed is counted in the summary; its reason and [Approve] show once
 the group is opened.
 The calls the user should see stay out of the list: the other tools
-that run things (`elisp`, `ssh`, `emacs_eval`), what writes
+that run things (`elisp`, `ssh`), what writes
 (`edit_file`, `write_file`, `review_comment`), what acts on other
 sessions or tasks (`spawn_agent`, `session_send`, `task_submit`), what
 waits or watches (`ask_user`, `session_wait`, `task_wait`,

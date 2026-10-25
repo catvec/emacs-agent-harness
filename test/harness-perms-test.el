@@ -146,6 +146,106 @@
       (should ran)
       (should (equal "read inside.txt" (plist-get r :content))))))
 
+(ert-deftest harness-perms-path-writable-p-is-the-jails-rule-for-a-write ()
+  "A tool that acts on a file through something else asks `permission/path-writable-p'.
+It answers as the jail does for a write: the session's directory and
+what is granted to it, links resolved, `..' collapsed, and a sibling that
+only shares a prefix is outside."
+  (let ((outside (harness-test-temp-dir))
+        (granted (harness-test-temp-dir)))
+    (harness-test-with-temp-state
+      (let* ((s (harness-perms-test--setup :permission-mode 'yolo))
+             (cwd (plist-get s :cwd))
+             (writable (lambda (path) (harness-call 'permission/path-writable-p "s1" path))))
+        (should (funcall writable (expand-file-name "a.txt" cwd)))
+        (should (funcall writable (expand-file-name "new/dir/a.txt" cwd)))
+        (should-not (funcall writable (expand-file-name "a.txt" outside)))
+        (should-not (funcall writable (concat (directory-file-name cwd) "-evil/a.txt")))
+        ;; `..' out of the directory, and a link in it that leads out.
+        (should-not (funcall writable (concat cwd "../" (file-name-nondirectory (directory-file-name outside)) "/a.txt")))
+        (make-symbolic-link (directory-file-name outside) (expand-file-name "link" cwd))
+        (should-not (funcall writable (expand-file-name "link/a.txt" cwd)))
+        ;; A link to a place inside is inside.
+        (make-directory (expand-file-name "real" cwd))
+        (make-symbolic-link (expand-file-name "real" cwd) (expand-file-name "alias" cwd))
+        (should (funcall writable (expand-file-name "alias/a.txt" cwd)))
+        ;; What is granted is writable, and what is revoked no longer is.
+        (should-not (funcall writable (expand-file-name "a.txt" granted)))
+        (harness-call 'permission/allow-dir "s1" granted)
+        (should (funcall writable (expand-file-name "a.txt" granted)))
+        (harness-call 'permission/revoke-dir "s1" granted)
+        (should-not (funcall writable (expand-file-name "a.txt" granted)))
+        ;; Not a path, not writable.
+        (should-not (funcall writable nil))
+        (should-not (funcall writable 42))))))
+
+;;;; The chain fails closed
+
+(ert-deftest harness-perms-a-stage-that-fails-refuses-the-call ()
+  "A call that no stage checked is refused, not decided by the stages after.
+A stage that signalled an error used to hand the decision on as it was,
+so the mode stage that followed allowed a read whose paths nobody had
+compared with the session's directories: in yolo mode every call, in
+every other mode every read.  The same holds for a stage whose promise
+is rejected."
+  (let ((ran 0))
+    (harness-perms-test--setup :permission-mode 'yolo)
+    (harness-define-tool "t_read" :label "Read" :kind 'read :paths (lambda (in) (list (plist-get in :path)))
+                         :handler (lambda (in _ctx) (cl-incf ran) (format "read %s" (plist-get in :path))))
+    (let ((call (lambda (id path)
+                  (harness-test-await (harness-call 'tools/execute "s1"
+                                                    (list :id id :name "t_read" :input (list :path path)))))))
+      ;; The call is fine while the jail works.
+      (should-not (plist-get (funcall call "c0" "inside.txt") :is-error))
+      (should (= 1 ran))
+      ;; The jail signals: the call is refused, the tool is not run, and the
+      ;; denial says why and what to do.
+      (advice-add 'harness-perms--jail :around
+                  (lambda (&rest _) (error "No session s1")) '((name . test-fail)))
+      (unwind-protect
+          (let ((r (funcall call "c1" "inside.txt")))
+            (should (plist-get r :is-error))
+            (should (plist-get r :denied))
+            (should (= 1 ran))
+            (should (string-search "permission check could not be completed" (plist-get r :content)))
+            (should (string-search "harness-perms--jail failed: No session s1" (plist-get r :content)))
+            (should (string-search "nothing checked it" (plist-get r :content)))
+            ;; Even where a rule would have allowed it: it was not checked.
+            (let ((r (funcall call "c2" "/etc/hostname")))
+              (should (plist-get r :is-error))
+              (should (= 1 ran))))
+        (advice-remove 'harness-perms--jail 'test-fail))
+      ;; The jail returns a promise that is rejected: the same.
+      (advice-add 'harness-perms--jail :around
+                  (lambda (&rest _) (harness-rejected '(harness-error "rejected"))) '((name . test-reject)))
+      (unwind-protect
+          (let ((r (funcall call "c3" "inside.txt")))
+            (should (plist-get r :is-error))
+            (should (= 1 ran))
+            (should (string-search "harness-perms--jail failed: rejected" (plist-get r :content))))
+        (advice-remove 'harness-perms--jail 'test-reject))
+      ;; And when the jail works again, so does the call.
+      (should-not (plist-get (funcall call "c4" "inside.txt") :is-error))
+      (should (= 2 ran)))))
+
+(ert-deftest harness-perms-a-stage-that-fails-is-refused-in-every-mode ()
+  "No mode turns a stage that failed into an allow: not yolo, not the
+modes that allow reads inside the roots, not a user who is away."
+  (dolist (mode '(ask accept-edits auto yolo))
+    (let ((ran 0))
+      (harness-perms-test--setup :permission-mode mode)
+      (harness-define-tool "t_read" :label "Read" :kind 'read :paths (lambda (in) (list (plist-get in :path)))
+                           :handler (lambda (_in _ctx) (cl-incf ran) "read"))
+      (advice-add 'harness-perms--jail :around
+                  (lambda (&rest _) (error "boom")) '((name . test-fail)))
+      (unwind-protect
+          (let ((r (harness-test-await (harness-call 'tools/execute "s1"
+                                                     (list :id "c1" :name "t_read"
+                                                           :input (list :path "inside.txt"))))))
+            (should (plist-get r :is-error))
+            (should (= 0 ran)))
+        (advice-remove 'harness-perms--jail 'test-fail)))))
+
 ;;;; Modes
 
 (ert-deftest harness-perms-mode-matrix ()
@@ -763,6 +863,10 @@ weigh what the call would do, never whether a value looks complete."
    (list :session harness-perms-test--session :tool "bash" :kind 'exec
          :input (list :command command) :call-id (harness-short-id))))
 
+(defun harness-perms-test--confine (confined)
+  "Make the sandbox say commands run CONFINED (non-nil) or not."
+  (harness-register-method 'sandbox/confined-p (lambda (_cwd) confined)))
+
 (ert-deftest harness-perms-read-only-cloud-commands-need-no-judge ()
   "A read-only cloud query must not reach the auto-mode judge.
 The judge runs on the cheapest model, sees the call alone and read a
@@ -770,8 +874,9 @@ cloud service outside the allowed roots as egress: it denied an
 uptime-check read as sending email to a third party and `gsutil ls' as
 sending credentials off the machine.  The mode stage allows them in
 `auto' mode and for a session the user left non-interactive, before the
-judge would be asked."
+judge would be asked, for a command the sandbox confines."
   (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-perms-test--confine t)
   (let* ((probe (harness-perms-test--judge-provider
                  '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it emails a third party\"}")
                    (:type done :stop-reason end-turn))))
@@ -801,6 +906,46 @@ judge would be asked."
           (plist-put harness-perms-test--session :non-interactive nil))
     (should (eq 'allow (plist-get (harness-perms-test--exec "gsutil ls gs://my-bucket") :behavior)))
     (should (null (funcall probe 'requests)))))
+
+(ert-deftest harness-perms-read-only-cloud-allow-needs-a-confined-command ()
+  "A reading of the command line allows only what the sandbox confines.
+That a cloud command is read-only is read off its text, and a text can
+be written to read as something it is not.  So the mode stage lets one
+past the judge only where the sandbox confines the command, whatever
+the reading missed then does no more than the sandbox shows; where it
+does not (no backend, the `off' policy, a remote directory, no sandbox
+module) the command goes on to the judge like any other."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"the judge decided\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-perms-auto-model "judge:x"))
+    ;; Confined: allowed by the mode, the judge is not asked.
+    (harness-perms-test--confine t)
+    (should (eq 'allow (plist-get (harness-perms-test--exec "gsutil ls gs://my-bucket") :behavior)))
+    (should (null (funcall probe 'requests)))
+    ;; Not confined: the judge decides it, and here refuses.
+    (harness-perms-test--confine nil)
+    (let ((d (harness-perms-test--exec "gsutil ls gs://my-bucket")))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (equal "the judge decided" (plist-get d :reason))))
+    (should (funcall probe 'requests))
+    ;; The sandbox module not loaded is not confined either.
+    (remhash 'sandbox/confined-p harness--methods)
+    (should (eq 'deny (plist-get (harness-perms-test--exec "gcloud config get-value project") :behavior)))
+    ;; A sandbox that fails to answer is no confinement.
+    (harness-register-method 'sandbox/confined-p (lambda (_cwd) (error "broken")))
+    (should (eq 'deny (plist-get (harness-perms-test--exec "gcloud config get-value project") :behavior)))
+    ;; The mode that asks still asks, confined or not.
+    (harness-perms-test--confine t)
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'ask)
+          harness-perms-test--session (plist-put harness-perms-test--session :non-interactive nil))
+    (should (eq 'ask (plist-get (harness-perms--mode-decision
+                                 (list :behavior 'ask)
+                                 (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                                       :input (list :command "gsutil ls gs://my-bucket")
+                                       :call-id (harness-short-id)))
+                                :behavior)))))
 
 (ert-deftest harness-perms-cloud-writes-and-logins-still-go-to-the-judge ()
   "A cloud command that is no obvious read is left to the judge.
@@ -2871,7 +3016,9 @@ auto judge objecting to a call offers none either."
   (should (equal "t_unknown: echo hi" (harness-perms-describe-request '(:tool "t_unknown" :input (:command "echo hi\nmore")))))
   ;; Re-running init keeps exactly one handler per stage.
   (harness-perms--init)
-  (should (= 8 (length (gethash 'permission/decide harness--filters))))
+  (should (= 7 (length (gethash 'permission/decide harness--filters))))
+  ;; Stage 7 read shell commands for the sandbox once; nothing is there now.
+  (should-not (assq 7 (gethash 'permission/decide harness--filters)))
   (should (equal 6 (car (rassq #'harness-perms--away-request
                                (gethash 'permission/decide harness--filters)))))
   (should (memq 'permission/requested (mapcar #'car (harness-events))))
@@ -2881,7 +3028,7 @@ auto judge objecting to a call offers none either."
   (harness-test-load-module 'perms)
   (should (harness-module-ready-p 'perms))
   (should (rassq #'harness-perms--dir-request (gethash 'permission/decide harness--filters)))
-  (should (= 8 (length (gethash 'permission/decide harness--filters)))))
+  (should (= 7 (length (gethash 'permission/decide harness--filters)))))
 
 ;;;; Inspecting the harness itself
 
@@ -3459,57 +3606,23 @@ Unconfined, it sees what the user sees, and goes on as before."
         :input (list :command command) :paths (list (plist-get harness-perms-test--session :cwd))
         :call-id (harness-short-id)))
 
-(ert-deftest harness-perms-sandbox-guard-is-final ()
-  "What the sandbox refuses is denied in every mode; the rest goes on."
-  (let ((s (harness-perms-test--setup :permission-mode 'yolo :worktree "/repo/.worktrees/own/"))
-        (seen nil))
-    (harness-register-method 'sandbox/check-command
-                             (lambda (cwd command &optional own)
-                               (push (list cwd command own) seen)
-                               (when (string-match-p "prune" command)
-                                 (list :reason "refused: use worktree/prune" :hint "never prune"))))
-    (let ((d (harness-perms-test--decide (harness-perms-test--bash "git worktree prune"))))
-      (should (eq 'deny (plist-get d :behavior)))
-      (should (plist-get d :final))
-      (should (equal "refused: use worktree/prune" (plist-get d :reason)))
-      (should (equal "never prune" (plist-get d :hint))))
-    ;; The sandbox learns where the command runs and the session's worktree.
-    (should (equal (list (plist-get s :cwd) "git worktree prune" "/repo/.worktrees/own/") (car seen)))
-    ;; A standing rule allowing bash does not help either.
-    (harness-perms-add-rule "s1" '(:tool "bash" :behavior allow) 'session)
-    (should (eq 'deny (plist-get (harness-perms-test--decide (harness-perms-test--bash "git worktree prune")) :behavior)))
-    ;; Other commands go on: yolo allows them.
-    (should (eq 'allow (plist-get (harness-perms-test--decide (harness-perms-test--bash "git status")) :behavior)))
-    ;; Calls that run no shell command are not looked at.
-    (setq seen nil)
-    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "f" (plist-get s :cwd)))))
-    (should-not seen)
-    ;; A guard that fails lets the chain decide.
-    (harness-register-method 'sandbox/check-command (lambda (&rest _) (error "Broken")))
-    (should (eq 'allow (plist-get (harness-perms-test--decide (harness-perms-test--bash "git status")) :behavior)))))
-
-(ert-deftest harness-perms-sandbox-guard-end-to-end ()
-  "In a sandbox, the bash tool never runs the cleanup that unregistered every worktree."
-  (harness-perms-test--setup :permission-mode 'yolo)
-  (harness-test-load-module 'sandbox)
-  (harness-test-load-module 'tools-shell)
-  (unwind-protect
-      (let ((harness-sandbox-policy 'preferred)
-            (ran nil))
-        (cl-letf (((symbol-function 'executable-find)
-                   (lambda (name &optional _remote) (and (equal name "bwrap") "/usr/bin/bwrap"))))
-          (harness-sandbox-detect))
-        (cl-letf (((symbol-function 'harness-run-command) (lambda (&rest _) (setq ran t) (harness-resolved nil))))
-          (let ((r (harness-test-await
-                    (harness-call 'tools/execute "s1"
-                                  (list :id "c1" :name "bash"
-                                        :input (list :command "git worktree remove --force .test-logs/base && git worktree prune"))))))
-            (should (plist-get r :is-error))
-            (should (plist-get r :denied))
-            (should (string-match-p "\\`Denied: `git worktree prune` is refused in the sandbox" (plist-get r :content)))
-            (should (string-match-p "worktree/prune" (plist-get r :content)))))
-        (should-not ran))
-    (harness-sandbox-detect)))
+(ert-deftest harness-perms-no-stage-reads-a-command-for-the-sandbox ()
+  "The chain does not read a shell command to refuse it for the sandbox.
+`git worktree prune' once was refused here by a reading of the command
+line, which a command line can always be written to escape.  What it
+did is kept from happening by the sandbox's mounts now (see
+test/harness-sandbox-test.el), so the chain has no stage for it, and
+decides such a command as it decides any other."
+  (harness-perms-test--setup :permission-mode 'yolo :worktree "/repo/.worktrees/own/")
+  (should-not (fboundp 'harness-perms--sandbox-guard))
+  (should-not (cl-find 'harness-perms--sandbox-guard (gethash 'permission/decide harness--filters)
+                       :key #'cdr))
+  ;; Whatever the sandbox would have said, the chain asks nobody.
+  (let ((asked nil))
+    (harness-register-method 'sandbox/check-command (lambda (&rest args) (push args asked) (list :reason "no")))
+    (dolist (command '("git worktree prune" "git worktree remove -f ../other" "git status"))
+      (should (eq 'allow (plist-get (harness-perms-test--decide (harness-perms-test--bash command)) :behavior))))
+    (should-not asked)))
 
 (ert-deftest harness-perms-rules-type-names-every-key ()
   "The settings page offers each part of a standing rule by name."

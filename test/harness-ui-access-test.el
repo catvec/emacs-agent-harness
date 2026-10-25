@@ -443,7 +443,7 @@ one in effect is no button."
         (should-not (harness-json-true-p (plist-get (harness-call 'session/get sid) :non-interactive)))
         ;; The network.
         (harness-ui-access-test-click "Off" (harness-ui-access--find-anchor '(setting . network)))
-        (harness-ui-access-test-wait-setting 'network "\\`Network ( ) On (x) Off No web tools, ssh or emacs_eval")
+        (harness-ui-access-test-wait-setting 'network "\\`Network ( ) On (x) Off No web tools or ssh")
         (should-not (harness-access-network-p (harness-call 'session/get sid)))
         (harness-ui-access-test-click "On" (harness-ui-access--find-anchor '(setting . network)))
         (harness-ui-access-test-wait-setting 'network "\\`Network (x) On ( ) Off\\'")

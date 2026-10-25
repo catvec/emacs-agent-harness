@@ -10,8 +10,6 @@
 ;;    5 dir-request      request_directory_access: the user's answer decides
 ;;    6 away-request     set_non_interactive: turning it on, the user's
 ;;                       answer decides; turning it off needs none
-;;    7 sandbox-guard    shell commands the sandbox would make destructive
-;;                       (`git worktree prune' and the like) are refused
 ;;    8 supervisor       a plugin's stage, not this module's (see below): a
 ;;                       session in supervisor mode is denied, for good,
 ;;                       every tool but the ones it plans and coordinates
@@ -2629,6 +2627,25 @@ continue the chain once `permission/answer' arrives."
                            (harness-perms--dir-prompt-options harness-perms-dir-options)
                            :decision decision))
 
+(defvar harness-perms--once-grants (make-hash-table :test 'equal)
+  "Call id -> the directory grants the user gave that call alone.
+A tool that runs in a sandbox of its own, which shows a process only
+what it is told (the file tools' worker), asks for them with
+`permission/once-grants', since a process cannot be shown a directory
+after it has started.  An entry goes when its call is finished
+\(`harness-perms--forget-once').")
+
+(defun harness-perms--note-once (call-id grant)
+  "Note that the user allowed the call CALL-ID alone to reach GRANT."
+  (when (stringp call-id)
+    (puthash call-id (cons grant (gethash call-id harness-perms--once-grants))
+             harness-perms--once-grants)))
+
+(defun harness-perms--forget-once (_session-id call &rest _)
+  "Forget the one-time grants of CALL, which is finished."
+  (when-let* ((id (plist-get call :id)))
+    (remhash id harness-perms--once-grants)))
+
 (defun harness-perms--answer-dir (session-id waiting answer)
   "Continue the chain for WAITING of SESSION-ID after the user's ANSWER.
 The answer is for its pattern (`harness-perms--answered-pattern'): an
@@ -2666,6 +2683,7 @@ decision, or `continue' when the chain goes on."
      (t
       (if (memq scope '(session always))
           (harness-perms--allow-dir-noted session-id grant scope)
+        (harness-perms--note-once (plist-get request :call-id) grant)
         (setq request (plist-put (copy-sequence request) :jail-once
                                  (cons grant (plist-get request :jail-once)))))
       ;; Check again with the fresh session: other paths may lie
@@ -2973,32 +2991,6 @@ is recorded.  Return the final decision."
     (funcall (plist-get waiting :next) decision)
     decision))
 
-;;;; Commands the sandbox makes destructive
-
-(defun harness-perms--sandbox-guard (decision next request)
-  "Refuse a shell command that would do damage because it runs sandboxed.
-In the sandbox git sees only the session's own directory, so `git
-worktree prune' there drops every other worktree; the sandbox module's
-`sandbox/check-command' tells which commands are like that.  Its
-refusal is final, in every mode.  Other calls go on with DECISION; NEXT
-continues the chain with REQUEST's decision."
-  (let* ((input (plist-get request :input))
-         (command (and (listp input) (plist-get input :command))))
-    (if (not (and (stringp command)
-                  (eq (harness-perms--sym (plist-get request :kind)) 'exec)
-                  (harness-method-exists-p 'sandbox/check-command)))
-        (funcall next decision)
-      (let* ((session (plist-get request :session))
-             (cwd (or (car (plist-get request :paths)) (plist-get session :cwd) default-directory))
-             (own (or (plist-get session :worktree) (plist-get session :cwd)))
-             (refusal (condition-case err
-                          (harness-call 'sandbox/check-command cwd command own)
-                        (error (harness-log 'warn "perms: the sandbox guard failed: %S" err) nil))))
-        (funcall next (if refusal
-                          (list :behavior 'deny :final t
-                                :reason (plist-get refusal :reason) :hint (plist-get refusal :hint))
-                        decision))))))
-
 ;;;; Mode and standing rules
 
 (defun harness-perms--rule-pattern (rule session)
@@ -3246,8 +3238,13 @@ DECISION is returned unchanged when the mode leaves the question open."
      ;; `gsutil ls' and an uptime-check read).  It is allowed exactly
      ;; where the judge would decide: in `auto' mode, and for a session
      ;; the user left non-interactive.  A mode that asks with the user
-     ;; present still asks, as for every other shell command.
+     ;; present still asks, as for every other shell command.  What
+     ;; makes it read-only is a reading of the command line, which is
+     ;; no boundary, so it allows only a command the sandbox confines:
+     ;; what the reading missed can then do no more than the sandbox
+     ;; shows.  An unconfined command goes on to the judge, or the user.
      ((and (harness-perms--read-only-cloud-p request)
+           (harness-perms--confined-p request)
            (or (eq mode 'auto) (harness-perms--non-interactive-p session)))
       (list :behavior 'allow :reason "read-only cloud commands never need approval"))
      ((eq mode 'yolo) (list :behavior 'allow :reason "yolo mode"))
@@ -3455,12 +3452,12 @@ The harness's own tools are ordinary work: spawning and answering sub-agents,
 reading, messaging and controlling other sessions of the harness, reading and
 writing the task board, and reading or writing the harness's own files inside
 the allowed roots.  So is inspecting the harness itself wherever it lives,
-inside the allowed roots or not: reading its code, its state directory
-(sessions and their transcripts, task boards, usage) and the user's live Emacs
-(buffers, the harness's log among them, windows, messages, variables,
-documentation), with any tool, Emacs Lisp included.  Its credentials are the
-one exception: deny reading the files acp-token and server-config.el in its
-state directory, which hold its secrets.
+inside the allowed roots or not: reading its code and its state directory
+(sessions and their transcripts, task boards, usage), with any tool,
+Emacs Lisp included, and looking into the user's live Emacs with the emacs_*
+tools (buffers, the harness's log among them, windows, messages, variables,
+documentation).  Its credentials are the one exception: deny reading the files
+acp-token and server-config.el in its state directory, which hold its secrets.
 
 When in doubt, allow: a needless denial stops work the user wants done.  Reply
 with exactly one line of JSON and nothing else:
@@ -5936,6 +5933,44 @@ here.  Return the session's effective roots."
   "Return every directory SESSION-ID may touch."
   (harness-perms-roots (harness-perms--session session-id)))
 
+(harness-defmethod permission/once-grants (call-id)
+  "Return the directory grants the user gave the call CALL-ID alone.
+They are what an \"allow once\" answer to a directory prompt granted: the
+call may reach them, and no other does.  A tool that runs where the
+session's directories are all it is shown asks, to be shown them too."
+  (and (stringp call-id) (gethash call-id harness-perms--once-grants)))
+
+(harness-defmethod permission/exempt-reads (session-id tool paths)
+  "Return those of PATHS that TOOL, for SESSION-ID, may read outside its roots.
+They are the places the jail lets every call that only reads reach,
+whatever the session's directories: the harness itself (its code and
+its state, less its credentials), the skills directories and the files
+the user's Emacs showed a definition in.  A tool that runs where the
+session's directories are all it is shown asks, to be shown them
+read-only; a path that is none of those is not returned, and a call
+that names it reaches nothing of it."
+  (let ((request (list :session (harness-perms--session session-id) :tool tool :kind 'read)))
+    (cl-remove-if-not (lambda (path)
+                        (and (stringp path)
+                             (or (harness-perms--inspectable-p request path)
+                                 (harness-perms--skill-readable-p request path)
+                                 (harness-perms--revealed-p request path))
+                             t))
+                      paths)))
+
+(harness-defmethod permission/path-writable-p (session-id path)
+  "Return non-nil when PATH lies in a directory SESSION-ID may write.
+It is the jail's rule for a write (`permission/allowed-dirs'), so a
+path the jail would refuse a write to is refused here, with the same
+roots, the same grants and the same reading of links.  A tool whose
+call does not name a path, because it acts on a file through something
+else (the file a buffer of the user's Emacs visits), asks it before it
+acts: the jail never saw that file."
+  (and (stringp path)
+       (cl-some (lambda (root) (harness-perms--within-p root path))
+                (harness-perms-roots (harness-perms--session session-id)))
+       t))
+
 (harness-defmethod permission/dirs (session-id)
   "Return the directories SESSION-ID may touch as (:dir :source :revocable).
 SOURCE is as in `harness-perms-dirs'.  An entry is revocable when it
@@ -6014,7 +6049,6 @@ only reads may read (see `harness-perms-inspection-dirs' and
 ;; for an answer, `rule' for a standing rule's).
 (pcase-dolist (`(,stage . ,label) '((harness-perms--dir-request . jail)
                                     (harness-perms--away-request . access)
-                                    (harness-perms--sandbox-guard . gate)
                                     (harness-perms--jail . jail)
                                     (harness-perms--mode . mode)
                                     (harness-perms--auto . judge)
@@ -6022,13 +6056,40 @@ only reads may read (see `harness-perms-inspection-dirs' and
                                     (harness-perms--ask . user)))
   (put stage 'harness-permission-stage label))
 
+;; The chain fails closed.  A stage that signals an error, or returns a
+;; promise that is rejected, would otherwise hand the decision on as it
+;; was; the stages after it, the mode stage among them, then decide a
+;; call that no stage looked at.  When the jail fails, that is a path
+;; nobody compared with the session's directories, allowed in yolo mode
+;; and as a read in every other.  Every stage either decides or passes
+;; the decision on knowing why (the judge, which can fail for a reason
+;; that is not a fault, says so itself), so an error that reaches the
+;; chain is a fault, and a call that was not checked is refused.
+
+(defun harness-perms--stage-failed (_value handler err)
+  "Return the decision for the stage HANDLER of `permission/decide' that failed.
+ERR is what it signalled.  The decision refuses the call for good: what
+the stage would have said is not known.  The denial says so, and the user
+can approve the call in the chat as any other denied call."
+  (list :behavior 'deny :final t
+        :reason (format "The permission check could not be completed (%s failed: %s)"
+                        (if (and handler (symbolp handler)) handler "a stage")
+                        (condition-case nil
+                            ;; A harness-error carries its message as it is.
+                            (if (and (eq (car-safe err) 'harness-error) (stringp (cadr err)))
+                                (cadr err)
+                              (harness-error-message err))
+                          (error "an error")))
+        :hint "The call was refused because nothing checked it. This is a fault in the harness, not a rule: tell the user, who can approve this one call in the chat."))
+
 (defun harness-perms--init ()
   "Install the `permission/decide' chain and the steering after denials.
 Grants until a turn ends are dropped from here on when it ends.  Safe
 to call again."
+  (harness-set-filter-failure 'permission/decide #'harness-perms--stage-failed)
+  (harness-on 'tools/finished #'harness-perms--forget-once)
   (harness-add-filter 'permission/decide #'harness-perms--dir-request 5)
   (harness-add-filter 'permission/decide #'harness-perms--away-request 6)
-  (harness-add-filter 'permission/decide #'harness-perms--sandbox-guard 7)
   (harness-add-filter 'permission/decide #'harness-perms--jail 10)
   (harness-add-filter 'permission/decide #'harness-perms--mode 20)
   (harness-add-filter 'permission/decide #'harness-perms--auto 30)
@@ -6051,7 +6112,9 @@ to call again."
 
 (defun harness-perms--shutdown ()
   "Remove the `permission/decide' chain and the steering after denials."
-  (dolist (fn '(harness-perms--dir-request harness-perms--away-request harness-perms--sandbox-guard
+  (harness-clear-filter-failure 'permission/decide)
+  (harness-off (cons 'tools/finished #'harness-perms--forget-once))
+  (dolist (fn '(harness-perms--dir-request harness-perms--away-request
                 harness-perms--jail harness-perms--mode
                 harness-perms--auto harness-perms--non-interactive harness-perms--ask))
     (harness-remove-filter 'permission/decide fn))
@@ -6073,7 +6136,7 @@ to call again."
 ;; harness never offers request_directory_access without the stage that
 ;; decides it; and a call no stage decides is asked about.
 (harness-define-module 'perms
-  :doc "Directory jail, directory requests, sandbox guard, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls."
+  :doc "Directory jail, directory requests, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls."
   :requires '(config tools)
   :init #'harness-perms--init
   :shutdown #'harness-perms--shutdown)

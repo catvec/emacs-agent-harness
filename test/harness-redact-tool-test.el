@@ -1042,60 +1042,19 @@ which is answered; any other method fails as it always did."
                            5 "the log line of the other notification")
         (should (string-search odd (harness-redact-tool-test--log-text)))))))
 
-(ert-deftest harness-redact-tool-acp-a-lisp-call-of-a-secret-method-keeps-its-data-out ()
-  "The Emacs on this machine calls a bus method with Lisp arguments through harness/call.
-A secret the user typed travels there, in `:args', so a failure of
-such a call is answered and logged as one of a secret's method is: by its
-kind, not its data."
-  (harness-redact-tool-test-with-acp
-    (let ((odd (concat "ODD-VALUE-" (make-string 12 ?v))))
-      (harness-register-method 'secrets/test-boom
-                               (lambda (&rest _) (signal 'wrong-type-argument (list 'stringp odd))))
-      (harness-register-method 'session/test-boom
-                               (lambda (&rest _) (signal 'wrong-type-argument (list 'stringp odd))))
-      (pcase-let ((`(,client . ,sent) (harness-redact-tool-test--client)))
-        ;; A request is answered with the kind of the error.
-        (let* ((answer (harness-redact-tool-test--ask
-                        client sent 1 "_harness/harness/call"
-                        (list :method "secrets/test-boom" :args (format "(%S)" odd))))
-               (e (plist-get answer :error)))
-          (should e)
-          (should (string-search "wrong-type-argument" (plist-get e :message)))
-          (should-not (string-search odd (prin1-to-string answer t))))
-        ;; Any other method called that way answers as it did.
-        (let ((answer (harness-redact-tool-test--ask
-                       client sent 2 "_harness/harness/call"
-                       (list :method "session/test-boom" :args (format "(%S)" odd)))))
-          (should (string-search odd (plist-get (plist-get answer :error) :message))))
-        ;; A notification that fails is logged by the kind of the error.
-        (harness-acp-client-receive
-         client (harness-json-encode (list :jsonrpc "2.0" :method "_harness/harness/call"
-                                           :params (list :method "secrets/test-boom"
-                                                         :args (format "(%S)" odd)))))
-        (harness-test-wait (lambda () (string-search "notification _harness/harness/call failed"
-                                                     (harness-redact-tool-test--log-text)))
-                           5 "the log line of the failed notification")
-        (should (string-search "wrong-type-argument" (harness-redact-tool-test--log-text)))
-        (should-not (string-search odd (harness-redact-tool-test--log-text)))))))
-
 (ert-deftest harness-redact-tool-acp-secret-methods-are-those-under-secrets ()
   "Which methods take a secret in their params: those under secrets/, with or without _harness/.
-And harness/call, when its params name one."
+Nothing else does: a method that called another with Lisp arguments
+\(`harness/call', now gone) was the only one that carried a secret under
+another method's name."
   (should (harness-acp--secret-method-p "secrets/redact"))
   (should (harness-acp--secret-method-p "_harness/secrets/add-source"))
   (should-not (harness-acp--secret-method-p "_harness/session/get"))
   (should-not (harness-acp--secret-method-p "secretsredact"))
   (should-not (harness-acp--secret-method-p nil))
   (should-not (harness-acp--secret-method-p 'secrets/redact))
-  ;; harness/call is one only for a call of such a method.
-  (should (harness-acp--secret-method-p "_harness/harness/call" '(:method "secrets/redact" :args "(nil)")))
-  (should (harness-acp--secret-method-p "harness/call" '(:method "secrets/add-source")))
-  (should-not (harness-acp--secret-method-p "_harness/harness/call" '(:method "session/get" :args "(nil)")))
-  (should-not (harness-acp--secret-method-p "_harness/harness/call" '(:method 'secrets/redact)))
-  (should-not (harness-acp--secret-method-p "_harness/harness/call" '(:args "(secrets/redact)")))
-  (should-not (harness-acp--secret-method-p "_harness/harness/call" nil))
-  (should-not (harness-acp--secret-method-p "_harness/harness/call" "secrets/redact"))
-  (should-not (harness-acp--secret-method-p "_harness/session/get" '(:method "secrets/redact"))))
+  (should-not (harness-acp--secret-method-p "_harness/harness/call"))
+  (should-not (harness-acp--secret-method-p "harness/call")))
 
 (provide 'harness-redact-tool-test)
 ;;; harness-redact-tool-test.el ends here

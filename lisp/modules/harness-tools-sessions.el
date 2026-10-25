@@ -2192,6 +2192,26 @@ INPUT is the tool call's input plist and CTX its context."
                       (cdr written))
                      :meta (list :task-id (plist-get task :id)))))
 
+(defun harness-tools-sessions--task-submit-paths (input &optional ctx)
+  "Return the directories a task_submit call with INPUT has a task work in.
+That is its `cwd' (the session's own by default), which the permission
+jail judges like the directory of any other call.  A task submitted
+with `main_tree' works in the main checkout of that project, not in a
+worktree of it, so that checkout is named too: from a worktree it is
+outside the session's directories, and the user is asked for it as for
+any other directory.  CTX is the call's context."
+  (let ((cwd (or (plist-get input :cwd) ".")))
+    (cons cwd
+          (when (harness-json-true-p (plist-get input :main_tree))
+            (let ((here (plist-get ctx :cwd)))
+              ;; The checkout the task will work in is the one `task/submit'
+              ;; takes (`harness-tasks--project').  A session on another
+              ;; host names a remote directory, whose project is found by
+              ;; asking that host: the cwd stands for it.
+              (unless (and here (file-remote-p here))
+                (list (harness-files-main-root
+                       (expand-file-name cwd (or here default-directory))))))))))
+
 (harness-define-tool "task_submit"
   :label "Submit task"
   :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately, and counts only the tasks' own top-level sessions at work: sub-agents, forks and the merge queue never take a slot), and waiting tasks take free slots by priority: high before medium (the default) before low; among equals, work sent back from review and tasks returned to pending go first, then the oldest (task_list says each waiting task's place in line). While the project's queue is suspended (task_control suspend-queue) nothing starts it on its own; the task waits until the queue is resumed or someone starts it with task_control start. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later; when the project's backlog is auto-queued (task_control auto-queue) the written-up task joins the pending queue by itself. With plan=true it is planned instead: an agent on the provider's hard model reads the code, read-only, and writes a detailed plan for a medium model, which then does the work once someone starts the task (model and thinking, when given, are that work's). With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
@@ -2207,6 +2227,7 @@ INPUT is the tool call's input plist and CTX its context."
                          :main_tree (:type "boolean" :description "Work in the project's main checkout, with no worktree and nothing to merge (default false)."))
             :required ("prompt"))
   :kind 'meta
+  :paths #'harness-tools-sessions--task-submit-paths
   :subject (lambda (input) (harness-first-line (plist-get input :prompt) 60))
   :handler #'harness-tools-sessions--task-submit)
 

@@ -68,11 +68,9 @@
 ;;   model-written code could block the UI beyond recovery (see
 ;;   harness-elisp.el); a timeout kills the child, its whole process
 ;;   group included.  The user's Emacs is read and driven with the
-;;   bounded `emacs_*' tools (tools-emacs); only emacs_eval
-;;   (tools-emacs-eval) evaluates there, when a judge model expects the
-;;   code to return at once and the user did not turn it off with
-;;   `harness-emacs-eval'.  The tool itself runs here, in the harness,
-;;   like every tool.
+;;   bounded `emacs_*' tools (tools-emacs), a fixed vocabulary none of
+;;   which evaluates code; no tool evaluates model-written Lisp there.
+;;   The tool itself runs here, in the harness, like every tool.
 ;;
 ;;   The child is a command like any other, so it runs in the sandbox
 ;;   as a bash command of the session does: `harness-tools-shell--wrap'
@@ -90,6 +88,19 @@
 ;;   The result is read back only from a regular file, since a child in
 ;;   the sandbox could leave a link there to a file only the harness
 ;;   can read.
+;;
+;;   With `snapshot' the child starts from a copy of the user's Emacs:
+;;   the harness asks that Emacs for it, in slices
+;;   (lisp/harness-snapshot.el; the `snapshot' request of
+;;   harness-emacs-endpoint.el), puts it in a file in the call's io/
+;;   directory and the child reads it as data before the code runs
+;;   (`harness-elisp-load-snapshot').  Such a child runs read-only and
+;;   offline whatever the session otherwise has, and is refused where no
+;;   sandbox can give that: the copy is the user's data and must not
+;;   meet an unconfined process.  The code can change its copy and
+;;   nothing else; the user's Emacs is only read, and the child cannot
+;;   reach it.  Credentials are left out of the copy by name
+;;   (docs/trust-model.md).
 
 ;;; Code:
 
@@ -100,8 +111,6 @@
 (require 'harness-util)
 (require 'harness-tools)
 (require 'harness-elisp)
-
-(declare-function harness-emacs-eval-p "harness-emacs-endpoint" ())
 
 (defconst harness-tools-shell--program "bash"
   "Shell used by the bash tool.")
@@ -284,6 +293,41 @@ Unwrapped, COMMAND comes back itself, the very list given."
     (error "The sandbox is required (harness-sandbox-policy), but the sandbox module is not loaded"))
    (t command)))
 
+(cl-defun harness-tools-shell-sandbox-profile (ctx cwd &key readable writable scratch)
+  "Return the sandbox profile of a process CTX's session runs in CWD, a plist.
+It is what a bash command of the session is shown, as data: `:cwd',
+`:writable' (the session's own temporary directory, its working
+directory and worktree, the configured and granted directories, and
+the WRITABLE ones given), `:readable' (the skills directories, the
+read-only directories of the session, and the READABLE ones given),
+`:scratch' (SCRATCH, directories made for the one process, which it
+writes whatever else is read-only) and `:options' (what the
+`tools/sandbox-options' filter makes of nil, see
+`harness-tools-shell--sandbox-options').  `harness-tools-shell-wrap-profile'
+wraps a command in it.  The MCP host (lisp/modules/harness-mcp.el)
+starts the servers of a session this way, so a tool it serves sees what
+bash sees.  Signals an error when a handler of the filter gives no
+plist of options."
+  (let ((options (harness-tools-shell--sandbox-options ctx))
+        (dirs (harness-tools-shell--session-dirs ctx)))
+    (list :cwd cwd
+          :writable (delete-dups (delq nil (append writable
+                                                   (cons (harness-tools-shell--tmp-dir ctx) (car dirs)))))
+          :readable (delete-dups (append readable (harness-tools-shell--skill-dirs ctx) (cdr dirs)))
+          :scratch scratch
+          :options options)))
+
+(defun harness-tools-shell-wrap-profile (profile command)
+  "Return COMMAND wrapped for the sandbox as PROFILE says.
+PROFILE is what `harness-tools-shell-sandbox-profile' returned.  This
+is `harness-tools-shell--wrap': a `required' policy without a backend, or
+options that need a sandbox there is none of, signal an error rather
+than leave COMMAND unconfined, and COMMAND comes back itself, the very
+list given, when it runs unwrapped."
+  (harness-tools-shell--wrap (plist-get profile :cwd) command
+                             (plist-get profile :writable) (plist-get profile :readable)
+                             (plist-get profile :options) (plist-get profile :scratch)))
+
 (defun harness-tools-shell--format-output (r timeout)
   "Format the result plist R of `harness-run-command' run with TIMEOUT seconds."
   (let* ((exit (plist-get r :exit))
@@ -403,12 +447,123 @@ opens the latest line under that."
 ;; The tool runs here, in the harness, like every tool, and always
 ;; evaluates in a fresh background Emacs, apart from the user's, so code
 ;; that blocks cannot freeze theirs.  The Emacs a client lent the
-;; harness evaluates only for emacs_eval (tools-emacs-eval), which runs
-;; only code a judge expects to return at once, unless the user turned
-;; it off with `harness-emacs-eval'; the other `emacs_*' tools read and
-;; drive it without evaluating anything.  The background child
+;; harness evaluates nothing: the `emacs_*' tools read and drive it
+;; with a fixed vocabulary of bounded requests.  The background child
 ;; reports its result with `harness-elisp-payload', which one function
 ;; words.
+
+;;;; A copy of the user's Emacs
+
+(defconst harness-tools-shell--snapshot-options '(:read-only t :network nil)
+  "The sandbox options of an elisp call that starts from a copy of the user's Emacs.
+Whatever the session otherwise has, such a child reads, changes nothing
+but its own call's directory and reaches no network: the copy is the
+user's data.  They ask for the sandbox, so a child that cannot have it
+is refused, whatever `harness-sandbox-policy' says.")
+
+(defconst harness-tools-shell--snapshot-seconds 8
+  "Seconds the harness takes at most to fetch a copy of the user's Emacs.
+A copy not whole by then is used as it is, and the result says so.")
+
+(defconst harness-tools-shell--snapshot-request-seconds 4
+  "Seconds the user's Emacs has to answer one slice of the copy.")
+
+(defconst harness-tools-shell--snapshot-ttl 60
+  "Seconds a copy of the user's Emacs is kept for the next call of its session.
+`fresh' asks for a new one.")
+
+(defconst harness-tools-shell--snapshot-load-seconds 20
+  "Seconds, besides its timeout, a child has to read the copy.")
+
+(defvar harness-tools-shell--snapshots nil
+  "The copies kept, newest first: (SESSION-ID TIME . SNAPSHOT).
+SNAPSHOT is a plist of `:text', `:partial' (a reason, or nil) and
+`:taken' (a time).")
+
+(defun harness-tools-shell--snapshot-sandbox-options (options)
+  "Return OPTIONS, the sandbox options of a call, made read-only and offline.
+Capabilities are taken off, as for any command that changes nothing."
+  (harness-plist-merge (harness-plist-remove options :capabilities)
+                       harness-tools-shell--snapshot-options))
+
+(defun harness-tools-shell--snapshot-fetch ()
+  "Ask the user's Emacs for a copy of itself, slice by slice; return a promise.
+It resolves to a plist: `:text' (the forms of the copy), `:partial' (why
+it is not whole, or nil), `:taken' (the time) and `:slices'.  It rejects
+when the Emacs gives nothing at all.  A copy that stops short, because
+the time allowed (`harness-tools-shell--snapshot-seconds') ran out or the
+Emacs stopped answering, is resolved as it is, marked partial."
+  (harness-with-promise (resolve reject)
+    (let ((deadline (+ (float-time) harness-tools-shell--snapshot-seconds))
+          (chunks nil) (cursor nil) (slices 0))
+      (cl-labels
+          ((finish (partial)
+             (when (and partial cursor)
+               ;; The user's Emacs keeps what the cursor stands for for a minute: let it go.
+               (ignore-errors
+                 (harness-then (harness-tools-ask-emacs "snapshot" (list :cursor cursor :release t) 2)
+                               #'ignore #'ignore)))
+             (funcall resolve
+                      (list :text (apply #'concat (append (reverse chunks)
+                                                          (and partial (list (format "(partial %S)\n" partial)))))
+                            :partial partial :taken (float-time) :slices slices)))
+           (step ()
+             (let ((left (- deadline (float-time))))
+               (if (< left 0.1)
+                   (finish "the time allowed for taking the copy ran out")
+                 (harness-then
+                  (harness-tools-ask-emacs
+                   "snapshot"
+                   (append (and cursor (list :cursor cursor)) (list :maxChars (* 256 1024)))
+                   (min left harness-tools-shell--snapshot-request-seconds))
+                  (lambda (answer)
+                    (cl-incf slices)
+                    (push (or (plist-get answer :chunk) "") chunks)
+                    (setq cursor (plist-get answer :next))
+                    (if (or (harness-json-true-p (plist-get answer :done)) (null cursor))
+                        (finish nil)
+                      (step)))
+                  (lambda (err)
+                    (if chunks
+                        (finish (format "the user's Emacs stopped answering: %s"
+                                        (harness-tools-reason err)))
+                      (funcall reject err))))))))
+        (step)))))
+
+(defun harness-tools-shell--snapshot (ctx fresh)
+  "Return a promise of a copy of the user's Emacs for the call under CTX.
+It is the copy kept for CTX's session if that is younger than
+`harness-tools-shell--snapshot-ttl' seconds and FRESH is nil, else a new
+one (`harness-tools-shell--snapshot-fetch'), which is kept.  The plist
+it resolves to has `:cached' besides what the fetch gives."
+  (let* ((key (or (plist-get ctx :session-id) ""))
+         (now (float-time))
+         (kept (cl-remove-if (lambda (entry) (> (- now (cadr entry)) harness-tools-shell--snapshot-ttl))
+                             harness-tools-shell--snapshots))
+         (entry (assoc key kept)))
+    (setq harness-tools-shell--snapshots kept)
+    (if (and entry (not fresh))
+        (harness-resolved (append (list :cached t) (cddr entry)))
+      (harness-then
+       (harness-tools-shell--snapshot-fetch)
+       (lambda (snapshot)
+         (setq harness-tools-shell--snapshots
+               (seq-take (cons (cons key (cons (float-time) snapshot))
+                               (assoc-delete-all key harness-tools-shell--snapshots))
+                         3))
+         (append (list :cached nil) snapshot))))))
+
+(defun harness-tools-shell--snapshot-note (snapshot)
+  "Return what to tell the model about SNAPSHOT, the report of the child, or nil.
+Nothing, when the copy was loaded whole; why not, when it was not."
+  (let ((partial (plist-get snapshot :partial))
+        (error (plist-get snapshot :error)))
+    (cond
+     ((and (stringp error) (not (string-empty-p error)))
+      (format "The copy of the user's Emacs is not usable: %s." error))
+     ((and (stringp partial) (not (string-empty-p partial)))
+      (format "The copy of the user's Emacs is partial: %s.  (harness-snapshot-info) says what it holds."
+              partial)))))
 
 (defun harness-tools-shell--elisp-timeout (input)
   "Return the seconds a call of the elisp tool with INPUT may evaluate for."
@@ -420,7 +575,11 @@ opens the latest line under that."
   "Turn PAYLOAD, the report of an evaluation, into an elisp tool result with META.
 PAYLOAD is what `harness-elisp-payload' returns, as the background
 Emacs wrote it or the user's Emacs answered it."
-  (let ((error (and (listp payload) (plist-get payload :error))))
+  (let* ((error (and (listp payload) (plist-get payload :error)))
+         (snapshot (and (listp payload) (plist-get payload :snapshot)))
+         (meta (if snapshot (append (list :snapshot (append (plist-get meta :snapshot) snapshot))
+                                    (harness-plist-remove meta :snapshot))
+                 meta)))
     (cond
      ((not (and payload (listp payload)))
       (harness-tool-error "Evaluation produced an unreadable result" :meta meta))
@@ -429,7 +588,8 @@ Emacs wrote it or the user's Emacs answered it."
      (t
       (harness-tool-ok (harness-elisp-format-result (or (plist-get payload :value) "")
                                                     (or (plist-get payload :output) "")
-                                                    (or (plist-get payload :messages) ""))
+                                                    (or (plist-get payload :messages) "")
+                                                    (harness-tools-shell--snapshot-note snapshot))
                        :meta meta)))))
 
 (defun harness-tools-shell--elisp-batch-result (r result-file timeout &optional meta)
@@ -491,7 +651,16 @@ whatever reaches them evaluates Lisp outside the sandbox."
   (list (expand-file-name "harness.el" harness-directory)
         (file-name-as-directory (expand-file-name "lisp" harness-directory))))
 
-(defun harness-tools-shell--elisp-command (child env cwd io ctx)
+(defun harness-tools-shell-child-dirs ()
+  "Return what a background Emacs of the harness must be shown to start.
+Those are `harness-tools-shell--harness-files' and
+`harness-tools-shell--emacs-dirs': the harness's Lisp, read-only, and
+the Emacs it runs.  The elisp tool's child is shown them, and so is the
+file tools' worker (lisp/harness-mcp-fs.el): a process the harness
+starts in the sandbox, whose program is the harness's own."
+  (append (harness-tools-shell--harness-files) (harness-tools-shell--emacs-dirs)))
+
+(defun harness-tools-shell--elisp-command (child env cwd io ctx &optional snapshot)
   "Return the command line that runs CHILD, the background Emacs, under CTX.
 ENV is the alist of environment variables CHILD reads, CWD where it
 runs and IO the directory of its code and its result.  It goes through
@@ -505,8 +674,12 @@ whatever the options say, so that it can report even when it is
 `:read-only'.  Unwrapped, as without the sandbox module, the command
 line is CHILD itself, run with ENV as it always was; in the sandbox
 `env' sets ENV first, since systemd-run passes none of the harness's
-environment on.  Signals an error when CHILD may not run."
-  (let* ((options (harness-tools-shell--sandbox-options ctx))
+environment on.  Signals an error when CHILD may not run.  A SNAPSHOT
+call runs read-only and offline (`harness-tools-shell--snapshot-options')
+whatever the options say, and signals the same error where no sandbox
+can give that."
+  (let* ((options (let ((options (harness-tools-shell--sandbox-options ctx)))
+                    (if snapshot (harness-tools-shell--snapshot-sandbox-options options) options)))
          (dirs (harness-tools-shell--session-dirs ctx))
          (in-env (append (list "env")
                          (mapcar (lambda (v) (concat (car v) "=" (cdr v))) env)
@@ -519,8 +692,10 @@ environment on.  Signals an error when CHILD may not run."
                    options (list io))))
     (if (eq wrapped in-env) child wrapped)))
 
-(defun harness-tools-shell--elisp-batch (code input ctx)
+(defun harness-tools-shell--elisp-batch (code input ctx &optional snapshot)
   "Evaluate CODE for the elisp tool in a background Emacs; return a promise.
+With SNAPSHOT, a plist (`:fresh' says not to use a kept copy), the child
+starts from a copy of the user's Emacs, read-only and offline.
 INPUT and CTX supply the working directory and the timeout; the child
 adds the harness to its `load-path' so `(require \='harness-...)' works
 as it did when the code ran in the harness's own Emacs.  It runs apart
@@ -547,11 +722,13 @@ directory."
                       "-L" (expand-file-name "lisp" harness-directory)
                       "-l" (expand-file-name "lisp/harness-elisp.el" harness-directory)
                       "-f" "harness-elisp-batch-main"))
-         (env (list (cons "HARNESS_ELISP_CODE" code-file)
-                    (cons "HARNESS_ELISP_RESULT" result-file)
-                    (cons "HARNESS_ELISP_TIMEOUT" (number-to-string timeout))
-                    (cons "HARNESS_ELISP_MAX_VALUE_CHARS"
-                          (number-to-string harness-elisp--max-value-chars))))
+         (snapshot-file (and snapshot (expand-file-name "snapshot.eld" io)))
+         (env (append (list (cons "HARNESS_ELISP_CODE" code-file)
+                            (cons "HARNESS_ELISP_RESULT" result-file)
+                            (cons "HARNESS_ELISP_TIMEOUT" (number-to-string timeout))
+                            (cons "HARNESS_ELISP_MAX_VALUE_CHARS"
+                                  (number-to-string harness-elisp--max-value-chars)))
+                      (and snapshot (list (cons "HARNESS_ELISP_SNAPSHOT" snapshot-file)))))
          cmd)
     ;; The call's directory is ours to delete from here on, whatever fails
     ;; before the command that uses it starts: a full /tmp, say.
@@ -563,8 +740,10 @@ directory."
             (set-file-modes code-file #o600)))
       (error (ignore-errors (delete-directory dir t))
              (signal (car err) (cdr err))))
+    ;; The command comes first: where it may not run, nothing is asked of the
+    ;; user's Emacs, and no copy of it is made.
     (setq cmd (condition-case err
-                  (harness-tools-shell--elisp-command child env cwd io ctx)
+                  (harness-tools-shell--elisp-command child env cwd io ctx snapshot)
                 (error (list :error (harness-error-message err)))))
     (if (eq (car-safe cmd) :error)
         (progn
@@ -579,20 +758,47 @@ directory."
                            (setq settled t)
                            (ignore-errors (delete-directory dir t))
                            (funcall resolve result)))))
-          (harness-then
-           (harness-run-command cmd :cwd cwd :timeout (+ timeout 5) :name "harness-elisp" :env env)
-           (lambda (r) (funcall finish (harness-tools-shell--elisp-batch-result r result-file timeout meta)))
-           (lambda (e) (funcall finish (harness-tool-error
-                                        (format "elisp failed: %s" (harness-error-message e))
-                                        :meta meta)))))))))
+          (cl-flet
+              ((run (extra)
+                 (let ((meta (append meta extra)))
+                   (harness-then
+                    (harness-run-command cmd :cwd cwd :name "harness-elisp" :env env
+                                         :timeout (+ timeout 5 (if snapshot harness-tools-shell--snapshot-load-seconds 0)))
+                    (lambda (r) (funcall finish (harness-tools-shell--elisp-batch-result r result-file timeout meta)))
+                    (lambda (e) (funcall finish (harness-tool-error
+                                                 (format "elisp failed: %s" (harness-error-message e))
+                                                 :meta meta)))))))
+            (if (not snapshot)
+                (run nil)
+              (harness-then
+               (harness-tools-shell--snapshot ctx (plist-get snapshot :fresh))
+               (lambda (copy)
+                 (condition-case err
+                     (progn
+                       (let ((coding-system-for-write 'utf-8-unix))
+                         (write-region (plist-get copy :text) nil snapshot-file nil 'silent))
+                       (set-file-modes snapshot-file #o600)
+                       (run (list :snapshot (list :cached (and (plist-get copy :cached) t)
+                                                  :partial (plist-get copy :partial)
+                                                  :taken (plist-get copy :taken)
+                                                  :chars (length (plist-get copy :text))))))
+                   (error (funcall finish (harness-tool-error
+                                           (format "Cannot start from a copy of the user's Emacs: %s"
+                                                   (harness-error-message err))
+                                           :meta meta)))))
+               (lambda (err)
+                 (funcall finish (harness-tool-error
+                                  (format "Cannot take a copy of the user's Emacs: %s.  Run the code without snapshot, or read it with the emacs_* tools."
+                                          (harness-tools-reason err))
+                                  :meta meta)))))))))))
 
 (defun harness-tools-shell--elisp (input ctx)
   "Handler for the elisp tool with INPUT under CTX; returns a promise.
 The code always evaluates in a background Emacs, so a call that asks
-for the user's Emacs is refused with that explanation, which names
-emacs_eval unless the user turned that off (`harness-emacs-eval')."
+for the user's Emacs is refused with that explanation."
   (let ((code (plist-get input :code))
-        (where (plist-get input :emacs)))
+        (where (plist-get input :emacs))
+        (snapshot (harness-json-true-p (plist-get input :snapshot))))
     (cond
      ((or (not (stringp code)) (string-blank-p code))
       (harness-tool-error "Missing code"))
@@ -600,19 +806,20 @@ emacs_eval unless the user turned that off (`harness-emacs-eval')."
            (not (string-empty-p where))
            (not (equal where "background")))
       (harness-tool-error
-       (format "The elisp tool never evaluates in the user's Emacs (%S): it always evaluates in a background Emacs. Read or drive the user's Emacs with the emacs_* tools instead%s."
-               where
-               (if (and (fboundp 'harness-emacs-eval-p) (harness-emacs-eval-p))
-                   "; emacs_eval evaluates code there that returns at once"
-                 ""))))
-     (t (harness-tools-shell--elisp-batch code input ctx)))))
+       (format "The elisp tool never evaluates in the user's Emacs (%S): it always evaluates in a background Emacs. Read or drive the user's Emacs with the emacs_* tools instead."
+               where)))
+     (t (harness-tools-shell--elisp-batch
+         code input ctx
+         (and snapshot (list :fresh (harness-json-true-p (plist-get input :fresh)))))))))
 
 (harness-define-tool "elisp"
   :label "Emacs Lisp"
-  :description "Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename; it may run in the same sandbox as bash commands, and sees what they see and has what they have (no Linux capability unless the user gave this session some: request_escalation, attribute capability). Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation."
+  :description "Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename; it may run in the same sandbox as bash commands, and sees what they see and has what they have (no Linux capability unless the user gave this session some: request_escalation, attribute capability). Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation. With snapshot the process starts from a copy of the user's Emacs: the values of its variables and its buffers (name, mode, file, directory, point, text), to compute over. The code can change the copy and never the user's Emacs; the process then runs read-only and offline, whatever the session otherwise has, and is refused where no sandbox can give that. Credentials are left out of the copy by the names of variables and buffers, and the copy says what it left out: (harness-snapshot-info). The variables the process needs for itself, hooks and every variable that holds a function keep the process's own value: read the user's with (harness-user-value 'load-path)."
   :schema '(:type "object"
             :properties (:code (:type "string" :description "One or more Emacs Lisp forms")
-                         :timeout (:type "integer" :description "Seconds before the evaluation is stopped. Default 30"))
+                         :timeout (:type "integer" :description "Seconds before the evaluation is stopped. Default 30")
+                         :snapshot (:type "boolean" :description "Start from a copy of the user's Emacs (its variables and buffers, credentials left out), read-only and offline. Default false")
+                         :fresh (:type "boolean" :description "With snapshot: take a new copy now instead of the one kept for the last minute. Default false"))
             :required ("code"))
   :kind 'exec
   :timeout 3700

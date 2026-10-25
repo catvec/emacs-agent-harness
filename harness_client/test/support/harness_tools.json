@@ -8,7 +8,6 @@
   {"name": "emacs_buffer", "label": "Read buffer", "kind": "read", "coalescable": true},
   {"name": "emacs_buffers", "label": "List buffers", "kind": "read", "coalescable": true},
   {"name": "emacs_describe", "label": "Describe symbol", "kind": "read", "coalescable": true},
-  {"name": "emacs_eval", "label": "Evaluate in Emacs", "kind": "exec", "coalescable": false},
   {"name": "emacs_find_definition", "label": "Find definition", "kind": "read", "coalescable": true},
   {"name": "emacs_insert", "label": "Insert text", "kind": "write", "coalescable": false},
   {"name": "emacs_messages", "label": "Emacs messages", "kind": "read", "coalescable": true},

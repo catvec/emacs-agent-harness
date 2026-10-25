@@ -117,5 +117,30 @@ tests assume says so on this side."
         (should (assoc name registry))
         (should-not (nth 3 (assoc name registry)))))))
 
+(ert-deftest harness-client-tools-no-tool-evaluates-in-the-users-emacs ()
+  "No tool named emacs_eval exists once every tool module is loaded, and
+a call of one is a call of a tool that does not exist.
+The tool ran model-written Lisp in the user's own Emacs, outside every
+sandbox.  Its module and its row in the app's file are gone; the elisp
+tool, which evaluates in a sandboxed background Emacs, and the bounded
+emacs_* tools are not."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (harness-client-tools-test--load)
+    (let ((registry (harness-client-tools-test--specs)))
+      (should (> (length registry) 20))
+      (should (assoc "elisp" registry))
+      (should (assoc "emacs_buffers" registry))
+      (should-not (assoc "emacs_eval" registry))
+      (should-not (harness-tool-get "emacs_eval"))
+      (should-not (assoc "emacs_eval" (harness-client-tools-test--file-specs)))
+      (let ((r (harness-test-await
+                (harness-call 'tools/execute nil
+                              (list :id "c1" :name "emacs_eval" :input (list :code "(+ 1 2)"))))))
+        (should (plist-get r :is-error))
+        (should (string-prefix-p "Unknown tool emacs_eval" (plist-get r :content)))))
+    (should-not (file-exists-p (expand-file-name "lisp/modules/harness-tools-emacs-eval.el"
+                                                 harness-test-root)))))
+
 (provide 'harness-client-tools-test)
 ;;; harness-client-tools-test.el ends here

@@ -3,17 +3,17 @@
 ;;; Commentary:
 
 ;; Narrow windows into the user's Emacs so a model can help drive it:
-;; the buffer and window lists, a buffer's text, showing a buffer or a
-;; file where the user can see it, inserting text into a buffer, saving
-;; one, the tail of *Messages*, and debugging its Lisp: what a symbol
+;; the buffer and window lists, a buffer's text (a range, the last
+;; lines, or the lines that hold a string, which is how the harness's
+;; log is searched), showing a buffer or a file where the user can see
+;; it, inserting text into a buffer, saving one, the tail of
+;; *Messages*, and debugging its Lisp: what a symbol
 ;; is and holds (its documentation, value, advice, watchers), where it
 ;; is defined and the source of that definition, and tracing the calls
 ;; of a function or the changes of a variable while the user works.
-;; None of them evaluates code: the elisp tool (tools-shell) evaluates
-;; in a background Emacs, and model-written Lisp runs in the user's
-;; Emacs only through emacs_eval (tools-emacs-eval), which runs only
-;; code a judge model expects to return at once, unless the user turned
-;; it off with `harness-emacs-eval'.
+;; They are a fixed vocabulary of bounded requests, and none of them
+;; evaluates code: model-written Lisp runs only in the background Emacs
+;; of the elisp tool (tools-shell), never in the user's.
 ;;
 ;; Like every tool these run here, in the harness.  The user's Emacs is
 ;; a resource they reach, as a TRAMP host is for the file tools: they
@@ -29,6 +29,15 @@
 ;; agent can read the code around the definition with read_file or grep
 ;; without the user being asked about a file whose definitions these
 ;; tools already show.
+;;
+;; A buffer that visits a file is that file: emacs_insert and
+;; emacs_save_buffer name a buffer, not a path, so the permission jail
+;; has nothing to judge in the call, and saved, the buffer would
+;; overwrite the user's file as the user, outside every sandbox.  They ask
+;; the Emacs which file the buffer visits first, and change it only when
+;; the session may write that file (`permission/path-writable-p'); the
+;; Emacs checks that the buffer still visits it (see "Changing a buffer"
+;; below, and docs/trust-model.md).
 
 ;;; Code:
 
@@ -69,6 +78,17 @@ larger text is refused rather than freeze it moving the text.")
   "Write the change to a file with write_file or edit_file instead."
   "What the model is told when a write to the user's Emacs is refused.")
 
+(defun harness-tools-emacs--failure (err hint)
+  "Return the error result for ERR, why the user's Emacs could not be asked.
+It says why, followed by HINT: `harness-tools-emacs--no-emacs-hint' by
+default (HINT nil), `:none' for no hint at all."
+  (let ((text (harness-tools-sentence (harness-tools-reason err))))
+    (harness-tool-error
+     (pcase hint
+       ('nil (concat text " " harness-tools-emacs--no-emacs-hint))
+       (':none text)
+       (_ (concat text " " hint))))))
+
 (defun harness-tools-emacs--ask (method params format-answer &optional hint)
   "Ask the user's Emacs for METHOD with PARAMS; return a promise of a tool result.
 FORMAT-ANSWER turns the answer into the result.  When the Emacs cannot
@@ -81,13 +101,55 @@ followed by HINT: `harness-tools-emacs--no-emacs-hint' by default,
      (condition-case err
          (funcall format-answer answer)
        (error (harness-tool-error (harness-error-message err)))))
-   (lambda (err)
-     (let ((text (harness-tools-sentence (harness-tools-reason err))))
-       (harness-tool-error
-        (pcase hint
-          ('nil (concat text " " harness-tools-emacs--no-emacs-hint))
-          (':none text)
-          (_ (concat text " " hint))))))))
+   (lambda (err) (harness-tools-emacs--failure err hint))))
+
+;;;; Changing a buffer, which changes a file
+;;
+;; A call that names a file is judged by the permission jail, which
+;; sees the path.  emacs_insert and emacs_save_buffer name a buffer,
+;; and a buffer that visits a file is that file: saved, it overwrites
+;; it on the user's disk, as the user, outside every sandbox -- the
+;; init file, if it is open.  No path is in the call for the jail to
+;; judge, so these tools ask the Emacs which file the buffer visits,
+;; and go on only when the session may write it, by the jail's own
+;; rule (`permission/path-writable-p').  The change then says which file
+;; it was allowed for, and the Emacs refuses it if the buffer visits
+;; another one by then.  A buffer that visits no file changes none.
+
+(defun harness-tools-emacs--may-write-p (file ctx)
+  "Non-nil when the session of CTX may write FILE, a file a buffer visits.
+That is the jail's rule for a write.  Without the permission module,
+which is how some tests load these tools, FILE must lie in the
+session's working directory."
+  (if (harness-method-exists-p 'permission/path-writable-p)
+      (harness-call 'permission/path-writable-p (plist-get ctx :session-id) file)
+    (harness-path-within-p (or (plist-get ctx :cwd) default-directory) file)))
+
+(defun harness-tools-emacs--change (name ctx method params format-answer)
+  "Ask the Emacs for METHOD with PARAMS, a change to the buffer NAME, if allowed.
+Return a promise of a tool result.  The Emacs is asked first which file
+NAME visits; when that file lies outside the directories the session of
+CTX may write, the change is refused, and otherwise it is asked for with
+`:file' set to the file, which the Emacs checks again.  FORMAT-ANSWER is
+as for `harness-tools-emacs--ask'."
+  (harness-then
+   (harness-tools-ask-emacs "buffer" (list :name name :limit 1 :maxChars 1))
+   (lambda (answer)
+     (let ((file (and (harness-json-true-p (plist-get answer :exists))
+                      (plist-get answer :file))))
+       (if (and (stringp file) (not (harness-tools-emacs--may-write-p file ctx)))
+           (harness-tool-error
+            (format "Refusing to change %s: it visits %s, which is outside the directories this session may write. %s"
+                    name (abbreviate-file-name file)
+                    "Change files inside them with write_file or edit_file, or ask the user for the directory with request_directory_access."))
+         ;; A buffer that does not exist is the Emacs's to say.
+         (harness-tools-emacs--ask
+          method
+          (if (harness-json-true-p (plist-get answer :exists))
+              (append params (list :file (if (stringp file) file "")))
+            params)
+          format-answer harness-tools-emacs--write-hint))))
+   (lambda (err) (harness-tools-emacs--failure err harness-tools-emacs--write-hint))))
 
 (defun harness-tools-emacs--int (value default)
   "Return VALUE as an integer, or DEFAULT."
@@ -203,62 +265,135 @@ Hidden buffers, whose names start with a space, are left out unless ALL."
 
 ;;;; emacs_buffer
 
-(defun harness-tools-emacs--format-buffer (name answer)
-  "Return the emacs_buffer result for buffer NAME from ANSWER.
-ANSWER is what the user's Emacs sent: the lines, and where they are."
-  (let* ((total (or (plist-get answer :total) 0))
-         (first (or (plist-get answer :first) 1))
-         (lines (plist-get answer :lines))
-         (last (+ first (length lines) -1))
-         (mode (plist-get answer :mode))
-         (file (plist-get answer :file)))
+(defun harness-tools-emacs--format-matches (name answer)
+  "Return the emacs_buffer result for buffer NAME from ANSWER, a search.
+ANSWER holds the lines that hold the strings looked for, each with its
+number, and how many there were in all."
+  (let* ((matches (plist-get answer :matches))
+         (count (or (plist-get answer :matchCount) 0))
+         (total (or (plist-get answer :total) 0))
+         (tail (harness-json-true-p (plist-get answer :tail)))
+         (from (or (plist-get answer :searchedFrom) 1))
+         (what (mapconcat (lambda (term) (format "%S" term)) (plist-get answer :terms) " or "))
+         (scope (if (> from 1)
+                    (format " (only lines %d-%d were searched: a long buffer is searched from its end)"
+                            from total)
+                  ""))
+         (shown (length matches)))
     (cond
      ((not (harness-json-true-p (plist-get answer :exists)))
       (harness-tool-error (format "No buffer named %S; use emacs_buffers to list them" name)))
-     ((zerop total) (harness-tool-ok (format "Buffer %s is empty" name)))
-     ((> first total)
-      (harness-tool-error (format "offset %d is past the end of %s (%d lines)" first name total)))
+     ((zerop count)
+      (harness-tool-ok (format "No line of %s contains %s%s [%d line%s]"
+                               name what scope total (if (= total 1) "" "s"))))
+     ((zerop shown)
+      (harness-tool-ok (format "%d of %d lines of %s contain %s%s; none is shown, the limit being 0"
+                               count total name what scope)))
      (t
       (harness-tool-ok
-       (format "%s\n\n[%s (%s): lines %d-%d of %d%s%s%s]"
-               (string-join (cl-loop for line in lines for n from first
-                                     collect (format "%6d\t%s" n line))
+       (format "%s\n\n[%s (%s): %d of %d lines contain %s%s%s%s]"
+               (string-join (mapcar (lambda (m) (format "%6d\t%s" (plist-get m :line) (plist-get m :text)))
+                                    matches)
                             "\n")
-               name mode first last total
-               (if (stringp file) (format ", file %s" (abbreviate-file-name file)) "")
-               (if (harness-json-true-p (plist-get answer :modified)) ", modified" "")
+               name (plist-get answer :mode) count total what scope
+               (cond ((< shown count) (format "; %s %d shown" (if tail "the last" "the first") shown))
+                     (t ""))
                (if (harness-json-true-p (plist-get answer :truncated))
-                   (format "; stopped at %d characters, read on with offset %d"
-                           (harness-tools-emacs--buffer-chars) (1+ last))
+                   (format "; stopped at %d characters" (harness-tools-emacs--buffer-chars))
                  "")))))))
+
+(defun harness-tools-emacs--format-buffer (name answer)
+  "Return the emacs_buffer result for buffer NAME from ANSWER.
+ANSWER is what the user's Emacs sent: the lines, and where they are,
+or, for a search, the lines that matched (see
+`harness-tools-emacs--format-matches')."
+  (if (plist-get answer :terms)
+      (harness-tools-emacs--format-matches name answer)
+    (let* ((total (or (plist-get answer :total) 0))
+           (first (or (plist-get answer :first) 1))
+           (lines (plist-get answer :lines))
+           (last (+ first (length lines) -1))
+           (mode (plist-get answer :mode))
+           (file (plist-get answer :file)))
+      (cond
+       ((not (harness-json-true-p (plist-get answer :exists)))
+        (harness-tool-error (format "No buffer named %S; use emacs_buffers to list them" name)))
+       ((zerop total) (harness-tool-ok (format "Buffer %s is empty" name)))
+       ((> first total)
+        (harness-tool-error (format "offset %d is past the end of %s (%d lines)" first name total)))
+       (t
+        (harness-tool-ok
+         (format "%s\n\n[%s (%s): lines %d-%d of %d%s%s%s]"
+                 (string-join (cl-loop for line in lines for n from first
+                                       collect (format "%6d\t%s" n line))
+                              "\n")
+                 name mode first last total
+                 (if (stringp file) (format ", file %s" (abbreviate-file-name file)) "")
+                 (if (harness-json-true-p (plist-get answer :modified)) ", modified" "")
+                 (if (harness-json-true-p (plist-get answer :truncated))
+                     (format "; stopped at %d characters, read on with offset %d"
+                             (harness-tools-emacs--buffer-chars) (1+ last))
+                   ""))))))))
+
+(defun harness-tools-emacs--contains (value)
+  "Return VALUE, the `contains' of an emacs_buffer call, as a list of strings.
+A string stands for a list of one.  Nil without it.  Signal why when it
+is none of that; the user's Emacs checks the number and the length of
+the strings."
+  (cond ((null value) nil)
+        ((stringp value) (list value))
+        ((and (proper-list-p value) (cl-every #'stringp value)) value)
+        ((and (vectorp value) (cl-every #'stringp value)) (append value nil))
+        (t (error "contains must be a string or a list of strings"))))
 
 (defun harness-tools-emacs--buffer (input _ctx)
   "Handler for emacs_buffer with INPUT."
   (let ((name (plist-get input :name))
-        (offset (max 1 (harness-tools-emacs--int (plist-get input :offset) 1)))
-        (limit (harness-tools-emacs--int (plist-get input :limit) nil)))
-    (if (not (stringp name))
-        (harness-tool-error "Missing name")
-      (harness-tools-emacs--ask
-       "buffer" (list :name name :offset offset :limit (and limit (max 0 limit))
-                      :maxChars (harness-tools-emacs--buffer-chars))
-       (lambda (answer) (harness-tools-emacs--format-buffer name answer))))))
+        (offset (plist-get input :offset))
+        (limit (harness-tools-emacs--int (plist-get input :limit) nil))
+        (tail (harness-json-true-p (plist-get input :tail))))
+    (condition-case err
+        (let ((terms (harness-tools-emacs--contains (plist-get input :contains))))
+          (cond
+           ((not (stringp name)) (harness-tool-error "Missing name"))
+           ((and (or terms tail) offset)
+            (harness-tool-error
+             "offset reads a range from a line; with contains or tail the read is from the end, so give a limit and no offset"))
+           (t
+            (harness-tools-emacs--ask
+             "buffer" (append (list :name name
+                                    :offset (max 1 (harness-tools-emacs--int offset 1))
+                                    :limit (and limit (max 0 limit))
+                                    :maxChars (harness-tools-emacs--buffer-chars))
+                              (and terms (list :contains terms))
+                              (and tail (list :tail t)))
+             (lambda (answer) (harness-tools-emacs--format-buffer name answer))))))
+      (error (harness-tool-error (harness-error-message err))))))
 
 (harness-define-tool "emacs_buffer"
   :label "Read buffer"
-  :description "Read the text of a live buffer with line numbers, optionally a range (offset is the 1-based first line, limit the number of lines)."
+  :description "Read the text of a live buffer with line numbers, optionally a range (offset is the 1-based first line, limit the number of lines). To find something in a long buffer, such as the harness's log, give contains: only the lines that hold any of those strings come back, each with its line number; the strings are looked for as they are, ignoring case, not as patterns. tail reads from the end: the last limit lines, or with contains the last limit lines that match."
   :schema '(:type "object"
             :properties (:name (:type "string" :description "Buffer name, exactly as emacs_buffers lists it")
-                         :offset (:type "integer" :description "First line to return (1-based). Default 1")
-                         :limit (:type "integer" :description "Maximum number of lines. Default: all"))
+                         :offset (:type "integer" :description "First line to return (1-based). Default 1. Not with contains or tail")
+                         :limit (:type "integer" :description "Maximum number of lines. Default: all, or 100 with contains or tail")
+                         :contains (:type "array" :items (:type "string")
+                                    :description "Return only the lines holding any of these strings (at most 5, one line each, ignoring case, not patterns)")
+                         :tail (:type "boolean" :description "Count from the end: the last limit lines, or the last limit lines that match contains. Default false"))
             :required ("name"))
   :kind 'read
   :coalescable t
   :subject (lambda (input)
              (when-let* ((name (plist-get input :name)))
-               (let ((o (plist-get input :offset)) (l (plist-get input :limit)))
-                 (format "%s%s" name
-                         (cond ((and o l) (format ":%s-%s" o (+ o l -1))) (o (format ":%s-" o)) (t ""))))))
+               (let ((o (plist-get input :offset)) (l (plist-get input :limit))
+                     (c (plist-get input :contains)))
+                 (format "%s%s%s" name
+                         (cond ((and o l) (format ":%s-%s" o (+ o l -1))) (o (format ":%s-" o)) (t ""))
+                         (cond ((stringp c) (format " contains %S" c))
+                               ((and (consp c) (cl-every #'stringp c))
+                                (format " contains %s" (mapconcat (lambda (x) (format "%S" x)) c " or ")))
+                               ((harness-json-true-p (plist-get input :tail)) " (tail)")
+                               (t ""))))))
   :handler #'harness-tools-emacs--buffer)
 
 ;;;; emacs_open
@@ -321,8 +456,8 @@ Return nil when VALUE names none of them."
           ((equal name "start") "start")
           ((equal name "end") "end"))))
 
-(defun harness-tools-emacs--insert (input _ctx)
-  "Handler for emacs_insert with INPUT."
+(defun harness-tools-emacs--insert (input ctx)
+  "Handler for emacs_insert with INPUT under CTX."
   (let* ((name (plist-get input :name))
          (text (plist-get input :text))
          (position (harness-tools-emacs--position (plist-get input :position)))
@@ -337,8 +472,8 @@ Return nil when VALUE names none of them."
        (format "Text is %d characters, over the %d the emacs_insert limit allows"
                (length text) harness-tools-emacs--insert-max-chars)))
      (t
-      (harness-tools-emacs--ask
-       "insert"
+      (harness-tools-emacs--change
+       name ctx "insert"
        (list :name name :text text :position position
              :maxChars harness-tools-emacs--insert-max-chars)
        (lambda (answer)
@@ -347,8 +482,7 @@ Return nil when VALUE names none of them."
                   (or (plist-get answer :inserted) (length text))
                   (pcase position ("point" "at point") ("start" "at the start") (_ "at the end"))
                   (or (plist-get answer :name) name)
-                  (or (plist-get answer :line) 1))))
-       harness-tools-emacs--write-hint)))))
+                  (or (plist-get answer :line) 1)))))))))
 
 (harness-define-tool "emacs_insert"
   :label "Insert text"
@@ -365,19 +499,18 @@ Return nil when VALUE names none of them."
 
 ;;;; emacs_save_buffer
 
-(defun harness-tools-emacs--save-buffer (input _ctx)
-  "Handler for emacs_save_buffer with INPUT."
+(defun harness-tools-emacs--save-buffer (input ctx)
+  "Handler for emacs_save_buffer with INPUT under CTX."
   (let ((name (plist-get input :name)))
     (if (not (stringp name))
         (harness-tool-error "Missing name")
-      (harness-tools-emacs--ask
-       "save" (list :name name)
+      (harness-tools-emacs--change
+       name ctx "save" (list :name name)
        (lambda (answer)
          (harness-tool-ok
           (format "Saved %s to %s"
                   (or (plist-get answer :name) name)
-                  (abbreviate-file-name (or (plist-get answer :path) "")))))
-       harness-tools-emacs--write-hint))))
+                  (abbreviate-file-name (or (plist-get answer :path) "")))))))))
 
 (harness-define-tool "emacs_save_buffer"
   :label "Save buffer"

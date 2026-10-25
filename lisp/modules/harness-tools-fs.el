@@ -18,6 +18,25 @@
 ;; the session cwd and host, and every tool declares the paths it
 ;; touches so the permission jail can judge them.
 ;;
+;; Where they run.  The jail compares paths, once, in the harness
+;; process, which can reach everything; the use that follows can differ
+;; from what was compared.  So where the sandbox applies, the tools do
+;; not run in the harness at all: a call on a local path goes to a
+;; worker (lisp/harness-mcp-fs.el), an Emacs the harness starts in the
+;; session's sandbox through its MCP host, with the mounts a bash
+;; command of the session gets, and the handlers below run there,
+;; unchanged.  A path outside the mounts does not exist for the worker,
+;; whatever the permission chain decided.  A call on a path of another
+;; host (TRAMP), one where no sandbox applies (the policy is `off', or
+;; `preferred' with no backend, as for bash), and one with
+;; `harness-tools-fs-jail' off run here, as they always did.  Where a
+;; call has to reach beyond the session's directories on purpose -- the
+;; harness's own files, a skills directory, a file the user's Emacs
+;; showed a definition in, a directory the user allowed for this call
+;; alone, a call the user approved after it was denied -- the worker is
+;; started with exactly those mounts added (see "Running in the
+;; sandbox"), and only for that call.
+;;
 ;; Reads are guarded against context bombs: read_file trims the
 ;; requested range to `harness-tools-max-output-chars' at a line
 ;; boundary and says where to continue, other tools rely on the
@@ -57,6 +76,21 @@
 (require 'harness-tools)
 
 (defvar harness-state-directory)
+(defvar harness-directory)
+(defvar harness-elisp-emacs)
+(defvar harness-tools-fs--copy-root nil
+  "Directory the copies of images for a model are made in, or nil.
+The worker sets it from the session's own temporary directory, which
+the harness can read; without it copies go under `harness-state-directory'.")
+
+(declare-function harness-mcp-define-server "harness-mcp" (name &rest keys))
+(declare-function harness-mcp-call-tool "harness-mcp" (server tool input ctx &optional timeout meta key))
+(declare-function harness-mcp-server-declared-p "harness-mcp" (name))
+(declare-function harness-tools-shell-sandbox-profile "harness-tools-shell" (ctx cwd &rest options))
+(declare-function harness-tools-shell-child-dirs "harness-tools-shell" ())
+(declare-function harness-tools-shell--tmp-dir "harness-tools-shell" (ctx))
+(declare-function harness-tools-shell--sandbox-required-p "harness-tools-shell" (cwd))
+(declare-function harness--compile-directory "harness" ())
 
 (defconst harness-tools-fs--glob-limit 500
   "Maximum number of paths returned by the glob tool.")
@@ -265,11 +299,13 @@ than SIDE pixels on a side."
 (defun harness-tools-fs--copy-dir ()
   "Return the directory the copies of images for models are kept in.
 It is made when missing, under `harness-state-directory', where the
-harness keeps what it makes (video thumbnails, saved outputs)."
+harness keeps what it makes (video thumbnails, saved outputs), or where
+`harness-tools-fs--copy-root' says when the tool runs in the sandbox."
   (harness-ensure-directory
-   (expand-file-name "model-images/" (if (bound-and-true-p harness-state-directory)
-                                         harness-state-directory
-                                       temporary-file-directory))))
+   (or harness-tools-fs--copy-root
+       (expand-file-name "model-images/" (if (bound-and-true-p harness-state-directory)
+                                             harness-state-directory
+                                           temporary-file-directory)))))
 
 (defun harness-tools-fs--copy-name (path side jpeg)
   "Return the file that holds the copy of the image PATH fitted into SIDE pixels.
@@ -458,6 +494,244 @@ takes ffmpeg a moment, so then a promise of the result is returned."
                     (lambda (copy)
                       (harness-tools-fs--image-result shown path attachment info copy))))))
 
+;;;; Running in the sandbox
+;;
+;; Each tool below is registered with a broker (`harness-tools-fs--broker')
+;; for its handler, which decides where a call runs.  The handlers are
+;; the same wherever: the worker (lisp/harness-mcp-fs.el) loads this file
+;; and calls them by name (`harness-tools-fs--handlers').
+;;
+;; What the worker is shown is the session's profile, the mounts a bash
+;; command of it gets (`harness-tools-shell-sandbox-profile'), and the
+;; harness's own Lisp and compiled files, read-only, to start from.  The
+;; mounts are fixed when it starts, so a directory granted to the session
+;; starts a new worker, once the one running is idle (the MCP host does
+;; that).  A call that has to reach further than the session's profile,
+;; on purpose, is given a worker of its own with exactly those mounts
+;; added, found by a key that says which (`harness-mcp-call-tool'):
+;;
+;; - a read of the harness itself, of a skills directory or of a file the
+;;   user's Emacs showed a definition in, which the permission jail lets
+;;   every call that only reads make (`permission/exempt-reads'): the
+;;   path, read-only;
+;; - a directory the user allowed for this call alone (`permission/once-grants'):
+;;   the directory, as the call's kind says;
+;; - a call the user approved by hand after it was denied (the context's
+;;   `:approved'): the paths it names, as its kind says.
+;;
+;; The extra mounts come from those, each decided by the permission
+;; module's own predicates, never from "whatever the call named": a
+;; path the jail passed by mistake gets no mount, and the kernel then
+;; says it is not there.
+
+(defcustom harness-tools-fs-jail t
+  "Whether the file tools run in the session's sandbox where one applies.
+On, a call on a local path goes to a worker the harness starts in the
+sandbox, the one a bash command of the session runs in, so the kernel,
+not a comparison of paths, keeps the call inside the session's
+directories.  Off, they run in the harness process as they used to,
+behind the permission jail alone.  Where no sandbox applies -- the
+sandbox policy is `off', or `preferred' and no backend exists -- they run
+there either way, as bash runs unconfined then; with the policy
+`required' and no backend a call is refused.  Calls on another host
+\(TRAMP) always run here."
+  :type 'boolean :group 'harness)
+
+(defconst harness-tools-fs-options-key :harness/fs
+  "Where in the `_meta' of a call the options for the worker go.")
+
+(defconst harness-tools-fs--handlers
+  '(("read_file" . harness-tools-fs--read-file)
+    ("write_file" . harness-tools-fs--write-file)
+    ("edit_file" . harness-tools-fs--edit-file)
+    ("list_dir" . harness-tools-fs--list-dir)
+    ("glob" . harness-tools-fs--glob)
+    ("grep" . harness-tools-fs--grep)
+    ("file_info" . harness-tools-fs--file-info))
+  "File tool name -> the function that does its work, called with (INPUT CTX).")
+
+(defconst harness-tools-fs--writing '("write_file" "edit_file")
+  "The file tools that change files: extra mounts they need are writable.")
+
+(defun harness-tools-fs--sandbox-applies-p (cwd)
+  "Non-nil when a process for a session working in CWD is confined, or must be.
+That is the case when the sandbox confines a command there
+\(`sandbox/confined-p'), and when the policy is `required', which a
+process with no backend fails: it is never run unconfined."
+  (or (and (harness-method-exists-p 'sandbox/confined-p)
+           (condition-case nil (harness-call 'sandbox/confined-p cwd) (error nil))
+           t)
+      (and (fboundp 'harness-tools-shell--sandbox-required-p)
+           (harness-tools-shell--sandbox-required-p cwd))))
+
+(defun harness-tools-fs--elc-dir ()
+  "Return the directory of the harness's compiled files, or nil.
+The worker loads them from there, which is quick, and the sandbox shows
+it read-only.  It holds the compiled Lisp of the harness and nothing else."
+  (when (fboundp 'harness--compile-directory)
+    (let ((dir (ignore-errors (harness--compile-directory))))
+      (and (stringp dir) (file-directory-p dir) (file-name-as-directory dir)))))
+
+(defun harness-tools-fs--worker-command (_ctx)
+  "Return the program and arguments of the worker, an Emacs that serves the tools."
+  (let* ((root (file-name-as-directory (expand-file-name harness-directory)))
+         (elc (harness-tools-fs--elc-dir)))
+    (append (list (if (boundp 'harness-elisp-emacs)
+                      harness-elisp-emacs
+                    (expand-file-name invocation-name invocation-directory))
+                  "--batch" "-Q")
+            (and elc (list "-L" (directory-file-name elc)))
+            (list "-L" (expand-file-name "lisp" root)
+                  "-L" (expand-file-name "lisp/modules" root)
+                  "-l" (expand-file-name "lisp/harness-mcp-fs.el" root)
+                  "-f" "harness-mcp-fs-main"))))
+
+(defun harness-tools-fs--profile (ctx)
+  "Return the sandbox profile of the worker that serves a call under CTX.
+It is the session's (see `harness-tools-shell-sandbox-profile'), with
+what the worker starts from shown read-only -- the harness's Lisp and
+the Emacs it runs, and the harness's compiled files -- and the mounts
+the call has to have besides: CTX's `:fs-extras', a list of (PATH .
+MODE), MODE `ro' or `rw'."
+  (let ((extras (plist-get ctx :fs-extras))
+        (elc (harness-tools-fs--elc-dir)))
+    ;; Where a tool's long output is saved, and the file tools read it back
+    ;; from: made on the first long output, which can be after the worker
+    ;; started, and the worker is shown only what exists when it does.
+    (when (bound-and-true-p harness-state-directory)
+      (ignore-errors
+        (make-directory (expand-file-name "outputs" harness-state-directory) t)))
+    (harness-tools-shell-sandbox-profile
+     ctx (or (plist-get ctx :cwd) default-directory)
+     :readable (append (harness-tools-shell-child-dirs)
+                       (and elc (list elc))
+                       (cl-loop for (path . mode) in extras when (eq mode 'ro) collect path))
+     :writable (cl-loop for (path . mode) in extras when (eq mode 'rw) collect path))))
+
+(defun harness-tools-fs--shown-p (path profile)
+  "Non-nil when PATH lies in a directory, or is a file, that PROFILE shows."
+  (cl-some (lambda (dir) (and (stringp dir) (harness-path-within-p dir path)))
+           (append (plist-get profile :writable) (plist-get profile :readable))))
+
+(defun harness-tools-fs--grant-dir (grant)
+  "Return the directory a one-time GRANT names, or nil when it names none.
+A grant is a directory or a pattern `DIR/**'; a pattern with anything
+else in it cannot be mounted."
+  (let ((dir (replace-regexp-in-string "/\\*\\*\\'" "/" grant)))
+    (and (stringp dir)
+         (not (string-match-p "[*?[]" dir))
+         (not (file-remote-p dir))
+         (file-directory-p dir)
+         (file-name-as-directory dir))))
+
+(defun harness-tools-fs--extra-mount (path write)
+  "Return the (MOUNT . MODE) that shows PATH to a call, or nil.
+An existing file or directory is shown itself, read-only, or writable
+when WRITE; a file a writing call would make, by the directory it
+would be made in."
+  (let ((target (cond ((file-exists-p path) path)
+                      ((and write (file-directory-p (file-name-directory path)))
+                       (file-name-directory path)))))
+    (and target (cons target (if write 'rw 'ro)))))
+
+(defun harness-tools-fs--once-grants (ctx)
+  "Return the directories the user allowed the call of CTX alone to reach."
+  (let ((id (plist-get ctx :call-id)))
+    (and (stringp id) (harness-method-exists-p 'permission/once-grants)
+         (delq nil (mapcar #'harness-tools-fs--grant-dir
+                           (harness-call 'permission/once-grants id))))))
+
+(defun harness-tools-fs--exempt-reads (name paths ctx)
+  "Return those of PATHS that a call of NAME under CTX may read outside the roots.
+They are the harness's own files, skills and the files the user's Emacs
+showed a definition in (`permission/exempt-reads')."
+  (let ((sid (plist-get ctx :session-id)))
+    (and sid paths (harness-method-exists-p 'permission/exempt-reads)
+         (harness-call 'permission/exempt-reads sid name paths))))
+
+(defun harness-tools-fs--extras (name paths ctx)
+  "Return the (MOUNT . MODE) pairs the call of NAME on PATHS under CTX needs.
+Those are the mounts that the permission module's own reasons for
+letting a call reach outside the session's profile call for (see the
+comment above `harness-tools-fs-jail'), sorted, so that equal needs
+give equal keys."
+  (let* ((write (and (member name harness-tools-fs--writing) t))
+         (profile (harness-tools-fs--profile ctx))
+         (outside (cl-remove-if (lambda (p) (harness-tools-fs--shown-p p profile)) paths)))
+    (when outside
+      (let ((once (harness-tools-fs--once-grants ctx))
+            (exempt (and (not write) (harness-tools-fs--exempt-reads name outside ctx)))
+            extras)
+        (dolist (path outside)
+          (let* ((grant (cl-find-if (lambda (dir) (harness-path-within-p dir path)) once))
+                 (mount (cond ((plist-get ctx :approved) (harness-tools-fs--extra-mount path write))
+                              (grant (cons grant (if write 'rw 'ro)))
+                              ((member path exempt) (harness-tools-fs--extra-mount path nil)))))
+            (when mount (cl-pushnew mount extras :test #'equal))))
+        (sort extras (lambda (a b) (string< (car a) (car b))))))))
+
+(defun harness-tools-fs--jail-plan (name input ctx)
+  "Say where the call of the file tool NAME with INPUT under CTX runs.
+Return nil to run it here, `(:extras MOUNTS)' to run it in the sandbox
+with those mounts besides the session's (nil for none), or `(:error
+MESSAGE)' for a call whose paths cannot be told, which is refused."
+  (let ((cwd (plist-get ctx :cwd)))
+    (when (and harness-tools-fs-jail
+               (fboundp 'harness-mcp-server-declared-p)
+               (harness-mcp-server-declared-p 'fs)
+               (not (plist-get ctx :host))
+               (stringp cwd) (not (file-remote-p cwd))
+               (harness-tools-fs--sandbox-applies-p cwd))
+      (condition-case err
+          (let ((paths (harness-tools--call-paths (harness-tool-get name) input ctx)))
+            ;; A path on another host is that host's to confine.
+            (unless (cl-some #'harness-file-remote-p paths)
+              (list :extras (harness-tools-fs--extras name paths ctx))))
+        (error (list :error (format "Which files this call touches could not be worked out (%s), so it cannot run in the sandbox"
+                                    (harness-error-message err))))))))
+
+(defun harness-tools-fs--forwarded-options (ctx)
+  "Return the options of the harness's own that the worker's tools read, for CTX.
+A copy of an image is made in the session's own temporary directory,
+which the harness can read: the worker's /tmp is its own.  The writable
+mounts go too (`:writable')."
+  (let ((tmp (harness-tools-shell--tmp-dir ctx)))
+    (list :maxOutputChars harness-tools-max-output-chars
+          :imageMaxBytes harness-tools-fs-image-max-bytes
+          :imageMaxSide harness-tools-fs-image-max-side
+          :ffmpeg (or harness-tools-fs-ffmpeg :false)
+          :copyRoot (if tmp (expand-file-name "model-images/" tmp) :false)
+          ;; Where the worker can really write, so that it can say no to a
+          ;; write anywhere else: the sandbox's /tmp and home are its own,
+          ;; and a file written there is gone, but for the worker's own
+          ;; eyes, once it stops.
+          :writable (cons (or (plist-get ctx :cwd) default-directory)
+                          (plist-get (harness-tools-fs--profile ctx) :writable)))))
+
+(defun harness-tools-fs--run-jailed (name input ctx extras)
+  "Run the file tool NAME with INPUT under CTX in the sandbox; return a promise.
+EXTRAS are the mounts beyond the session's.  They give the call a worker
+of its own, found by a key made from them, so that the session's own
+worker is not restarted for a call that is not the usual one."
+  (let* ((ctx (plist-put (copy-sequence ctx) :fs-extras extras))
+         (key (and extras (cons (plist-get ctx :session-id)
+                                (secure-hash 'sha1 (prin1-to-string extras))))))
+    (harness-mcp-call-tool
+     'fs name input ctx 600
+     (list harness-tools-fs-options-key (harness-tools-fs--forwarded-options ctx))
+     key)))
+
+(defun harness-tools-fs--broker (name)
+  "Return the handler of the file tool NAME.
+It runs the call in the sandbox where one applies, and here otherwise
+\(see `harness-tools-fs--jail-plan')."
+  (lambda (input ctx)
+    (let ((plan (harness-tools-fs--jail-plan name input ctx))
+          (handler (cdr (assoc name harness-tools-fs--handlers))))
+      (cond ((null plan) (funcall handler input ctx))
+            ((plist-get plan :error) (harness-tool-error (plist-get plan :error)))
+            (t (harness-tools-fs--run-jailed name input ctx (plist-get plan :extras)))))))
+
 ;;;; read_file
 
 (defun harness-tools-fs--read-range (path offset limit)
@@ -562,7 +836,7 @@ TEXT is numbered and already trimmed to the output budget."
   :coalescable t
   :paths (lambda (input) (list (plist-get input :path)))
   :subject #'harness-tools-fs--read-subject
-  :handler #'harness-tools-fs--read-file)
+  :handler (harness-tools-fs--broker "read_file"))
 
 ;;;; write_file
 
@@ -594,7 +868,7 @@ TEXT is numbered and already trimmed to the output budget."
   :paths (lambda (input) (list (plist-get input :path)))
   :subject (lambda (input) (when-let* ((path (plist-get input :path)))
                              (format "%s (%d bytes)" path (string-bytes (or (plist-get input :content) "")))))
-  :handler #'harness-tools-fs--write-file)
+  :handler (harness-tools-fs--broker "write_file"))
 
 ;;;; edit_file
 
@@ -670,7 +944,7 @@ Used only to give a better error message."
   :kind 'write
   :paths (lambda (input) (list (plist-get input :path)))
   :subject (lambda (input) (plist-get input :path))
-  :handler #'harness-tools-fs--edit-file)
+  :handler (harness-tools-fs--broker "edit_file"))
 
 ;;;; list_dir
 
@@ -737,7 +1011,7 @@ PREFIX is the relative path shown for entries; LIMIT caps the total."
   :coalescable t
   :paths (lambda (input) (list (or (plist-get input :path) ".")))
   :subject (lambda (input) (or (plist-get input :path) "."))
-  :handler #'harness-tools-fs--list-dir)
+  :handler (harness-tools-fs--broker "list_dir"))
 
 ;;;; glob
 
@@ -751,17 +1025,57 @@ See `harness-glob-regexp', which the permission patterns share."
 A predicate for `directory-files-recursively'."
   (not (string= (file-name-nondirectory (directory-file-name dir)) ".git")))
 
+(defun harness-tools-fs--glob-pattern (pattern base)
+  "Return PATTERN as a pattern to match below directory BASE, or nil.
+The permission jail judges the `path' a glob call names, which is BASE;
+the pattern is matched below it.  So a pattern is only one when it
+stays there: an absolute pattern (a leading `/' or `~') is taken as the
+relative one when it begins with BASE, and is refused otherwise, and so
+is one with a `..' segment.  Otherwise the pattern would list names in a
+directory the jail never saw.  Only the text of PATTERN is looked at;
+a name that TRAMP could take for a host is not looked up."
+  (let* ((local (file-local-name base))
+         (rel (cond ((string-prefix-p base pattern) (substring pattern (length base)))
+                    ((and (string-prefix-p "/" pattern) (not (equal local base))
+                          (string-prefix-p local pattern))
+                     (substring pattern (length local)))
+                    (t pattern))))
+    (unless (or (string-prefix-p "/" rel) (string-prefix-p "~" rel)
+                (member ".." (split-string rel "/")))
+      rel)))
+
+(defun harness-tools-fs--below-p (base files)
+  "Return those of FILES that lie below directory BASE, links resolved.
+A file is below BASE when the directory that holds it, with the
+symbolic links on its way resolved, is BASE or lies in it.  A link in
+the tree that leads out of it is listed by its own name, and what lies
+beyond it is not, so a pattern cannot walk through one to a directory
+the jail did not judge."
+  (let ((seen (make-hash-table :test 'equal)))
+    (cl-remove-if-not
+     (lambda (f)
+       (let* ((dir (file-name-directory (directory-file-name f)))
+              (known (gethash dir seen :unknown)))
+         (if (eq known :unknown)
+             (puthash dir (and (harness-path-within-p base dir) t) seen)
+           known)))
+     files)))
+
 (defun harness-tools-fs--glob-matches (pattern base)
-  "Return absolute paths under BASE matching glob PATTERN."
-  (if (string-search "**" pattern)
-      (let* ((rx (harness-tools-fs--glob-regexp pattern))
-             (leaf (file-name-nondirectory pattern))
-             (leaf-rx (if (or (string-empty-p leaf) (string-search "**" leaf))
-                          "" (wildcard-to-regexp leaf)))
-             (files (directory-files-recursively base leaf-rx nil #'harness-tools-fs--not-git-p)))
-        (cl-remove-if-not (lambda (f) (string-match-p rx (file-relative-name f base))) files))
-    (cl-remove-if (lambda (f) (string-match-p "\\(\\`\\|/\\)\\.git\\(/\\|\\'\\)" f))
-                  (file-expand-wildcards (expand-file-name pattern base) t))))
+  "Return absolute paths under BASE matching glob PATTERN.
+PATTERN is relative to BASE (see `harness-tools-fs--glob-pattern'), and
+nothing is returned that lies behind a symbolic link out of BASE."
+  (harness-tools-fs--below-p
+   base
+   (if (string-search "**" pattern)
+       (let* ((rx (harness-tools-fs--glob-regexp pattern))
+              (leaf (file-name-nondirectory pattern))
+              (leaf-rx (if (or (string-empty-p leaf) (string-search "**" leaf))
+                           "" (wildcard-to-regexp leaf)))
+              (files (directory-files-recursively base leaf-rx nil #'harness-tools-fs--not-git-p)))
+         (cl-remove-if-not (lambda (f) (string-match-p rx (file-relative-name f base))) files))
+     (cl-remove-if (lambda (f) (string-match-p "\\(\\`\\|/\\)\\.git\\(/\\|\\'\\)" f))
+                   (file-expand-wildcards (expand-file-name pattern base) t)))))
 
 (defun harness-tools-fs--mtime (path)
   "Modification time of PATH as a float, or 0."
@@ -776,8 +1090,13 @@ A predicate for `directory-files-recursively'."
     (cond
      ((or (not (stringp pattern)) (string-empty-p pattern)) (harness-tool-error "Missing pattern"))
      ((not (file-directory-p base)) (harness-tool-error (format "Directory not found: %s" shown)))
+     ((null (harness-tools-fs--glob-pattern pattern base))
+      (harness-tool-error
+       (format "The pattern %s does not stay inside %s. A pattern is matched below path: name the directory as path, and keep the pattern relative to it, with no `..' and no leading `/' or `~'"
+               pattern shown)))
      (t
-      (let* ((matches (harness-tools-fs--glob-matches pattern base))
+      (let* ((matches (harness-tools-fs--glob-matches
+                       (harness-tools-fs--glob-pattern pattern base) base))
              (total (length matches))
              (sorted (sort matches (lambda (a b) (> (harness-tools-fs--mtime a) (harness-tools-fs--mtime b)))))
              (kept (seq-take sorted harness-tools-fs--glob-limit))
@@ -802,7 +1121,7 @@ A predicate for `directory-files-recursively'."
   :paths (lambda (input) (list (or (plist-get input :path) ".")))
   :subject (lambda (input) (format "%s%s" (or (plist-get input :pattern) "")
                                    (if (plist-get input :path) (format " in %s" (plist-get input :path)) "")))
-  :handler #'harness-tools-fs--glob)
+  :handler (harness-tools-fs--broker "glob"))
 
 ;;;; grep
 
@@ -910,7 +1229,7 @@ hits are named in full, TRAMP prefix and all."
   :paths (lambda (input) (list (or (plist-get input :path) ".")))
   :subject (lambda (input) (format "%s in %s" (harness-truncate-end (or (plist-get input :pattern) "") 40)
                                    (or (plist-get input :path) ".")))
-  :handler #'harness-tools-fs--grep)
+  :handler (harness-tools-fs--broker "grep"))
 
 ;;;; file_info
 
@@ -965,7 +1284,19 @@ hits are named in full, TRAMP prefix and all."
   :coalescable t
   :paths (lambda (input) (list (plist-get input :path)))
   :subject (lambda (input) (plist-get input :path))
-  :handler #'harness-tools-fs--file-info)
+  :handler (harness-tools-fs--broker "file_info"))
+
+;; The worker, declared to the MCP host when there is one.  At top level, so
+;; a reload declares it again.  The host is not required: without it the
+;; tools run here, as they do in a harness that has no host.
+(with-eval-after-load 'harness-mcp
+  (harness-mcp-define-server
+   'fs
+   :title "File tools"
+   :doc "The file tools, run in the session's sandbox (lisp/harness-mcp-fs.el)."
+   :command #'harness-tools-fs--worker-command
+   :profile #'harness-tools-fs--profile
+   :events '(tools/file-written)))
 
 (harness-define-module 'tools-fs
   :doc "Read file, Write file, Edit file, List directory, Find files, Search files and File info."

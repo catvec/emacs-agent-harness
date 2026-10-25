@@ -64,7 +64,11 @@ cannot be reached."
   (funcall next (list :behavior 'allow)))
 
 (defun harness-tools-ssh-test--setup ()
-  "Load the tool and allow every call; no session, so no jail."
+  "Load the tool and allow every call; no session, so no jail.
+The bus starts empty: a test that ran before this one may have loaded
+the permission module, whose jail would then judge these session-less
+calls, fail on them, and (the chain failing closed) refuse them."
+  (harness-test-reset-bus)
   (harness-test-load-module 'tools)
   (harness-test-load-module 'tools-shell)
   (harness-test-load-module 'tools-ssh)

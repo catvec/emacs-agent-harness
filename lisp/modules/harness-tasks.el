@@ -2597,7 +2597,7 @@ without it."
 ;; its own session commits or resolves the conflicts.
 ;;
 ;; The harness's own model calls -- the title of a task (see Titles), a
-;; recap, a permission or emacs_eval judge, a compaction's summary -- are
+;; recap, a permission judge, a compaction's summary -- are
 ;; internal jobs: none is a turn, and none makes a session or a task, so
 ;; the limit is blind to them.  They go straight to `provider/complete',
 ;; take no slot, wait for none and are not counted; the gate that holds

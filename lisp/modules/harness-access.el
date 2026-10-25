@@ -36,8 +36,7 @@
 ;; - the tools a session may not use go from its tool list (`agent/tools')
 ;;   and a call to one is refused for good by a `permission/decide'
 ;;   stage at 4, before every other: tools turned off, and without the
-;;   network those of kind net, ssh and emacs_eval (which runs in the
-;;   user's Emacs, outside any sandbox), and bash and elisp unless the
+;;   network those of kind net and ssh, and bash and elisp unless the
 ;;   sandbox runs them offline (`tools/sandbox-options' `:network nil');
 ;; - a read-only session is one of `harness-readonly-register''s: only
 ;;   the reading tools, and bash read-only and offline;
@@ -151,11 +150,9 @@ user's answer, and lowered by the agent at once, asking nobody.")
   "The permission modes from the least permissive to the most.
 A mode later in the list is an escalation from one before it.")
 
-(defconst harness-access-offline-tools '("ssh" "emacs_eval")
+(defconst harness-access-offline-tools '("ssh")
   "Tools besides those of kind net that a session without the network loses.
-ssh runs commands on another machine; emacs_eval runs code in the
-user's Emacs, outside any sandbox, where nothing keeps it off the
-network.")
+ssh runs commands on another machine.")
 
 (defconst harness-access-sandboxed-tools '("bash" "elisp")
   "Tools whose commands run in the sandbox.
@@ -507,10 +504,10 @@ commands, `unknown' to look it up."
 (defun harness-access--tools (names session)
   "Offer SESSION only the tools of NAMES its profile leaves it.
 An `agent/tools' filter at 85, before the read-only policies' at 90.
-The tools it turned off go, and without the network those of kind net,
-ssh and emacs_eval, and bash and elisp unless the sandbox confines its
-commands.  `harness-access-drop-tool' always stays.  A nil SESSION is
-the catalogue of every tool and keeps NAMES."
+The tools it turned off go, and without the network those of kind net
+and ssh, and bash and elisp unless the sandbox confines its commands.
+`harness-access-drop-tool' always stays.  A nil SESSION is the
+catalogue of every tool and keeps NAMES."
   (if (or (null session) (null (harness-access-profile session)))
       names
     (let ((off (harness-access-tools-off session))
@@ -870,7 +867,7 @@ allow that grants nothing when the session has what it asks for."
        (if (harness-access-network-p session)
            (funcall next (harness-access--nothing attribute nil "this session may reach the network already"))
          (harness-access--confirm request next attribute nil "Let the agent reach the network again"
-                                  "It gave the network up, or you turned it off: web tools, ssh and emacs_eval come back, and bash runs online.")))
+                                  "It gave the network up, or you turned it off: web tools and ssh come back, and bash runs online.")))
       ("writes"
        (cond
         ((harness-access-read-only-p session)
@@ -980,7 +977,7 @@ session.  A directory the user granted at the prompt was granted there
           (harness-tool-ok (harness-access-add-read-dir sid value 'user)))
          ((equal attribute "network")
           (harness-access-set-network sid t 'user)
-          (harness-tool-ok "The user let this session reach the network again: the web tools, ssh and emacs_eval are back from the next request on, and bash runs online."))
+          (harness-tool-ok "The user let this session reach the network again: the web tools and ssh are back from the next request on, and bash runs online."))
          ((equal attribute "writes")
           (harness-access-set-read-only sid nil 'user)
           (harness-tool-ok "The user let this session write again, where its directories allow, from the next request on."))
@@ -1045,7 +1042,7 @@ a session may always take access away from itself."
                                       " " back))))
           ("network"
            (harness-access-set-network sid nil 'agent)
-           (harness-tool-ok (concat "This session may no longer reach the network: the web tools, ssh and emacs_eval are gone from the next request on, and bash runs offline in the sandbox (or not at all where the sandbox cannot confine it). " back)))
+           (harness-tool-ok (concat "This session may no longer reach the network: the web tools and ssh are gone from the next request on, and bash runs offline in the sandbox (or not at all where the sandbox cannot confine it). " back)))
           ("writes"
            (harness-access-set-read-only sid t 'agent)
            (harness-tool-ok (concat "This session is read-only now: from the next request on it has only the reading tools, and bash runs read-only and offline in the sandbox. " back)))

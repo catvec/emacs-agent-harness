@@ -26,10 +26,14 @@ directory.  An agent gathers them first, with tools that can see it:
   tool shows only the first ~400 characters of a line, so ``parent-id``,
   ``created`` and ``usage`` cannot be read with grep, and read_file output is
   cut at ~45 000 characters.  The records are therefore read through the
-  harness's own API, which the ``emacs_eval`` tool allows
+  harness's own API, from an Emacs in which the harness's methods are
+  registered, such as the harness process itself
   (``(harness-call 'session/list)``, ``'task/list``, and
   ``'usage/summary :group-by 'session`` for the usage ledger), picking a fixed
-  list of fields.  ``--print-gather-recipe`` prints the Elisp that was run,
+  list of fields.  (The ``emacs_eval`` tool, which let an agent do this from
+  the user's own Emacs, is gone; see docs/trust-model.md.  The ``elisp``
+  tool runs in a sandboxed child and cannot reach the harness's methods.)
+  ``--print-gather-recipe`` prints the Elisp that was run,
   with the output path, the project directory and the two compaction-count
   strings left for you to fill in.  Compaction counts come from ``grep``
   over sessions/<id>.nodes.jsonl (the recipe's header says how).  Nothing
@@ -365,8 +369,10 @@ def convert(tasks_raw: Path, sessions_raw: Path, out_dir: Path, strict: bool = F
 
 GATHER_RECIPE = r''';;; gather_sessions_raw.el --- make sessions_raw.jsonl  -*- lexical-binding: t; -*-
 ;;
-;; Run with the emacs_eval tool (the user's live Emacs; the harness server is
-;; reached through `harness-call').  It writes ids, enum strings, flags and
+;; Run in an Emacs in which the harness's methods are registered (the harness
+;; process is one; `harness-call' reaches them there).  The emacs_eval tool,
+;; which ran this in the user's live Emacs, was removed (docs/trust-model.md).
+;; It writes ids, enum strings, flags and
 ;; numbers only: never `:name', `:cwd', `:worktree', `:project' or a plan.
 ;;
 ;; Fill in OUT, PROJECT (the project directory whose task board it is) and the

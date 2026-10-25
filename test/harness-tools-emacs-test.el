@@ -41,6 +41,64 @@ Emacs it connected itself, once."
   "Execute tool NAME with INPUT through tools/execute and wait."
   (harness-await (harness-call 'tools/execute nil (list :id "c1" :name name :input input))))
 
+(ert-deftest harness-tools-emacs-buffer-search-and-tail ()
+  "emacs_buffer finds the lines that hold strings, and reads from the end.
+What it says is as exact as a read: the numbers are the buffer's lines,
+how many matched and how many are shown are said, and what the call
+asks wrongly is refused with a reason."
+  (harness-tools-emacs-test--setup)
+  (harness-test-with-temp-state
+    (let ((buf (generate-new-buffer "harness-test-search")))
+      (unwind-protect
+          (progn
+            (with-current-buffer buf
+              (dotimes (i 120)
+                (insert (format "row %03d %s\n" (1+ i) (if (zerop (% i 40)) "Naming failed" "ok")))))
+            (cl-flet ((call (&rest input)
+                        (apply #'harness-tools-emacs-test--call "emacs_buffer" :name "harness-test-search" input)))
+              ;; Search: numbered lines, then what was found.
+              (let* ((r (call :contains "naming"))
+                     (c (plist-get r :content)))
+                (should-not (plist-get r :is-error))
+                (should (string-prefix-p "     1\trow 001 Naming failed\n    41\trow 041 Naming failed\n    81\trow 081 Naming failed" c))
+                (should (string-search "3 of 120 lines contain \"naming\"" c))
+                (should (string-search "harness-test-search" c))
+                (should-not (string-search "shown" c)))
+              (let ((c (plist-get (call :contains ["naming" "row 120"]) :content)))
+                (should (string-search "   120\trow 120 ok" c))
+                (should (string-search "4 of 120 lines contain \"naming\" or \"row 120\"" c)))
+              ;; A limit is said, and tail takes the last.
+              (let ((c (plist-get (call :contains '("naming") :limit 2) :content)))
+                (should (string-search "     1\trow 001" c))
+                (should (string-search "the first 2 shown" c)))
+              (let ((c (plist-get (call :contains '("naming") :limit 2 :tail t) :content)))
+                (should-not (string-search "row 001" c))
+                (should (string-search "    81\trow 081" c))
+                (should (string-search "the last 2 shown" c)))
+              (should (string-search "No line of harness-test-search contains \"zzz\""
+                                     (plist-get (call :contains "zzz") :content)))
+              ;; From the end, without a search.
+              (let ((c (plist-get (call :tail t :limit 2) :content)))
+                (should (string-prefix-p "   119\trow 119 ok\n   120\trow 120 ok" c))
+                (should (string-search "lines 119-120 of 120" c)))
+              (should (string-search "lines 21-120 of 120" (plist-get (call :tail t) :content)))
+              ;; What cannot be asked.
+              (dolist (bad (list '(:contains "") '(:contains ("a" "b" "c" "d" "e" "f")) '(:contains 42)
+                                 '(:contains "a\nb") '(:contains "x" :offset 3) '(:tail t :offset 3)))
+                (let ((r (apply #'call bad)))
+                  (should (plist-get r :is-error))))
+              (should (string-search "offset" (plist-get (call :contains "x" :offset 3) :content)))
+              (let ((r (harness-tools-emacs-test--call "emacs_buffer" :name "no-such-buffer-xyz" :contains "x")))
+                (should (plist-get r :is-error))
+                (should (string-search "emacs_buffers" (plist-get r :content))))
+              ;; Reading has not changed.
+              (should (string-search "lines 5-6 of 120" (plist-get (call :offset 5 :limit 2) :content))))
+            (should (equal "Read buffer: x contains \"a\" or \"b\""
+                           (harness-tool-title "emacs_buffer" '(:name "x" :contains ("a" "b")))))
+            (should (equal "Read buffer: x (tail)" (harness-tool-title "emacs_buffer" '(:name "x" :tail t))))
+            (should (equal "Read buffer: x:5-9" (harness-tool-title "emacs_buffer" '(:name "x" :offset 5 :limit 5)))))
+        (kill-buffer buf)))))
+
 (ert-deftest harness-tools-emacs-buffers ()
   (harness-tools-emacs-test--setup)
   (harness-test-with-temp-state
@@ -223,6 +281,9 @@ Emacs it connected itself, once."
   (harness-tools-emacs-test--setup)
   (harness-test-with-temp-state
     (let* ((root (harness-test-temp-dir))
+           ;; The session works in ROOT: a buffer is saved only to a file
+           ;; the session may write.
+           (default-directory (file-name-as-directory root))
            (file (expand-file-name "save-me.txt" root)))
       (unwind-protect
           (let ((buf (find-file-noselect file t)))
@@ -262,6 +323,117 @@ Emacs it connected itself, once."
                       (kill-buffer nb)))
                   (should (eq 'write (harness-tool-kind (harness-tool-get "emacs_save_buffer")))))
               (kill-buffer buf)))
+        (delete-directory root t)))))
+
+(ert-deftest harness-tools-emacs-a-buffer-changes-the-file-it-visits ()
+  "A change to a buffer is a change to the file it visits, and is judged so.
+emacs_insert and emacs_save_buffer name a buffer, so the permission jail
+sees no path in the call; a permission filter that allows everything, as
+this test installs, therefore does not stand between an agent and the
+init file the user has open.  The tools ask which file the buffer visits
+and change it only where the session may write: in its directory, not
+outside it and not through a link that leads out."
+  (harness-tools-emacs-test--setup)
+  (harness-test-with-temp-state
+    (let* ((root (file-name-as-directory (harness-test-temp-dir)))
+           (elsewhere (file-name-as-directory (harness-test-temp-dir)))
+           (default-directory root)
+           (inside (expand-file-name "inside.txt" root))
+           (outside (expand-file-name "outside.txt" elsewhere))
+           (target (expand-file-name "target.txt" elsewhere))
+           (link (expand-file-name "link.txt" root))
+           (buffers nil))
+      (unwind-protect
+          (progn
+            (with-temp-file inside (insert "inside\n"))
+            (with-temp-file outside (insert "outside\n"))
+            (with-temp-file target (insert "target\n"))
+            (make-symbolic-link target link)
+            (let ((in (find-file-noselect inside t))
+                  (out (find-file-noselect outside t))
+                  (via-link (find-file-noselect link t))
+                  (none (generate-new-buffer "harness-test-change-no-file")))
+              (setq buffers (list in out via-link none))
+              (dolist (b (list in out via-link))
+                (with-current-buffer b (goto-char (point-max)) (insert "edited\n")))
+              ;; Inside the session's directory both tools work.
+              (let ((r (harness-tools-emacs-test--call "emacs_insert" :name (buffer-name in) :text "more\n")))
+                (should-not (plist-get r :is-error)))
+              (let ((r (harness-tools-emacs-test--call "emacs_save_buffer" :name (buffer-name in))))
+                (should-not (plist-get r :is-error))
+                (should (equal "inside\nedited\nmore\n" (harness-read-file inside))))
+              ;; Outside it neither does: the buffer is not touched, and the
+              ;; file on the disk is what it was.
+              (let ((before (with-current-buffer out (buffer-string))))
+                (let ((r (harness-tools-emacs-test--call "emacs_insert" :name (buffer-name out) :text "attack\n")))
+                  (should (plist-get r :is-error))
+                  (should (string-search "outside the directories this session may write" (plist-get r :content)))
+                  (should (string-search "write_file" (plist-get r :content))))
+                (should (equal before (with-current-buffer out (buffer-string))))
+                (let ((r (harness-tools-emacs-test--call "emacs_save_buffer" :name (buffer-name out))))
+                  (should (plist-get r :is-error))
+                  (should (string-search "outside the directories this session may write" (plist-get r :content))))
+                (should (equal "outside\n" (harness-read-file outside))))
+              ;; A link in the session's directory that leads out is the file
+              ;; it leads to.
+              (let ((r (harness-tools-emacs-test--call "emacs_save_buffer" :name (buffer-name via-link))))
+                (should (plist-get r :is-error))
+                (should (string-search "outside the directories this session may write" (plist-get r :content))))
+              (should (equal "target\n" (harness-read-file target)))
+              (let ((r (harness-tools-emacs-test--call "emacs_insert" :name (buffer-name via-link) :text "x")))
+                (should (plist-get r :is-error)))
+              ;; A buffer that visits no file changes none: inserting is fine,
+              ;; and saving is refused for want of a file.
+              (let ((r (harness-tools-emacs-test--call "emacs_insert" :name "harness-test-change-no-file" :text "free")))
+                (should-not (plist-get r :is-error))
+                (should (equal "free" (with-current-buffer none (buffer-string)))))
+              (let ((r (harness-tools-emacs-test--call "emacs_save_buffer" :name "harness-test-change-no-file")))
+                (should (plist-get r :is-error))
+                (should (string-search "not visiting a file" (plist-get r :content))))
+              ;; A buffer that does not exist is the Emacs's to answer.
+              (let ((r (harness-tools-emacs-test--call "emacs_insert" :name "harness-test-no-such-buffer" :text "x")))
+                (should (plist-get r :is-error))
+                (should (string-search "No buffer named" (plist-get r :content))))))
+        (dolist (b buffers)
+          (when (buffer-live-p b)
+            (with-current-buffer b (set-buffer-modified-p nil))
+            (kill-buffer b)))
+        (delete-directory root t)
+        (delete-directory elsewhere t)))))
+
+(ert-deftest harness-tools-emacs-a-change-says-which-file-it-was-checked-for ()
+  "The change is asked for with the file it was allowed for, so that the
+Emacs can tell when the buffer visits another one by then."
+  (harness-tools-emacs-test--setup)
+  (harness-test-with-temp-state
+    (let* ((root (file-name-as-directory (harness-test-temp-dir)))
+           (default-directory root)
+           (file (expand-file-name "checked.txt" root))
+           (asked nil)
+           (buffers nil))
+      (unwind-protect
+          (progn
+            (with-temp-file file (insert "x\n"))
+            (let ((visiting (find-file-noselect file t))
+                  (none (generate-new-buffer "harness-test-checked-none")))
+              (setq buffers (list visiting none))
+              (let ((real (symbol-function 'harness-tools-ask-emacs)))
+                (cl-letf (((symbol-function 'harness-tools-ask-emacs)
+                           (lambda (method params)
+                             (push (cons method params) asked)
+                             (funcall real method params))))
+                  (harness-tools-emacs-test--call "emacs_insert" :name (buffer-name visiting) :text "y")
+                  (harness-tools-emacs-test--call "emacs_insert" :name "harness-test-checked-none" :text "y")))
+              (let ((inserts (cl-remove-if-not (lambda (a) (equal "insert" (car a))) asked)))
+                (should (= 2 (length inserts)))
+                ;; Oldest first: the buffer that visits a file names it, the
+                ;; one that visits none says so with the empty string.
+                (should (equal file (plist-get (cdr (nth 1 inserts)) :file)))
+                (should (equal "" (plist-get (cdr (nth 0 inserts)) :file))))))
+        (dolist (b buffers)
+          (when (buffer-live-p b)
+            (with-current-buffer b (set-buffer-modified-p nil))
+            (kill-buffer b)))
         (delete-directory root t)))))
 
 (ert-deftest harness-tools-emacs-describe ()

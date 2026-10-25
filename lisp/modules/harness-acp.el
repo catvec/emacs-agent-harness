@@ -40,6 +40,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+(require 'harness-emacs-endpoint)
 
 (defvar harness-state-directory)
 
@@ -139,7 +140,7 @@ is never used for any other failure.")
 (defconst harness-acp-extension-prefixes
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
-    "harness/api" "harness/modules" "harness/version" "harness/reload" "harness/call"
+    "harness/api" "harness/modules" "harness/version" "harness/reload"
     "question/" "project/" "task/" "plugins/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/"
     "secrets/" "commit-msg/"
@@ -292,6 +293,8 @@ session to end.")
   remote                             ; plist of a client on another device, else nil
   active                             ; `float-time' of its last request or notification
   hello                              ; the `clientInfo' (name, title, version) it gave `initialize'
+  ;; Slots added later go last, so clients made before a reload keep working.
+  mcp-key                            ; the key of the MCP connection to its Emacs
   replaying)                         ; (SESSION-ID DEPTH . HELD) for each session `session/load' is sending it, see `harness-acp--replay-begin'
 
 (cl-defstruct (harness-acp-error-value (:constructor harness-acp--make-error-value)
@@ -439,22 +442,14 @@ For example :sessionId becomes :session-id."
    (and tool-name (harness-method-exists-p 'tools/get)
         (plist-get (ignore-errors (harness-call 'tools/get tool-name)) :kind))))
 
-(defun harness-acp--secret-method-p (method &optional params)
+(defun harness-acp--secret-method-p (method)
   "Non-nil when METHOD, a method a client names, takes a secret in its params.
 That is every method under secrets/ (`_harness/secrets/redact'): a
-reference to a secret, or, from the Emacs on this machine, its text.  It
-is `harness/call' too when PARAMS, the params of the request, name such a
-method: the Emacs on this machine calls the harness's methods with Lisp
-arguments through it (`harness-acp-call-lisp'), and a secret typed in it
-travels in `:args'.  The params of such a method are never logged, and
-the errors of its handling never quote them (`harness-acp--safe-error-text')."
+reference to a secret, or, from the Emacs on this machine, its text.
+The params of such a method are never logged, and the errors of its
+handling never quote them (`harness-acp--safe-error-text')."
   (and (stringp method)
-       (let ((name (string-remove-prefix "_harness/" method)))
-         (or (string-prefix-p "secrets/" name)
-             (and (equal name "harness/call")
-                  (consp params)
-                  (let ((target (plist-get params :method)))
-                    (and (stringp target) (string-prefix-p "secrets/" target))))))))
+       (string-prefix-p "secrets/" (string-remove-prefix "_harness/" method))))
 
 (defun harness-acp--safe-error-text (err)
   "Describe ERR, signalled while a secret's method was handled, without its data.
@@ -468,22 +463,20 @@ the harness writes it to say what is wrong, and a value never goes in one."
         ((and (consp err) (symbolp (car err))) (format "The request failed (%s)" (car err)))
         (t "The request failed")))
 
-(defun harness-acp--loggable-error (method err &optional params)
+(defun harness-acp--loggable-error (method err)
   "Return ERR, signalled while METHOD was handled, as text a log may keep.
-For a method that takes a secret (`harness-acp--secret-method-p', which
-looks at PARAMS, the params of the request, too) that is
-`harness-acp--safe-error-text'; for any other the printed error."
-  (if (harness-acp--secret-method-p method params)
+For a method that takes a secret (`harness-acp--secret-method-p') that
+is `harness-acp--safe-error-text'; for any other the printed error."
+  (if (harness-acp--secret-method-p method)
       (harness-acp--safe-error-text err)
     (format "%S" err)))
 
-(defun harness-acp--error-triplet (err &optional method params)
+(defun harness-acp--error-triplet (err &optional method)
   "Return (CODE MESSAGE DATA) for ERR, an error object or rejection value.
-METHOD and PARAMS are the method and params of the request that failed.
-When it takes a secret (`harness-acp--secret-method-p'), a Lisp error
-answers with its kind and not its data, which can quote what the request
-was given."
-  (let ((secret (harness-acp--secret-method-p method params)))
+METHOD is the method of the request that failed.  When it takes a
+secret (`harness-acp--secret-method-p'), a Lisp error answers with its
+kind and not its data, which can quote what the request was given."
+  (let ((secret (harness-acp--secret-method-p method)))
     (pcase err
       (`(acp-error ,code ,message . ,rest) (list code message (car rest)))
       (`(harness-no-such-method . ,_)
@@ -718,14 +711,16 @@ callable over ACP."
 ;; Every tool runs here, in the harness.  The tools about the user's
 ;; Emacs (its buffers, its windows, its symbols) reach that Emacs as a
 ;; resource, the way the file tools reach a TRAMP host; it is never
-;; where a tool runs, and the one request that evaluates code in it,
-;; emacs_eval's, is refused there once its user turned that off
-;; (`harness-emacs-eval').  An Emacs lends itself by advertising
-;; `_harness.emacs' among the `clientCapabilities' of `initialize'
-;; (lisp/harness-emacs-endpoint.el), the way ACP clients offer an agent
-;; their files with `fs'.  A client that lends nothing, such as a phone,
-;; is never asked; a harness no Emacs is attached to (headless) runs
-;; every other tool as usual.
+;; where a tool runs, and none of its tools takes code.  An Emacs lends
+;; itself by advertising `_harness.emacs' among the
+;; `clientCapabilities' of `initialize' (lisp/harness-emacs-endpoint.el),
+;; the way ACP clients offer an agent their files with `fs'.  What it
+;; lends is an MCP server: the harness is an MCP host
+;; (lisp/modules/harness-mcp.el), and the connection to that Emacs is an
+;; `:external' server whose transport is this ACP connection, one MCP
+;; message per `_harness/emacs/mcp' request.  A client that lends
+;; nothing, such as a phone, is never asked; a harness no Emacs is
+;; attached to (headless) runs every other tool as usual.
 
 (defun harness-acp--emacs-info (client)
   "Return the plist CLIENT advertised for the Emacs it lends, or nil."
@@ -747,6 +742,78 @@ answer for the user's Emacs with what it likes."
         (lambda (a b) (> (or (harness-acp--client-get a 'active) 0)
                          (or (harness-acp--client-get b 'active) 0)))))
 
+(defvar harness-acp--emacs-mcp (make-hash-table :test 'eq)
+  "Client -> the MCP connection to the Emacs it lends.")
+
+(defun harness-acp--client-mcp-key (client)
+  "Return the key of the MCP connection to CLIENT's Emacs.
+It names the client for as long as it is connected, so the host's
+connection and the ACP client stay the same thing."
+  (let ((slot 'mcp-key))
+    (or (harness-acp--client-get client slot)
+        (let ((key (format "acp-%s" (harness-short-id 8))))
+          (harness-acp--client-set client slot key)
+          key))))
+
+(defun harness-acp--emacs-server ()
+  "Declare the MCP server an Emacs lends, when the MCP host is here.
+Return non-nil when the host can attach one.  On the UI side of the
+process split there is no host, and nothing to attach."
+  (when (and harness-process (not (fboundp 'harness-mcp-attach)))
+    (require 'harness-mcp nil t))
+  (when (fboundp 'harness-mcp-define-server)
+    (harness-mcp-define-server
+     'emacs
+     :title "Emacs"
+     :doc "The Emacs a client lent the harness: its buffers, windows, symbols and messages, with bounded work on them."
+     :external t)
+    t))
+
+(defun harness-acp--attach-emacs (client &rest _)
+  "Attach CLIENT's Emacs to the harness as the MCP server `emacs'.
+Called when the client said what it lends (see
+`harness-acp-initialized-functions').  A client that lends no Emacs, or
+has not signed in yet, gets none.  Every message the host sends is one
+`_harness/emacs/mcp' request; what comes back goes to the host."
+  (when (and (harness-acp--emacs-info client)
+             (not (harness-acp--auth-needed-p client))
+             (harness-acp--emacs-server))
+    (let* ((key (harness-acp--client-mcp-key client))
+           ;; The handshake sends before `harness-mcp-attach' returns, and
+           ;; the answer can only come later; the cell still holds nil then.
+           (cell (list nil)))
+      (setcar
+       cell
+       (harness-mcp-attach
+        'emacs
+        (lambda (message)
+          (harness-acp--client-request
+           client harness-emacs-endpoint-mcp-method (list :message message)
+           (lambda (result error)
+             (let ((conn (car cell)))
+               (cond
+                ((null conn) nil)
+                (error
+                 (harness-mcp-detach
+                  conn (if (and (listp error)
+                                (eql (plist-get error :code) harness-acp-error-transport))
+                           "The user's Emacs disconnected before it answered."
+                         (format "the Emacs could not be asked: %s"
+                                 (or (and (listp error) (plist-get error :message)) error)))))
+                (result (harness-mcp-receive conn result)))))))
+        :key key))
+      (puthash client (car cell) harness-acp--emacs-mcp)
+      (harness-log 'debug "acp: attached the Emacs of %s as MCP server emacs"
+                   (harness-acp-client-kind client))
+      (car cell))))
+
+(defun harness-acp--detach-emacs (client &optional reason)
+  "Drop the MCP connection to CLIENT's Emacs, for REASON."
+  (when-let* ((conn (gethash client harness-acp--emacs-mcp)))
+    (remhash client harness-acp--emacs-mcp)
+    (when (fboundp 'harness-mcp-detach)
+      (harness-mcp-detach conn (or reason "the Emacs left")))))
+
 (harness-defmethod emacs/attached ()
   "Return the Emacsen lent to the harness, the one `emacs/request' asks first.
 Each is the plist its client advertised (`:version', `:pid', `:host')
@@ -761,33 +828,36 @@ Empty when the harness runs headless, or none of its clients is an Emacs."
           (harness-acp--emacs-clients)))
 
 (harness-defmethod emacs/request (method params)
-  "Send `_harness/emacs/METHOD' with PARAMS to the Emacs lent to the harness.
-Return a promise of its answer.  Exactly one Emacs is asked, never every
-client: the most recently active of those that lend one, which is where
-the user is.  The promise rejects at once when none is attached, with
-the Emacs's message when it refuses, and when it disconnects first.
-The tools of tools-emacs and tools-emacs-eval use it; see
-lisp/harness-emacs-endpoint.el for the methods.  Not callable over ACP."
+  "Call the MCP tool METHOD of the Emacs lent to the harness, with PARAMS.
+Return a promise of the tool's answer, the `structuredContent' it sent.
+Exactly one Emacs is asked, never every client: the most recently active
+of those that lend one, which is where the user is.  The promise rejects
+at once when none is attached, with the Emacs's message when it refuses,
+and when it disconnects first.  The tools of tools-emacs use it; see
+lisp/harness-emacs-endpoint.el for the tools.  Not callable over ACP."
   (harness-with-promise (resolve reject)
     (let ((client (car (harness-acp--emacs-clients))))
-      (if (null client)
-          (funcall reject (list 'harness-error
-                                "no Emacs is attached to the harness: it runs headless, or none of its clients is an Emacs"))
-        (harness-acp--client-request
-         client (concat "_harness/emacs/" method) params
-         (lambda (result error)
-           (cond
-            ((null error) (funcall resolve result))
-            ((and (listp error) (eql (plist-get error :code) harness-acp-error-transport))
-             (funcall reject (list 'harness-error "the user's Emacs disconnected before it answered")))
-            (t (funcall reject (list 'harness-error
-                                     (format "%s" (or (and (listp error) (plist-get error :message))
-                                                      error))))))))))))
+      (cond
+       ((null client)
+        (funcall reject (list 'harness-error
+                              "no Emacs is attached to the harness: it runs headless, or none of its clients is an Emacs")))
+       ((not (fboundp 'harness-mcp-call))
+        (funcall reject (list 'harness-error "the MCP host (harness-mcp) is not loaded")))
+       (t
+        (harness-then
+         (harness-mcp-call 'emacs method params :key (harness-acp--client-mcp-key client))
+         (lambda (result)
+           (if (harness-mcp-result-error-p result)
+               (funcall reject (list 'harness-error (harness-mcp-result-text result)))
+             (funcall resolve (harness-mcp-result-structured result)))
+           nil)
+         (lambda (err) (funcall reject err) nil)))))))
 
 (defun harness-acp--drop-client (client)
   "Forget CLIENT and fail whatever it still owed."
   (when (memq client harness-acp--clients)
     (setq harness-acp--clients (delq client harness-acp--clients))
+    (harness-acp--detach-emacs client "The user's Emacs disconnected before it answered.")
     (let ((pending (harness-acp-client-pending client)) cbs)
       (maphash (lambda (_ cb) (push cb cbs)) pending)
       (clrhash pending)
@@ -840,8 +910,8 @@ wait on ID for good, its own request showing no answer ever came."
     (condition-case err
         (harness-then (harness-as-promise (harness-acp--invoke client method params))
                       (lambda (result) (funcall reply result nil))
-                      (lambda (e) (funcall reply nil (harness-acp--error-triplet e method params))))
-      (error (funcall reply nil (harness-acp--error-triplet err method params))))))
+                      (lambda (e) (funcall reply nil (harness-acp--error-triplet e method))))
+      (error (funcall reply nil (harness-acp--error-triplet err method))))))
 
 (defun harness-acp--handle-notification (client method params)
   "Run METHOD with PARAMS for CLIENT; failures are only logged.
@@ -854,9 +924,9 @@ some mobile clients send to keep their connection open."
           (when (harness-promise-p v)
             (harness-catch v (lambda (e)
                                (harness-log 'warn "acp: notification %s failed: %s" method
-                                            (harness-acp--loggable-error method e params))))))
+                                            (harness-acp--loggable-error method e))))))
       (error (harness-log 'warn "acp: notification %s failed: %s" method
-                          (harness-acp--loggable-error method err params))))))
+                          (harness-acp--loggable-error method err))))))
 
 (defun harness-acp--handle-response (client id msg)
   "Route MSG, CLIENT's answer to the request ID, to the waiting callback."
@@ -886,7 +956,8 @@ from this machine must authenticate when `harness-acp-token' is set."
   "The client whose message `harness-acp--invoke' is dispatching, or nil.
 Bound while the method called for it runs, up to the promise it may
 return, so a method that is not for every client can tell who asks:
-`harness/call' refuses clients on other devices.")
+the methods that manage serving other devices (acp/remote-) and those
+that take a secret's text (secrets/) refuse clients on other devices.")
 
 (defun harness-acp--invoke (client method params)
   "Return the value or promise of calling METHOD with PARAMS for CLIENT."
@@ -1013,8 +1084,7 @@ That is the text itself, or a command that prints it, in PARAMS.  Only
 methods under secrets/ are looked at.  A reference to where a
 secret can be read is for every client, but a secret's text, a command
 that prints it or the leave to accept them is for the Emacs on this
-machine, as `harness/call' is: a command runs here, outside the
-permission system."
+machine: a command runs here, outside the permission system."
   (when (and (harness-acp--secret-method-p name)
              harness-acp--calling-client
              (harness-acp-client-remote-info harness-acp--calling-client)
@@ -1062,6 +1132,19 @@ a third-party ACP client shows them.")
   (if (equal id "harness:projects") "virtual-projects" "virtual-new-task"))
 
 (declare-function harness-project-main "harness-project" (root &optional seen))
+
+;; The MCP host is loaded at runtime (see `harness-acp--emacs-server'): a
+;; UI's Emacs has no host, and only a harness process starts servers.  The
+;; ones that take keywords are declared with `&rest', which the byte
+;; compiler can check a call against.
+(declare-function harness-mcp-attach "harness-mcp" (server send &rest keys))
+(declare-function harness-mcp-detach "harness-mcp" (conn &optional reason))
+(declare-function harness-mcp-receive "harness-mcp" (conn message))
+(declare-function harness-mcp-call "harness-mcp" (server tool arguments &rest keys))
+(declare-function harness-mcp-define-server "harness-mcp" (name &rest keys))
+(declare-function harness-mcp-result-error-p "harness-mcp-protocol" (result))
+(declare-function harness-mcp-result-text "harness-mcp-protocol" (result))
+(declare-function harness-mcp-result-structured "harness-mcp-protocol" (result))
 
 (defun harness-acp--virtual-projects ()
   "Return the project directories the project-list page shows, sorted.
@@ -1554,122 +1637,6 @@ runs in another Emacs, such as its own process."
   "Return the harness and Emacs versions."
   (list :version (harness-acp--version) :emacs emacs-version
         :protocolVersion harness-acp-protocol-version))
-
-;;;; Calling bus methods with Lisp arguments
-
-;; `_harness/NAME' passes a method its arguments as JSON, which has no
-;; symbols: every one becomes a string, but for the values of
-;; `harness-acp--enum-keys', which are made symbols again.  An Emacs
-;; that calls the harness's methods as `harness-call' would has
-;; symbols, keywords and nested plists to pass, and wants them back as
-;; they were: code that emacs_eval runs in the user's Emacs calls
-;; `harness-call', and lisp/harness-emacs-endpoint.el forwards what that
-;; Emacs has no method for to `harness/call', arguments and result
-;; printed as Lisp.
-
-(defun harness-acp--with-standard-io (fn)
-  "Call FN with the printer and reader set to give back what they get.
-Nothing is elided (`print-length', `print-level'), shared and
-circular structure prints as #N= (`print-circle'), and no file's
-symbol shorthands apply."
-  (let ((print-length nil) (print-level nil) (print-circle t)
-        (print-escape-nonascii t) (print-escape-newlines nil)
-        (print-quoted t) (print-gensym nil) (float-output-format nil)
-        (print-integers-as-characters nil)
-        (read-symbol-shorthands nil))
-    (funcall fn)))
-
-(defun harness-acp--print-readably (value)
-  "Return VALUE printed so that `read' gives it back, or nil when it cannot be.
-A value holding an object without a read syntax, such as a buffer,
-prints as #<...>, which does not read."
-  (harness-acp--with-standard-io
-   (lambda ()
-     (let* ((printed (prin1-to-string value))
-            (back (condition-case nil (read-from-string printed) (error nil))))
-       (and back (string-blank-p (substring printed (cdr back))) printed)))))
-
-(defun harness-acp--inert-p (obj)
-  "Non-nil when OBJ is data that cannot run as code.
-That is text, numbers, symbols, and lists and vectors of them, with no
-function object and no list that starts with `lambda' or `closure' at
-any depth: a function would run in this Emacs, away from the variables
-it was made with."
-  (let ((stack (list obj)) (ok t))
-    (while (and ok stack)
-      (let ((x (pop stack)))
-        (cond
-         ((consp x)
-          (if (memq (car x) '(lambda closure))
-              (setq ok nil)
-            (push (car x) stack)
-            (push (cdr x) stack)))
-         ((or (stringp x) (numberp x) (symbolp x)))
-         ((vectorp x) (setq stack (append x stack)))
-         (t (setq ok nil)))))
-    ok))
-
-(defun harness-acp--read-call-args (printed)
-  "Return the arguments PRINTED holds for `harness/call', a list.
-PRINTED is a string holding one printed Lisp list and nothing more.
-It is read as data: #N= syntax is refused, and so is anything else
-`harness-acp--inert-p' refuses.  Signal `harness-acp-invalid-params'
-otherwise."
-  (unless (stringp printed)
-    (signal 'harness-acp-invalid-params (list "args must be a string holding a printed Lisp list")))
-  (let* ((read (condition-case err
-                   (let ((read-circle nil))
-                     (harness-acp--with-standard-io (lambda () (read-from-string printed))))
-                 (error (signal 'harness-acp-invalid-params
-                                (list (format "args do not read: %s" (error-message-string err)))))))
-         (args (car read)))
-    (cond
-     ((not (string-blank-p (substring printed (cdr read))))
-      (signal 'harness-acp-invalid-params (list "args must hold one list and nothing after it")))
-     ((not (proper-list-p args))
-      (signal 'harness-acp-invalid-params (list "args must be a list of the arguments")))
-     ((not (harness-acp--inert-p args))
-      (signal 'harness-acp-invalid-params
-              (list "args must be data: text, numbers, symbols, lists and vectors, no functions")))
-     (t args))))
-
-(defun harness-acp--call-answer (value)
-  "Return what `harness/call' answers for VALUE, the method's result."
-  (let ((printed (harness-acp--print-readably value)))
-    (if printed
-        (list :value printed)
-      (list :wire (harness-acp--normalise value)))))
-
-(harness-defmethod harness/call (method args)
-  "Call bus METHOD with the arguments printed in ARGS; return (:value PRINTED).
-It is `_harness/METHOD' for a client that speaks Lisp: code emacs_eval
-evaluates in the user's Emacs calls the harness's methods with
-`harness-call', which that Emacs forwards here when it has no method of
-the name (lisp/harness-emacs-endpoint.el).  METHOD is the method's name,
-a string, one a client may call as `_harness/METHOD', never this one.
-ARGS is a string holding the printed list of its arguments, read as
-data (`harness-acp--read-call-args').  The result, or the value of the
-promise the method returns, comes back printed as Lisp in PRINTED, so
-symbols, keywords and nested lists stay as they were, which the JSON of
-`_harness/METHOD' turns into strings; one that does not print readably,
-such as a buffer, comes back as (:wire OBJ), OBJ in wire shape.  A
-client on another device is refused: Lisp arguments can name any
-function, and only the Emacs on this machine needs them."
-  (let ((client harness-acp--calling-client))
-    (when (and client (harness-acp-client-remote-info client))
-      (signal 'harness-error
-              (list "harness/call is for an Emacs on this machine, not a client on another device: call _harness/METHOD instead"))))
-  (unless (stringp method)
-    (signal 'harness-acp-invalid-params (list "method must be the name of a method, a string")))
-  (when (equal method "harness/call")
-    (signal 'harness-acp-invalid-params (list "harness/call does not call itself")))
-  (let ((sym (intern-soft method)))
-    (unless (and sym (harness-acp--extension-allowed-p method) (harness-method-exists-p sym))
-      (signal 'harness-no-such-method (list method)))
-    (let ((value (apply #'harness-call sym (harness-acp--read-call-args args))))
-      (if (harness-promise-p value)
-          (harness-then value #'harness-acp--call-answer)
-        (harness-acp--call-answer value)))))
 
 ;;;; Bus events -> notifications
 
@@ -2492,14 +2459,6 @@ Each is (CONN . MESSAGE), MESSAGE a line still to parse or a plist.")
 What arrives meanwhile waits in `harness-acp--inbox', in order, and
 `harness-acp--drain' leaves it there; it is handled once the wait ends.")
 
-(defvar harness-acp-current-connection nil
-  "The connection whose request or notification a handler is given, or nil.
-Bound around the call of a connection's handler (see
-`harness-acp-set-handler'), so the handler, and what it calls before it
-returns, knows the connection a message came on: the Emacs endpoint
-sends the `harness-call's of the code it evaluates for the harness back
-over it (lisp/harness-emacs-endpoint.el).")
-
 (defvar harness-acp-receiving nil
   "Non-nil while received messages are handled, a slice at a time.
 Work a handler would repeat for every message of a burst, such as
@@ -2671,8 +2630,7 @@ They are parsed as they are handled, a slice at a time."
         (harness-acp-respond-error respond harness-acp-error-method-not-found
                                    (format "No handler on this client for %s" method))))
      (t (condition-case err
-            (let ((harness-acp-current-connection conn))
-              (funcall handler method params respond))
+            (funcall handler method params respond)
           (error
            (harness-log 'error "acp: client handler failed on %s: %S" method err)
            (when respond
@@ -2681,19 +2639,17 @@ They are parsed as they are handled, a slice at a time."
 ;;;; Client: waiting for an answer
 
 ;; Everything above answers from the command loop.  Code that must have
-;; an answer before it returns -- Lisp evaluated for the harness in the
-;; user's Emacs, which calls `harness-call' and goes on with the value
-;; -- waits with `harness-acp-call-sync', briefly, for that one answer.
-;; It runs where nothing may wait for input (`inhibit-interaction',
-;; `while-no-input'), so it reads process output only, timers allowed:
-;; a server in the same Emacs answers from them, and the evaluation's
-;; own timer still stops the code.  Each turn of the wait first reads
-;; the socket without waiting, as the poll does (see "Client: polling
-;; the sockets"), so an answer already there is seen within one slice
-;; whatever the event loop's select does.  What else arrives meanwhile
-;; is queued as usual but handled only once the wait is over, in order:
-;; handling it inside the wait would run the UI's handlers in the
-;; middle of somebody's code, under its bindings.
+;; an answer before it returns waits with `harness-acp-call-sync',
+;; briefly, for that one answer.  It runs where nothing may wait for
+;; input (`inhibit-interaction', `while-no-input'), so it reads process
+;; output only, timers allowed: a server in the same Emacs answers from
+;; them, and a timer of the caller's own still stops the wait.  Each
+;; turn of the wait first reads the socket without waiting, as the poll
+;; does (see "Client: polling the sockets"), so an answer already there
+;; is seen within one slice whatever the event loop's select does.  What
+;; else arrives meanwhile is queued as usual but handled only once the
+;; wait is over, in order: handling it inside the wait would run the
+;; UI's handlers in the middle of somebody's code, under its bindings.
 
 (defconst harness-acp-call-sync-timeout 2
   "Seconds `harness-acp-call-sync' waits when its caller names no limit.")
@@ -2740,17 +2696,16 @@ answer that comes later is dropped.
 
 This blocks, unlike the rest of the client API: it is for code that
 must have the answer before it returns and cannot wait for input, such
-as code evaluated for the harness under `inhibit-interaction' and
-`while-no-input'.  It reads process output in short slices, running
-timers as it goes, so a timer such as an evaluation's own timeout can
-stop it, and so can input under `while-no-input'.  Each slice starts
-with a read of the socket that waits for nothing, so an answer already
-there is seen at once whatever the event loop does (see
-`harness-acp-client-poll-interval').  It never waits for
-input: no `sit-for', `read-event' or `harness-await'.  Meanwhile the
-messages that arrive are queued but not handled, but for this answer:
-they are handled once the wait ends, however it ends, in the order
-they came."
+as code under `inhibit-interaction' and `while-no-input'.  It reads
+process output in short slices, running timers as it goes, so a timer
+of the caller's own can stop it, and so can input under
+`while-no-input'.  Each slice starts with a read of the socket that
+waits for nothing, so an answer already there is seen at once whatever
+the event loop does (see `harness-acp-client-poll-interval').  It never
+waits for input: no `sit-for', `read-event' or `harness-await'.
+Meanwhile the messages that arrive are queued but not handled, but for
+this answer: they are handled once the wait ends, however it ends, in
+the order they came."
   (let* ((timeout (or timeout harness-acp-call-sync-timeout))
          (deadline (+ (float-time) timeout))
          (proc (and (eq (harness-acp-connection-kind conn) 'tcp)
@@ -2787,47 +2742,6 @@ they came."
       (when (and harness-acp--inbox (not harness-acp--inbox-held))
         (harness-acp--wake)))))
 
-(defun harness-acp--error-text (message)
-  "Return MESSAGE, of an error answer, as the error it tells of would say it.
-A `harness-error' of the harness's is sent printed, as
-\"Harness error: \\\"No session x\\\"\": that reads \"No session x\"."
-  (let ((text (format "%s" (or message "")))
-        (prefix "Harness error: "))
-    (or (and (string-prefix-p (concat prefix "\"") text)
-             (condition-case nil
-                 (let ((read (read-from-string text (length prefix))))
-                   (and (stringp (car read)) (= (cdr read) (length text)) (car read)))
-               (error nil)))
-        (string-remove-prefix prefix text))))
-
-(defun harness-acp-call-lisp (conn name args &optional timeout)
-  "Call bus method NAME with ARGS in the harness CONN reaches; return its result.
-As `harness-call' would there: ARGS go, and the result comes back,
-printed as Lisp (`harness/call'), so symbols, keywords and nested
-plists stay as they are, which `_harness/NAME''s JSON makes strings.
-It waits as `harness-acp-call-sync' does, TIMEOUT seconds at most, and
-signals as `harness-call' would: `harness-no-such-method' when the
-harness has no method NAME a client may call, `harness-error' with the
-harness's message when the method fails or no answer comes in time.
-ARGS must be data that prints readably, with no functions."
-  (let* ((printed (let ((print-length nil) (print-level nil) (print-circle nil)
-                        (print-escape-nonascii t) (print-quoted t))
-                    (prin1-to-string args)))
-         (answer (condition-case err
-                     (harness-acp-call-sync conn "_harness/harness/call"
-                                            (list :method (if (symbolp name) (symbol-name name) (format "%s" name))
-                                                  :args printed)
-                                            timeout)
-                   (acp-error
-                    (if (eql (nth 1 err) harness-acp-error-method-not-found)
-                        (signal 'harness-no-such-method (list name))
-                      (signal 'harness-error
-                              (list (format "%s: %s" name (harness-acp--error-text (nth 2 err))))))))))
-    (if (plist-member answer :value)
-        (let ((read-symbol-shorthands nil))
-          (car (read-from-string (plist-get answer :value))))
-      (plist-get answer :wire))))
-
 ;;;; Corporate mode
 
 (defun harness-acp--on-corporate-mode ()
@@ -2855,6 +2769,11 @@ to the loopback address, on the same port when it is free."
 The server starts as the module does, not at a reload, which leaves it
 as it is: stopped, say, by `harness-acp--on-corporate-mode'."
   (add-hook 'harness-corporate-mode-change-hook #'harness-acp--on-corporate-mode)
+  (add-hook 'harness-acp-initialized-functions #'harness-acp--attach-emacs)
+  ;; A reload keeps the clients that are connected: re-attach their Emacsen.
+  (dolist (client (harness-acp--emacs-clients))
+    (when (not (gethash client harness-acp--emacs-mcp))
+      (harness-acp--attach-emacs client)))
   (harness-acp--subscribe)
   (when (and harness-acp--server-enabled (not (harness-module-ready-p 'acp)))
     (condition-case err

@@ -58,7 +58,6 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;openai             ; OpenAI-compatible chat completions provider (OpenAI, OpenRouter, local…
  :tools
  ;;compact            ; The compact tool: an agent compacts its own conversation, on a running…
- ;;emacs-eval         ; Evaluate in Emacs: run Lisp in the user's Emacs when a judge model…
  ;;events             ; watch_events and unwatch_events: a session watches harness events, and…
  ;;handin             ; The hand_in tool: a task session hands its finished work in and stops.
  ;;notify             ; Notification and Notification providers: agents reach the user through…
@@ -104,13 +103,14 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [fallback](fallback.md) |  | [store](store.md), [session](session.md), [provider](provider.md) | Carry on with another provider when one runs out of quota or money. |
 | [handoff](handoff.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md) | Warn before a lossy switch to a hosted-loop provider, and hand the conversation over. |
 | [insights](insights.md) |  | [store](store.md) | The Insights report: figures and a written summary of the work, for any provider. |
-| [judge](judge.md) |  |  | Judges: one-off questions to the simple tier of a session's model, read as a decision, with a few lookups that only read (emacs_eval's speed judge, event watches). |
+| [judge](judge.md) |  |  | Judges: one-off questions to the simple tier of a session's model, read as a decision, with a few lookups that only read (event watches). |
 | [linking](linking.md) | by default | [session](session.md) | Links in what agents write: sessions, messages, tool calls, tasks and review threads, found and written out in full, and taught to agents in the system prompt. |
+| [mcp](mcp.md) | by default | [config](config.md) | MCP host: starts tool servers in the session's sandbox and calls them. |
 | [merge](merge.md) |  | [session](session.md), [agent](agent.md) | Merge queue: worktree branches merged into the session they were built on, or into the main checkout. |
 | [naming](naming.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Name nameless sessions with a cheap model as soon as their first message is sent. |
 | [notifications](notifications.md) |  |  | Notifications for the user through pluggable providers: desktop (system) and Gotify. |
 | [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent. |
-| [perms](perms.md) | by default | [config](config.md), [tools](tools.md) | Directory jail, directory requests, sandbox guard, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls. |
+| [perms](perms.md) | by default | [config](config.md), [tools](tools.md) | Directory jail, directory requests, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls. |
 | [pet](pet.md) |  | [store](store.md), [provider](provider.md) | A companion pet: hatched with random bones, named and voiced by a cheap model, growing with use. |
 | [plugins](plugins.md) |  | [session](session.md) | Projects' plugins: what a project's trusted .dir-locals.el loads, and the plugin modules each session froze. |
 | [priority](priority.md) | by default |  | Session priority (a task's is its session's): low, medium or high, and the one vocabulary for it. |
@@ -145,7 +145,6 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [tools-agent](tools-agent.md) | by default | [tools](tools.md), [session](session.md), [agent](agent.md) | The Sub-agent tool (spawn_agent), and the Planning section of the system prompt. |
 | [tools-compact](tools-compact.md) |  | [tools](tools.md), [compaction](compaction.md) | The compact tool: an agent compacts its own conversation, on a running turn by queueing it or interrupting it. |
 | [tools-emacs](tools-emacs.md) | by default | [tools](tools.md) | List buffers, List windows, Read buffer, Open buffer, Insert text, Save buffer, Describe symbol, Find definition, Trace symbol and Emacs messages: bounded tools into the user's Emacs, without evaluation. |
-| [tools-emacs-eval](tools-emacs-eval.md) |  | [tools](tools.md) | Evaluate in Emacs: run Lisp in the user's Emacs when a judge model expects the code to return at once, unless the user turned it off (`harness-emacs-eval`). |
 | [tools-events](tools-events.md) |  | [tools](tools.md), [session](session.md), [agent](agent.md), [tools-sessions](tools-sessions.md) | watch_events and unwatch_events: a session watches harness events, and a cheap model decides which call for it to act. |
 | [tools-fs](tools-fs.md) | by default | [tools](tools.md) | Read file, Write file, Edit file, List directory, Find files, Search files and File info. |
 | [tools-handin](tools-handin.md) |  | [tools](tools.md), [session](session.md) | The hand_in tool: a task session hands its finished work in and stops. |
@@ -284,7 +283,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/changed` | [session](session.md) | [session](session.md) | [acp](acp.md), [cache](cache.md), [cache-warm](cache-warm.md), [tools](tools.md), [tools-sessions](tools-sessions.md) |  |
 | `session/created` | [session](session.md) | [session](session.md) | [access](access.md), [plugins](plugins.md), [supervisor](supervisor.md), [ui-tree](ui-tree.md) | yes |
 | `session/deactivated` | [session](session.md) | [session](session.md) | [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md) |  |
-| `session/deleted` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache](cache.md), [cache-compact](cache-compact.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [perms](perms.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [redact](redact.md), [seed](seed.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-tree](ui-tree.md), [usage](usage.md) | yes |
+| `session/deleted` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache](cache.md), [cache-compact](cache-compact.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [mcp](mcp.md), [perms](perms.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [redact](redact.md), [seed](seed.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-tree](ui-tree.md), [usage](usage.md) | yes |
 | `session/ext-changed` | [session](session.md) | [session](session.md) | [supervisor](supervisor.md), [tasks](tasks.md), [ui-priority](ui-priority.md), [ui-tasks](ui-tasks.md) | yes |
 | `session/forked` | [session](session.md) | [session](session.md) | [fallback](fallback.md), [session-search](session-search.md), [ui-tree](ui-tree.md) | yes |
 | `session/head-moved` | [session](session.md) | [session](session.md) | [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-tree](ui-tree.md) | yes |
@@ -317,7 +316,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `tool-slots/changed` | [tool-slots-load](tool-slots-load.md) | [tool-slots-load](tool-slots-load.md) | [ui-slots](ui-slots.md), [ui-tool-slots-load](ui-tool-slots-load.md) | yes |
 | `tool-slots/holders-changed` | [tool-slots](tool-slots.md) | [tool-slots](tool-slots.md) | [tool-slots-load](tool-slots-load.md) |  |
 | `tools/file-written` | [tools](tools.md) | [tools-fs](tools-fs.md) |  | yes |
-| `tools/finished` | [tools](tools.md) | [tools](tools.md) | [supervisor](supervisor.md) |  |
+| `tools/finished` | [tools](tools.md) | [tools](tools.md) | [perms](perms.md), [supervisor](supervisor.md) |  |
 | `tools/note` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md) |  |
 | `tools/progress` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md), [resilience](resilience.md) |  |
 | `tools/started` | [tools](tools.md) | [tools](tools.md) |  |  |
@@ -347,11 +346,11 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50) |
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50) |
 | `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [seed](seed.md) (1000), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40) |
-| `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-emacs-eval](tools-emacs-eval.md) (50), [tools-handin](tools-handin.md) (50), [tools-review](tools-review.md) (50) |
+| `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [tools-review](tools-review.md) (50) |
 | `naming/auto-p` | [naming](naming.md) | [tasks](tasks.md) (50) |
 | `naming/system-prompt` | [naming](naming.md) | [tasks](tasks.md) (60) |
 | `notification/before-send` | [notifications](notifications.md) |  |
-| `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [perms](perms.md) (5, 6, 7, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
+| `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [perms](perms.md) (5, 6, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
 | `permission/dir-entries` | [perms](perms.md) | [access](access.md) (50) |
 | `session/before-move` | [session](session.md) | [merge](merge.md) (50), [tasks](tasks.md) (50) |
 | `task/before-hand-in` | [tools-handin](tools-handin.md) |  |
@@ -382,7 +381,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-authenticate-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-authorize-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-initialize-extras-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
-| `harness-acp-initialized-functions` | [acp](acp.md) |  |
+| `harness-acp-initialized-functions` | [acp](acp.md) | [acp](acp.md) |
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-chat-header-end-functions` | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md) | [ui-cache-warm](ui-cache-warm.md), [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
@@ -436,7 +435,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-update-hook` | [ui-version](ui-version.md), `harness.el` | [ui-version](ui-version.md) |
 | `harness-websearch-ready-functions` | [tools-web](tools-web.md) |  |
 | `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md) |
-| `kill-emacs-hook` |  | [agent](agent.md), [pet](pet.md), [provider-demo](provider-demo.md), [session](session.md), [tasks](tasks.md), [ui](ui.md) |
+| `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [session](session.md), [tasks](tasks.md), [ui](ui.md) |
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
 | `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), `compose-quote.el`, `change-review-ui.el` |
 | `pre-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) |

@@ -57,18 +57,14 @@ its way out is written to a process that is exiting."
 (defconst harness-server-test--init
   (concat ";; -*- lexical-binding: t -*-\n"
           "(with-eval-after-load 'harness-config\n"
-          "  (eval '(harness-defmethod config/test-block () \"Block 2 s.\" (sleep-for 2) \"done\") t)\n"
-          "  (eval '(harness-defmethod config/test-eval (code) \"Have the lent Emacs evaluate CODE.\"\n"
-          "     (harness-call 'emacs/request \"eval\" (list :code code :timeout 10 :maxChars 2000))) t))\n"
+          "  (eval '(harness-defmethod config/test-block () \"Block 2 s.\" (sleep-for 2) \"done\") t))\n"
           "(with-eval-after-load 'harness-tools-shell\n"
           "  (eval '(harness-defmethod config/test-tool (name input) \"Run tool NAME with INPUT, allowed.\"\n"
           "     (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 1)\n"
           "     (harness-call 'tools/execute nil (list :id \"t1\" :name name :input input))) t))\n")
   "Init file of the harness process in these tests.
 It defines `config/test-block', which blocks the process's thread for 2
-seconds, `config/test-eval', which has the Emacs lent to the harness
-evaluate code as emacs_eval does once its judge lets it, and
-`config/test-tool', which runs a tool, any call allowed.")
+seconds, and `config/test-tool', which runs a tool, any call allowed.")
 
 (defun harness-server-test--tool (request name &rest input)
   "Run tool NAME with INPUT in the harness process; return its result.
@@ -262,37 +258,17 @@ evaluation, which it never runs."
               (should (harness-json-true-p (plist-get r :is-error)))
               (should (string-search "never evaluates in the user's Emacs" (plist-get r :content)))
               (should (string-search "emacs_* tools" (plist-get r :content))))
+            ;; Nor is there a tool that would: a call of the one that
+            ;; did is a call of a tool that does not exist.
+            (let ((r (harness-server-test--tool #'harness-ui-request "emacs_eval" :code "(emacs-pid)")))
+              (should (harness-json-true-p (plist-get r :is-error)))
+              (should (string-prefix-p "Unknown tool emacs_eval" (plist-get r :content))))
             ;; The background Emacs is neither the UI's nor the harness's.
             (let ((c (plist-get (harness-server-test--tool #'harness-ui-request "elisp" :code "(emacs-pid)") :content)))
               (should (string-prefix-p "=> " c))
               (should-not (equal (format "=> %d" (emacs-pid)) c))
               (should-not (equal (format "=> %d" (process-id harness-ui--server)) c))))
         (kill-buffer buf)))))
-
-(ert-deftest harness-server-evaluated-code-calls-the-harness ()
-  "Code evaluated in the UI's Emacs for the harness, as emacs_eval has
-it, reads and changes the harness's state with `harness-call', though
-the methods are the harness process's alone: the calls reach it over
-the UI's connection, with Lisp arguments and values."
-  (harness-server-test-with-process
-    (harness-test-await (harness-ui-request "_harness/session/list") 30)
-    (let* ((cwd (expand-file-name "work/" harness-state-directory))
-           (code (format "%S"
-                         `(let ((before (length (harness-call 'session/list)))
-                                (made (harness-call 'session/create :cwd ,cwd
-                                                    :name "Made by evaluated code" :model "demo:scripted")))
-                            (list (- (length (harness-call 'session/list)) before)
-                                  (plist-get made :name)
-                                  (plist-get made :kind)
-                                  (harness-method-exists-p 'session/list))))))
-      (make-directory cwd)
-      (let ((r (harness-test-await (harness-ui-request "_harness/config/test-eval" (list :code code)) 30)))
-        (should (equal "(1 \"Made by evaluated code\" main nil)" (plist-get r :value))))
-      (should (member "Made by evaluated code"
-                      (mapcar (lambda (s) (plist-get s :name))
-                              (harness-test-await (harness-ui-request "_harness/session/list") 30)))))
-    (should-not (harness-method-exists-p 'session/list))
-    (harness-server-test--settle)))
 
 (ert-deftest harness-server-headless-runs-tools-with-no-emacs-lent ()
   "A harness process no Emacs is attached to -- headless, driven by a

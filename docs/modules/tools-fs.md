@@ -27,6 +27,25 @@ Every path is resolved with `harness-tools-resolve-path` against
 the session cwd and host, and every tool declares the paths it
 touches so the permission jail can judge them.
 
+Where they run.  The jail compares paths, once, in the harness
+process, which can reach everything; the use that follows can differ
+from what was compared.  So where the sandbox applies, the tools do
+not run in the harness at all: a call on a local path goes to a
+worker (lisp/harness-mcp-fs.el), an Emacs the harness starts in the
+session's sandbox through its MCP host, with the mounts a bash
+command of the session gets, and the handlers below run there,
+unchanged.  A path outside the mounts does not exist for the worker,
+whatever the permission chain decided.  A call on a path of another
+host (TRAMP), one where no sandbox applies (the policy is `off`, or
+`preferred` with no backend, as for bash), and one with
+`harness-tools-fs-jail` off run here, as they always did.  Where a
+call has to reach beyond the session's directories on purpose -- the
+harness's own files, a skills directory, a file the user's Emacs
+showed a definition in, a directory the user allowed for this call
+alone, a call the user approved after it was denied -- the worker is
+started with exactly those mounts added (see "Running in the
+sandbox"), and only for that call.
+
 Reads are guarded against context bombs: read_file trims the
 requested range to `harness-tools-max-output-chars` at a line
 boundary and says where to continue, other tools rely on the
@@ -73,8 +92,15 @@ by the agent, which owns that knowledge.
 - `harness-tools-fs-ffmpeg` — Program that read_file runs to make an image fit for a model to see.
 - `harness-tools-fs-image-max-bytes` — Largest image file, in bytes, that read_file shows a model as it is.
 - `harness-tools-fs-image-max-side` — Most pixels on a side of an image that read_file shows a model as it is.
+- `harness-tools-fs-jail` — Whether the file tools run in the session's sandbox where one applies.
 
 ## Uses
+
+### Methods it calls
+
+- `permission/exempt-reads` ([perms](perms.md)), when it is loaded
+- `permission/once-grants` ([perms](perms.md)), when it is loaded
+- `sandbox/confined-p` ([sandbox](sandbox.md)), when it is loaded
 
 ### Events it emits
 

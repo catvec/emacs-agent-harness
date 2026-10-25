@@ -331,9 +331,11 @@ can do anything, as it can for any package: the file system, which
 keeps the policy file out of the user's reach, is the boundary.  The
 harness process runs no code from the user's configuration beyond what
 it always did, and agents cannot evaluate Lisp in it (the `elisp` tool
-runs in a separate `emacs --batch`).  In the user's Emacs they can,
-through `emacs_eval`, unless `harness-emacs-eval` is off: a policy that
-sets `(harness-emacs-eval . nil)` keeps them out of it too.
+runs in a separate `emacs --batch`, in the session's sandbox).  Nor can
+they evaluate Lisp in the user's Emacs: the tool that did
+(`emacs_eval`, with its `harness-call` bridge into the harness) is
+removed, and the Emacs lends a fixed vocabulary of typed MCP tools
+instead (see docs/trust-model.md).
 
 Kept out of the first version, to keep it small:
 

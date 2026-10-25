@@ -34,13 +34,15 @@ add --lock'), its lock reason starting with
 and that matters because agents run git in a sandbox that shows only
 their own worktree: a `git worktree prune` there takes every other
 worktree for deleted and drops its registration, leaving its files
-without an index and every git command in it failing.  The merge
-module lifts the lock once the branch is merged (`worktree/unlock`),
-so merged worktrees can be pruned again; `worktree/remove` lifts the
-harness's lock itself.  Worktrees made before the harness locked them
-are locked once per repository when the harness starts
-(`worktree/lock-existing`).  Locks with another reason belong to
-someone else and are left alone.
+without an index and every git command in it failing.  The sandbox
+keeps the registrations of the worktrees it does not show read-only
+(see the sandbox module), so no command there drops them; the lock is
+a second line.  The merge module lifts the lock once the branch is
+merged (`worktree/unlock`), so merged worktrees can be pruned again;
+`worktree/remove` lifts the harness's lock itself.  Worktrees made
+before the harness locked them are locked once per repository when
+the harness starts (`worktree/lock-existing`).  Locks with another
+reason belong to someone else and are left alone.
 
 Merged worktrees.  The merge queue lifts a merged worktree's lock but
 leaves the directory, so the harness's worktrees accumulate.  A merge

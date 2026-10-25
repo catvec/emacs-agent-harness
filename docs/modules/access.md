@@ -46,8 +46,7 @@ held by the harness, not by a prompt:
 - the tools a session may not use go from its tool list (`agent/tools`)
   and a call to one is refused for good by a `permission/decide`
   stage at 4, before every other: tools turned off, and without the
-  network those of kind net, ssh and emacs_eval (which runs in the
-  user's Emacs, outside any sandbox), and bash and elisp unless the
+  network those of kind net and ssh, and bash and elisp unless the
   sandbox runs them offline (`tools/sandbox-options` `:network nil`);
 - a read-only session is one of `harness-readonly-register`'s: only
   the reading tools, and bash read-only and offline;

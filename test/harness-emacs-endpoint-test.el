@@ -18,15 +18,7 @@
 (defvar harness-acp-token)
 (defvar harness-model)
 (defvar harness-tools-max-output-chars)
-(defvar harness-emacs-eval)
 (defvar harness-emacs-endpoint--methods)
-(defvar harness-emacs-endpoint--evaluating)
-(defvar harness-emacs-endpoint--deferred-methods)
-(defvar harness-emacs-endpoint--eval-retry)
-(declare-function harness-emacs-eval-p "harness-emacs-endpoint" ())
-(declare-function harness-emacs-endpoint--eval "harness-emacs-endpoint" (params answer fail))
-(declare-function harness-emacs-endpoint--seconds "harness-emacs-endpoint" (value default max))
-(declare-function harness-emacs-endpoint-test--defined nil)
 (declare-function harness-tools-reason "harness-tools" (err))
 (declare-function harness-acp-add-client "harness-acp")
 (declare-function harness-acp-client-receive "harness-acp")
@@ -35,18 +27,6 @@
 (declare-function harness-acp-request "harness-acp")
 (declare-function harness-acp-respond-error "harness-acp")
 (declare-function harness-emacs-endpoint-handle "harness-emacs-endpoint")
-
-(defvar harness-emacs-endpoint-test--evaluations 0
-  "How many times test code evaluated in this Emacs.")
-
-(defvar harness-emacs-endpoint-test--after nil
-  "Set by test code that went on past where it should have been stopped.")
-
-(defvar harness-emacs-endpoint-test--order nil
-  "What test evaluations did, newest first.")
-
-(defvar harness-emacs-endpoint-test--inner nil
-  "The promise of an evaluation that test code asked for.")
 
 (defun harness-emacs-endpoint-test--allow (_decision next &rest _)
   "Permissive permission filter for the tests."
@@ -65,6 +45,17 @@ Each test then connects the clients it is about, and only those."
   (dolist (client (copy-sequence harness-acp--clients))
     (harness-acp-drop-client client)))
 
+(defun harness-emacs-endpoint-test--label (method params)
+  "Return what a test watching METHOD with PARAMS should see.
+An MCP message is labelled with the tool it calls, so a test can tell
+which tool an Emacs was asked for."
+  (if (equal method harness-emacs-endpoint-mcp-method)
+      (let* ((message (plist-get params :message))
+             (name (plist-get (plist-get message :params) :name)))
+        (format "%s/%s%s" method (plist-get message :method)
+                (if name (concat "/" name) "")))
+    method))
+
 (defun harness-emacs-endpoint-test--connect (lend)
   "Connect an in-process client; it lends this Emacs when LEND.
 Return (CONNECTION . SEEN): SEEN is a cons whose car lists the methods
@@ -76,7 +67,7 @@ harness's requests for its Emacs."
     (harness-acp-set-handler
      conn
      (lambda (method params respond)
-       (push method (car seen))
+       (push (harness-emacs-endpoint-test--label method params) (car seen))
        (unless (and lend (harness-emacs-endpoint-answer method params respond))
          (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
     (harness-test-await (harness-acp-initialize conn (and lend (harness-emacs-endpoint-client-capabilities))))
@@ -150,7 +141,7 @@ in the background as always, and the client gets no tool request."
               (should (equal emacs-version (plist-get (car attached) :version))))
             (should (string-search "harness-endpoint-lent"
                                    (plist-get (harness-emacs-endpoint-test--call "emacs_buffers") :content)))
-            (should (member "_harness/emacs/buffers" (car (cdr emacs))))
+            (should (member "_harness/emacs/mcp/tools/call/buffers" (car (cdr emacs))))
             (should-not (harness-emacs-endpoint-test--asked-p (cdr phone))))
         (kill-buffer buffer)
         (harness-acp-close (car phone))
@@ -171,13 +162,13 @@ the same file in every connected Emacs."
             (let ((r (harness-emacs-endpoint-test--call "emacs_windows")))
               (should-not (plist-get r :is-error))
               (should (string-search "FRAME" (plist-get r :content))))
-            (should (member "_harness/emacs/windows" (car (cdr a))))
-            (should-not (member "_harness/emacs/windows" (car (cdr b))))
+            (should (member "_harness/emacs/mcp/tools/call/windows" (car (cdr a))))
+            (should-not (member "_harness/emacs/mcp/tools/call/windows" (car (cdr b))))
             ;; Then B: the request follows the user, still to one Emacs.
             (harness-test-await (harness-acp-request (car b) "_harness/harness/version" nil))
             (harness-emacs-endpoint-test--call "emacs_windows")
-            (should (member "_harness/emacs/windows" (car (cdr b))))
-            (should (= 1 (cl-count "_harness/emacs/windows" (car (cdr a)) :test #'equal))))
+            (should (member "_harness/emacs/mcp/tools/call/windows" (car (cdr b))))
+            (should (= 1 (cl-count "_harness/emacs/mcp/tools/call/windows" (car (cdr a)) :test #'equal))))
         (harness-acp-close (car a))
         (harness-acp-close (car b))))))
 
@@ -209,10 +200,15 @@ shown its buffers, with what it likes."
   (harness-emacs-endpoint-test--setup)
   (harness-test-with-temp-state
     (let ((conn (harness-acp-connect nil)))
+      ;; The MCP handshake completes; the Emacs goes when a tool is called.
+      (harness-acp-set-handler
+       conn (lambda (method params respond)
+              (if (and (equal method harness-emacs-endpoint-mcp-method)
+                       (equal (plist-get (plist-get params :message) :method) "tools/call"))
+                  ;; It leaves instead of answering the call.
+                  (harness-acp-close conn)
+                (harness-emacs-endpoint-answer method params respond))))
       (harness-test-await (harness-acp-initialize conn (harness-emacs-endpoint-client-capabilities)))
-      (harness-acp-set-handler conn (lambda (method &rest _)
-                                      (when (string-prefix-p "_harness/emacs/" method)
-                                        (run-at-time 0 nil #'harness-acp-close conn))))
       (let ((r (harness-emacs-endpoint-test--call "emacs_buffers")))
         (should (plist-get r :is-error))
         (should (string-prefix-p "The user's Emacs disconnected before it answered." (plist-get r :content)))))))
@@ -282,14 +278,192 @@ that Emacs."
             (should (equal "*trace-output*" (plist-get answer :buffer)))
             (should (integerp (plist-get answer :lines))))
           (should-error (harness-emacs-endpoint-handle "trace" '(:action "eval" :symbol "car")))
-          (should-error (harness-emacs-endpoint-handle "shell" nil))
-          ;; The one request that evaluates code answers once it has
-          ;; run, through `harness-emacs-endpoint-answer' alone (see
-          ;; the eval tests below), never as data at once.
-          (should-not (assoc "eval" harness-emacs-endpoint--methods))
-          (should (assoc "eval" harness-emacs-endpoint--deferred-methods))
-          (let ((harness-emacs-eval t))
-            (should-error (harness-emacs-endpoint-handle "eval" '(:code "(+ 1 2)")))))
+          (should-error (harness-emacs-endpoint-handle "shell" nil)))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-emacs-endpoint-a-change-is-for-the-file-it-was-checked-for ()
+  "`insert' and `save' refuse a buffer that visits another file than the one named.
+The harness checks that the session may write the file a buffer visits
+before it asks to change the buffer, and says which file that was; the
+Emacs makes sure the buffer still visits it, so a buffer that came to
+visit another file between the check and the change is left alone.  A
+request that names no file is not checked, and the empty string stands
+for a buffer that visits none."
+  (harness-emacs-endpoint-test--setup)
+  (harness-test-with-temp-state
+    (let* ((root (file-name-as-directory (harness-test-temp-dir)))
+           (file (expand-file-name "checked.txt" root))
+           (other (expand-file-name "other.txt" root))
+           (visiting nil)
+           (none (generate-new-buffer "harness-endpoint-checked-none")))
+      (unwind-protect
+          (progn
+            (with-temp-file file (insert "one\n"))
+            (setq visiting (find-file-noselect file t))
+            (let ((name (buffer-name visiting)))
+              ;; The file it was checked for: the change is made.
+              (should (equal 1 (plist-get (harness-emacs-endpoint-handle
+                                           "insert" (list :name name :text "!" :file file))
+                                          :inserted)))
+              ;; Another file, or none, is not the file it was checked for.
+              (dolist (wrong (list other "" "/etc/passwd"))
+                (let ((err (should-error (harness-emacs-endpoint-handle
+                                          "insert" (list :name name :text "x" :file wrong)))))
+                  (should (string-search "not the file this change was checked for" (cadr err))))
+                (should-error (harness-emacs-endpoint-handle "save" (list :name name :file wrong))))
+              (should (equal "!one\n" (with-current-buffer visiting (buffer-string))))
+              (set-buffer-modified-p nil)
+              ;; A buffer that visits none matches the empty string only.
+              (should (equal 1 (plist-get (harness-emacs-endpoint-handle
+                                           "insert" (list :name "harness-endpoint-checked-none" :text "a" :file ""))
+                                          :inserted)))
+              (should-error (harness-emacs-endpoint-handle
+                             "insert" (list :name "harness-endpoint-checked-none" :text "b" :file file)))
+              (should (equal "a" (with-current-buffer none (buffer-string))))
+              ;; And a save writes the file it was checked for, nothing else.
+              (with-current-buffer visiting (goto-char (point-max)) (insert "two\n") (set-buffer-modified-p t))
+              (should-error (harness-emacs-endpoint-handle "save" (list :name name :file other)))
+              (should (equal "one\n" (harness-read-file file)))
+              (should (equal file (plist-get (harness-emacs-endpoint-handle "save" (list :name name :file file))
+                                             :path)))
+              (should (equal "!one\ntwo\n" (harness-read-file file)))
+              ;; Without a file in the request, nothing is checked.
+              (should (equal 1 (plist-get (harness-emacs-endpoint-handle
+                                           "insert" (list :name "harness-endpoint-checked-none" :text "c"))
+                                          :inserted)))))
+        (when (buffer-live-p visiting) (with-current-buffer visiting (set-buffer-modified-p nil)) (kill-buffer visiting))
+        (kill-buffer none)
+        (delete-directory root t)))))
+
+(defun harness-emacs-endpoint-test--log-buffer (name)
+  "Make buffer NAME hold 300 lines, with strings to look for in some.
+\"Naming failed\" is on lines 1, 51, 101, 151, 201 and 251, and
+\"rename done\" on 71, 141, 211 and 281."
+  (let ((buffer (generate-new-buffer name)))
+    (with-current-buffer buffer
+      (dotimes (i 300)
+        (insert (format "line %03d %s\n" (1+ i)
+                        (cond ((zerop (% i 50)) "Naming failed")
+                              ((zerop (% i 70)) "rename done")
+                              (t "plain"))))))
+    buffer))
+
+(defun harness-emacs-endpoint-test--lines-of (answer)
+  "Return the line numbers of the matches in ANSWER, a search."
+  (mapcar (lambda (m) (plist-get m :line)) (plist-get answer :matches)))
+
+(ert-deftest harness-emacs-endpoint-a-buffer-is-searched-and-read-from-its-end ()
+  "`buffer' gives the lines that hold given strings, or the last lines.
+The strings are looked for as they are, ignoring case, never as patterns
+\(a pattern written to backtrack would freeze this Emacs, which answers on
+its only thread); a search is bounded in what it looks through and in
+what it gives; and it asks for little: a few short strings of one line."
+  (harness-emacs-endpoint-test--setup)
+  (let ((buffer (harness-emacs-endpoint-test--log-buffer "harness-endpoint-search"))
+        (name "harness-endpoint-search"))
+    (unwind-protect
+        (progn
+          ;; From the end: the last lines, and the range a limit alone gives.
+          (let ((answer (harness-emacs-endpoint-handle "buffer" (list :name name :tail t :limit 3))))
+            (should (= 300 (plist-get answer :total)))
+            (should (= 298 (plist-get answer :first)))
+            (should (equal '("line 298 plain" "line 299 plain" "line 300 plain") (plist-get answer :lines))))
+          (should (= 201 (plist-get (harness-emacs-endpoint-handle "buffer" (list :name name :tail t :limit 100))
+                                    :first)))
+          (should (= 1 (plist-get (harness-emacs-endpoint-handle "buffer" (list :name name :tail t :limit 9999))
+                                  :first)))
+          ;; Lines that hold a string, with their numbers, whatever the case.
+          (let ((answer (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("NAMING")))))
+            (should (= 6 (plist-get answer :matchCount)))
+            (should (equal '(1 51 101 151 201 251) (harness-emacs-endpoint-test--lines-of answer)))
+            (should (equal "line 051 Naming failed" (plist-get (nth 1 (plist-get answer :matches)) :text)))
+            (should (equal 300 (plist-get answer :total)))
+            (should (= 1 (plist-get answer :searchedFrom)))
+            (should (equal '("NAMING") (plist-get answer :terms)))
+            (should (eq :false (plist-get answer :truncated))))
+          ;; Any of several, once each, in order.
+          (should (equal '(1 51 71 101 141 151 201 211 251 281)
+                         (harness-emacs-endpoint-test--lines-of
+                          (harness-emacs-endpoint-handle
+                           "buffer" (list :name name :contains '("naming" "Rename" "naming"))))))
+          ;; A limit takes the first matches, or with tail the last.
+          (let ((answer (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("naming" "rename") :limit 3))))
+            (should (equal '(1 51 71) (harness-emacs-endpoint-test--lines-of answer)))
+            (should (= 10 (plist-get answer :matchCount))))
+          (should (equal '(251 281)
+                         (harness-emacs-endpoint-test--lines-of
+                          (harness-emacs-endpoint-handle
+                           "buffer" (list :name name :contains '("naming" "rename") :limit 2 :tail t)))))
+          (let ((answer (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("naming") :limit 0))))
+            (should (= 6 (plist-get answer :matchCount)))
+            (should-not (plist-get answer :matches)))
+          ;; Nothing found is an answer.
+          (let ((answer (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("no such text")))))
+            (should (= 0 (plist-get answer :matchCount)))
+            (should-not (plist-get answer :matches)))
+          ;; Strings, not patterns: a dot is a dot, and a bracket breaks nothing.
+          (with-current-buffer buffer (goto-char (point-max)) (insert "a.b [x] a(b\naxb\n"))
+          (should (equal '(301) (harness-emacs-endpoint-test--lines-of
+                                 (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("a.b"))))))
+          (should (equal '(301) (harness-emacs-endpoint-test--lines-of
+                                 (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("[x]" "a(b"))))))
+          (should (equal '() (harness-emacs-endpoint-test--lines-of
+                              (harness-emacs-endpoint-handle "buffer" (list :name name :contains '(".*"))))))
+          ;; A buffer narrowed to a few lines is searched whole, and point stays.
+          (with-current-buffer buffer (goto-char 5) (narrow-to-region 1 30))
+          (should (equal '(281) (harness-emacs-endpoint-test--lines-of
+                                 (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("line 281"))))))
+          (should (= 5 (with-current-buffer buffer (point))))
+          ;; What is given back is bounded: a line is cut, and the characters
+          ;; stop at the budget, saying so.
+          (with-current-buffer buffer (widen) (goto-char (point-max))
+                               (insert (concat "long " (make-string 2000 ?x) "\n")))
+          (let ((answer (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("long ")))))
+            (should (= harness-emacs-endpoint--search-line-chars
+                       (length (plist-get (car (plist-get answer :matches)) :text)))))
+          (let ((answer (harness-emacs-endpoint-handle
+                         "buffer" (list :name name :contains '("line 0") :maxChars 120))))
+            (should (eq t (plist-get answer :truncated)))
+            (should (< 0 (length (plist-get answer :matches)) 10))
+            (should (< 10 (plist-get answer :matchCount))))
+          ;; A buffer that does not exist.
+          (should (equal '(:exists :false)
+                         (harness-emacs-endpoint-handle "buffer" '(:name "harness-endpoint-none" :contains ("x")))))
+          ;; What it asks for: a few short strings of one line.
+          (dolist (bad (list '("") '("a\nb") '("a\rb") (make-list 6 "x")
+                             (list (make-string 201 ?x)) 42 '(1 2)))
+            (should-error (harness-emacs-endpoint-handle "buffer" (list :name name :contains bad))))
+          (should (equal '(2) (harness-emacs-endpoint-test--lines-of
+                               (harness-emacs-endpoint-handle "buffer" (list :name name :contains "line 002"))))))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-emacs-endpoint-a-search-looks-through-a-bounded-end-of-the-buffer ()
+  "A search looks through the last stretch of a buffer and says from which line.
+So a very long buffer cannot keep this Emacs busy: the search of a
+buffer is bounded by what it looks through, not by what it finds."
+  (harness-emacs-endpoint-test--setup)
+  (let ((buffer (harness-emacs-endpoint-test--log-buffer "harness-endpoint-scan"))
+        (name "harness-endpoint-scan")
+        (everything (harness-emacs-endpoint-test--lines-of
+                     (let ((b (get-buffer "harness-endpoint-scan")))
+                       (ignore b) nil))))
+    (ignore everything)
+    (unwind-protect
+        (let ((full (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("naming" "rename")))))
+          (should (= 10 (plist-get full :matchCount)))
+          (should (= 1 (plist-get full :searchedFrom)))
+          ;; Looking through about the last fifth of it.
+          (let* ((harness-emacs-endpoint--search-scan-chars 1500)
+                 (answer (harness-emacs-endpoint-handle "buffer" (list :name name :contains '("naming" "rename")))))
+            (should (> (plist-get answer :searchedFrom) 200))
+            (should (< (plist-get answer :matchCount) 10))
+            (should (> (plist-get answer :matchCount) 0))
+            (should (cl-every (lambda (n) (>= n (plist-get answer :searchedFrom)))
+                              (harness-emacs-endpoint-test--lines-of answer)))
+            ;; The numbers are the buffer's own lines.
+            (should (member 281 (harness-emacs-endpoint-test--lines-of answer)))
+            (should (equal "line 281 rename done"
+                           (plist-get (car (last (plist-get answer :matches))) :text)))))
       (kill-buffer buffer))))
 
 (ert-deftest harness-emacs-endpoint-reads-are-bounded ()
@@ -329,337 +503,110 @@ ranges, a long line is cut, and a big value is printed only in part."
         (kill-buffer buffer)
         (harness-acp-close conn)))))
 
-;;;; Evaluating, when the user lets agents
+;;;; No request evaluates code
 
-(defun harness-emacs-endpoint-test--eval (code &rest params)
-  "Have the lent Emacs evaluate CODE with PARAMS, as emacs_eval asks it.
-Return its answer, or (failed MESSAGE) when it refused or ran nothing.
-The request reaches the Emacs as a real one does, from a timer, where
-quitting is inhibited."
-  (condition-case err
-      (harness-test-await (harness-call 'emacs/request "eval" (append (list :code code) params)) 20)
-    (error (list 'failed (harness-tools-reason err)))))
+;; The lent Emacs once answered an `eval' request too, which ran the code
+;; a model wrote in the user's own Emacs, outside every sandbox.  It does
+;; not any more; these tests keep it that way.
 
-(defvar harness-emacs-endpoint-test--conn nil
-  "The connection `harness-emacs-endpoint-test--with-eval' lends this Emacs on.")
+(defvar harness-emacs-endpoint-test--ran nil
+  "Set by code a test hands the lent Emacs to evaluate, if it ever runs.")
 
-(defmacro harness-emacs-endpoint-test--with-eval (&rest body)
-  "Run BODY with this Emacs lent to the harness, letting agents evaluate in it.
-`harness-emacs-eval' is set globally, as the settings page sets it,
-and put back after.  The connection it is lent on is
-`harness-emacs-endpoint-test--conn' meanwhile."
-  (declare (indent 0))
-  (let ((old (make-symbol "old")))
-    `(progn
-       (harness-emacs-endpoint-test--setup)
-       (harness-test-with-temp-state
-         (let ((harness-emacs-endpoint-test--conn (harness-test-connect-ui-client))
-               (,old (default-value 'harness-emacs-eval)))
-           (setq harness-emacs-endpoint-test--evaluations 0
-                 harness-emacs-endpoint-test--after nil
-                 harness-emacs-endpoint-test--order nil)
-           (setq-default harness-emacs-eval t)
-           (unwind-protect (progn ,@body)
-             (setq-default harness-emacs-eval ,old)
-             (harness-acp-close harness-emacs-endpoint-test--conn)))))))
+(declare-function harness-acp-error-value-p "harness-acp")
+(declare-function harness-acp-error-value-message "harness-acp")
 
-(ert-deftest harness-emacs-endpoint-eval-is-refused-unless-the-user-lets-agents ()
-  "On by default; turned off, the lent Emacs evaluates nothing, whatever
-the harness asks.  Only the global value counts: a buffer's own value
-turns it neither on nor off."
+(ert-deftest harness-emacs-endpoint-has-a-fixed-vocabulary-without-eval ()
+  "The lent Emacs answers eleven requests of data and bounded work, and none
+takes code to run: there is no `eval', no option that would turn one on,
+and none of the machinery that ran one is left."
   (require 'harness-emacs-endpoint)
-  (should (eq t (eval (car (get 'harness-emacs-eval 'standard-value)) t)))
-  (harness-emacs-endpoint-test--with-eval
-    (setq-default harness-emacs-eval nil)
-    (let ((r (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)")))
-      (should (eq 'failed (car r)))
-      (should (string-search "harness-emacs-eval" (cadr r)))
-      (should (string-search "off there" (cadr r))))
-    (with-temp-buffer
-      (setq-local harness-emacs-eval t)
-      (should-not (harness-emacs-eval-p))
-      (should (eq 'failed (car (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)")))))
-    (should (= 0 harness-emacs-endpoint-test--evaluations))
-    (setq-default harness-emacs-eval t)
-    (with-temp-buffer
-      (setq-local harness-emacs-eval nil)
-      (should (harness-emacs-eval-p)))))
+  (should (equal '("buffers" "windows" "buffer" "open" "insert" "save"
+                   "describe" "definition" "trace" "messages" "snapshot")
+                 (mapcar #'car harness-emacs-endpoint--methods)))
+  (should-not (assoc "eval" harness-emacs-endpoint--methods))
+  ;; Every request is answered at once: nothing is left to answer later.
+  (should-not (boundp 'harness-emacs-endpoint--deferred-methods))
+  ;; The option and its predicate are gone, not just off.
+  (should-not (fboundp 'harness-emacs-eval-p))
+  (should-not (boundp 'harness-emacs-eval))
+  (should-not (custom-variable-p 'harness-emacs-eval))
+  ;; Nor the guarded evaluation, or the bridge that let the code call
+  ;; the harness back.
+  (dolist (fn '(harness-emacs-endpoint--eval harness-emacs-endpoint--eval-run
+                harness-emacs-endpoint--eval-start harness-emacs-endpoint--forwarder
+                harness-acp-call-lisp))
+    (should-not (fboundp fn)))
+  (should-not (boundp 'harness-call-fallback-function)))
 
-(ert-deftest harness-emacs-endpoint-eval-answers-the-value-output-and-messages ()
-  "The code runs here, form by form with lexical binding, and changes
-this Emacs; the answer holds its printed value, what it printed and
-the messages it logged, each cut at the size the harness names."
-  (harness-emacs-endpoint-test--with-eval
-    (let ((r (harness-emacs-endpoint-test--eval
-              (concat "(cl-incf harness-emacs-endpoint-test--evaluations)\n"
-                      "(princ \"printed\")\n"
-                      "(message \"said %d\" 42)\n"
-                      "(let ((f (let ((x 5)) (lambda () x)))) (list (funcall f) \"two\" 'three))"))))
-      (should (equal "(5 \"two\" three)" (plist-get r :value)))
-      (should (equal "printed" (plist-get r :output)))
-      (should (equal "said 42" (plist-get r :messages)))
-      (should-not (plist-get r :error))
-      (should-not (plist-get r :stopped))
-      (should (numberp (plist-get r :seconds))))
-    (should (= 1 harness-emacs-endpoint-test--evaluations))
-    (unwind-protect
-        (progn
-          (harness-emacs-endpoint-test--eval "(defun harness-emacs-endpoint-test--defined () 'here)")
-          (should (eq 'here (funcall 'harness-emacs-endpoint-test--defined))))
-      (fmakunbound 'harness-emacs-endpoint-test--defined))
-    (let ((r (harness-emacs-endpoint-test--eval "(make-string 5000 ?x)" :maxChars 200)))
-      (should (< (length (plist-get r :value)) 300)))
-    (should-not harness-emacs-endpoint--evaluating)))
-
-(ert-deftest harness-emacs-endpoint-eval-reports-errors-and-refuses-prompts ()
-  "An error is part of the answer; the code may not prompt; code that is
-missing, too long or does not read runs not at all."
-  (harness-emacs-endpoint-test--with-eval
-    (let ((r (harness-emacs-endpoint-test--eval "(message \"before\") (error \"Boom %d\" 7)")))
-      (should (equal "Boom 7" (plist-get r :error)))
-      (should (equal "before" (plist-get r :messages)))
-      (should-not (plist-get r :stopped)))
-    (dolist (code '("(read-string \"Name: \")" "(y-or-n-p \"Sure? \")"))
-      (should (string-search "inhibited" (plist-get (harness-emacs-endpoint-test--eval code) :error))))
-    (let ((r (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations) (+ 1")))
-      (should (eq 'failed (car r)))
-      (should (string-search "does not read" (cadr r))))
-    (should (equal '(failed "Missing code") (harness-emacs-endpoint-test--eval "  ")))
-    (should (string-search "longer than" (cadr (harness-emacs-endpoint-test--eval
-                                                (concat "'" (make-string 100001 ?x))))))
-    (should (= 0 harness-emacs-endpoint-test--evaluations))))
-
-(ert-deftest harness-emacs-endpoint-eval-stops-code-that-waits ()
-  "Code that waits is stopped once it has waited what it may, by a timer
-of the evaluation's own that no `catch' or `with-timeout' in the code
-takes for its own; the harness names the time, within a bound."
-  (harness-emacs-endpoint-test--with-eval
-    (dolist (code '("(sleep-for 5)"
-                    "(accept-process-output nil 5)"
-                    "(catch 'harness-emacs-endpoint-test--tag (sit-for 5))"
-                    "(with-timeout (10 'late) (sleep-for 5))"))
-      (setq harness-emacs-endpoint-test--after nil)
-      (let* ((start (float-time))
-             (r (harness-emacs-endpoint-test--eval
-                 (concat "(cl-incf harness-emacs-endpoint-test--evaluations) " code
-                         " (setq harness-emacs-endpoint-test--after t)")
-                 :timeout 0.3)))
-        (should (equal "timeout" (plist-get r :stopped)))
-        (should-not (plist-get r :error))
-        (should (< (- (float-time) start) 3))
-        (should-not harness-emacs-endpoint-test--after)))
-    (should (= 4 harness-emacs-endpoint-test--evaluations))
-    (should-not harness-emacs-endpoint--evaluating)
-    (should (= 2 (harness-emacs-endpoint--seconds nil 2 10)))
-    (should (= 2 (harness-emacs-endpoint--seconds -1 2 10)))
-    (should (= 0.5 (harness-emacs-endpoint--seconds 0.5 2 10)))
-    (should (= 10 (harness-emacs-endpoint--seconds 100 2 10)))))
-
-(ert-deftest harness-emacs-endpoint-eval-stops-at-the-users-next-key ()
-  "The user's next key stops the code (input under `while-no-input'
-throws to `throw-on-input'), and so does C-g, which quits the code
-alone: `quit-flag' is clear after, so nothing else quits."
-  (harness-emacs-endpoint-test--with-eval
-    (let ((r (harness-emacs-endpoint-test--eval
-              "(cl-incf harness-emacs-endpoint-test--evaluations) (throw throw-on-input t) (setq harness-emacs-endpoint-test--after t)")))
-      (should (equal "input" (plist-get r :stopped)))
-      (should-not harness-emacs-endpoint-test--after))
-    (let ((r (harness-emacs-endpoint-test--eval
-              "(cl-incf harness-emacs-endpoint-test--evaluations) (signal 'quit nil) (setq harness-emacs-endpoint-test--after t)")))
-      (should (equal "quit" (plist-get r :stopped)))
-      (should-not harness-emacs-endpoint-test--after)
-      (should-not quit-flag))
-    ;; C-g can quit the code, though requests arrive where it cannot.
-    (should (equal "nil" (plist-get (harness-emacs-endpoint-test--eval "inhibit-quit") :value)))
-    (should (= 2 harness-emacs-endpoint-test--evaluations))
-    (should-not harness-emacs-endpoint--evaluating)))
-
-(ert-deftest harness-emacs-endpoint-eval-waits-while-the-user-types ()
-  "Code never starts while the user is typing: it waits for a pause, and
-runs nothing when none comes before the harness stops waiting."
-  (harness-emacs-endpoint-test--with-eval
-    (let ((checks 0) (start (float-time)))
-      (cl-letf (((symbol-function 'harness-emacs-endpoint--input-pending-p)
-                 (lambda () (<= (cl-incf checks) 3))))
-        (should (equal "1" (plist-get (harness-emacs-endpoint-test--eval
-                                       "(cl-incf harness-emacs-endpoint-test--evaluations)")
-                                      :value))))
-      (should (= 4 checks))
-      (should (>= (- (float-time) start) (* 3 harness-emacs-endpoint--eval-retry))))
-    (cl-letf (((symbol-function 'harness-emacs-endpoint--input-pending-p) (lambda () t)))
-      (let ((r (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)"
-                                                  :deadline (+ (float-time) 0.4) :host (system-name))))
-        (should (eq 'failed (car r)))
-        (should (string-search "typing" (cadr r)))))
-    (should (= 1 harness-emacs-endpoint-test--evaluations))))
-
-(ert-deftest harness-emacs-endpoint-eval-never-starts-once-the-harness-gave-up ()
-  "A request read after the harness stopped waiting for it runs nothing.
-The deadline is by the harness's clock, so it counts only on the
-harness's machine; there it also bounds how long the code may wait."
-  (harness-emacs-endpoint-test--with-eval
-    (let ((r (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)"
-                                                :deadline (- (float-time) 1) :host (system-name))))
-      (should (eq 'failed (car r)))
-      (should (string-search "stopped waiting" (cadr r))))
-    (should (= 0 harness-emacs-endpoint-test--evaluations))
-    (should (equal "1" (plist-get (harness-emacs-endpoint-test--eval
-                                   "(cl-incf harness-emacs-endpoint-test--evaluations)"
-                                   :deadline (- (float-time) 1) :host "elsewhere.invalid")
-                                  :value)))
-    (let* ((start (float-time))
-           (r (harness-emacs-endpoint-test--eval "(sleep-for 5)" :timeout 5
-                                                 :deadline (+ start 0.5) :host (system-name))))
-      (should (equal "timeout" (plist-get r :stopped)))
-      (should (< (- (float-time) start) 2)))))
-
-(ert-deftest harness-emacs-endpoint-eval-never-nests ()
-  "Code that waits lets other requests in, and a second evaluation waits
-for the first to end rather than run inside it; one that waits until
-the harness stops waiting runs nothing."
-  (harness-emacs-endpoint-test--with-eval
-    (setq harness-emacs-endpoint-test--inner nil)
-    (should (equal "(outer)"
-                   (plist-get (harness-emacs-endpoint-test--eval
-                               (concat "(setq harness-emacs-endpoint-test--inner"
-                                       "      (harness-call 'emacs/request \"eval\""
-                                       "                    '(:code \"(push 'inner harness-emacs-endpoint-test--order)\")))"
-                                       "(sleep-for 0.3)"
-                                       "(push 'outer harness-emacs-endpoint-test--order)"))
-                              :value)))
-    (should (harness-promise-p harness-emacs-endpoint-test--inner))
-    (should (equal "(inner outer)" (plist-get (harness-test-await harness-emacs-endpoint-test--inner) :value)))
-    (should (equal '(inner outer) harness-emacs-endpoint-test--order))
-    (let ((harness-emacs-endpoint--evaluating t))
-      (let ((r (harness-emacs-endpoint-test--eval "(push 'late harness-emacs-endpoint-test--order)"
-                                                  :deadline (+ (float-time) 0.3) :host (system-name))))
-        (should (eq 'failed (car r)))
-        (should (string-search "another evaluation" (cadr r)))))
-    (should (equal '(inner outer) harness-emacs-endpoint-test--order))))
-
-(ert-deftest harness-emacs-endpoint-eval-says-when-code-leaves-by-a-non-local-exit ()
-  "Code that throws past the evaluation fails the request, saying so,
-and leaves this Emacs free for the next one."
+(ert-deftest harness-emacs-endpoint-refuses-eval-as-any-unknown-request ()
+  "Asked to evaluate, the lent Emacs gives the error it gives any request
+it does not know, and runs nothing."
   (harness-emacs-endpoint-test--setup)
-  (let ((harness-emacs-eval t) (failed nil) (answered nil))
-    (catch 'harness-emacs-endpoint-test--away
-      (let ((inhibit-quit t))
-        (harness-emacs-endpoint--eval '(:code "(throw 'harness-emacs-endpoint-test--away 1)")
-                                      (lambda (r) (setq answered r))
-                                      (lambda (m) (setq failed m)))))
-    (should-not answered)
-    (should (string-search "non-local exit" failed))
-    (should-not harness-emacs-endpoint--evaluating)))
-
-(ert-deftest harness-emacs-endpoint-a-deferred-request-is-answered-once ()
-  "A request answered later gets one answer, whatever its method does."
-  (harness-emacs-endpoint-test--setup)
-  (let* ((responses nil)
-         (harness-emacs-endpoint--deferred-methods
-          (list (cons "twice" (lambda (_params answer fail)
-                                (funcall answer '(:first t))
-                                (funcall fail "second")
-                                (funcall answer '(:third t)))))))
-    (should (harness-emacs-endpoint-answer "_harness/emacs/twice" nil
+  (setq harness-emacs-endpoint-test--ran nil)
+  (let ((params (list :code "(setq harness-emacs-endpoint-test--ran t)"))
+        (responses nil))
+    (let ((err (should-error (harness-emacs-endpoint-handle "eval" params))))
+      (should (string-search "This Emacs answers no request eval" (error-message-string err))))
+    (should (harness-emacs-endpoint-answer "_harness/emacs/eval" params
                                            (lambda (r) (push r responses) t)))
-    (should (equal '((:first t)) responses))))
+    (should (= 1 (length responses)))
+    (should (harness-acp-error-value-p (car responses)))
+    (should (string-search "This Emacs answers no request eval"
+                           (harness-acp-error-value-message (car responses))))
+    (should-not harness-emacs-endpoint-test--ran)))
 
-;;;; The code's calls of the harness
-
-(defvar harness-acp-current-connection)
-(defvar harness-acp--inbox-held)
-(defvar harness-emacs-endpoint--forward-min-wait)
-(declare-function harness-acp-call-sync "harness-acp" (conn method params &optional timeout))
-(declare-function harness-emacs-endpoint--forwarder "harness-emacs-endpoint" (conn end))
-
-(ert-deftest harness-emacs-endpoint-eval-calls-the-harness-for-what-it-lacks ()
-  "The code's `harness-call' of a method this Emacs has none of goes to
-the harness over the connection the request came on, its arguments
-printed as Lisp, and waits no longer than the code may; the value comes
-back as it went, and errors as `harness-call' signals them.  A method
-this Emacs has is called here, as ever."
-  (harness-emacs-endpoint-test--with-eval
-    (let ((calls nil)
-          (answer (lambda () '(:value "(:answer 42 :status idle)"))))
-      (cl-letf (((symbol-function 'harness-acp-call-sync)
-                 (lambda (conn method params &optional timeout)
-                   (push (list conn method params timeout) calls)
-                   (funcall answer))))
-        (let ((r (harness-emacs-endpoint-test--eval
-                  "(harness-call 'session/test-forwarded '(:status idle) \"x\")" :timeout 2)))
-          (should (equal "(:answer 42 :status idle)" (plist-get r :value)))
-          (should-not (plist-get r :error)))
-        (should (= 1 (length calls)))
-        (pcase-let ((`(,conn ,method ,params ,timeout) (car calls)))
-          (should (eq harness-emacs-endpoint-test--conn conn))
-          (should (equal "_harness/harness/call" method))
-          (should (equal '(:method "session/test-forwarded" :args "((:status idle) \"x\")") params))
-          (should (< 1 timeout))
-          (should (<= timeout 2)))
-        ;; A call made as the code's time runs out still waits a little.
-        (funcall (harness-emacs-endpoint--forwarder harness-emacs-endpoint-test--conn (- (float-time) 5))
-                 'session/test-forwarded)
-        (should (= harness-emacs-endpoint--forward-min-wait (nth 3 (car calls))))
-        ;; Errors are signalled as `harness-call' signals them, for the
-        ;; code to handle.
-        (setq answer (lambda () (signal 'acp-error (list -32601 "Method not found: session/test-forwarded" nil))))
-        (should (equal "(none session/test-forwarded)"
-                       (plist-get (harness-emacs-endpoint-test--eval
-                                   (concat "(condition-case err (harness-call 'session/test-forwarded)"
-                                           "  (harness-no-such-method (list 'none (cadr err))))"))
-                                  :value)))
-        (setq answer (lambda () (signal 'acp-error (list -32603 "Harness error: \"No session x\"" nil))))
-        (should (equal "Harness error: \"session/test-forwarded: No session x\""
-                       (plist-get (harness-emacs-endpoint-test--eval "(harness-call 'session/test-forwarded)")
-                                  :error)))
-        ;; What this Emacs has, it calls itself.
-        (setq calls nil)
-        (unwind-protect
-            (progn
-              (harness-register-method 'session/test-here (lambda () 'here))
-              (should (equal "here" (plist-get (harness-emacs-endpoint-test--eval "(harness-call 'session/test-here)")
-                                               :value))))
-          (harness-unregister-method 'session/test-here))
-        (should-not calls)))))
-
-(ert-deftest harness-emacs-endpoint-eval-asks-the-harness-it-came-from ()
-  "A real round trip, to the harness in this Emacs: a method neither has
-signals `harness-no-such-method' in the code, which can handle it."
-  (harness-emacs-endpoint-test--with-eval
-    (let* ((calls nil)
-           (real (symbol-function 'harness-acp-call-sync)))
-      (cl-letf (((symbol-function 'harness-acp-call-sync)
-                 (lambda (&rest args) (push args calls) (apply real args))))
-        (let ((r (harness-emacs-endpoint-test--eval
-                  (concat "(condition-case err (harness-call 'session/test-nowhere 1)"
-                          "  (harness-no-such-method (list 'none (cadr err))))"))))
-          (should (equal "(none session/test-nowhere)" (plist-get r :value)))
-          (should-not (plist-get r :stopped))))
-      (should (= 1 (length calls)))
-      (should (equal "_harness/harness/call" (nth 1 (car calls))))
-      (should (equal '(:method "session/test-nowhere" :args "(1)") (nth 2 (car calls))))
-      (should-not harness-acp--inbox-held))))
-
-(ert-deftest harness-emacs-endpoint-eval-without-a-connection-calls-nothing-away ()
-  "Code evaluated for no connection, or one that closed, calls methods
-here only: one this Emacs lacks signals as it always did."
+(ert-deftest harness-emacs-endpoint-the-harness-cannot-ask-the-lent-emacs-to-evaluate ()
+  "A request to evaluate, sent as the harness sends the others, is refused
+by the lent Emacs: the promise rejects with its message, and the Emacs
+still answers the requests it knows."
   (harness-emacs-endpoint-test--setup)
-  (let ((harness-emacs-eval t) (harness-acp-current-connection nil)
-        (answered nil) (failed nil) (calls nil))
-    (cl-letf (((symbol-function 'harness-acp-call-sync)
-               (lambda (&rest args) (push args calls) '(:value "forwarded"))))
-      (harness-emacs-endpoint--eval
-       '(:code "(condition-case err (harness-call 'session/test-nowhere) (harness-no-such-method (list 'none (cadr err))))")
-       (lambda (r) (setq answered r))
-       (lambda (m) (setq failed m)))
-      (harness-test-wait (lambda () (or answered failed)) 5 "the evaluation")
-      (should-not failed)
-      (should (equal "(none session/test-nowhere)" (plist-get answered :value)))
-      (should-not calls))
-    (should-not (harness-emacs-endpoint--forwarder nil (+ (float-time) 5)))
-    (let ((conn (harness-acp-connect nil)))
-      (harness-acp-close conn)
-      (should-not (harness-emacs-endpoint--forwarder conn (+ (float-time) 5))))))
+  (harness-test-with-temp-state
+    (let ((conn (harness-test-connect-ui-client)))
+      (unwind-protect
+          (progn
+            (setq harness-emacs-endpoint-test--ran nil)
+            (let ((r (condition-case err
+                         (harness-test-await
+                          (harness-call 'emacs/request "eval"
+                                        (list :code "(setq harness-emacs-endpoint-test--ran t)"))
+                          20)
+                       (error (list 'failed (harness-tools-reason err))))))
+              (should (eq 'failed (car r)))
+              (should (string-search "Unknown tool: eval" (cadr r))))
+            (should-not harness-emacs-endpoint-test--ran)
+            (should (plist-get (harness-test-await (harness-call 'emacs/request "buffers" nil) 20)
+                               :buffers)))
+        (harness-acp-close conn)))))
+
+(ert-deftest harness-emacs-endpoint-still-advertises-the-emacs ()
+  "An Emacs lends itself as before: its version, process and host under
+`_harness.emacs', and none of ACP's own file or terminal capabilities.
+The advertisement offers no way to evaluate."
+  (require 'harness-emacs-endpoint)
+  (let* ((capabilities (harness-emacs-endpoint-client-capabilities))
+         (lent (plist-get capabilities :_harness))
+         (emacs (plist-get lent :emacs)))
+    (should (equal emacs-version (plist-get emacs :version)))
+    (should (equal (emacs-pid) (plist-get emacs :pid)))
+    (should (equal (system-name) (plist-get emacs :host)))
+    (should (equal '(:emacs) (cl-loop for (key _) on lent by #'cddr collect key)))
+    (should (equal '(:version :pid :host) (cl-loop for (key _) on emacs by #'cddr collect key)))
+    (should (eq :false (plist-get capabilities :terminal)))
+    (should (eq :false (plist-get (plist-get capabilities :fs) :readTextFile)))
+    (should (eq :false (plist-get (plist-get capabilities :fs) :writeTextFile)))))
+
+(ert-deftest harness-emacs-endpoint-an-init-file-that-still-sets-the-old-option-is-harmless ()
+  "`(setq harness-emacs-eval nil)' in an init file written before the
+option was removed sets a variable nothing reads: it defines no option,
+offers no tool and changes no answer."
+  (harness-emacs-endpoint-test--setup)
+  (unwind-protect
+      (dolist (value '(nil t))
+        (set 'harness-emacs-eval value)
+        (should-not (custom-variable-p 'harness-emacs-eval))
+        (should-not (harness-tool-get "emacs_eval"))
+        (should-error (harness-emacs-endpoint-handle "eval" '(:code "(+ 1 2)"))))
+    (makunbound 'harness-emacs-eval)))
 
 ;;;; Chores of the UI
 

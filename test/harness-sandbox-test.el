@@ -325,161 +325,287 @@ all deleted; staging anything would wreck its index."
     (should (string-match-p "committed" (plist-get r :stdout)))
     (should (string-empty-p (harness-sandbox-test--git root "status" "--porcelain")))))
 
-;;;; Refusing git worktree commands
+;;;; The other worktrees' registrations
+
+;; A command in the sandbox sees its own worktree, not the others, so git
+;; there takes them for deleted.  The registration of every worktree the
+;; sandbox does not show is mounted read-only, and no command line is read
+;; to refuse anything: these tests ask the kernel.
+
+(defun harness-sandbox-test--worktree-fixture ()
+  "Make a repository with worktrees under a temporary directory; return a plist.
+`:tmp' holds it all.  `:root' is the main checkout and `:own' the
+session's worktree, locked as the harness locks its worktrees; `:other'
+is another session's, locked too, `:merged' one that is not, as after
+its merge, and `:foreign' one outside the repository's tree; `:base' is
+a worktree the session made inside its own."
+  (let* ((tmp (harness-test-temp-dir))
+         (root (file-name-as-directory (expand-file-name "repo" tmp)))
+         (own (file-name-as-directory (expand-file-name ".worktrees/own" root)))
+         (other (file-name-as-directory (expand-file-name ".worktrees/other" root)))
+         (merged (file-name-as-directory (expand-file-name ".worktrees/merged" root)))
+         (foreign (file-name-as-directory (expand-file-name "foreign" tmp)))
+         (base (file-name-as-directory (expand-file-name ".test-logs/base" own))))
+    (make-directory root t)
+    (harness-sandbox-test--git root "init" "-q" "-b" "main")
+    (harness-sandbox-test--git root "config" "user.name" "Sandbox Test")
+    (harness-sandbox-test--git root "config" "user.email" "sandbox@example.invalid")
+    (harness-sandbox-test--git root "config" "commit.gpgsign" "false")
+    (harness-sandbox-test--git root "commit" "-q" "--allow-empty" "-m" "initial")
+    (harness-sandbox-test--git root "worktree" "add" "-q" "--lock" "--reason" "harness: task/own" "-b" "task/own" own)
+    (harness-sandbox-test--git root "worktree" "add" "-q" "--lock" "--reason" "harness: task/other" "-b" "task/other" other)
+    (harness-sandbox-test--git root "worktree" "add" "-q" "-b" "task/merged" merged)
+    (harness-sandbox-test--git root "worktree" "add" "-q" "-b" "foreign" foreign)
+    (harness-sandbox-test--git own "worktree" "add" "-q" "--detach" base)
+    (list :tmp tmp :root root :own own :other other :merged merged :foreign foreign :base base)))
 
 (defmacro harness-sandbox-test-with-worktrees (&rest body)
   "Run BODY in a repository with worktrees, sandboxed by a stand-in bwrap.
-Binds `root', `own' (the session's worktree, locked as the harness
-locks its worktrees), `other' (another session's, locked too),
-`merged' (unlocked, as after its merge), `foreign' (outside the
-repository) and `base' (a worktree the session made inside its own)."
+Binds `tmp', `root', `own', `other', `merged', `foreign' and `base' (see
+`harness-sandbox-test--worktree-fixture') and `admin', a function of a
+worktree's name returning its registration.  The command lines are
+built and looked at, nothing is run."
   (declare (indent 0))
   `(progn
      (harness-sandbox-test--setup)
-     (let* ((tmp (harness-test-temp-dir))
-            (root (file-name-as-directory (expand-file-name "repo" tmp)))
-            (own (file-name-as-directory (expand-file-name ".worktrees/own" root)))
-            (other (file-name-as-directory (expand-file-name ".worktrees/other" root)))
-            (merged (file-name-as-directory (expand-file-name ".worktrees/merged" root)))
-            (foreign (file-name-as-directory (expand-file-name "foreign" tmp)))
-            (base (file-name-as-directory (expand-file-name ".test-logs/base" own)))
+     (let* ((fixture (harness-sandbox-test--worktree-fixture))
+            (tmp (plist-get fixture :tmp)) (root (plist-get fixture :root))
+            (own (plist-get fixture :own)) (other (plist-get fixture :other))
+            (merged (plist-get fixture :merged)) (foreign (plist-get fixture :foreign))
+            (base (plist-get fixture :base))
+            (admin (lambda (name) (directory-file-name (expand-file-name (concat ".git/worktrees/" name) root))))
             (harness-sandbox-policy 'preferred)
             (harness-sandbox-backend 'auto))
-       (ignore merged foreign base)
-       (make-directory root t)
-       (harness-sandbox-test--git root "init" "-q" "-b" "main")
-       (harness-sandbox-test--git root "config" "user.name" "Sandbox Test")
-       (harness-sandbox-test--git root "config" "user.email" "sandbox@example.invalid")
-       (harness-sandbox-test--git root "config" "commit.gpgsign" "false")
-       (harness-sandbox-test--git root "commit" "-q" "--allow-empty" "-m" "initial")
-       (harness-sandbox-test--git root "worktree" "add" "-q" "--lock" "--reason" "harness: task/own" "-b" "task/own" own)
-       (harness-sandbox-test--git root "worktree" "add" "-q" "--lock" "--reason" "harness: task/other" "-b" "task/other" other)
-       (harness-sandbox-test--git root "worktree" "add" "-q" "-b" "task/merged" merged)
-       (harness-sandbox-test--git root "worktree" "add" "-q" "-b" "foreign" foreign)
-       (harness-sandbox-test--git own "worktree" "add" "-q" "--detach" base)
+       (ignore tmp root own other merged foreign base admin)
        (unwind-protect
            (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
              ,@body)
          (harness-sandbox-detect)
          (delete-directory tmp t)))))
 
-(ert-deftest harness-sandbox-refuses-git-worktree-prune ()
-  "`git worktree prune' is refused in the sandbox, however it is written."
-  (harness-sandbox-test-with-worktrees
-    (dolist (command '("git worktree prune"
-                       "git worktree prune -v --expire now"
-                       "git worktree remove --force .test-logs/base && git worktree prune"
-                       "git -C .. worktree prune"
-                       "/usr/bin/git --no-pager -c core.quotepath=off worktree prune"
-                       "cd sub; git worktree prune 2>&1 | tail"
-                       "bash -lc 'git worktree prune'"
-                       "sh -c \"cd /tmp && git worktree prune\""
-                       "echo $(git worktree prune)"
-                       "x=`git worktree prune`"
-                       "eval git worktree prune"
-                       "env GIT_TRACE=1 timeout 30 git worktree prune"
-                       "git -c alias.tidy='worktree prune' tidy"
-                       "git -c alias.tidy='!git worktree prune' tidy"
-                       "true\ngit worktree prune"))
-      (let ((refusal (harness-call 'sandbox/check-command own command own)))
-        (should refusal)
-        (should (string-match-p "\\``git worktree prune` is refused in the sandbox" (plist-get refusal :reason)))
-        (should (string-match-p "worktree/prune" (plist-get refusal :reason)))
-        (should (string-match-p "never `git worktree prune`" (plist-get refusal :hint)))))
-    ;; The session's own worktree is the default.
-    (should (harness-call 'sandbox/check-command own "git worktree prune"))
-    ;; Commands that only mention it, and the other worktree commands, run.
-    (dolist (command '("git commit -m \"Refuse git worktree prune in the sandbox\""
-                       "grep -rn 'git worktree prune' lisp/"
-                       "echo git worktree prune # not run"
-                       "git log --grep 'worktree prune'"
-                       "git worktree list --porcelain"
-                       "git worktree add --detach .test-logs/new HEAD"
-                       "git worktree lock --reason mine .test-logs/base"))
-      (should-not (harness-call 'sandbox/check-command own command own)))))
+(defmacro harness-sandbox-test-with-real-worktrees (&rest body)
+  "As `harness-sandbox-test-with-worktrees', but under the real bwrap, required.
+Skips where bwrap cannot start."
+  (declare (indent 0))
+  `(progn
+     (harness-sandbox-test--setup)
+     (skip-unless (executable-find "bwrap"))
+     (harness-sandbox-detect)
+     (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+     (let* ((fixture (harness-sandbox-test--worktree-fixture))
+            (tmp (plist-get fixture :tmp)) (root (plist-get fixture :root))
+            (own (plist-get fixture :own)) (other (plist-get fixture :other))
+            (merged (plist-get fixture :merged)) (foreign (plist-get fixture :foreign))
+            (base (plist-get fixture :base))
+            (admin (lambda (name) (directory-file-name (expand-file-name (concat ".git/worktrees/" name) root))))
+            (harness-sandbox-policy 'required))
+       (ignore tmp root own other merged foreign base admin)
+       (unwind-protect (progn ,@body)
+         (delete-directory tmp t)))))
 
-(ert-deftest harness-sandbox-refuses-touching-other-worktrees ()
-  "Unlocking, removing or moving a worktree is refused unless the session made it in its own."
-  (harness-sandbox-test-with-worktrees
-    (cl-flet ((check (command) (harness-call 'sandbox/check-command own command own)))
-      ;; A worktree the session made inside its own may go.
-      (dolist (command (list "git worktree remove .test-logs/base"
-                             "git worktree remove --force .test-logs/base 2>/dev/null"
-                             "git worktree unlock .test-logs/base"
-                             (format "git worktree remove %s" base)
-                             "git worktree move .test-logs/base .test-logs/moved"
-                             "cd .test-logs && git worktree remove -f base"
-                             "(cd /tmp); git worktree remove .test-logs/base"
-                             ;; By the end of its path, as git allows.
-                             "git worktree remove base"))
-        (should-not (check command)))
-      ;; Not the others, however they are named.
-      (dolist (case (list '("git worktree unlock ../other" "outside this session's worktree")
-                          '("git worktree unlock other" "outside this session's worktree")
-                          (list (format "git worktree remove -f -f %s" other) "outside")
-                          '("git -C ../other worktree remove ." "outside")
-                          '("git worktree remove 2>/dev/null ../other" "outside")
-                          ;; A cd in a subshell or a pipe does not carry on.
-                          '("(cd .test-logs); git worktree remove -f -f ../other" "outside")
-                          '("cd .test-logs | git worktree remove ../other" "outside")
-                          (list (format "git worktree remove %s" foreign) "outside")
-                          '("git worktree remove merged" "outside")
-                          '("git worktree move ../merged ../elsewhere" "outside")
-                          '("git worktree move .test-logs/base /tmp/away" "outside")
-                          '("git worktree unlock ." "own worktree")
-                          (list (format "git worktree remove %s" own) "own worktree")
-                          '("git worktree remove $WT" "cannot be told")
-                          '("git worktree remove ~/x" "cannot be told")
-                          '("cd - && git worktree remove base2" "cannot be told")
-                          '("ls -d .test-logs/* | xargs git worktree remove" "only when it runs")))
-        (let ((refusal (check (car case))))
-          (should refusal)
-          (should (string-match-p (regexp-quote (cadr case)) (plist-get refusal :reason)))
-          (should (string-match-p "worktree/prune" (plist-get refusal :reason))))))
-    ;; From the main checkout: the worktrees inside it that the harness locked.
-    (cl-flet ((check (command) (harness-call 'sandbox/check-command root command root)))
-      (should (string-match-p "the harness locked .*other (harness: task/other)"
-                              (plist-get (check "git worktree remove .worktrees/other") :reason)))
-      (should (check "git worktree unlock other"))
-      (should-not (check "git worktree remove .worktrees/merged"))
-      (should (check "git worktree remove ../foreign")))))
+(defun harness-sandbox-test--run-in (dir script)
+  "Run the shell SCRIPT in DIR under the real sandbox; return its result plist.
+Skips the test where bwrap cannot start."
+  (let* ((cmd (harness-call 'sandbox/wrap dir (list "sh" "-c" script)))
+         (r (harness-await (harness-run-command cmd :cwd dir :timeout 60))))
+    (when (and (not (eql 0 (plist-get r :exit))) (string-match-p "bwrap:" (plist-get r :stderr)))
+      (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get r :stderr)))))
+    r))
 
-(ert-deftest harness-sandbox-guard-only-when-confined ()
-  "Without the sandbox git sees every worktree, so nothing is refused."
+(ert-deftest harness-sandbox-worktree-registrations-are-mounted-read-only ()
+  "The registration of each worktree the command is not shown is read-only.
+From the session's worktree they are those of the other sessions', the
+merged one's and the one outside the repository; its own, and the one
+it made inside its own directory, stay writable."
   (harness-sandbox-test-with-worktrees
-    (should (harness-call 'sandbox/check-command own "git worktree prune" own))
-    (let ((harness-sandbox-policy 'off))
-      (should-not (harness-call 'sandbox/check-command own "git worktree prune" own)))
-    (should-not (harness-call 'sandbox/check-command "/ssh:example.invalid:/srv/" "git worktree prune"))
-    (harness-sandbox-test-with-executables nil
-      (should-not (harness-call 'sandbox/check-command own "git worktree prune" own)))))
+    (let* ((cmd (harness-call 'sandbox/wrap own '("true")))
+           (common (directory-file-name (expand-file-name ".git" root)))
+           (bound (lambda (name) (harness-sandbox-test--subseq-p
+                                  (list "--ro-bind" (funcall admin name) (funcall admin name)) cmd))))
+      (dolist (name '("other" "merged" "foreign"))
+        (should (funcall bound name)))
+      (dolist (name '("own" "base"))
+        (should-not (funcall bound name)))
+      ;; Over the writable git directory, after what makes it writable and
+      ;; the protected files, so they win.
+      (let ((writable (cl-position common cmd :test #'equal))
+            (hooks (cl-position (concat common "/hooks") cmd :test #'equal))
+            (first (cl-position (funcall admin "other") cmd :test #'equal)))
+        (should (< writable hooks first (cl-position "--unshare-pid" cmd :test #'equal))))
+      ;; A read-only command has the whole git directory read-only already.
+      (let ((cmd (harness-call 'sandbox/wrap own '("true") :read-only t)))
+        (should (harness-sandbox-test--subseq-p (list "--ro-bind" common common) cmd))
+        (should-not (cl-some (lambda (name) (member (funcall admin name) cmd)) '("other" "merged" "foreign")))))))
 
-(ert-deftest harness-sandbox-bwrap-real-prune-keeps-locked-worktrees ()
-  "Under the real bwrap, a prune from one worktree drops the unlocked others, never a locked one."
+(ert-deftest harness-sandbox-systemd-and-mxc-keep-the-registrations-too ()
+  "systemd-run binds them read-only, MXC lists them among its read-only paths."
+  (harness-sandbox-test-with-worktrees
+    (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+      (let ((cmd (harness-call 'sandbox/wrap own '("true"))))
+        (dolist (name '("other" "merged" "foreign"))
+          (should (member (concat "BindReadOnlyPaths=" (funcall admin name)) cmd)))
+        (dolist (name '("own" "base"))
+          (should-not (member (concat "BindReadOnlyPaths=" (funcall admin name)) cmd)))))
+    (let* ((harness-sandbox--mxc-system-dirs nil)
+           (harness-sandbox-extra-read-only-dirs nil)
+           (real (lambda (name) (harness-sandbox-test--real (funcall admin name))))
+           (config (harness-sandbox-test--mxc-config
+                    (harness-sandbox--mxc-command "mxc-exec-mac" own '("true"))))
+           (ro (harness-plist-get-in config '(:filesystem :readonlyPaths)))
+           (rw (harness-plist-get-in config '(:filesystem :readwritePaths))))
+      (dolist (name '("other" "merged" "foreign"))
+        (should (member (funcall real name) ro))
+        (should-not (member (funcall real name) rw)))
+      (dolist (name '("own" "base"))
+        (should-not (member (funcall real name) ro)))
+      ;; Read-only has the whole git directory read-only; no extra paths.
+      (let ((ro (harness-plist-get-in (harness-sandbox-test--mxc-config
+                                       (harness-sandbox--mxc-command "mxc-exec-mac" own '("true") :read-only t))
+                                      '(:filesystem :readonlyPaths))))
+        (should-not (member (funcall real "other") ro))))))
+
+(ert-deftest harness-sandbox-a-main-checkout-keeps-the-registrations-of-worktrees-it-does-not-hold ()
+  "In the main checkout the git directory is inside the working directory.
+The worktrees under it are shown; the one outside is not, and its
+registration is read-only over the writable git directory."
+  (harness-sandbox-test-with-worktrees
+    (let ((cmd (harness-call 'sandbox/wrap root '("true"))))
+      (dolist (name '("own" "other" "merged" "base"))
+        (should-not (member (funcall admin name) cmd)))
+      (should (harness-sandbox-test--subseq-p
+               (list "--ro-bind" (funcall admin "foreign") (funcall admin "foreign")) cmd)))))
+
+(ert-deftest harness-sandbox-a-worktree-that-is-not-certainly-shown-is-not-shown ()
+  "A registration that does not say where its worktree is, or whose
+worktree the sandbox would not find where it is recorded, is kept: the
+safe answer.  One recorded inside a writable directory that was granted
+is shown; one inside a directory that is only readable is not."
+  (harness-sandbox-test-with-worktrees
+    (let* ((worktrees (expand-file-name ".git/worktrees" root))
+           (granted (file-name-as-directory (expand-file-name "granted" tmp)))
+           (readable (file-name-as-directory (expand-file-name "readable" tmp)))
+           (elsewhere (file-name-as-directory (expand-file-name "elsewhere" tmp)))
+           (register (lambda (name recorded)
+                       (let ((dir (expand-file-name name worktrees)))
+                         (make-directory dir t)
+                         (when recorded
+                           (with-temp-file (expand-file-name "gitdir" dir)
+                             (insert (directory-file-name recorded) "/.git\n")))
+                         dir)))
+           (bound (lambda (dir cmd)
+                    (harness-sandbox-test--subseq-p (list "--ro-bind" dir dir) cmd))))
+      (dolist (d (list granted readable elsewhere (expand-file-name "x" elsewhere)))
+        (make-directory d t))
+      ;; A link in the working directory that leads out of what is mounted.
+      (make-symbolic-link (directory-file-name elsewhere) (expand-file-name "link" own))
+      (let ((nogitdir (funcall register "no-gitdir" nil))
+            (empty (funcall register "empty" nil))
+            (linked (funcall register "linked" (expand-file-name "link/x" own)))
+            (dotdot (funcall register "dotdot" (concat own "../../../elsewhere/x")))
+            (inside (funcall register "inside" (expand-file-name "somewhere/new" own)))
+            (in-granted (funcall register "in-granted" (expand-file-name "wt" granted)))
+            (in-readable (funcall register "in-readable" (expand-file-name "wt" readable)))
+            (cmd (harness-call 'sandbox/wrap own '("true") :writable (list granted) :readable (list readable))))
+        (with-temp-file (expand-file-name "gitdir" empty) (insert "\n"))
+        (should (funcall bound nogitdir cmd))
+        (should (funcall bound empty cmd))
+        ;; Inside the working directory by its name, but the link leads out of
+        ;; what the sandbox mounts: git would find nothing there.
+        (should (funcall bound linked cmd))
+        (should (funcall bound dotdot cmd))
+        (should (funcall bound in-readable cmd))
+        ;; Where git would find it, or find it gone.
+        (should-not (funcall bound inside cmd))
+        (should-not (funcall bound in-granted cmd))))))
+
+(ert-deftest harness-sandbox-has-no-reading-of-command-lines ()
+  "Nothing in the sandbox reads a command line to refuse it any more."
   (harness-sandbox-test--setup)
-  (skip-unless (executable-find "bwrap"))
-  (harness-sandbox-detect)
-  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
-  (let* ((repo (harness-sandbox-test--worktree))
-         (root (car repo))
-         (wt (cdr repo))
-         (locked (file-name-as-directory (expand-file-name ".worktrees/locked" root)))
-         (plain (file-name-as-directory (expand-file-name ".worktrees/plain" root)))
-         (harness-sandbox-policy 'required))
-    (harness-sandbox-test--git root "worktree" "add" "-q" "--lock" "--reason" "harness: locked" "-b" "locked" locked)
-    (harness-sandbox-test--git root "worktree" "add" "-q" "-b" "plain" plain)
-    ;; The guard refuses it ...
-    (should (harness-call 'sandbox/check-command wt "git worktree prune -v"))
-    ;; ... and should it run anyway, the lock keeps the worktree.
-    (let ((r (harness-await (harness-run-command (harness-call 'sandbox/wrap wt '("git" "worktree" "prune" "-v"))
-                                                 :cwd wt :timeout 20))))
-      (when (and (not (eql 0 (plist-get r :exit))) (string-match-p "bwrap:" (plist-get r :stderr)))
-        (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get r :stderr)))))
+  (should-not (harness-method-exists-p 'sandbox/check-command))
+  (should-not (fboundp 'harness-sandbox--git-worktree-calls))
+  (should-not (fboundp 'harness-sandbox--shell-parse))
+  (should-not (boundp 'harness-sandbox-worktree-hint))
+  (should (harness-method-exists-p 'sandbox/confined-p)))
+
+(ert-deftest harness-sandbox-bwrap-real-worktree-commands-change-nothing ()
+  "Under the real bwrap, the worktree commands cannot touch the others.
+Prune, remove, move, lock and unlock of another session's worktree, of
+the merged one and of the one outside the repository run against the
+registrations as the sandbox shows them, and nothing of them changes on
+the machine: their registrations, their locks, their files.  What the
+session made in its own directory it can remove, and it still commits."
+  (harness-sandbox-test-with-real-worktrees
+    (let ((r (harness-sandbox-test--run-in
+              own
+              (concat "git worktree prune -v 2>&1; "
+                      "git worktree unlock ../other 2>&1; "
+                      "git worktree lock --reason mine ../merged 2>&1; "
+                      "git worktree move ../merged ../moved 2>&1; "
+                      "git worktree remove -f -f ../other 2>&1; "
+                      "git worktree remove -f ../merged 2>&1; "
+                      (format "git worktree remove -f %s 2>&1; " (shell-quote-argument foreign))
+                      "git worktree add -q --detach .scratch/new HEAD 2>&1 && echo added; "
+                      "git worktree remove .scratch/new 2>&1 && echo removed-new; "
+                      "git worktree remove -f .test-logs/base 2>&1 && echo removed-base; "
+                      "echo change > f && git add f && git -c commit.gpgsign=false commit -q -m inside && echo committed"))))
       (should (eql 0 (plist-get r :exit)))
-      (should (string-match-p "worktrees/plain" (plist-get r :stderr)))
-      (should-not (string-match-p "worktrees/locked" (plist-get r :stderr))))
-    (should (equal "locked\n" (harness-sandbox-test--git locked "branch" "--show-current")))
-    (should-error (harness-sandbox-test--git plain "status"))))
+      (should (string-match-p "^added$" (plist-get r :stdout)))
+      (should (string-match-p "^removed-new$" (plist-get r :stdout)))
+      (should (string-match-p "^removed-base$" (plist-get r :stdout)))
+      (should (string-match-p "^committed$" (plist-get r :stdout))))
+    ;; The registrations of the others survive, with their locks ...
+    (dolist (name '("other" "merged" "foreign" "own"))
+      (should (file-regular-p (expand-file-name "gitdir" (funcall admin name)))))
+    (should (equal "harness: task/other"
+                   (string-trim (with-temp-buffer
+                                  (insert-file-contents (expand-file-name "locked" (funcall admin "other")))
+                                  (buffer-string)))))
+    (should-not (file-exists-p (expand-file-name "locked" (funcall admin "merged"))))
+    ;; ... and their files stay where they are, with an index.
+    (dolist (wt (list other merged foreign))
+      (should (file-regular-p (expand-file-name ".git" wt)))
+      (should (equal "" (harness-sandbox-test--git wt "status" "--porcelain"))))
+    (should-not (file-exists-p (expand-file-name ".worktrees/moved" root)))
+    ;; What the session made is gone, and its own commit is there.
+    (should-not (file-exists-p (funcall admin "base")))
+    (should (equal "inside\n" (harness-sandbox-test--git own "log" "-1" "--format=%s")))
+    (should (= 5 (cl-count "worktree" (split-string (harness-sandbox-test--git root "worktree" "list" "--porcelain") "[ \n]" t)
+                           :test #'equal)))))
+
+(ert-deftest harness-sandbox-bwrap-real-prune-drops-only-what-is-really-gone ()
+  "From the main checkout, a prune drops a registration whose worktree is
+gone from inside the working directory, as it should; the worktree
+outside, which exists but is not in the sandbox, is kept."
+  (harness-sandbox-test-with-real-worktrees
+    (delete-directory merged t)
+    ;; What git says of the one it cannot delete is its own business; what
+    ;; is left on the machine is the test.
+    (harness-sandbox-test--run-in root "git worktree prune -v 2>&1; echo end")
+    (should-not (file-exists-p (funcall admin "merged")))
+    (dolist (name '("own" "other" "foreign"))
+      (should (file-directory-p (funcall admin name))))
+    (should (equal "foreign\n" (harness-sandbox-test--git foreign "branch" "--show-current")))))
+
+(ert-deftest harness-sandbox-bwrap-real-granted-repository-keeps-its-registrations ()
+  "A repository the session was granted, beside its own directory, is covered.
+Its worktrees are not in the sandbox either, and `git -C' reaches the
+git directory the grant makes writable."
+  (harness-sandbox-test-with-real-worktrees
+    (let* ((cwd (file-name-as-directory (expand-file-name "scratch" tmp)))
+           (script (format "git -C %s worktree prune -v 2>&1; git -C %s worktree remove -f %s 2>&1; echo end"
+                           (shell-quote-argument root) (shell-quote-argument root)
+                           (shell-quote-argument foreign))))
+      (make-directory cwd t)
+      (let* ((cmd (harness-call 'sandbox/wrap cwd (list "sh" "-c" script) :writable (list root)))
+             (r (harness-await (harness-run-command cmd :cwd cwd :timeout 60))))
+        (when (and (not (eql 0 (plist-get r :exit))) (string-match-p "bwrap:" (plist-get r :stderr)))
+          (ert-skip "bwrap cannot start here"))
+        (should (string-match-p "^end$" (plist-get r :stdout))))
+      ;; The granted repository's own worktrees are inside it, so they
+      ;; are shown; the foreign one is outside, and survives.
+      (dolist (name '("own" "other" "merged" "foreign"))
+        (should (file-directory-p (funcall admin name))))
+      (should (file-regular-p (expand-file-name ".git" foreign))))))
 
 ;;;; Directories shown read-only
 
@@ -1825,11 +1951,14 @@ HEAD are not; read-only, the whole of it is; git has the commit identity."
             (should (equal (list (harness-sandbox-test--real wt) common)
                            (harness-plist-get-in config '(:filesystem :readonlyPaths))))
             (should (equal '("Sandbox Test") (harness-sandbox-test--mxc-env config "GIT_AUTHOR_NAME"))))
-          ;; A main checkout needs nothing extra: its .git is inside it.
+          ;; A main checkout needs no git directory of its own: its .git is
+          ;; inside it.  Only the registration of its worktree, which lies
+          ;; outside it and so is not shown to the command, is read-only.
           (let ((config (funcall build (car repo))))
             (should (equal (list (harness-sandbox-test--real (car repo)))
                            (harness-plist-get-in config '(:filesystem :readwritePaths))))
-            (should-not (harness-plist-get-in config '(:filesystem :readonlyPaths)))))
+            (should (equal (list (harness-sandbox-test--real (expand-file-name ".git/worktrees/wt" (car repo))))
+                           (harness-plist-get-in config '(:filesystem :readonlyPaths))))))
       (delete-directory (file-name-directory (directory-file-name (car repo))) t))))
 
 (ert-deftest harness-sandbox-mxc-wrap ()

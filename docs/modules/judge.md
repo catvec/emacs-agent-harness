@@ -2,7 +2,7 @@
 
 # judge
 
-Judges: one-off questions to the simple tier of a session's model, read as a decision, with a few lookups that only read (emacs_eval's speed judge, event watches).
+Judges: one-off questions to the simple tier of a session's model, read as a decision, with a few lookups that only read (event watches).
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-judge.el](../../lisp/modules/harness-judge.el)
@@ -12,14 +12,12 @@ Judges: one-off questions to the simple tier of a session's model, read as a dec
 ## About
 
 A judge is a one-off question to the simple tier of a session's
-model, whose short reply the caller reads as a decision: emacs_eval
-(tools-emacs-eval) asks one whether code returns at once before it
-runs the code in the user's Emacs, and an event watch (tools-events)
-asks one what an event that came in means for the session watching
-it.  A judge is asked as the auto-mode permission judge is
-(lisp/modules/harness-perms.el): `:ephemeral` requests, which bring
-no earlier conversation and keep none, without thinking, with a
-small output budget.
+model, whose short reply the caller reads as a decision: an event
+watch (tools-events) asks one what an event that came in means for
+the session watching it.  A judge is asked as the auto-mode
+permission judge is (lisp/modules/harness-perms.el): `:ephemeral`
+requests, which bring no earlier conversation and keep none, without
+thinking, with a small output budget.
 
 `harness-judge-ask` asks one and returns a promise of its answer,
 which never rejects: the value the caller's parser found in the
@@ -28,13 +26,12 @@ without a value, no answer in time).  A reply its output budget cut
 off before it held a value is asked for once more, with a larger
 budget.  `harness-judge-model` says which model a judge asks.
 
-A judge may be given tools to look things up before it answers:
-emacs_eval's judge looks up the functions and variables the code
-uses that it does not know, as the user's Emacs has them.  Lookups
-only read.  They run here as plain functions, outside the permission
-chain and every session's chat, and a judge makes a few at most
-(`:max-lookups`): a call past that budget, or of a tool the judge was
-not given, gets an error result that tells it so, and runs nothing.
+A judge may be given tools to look things up before it answers (the
+event watches' classifier is given none).  Lookups only read.  They
+run here as plain functions, outside the permission chain and every
+session's chat, and a judge makes a few at most (`:max-lookups`): a
+call past that budget, or of a tool the judge was not given, gets an
+error result that tells it so, and runs nothing.
 Both kinds of provider loop work:
 
 - A provider that runs the tool loop itself (Claude Code, Copilot)

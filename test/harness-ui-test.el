@@ -1968,6 +1968,25 @@ agenda or Embark for instance."
       (should (equal "Access ~/notes/" s))
       (should (eq 'harness-tool-title-face (get-text-property 0 'face s))))))
 
+(ert-deftest harness-ui-tools-a-call-of-a-removed-tool-still-renders ()
+  "A transcript from before emacs_eval was removed still renders its calls.
+The tool is gone from `tools/list', so the cache does not know it: the
+call reads as the name it was made under, and the title it was recorded
+with is shown as it is."
+  (harness-ui-test-with-tools '((:name "read_file" :label "Read file"))
+    (should (equal "emacs_eval" (harness-ui-tool-label "emacs_eval")))
+    (should (equal '("emacs_eval" . nil) (harness-ui-tool-title-parts "emacs_eval" nil)))
+    ;; Recorded with the label it had.
+    (should (equal '(nil . "Evaluate in Emacs: (+ 1 2)")
+                   (harness-ui-tool-title-parts "emacs_eval" "Evaluate in Emacs: (+ 1 2)")))
+    (should (equal "Evaluate in Emacs: (+ 1 2)"
+                   (harness-ui-tool-title "emacs_eval" "Evaluate in Emacs: (+ 1 2)")))
+    ;; Recorded with the name, as before tools had labels.
+    (should (equal "emacs_eval: (+ 1 2)" (harness-ui-tool-title "emacs_eval" "emacs_eval (+ 1 2)")))
+    (should (equal "Evaluate in Emacs: (+ 1 2)"
+                   (substring-no-properties
+                    (harness-ui-tool-title-string "emacs_eval" "Evaluate in Emacs: (+ 1 2)"))))))
+
 (ert-deftest harness-ui-tools-are-fetched-once-per-connection ()
   "Every tool's spec is fetched once, again after a reload or reconnect."
   (harness-ui-test-with-tools nil

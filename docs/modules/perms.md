@@ -2,7 +2,7 @@
 
 # perms
 
-Directory jail, directory requests, sandbox guard, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls.
+Directory jail, directory requests, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-perms.el](../../lisp/modules/harness-perms.el)
@@ -20,8 +20,6 @@ decision:
    5 dir-request      request_directory_access: the user's answer decides
    6 away-request     set_non_interactive: turning it on, the user's
                       answer decides; turning it off needs none
-   7 sandbox-guard    shell commands the sandbox would make destructive
-                      (`git worktree prune` and the like) are refused
    8 supervisor       a plugin's stage, not this module's (see below): a
                       session in supervisor mode is denied, for good,
                       every tool but the ones it plans and coordinates
@@ -244,6 +242,9 @@ needs from them are looked up with `harness-method-exists-p`.
 - `permission/approve-denied` (session-id handle) — Approve the denied call HANDLE of SESSION-ID, for the user.
 - `permission/denied-note` (session-id request) — Return what a denial of REQUEST tells SESSION-ID's agent about the user.
 - `permission/dirs` (session-id) — Return the directories SESSION-ID may touch as (:dir :source :revocable).
+- `permission/exempt-reads` (session-id tool paths) — Return those of PATHS that TOOL, for SESSION-ID, may read outside its roots.
+- `permission/once-grants` (call-id) — Return the directory grants the user gave the call CALL-ID alone.
+- `permission/path-writable-p` (session-id path) — Return non-nil when PATH lies in a directory SESSION-ID may write.
 - `permission/pending` (session-id) — Return the permission requests of SESSION-ID still waiting for an answer.
 - `permission/redo` (session-id node-id) — Redo the lasting answer that note NODE-ID of SESSION-ID tells of, once undone.
 - `permission/reveal-file` (session-id file) — Let SESSION-ID's calls that only read read FILE from now on.
@@ -287,7 +288,6 @@ needs from them are looked up with `harness-method-exists-p`.
 - `decision/record` ([decisions](decisions.md)), when it is loaded
 - `provider/complete` ([provider](provider.md)), when it is loaded
 - `provider/tier-model` ([provider](provider.md)), when it is loaded
-- `sandbox/check-command` ([sandbox](sandbox.md)), when it is loaded
 - `sandbox/confined-p` ([sandbox](sandbox.md)), when it is loaded
 - `session/append` ([session](session.md)), when it is loaded
 - `session/exists-p` ([session](session.md)), when it is loaded
@@ -319,6 +319,7 @@ needs from them are looked up with `harness-method-exists-p`.
 - `session/deleted` → `harness-perms--forget-decided-by`
 - `session/deleted` → `harness-perms--forget-revealed`
 - `session/updated` → `harness-perms--on-session-updated`
+- `tools/finished` → `harness-perms--forget-once`
 
 ### Events it emits
 
@@ -334,7 +335,6 @@ needs from them are looked up with `harness-method-exists-p`.
 - `permission/decide` at 30 → `harness-perms--auto`
 - `permission/decide` at 20 → `harness-perms--mode`
 - `permission/decide` at 10 → `harness-perms--jail`
-- `permission/decide` at 7 → `harness-perms--sandbox-guard`
 - `permission/decide` at 6 → `harness-perms--away-request`
 - `permission/decide` at 5 → `harness-perms--dir-request`
 

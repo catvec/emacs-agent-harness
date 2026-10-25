@@ -45,7 +45,7 @@
 ;; The classifier is given no tools, so it reaches nothing, and its
 ;; system prompt (`harness-tools-events--classifier-system') has it read
 ;; the session's prompt and the event as data, each fenced by lines with
-;; a tag of the question's own, as emacs_eval's judge reads code.  A
+;; a tag of the question's own, so nothing in either can end the fence.  A
 ;; question that gets no decision -- no model, a failed request, a reply
 ;; without an allowed action -- skips its event, which is logged; three
 ;; in a row end the watch, and its session is told why, so a classifier

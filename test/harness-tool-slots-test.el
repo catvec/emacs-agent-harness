@@ -516,11 +516,11 @@ error, not the ticket's."
 
 ;;;; Judges decide before the wait
 ;;
-;; The auto-mode judge, and the one of emacs_eval, are model calls of the
-;; harness's own.  They are `permission/decide' stages, and `tools/execute'
-;; runs that chain to its end before it runs the handler, which is where a
-;; governed tool waits for its slot.  So a judge never holds a slot nor
-;; queues for one, and a call that waits for a slot has been judged.
+;; The auto-mode judge is a model call of the harness's own.  It is a
+;; `permission/decide' stage, and `tools/execute' runs that chain to its
+;; end before it runs the handler, which is where a governed tool waits
+;; for its slot.  So a judge never holds a slot nor queues for one, and
+;; a call that waits for a slot has been judged.
 
 (defvar harness-tool-slots-test--judged nil
   "What the stand-in judge decided, newest first, as (CALL-ID HELD WAITING).

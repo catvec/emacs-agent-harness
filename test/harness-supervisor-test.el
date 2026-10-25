@@ -1410,11 +1410,11 @@ selected by `:active' alone; the active sessions change as ever."
 
 (defconst harness-supervisor-test-dropped
   '("edit_file" "write_file" "emacs_insert" "emacs_save_buffer" "emacs_trace" "elisp"
-    "emacs_eval" "ssh" "open_harness" "merge_done" "plan" "spawn_agent")
+    "ssh" "open_harness" "merge_done" "plan" "spawn_agent")
   "The tools a supervising session is not offered, bash apart.")
 
 (defconst harness-supervisor-test-tool-modules
-  '(tools-fs tools-shell tools-ssh tools-emacs tools-emacs-eval tools-web tools-sessions
+  '(tools-fs tools-shell tools-ssh tools-emacs tools-web tools-sessions
     tools-events tools-notify tools-handin tools-dev skills merge perms tasks)
   "The modules that define the tools of the harness.")
 
@@ -1424,7 +1424,7 @@ selected by `:active' alone; the active sessions change as ever."
 
 (ert-deftest harness-supervisor-a-supervisor-is-offered-the-allowlist-only ()
   "A supervising session gets reading, the web and coordination, and no way to write."
-  (harness-supervisor-test-with-modules (tools-fs tools-shell tools-ssh tools-emacs tools-emacs-eval
+  (harness-supervisor-test-with-modules (tools-fs tools-shell tools-ssh tools-emacs
                                          tools-web tools-sessions tools-events tools-notify tools-handin
                                          tools-dev skills merge perms tasks)
     (harness-supervisor-test-confined nil)
@@ -1555,7 +1555,7 @@ thread open.  A session that is no task's has no review to answer."
     (harness-supervisor-test-allow-all)
     (let ((sid (harness-supervisor-test-session)))
       (dolist (tool '("write_file" "edit_file" "emacs_insert" "emacs_save_buffer" "emacs_trace" "elisp"
-                      "emacs_eval" "ssh" "open_harness" "merge_done" "plan" "spawn_agent" "made_up"))
+                      "ssh" "open_harness" "merge_done" "plan" "spawn_agent" "made_up"))
         (ert-info (tool)
           (let ((decision (harness-supervisor-test-decide sid tool)))
             (should (eq 'deny (plist-get decision :behavior)))
@@ -1597,7 +1597,7 @@ thread open.  A session that is no task's has no review to answer."
             (should (eq 'allow (plist-get (harness-supervisor-test-decide sid tool) :behavior)))))))))
 
 (ert-deftest harness-supervisor-stage-runs-before-the-jail-the-mode-and-the-judge ()
-  "The stage is the readonly module's at 8: after the move and sandbox guards, before the jail at 10."
+  "The stage is the readonly module's at 8: after the move guard, before the jail at 10."
   (harness-supervisor-test-with
     (let ((priorities (mapcar #'car (gethash 'permission/decide harness--filters))))
       (should (= 8 (car (rassq #'harness-readonly--gate (gethash 'permission/decide harness--filters)))))

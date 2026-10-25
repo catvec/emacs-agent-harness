@@ -443,6 +443,42 @@ the filter gets the session and the call it filters for."
                      10)
       (should (equal '((nil "c2" "AGAIN")) progress)))))
 
+;;;; A call whose paths cannot be told is not run
+
+(ert-deftest harness-tools-a-call-whose-paths-cannot-be-told-is-refused ()
+  "The jail takes a call with no paths for one with nothing to judge.
+So a paths function that fails (an argument that is no path) must not
+pass for \"no paths\": the call is refused before the permission chain,
+even one that would allow everything, and the tool is not run.  A call
+whose paths are told runs as it did."
+  (harness-tools-test-with
+    (let ((ran 0) (chain 0))
+      (harness-add-filter 'permission/decide
+                          (lambda (_d next &rest _) (cl-incf chain) (funcall next (list :behavior 'allow)))
+                          10)
+      (harness-define-tool "t_pathful" :label "Pathful" :kind 'read
+                           :paths (lambda (input)
+                                    ;; The way `file-name-directory' fails on a number.
+                                    (list (file-name-directory (plist-get input :path))))
+                           :handler (lambda (_input _ctx) (cl-incf ran) "ran"))
+      (cl-flet ((call (id &rest input)
+                  (harness-test-await (harness-call 'tools/execute nil
+                                                    (list :id id :name "t_pathful" :input input)))))
+        (should-not (plist-get (call "c1" :path "/work/a.txt") :is-error))
+        (should (= 1 ran))
+        (should (= 1 chain))
+        (let ((r (call "c2" :path 42)))
+          (should (plist-get r :is-error))
+          (should (plist-get r :denied))
+          (should (string-search "could not be worked out" (plist-get r :content)))
+          (should (string-search "cannot be checked" (plist-get r :content))))
+        (let ((r (call "c3" :path ["a" "b"])))
+          (should (plist-get r :is-error))
+          (should (plist-get r :denied)))
+        ;; Neither reached the tool, nor the chain.
+        (should (= 1 ran))
+        (should (= 1 chain))))))
+
 ;;;; The paths a call touches, for the permission chain
 
 (ert-deftest harness-tools-paths-are-worked-out-without-connecting ()

@@ -278,11 +278,13 @@ once trusted, put its sessions in the check's scope and no other session."
 
 (ert-deftest harness-tools-dev-plugin-tells-the-harness-of-its-tool ()
   "Loading the plugin tells the harness what its own modules list for theirs.
-open_harness needs no approval (`harness-perms-extra-auto-allow-tools'),
-holds a slot of the machine as bash does (`harness-tool-slots-tools'),
-and the board reaches `harness-dev/open' over ACP
-\(`harness-acp-extra-method-prefixes'); the harness's own lists name it
-nowhere."
+open_harness holds a slot of the machine as bash does
+\(`harness-tool-slots-tools'), and the board reaches `harness-dev/open'
+over ACP (`harness-acp-extra-method-prefixes'); the harness's own lists
+name it nowhere.  It is not among the tools that need no approval
+\(`harness-perms-extra-auto-allow-tools'): it runs the checkout's scripts,
+which the agent may have written, outside the sandbox, so the permission
+mode decides it as it decides bash."
   (harness-test-with-temp-state
     (harness-test-reset-bus)
     (dolist (m '(project config tools provider perms))
@@ -296,14 +298,18 @@ nowhere."
       (should-not (member "open_harness" harness-tool-slots-tools))
       (should-not (member "harness-dev/" harness-acp-extension-prefixes))
       (harness-test-load-module 'tools-dev)
-      (should (member "open_harness" harness-perms-extra-auto-allow-tools))
+      (should-not (member "open_harness" harness-perms-extra-auto-allow-tools))
       (should (member "open_harness" harness-tool-slots-tools))
       (should (member "harness-dev/" harness-acp-extra-method-prefixes))
-      (should (eq 'allow (plist-get (harness-perms--mode-decision
-                                     (list :behavior 'ask)
-                                     (list :session (list :id "s1" :permission-mode 'ask)
-                                           :tool "open_harness" :kind 'exec))
-                                    :behavior))))))
+      ;; The mode decides it, as it decides bash: the user is asked in ask
+      ;; and accept-edits mode, and only yolo allows it unasked.
+      (dolist (case '((ask . ask) (accept-edits . ask) (yolo . allow)))
+        (should (eq (cdr case)
+                    (plist-get (harness-perms--mode-decision
+                                (list :behavior 'ask)
+                                (list :session (list :id "s1" :permission-mode (car case))
+                                      :tool "open_harness" :kind 'exec))
+                               :behavior)))))))
 
 (ert-deftest harness-tools-dev-tool-runs-the-live-loop ()
   "The tool runs the checkout's scripts/dev.sh with its own socket."

@@ -173,8 +173,9 @@ its input, as a plist (by default an object without properties).
 HANDLER, required too, is called with the input and context of a call
 and returns a RESULT plist, a string, or a promise of one.  KIND is the
 permission class of the tool: read, write, exec, net or meta, the
-default.  PATHS is a function of a call's input returning the paths
-the call touches, for the jail, and COALESCABLE non-nil lets the UI
+default.  PATHS is a function of a call's input (and, if it takes two
+arguments, of its context) returning the paths the call touches, for
+the jail, and COALESCABLE non-nil lets the UI
 fold the tool's calls into a summary block.  SUBJECT is a function of
 a call's input returning what the call is about (the path it reads,
 the command it runs) or nil; it follows the label in the call's title,
@@ -305,12 +306,10 @@ note; this never signals."
 ;; about the user's Emacs reaches that Emacs as a resource, the way the
 ;; file tools reach a TRAMP host: a client lends its Emacs to the
 ;; harness (see lisp/harness-emacs-endpoint.el), and the tool asks it
-;; for plain data or a few bounded actions.  Only emacs_eval
-;; (tools-emacs-eval) asks it to evaluate code, when a judge model
-;; expects the code to return at once and the user did not turn that
-;; off there (`harness-emacs-eval').  A client that lends no Emacs,
-;; such as a phone, is never asked, and a harness with none attached
-;; (headless) runs every other tool as usual.
+;; for plain data or a few bounded actions.  No tool asks it to evaluate
+;; code.  A client that lends no Emacs, such as a phone, is never asked,
+;; and a harness with none attached (headless) runs every other tool as
+;; usual.
 
 (defun harness-tools-reason (err)
   "Return the message of ERR, a rejection or an error, for the model to read.
@@ -425,18 +424,51 @@ turn into a directory."
           (concat host p)
         p))))
 
-(defun harness-tools--paths (tool input ctx)
+(defun harness-tools--takes-context-p (fn)
+  "Non-nil when the paths function FN takes the context of the call too.
+Most take the input alone; one that has to resolve a path it works out
+\(the checkout a task is submitted to) takes the context as well."
+  (let ((max (cdr (func-arity fn))))
+    (or (eq max 'many) (>= max 2))))
+
+(defun harness-tools--call-paths (tool input ctx)
   "Return the paths a call of TOOL with INPUT touches, absolute under CTX.
 They are what its paths function says, resolved without connecting to
 a host (`harness-tools--request-path'; the handlers of the tools resolve
 a path with `harness-tools-resolve-path', which does connect, once the
-call is allowed); nil without that function, or when it fails, which is
-logged."
+call is allowed); nil without that function.  The function is called
+with the input, and with the context after it when it takes two
+arguments.  It signals when the paths function does: a call whose paths
+cannot be told cannot be judged (see `harness-tools--path-fields')."
   (when (harness-tool-paths-fn tool)
-    (condition-case err
-        (mapcar (lambda (p) (harness-tools--request-path p ctx))
-                (delq nil (funcall (harness-tool-paths-fn tool) input)))
-      (error (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err) nil))))
+    (let ((fn (harness-tool-paths-fn tool)))
+      (mapcar (lambda (p) (harness-tools--request-path p ctx))
+              (delq nil (if (harness-tools--takes-context-p fn)
+                            (funcall fn input ctx)
+                          (funcall fn input)))))))
+
+(defun harness-tools--paths (tool input ctx)
+  "Return the paths a call of TOOL with INPUT touches, absolute under CTX.
+As `harness-tools--call-paths', but nil when the paths function fails,
+which is logged.  That suits a caller that only wants to know where a
+call that failed was about (`harness-tools--unreached-host'); the
+permission request does not use it, since \"no paths\" there reads as
+\"nothing to judge\" (`harness-tools--path-fields')."
+  (condition-case err
+      (harness-tools--call-paths tool input ctx)
+    (error (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err) nil)))
+
+(defun harness-tools--path-fields (tool input ctx)
+  "Return the `:paths' of the permission request for a call of TOOL, as a plist.
+It is (:paths PATHS) normally.  When the tool's paths function fails
+\(an argument that is no path, say) it is (:paths nil :paths-error WHY):
+the jail would take no paths for a call with nothing to judge and let it
+through, so the call is refused instead (`harness-tools--decide')."
+  (condition-case err
+      (list :paths (harness-tools--call-paths tool input ctx))
+    (error
+     (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err)
+     (list :paths nil :paths-error (harness-error-message err)))))
 
 ;;;; Notes under running calls
 ;;
@@ -967,16 +999,30 @@ more precise, such as a module's own refusal."
           ((stringp by) (intern by))
           ((and stage (symbolp stage)) (or (get stage 'harness-permission-stage) 'gate)))))
 
+(defun harness-tools--unjudgeable-refusal (request)
+  "Return the decision refusing REQUEST, or nil, if its paths could not be told.
+A request whose tool could not say which paths the call touches
+\(`:paths-error', see `harness-tools--path-fields') has no paths for the
+jail to judge, and a call with none passes it.  So such a call is refused
+here, before the chain, whatever the mode."
+  (when-let* ((why (plist-get request :paths-error)))
+    (list :behavior 'deny
+          :reason (format "which files this call touches could not be worked out (%s), so it cannot be checked"
+                          why)
+          :hint "Give each path argument as a string.")))
+
 (defun harness-tools--decide (request)
   "Return a promise of the permission decision on REQUEST.
-A call corporate mode refuses (`harness-tools--corporate-refusal')
+A call corporate mode refuses (`harness-tools--corporate-refusal'), and
+one whose paths could not be told (`harness-tools--unjudgeable-refusal'),
 never reaches the `permission/decide' chain; any other call does, and
 its decision names the stage that made it (`harness-tools-decide-traced')."
   (let ((refusal (harness-tools--corporate-refusal (plist-get request :tool)
-                                                   (plist-get request :kind))))
-    (if refusal
-        (harness-resolved (append refusal (list :by 'corporate)))
-      (harness-tools-decide-traced request))))
+                                                   (plist-get request :kind)))
+        (unjudgeable (harness-tools--unjudgeable-refusal request)))
+    (cond (refusal (harness-resolved (append refusal (list :by 'corporate))))
+          (unjudgeable (harness-resolved (append unjudgeable (list :by 'jail))))
+          (t (harness-tools-decide-traced request)))))
 
 ;;;; Tools a provider runs itself
 
@@ -1084,14 +1130,16 @@ model is told."
          (session (harness-tools--session session-id))
          (ctx (list :session-id session-id :cwd (plist-get session :cwd)
                     :host (plist-get session :host) :call-id call-id))
-         (request (list :session session :tool name :input input
-                        :kind (cond (tool (harness-tool-kind tool))
-                                    ((stringp kind) (intern kind))
-                                    ((and kind (symbolp kind)) kind)
-                                    (t 'exec))
-                        :paths (and tool (harness-tools--paths tool input ctx))
-                        :call-id call-id
-                        :builtin t)))
+         (request (append (list :session session :tool name :input input
+                                :kind (cond (tool (harness-tool-kind tool))
+                                            ((stringp kind) (intern kind))
+                                            ((and kind (symbolp kind)) kind)
+                                            (t 'exec))
+                                :call-id call-id
+                                :builtin t)
+                          (if tool
+                              (harness-tools--path-fields tool input ctx)
+                            (list :paths nil)))))
     (harness-then
      (harness-tools--decide request)
      (lambda (decision)
@@ -1194,10 +1242,10 @@ secrets in all three."
         (harness-emit 'tools/finished session-id call r)
         (harness-resolved r)))
      (t
-      (let* ((request (list :session session :tool name :input input
-                            :kind (harness-tool-kind tool)
-                            :paths (harness-tools--paths tool input ctx)
-                            :call-id call-id))
+      (let* ((request (append (list :session session :tool name :input input
+                                    :kind (harness-tool-kind tool)
+                                    :call-id call-id)
+                              (harness-tools--path-fields tool input ctx)))
              (decision (harness-tools--decide request)))
         (harness-then
          decision
@@ -1234,8 +1282,11 @@ under.  Return a promise of the result."
          (input (plist-get call :input))
          (tool (harness-tool-get name))
          (session (harness-tools--session session-id))
+         ;; `:approved': the user said yes to this very call, which the
+         ;; chain had denied.  A tool that runs where it is shown only
+         ;; what it is told is told what the call names.
          (ctx (list :session-id session-id :cwd (plist-get session :cwd)
-                    :host (plist-get session :host) :call-id call-id
+                    :host (plist-get session :host) :call-id call-id :approved t
                     :report (lambda (text)
                               (harness-emit 'tools/progress session-id call-id
                                             (harness-tools--output-text text session-id)))

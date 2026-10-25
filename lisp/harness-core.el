@@ -443,28 +443,13 @@ implementation (this is what makes hot reloading safe)."
   "Non-nil when a method NAME is registered."
   (and (gethash name harness--methods) t))
 
-(defvar harness-call-fallback-function nil
-  "Function that answers `harness-call' for methods this Emacs lacks, or nil.
-When non-nil and no method NAME is registered, `harness-call' returns
-what this function returns when called with NAME and the call's
-arguments, instead of signalling `harness-no-such-method'.  It is
-meant to be let-bound around code that runs in an Emacs which talks
-to the harness from a distance: the Emacs endpoint binds it while it
-evaluates code for `emacs_eval', so that code reaches the harness
-process over the connection the request came on.  Methods registered
-here are still called here, and `harness-method-exists-p' does not
-look at it.")
-
 (defun harness-call (name &rest args)
   "Call method NAME with ARGS and return its result.
-Signals `harness-no-such-method' when nothing implements NAME, unless
-`harness-call-fallback-function' answers for it."
+Signals `harness-no-such-method' when nothing implements NAME."
   (let ((m (gethash name harness--methods)))
-    (cond
-     (m (apply (harness-method-fn m) args))
-     (harness-call-fallback-function
-      (apply harness-call-fallback-function name args))
-     (t (signal 'harness-no-such-method (list name))))))
+    (if m
+        (apply (harness-method-fn m) args)
+      (signal 'harness-no-such-method (list name)))))
 
 (defun harness-call-async (name &rest args)
   "Call method NAME with ARGS and always return a promise.
@@ -600,13 +585,47 @@ becomes the next VALUE.  A function that signals is skipped."
         (setq value (apply (cdr f) value args))
       (error (harness-log 'error "filter %S in %s failed: %S" (cdr f) name err)))))
 
+(defvar harness--filter-failures (make-hash-table :test 'eq)
+  "Filter chain name -> function saying what a handler that failed hands on.
+See `harness-set-filter-failure'.")
+
+(defun harness-set-filter-failure (name fn)
+  "Make FN say what the asynchronous chain NAME hands on when a handler fails.
+A handler fails when it signals an error, or returns a promise that is
+rejected.  A chain without such a function carries on as if the handler
+had passed its value on unchanged, which is right for a chain that only
+adds (a prompt, a list of tools) and wrong for one that guards: the
+handler that failed is the one that would have said no.  FN is called as
+\(FN VALUE HANDLER ERR) with the value the handler was given, the handler
+and the error, and returns the value to hand on, which stops the chain
+when it is `:final'.  FN must not fail; if it does, VALUE is handed on.
+A chain has one such function; setting another replaces it."
+  (puthash name fn harness--filter-failures))
+
+(defun harness-clear-filter-failure (name)
+  "Take away what `harness-set-filter-failure' set for the chain NAME."
+  (remhash name harness--filter-failures))
+
+(defun harness--filter-failed (name handler value err)
+  "Return the value the chain NAME hands on after HANDLER failed with ERR on VALUE.
+That is what the chain's failure function says (see
+`harness-set-filter-failure'), else VALUE."
+  (let ((fn (gethash name harness--filter-failures)))
+    (if (null fn)
+        value
+      (condition-case inner
+          (funcall fn value handler err)
+        (error (harness-log 'error "failure function of filter %s failed: %S" name inner)
+               value)))))
+
 (defun harness-run-filter-async (name value &rest args)
   "Run the asynchronous filter chain NAME starting from VALUE.
 Each function is called as (FN VALUE NEXT . ARGS) and must eventually
 call NEXT with the new value (or return a promise of it, in which case
 NEXT is called for it).  A function may stop the chain by calling NEXT
-with a value whose `:final' property is non-nil.  Return a promise of
-the final value."
+with a value whose `:final' property is non-nil.  A function that
+fails hands VALUE on, unless the chain says otherwise
+\(`harness-set-filter-failure').  Return a promise of the final value."
   (harness--run-async-chain name (gethash name harness--filters) value args))
 
 (defun harness-run-filter-async-between (name from to value &rest args)
@@ -663,10 +682,10 @@ promise of the final value."
                               (harness-then ret next
                                             (lambda (e)
                                               (harness-log 'error "async filter %S rejected: %S" fn e)
-                                              (funcall next value)))))
+                                              (funcall next (harness--filter-failed name fn value e))))))
                         (error
                          (harness-log 'error "async filter %S in %s failed: %S" fn name err)
-                         (funcall next value)))))))
+                         (funcall next (harness--filter-failed name fn value err))))))))
       (step value chain))
     promise))
 

@@ -12,17 +12,17 @@ List buffers, List windows, Read buffer, Open buffer, Insert text, Save buffer, 
 ## About
 
 Narrow windows into the user's Emacs so a model can help drive it:
-the buffer and window lists, a buffer's text, showing a buffer or a
-file where the user can see it, inserting text into a buffer, saving
-one, the tail of *Messages*, and debugging its Lisp: what a symbol
+the buffer and window lists, a buffer's text (a range, the last
+lines, or the lines that hold a string, which is how the harness's
+log is searched), showing a buffer or a file where the user can see
+it, inserting text into a buffer, saving one, the tail of
+*Messages*, and debugging its Lisp: what a symbol
 is and holds (its documentation, value, advice, watchers), where it
 is defined and the source of that definition, and tracing the calls
 of a function or the changes of a variable while the user works.
-None of them evaluates code: the elisp tool (tools-shell) evaluates
-in a background Emacs, and model-written Lisp runs in the user's
-Emacs only through emacs_eval (tools-emacs-eval), which runs only
-code a judge model expects to return at once, unless the user turned
-it off with `harness-emacs-eval`.
+They are a fixed vocabulary of bounded requests, and none of them
+evaluates code: model-written Lisp runs only in the background Emacs
+of the elisp tool (tools-shell), never in the user's.
 
 Like every tool these run here, in the harness.  The user's Emacs is
 a resource they reach, as a TRAMP host is for the file tools: they
@@ -39,11 +39,20 @@ agent can read the code around the definition with read_file or grep
 without the user being asked about a file whose definitions these
 tools already show.
 
+A buffer that visits a file is that file: emacs_insert and
+emacs_save_buffer name a buffer, not a path, so the permission jail
+has nothing to judge in the call, and saved, the buffer would
+overwrite the user's file as the user, outside every sandbox.  They ask
+the Emacs which file the buffer visits first, and change it only when
+the session may write that file (`permission/path-writable-p`); the
+Emacs checks that the buffer still visits it (see "Changing a buffer"
+below, and docs/trust-model.md).
+
 ## Provides
 
 ### Tools
 
-- `emacs_buffer` — Read the text of a live buffer with line numbers, optionally a range (offset is the 1-based first line, limit the number of lines).
+- `emacs_buffer` — Read the text of a live buffer with line numbers, optionally a range (offset is the 1-based first line, limit the number of lines). To find something in a long buffer, such as the harness's log, give contains: only the lines that hold any of those strings come back, each with its line number; the strings are looked for as they are, ignoring case, not as patterns. tail reads from the end: the last limit lines, or with contains the last limit lines that match.
 - `emacs_buffers` — List the live buffers in the user's Emacs: name, major mode, modified flag (M), size and visited file.
 - `emacs_describe` — Describe an Emacs symbol in the user's live Emacs, as describe-function and describe-variable would. For a function: signature, how it is defined (byte-, native-compiled, interpreted, built-in, autoloaded) and the file it was loaded from, aliases, the keys that run a command, any advice on it (including traces), and its docstring. For a variable: its value in a buffer (truncated), whether it is buffer-local there and in which buffers, its global value, whether it was changed from its standard value, its variable watchers, its file and docstring. For a face: its file and docstring. Use emacs_find_definition for the source of a definition.
 - `emacs_find_definition` — Find where a function, variable or face is defined in the user's live Emacs, as find-function does: what it is, the file it was loaded from (and its native code), and the source file with the line range and text of its definition, numbered. An alias is followed to what it names, an autoload to the library it will load, and a buffer visiting the source is read as it stands, unsaved changes included. A function evaluated outside any file is printed as Emacs holds it. Nothing is visited, shown or run: the source is only read. The source file named may then be read with the tools that only read (read_file, grep) without a grant, for the code around the definition.
@@ -58,5 +67,6 @@ tools already show.
 
 ### Methods it calls
 
+- `permission/path-writable-p` ([perms](perms.md)), when it is loaded
 - `permission/reveal-file` ([perms](perms.md)), when it is loaded
 

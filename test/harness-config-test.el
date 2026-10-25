@@ -88,8 +88,6 @@ reaching a custom file."
       (should (eq t (plist-get (plist-get d :files) :project-exists)))
       ;; The settings of the sections come first, in their order, here
       ;; the layered ones and the Budget: no other module is loaded.
-      ;; `harness-emacs-eval' too once lisp/harness-emacs-endpoint.el
-      ;; is, as the UI client of another test loads it.
       ;; Those no module defines are not there: the supervisor's, until
       ;; its plugin is loaded.  One that two sections name is there once.
       ;; A module defines an option with `defcustom': one a test helper
@@ -103,7 +101,6 @@ reaching a custom file."
                                                   (plist-get props :keys))))))
         (should (equal (sort (copy-sequence placed) #'string<)
                        (sort (append (list 'harness-budget)
-                                     (and (boundp 'harness-emacs-eval) (list 'harness-emacs-eval))
                                      (cl-remove-if-not #'boundp harness-config-keys)
                                      (cl-remove-if-not #'boundp '(harness-supervisor-tasks
                                                                   harness-supervisor-judge-model
@@ -432,8 +429,6 @@ something else, a task's edit, is named itself."
           (should (equal (file-name-directory (plist-get f :file)) (plist-get f :dir))))))))
 
 (ert-deftest harness-config-describe-puts-common-settings-in-sections ()
-  ;; A library both sides load, as `harness-start' does.
-  (require 'harness-emacs-endpoint)
   (harness-config-test-with
     (let* ((d (harness-call 'config/describe sub))
            (settings (plist-get d :settings))
@@ -446,8 +441,9 @@ something else, a task's edit, is named itself."
       (should (equal "sessions" (funcall section "harness-model")))
       (should (equal "spending" (funcall section "harness-budget")))
       (should (equal "safety" (funcall section "harness-sandbox-policy")))
-      ;; Letting agents evaluate in the user's Emacs is a safety matter.
-      (should (equal "safety" (funcall section "harness-emacs-eval")))
+      ;; Letting agents evaluate in the user's Emacs is no setting any
+      ;; more: nothing evaluates there, so the option is gone.
+      (should-not (harness-config-test--setting d "harness-emacs-eval"))
       ;; The tasks module is not loaded, so its settings and section are absent.
       (should (null (funcall section "harness-tasks-model")))
       ;; Everything else is advanced: no section, after every sectioned one.

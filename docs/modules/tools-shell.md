@@ -78,11 +78,9 @@ Two ways for a model to run things:
   model-written code could block the UI beyond recovery (see
   harness-elisp.el); a timeout kills the child, its whole process
   group included.  The user's Emacs is read and driven with the
-  bounded `emacs_*` tools (tools-emacs); only emacs_eval
-  (tools-emacs-eval) evaluates there, when a judge model expects the
-  code to return at once and the user did not turn it off with
-  `harness-emacs-eval`.  The tool itself runs here, in the harness,
-  like every tool.
+  bounded `emacs_*` tools (tools-emacs), a fixed vocabulary none of
+  which evaluates code; no tool evaluates model-written Lisp there.
+  The tool itself runs here, in the harness, like every tool.
 
   The child is a command like any other, so it runs in the sandbox
   as a bash command of the session does: `harness-tools-shell--wrap`
@@ -101,12 +99,25 @@ Two ways for a model to run things:
   the sandbox could leave a link there to a file only the harness
   can read.
 
+  With `snapshot` the child starts from a copy of the user's Emacs:
+  the harness asks that Emacs for it, in slices
+  (lisp/harness-snapshot.el; the `snapshot` request of
+  harness-emacs-endpoint.el), puts it in a file in the call's io/
+  directory and the child reads it as data before the code runs
+  (`harness-elisp-load-snapshot`).  Such a child runs read-only and
+  offline whatever the session otherwise has, and is refused where no
+  sandbox can give that: the copy is the user's data and must not
+  meet an unconfined process.  The code can change its copy and
+  nothing else; the user's Emacs is only read, and the child cannot
+  reach it.  Credentials are left out of the copy by name
+  (docs/trust-model.md).
+
 ## Provides
 
 ### Tools
 
 - `bash` — Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer "Operation not permitted": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine.
-- `elisp` — Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename; it may run in the same sandbox as bash commands, and sees what they see and has what they have (no Linux capability unless the user gave this session some: request_escalation, attribute capability). Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation.
+- `elisp` — Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename; it may run in the same sandbox as bash commands, and sees what they see and has what they have (no Linux capability unless the user gave this session some: request_escalation, attribute capability). Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation. With snapshot the process starts from a copy of the user's Emacs: the values of its variables and its buffers (name, mode, file, directory, point, text), to compute over. The code can change the copy and never the user's Emacs; the process then runs read-only and offline, whatever the session otherwise has, and is refused where no sandbox can give that. Credentials are left out of the copy by the names of variables and buffers, and the copy says what it left out: (harness-snapshot-info). The variables the process needs for itself, hooks and every variable that holds a function keep the process's own value: read the user's with (harness-user-value 'load-path).
 
 ### Filter chains it runs
 

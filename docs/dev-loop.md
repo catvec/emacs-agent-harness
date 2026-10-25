@@ -20,7 +20,12 @@ A task's worktree can be driven the same way without leaving the board:
 `[Open harness]` on a card in *Ready for review* starts that loop in
 the worktree's checkout, under a socket and state directory of its own,
 and raises its frame.  The agent's `open_harness` tool does the same
-and returns the commands above with the socket to use.
+and returns the commands above with the socket to use.  It runs the
+checkout's own `scripts/dev.sh` and the Elisp its daemon loads outside the
+sandbox, code the session may have written in its worktree, so it is an
+`exec` call that the permission mode decides as it decides `bash` (asked in
+ask and accept-edits mode, weighed by the judge in auto mode and for a user
+who is away, allowed in yolo mode), not one that needs no approval.
 
 The daemon's socket lives in the checkout, at
 `scripts/.dev/run/SOCKET`, not where Emacs puts sockets by default

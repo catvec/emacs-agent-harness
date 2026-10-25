@@ -135,7 +135,7 @@ after changing it run \\[harness-restart]."
   :type '(repeat directory) :group 'harness)
 
 (defconst harness-core-modules
-  '(access acp agent compaction config linking naming perms priority project provider provider-claude
+  '(access acp agent compaction config linking mcp naming perms priority project provider provider-claude
     resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo
@@ -213,6 +213,7 @@ every file (see `harness--compiled-fresh-p').")
                                   "lisp/harness-links.el" "lisp/harness-carry.el"
                                   "lisp/harness-redaction.el"
                                   "lisp/harness-claude-plugin.el"
+                                  "lisp/harness-mcp-protocol.el"
                                   "lisp/harness-emacs-endpoint.el"
                                   "lisp/harness-notifications-desktop.el" "lisp/harness-server.el"
                                   "lisp/harness-revision.el" "lisp/harness-module-docs.el"
@@ -241,8 +242,8 @@ harness-claude-plugin (the Claude Code plugin through which the Claude
 provider serves tools, and the loopback listener its relay connects to),
 harness-notifications-desktop, harness-revision (which notes, on each
 side, the commit the harness was loaded from) and harness-emacs-endpoint
-\(whose `harness-emacs-eval' each side reads for itself).  Only the
-harness process's modules use harness-slots, the pools of slots that
+\(what an Emacs lends the harness: its answers to the emacs_* tools).
+Only the harness process's modules use harness-slots, the pools of slots that
 hold work back to so many at once (the tool slots, the task board's
 title requests).  They are loaded compiled as the core files are and
 every `harness-reload' loads them again, so a reloaded module never
