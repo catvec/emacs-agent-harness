@@ -38,7 +38,7 @@ shows the recap, in the needs-input column.  One request per session
 is in flight at a time, and a failed one waits
 `harness-tasks-recap-retry` seconds before the next try.
 
-A chat shows the recap too: while a turn runs, the line above the one
+A chat shows the recap too: while a turn runs, the line under the one
 saying what it does (see `harness-ui-chat`), and, opened, the last few.
 So every recap made for a session -- a card's, a sub-agent's, a
 chat's -- is also added to the session's history, the newest

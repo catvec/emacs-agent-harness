@@ -14,10 +14,11 @@
 ;;   queue         messages queued for the next turn, each drawn as the
 ;;                 user message it will be, "queued" and its buttons on
 ;;                 its sender line
-;;   activity      while a turn runs, the recap of it so far, the newest
-;;                 recap or, opened, the last few, then what the turn does
-;;                 now and for how long, on a background of its own,
-;;                 then a blank line
+;;   activity      while a turn runs, what it does now and for how long,
+;;                 on a background of its own, then a blank line; under
+;;                 it the recap of the turn so far, the newest recap or,
+;;                 opened, the last few, and a blank line again, so the
+;;                 line, the recap and the todos below are apart
 ;;   pending panel permission requests and questions waiting for the user;
 ;;                 a question whose options have diagrams shows one of
 ;;                 them at a time, in one place, and switches between them
@@ -351,7 +352,7 @@ depends on it (`harness-chat--insert-queue').")
 Nil, until the reader folds or opens the list, follows
 `harness-chat-todos-collapsed'.  Drawing the tail again leaves it be.")
 (defvar-local harness-chat--recap-expanded nil
-  "Non-nil when the recap above the activity line shows the last few recaps.
+  "Non-nil when the recap under the activity line shows the last few recaps.
 Nil shows the newest alone.  The reader's choice for this buffer: it
 stays from one turn to the next (`harness-chat-toggle-recap').")
 (defvar-local harness-chat--activity nil
@@ -5079,8 +5080,10 @@ cannot be put back in the box."
 ;; text), write a long tool input, or wait on a slow tool.  The line is
 ;; an overlay string, so its spinner ticks without editing the buffer.
 ;; Its own background and a blank line under it keep it apart from the
-;; compose box below.  Queued messages read as the newest messages, so
-;; the line goes under them (`harness-chat--activity-position').
+;; compose box below, and from the turn's recap, which is under it in the
+;; same string with a blank line of its own, so the todo list is apart
+;; from both.  Queued messages read as the newest messages, so the line
+;; goes under them (`harness-chat--activity-position').
 ;;
 ;; What `harness-chat-top-functions' draw -- the companion pet -- goes
 ;; first in the tail, so it stands on the line.  The overlay sits where
@@ -5130,7 +5133,7 @@ The size of the tool input written so far, the latest line a tool reported."
           ((< s 3600) (format "%dm%02ds" (/ s 60) (% s 60)))
           (t (format "%dh%02dm" (/ s 3600) (/ (% s 3600) 60))))))
 
-;;;; The recap above the activity line
+;;;; The recap under the activity line
 ;;
 ;; A turn of many tool calls is easy to lose the thread of: the activity
 ;; line says what it does this second, and the transcript above it is a
@@ -5138,17 +5141,18 @@ The size of the tool input written so far, the latest line a tool reported."
 ;; turn up in a sentence now and then, and keeps the last few with the
 ;; session (`:recaps' in its `ext', which every `_harness/session'
 ;; update carries).  They are drawn in the activity line's own overlay
-;; string, above the line: the newest in a line of its own, with how
-;; long ago it was made, folded under a ▸; opened by a click on it, or
-;; `harness-chat-toggle-recap', a ▾ and the last few, oldest first, each
-;; with its age, the newest right above the line.  A line is one screen
-;; line, cut short with an ellipsis whose tooltip holds all of it.  The
-;; string is made again with the line, on every tick of the spinner, so
-;; the ages go on counting.  Nothing shows without a recap or a running
-;; turn.
+;; string, under the line and above the todo list, a blank line between
+;; each (`harness-chat--activity-line'): the newest in a line of its
+;; own, with how long ago it was made, folded under a ▸; opened by a
+;; click on it, or `harness-chat-toggle-recap', a ▾ and the last few,
+;; oldest first, each with its age, the newest last.  A line is one
+;; screen line, cut short with an ellipsis whose tooltip holds all of
+;; it.  The string is made again with the line, on every tick of the
+;; spinner, so the ages go on counting.  Nothing shows without a recap
+;; or a running turn.
 
 (defvar harness-chat-recap-map (make-sparse-keymap)
-  "Keymap of the recap above the activity line: a click folds or opens it.")
+  "Keymap of the recap under the activity line: a click folds or opens it.")
 
 ;; Filled at top level, not in the `defvar', so a reload updates the map.
 (let ((map harness-chat-recap-map))
@@ -5180,14 +5184,16 @@ list of it."
     (if (string-empty-p icon) (if open "-" "+") icon)))
 
 (defun harness-chat--recap-block (room)
-  "Return the recap above the activity line, ROOM columns wide, or nil.
+  "Return the recap under the activity line, ROOM columns wide, or nil.
 Nothing without a recap.  Folded it is the newest alone: the chevron,
 \"Recap\", how long ago it was made and its words.  Open
 \(`harness-chat--recap-expanded') it is a line of the chevron and
 \"Recap\", then each recap kept, oldest first, with its age before it,
 the newest in the usual colour and those before it dim.  Every line is
 one screen line; a click on any of them folds or opens the block, and
-the words, cut short, are whole in their tooltip."
+the words, cut short, are whole in their tooltip.  The blank lines that
+set the block apart from the line above it and the todo list below are
+not its: `harness-chat--activity-line' adds them."
   (when-let* ((recaps (harness-chat--recaps)))
     (let* ((open (and harness-chat--recap-expanded t))
            (newest (car (last recaps)))
@@ -5243,9 +5249,9 @@ the words, cut short, are whole in their tooltip."
         (harness-chat-toggle-recap)))))
 
 (defun harness-chat-toggle-recap ()
-  "Show or hide the recaps before the newest, above the activity line.
+  "Show or hide the recaps before the newest, under the activity line.
 The activity line says what the turn does.  Folded, the newest recap is
-a line of its own there; open, the last few
+a line of its own under it; open, the last few
 \(`harness-tasks-recap-history') are listed, oldest first, each with how
 long ago it was made.  The recap is of the running turn, made as it goes
 \(`harness-tasks-recap-chats'); what you leave it as stays so in this
@@ -5261,9 +5267,14 @@ on screen and the echo area says how they will show."
 
 (defun harness-chat--activity-line ()
   "Return the activity line due now, or nil unless the session runs.
-A blocked session shows its panel instead.  The line wears
-`harness-chat-activity-face' and a blank line follows it: both keep it
-apart from what comes below, the compose box or a panel."
+A blocked session shows its panel instead.  The string holds the line
+saying what the turn does and, under it, the turn's recap
+\(`harness-chat--recap-block') when there is one; the todo list, drawn
+in the buffer, comes under both.  A blank line follows the line and
+another the recap, so the three stand apart; a recap that is not there
+leaves no blank line of its own, the line then having the one.  The
+line and the recap wear `harness-chat-activity-face'; the blank lines
+wear the window's own background."
   (when (and (equal (plist-get (harness-chat--session) :status) "running")
              (not harness-chat--dead))
     (let* ((activity harness-chat--activity)
@@ -5275,26 +5286,28 @@ apart from what comes below, the compose box or a panel."
            (w (car (harness-chat--windows)))
            ;; One screen line, so the box below never jumps.
            (room (max 12 (- (if w (window-body-width w) 80) 4)))
-           ;; The recap goes above it; a recap that cannot be drawn leaves
+           ;; The recap goes under it; a recap that cannot be drawn leaves
            ;; the line as it is.  Drawn from a timer, it takes its icon
            ;; from the frame that shows the buffer, as the tail's do.
            (recap (condition-case err
                       (harness-chat--with-display (harness-chat--recap-block room))
                     (error (harness-log 'warn "chat: no recap line: %s" (harness-error-short-message err))
                            nil)))
-           (line (concat recap
-                         " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
+           (line (concat " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
                          (propertize (truncate-string-to-width text room nil nil "\N{U+2026}") 'face 'harness-dim-face)
-                         "\n")))
-      ;; Emacs draws an overlay string over the face of the text it
-      ;; precedes: the box's prompt or a panel, whose background would
-      ;; make the line look like their first.  Both lines are drawn over
-      ;; `default' instead, extended: the space after the end of a line
-      ;; takes only faces that extend, so the box's would fill it.
-      (let ((ground '(:inherit default :extend t)))
-        (add-face-text-property 0 (length line) 'harness-chat-activity-face t line)
-        (add-face-text-property 0 (length line) ground t line)
-        (concat line (propertize "\n" 'face ground))))))
+                         "\n"))
+           ;; Emacs draws an overlay string over the face of the text it
+           ;; precedes: the box's prompt or a panel, whose background would
+           ;; make the line look like their first.  Every line is drawn over
+           ;; `default' instead, extended: the space after the end of a line
+           ;; takes only faces that extend, so the box's would fill it.
+           (ground '(:inherit default :extend t))
+           (gap (propertize "\n" 'face ground)))
+      (dolist (part (list line recap))
+        (when part
+          (add-face-text-property 0 (length part) 'harness-chat-activity-face t part)
+          (add-face-text-property 0 (length part) ground t part)))
+      (concat line gap (and recap (concat recap gap))))))
 
 (defun harness-chat--activity-position ()
   "Return where the activity line goes: under the top of the tail and the queue.
@@ -5333,7 +5346,7 @@ off its place, and `harness-chat--refresh-activity' puts it back."
 
 (defun harness-chat--show-activity (line)
   "Make LINE, or nothing when nil, the activity line.
-A line appearing or going, or the recap above it opening and folding,
+A line appearing or going, or the recap under it opening and folding,
 changes the height of the text above the compose box: its padding is
 sized again and the windows that showed the end keep showing it."
   (let* ((ov (harness-chat--activity-overlay))

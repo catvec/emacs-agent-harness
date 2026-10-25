@@ -1911,10 +1911,12 @@ there it is at the end of the transcript, as it was before the hook."
   (let ((line (harness-ui-chat-test-activity-line buf)))
     (and line (split-string (substring-no-properties line) "\n"))))
 
-(ert-deftest harness-ui-chat-recap-shows-above-the-activity-line ()
-  "The newest recap is a line of its own above the one saying what the turn does.
+(ert-deftest harness-ui-chat-recap-shows-under-the-activity-line ()
+  "The newest recap is a line of its own under the one saying what the turn does.
 It is folded under a ▸ with how long ago it was made, and goes with the
-line: no recap, or no running turn, none."
+line: no recap, or no running turn, none.  A blank line follows the
+activity line and another the recap, and a missing recap leaves no
+blank line of its own."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
@@ -1924,11 +1926,14 @@ line: no recap, or no running turn, none."
         (should (string-match-p "\\`[^\n]+\n\n\\'" (harness-ui-chat-test-activity-line buf)))
         (harness-ui-chat-test-set-recaps buf)
         (should (string-match-p "\\`[^\n]+\n\n\\'" (harness-ui-chat-test-activity-line buf)))
-        ;; Recaps arrive with the session record: the newest shows, above the line.
+        ;; Recaps arrive with the session record: the newest shows, under the
+        ;; line, a blank line between them and another after it.
         (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the failing test" 120))
-        (should (string-match-p "\\`[^\n]+\n[^\n]+\n\n\\'" (harness-ui-chat-test-activity-line buf)))
-        (should (string-match-p "\\` *[▸+] Recap · 2m ago · Wrote the failing test\\'" (nth 0 (lines))))
-        (should (string-match-p "Working" (nth 1 (lines))))
+        (should (string-match-p "\\`[^\n]+\n\n[^\n]+\n\n\\'" (harness-ui-chat-test-activity-line buf)))
+        (should (string-match-p "Working" (nth 0 (lines))))
+        (should (equal "" (nth 1 (lines))))
+        (should (string-match-p "\\` *[▸+] Recap · 2m ago · Wrote the failing test\\'" (nth 2 (lines))))
+        (should (equal "" (nth 3 (lines))))
         (should-not (string-match-p "Read the parser" (mapconcat #'identity (lines) "\n")))
         ;; It is in the line's overlay, not in the buffer: nothing was edited.
         (with-current-buffer buf
@@ -1939,12 +1944,91 @@ line: no recap, or no running turn, none."
         (harness-ui-chat-test-set-status buf "idle")
         (should-not (harness-ui-chat-test-activity-line buf))
         (harness-ui-chat-test-set-status buf "running")
-        (should (string-match-p "Recap · 2m ago · Wrote the failing test" (nth 0 (lines))))))))
+        (should (string-match-p "Recap · 2m ago · Wrote the failing test" (nth 2 (lines))))
+        ;; Gone again with its recaps, the blank line of the recap goes too.
+        (harness-ui-chat-test-set-recaps buf)
+        (should (string-match-p "\\`[^\n]+\n\n\\'" (harness-ui-chat-test-activity-line buf)))))))
+
+(ert-deftest harness-ui-chat-recap-stands-between-the-activity-line-and-the-todo-list ()
+  "On screen, the activity line is first, then the recap, then the todo list.
+All three are apart by a blank line, through draws of the tail, blocks
+coming in and the line's own redraws.  The first two are one overlay
+string, the last is the buffer's text it stands before; without a todo
+list the string is the last above the compose box, with its blank line,
+and without a recap the todo list is apart from the line by the one
+blank line it always had."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (cl-flet* ((line () (harness-ui-chat-test-activity-line buf))
+                 (todo () (harness-ui-chat-test-find buf "Todo list"))
+                 (place () (with-current-buffer buf (overlay-start harness-chat--activity-overlay)))
+                 (shows-in-order ()
+                   ;; The string's two parts, in the order they are drawn.
+                   (let ((line (line)))
+                     (and (string-match "Working" line)
+                          (string-match "Recap" line (match-end 0))
+                          t))))
+        (harness-ui-chat-test-set-status buf "running")
+        (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the failing test" 120))
+        ;; No todo list: the string is above the compose box, apart from it.
+        (should (shows-in-order))
+        (with-current-buffer buf
+          (should (<= (overlay-end harness-chat--activity-overlay) harness-compose-start)))
+        (should (string-match-p "\n\n\\'" (line)))
+        ;; A todo list under it, and the string before it: activity line,
+        ;; recap, todo list, top to bottom.
+        (harness-ui-chat-test-set-session buf :todos '((:id "1" :text "Survey the project" :status "in-progress")))
+        (should (with-current-buffer buf harness-chat--todos))
+        (should (shows-in-order))
+        (should (<= (place) (todo)))
+        (should (equal "" (nth 3 (harness-ui-chat-test-recap-lines buf))))
+        ;; Nothing but the string between the recap and the todo list.
+        (with-current-buffer buf
+          (should (= (place) (text-property-any (point-min) (point-max) 'harness-chat-todos t))))
+        ;; Only the line and the recap are clickable; the blank lines are not,
+        ;; and wear the window's own background to its edge.
+        (let* ((string (line))
+               (ground '(:inherit default :extend t))
+               (gaps (cl-loop for pos from 0 below (length string)
+                              when (and (> pos 0) (eq ?\n (aref string pos)) (eq ?\n (aref string (1- pos))))
+                              collect pos)))
+          (should (equal 2 (length gaps)))
+          (dolist (pos gaps)
+            (should (equal ground (get-text-property pos 'face string)))
+            (should-not (get-text-property pos 'keymap string)))
+          (should (get-text-property (string-match "Recap" string) 'keymap string))
+          (should-not (get-text-property (string-match "Working" string) 'keymap string)))
+        ;; Through another draw of the tail, a block coming in and one drawn
+        ;; again, and the line drawn again: the same place, the same order.
+        (with-current-buffer buf (harness-chat--render-tail))
+        (should (shows-in-order))
+        (should (<= (place) (todo)))
+        (with-current-buffer buf
+          (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                            :node (list :id "n-a" :kind "assistant" :content "Done")))
+          (harness-chat--rerender (gethash "n-a" harness-chat--blocks))
+          (harness-chat--refresh-activity))
+        (should (shows-in-order))
+        (should (<= (place) (todo)))
+        (should (= (place) (with-current-buffer buf
+                             (text-property-any (point-min) (point-max) 'harness-chat-todos t))))
+        ;; Opened, the recaps are the same place, the todo list still after them.
+        (with-current-buffer buf (harness-chat-toggle-recap))
+        (should (shows-in-order))
+        (should (equal 2 (length (cl-remove-if-not (lambda (text) (string-match-p " ago  " text))
+                                                   (harness-ui-chat-test-recap-lines buf)))))
+        (should (<= (place) (todo)))
+        ;; Without a recap, the line and the todo list, a blank line between.
+        (with-current-buffer buf (harness-chat-toggle-recap))
+        (harness-ui-chat-test-set-recaps buf)
+        (should (string-match-p "\\`[^\n]+\n\n\\'" (line)))
+        (should (<= (place) (todo)))))))
 
 (ert-deftest harness-ui-chat-recap-opens-to-the-last-few ()
   "Opened, the recap lists the recaps kept, oldest first, each with its age.
-The newest is right above the activity line; the toggle is a command, a
-click and a key, and the choice stays from turn to turn."
+The newest is last, right above the todo list's blank line; the toggle
+is a command, a click and a key, and the choice stays from turn to turn."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
@@ -1955,18 +2039,21 @@ click and a key, and the choice stays from turn to turn."
         (should (equal 2 (length (cl-remove-if #'string-empty-p (lines)))))
         (with-current-buffer buf (harness-chat-toggle-recap))
         (let ((lines (cl-remove-if #'string-empty-p (lines))))
-          ;; The header, the three recaps, the line saying what the turn does.
+          ;; The line saying what the turn does, then the header and the three recaps.
           (should (equal 5 (length lines)))
-          (should (string-match-p "\\` *[▾-] Recap\\'" (nth 0 lines)))
-          (should (string-match-p "\\` +1h ago  Read the parser\\'" (nth 1 lines)))
-          (should (string-match-p "\\` +7m ago  Wrote the failing test\\'" (nth 2 lines)))
-          (should (string-match-p "\\` +15s ago  Fixed the parser\\'" (nth 3 lines)))
-          (should (string-match-p "Working" (nth 4 lines)))
+          (should (string-match-p "Working" (nth 0 lines)))
+          (should (string-match-p "\\` *[▾-] Recap\\'" (nth 1 lines)))
+          (should (string-match-p "\\` +1h ago  Read the parser\\'" (nth 2 lines)))
+          (should (string-match-p "\\` +7m ago  Wrote the failing test\\'" (nth 3 lines)))
+          (should (string-match-p "\\` +15s ago  Fixed the parser\\'" (nth 4 lines)))
           ;; The ages line up.
-          (should (= (string-match "Read the parser" (nth 1 lines))
-                     (string-match "Wrote the failing test" (nth 2 lines))))
-          (should (= (string-match "Read the parser" (nth 1 lines))
-                     (string-match "Fixed the parser" (nth 3 lines)))))
+          (should (= (string-match "Read the parser" (nth 2 lines))
+                     (string-match "Wrote the failing test" (nth 3 lines))))
+          (should (= (string-match "Read the parser" (nth 2 lines))
+                     (string-match "Fixed the parser" (nth 4 lines)))))
+        ;; A blank line between the line and the header, and another after the newest.
+        (should (string-match-p "\\`[^\n]+\n\n[^\n]+\n[^\n]+\n[^\n]+\n[^\n]+\n\n\\'"
+                                (harness-ui-chat-test-activity-line buf)))
         ;; Those before the newest are dim, the newest is not.
         (let* ((line (harness-ui-chat-test-activity-line buf))
                (older (string-match "Read the parser" line))
@@ -1976,11 +2063,13 @@ click and a key, and the choice stays from turn to turn."
         ;; Folded again.
         (with-current-buffer buf (harness-chat-toggle-recap))
         (should (equal 2 (length (cl-remove-if #'string-empty-p (lines)))))
-        ;; A click does it, in the window it was made in.
+        ;; A click does it, in the window it was made in.  The line saying what
+        ;; the turn does is not the recap's: a click on it does nothing.
         (let* ((window (selected-window))
                (line (harness-ui-chat-test-activity-line buf))
-               (map (get-text-property 0 'keymap line)))
+               (map (get-text-property (string-match "Recap" line) 'keymap line)))
           (set-window-buffer window buf)
+          (should-not (get-text-property 0 'keymap line))
           (should (keymapp map))
           (should (eq #'harness-chat--recap-click (lookup-key map [mouse-1])))
           (should (eq #'harness-chat--recap-click (lookup-key map [mouse-2])))
@@ -2056,7 +2145,9 @@ Every line of it is one screen line, so the box below does not jump."
                (width (window-body-width (selected-window))))
           (dolist (text (split-string (substring-no-properties line) "\n" t))
             (should (< (string-width text) width)))
-          (let ((cut (string-match "…" line)))
+          ;; The first ellipsis is the activity line's own, "Working…": the
+          ;; recap's, which cuts its words, is under it.
+          (let ((cut (string-match "…" line (string-match "\n" line))))
             (should cut)
             (should (equal long (get-text-property cut 'help-echo line))))
           ;; The rest of a line says what a click does.
@@ -2064,7 +2155,9 @@ Every line of it is one screen line, so the box below does not jump."
                                   (get-text-property (string-match "Recap" line) 'help-echo line))))))))
 
 (ert-deftest harness-ui-chat-recap-wears-the-activity-lines-background ()
-  "The recap lines are drawn over the activity line's background, to the window's edge."
+  "The recap lines are drawn over the activity line's background, to the window's edge.
+The blank lines between them, and the one after the last, are drawn over
+the window's own, which keeps the line, the recap and what is under them apart."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
@@ -2074,14 +2167,20 @@ Every line of it is one screen line, so the box below does not jump."
         (with-current-buffer buf (setq harness-chat--recap-expanded open) (harness-chat--refresh-activity))
         (let* ((line (harness-ui-chat-test-activity-line buf))
                (ground '(:inherit default :extend t))
-               (end (1- (length line))))
-          (dotimes (pos end)
-            (let ((faces (ensure-list (get-text-property pos 'face line))))
-              (should (memq 'harness-chat-activity-face faces))
-              (should (equal ground (car (last faces))))
-              ;; A face that sets every attribute would hide the background.
-              (should-not (memq 'default faces))))
-          (should (equal ground (get-text-property end 'face line))))))))
+               (blanks 0))
+          (dotimes (pos (length line))
+            (if (and (> pos 0) (eq ?\n (aref line pos)) (eq ?\n (aref line (1- pos))))
+                ;; A blank line: the window's background, to its edge.
+                (progn (cl-incf blanks)
+                       (should (equal ground (get-text-property pos 'face line))))
+              (let ((faces (ensure-list (get-text-property pos 'face line))))
+                (should (memq 'harness-chat-activity-face faces))
+                (should (equal ground (car (last faces))))
+                ;; A face that sets every attribute would hide the background.
+                (should-not (memq 'default faces)))))
+          ;; One under the activity line and one under the recap.
+          (should (= 2 blanks))
+          (should (eq ?\n (aref line (1- (length line))))))))))
 
 (ert-deftest harness-ui-chat-recap-opening-sizes-the-padding-again ()
   "Opening or folding the recap changes the height above the box; ticks do not.
@@ -2094,11 +2193,17 @@ activity line appears or goes."
            (repads 0))
       (set-window-buffer window buf)
       (harness-ui-chat-test-set-status buf "running")
-      (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the failing test" 120))
       (cl-letf* ((orig (symbol-function 'harness-compose-repad))
                  ((symbol-function 'harness-compose-repad)
                   (lambda (w) (cl-incf repads) (funcall orig w))))
         (with-current-buffer buf
+          ;; The first recap of the turn comes with the blank line under it.
+          (harness-ui-chat-test-set-recaps buf '("Read the parser" 300))
+          (should (> repads 0))
+          (setq repads 0)
+          ;; The next replaces the newest: the same height.
+          (harness-ui-chat-test-set-recaps buf '("Read the parser" 300) '("Wrote the failing test" 120))
+          (should (zerop repads))
           ;; A tick of the spinner or of the clock: the same height.
           (harness-chat--spinner-tick)
           (harness-chat--refresh-activity)
@@ -2120,6 +2225,11 @@ activity line appears or goes."
           (setq repads 0)
           ;; Folding takes them away.
           (harness-chat-toggle-recap)
+          (should (> repads 0))
+          (setq repads 0)
+          ;; With no recap left, the line is alone again, the blank line of
+          ;; the recap gone with it.
+          (harness-ui-chat-test-set-recaps buf)
           (should (> repads 0)))))))
 
 (ert-deftest harness-ui-chat-recap-reads-what-the-store-gives-back ()
@@ -2140,7 +2250,7 @@ activity line appears or goes."
         (should (equal nil (recaps 17)))
         ;; A record with no time still shows, with no age.
         (harness-ui-chat-test-set-session buf :ext (list :recaps (list (list :text "Timeless"))))
-        (should (string-match-p "\\` *[▸+] Recap · Timeless\\'" (nth 0 (harness-ui-chat-test-recap-lines buf))))))))
+        (should (string-match-p "\\` *[▸+] Recap · Timeless\\'" (nth 2 (harness-ui-chat-test-recap-lines buf))))))))
 
 (ert-deftest harness-ui-chat-recap-failing-leaves-the-activity-line ()
   "A recap that cannot be drawn must not take the activity line with it."

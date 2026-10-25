@@ -667,7 +667,7 @@ The tail of the transcript, so the request stays short on a long task."
 
 (defcustom harness-tasks-recap-chats t
   "When non-nil, a session that is no task's gets recaps as its turn runs.
-The chat of a running turn shows the newest above the line saying what
+The chat of a running turn shows the newest under the line saying what
 the turn does, and the last `harness-tasks-recap-history' of them when
 the recap is opened: a turn of many tool calls is easy to lose track
 of.  They are made as a task card's are, a short call to the simple

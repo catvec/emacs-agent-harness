@@ -29,7 +29,7 @@
 ;; is in flight at a time, and a failed one waits
 ;; `harness-tasks-recap-retry' seconds before the next try.
 ;;
-;; A chat shows the recap too: while a turn runs, the line above the one
+;; A chat shows the recap too: while a turn runs, the line under the one
 ;; saying what it does (see `harness-ui-chat'), and, opened, the last few.
 ;; So every recap made for a session -- a card's, a sub-agent's, a
 ;; chat's -- is also added to the session's history, the newest
@@ -261,7 +261,7 @@ keep it is logged, not signalled."
 (defun harness-recap--forget (session-id)
   "Drop the recaps kept for SESSION-ID, if it has any.
 A session that is no task's starts its next turn without the last one's
-\(`harness-recap--on-turn-started'), so a chat never shows them above
+\(`harness-recap--on-turn-started'), so a chat never shows them under
 the new turn's line."
   (condition-case err
       (when (and (harness-method-exists-p 'session/set-ext)
@@ -520,7 +520,7 @@ is nothing to show yet."
 
 ;;;; Recaps of a running chat
 
-;; A chat shows the recap above the line saying what its turn does, and
+;; A chat shows the recap under the line saying what its turn does, and
 ;; the last few with it opened, so a long turn can be followed
 ;; (`harness-ui-chat').  A task's card is recapped as the task works;
 ;; any other session -- a conversation, a fork, a sub-agent -- is

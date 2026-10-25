@@ -774,7 +774,7 @@ so `C-c .` is how you aim a key at a panel from there (see
 | `C-M-n` / `C-M-p` | Jump to the next or previous tool call or thinking block; a run of tool calls folded under one summary line is one stop. Coming from the box, the first jump lands on the newest one |
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
-| `C-c C-j` | Show or hide the recaps before the newest, above the line saying what the agent is doing while a turn runs (a click on the recap does it too) |
+| `C-c C-j` | Show or hide the recaps before the newest, under the line saying what the agent is doing while a turn runs (a click on the recap does it too) |
 | `C-c C-w` | Copy the last reply |
 | `C-c C-l` | Copy a link to the message or tool call at point -- `harness:session/ID/message/NODE`, `harness:session/ID/call/NODE` -- or to the session where point is on none; with `C-u` the Markdown link `[words](URL)`. Paste it in a message and the agent can write it in what it says (see [Links in what agents write](#links-in-what-agents-write)) |
 | `C-c M-l` | Copy a link to the session (`C-u`: as `[name](URL)`) |
@@ -1114,7 +1114,7 @@ folds it again, and a chat you opened or folded keeps it so
 list disappears when the agent clears it.
 
 A turn of many tool calls is easy to lose track of, so the line saying
-what the agent is doing has the turn's recap above it: one sentence from
+what the agent is doing has the turn's recap under it: one sentence from
 a cheap model, made now and then as the turn goes on -- every
 `harness-tasks-recap-seconds` seconds or `harness-tasks-recap-tool-calls`
 tool calls, counted from the start of the turn or the last recap, the
@@ -1122,12 +1122,16 @@ same thresholds a task card's recap has -- under a chevron, with how
 long ago it was made: `› Recap · 2m ago · Rewrote the tokenizer; two of
 the three tests pass`. Click it, or press `C-c C-j`, to see the last few
 (`harness-tasks-recap-history`, five), oldest first, each with its age,
-the newest right above the line, and the same again to fold them. It
-shows while a turn runs and only if there is a recap: the recaps of a
-turn are dropped when the next one begins, and a session that is a
-task's keeps the recaps of its card. `harness-tasks-recap-chats` nil
-makes none for sessions that are no task's (a task still has its
-card's), and `harness-tasks-recap` nil makes no recap at all.
+the newest last, and the same again to fold them. The recap stands
+under the line saying what the agent is doing and above the todo list,
+a blank line after each of the first two, so the three stand apart; a
+turn with no recap has the one blank line under its line, as it did
+before. It shows while a turn runs and only if there is a recap: the
+recaps of a turn are dropped when the next one begins, and a session
+that is a task's keeps the recaps of its card.
+`harness-tasks-recap-chats` nil makes none for sessions that are no
+task's (a task still has its card's), and `harness-tasks-recap` nil
+makes no recap at all.
 
 A session that other sessions merge their work into -- the sub-agents it
 started, in worktrees of their own -- shows that queue in the same place,

@@ -11885,27 +11885,32 @@ where `harness-chat-top-functions` drew something (the pet's figure,
 which then stands on the line), the end of that text, which the property
 `harness-chat-top` marks.  A render of the tail takes the overlay off
 its place and `harness-chat--refresh-activity` puts it back.  The
-recap of the turn is the first line of the same overlay string, above
-the activity line: the session's newest recap in a line of its own,
+recap of the turn is in the same overlay string, under the activity
+line and so above the todo list, which the buffer's text draws after
+it: the session's newest recap in a line of its own,
 "Recap · 2m ago · what the turn has done", folded under a chevron, and,
-opened, the last few oldest first, each with its age, the newest right
-above the activity line (`harness-chat--recap-block'; the recaps are in
-the session's `ext', see the recap module).  A click on it, or
-`harness-chat-toggle-recap' (`C-c C-j'), opens and folds it, and what
-the reader chose stays from turn to turn.  Every line is one screen
-line, cut with an ellipsis whose tooltip holds the whole recap, so the
-box below never jumps; opening or folding it changes the height above the
-box, which sizes the box's padding again as the line appearing does
-(`harness-chat--show-activity').  It is drawn over the line's
-background, goes with the line (nothing without a recap or a running
-turn), and a recap that cannot be drawn leaves the activity line as it
-is.  The mode line's spinner gives the phase only in its tooltip:
-this line is where it shows.  It has a background of
-its own (`harness-chat-activity-face`) and a blank line under it, which
-set it apart from the compose box: an overlay string is drawn over the
-face of the text it precedes, the box's prompt, so both lines are drawn
-over `default` extended to the window's edge.  A buffer opened
-mid-turn asks `agent/activity`; a harness that reports none gets
+opened, the last few oldest first, each with its age, the newest last
+(`harness-chat--recap-block'; the recaps are in the session's `ext',
+see the recap module).  A blank line follows the activity line and
+another the recap, so the line, the recap and the todo list are apart
+from one another; the recap and the blank line after it are not there
+without a recap, so a turn with none has the one blank line under its
+line, which sets it apart from the todo list or the compose box under
+it.  A click on the recap, or `harness-chat-toggle-recap' (`C-c C-j'),
+opens and folds it, and what the reader chose stays from turn to turn.
+Every line is one screen line, cut with an ellipsis whose tooltip holds
+the whole recap, so the box below never jumps; opening or folding it
+changes the height above the box, which sizes the box's padding again
+as the line appearing does (`harness-chat--show-activity').  It is
+drawn over the same background as the line, goes with the line (nothing
+without a recap or a running turn), and a recap that cannot be drawn
+leaves the activity line as it is.  The mode line's spinner gives the
+phase only in its tooltip: this line is where it shows.  The line and
+the recap have a background of their own (`harness-chat-activity-face`)
+and the blank lines none, which keeps them apart: an overlay string is
+drawn over the face of the text it precedes, the box's prompt, so every
+line is drawn over `default` extended to the window's edge.  A buffer
+opened mid-turn asks `agent/activity`; a harness that reports none gets
 "Working" with the turn's duration.  A block whose renderer
 signals is shown unformatted with a note, so one bad node never costs the
 buffer the rest of its transcript or its compose box.  Opening a session
