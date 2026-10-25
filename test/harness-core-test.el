@@ -950,6 +950,354 @@ that does not compile refuses the reload like a module does."
       (setq features (delq 'harness-testlib features))
       (delete-directory dir t))))
 
+;;;; A reload unbinds what a file no longer defines
+
+(defmacro harness-core-test-with-reload-tree (&rest body)
+  "Run BODY in a tree of module files it writes, to start the harness from and reload.
+`tree' is the tree.  `write' is a function of a module's short name and
+the forms of its file: it writes lisp/modules/harness-reloadtest-NAME.el,
+which loads in the order of the names.  The harness's own harness.el is
+left out of the reloads, a file of the tree's own standing in for it: the
+real one would put back the `harness--path' this replaces.  What the
+files define is named harness-reloadtest-..., and is gone after BODY, with
+the `load-history' entries of the state directory they were compiled in."
+  (declare (indent 0))
+  `(let ((tree (harness-test-temp-dir)))
+     (harness-test-reset-bus)
+     (harness-core-test--write-elisp (expand-file-name "harness.el" tree) '(ignore))
+     (unwind-protect
+         (harness-test-with-temp-state
+           (unwind-protect
+               (cl-letf (((symbol-function 'harness--path)
+                          (lambda (rel) (expand-file-name rel tree))))
+                 (let ((write (lambda (name &rest forms)
+                                (apply #'harness-core-test--write-elisp
+                                       (expand-file-name
+                                        (format "lisp/modules/harness-reloadtest-%s.el" name) tree)
+                                       forms)))
+                       (harness--self-file (expand-file-name "harness.el" tree))
+                       (harness-module-directories '("lisp/modules"))
+                       (harness--core-files nil)
+                       (harness--library-files nil)
+                       (harness-process nil)
+                       (harness-enabled-modules t)
+                       (harness-disabled-modules nil))
+                   (ignore write)
+                   ,@body))
+             (mapatoms (lambda (symbol)
+                         (when (string-prefix-p "harness-reloadtest-" (symbol-name symbol))
+                           (fmakunbound symbol))))
+             (setq features (cl-remove-if (lambda (feature)
+                                            (string-prefix-p "harness-reloadtest-" (symbol-name feature)))
+                                          features)
+                   load-history (cl-remove-if (lambda (entry)
+                                                (and (stringp (car entry))
+                                                     (or (string-prefix-p harness-state-directory (car entry))
+                                                         (string-prefix-p tree (car entry)))))
+                                              load-history))))
+       (harness-test-reset-bus)
+       (delete-directory tree t))))
+
+(ert-deftest harness-loader-reload-premise-a-leftover-reads-its-documentation-by-loading ()
+  "The premise of the unbinding: a function left defined costs a load per read.
+A file loaded again without one of its commands leaves it defined, with
+the documentation pointer of the .elc the load rewrote, and the new .elc
+never has it: Emacs loads the library again each time it is asked for
+that documentation.  A command the new file has reads its own."
+  (harness-core-test-with-reload-tree
+    (let ((file (expand-file-name "lisp/modules/harness-reloadtest-a.el" tree))
+          (loads nil))
+      (funcall write "a"
+               '(defun harness-reloadtest-kept () "Kept, version 1." (interactive) 1)
+               '(defun harness-reloadtest-left () "Left." (interactive) 2))
+      (harness-load-compiled file)
+      (funcall write "a"
+               '(defun harness-reloadtest-kept () "Kept, version 2, longer than before." (interactive) 1))
+      (harness-load-compiled file)
+      (should (fboundp 'harness-reloadtest-left))
+      (let ((after-load-functions (list (lambda (loaded) (push loaded loads)))))
+        (documentation 'harness-reloadtest-kept)
+        (should-not loads)
+        (documentation 'harness-reloadtest-left)
+        (documentation 'harness-reloadtest-left)
+        (should (= 2 (length loads)))))))
+
+(ert-deftest harness-loader-reload-unbinds-what-a-file-no-longer-defines ()
+  "A reload unbinds the functions a file stopped defining, and only those.
+The file is rewritten without a command, a macro and an alias.  A
+function left defined keeps the documentation pointer of the .elc the
+reload rewrote, and Emacs would load the library again for each
+`documentation' asked of it, as it does for the quick search's scan of
+the commands.  What the file still defines is not touched, and its
+documentation loads nothing.  A key that a kept keymap binds to a removed
+command reports it undefined."
+  (harness-core-test-with-reload-tree
+    (let ((loads nil)
+          (keymap (make-sparse-keymap)))
+      (funcall write "a"
+               '(defun harness-reloadtest-kept () "Kept, version 1." (interactive) 1)
+               '(defun harness-reloadtest-removed () "Removed." (interactive) 2)
+               '(defmacro harness-reloadtest-macro () 3)
+               '(defalias 'harness-reloadtest-alias #'harness-reloadtest-kept))
+      (should (harness-start))
+      (define-key keymap "r" #'harness-reloadtest-removed)
+      (should (commandp 'harness-reloadtest-removed))
+      (should (equal "Removed." (documentation 'harness-reloadtest-removed)))
+      ;; The file, without them; its documentation moves in the .elc.
+      (funcall write "a"
+               '(defun harness-reloadtest-kept ()
+                  "Kept, version 2, with a longer text to move what follows." (interactive) 1))
+      (let ((result (harness--reload)))
+        (should-not (plist-get result :errors))
+        (should (equal '(harness-reloadtest-alias harness-reloadtest-macro harness-reloadtest-removed)
+                       (plist-get result :unbound))))
+      (should-not (fboundp 'harness-reloadtest-removed))
+      (should-not (fboundp 'harness-reloadtest-macro))
+      (should-not (fboundp 'harness-reloadtest-alias))
+      (should (commandp 'harness-reloadtest-kept))
+      (should (string-search "unbound 3 functions that harness-reloadtest-a no longer defines: harness-reloadtest-alias, harness-reloadtest-macro, harness-reloadtest-removed"
+                             (harness-core-test--log-text)))
+      ;; Reading what is kept loads no library again.
+      (let ((after-load-functions (list (lambda (file) (push file loads)))))
+        (should (equal "Kept, version 2, with a longer text to move what follows."
+                       (documentation 'harness-reloadtest-kept)))
+        (should-not loads))
+      ;; The keymap still binds the command, which is none now.
+      (should (eq 'harness-reloadtest-removed (lookup-key keymap "r")))
+      (should-not (commandp (lookup-key keymap "r")))
+      ;; Reloaded again with nothing more to unbind, nothing is.
+      (should-not (plist-get (harness--reload) :unbound))
+      (should (commandp 'harness-reloadtest-kept)))))
+
+(ert-deftest harness-loader-reload-unbinds-what-a-file-dropped-though-a-stale-copy-lists-it ()
+  "The copy a `require' loaded before the loader did is no file defining the function.
+A module another requires loads from `load-path', as source, before the
+loader reaches it and loads its compiled copy over it.  The entry of
+that source stays in `load-history' with what the file defined at the
+start, so a function the file drops later is still listed by a file --
+its own, older one.  In a session that is most of the big modules (the
+task board's and the chat's among them) and the libraries."
+  (harness-core-test-with-reload-tree
+    (let ((file (expand-file-name "lisp/modules/harness-reloadtest-a.el" tree)))
+      (funcall write "a"
+               '(defun harness-reloadtest-kept () 1)
+               '(defun harness-reloadtest-removed () 2))
+      (load file nil t)
+      (should (harness-start))
+      (should (cl-every (lambda (f) (member f (harness-core-test--listed-in-entries-named "harness-reloadtest-a")))
+                        '(harness-reloadtest-kept harness-reloadtest-removed)))
+      (funcall write "a" '(defun harness-reloadtest-kept () 1))
+      (should (equal '(harness-reloadtest-removed) (plist-get (harness--reload) :unbound)))
+      (should-not (fboundp 'harness-reloadtest-removed))
+      (should (fboundp 'harness-reloadtest-kept))
+      ;; The stale copy still lists it, and the next reload leaves things be.
+      (should (member 'harness-reloadtest-removed
+                      (harness-core-test--listed-in-entries-named "harness-reloadtest-a")))
+      (should-not (plist-get (harness--reload) :unbound)))))
+
+(ert-deftest harness-loader-reload-logs-a-dozen-names-of-what-it-unbound ()
+  "The log line names twelve of what a library lost, and how many more.
+A file that loses many functions at once -- a prefix renamed -- would
+otherwise log a line of kilobytes.  The result lists them all."
+  (harness-core-test-with-reload-tree
+    (let ((names (cl-loop for n from 1 to 14
+                          collect (intern (format "harness-reloadtest-f%02d" n)))))
+      (apply write "a" (mapcar (lambda (name) `(defun ,name () 1)) names))
+      (should (harness-start))
+      (funcall write "a")
+      (should (equal names (plist-get (harness--reload) :unbound)))
+      (should (string-search
+               (concat "unbound 14 functions that harness-reloadtest-a no longer defines: "
+                       (mapconcat #'symbol-name (cl-subseq names 0 12) ", ")
+                       " and 2 more\n")
+               (harness-core-test--log-text)))
+      (should-not (string-search "harness-reloadtest-f13," (harness-core-test--log-text))))))
+
+(ert-deftest harness-loader-reload-unbinds-what-harness-el-no-longer-defines ()
+  "harness.el is a library like the others: what it stopped defining goes."
+  (harness-core-test-with-reload-tree
+    (let ((self (expand-file-name "harness.el" tree)))
+      (harness-core-test--write-elisp self
+                                      '(defun harness-reloadtest-self-kept () 1)
+                                      '(defun harness-reloadtest-self-removed () 2))
+      (load self nil t)
+      (should (harness-start))
+      (harness-core-test--write-elisp self '(defun harness-reloadtest-self-kept () 1))
+      (should (equal '(harness-reloadtest-self-removed) (plist-get (harness--reload) :unbound)))
+      (should (fboundp 'harness-reloadtest-self-kept))
+      (should-not (fboundp 'harness-reloadtest-self-removed)))))
+
+(ert-deftest harness-loader-reload-keeps-a-function-moved-to-another-file ()
+  "A function that left one file for another reloaded with it stays defined.
+Whether the file that took it loads after the one that gave it up, or
+before: the check waits until every file has loaded."
+  (harness-core-test-with-reload-tree
+    (funcall write "a"
+             '(defun harness-reloadtest-a-only () 'a)
+             '(defun harness-reloadtest-late () 'a))
+    (funcall write "b"
+             '(defun harness-reloadtest-b-only () 'b)
+             '(defun harness-reloadtest-early () 'b))
+    (should (harness-start))
+    ;; Late moves from a to b, which loads after it; early from b to a.
+    (funcall write "a"
+             '(defun harness-reloadtest-a-only () 'a)
+             '(defun harness-reloadtest-early () 'a))
+    (funcall write "b"
+             '(defun harness-reloadtest-b-only () 'b)
+             '(defun harness-reloadtest-late () 'b))
+    (let ((result (harness--reload)))
+      (should-not (plist-get result :errors))
+      (should-not (plist-get result :unbound)))
+    (should (eq 'b (harness-reloadtest-late)))
+    (should (eq 'a (harness-reloadtest-early)))
+    (should (eq 'a (harness-reloadtest-a-only)))
+    (should (eq 'b (harness-reloadtest-b-only)))))
+
+(ert-deftest harness-loader-reload-keeps-a-function-redefined-since-the-snapshot ()
+  "A function not the one a library defined, any more, stays defined.
+The snapshot holds what each function was before the files loaded; one
+that something replaced while they did -- here the new file, which sets
+it without a `defun' -- is not what the library defined."
+  (harness-core-test-with-reload-tree
+    (funcall write "a"
+             '(defun harness-reloadtest-replaced () 'defined)
+             '(defun harness-reloadtest-removed () 'defined))
+    (should (harness-start))
+    (funcall write "a" '(fset 'harness-reloadtest-replaced (lambda () 'by-hand)))
+    (let ((result (harness--reload)))
+      (should-not (plist-get result :errors))
+      (should (equal '(harness-reloadtest-removed) (plist-get result :unbound))))
+    (should (eq 'by-hand (harness-reloadtest-replaced)))
+    (should-not (fboundp 'harness-reloadtest-removed))))
+
+(ert-deftest harness-loader-reload-keeps-a-function-another-file-defines ()
+  "A function that a file outside the reload also defines stays defined.
+The file that dropped it was not the only one to define it -- a generic
+that another file declares is one such.  The function is still the very
+one the library defined, since nothing loaded it again, so only
+`symbol-file' tells."
+  (harness-core-test-with-reload-tree
+    (let ((shared (expand-file-name "shared.el" tree)))
+      (funcall write "a" '(defun harness-reloadtest-shared () 'a))
+      (should (harness-start))
+      (harness-core-test--write-elisp shared '(defun harness-reloadtest-shared () 'shared))
+      (load shared nil t)
+      (funcall write "a" '(defun harness-reloadtest-here () 'a))
+      (let ((result (harness--reload)))
+        (should-not (plist-get result :errors))
+        (should-not (plist-get result :unbound)))
+      (should (eq 'shared (harness-reloadtest-shared))))))
+
+(defun harness-core-test--listed-in-entries-named (name)
+  "Return the functions the `load-history' entries of the files named NAME record as defined.
+Whichever directory they were loaded from, source or compiled."
+  (cl-loop for entry in load-history
+           when (and (stringp (car entry)) (equal (file-name-base (car entry)) name))
+           append (cl-loop for element in (cdr entry)
+                           when (eq (car-safe element) 'defun) collect (cdr element))))
+
+(defun harness-core-test--defined-in (name)
+  "Return the functions the entry of test module NAME in `load-history' records, sorted.
+They are its `(defun . F)' elements, which `defalias' and `defmacro' make
+too (see `harness-core-test-with-reload-tree')."
+  (let ((file (harness--compiled-name (format "harness-reloadtest-%s.el" name))))
+    (sort (cl-loop for element in (cdr (assoc file load-history))
+                   when (eq (car-safe element) 'defun) collect (cdr element))
+          #'string<)))
+
+(ert-deftest harness-loader-reload-keeps-a-generic-function ()
+  "A generic function is not one a file dropped, whoever made it.
+The first `cl-defmethod' of a generic that has no `cl-defgeneric' records
+`(defun . F)' in the entry of its file at the first load only: the next
+load does not, with the generic still there and no other file defining
+it.  Until a call has made Emacs replace the function by the one the
+methods dispatch through, it is the very function the snapshot holds.
+One a file declares with `cl-defgeneric' and then drops has methods that
+may be in any file: it is left alone."
+  (harness-core-test-with-reload-tree
+    (funcall write "a"
+             '(cl-defmethod harness-reloadtest-made ((x integer)) (list 'integer x))
+             '(cl-defgeneric harness-reloadtest-declared (x) "Declared.")
+             '(cl-defmethod harness-reloadtest-declared ((x string)) (list 'string x)))
+    (should (harness-start))
+    (should (equal '(harness-reloadtest-declared harness-reloadtest-made)
+                   (harness-core-test--defined-in "a")))
+    (let ((result (harness--reload)))
+      (should-not (plist-get result :errors))
+      (should-not (plist-get result :unbound)))
+    ;; The entry has forgotten the one that a method made.
+    (should (equal '(harness-reloadtest-declared) (harness-core-test--defined-in "a")))
+    (should (equal '(integer 1) (harness-reloadtest-made 1)))
+    (should-not (plist-get (harness--reload) :unbound))
+    (should (equal '(integer 2) (harness-reloadtest-made 2)))
+    ;; The file drops both, and neither is unbound.
+    (funcall write "a" '(defun harness-reloadtest-kept () 1))
+    (should-not (plist-get (harness--reload) :unbound))
+    (should (fboundp 'harness-reloadtest-made))
+    (should (fboundp 'harness-reloadtest-declared))))
+
+(ert-deftest harness-loader-reload-keeps-a-subr-a-load-named ()
+  "A function that is a subr stays defined: it is none of the file's.
+Native compilation defines the trampoline of a primitive that a file
+advises as `--anonymous-lambda' while the file loads, and Emacs
+records that in the file's entry.  An alias of a primitive stands in."
+  (harness-core-test-with-reload-tree
+    (funcall write "a"
+             '(defalias 'harness-reloadtest-primitive (symbol-function 'car))
+             '(defun harness-reloadtest-removed () 1))
+    (should (harness-start))
+    (should (subrp (symbol-function 'harness-reloadtest-primitive)))
+    (funcall write "a")
+    (should (equal '(harness-reloadtest-removed) (plist-get (harness--reload) :unbound)))
+    (should (eq 1 (harness-reloadtest-primitive '(1 2))))))
+
+(ert-deftest harness-loader-reload-snapshot-leaves-the-libraries-it-is-told-failed ()
+  "The function `harness--reload-snapshot' returns unbinds nothing of a failed library.
+Told which libraries failed to load it leaves their functions, whatever
+`load-history' says of them; told none it unbinds what they dropped."
+  (harness-core-test-with-reload-tree
+    (let ((file (expand-file-name "lisp/modules/harness-reloadtest-a.el" tree)))
+      (funcall write "a"
+               '(defun harness-reloadtest-kept () 1)
+               '(defun harness-reloadtest-removed () 2))
+      (harness-load-compiled file)
+      (let ((unbind (harness--reload-snapshot)))
+        (funcall write "a" '(defun harness-reloadtest-kept () 1))
+        (harness-load-compiled file)
+        (should-not (funcall unbind '("harness-reloadtest-a")))
+        (should (fboundp 'harness-reloadtest-removed))
+        (should (equal '(harness-reloadtest-removed) (funcall unbind '("harness-reloadtest-b"))))
+        (should-not (fboundp 'harness-reloadtest-removed))
+        (should (fboundp 'harness-reloadtest-kept))))))
+
+(ert-deftest harness-loader-reload-unbinds-nothing-of-a-file-that-failed-to-load ()
+  "A file that does not load keeps its old entry of `load-history', and its functions.
+The next reload that loads it unbinds what it no longer defines."
+  (harness-core-test-with-reload-tree
+    (funcall write "a"
+             '(defun harness-reloadtest-kept () 1)
+             '(defun harness-reloadtest-removed () 2))
+    (funcall write "b" '(defun harness-reloadtest-b-old () 'b))
+    (should (harness-start))
+    ;; Rewritten without a function, but it fails half way; the file
+    ;; that loads after it renames one, which goes.
+    (funcall write "a" '(defun harness-reloadtest-kept () 1) '(error "Half way"))
+    (funcall write "b" '(defun harness-reloadtest-b-new () 'b))
+    (let ((result (harness--reload)))
+      (should (= 1 (length (plist-get result :errors))))
+      (should (string-match-p "harness-reloadtest-a.el: Half way" (car (plist-get result :errors))))
+      (should (equal '(harness-reloadtest-b-old) (plist-get result :unbound))))
+    (should (fboundp 'harness-reloadtest-removed))
+    (should-not (fboundp 'harness-reloadtest-b-old))
+    ;; Mended, it loads, and what it dropped goes.
+    (funcall write "a" '(defun harness-reloadtest-kept () 1))
+    (let ((result (harness--reload)))
+      (should-not (plist-get result :errors))
+      (should (equal '(harness-reloadtest-removed) (plist-get result :unbound))))
+    (should-not (fboundp 'harness-reloadtest-removed))
+    (should (fboundp 'harness-reloadtest-kept))))
+
 ;;;; Modules of the user's own
 
 (defun harness-core-test--write-elisp (file &rest forms)

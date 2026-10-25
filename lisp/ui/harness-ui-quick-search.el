@@ -395,7 +395,9 @@ a line that refers to none is as written."
 ;; A build must not ask for another.  Reading a command's documentation
 ;; can load its library again: Emacs does when the .elc changed on disk
 ;; since it was loaded, and does at every read for a command the new
-;; .elc no longer has, which a reload leaves defined.  A scan that took
+;; .elc no longer has, which a reload used to leave defined (it unbinds
+;; it now, `harness--reload-snapshot', but one that an older reload left
+;; stays until a restart).  A scan that took
 ;; those loads for news would be built again as soon as it was done,
 ;; for ever, and an idle timer set ripe by the one that ran it keeps
 ;; Emacs in its timer loop: it runs timers and redisplays, so a clock or

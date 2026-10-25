@@ -125,7 +125,8 @@ default) the layers above are split across two Emacs processes:
   with a feeder process, 0 calls in six seconds, 59 in sixty with the
   poll below.)  The quick search's idle build of its scan of the
   commands did this to a UI left alone, once a hot reload had left a
-  command defined that its library no longer has: Emacs loads a library
+  command defined that its library no longer has (a reload unbinds such
+  a function now, see Reload safety): Emacs loads a library
   again at every read of the documentation of such a command, a load
   marked the scan stale, and the build began again at once (see the quick
   search).  GUI Emacs on macOS may also leave the socket unread: its
@@ -282,6 +283,64 @@ section).  After a reload the
 `harness/reloaded` event fires and the UI redraws every session buffer.
 A reload loads the modules selected now (below) but stops none: one no
 longer enabled runs on until a restart, and the reload says so.
+
+A reload also unbinds the functions a file loaded again no longer
+defines (`harness--reload-snapshot`).  Left defined, such a function
+keeps its old byte-code, whose documentation string is a `(FILE . POS)`
+pointer into the .elc the reload rewrote: Emacs loads the library again
+for every `documentation` asked of it (doc.c, `reread_doc_file`), and
+the new .elc never has it to end that, so the quick search's scan, `M-x`
+annotations, `describe-function` and `apropos` each cost a load; and it
+stays a command.  So before anything loads the reload records the
+`load-history` entries of the harness libraries -- the files loaded from
+`harness--compile-directory`, and harness.el; a library is named by its
+file name without directory or extension -- and the `symbol-function` of
+each function they record as defined, `(defun . F)` (`defalias` and
+`defmacro` make those entries too).  Loading a file replaces its entry
+with a new one, so once every file has loaded, the entries that are gone
+are the old versions of the libraries and the ones that came are the new.
+The reload `fmakunbound`s each F that a library's old version has and its
+new one lacks, when F is still the recorded function and `symbol-file`
+knows no file of another library that defines it.  So a function that
+moved to another file stays, and one replaced since the record, by hand
+or by loading code.  `symbol-file` walks all of `load-history`, which is
+too slow to ask of every function: it is asked of these candidates only.
+
+An entry the reload did not replace is no version of it.  A library that
+failed to load keeps its old entry, and none of its functions are
+unbound; the next reload that loads it does.  And the copy of a file that
+a `require` loaded from `load-path` before the loader got to it stays: a
+module another requires loads as source first, and the loader loads its
+compiled copy over it, so most of the big modules (the task board, the
+chat) and the libraries have an entry of that source in `load-history`,
+listing what they defined at the start.  It is no other file defining a
+function the library dropped, which is why `symbol-file` is asked over
+the entries of the other libraries only.
+
+Two kinds of function are left out, because their entries mislead.  A
+generic function stays whoever made it: the first `cl-defmethod` of a
+generic that has no `cl-defgeneric` records `(defun . F)` in the entry of
+its file at the first load only, so every later load looks like a file
+that dropped it, with the function still there and no file defining it.
+And a subr stays: the library's functions are byte-code or interpreted,
+while native compilation defines `--anonymous-lambda`, the trampoline of
+a primitive that a file advises, as the file loads, and Emacs files that
+in the file's entry.  (A function a file defines only while nothing
+defines it yet, `(unless (fboundp 'f) (defun f ...))`, is in the entry
+of the first load alone, the same way; define it outright.)  The log
+names what was unbound, and `harness--reload` returns it as `:unbound`.
+
+What still names a removed function is left alone.  A keymap that a
+`defvar` keeps across the reload may still bind a removed command, and
+that key then reports an undefined command (`Wrong type argument:
+commandp, NAME`); a hook entry or a timer that names one signals
+`void-function` when it runs.  Only a restart clears them, as it clears
+a function left defined by a reload made before this one unbound it.  So
+code that renames or drops a function a hook names takes the old name
+out itself (`remove-hook`, where the new code adds the new one), and
+code that drops a command a keymap binds rebinds or clears the key at
+top level (`keymap-unset`; the `defvar` does not run again), or every
+reload leaves it dangling.
 
 ## Which modules load
 
@@ -13194,7 +13253,9 @@ left alone would run it again and again and Emacs would read no socket
 in between (see Processes): reading the documentation of a command
 loads its library again when the library's .elc changed since it was
 loaded, and at every read for a command the new .elc no longer has, which
-a hot reload leaves defined, so the loads a build makes are its own and
+a hot reload used to leave defined (it unbinds it now, see Reload safety,
+but one that an older reload left stays until a restart), so the loads a
+build makes are its own and
 mark nothing stale (`harness-quick-search--scanning`), and builds begin
 `harness-quick-search--min-interval` (5 s) apart at least: within the
 interval the timer is an ordinary one, which sets the idle timer when it

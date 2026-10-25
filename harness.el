@@ -44,7 +44,10 @@
 ;; with `harness-reload': each file is checked and compiled first and
 ;; the running instance is only touched when all of them pass, so a
 ;; broken edit never bricks live sessions.  `harness-auto-reload-mode'
-;; does this on every save while dogfooding.
+;; does this on every save while dogfooding.  A function that a file
+;; no longer defines is unbound by the reload; a key of a keymap that
+;; kept its bindings may still name it, and then reports an undefined
+;; command.
 
 ;;; Code:
 
@@ -842,6 +845,123 @@ Used by tests and the loader."
   (load (if (harness--compiled-fresh-p file) (harness--compiled-name file) (harness--compile-file file))
         nil 'nomessage))
 
+(defun harness--reload-snapshot ()
+  "Note what the harness's libraries define, to unbind what they stop defining.
+Call it before the libraries load again.  It returns a function to call
+after, with the names of the libraries that failed to load.  That
+function unbinds the functions that a library's old version defined and
+its new one does not, logs what it unbound, and returns them, sorted.
+
+A library is a file loaded from `harness--compile-directory', or
+harness.el, named by its file name without directory or extension.
+Loading a file replaces its entry in `load-history' with a new one: the
+entries gone afterwards are the old versions and the ones that came are
+the new, and a version defines what its entry records as `(defun . F)',
+which `defalias' and `defmacro' record as well.  An entry nothing
+replaced is no version of the reload's.  That is the entry of a library
+that failed to load, which keeps it and loses none of its functions, and
+the copy of a file that a `require' loaded from `load-path' before the
+loader got to it: it lists what the library defined at the start, and
+stays.
+
+Why: loading a library again leaves defined each function its new
+version no longer has, with its old byte-code, whose documentation
+string is a (FILE . POS) pointer into the .elc the reload rewrote.
+Emacs loads the library again for every `documentation' asked of such a
+function (doc.c, `reread_doc_file'), the new .elc never having it to
+end that: the quick search's scan of the commands does so, and
+`describe-function', and a completion that annotates commands with
+their documentation.  It stays a command, too.
+
+A function goes only when nothing defines it any more:
+- It is still the very function the library defined (`eq'); a
+  definition that replaced it since, by hand or by code that ran on the
+  way, stays.
+- `symbol-file' knows no file of another library that defines it; one
+  that moved to another file stays.  The old copies of the library
+  itself do not count, the stale one of a `require' included.
+  `symbol-file' walks all of `load-history', which is too slow to ask
+  of every function: it is asked of the candidates only.
+- It is not a generic function.  The first `cl-defmethod' of a generic
+  that has no `cl-defgeneric' records `(defun . F)' in the entry of its
+  file, at the first load only, so the next load would take it for
+  dropped, with the very function still there and no other file
+  defining it.  Its methods may be in any file, too.
+- It is not a subr.  A library's functions are byte-code or
+  interpreted, while a native-compiled function is Emacs's: the
+  trampoline for a primitive that a file advises is defined as
+  `--anonymous-lambda' while the file loads, and lands in its entry.
+A function a file defines only while nothing defines it yet,
+`(unless (fboundp \\='f) (defun f ...))', is in the entry of its first
+load and not of the next: define it outright, or the reload takes it
+for dropped.
+
+What the returned function does is closed over here, with what made the
+snapshot: a reload loads this file again before it is called, and a
+newer version of the code on the way might read a snapshot otherwise."
+  (let* ((compiled (file-name-as-directory (harness--compile-directory)))
+         (true-compiled (file-name-as-directory (file-truename compiled)))
+         (self (file-name-base harness--self-file))
+         (entries
+          ;; The `load-history' entries of the libraries, as they are now.
+          (lambda ()
+            (cl-remove-if-not
+             (lambda (entry)
+               (let ((file (car entry)))
+                 (and (stringp file)
+                      (or (string-prefix-p compiled file)
+                          (string-prefix-p true-compiled file)
+                          (equal (file-name-base file) self)))))
+             load-history)))
+         (defined
+          ;; What an entry records as defined.
+          (lambda (entry)
+            (cl-loop for element in (cdr entry)
+                     when (and (eq (car-safe element) 'defun) (symbolp (cdr element)))
+                     collect (cdr element))))
+         (before (funcall entries))
+         (functions (make-hash-table :test 'eq)))
+    (dolist (entry before)
+      (dolist (f (funcall defined entry))
+        (puthash f (symbol-function f) functions)))
+    (lambda (failed)
+      (let* ((after (funcall entries))
+             (replaced (cl-remove-if (lambda (entry) (memq entry after)) before))
+             (came (cl-remove-if (lambda (entry) (memq entry before)) after))
+             (unbound nil))
+        (dolist (name (delete-dups (mapcar (lambda (entry) (file-name-base (car entry))) replaced)))
+          (let* ((named (lambda (entry)
+                          (and (stringp (car entry)) (equal (file-name-base (car entry)) name))))
+                 (old (cl-remove-if-not named replaced))
+                 (new (cl-remove-if-not named came)))
+            (when (and new (not (member name failed)))
+              (let ((kept (make-hash-table :test 'eq))
+                    (others nil)
+                    (gone nil))
+                (dolist (entry new)
+                  (dolist (f (funcall defined entry))
+                    (puthash f t kept)))
+                (dolist (entry old)
+                  (dolist (f (funcall defined entry))
+                    (let ((was (gethash f functions)))
+                      (when (and was
+                                 (not (gethash f kept))
+                                 (not (subrp was))
+                                 (eq (symbol-function f) was)
+                                 (not (cl-generic-p f))
+                                 (not (let ((load-history (or others (setq others (cl-remove-if named load-history)))))
+                                        (symbol-file f 'defun))))
+                        (fmakunbound f)
+                        (push f gone)))))
+                (when gone
+                  (setq gone (sort gone #'string<))
+                  (harness-log 'info "reload: unbound %d function%s that %s no longer defines: %s%s"
+                               (length gone) (if (cdr gone) "s" "") name
+                               (mapconcat #'symbol-name (take 12 gone) ", ")
+                               (if (nthcdr 12 gone) (format " and %d more" (- (length gone) 12)) ""))
+                  (setq unbound (nconc gone unbound)))))))
+        (sort unbound #'string<)))))
+
 (defun harness--reload ()
   "Check every harness source file, then load them all again in place.
 The files are this one, the core and library files, and the modules of
@@ -854,8 +974,11 @@ it was ready so that its INIT wires in what the new code adds there
 \(see `harness-define-module'), and `harness-reload-hook' and the
 `harness/reloaded' event have run.  The result has :stale STALE too,
 the modules that are no longer enabled but run on until a restart
-\(`harness--stale-modules').  In the UI of a harness process, the
-process is asked to reload too."
+\(`harness--stale-modules'), and :unbound UNBOUND, the functions a
+file loaded again no longer defines, which were unbound
+\(`harness--reload-snapshot'): a key, hook or timer that still names
+one reports it undefined.  In the UI of a harness process, the process
+is asked to reload too."
   (harness--setup-load-path)
   (let* ((early (mapcar #'harness--path (append harness--core-files harness--library-files)))
          (files (append early (harness--module-files)))
@@ -865,7 +988,16 @@ process is asked to reload too."
           (when (featurep 'harness-core)
             (dolist (p problems) (harness-log 'error "reload refused: %s" p)))
           (list :refused problems))
-      (let ((errors nil))
+      (let ((errors nil)
+            (failed nil)
+            (unbound nil)
+            ;; Before anything loads, this file included: the new
+            ;; versions are held to what the libraries define now.
+            (unbind (condition-case err
+                        (harness--reload-snapshot)
+                      (error (harness-log 'warn "reload: noting what the libraries define failed: %s"
+                                          (error-message-string err))
+                             #'ignore))))
         (load harness--self-file nil 'nomessage)
         (dolist (f files)
           (condition-case err
@@ -874,7 +1006,14 @@ process is asked to reload too."
                 (harness--load-file f))
             (error (let ((problem (format "%s: %s" (file-name-nondirectory f) (error-message-string err))))
                      (harness-log 'error "reload: %s" problem)
+                     (push (file-name-base f) failed)
                      (push problem errors)))))
+        ;; Every file has loaded: what none defines now goes.  A fault
+        ;; here must not keep the rest of the reload from happening.
+        (condition-case err
+            (setq unbound (funcall unbind failed))
+          (error (harness-log 'warn "reload: unbinding what the files no longer define failed: %s"
+                              (error-message-string err))))
         ;; The policy file is read again; one that cannot be trusted
         ;; leaves the policy in force as it was.  Applying it again
         ;; also guards anew the options whose definitions were evaluated.
@@ -905,15 +1044,18 @@ process is asked to reload too."
           (when stale
             (harness-log 'warn "reload: no longer enabled, running until a restart: %s"
                          (mapconcat #'symbol-name stale ", ")))
-          (list :files (length files) :errors (nreverse errors) :stale stale))))))
+          (list :files (length files) :errors (nreverse errors) :stale stale :unbound unbound))))))
 
 ;;;###autoload
 (defun harness-reload ()
   "Check every harness source file, then reload all of them in place.
 Running sessions and buffers are kept: definitions are replaced under
 them and `harness-reload-hook' plus the `harness/reloaded' event let
-the UI redraw.  When any file fails to compile nothing is loaded.
-Return non-nil when every file loaded again."
+the UI redraw.  A function that a file loaded again no longer defines
+is unbound, and the log says which; a key, hook or timer that still
+names one reports it undefined until Emacs restarts.  When any file
+fails to compile nothing is loaded.  Return non-nil when every file
+loaded again."
   (interactive)
   (let ((result (harness--reload)))
     (cond

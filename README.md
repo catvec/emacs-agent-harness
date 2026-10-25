@@ -5937,7 +5937,14 @@ any file fails to compile, nothing is reloaded. The UI reloads first,
 then the harness process. Each ready module's `:init` runs again, so
 what new code wires in there takes effect. A module enabled since the
 start loads; one no longer enabled runs on until a restart, and the
-reload says so. The echo area says whether
+reload says so. A function a file no longer defines is unbound, so it
+stops showing as a command and Emacs stops loading its library again
+for every read of its documentation; the log says which went. What
+still names it is left alone: a key of a keymap that a `defvar` keeps
+across the reload may still bind a removed command, and that key then
+reports an undefined command (`Wrong type argument: commandp, NAME`),
+as a hook entry or a timer reports the function void, until you restart
+Emacs. The echo area says whether
 the process reloaded every file, some failed to load or a module failed
 to initialise, or it refused the reload.
 `harness-auto-reload-mode` reloads the harness whenever one of its

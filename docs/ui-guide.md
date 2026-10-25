@@ -65,5 +65,6 @@ Display
 - Redraw incrementally with markers and `inhibit-read-only`; never re-render the whole transcript on a delta.
 - Nothing may overflow its window: a view's lines are fitted to the width, a long list is fitted to the height (the task board holds back its least urgent cards rather than push its compose box out of the window), and a header is built with `harness-ui-fit-header` so its buttons and keys are the last to go.  A view that ends in a compose box measures with `harness-ui-text-height`, never `window-text-pixel-size` with a Y-LIMIT, which reports text that overflows as text that fits.
 - Buffers must survive `harness-reload`: keep state in buffer-local variables, rebuild from `harness-ui-redraw-hook`.
+- A reload unbinds a command the new code no longer defines, but not the keys of a keymap that a `defvar` keeps: a change that drops or renames a command rebinds or clears (`keymap-unset`) its key at top level, which runs again, or the key reports an undefined command (`Wrong type argument: commandp`) until Emacs restarts.
 - Respect the user's theme: faces inherit from standard faces and specify light/dark variants only for backgrounds.
 - A new view, or one that now looks different, gets its README picture taken again: see [screenshots.md](screenshots.md).
