@@ -32,9 +32,21 @@
 ;; (the next asker or giver-back would too).  A limit that fell stops no
 ;; holder; no waiter starts until the holders are under it again.
 ;;
+;; A pool also notes who is using it, for a view of that: each holder
+;; with the DATA it asked with and when it took its slot
+;; (`harness-slots-holders'), and the waiters in the order they will be
+;; served, with how long each has waited (`harness-slots-line').  That is
+;; a record kept beside the count, not a part of it: the count of slots
+;; held, which the limit is held to, is what it always was, and nothing
+;; here changes who is served or when.
+;;
 ;; A pool is plain state in the process that makes it, with no timer and
 ;; no module of its own; the library defines no macros, so a change to
-;; it does not recompile the modules (`harness--library-files').
+;; it does not recompile the modules (`harness--library-files').  A
+;; reload keeps the pools that exist, made by the code before it; so what
+;; the pool did not have then -- the holders -- is not a slot of its
+;; structure, which an old pool lacks and would signal for, but a table
+;; beside it, which an old pool simply has no entry in.
 
 ;;; Code:
 
@@ -46,7 +58,13 @@
   limit                  ; an integer, or a function of no arguments returning one
   rank                   ; nil, or a function of a waiter's DATA returning a number
   (running 0)            ; how many hold a slot
-  waiters)               ; plists (:data DATA :promise PROMISE), oldest first
+  waiters)               ; plists (:data DATA :promise PROMISE :asked TIME), oldest first
+
+(defvar harness-slots--holders (make-hash-table :test 'eq :weakness 'key)
+  "Pool -> who holds its slots: plists (:data DATA :started TIME), oldest first.
+Beside the pools rather than in them (see the commentary), and weak, so
+a pool nobody uses any more takes its record with it.  A pool with no
+holder has no entry.")
 
 (cl-defun harness-slots-create (&key limit rank)
   "Return a pool of slots that allows LIMIT holders at once.
@@ -81,9 +99,39 @@ as 0."
 (defun harness-slots-waiters (pool)
   "Return the DATA of each that waits for a slot of POOL, oldest first.
 That is what `harness-slots-acquire' was given, in the order they asked,
-not the order they will be served in when the pool has a rank."
+not the order they will be served in when the pool has a rank
+\(`harness-slots-line' lists that)."
   (mapcar (lambda (waiter) (plist-get waiter :data))
           (harness-slots--pool-waiters pool)))
+
+(defun harness-slots-holders (pool)
+  "Return who holds a slot of POOL, the one that has held it longest first.
+Each is a plist (:data DATA :started TIME): DATA is what the holder asked
+with (`harness-slots-acquire') and TIME, a float time, when the slot was
+given to it -- when it asked, if it did not have to wait.  A holder
+leaves the list when its ticket gives the slot back, and every holder
+when the pool is flushed (`harness-slots-flush'), which counts no one as
+holding a slot.  The plists are copies: changing one changes nothing in
+POOL."
+  (mapcar #'copy-sequence (gethash pool harness-slots--holders)))
+
+(defun harness-slots-line (pool)
+  "Return the waiters of POOL in the order they would be served now.
+That is the order a slot that came free would be given out in: the
+highest rank first, and among equal ranks the one that asked first
+\(`harness-slots-create'), where `harness-slots-waiters' lists them as
+they asked.  Each is a plist (:data DATA :asked TIME :rank RANK): DATA is
+what the waiter asked with, TIME, a float time, when it began to wait --
+nil for a waiter that began before the pool noted it -- and RANK what
+the pool's rank function says of DATA now, 0 for a pool without one.
+The ranks are read now, as they are whenever a slot frees."
+  (cl-stable-sort
+   (mapcar (lambda (waiter)
+             (list :data (plist-get waiter :data)
+                   :asked (plist-get waiter :asked)
+                   :rank (harness-slots--rank pool waiter)))
+           (harness-slots--pool-waiters pool))
+   #'> :key (lambda (entry) (plist-get entry :rank))))
 
 ;;;; Giving slots out
 
@@ -110,13 +158,35 @@ came, so the first of the highest rank is the oldest."
               (setq best waiter best-rank rank))))))
     best))
 
-(defun harness-slots--ticket (pool)
-  "Return the function that gives one slot of POOL back, once."
+(defun harness-slots--ticket (pool &optional holder)
+  "Return the function that gives one slot of POOL back, once.
+HOLDER is the entry of `harness-slots-holders' that goes with the slot:
+the holder is dropped from the list as the slot goes back, before the
+next waiter starts.  A slot that is not counted -- one a flush gave a
+waiter -- has none."
   (let ((given nil))
     (lambda ()
       (unless given
         (setq given t)
+        (harness-slots--drop pool holder)
         (harness-slots--give pool)))))
+
+(defun harness-slots--grant (pool data)
+  "Count a slot of POOL as taken by an asker with DATA, and return its ticket.
+The asker is noted among the holders with the time it took the slot."
+  (cl-incf (harness-slots--pool-running pool))
+  (let ((holder (list :data data :started (float-time))))
+    (puthash pool (nconc (gethash pool harness-slots--holders) (list holder))
+             harness-slots--holders)
+    (harness-slots--ticket pool holder)))
+
+(defun harness-slots--drop (pool holder)
+  "Take HOLDER, an entry of POOL's holders, out of them; nil is no holder.
+A holder POOL does not list -- the pool was flushed since -- is no matter."
+  (when holder
+    (if-let* ((rest (delq holder (gethash pool harness-slots--holders))))
+        (puthash pool rest harness-slots--holders)
+      (remhash pool harness-slots--holders))))
 
 (defun harness-slots--give (pool)
   "Give one slot of POOL back and start the next waiter, if one waits."
@@ -136,8 +206,8 @@ starts, asking or giving back a slot, finds it as it should be."
     (let ((waiter (harness-slots--next pool)))
       (setf (harness-slots--pool-waiters pool)
             (delq waiter (harness-slots--pool-waiters pool)))
-      (cl-incf (harness-slots--pool-running pool))
-      (harness-resolve (plist-get waiter :promise) (harness-slots--ticket pool)))))
+      (harness-resolve (plist-get waiter :promise)
+                       (harness-slots--grant pool (plist-get waiter :data))))))
 
 (defun harness-slots-acquire (pool &optional data)
   "Return a promise of a ticket for a slot of POOL.
@@ -152,13 +222,11 @@ that room has opened for, because the limit rose and nobody admitted
 them yet, start before this asker does."
   (harness-slots-admit pool)
   (if (< (harness-slots--pool-running pool) (harness-slots-limit pool))
-      (progn
-        (cl-incf (harness-slots--pool-running pool))
-        (harness-resolved (harness-slots--ticket pool)))
+      (harness-resolved (harness-slots--grant pool data))
     (let ((promise (harness-make-promise)))
       (setf (harness-slots--pool-waiters pool)
             (nconc (harness-slots--pool-waiters pool)
-                   (list (list :data data :promise promise))))
+                   (list (list :data data :promise promise :asked (float-time)))))
       promise)))
 
 (defun harness-slots-flush (pool)
@@ -166,11 +234,13 @@ them yet, start before this asker does."
 What a pool does when its work is given up: nobody waits any longer, the
 waiters are started oldest first, and the count of slots held goes back
 to 0, so the waiters hold tickets of slots that are not counted.  The
-tickets handed out before still work; giving a slot back never takes
-the count below 0."
+holders are forgotten with the count (`harness-slots-holders'), those
+the waiters became included.  The tickets handed out before still work;
+giving a slot back never takes the count below 0."
   (let ((waiters (harness-slots--pool-waiters pool)))
     (setf (harness-slots--pool-waiters pool) nil
           (harness-slots--pool-running pool) 0)
+    (remhash pool harness-slots--holders)
     (dolist (waiter waiters)
       (harness-resolve (plist-get waiter :promise) (harness-slots--ticket pool)))))
 

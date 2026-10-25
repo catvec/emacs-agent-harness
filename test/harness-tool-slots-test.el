@@ -470,7 +470,7 @@ error, not the ticket's."
         (logged nil))
     (harness-tool-slots-test--probe "slots-probe")
     (cl-letf (((symbol-function 'harness-tool-slots--acquire)
-               (lambda (_machine _session)
+               (lambda (_machine _session &optional _tool)
                  (harness-resolved (lambda () (error "Ticket boom")))))
               (harness-log-hook
                (list (lambda (level msg) (when (eq level 'error) (push msg logged))))))
@@ -738,6 +738,318 @@ verdict is in, and only then does it wait.  A slot freed, it runs."
           (should (equal "slots-parent" (harness-tool-slots-test--content holder)))
           (should (equal "slots-other" (harness-tool-slots-test--content plain)))
           (should (equal "slots-worker" (harness-tool-slots-test--content worker))))))))
+
+;;;; Who is using the slots
+;;
+;; The plugin knows, for each machine, which session's call of which
+;; tool holds each slot and since when, and who waits for one in what
+;; order, and says when that changes.  It is a record kept beside the
+;; slots: the tests above are the proof that the calls are served as
+;; they were.
+
+(defun harness-tool-slots-test--state (machine)
+  "Return the entry of `harness-tool-slots-machines' for MACHINE, nil if it has none."
+  (cl-find machine (harness-tool-slots-machines)
+           :key (lambda (entry) (plist-get entry :machine)) :test #'equal))
+
+(defun harness-tool-slots-test--who (users)
+  "Return USERS, holders or waiters, as (SESSION TOOL) pairs."
+  (mapcar (lambda (user) (list (plist-get user :session) (plist-get user :tool))) users))
+
+(ert-deftest harness-tool-slots-this-machine-is-always-listed ()
+  "An idle machine is listed with its limit and nobody on it, and others are not.
+A machine keeps its pool when its last call is done, but is listed only
+while a call holds a slot of it or waits for one."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 3)
+        (harness-tool-slots-burst 1)
+        (harness-tool-slots-machine-function
+         (lambda (_name input _ctx) (or (plist-get input :machine) "one"))))
+    (harness-tool-slots-test--probe "slots-probe")
+    (let ((local (harness-tool-slots--local-machine)))
+      (let ((machines (harness-tool-slots-machines)))
+        (should (equal (list local) (mapcar (lambda (m) (plist-get m :machine)) machines)))
+        (should (equal (list :machine local :label "this machine" :limit 4 :running 0
+                             :holders nil :waiters nil)
+                       (car machines))))
+      ;; Calls on two other machines list them, after this one, by name.
+      (let ((two (harness-tool-slots-test--call "slots-probe" '(:machine "two")))
+            (one (harness-tool-slots-test--call "slots-probe" '(:machine "one"))))
+        (should (equal (list local "one" "two")
+                       (mapcar (lambda (m) (plist-get m :machine)) (harness-tool-slots-machines))))
+        (should (equal "one" (plist-get (harness-tool-slots-test--state "one") :label)))
+        ;; The pools stay when the calls are done; the listing does not.
+        (harness-tool-slots-test--settle-all)
+        (should (equal "slots-probe" (harness-tool-slots-test--content one)))
+        (should (equal "slots-probe" (harness-tool-slots-test--content two)))
+        (should (harness-tool-slots-test--idle-p "one"))
+        (should (equal (list local)
+                       (mapcar (lambda (m) (plist-get m :machine)) (harness-tool-slots-machines))))))))
+
+(ert-deftest harness-tool-slots-holders-are-listed-with-session-tool-and-start ()
+  "A call that holds a slot is listed under its machine until it is done.
+Its session, its tool and when it took the slot, the longest holder
+first; the tool is the call's own, not the name of what the probe runs."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe" "slots-other"))
+        (harness-tool-slots-count 2)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+    (harness-tool-slots-test--probe "slots-probe")
+    (harness-tool-slots-test--probe "slots-other")
+    (let* ((before (float-time))
+           (one (harness-tool-slots-test--call "slots-probe" nil (list :session-id "s1")))
+           (two (harness-tool-slots-test--call "slots-other" nil (list :session-id "s2")))
+           (after (float-time))
+           (state (harness-tool-slots-test--state "test-machine")))
+      (should (equal "test-machine" (plist-get state :label)))
+      (should (= 2 (plist-get state :limit)))
+      (should (= 2 (plist-get state :running)))
+      (should (equal '(("s1" "slots-probe") ("s2" "slots-other"))
+                     (harness-tool-slots-test--who (plist-get state :holders))))
+      (dolist (holder (plist-get state :holders))
+        (should (<= before (plist-get holder :started) after))
+        (should (equal "medium" (plist-get holder :priority)))
+        ;; Without a session module no session has a name.
+        (should-not (plist-get holder :name)))
+      (should-not (plist-get state :waiters))
+      ;; The first call ends: only the second is left.
+      (harness-tool-slots-test--settle-oldest)
+      (should (equal "slots-probe" (harness-tool-slots-test--content one)))
+      (should (equal '(("s2" "slots-other"))
+                     (harness-tool-slots-test--who
+                      (plist-get (harness-tool-slots-test--state "test-machine") :holders))))
+      (harness-tool-slots-test--settle-all)
+      (should (equal "slots-other" (harness-tool-slots-test--content two)))
+      ;; Nobody holds a slot of it any more: it is not listed, though it
+      ;; keeps its pool.
+      (should-not (harness-tool-slots-test--state "test-machine"))
+      (should (harness-tool-slots-test--idle-p "test-machine")))))
+
+(ert-deftest harness-tool-slots-waiters-are-listed-in-the-order-they-will-be-served ()
+  "The calls waiting are listed by priority, the oldest first among equals.
+Each has its session, its tool, its session's priority as it is now and
+when it began to wait; a priority raised while it waits moves it up, as
+it moves it up the line, and the slot goes to whom the list says."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-hold" "slots-low" "slots-plain" "slots-urgent"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine)
+        (levels (list (cons "hold" 'medium) (cons "low" 'low)
+                      (cons "plain" 'medium) (cons "urgent" 'high))))
+    (dolist (name harness-tool-slots-tools)
+      (harness-tool-slots-test--probe name))
+    (cl-letf (((symbol-function 'harness-priority-of)
+               (lambda (sid) (or (cdr (assoc sid levels)) 'medium))))
+      (let* ((before (float-time))
+             (calls (mapcar (lambda (who)
+                              (harness-tool-slots-test--call (concat "slots-" who) nil
+                                                             (list :session-id who)))
+                            '("hold" "low" "plain" "urgent")))
+             (after (float-time))
+             (state (harness-tool-slots-test--state "test-machine")))
+        (should (equal '(("hold" "slots-hold")) (harness-tool-slots-test--who (plist-get state :holders))))
+        (should (= 1 (plist-get state :running)))
+        (should (equal '(("urgent" "slots-urgent" "high")
+                         ("plain" "slots-plain" "medium")
+                         ("low" "slots-low" "low"))
+                       (mapcar (lambda (w) (list (plist-get w :session) (plist-get w :tool)
+                                                 (plist-get w :priority)))
+                               (plist-get state :waiters))))
+        (dolist (waiter (plist-get state :waiters))
+          (should (<= before (plist-get waiter :asked) after))
+          (should-not (plist-member waiter :started)))
+        ;; The oldest waiter's priority rises above the others'.
+        (setcdr (assoc "low" levels) 'high)
+        (should (equal '("low" "urgent" "plain")
+                       (mapcar (lambda (w) (plist-get w :session))
+                               (plist-get (harness-tool-slots-test--state "test-machine") :waiters))))
+        ;; The slot that frees goes to the first in the list.
+        (harness-tool-slots-test--settle-oldest)
+        (should (equal '("slots-hold" "slots-low") harness-tool-slots-test--started))
+        (should (equal '(("low" "slots-low"))
+                       (harness-tool-slots-test--who
+                        (plist-get (harness-tool-slots-test--state "test-machine") :holders))))
+        (harness-tool-slots-test--settle-all)
+        (dolist (call calls) (harness-await call 5))
+        (should (harness-tool-slots-test--idle-p "test-machine"))))))
+
+(ert-deftest harness-tool-slots-a-session-is-listed-by-its-name-and-priority ()
+  "The session of a call is listed by its name, and its own priority.
+A session the harness does not know has no name and the default
+priority; so does a call of the harness's own, with no session."
+  (harness-tool-slots-test-with-sessions
+    (let* ((cwd (harness-test-temp-dir))
+           (named (plist-get (harness-call 'session/create :cwd cwd :name "Fix the build") :id))
+           (blank (plist-get (harness-call 'session/create :cwd cwd) :id)))
+      (harness-call 'priority/set named "high")
+      (let ((harness-tool-slots-tools '("slots-probe"))
+            (harness-tool-slots-count 4)
+            (harness-tool-slots-burst 0)
+            (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+        (harness-tool-slots-test--probe "slots-probe")
+        (dolist (id (list named blank "nobody" nil))
+          (harness-tool-slots-test--call "slots-probe" nil (list :session-id id)))
+        (let ((holders (plist-get (harness-tool-slots-test--state "test-machine") :holders)))
+          (should (equal (list named blank "nobody" nil)
+                         (mapcar (lambda (h) (plist-get h :session)) holders)))
+          (should (equal (list "Fix the build" nil nil nil)
+                         (mapcar (lambda (h) (plist-get h :name)) holders)))
+          (should (equal '("high" "medium" "medium" "medium")
+                         (mapcar (lambda (h) (plist-get h :priority)) holders))))
+        (harness-tool-slots-test--settle-all)))))
+
+(ert-deftest harness-tool-slots-the-rank-reads-the-session-from-any-form-of-data ()
+  "A call asks with its session and tool, and one from before asked with the session alone.
+A reload keeps the calls waiting, whatever they asked with, and the pool
+ranks them all by the priority of their session."
+  (cl-letf (((symbol-function 'harness-priority-of)
+             (lambda (sid) (if (equal sid "urgent") 'high 'medium))))
+    (should (= 2 (harness-tool-slots--rank-of (harness-tool-slots--data "urgent" "bash"))))
+    (should (= 2 (harness-tool-slots--rank-of "urgent")))
+    (should (= 1 (harness-tool-slots--rank-of "plain")))
+    (should (= 1 (harness-tool-slots--rank-of nil)))
+    (should (= 1 (harness-tool-slots--rank-of (harness-tool-slots--data nil "bash"))))))
+
+(ert-deftest harness-tool-slots-calls-from-before-pools-are-listed-without-a-tool ()
+  "The calls that waited in the slots from before pools are listed, with no tool.
+They ask the pool that takes over with the session they came with, and
+the tool is not known of them."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine)
+        (old (harness-make-promise)))
+    (harness-tool-slots-test--probe "slots-probe")
+    (puthash "test-machine" (cons 1 (list (list :promise old :session "old-session")))
+             harness-tool-slots--machines)
+    (let ((call (harness-tool-slots-test--call "slots-probe" nil (list :session-id "new-session")))
+          (state nil))
+      (setq state (harness-tool-slots-test--state "test-machine"))
+      (should (equal '(("old-session" nil)) (harness-tool-slots-test--who (plist-get state :holders))))
+      (should (equal '(("new-session" "slots-probe")) (harness-tool-slots-test--who (plist-get state :waiters))))
+      (funcall (harness-promise-value old))
+      (harness-tool-slots-test--settle-all)
+      (should (equal "slots-probe" (harness-tool-slots-test--content call)))
+      (should (harness-tool-slots-test--idle-p "test-machine")))))
+
+;;;; Saying that who holds a slot changed
+
+(defmacro harness-tool-slots-test-with-changes (var &rest body)
+  "Run BODY with VAR collecting what `tool-slots/holders-changed' says, newest first.
+Each is (MACHINE HOLDERS WAITERS): the machine, and how many sessions hold a
+slot of it and wait for one when the event came."
+  (declare (indent 1))
+  `(let* ((,var nil)
+          (handle (harness-on 'tool-slots/holders-changed
+                              (lambda (machine)
+                                (let ((state (harness-tool-slots-test--state machine)))
+                                  (push (list machine
+                                              (length (plist-get state :holders))
+                                              (length (plist-get state :waiters)))
+                                        ,var))))))
+     (unwind-protect (progn ,@body)
+       (harness-off handle))))
+
+(ert-deftest harness-tool-slots-every-change-of-who-holds-a-slot-is-announced ()
+  "A call taking a slot, one waiting, one done and the next starting are each announced.
+The announcement comes as the pool changes, so what it finds there is
+the pool after the change."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+    (harness-tool-slots-test--probe "slots-probe")
+    (harness-tool-slots-test-with-changes changes
+      (let ((first (harness-tool-slots-test--call "slots-probe" nil (list :session-id "s1"))))
+        ;; It took the only slot.
+        (should (equal '(("test-machine" 1 0)) (reverse changes)))
+        (let ((second (harness-tool-slots-test--call "slots-probe" nil (list :session-id "s2"))))
+          ;; The second one waits.
+          (should (equal '(("test-machine" 1 0) ("test-machine" 1 1)) (reverse changes)))
+          (harness-tool-slots-test--settle-oldest)
+          ;; The first is done and the second has its slot.
+          (should (equal '(("test-machine" 1 0) ("test-machine" 1 1) ("test-machine" 1 0))
+                         (reverse changes)))
+          (harness-tool-slots-test--settle-all)
+          (should (equal '("test-machine" 0 0) (car changes)))
+          (should (= 4 (length changes)))
+          (should (equal "slots-probe" (harness-tool-slots-test--content first)))
+          (should (equal "slots-probe" (harness-tool-slots-test--content second))))))))
+
+(ert-deftest harness-tool-slots-a-call-that-fails-announces-its-slot-back ()
+  "A call whose handler fails or signals gives its slot back, and says so."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+    (harness-tool-slots-test--probe "slots-probe")
+    (let ((tool (harness-tool-get "slots-probe")))
+      (harness-tool-slots-test-with-changes changes
+        (dolist (handler (list (lambda (&rest _) (harness-rejected "Handler failed"))
+                               (lambda (&rest _) (error "Handler signalled"))))
+          (setq changes nil)
+          (let ((call (harness-tool-slots--hold handler tool nil (list :session-id "s1"))))
+            (should (eq 'rejected (harness-promise-state call)))
+            ;; Took the slot, then gave it back.
+            (should (equal '(("test-machine" 1 0) ("test-machine" 0 0)) (reverse changes)))
+            (should-not (plist-get (harness-tool-slots-test--state "test-machine") :holders))))))))
+
+(ert-deftest harness-tool-slots-admitting-announces-only-when-a-call-started ()
+  "Starting the calls a raised limit has room for is announced, and nothing else is.
+Nothing started, nothing changed."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+    (harness-tool-slots-test--probe "slots-probe")
+    (let ((first (harness-tool-slots-test--call "slots-probe"))
+          (second (harness-tool-slots-test--call "slots-probe")))
+      (harness-tool-slots-test-with-changes changes
+        ;; Room for none: nobody starts, and nothing is said.
+        (harness-tool-slots--admit "test-machine")
+        (should-not changes)
+        ;; One more slot, and the second starts.
+        (setq harness-tool-slots-count 2)
+        (harness-tool-slots--admit "test-machine")
+        (should (equal '(("test-machine" 2 0)) changes))
+        (harness-tool-slots--admit "test-machine")
+        (should (= 1 (length changes))))
+      (harness-tool-slots-test--settle-all)
+      (should (equal "slots-probe" (harness-tool-slots-test--content first)))
+      (should (equal "slots-probe" (harness-tool-slots-test--content second))))))
+
+(ert-deftest harness-tool-slots-shutdown-announces-that-nobody-holds-a-slot ()
+  "Giving the slots up lets the waiting calls run, counts nobody as holding one, and says so."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function
+         (lambda (_name input _ctx) (or (plist-get input :machine) "one"))))
+    (harness-tool-slots-test--probe "slots-probe")
+    (let ((calls (list (harness-tool-slots-test--call "slots-probe" '(:machine "one"))
+                       (harness-tool-slots-test--call "slots-probe" '(:machine "one"))
+                       (harness-tool-slots-test--call "slots-probe" '(:machine "two")))))
+      ;; One call runs on each machine, and one waits on the first.
+      (should (= 2 (length harness-tool-slots-test--started)))
+      (harness-tool-slots-test-with-changes changes
+        (harness-tool-slots--shutdown)
+        (should (= 3 (length harness-tool-slots-test--started)))
+        (should (equal '("one" "two") (sort (mapcar #'car changes) #'string<)))
+        ;; Nobody holds a slot or waits: the calls run, but are not counted.
+        (dolist (change changes)
+          (should (equal 0 (nth 1 change)))
+          (should (equal 0 (nth 2 change)))))
+      (harness-tool-slots--init)
+      (harness-tool-slots-test--settle-all)
+      (dolist (call calls) (harness-await call 5)))))
 
 (provide 'harness-tool-slots-test)
 ;;; harness-tool-slots-test.el ends here

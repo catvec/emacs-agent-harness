@@ -40,6 +40,13 @@ the time of their start (`harness-ui-slots-test-with').")
 (defvar harness-ui-slots-test--opened nil
   "The sessions the page opened, newest first: (ID . POSITION).")
 
+(defvar harness-ui-slots-test--tools-requests nil
+  "The requests the page made for the tool slots, newest first: (CALLBACK . ON-ERROR).")
+
+(defvar harness-ui-slots-test--tools-answer nil
+  "What the harness answers a request for the tool slots with.
+(data PLIST), (fail MESSAGE), or nil for no answer at all.")
+
 (defun harness-ui-slots-test--fetch (dir callback on-error)
   "Stand in for `harness-ui-slots--fetch': answer as the test says."
   (push (list dir callback on-error) harness-ui-slots-test--requests)
@@ -48,17 +55,30 @@ the time of their start (`harness-ui-slots-test-with').")
     (`(fail ,message) (funcall on-error message))
     (_ nil)))
 
+(defun harness-ui-slots-test--fetch-tools (callback on-error)
+  "Stand in for `harness-ui-slots--fetch-tools': answer as the test says."
+  (push (cons callback on-error) harness-ui-slots-test--tools-requests)
+  (pcase harness-ui-slots-test--tools-answer
+    (`(data ,data) (funcall callback data))
+    (`(fail ,message) (funcall on-error message))
+    (_ nil)))
+
 (defmacro harness-ui-slots-test-with (&rest body)
   "Run BODY with the page's request answered by the test, nothing displayed.
-The opener of sessions only records what it was asked to open."
+The opener of sessions only records what it was asked to open.  The
+tool slots are asked for as the tasks' are, and answered as
+`harness-ui-slots-test--tools-answer' says: by default not at all."
   (declare (indent 0))
   `(let ((harness-ui-slots-test--now (float-time))
          (harness-ui-slots-test--requests nil)
          (harness-ui-slots-test--answer nil)
+         (harness-ui-slots-test--tools-requests nil)
+         (harness-ui-slots-test--tools-answer nil)
          (harness-ui-slots-test--displayed nil)
          (harness-ui-slots-test--opened nil))
      (clrhash harness-ui--sessions)
      (cl-letf (((symbol-function 'harness-ui-slots--fetch) #'harness-ui-slots-test--fetch)
+               ((symbol-function 'harness-ui-slots--fetch-tools) #'harness-ui-slots-test--fetch-tools)
                ((symbol-function 'harness-ui-display-view)
                 (lambda (buffer &optional _position) (push buffer harness-ui-slots-test--displayed)))
                ((symbol-function 'harness-ui-session-opener)
@@ -199,6 +219,17 @@ The arrow of a priority is left out of its label."
     (goto-char (point-min))
     (when-let* ((match (text-property-search-forward 'harness-slot-key key #'equal)))
       (prop-match-beginning match))))
+
+(defun harness-ui-slots-test--goto-tool (prefix &optional offset)
+  "In the page, go to the row of a tool call whose key starts with PREFIX, OFFSET in.
+A tool row's key names when its call began, so it is found by its start."
+  (goto-char (point-min))
+  (let ((match (text-property-search-forward
+                'harness-slot-key prefix
+                (lambda (prefix value) (and (stringp value) (string-prefix-p prefix value))))))
+    (unless match (error "No tool row starting %s on the page" prefix))
+    (goto-char (prop-match-beginning match))
+    (forward-char (or offset 0))))
 
 (defun harness-ui-slots-test--goto (key &optional lines offset)
   "In the page, go to the box or row KEY, LINES down from its first line, OFFSET in."
@@ -2195,6 +2226,443 @@ the row is running again."
               (harness-ui-slots-test--live-shows page " running +1 +– +– +– +\\[Pause\\]")
               (should-not (string-match-p "quota ·" (harness-ui-slots-test--live-text page)))))
         (harness-fallback--shutdown)))))
+
+;;;; The tool slots
+;;
+;; Below the tasks at work, the page lists who is using the machine's
+;; tool slots (`tool-slots/status'): the calls that hold a slot, and
+;; those waiting for one.  The state is stubbed here as the harness
+;; would give it; the live test at the end has the real module say it.
+
+(defun harness-ui-slots-test--use (session name tool priority seconds &optional waiting)
+  "A call using the tool slots, as `tool-slots/status' lists it.
+It is a call of TOOL for SESSION, called NAME, at PRIORITY, that took its
+slot SECONDS before `harness-ui-slots-test--now' -- or, WAITING, began to
+wait for one then."
+  (list :session session :name name :tool tool :priority priority
+        (if waiting :asked :started) (- harness-ui-slots-test--now seconds)))
+
+(defun harness-ui-slots-test--machine (key label limit holders &optional waiters)
+  "A machine of `tool-slots/status', KEY called LABEL, with LIMIT slots.
+HOLDERS and WAITERS are its calls (`harness-ui-slots-test--use')."
+  (list :machine key :label label :limit limit :running (length holders)
+        :holders holders :waiters waiters))
+
+(defun harness-ui-slots-test--tools (machines &rest props)
+  "An answer of `tool-slots/status' for MACHINES, 18 slots and no load; PROPS replace keys."
+  (let ((state (list :limit 18 :baseline 18 :pressure nil :text nil :at nil :machines machines)))
+    (while props (setq state (plist-put state (pop props) (pop props))))
+    state))
+
+(defun harness-ui-slots-test--tool-page (tools &optional width data)
+  "Return the page for DATA (no task at work) and TOOLS as lines, for WIDTH (100) columns."
+  (harness-ui-slots-test--lines
+   (harness-ui-slots--text (or data (harness-ui-slots-test--data)) (or width 100)
+                           harness-ui-slots-test--now "/home/me/src/acme/" nil tools)))
+
+(defun harness-ui-slots-test--tool-sections (lines)
+  "Return the tool slots sections of LINES, each a list of its lines.
+A section starts at its heading and ends at the blank line."
+  (let (sections)
+    (while (setq lines (cl-member-if (lambda (line) (string-prefix-p " Tool slots" line)) lines))
+      (push (seq-take-while (lambda (line) (not (string-empty-p line))) lines) sections)
+      (setq lines (cdr lines)))
+    (nreverse sections)))
+
+(ert-deftest harness-ui-slots-tools-list-who-is-using-the-slots ()
+  "Under the tasks at work, the calls at work and those waiting, as sessions are listed.
+A heading names the machine and counts its slots.  Then a row for each
+call holding a slot, the longest first, and one for each call waiting, in
+the order it will be served: the session's status icon and name -- the
+UI's, where it knows the session -- the tool, whether the call runs or
+waits and for how long, and the session's priority."
+  (harness-ui-slots-test-with
+    (harness-ui-slots-test--cache "s-build" :name "Fix the build" :status "running")
+    (let* ((tools (harness-ui-slots-test--tools
+                   (list (harness-ui-slots-test--machine
+                          "local:box" "this machine" 18
+                          (list (harness-ui-slots-test--use "s-build" "Old name" "bash" "medium" 41.0)
+                                (harness-ui-slots-test--use "s-docs" "Write the docs" "elisp" "high" 2.0))
+                          (list (harness-ui-slots-test--use "s-slow" "Plan the release" "bash" "low" 12.0 t)
+                                (harness-ui-slots-test--use "s-next" "Check the logs" "ssh" "medium" 5.0 t))))))
+           (lines (harness-ui-slots-test--tool-page tools))
+           (section (car (harness-ui-slots-test--tool-sections lines))))
+      (should (equal " Tool slots · this machine · 2 of 18 in use · 2 waiting" (car section)))
+      (should (string-match-p "\\` +Name +Tool +State +Time +Priority\\'" (nth 1 section)))
+      ;; The session the UI knows is called what the UI calls it.
+      (should (string-match-p "\\` ►  Fix the build +bash +running +41s *\\'" (nth 2 section)))
+      (should (string-match-p (format "\\` ►  Write the docs +elisp +running +2s +%s\\'"
+                                      (regexp-quote (harness-ui-slots-test--arrow "high")))
+                              (nth 3 section)))
+      ;; Then the line, first to be served first, each with its place.
+      (should (string-match-p (format "Plan the release +bash +waiting #1 +12s +%s\\'"
+                                      (regexp-quote (harness-ui-slots-test--arrow "low")))
+                              (nth 4 section)))
+      (should (string-match-p "Check the logs +ssh +waiting #2 +5s *\\'" (nth 5 section)))
+      (should (= 6 (length section)))
+      ;; It follows the tasks at work and comes before the queue of tasks.
+      (let ((in-use (cl-position " In use" lines :test #'equal))
+            (tools-at (cl-position (car section) lines :test #'equal))
+            (queue (cl-position-if (lambda (line) (string-prefix-p " Queue" line)) lines)))
+        (should (< in-use tools-at queue)))
+      ;; Nothing on the page is a box.
+      (should-not (cl-some (lambda (line) (string-match-p "[╭╮╰╯│]" line)) lines)))))
+
+(ert-deftest harness-ui-slots-tools-say-nothing-without-a-state ()
+  "A page the harness gave no tool slots to has no section for them.
+So does one whose state lists no machine: a harness that does not say
+who uses them."
+  (harness-ui-slots-test-with
+    (dolist (tools (list nil '(:limit 18 :baseline 18) (harness-ui-slots-test--tools nil)))
+      (let ((lines (harness-ui-slots-test--tool-page tools)))
+        (should-not (harness-ui-slots-test--tool-sections lines))
+        (should (equal (harness-ui-slots-test--page (harness-ui-slots-test--data)) lines))))))
+
+(ert-deftest harness-ui-slots-tools-an-idle-machine-says-no-call-is-running ()
+  "This machine is there with all its slots free, and a call is not."
+  (harness-ui-slots-test-with
+    (let* ((tools (harness-ui-slots-test--tools
+                   (list (harness-ui-slots-test--machine "local:box" "this machine" 18 nil))))
+           (section (car (harness-ui-slots-test--tool-sections (harness-ui-slots-test--tool-page tools)))))
+      (should (equal '(" Tool slots · this machine · 0 of 18 in use" "   no call is running")
+                     section)))
+    ;; Slots in use by calls the harness does not list -- it began them before a reload.
+    (let* ((tools (harness-ui-slots-test--tools
+                   (list (list :machine "local:box" :label "this machine" :limit 18 :running 2))))
+           (section (car (harness-ui-slots-test--tool-sections (harness-ui-slots-test--tool-page tools)))))
+      (should (equal '(" Tool slots · this machine · 2 of 18 in use"
+                       "   slots in use, by calls that are not listed")
+                     section)))))
+
+(ert-deftest harness-ui-slots-tools-name-each-machine-and-say-when-the-load-holds-this-one-back ()
+  "Every machine with a call at work has its own table, this machine's first.
+This machine says when its load holds its slots back, and how far; a
+machine over its limit says by how many."
+  (harness-ui-slots-test-with
+    (let* ((tools (harness-ui-slots-test--tools
+                   (list (harness-ui-slots-test--machine
+                          "local:box" "this machine" 5
+                          (list (harness-ui-slots-test--use "s-1" "One" "bash" "medium" 10.0)))
+                         (harness-ui-slots-test--machine
+                          "host:build" "build" 18
+                          (list (harness-ui-slots-test--use "s-2" "Two" "ssh" "medium" 20.0)))
+                         (list :machine "host:old" :label "old" :limit 1 :running 2
+                               :holders (list (harness-ui-slots-test--use "s-3" "Three" "ssh" "medium" 30.0)
+                                              (harness-ui-slots-test--use "s-4" "Four" "ssh" "medium" 25.0))))
+                   :limit 5 :pressure 1.8))
+           (sections (harness-ui-slots-test--tool-sections (harness-ui-slots-test--tool-page tools))))
+      (should (= 3 (length sections)))
+      (should (equal " Tool slots · this machine · 1 of 5 in use · held back from 18 by system load (1.8x)"
+                     (car (nth 0 sections))))
+      ;; Another host is not held back by this machine's load.
+      (should (equal " Tool slots · build · 1 of 18 in use" (car (nth 1 sections))))
+      (should (equal " Tool slots · old · 2 of 1 in use · 1 over the limit" (car (nth 2 sections))))
+      (should (string-match-p "Two +ssh +running +20s" (nth 2 (nth 1 sections))))
+      (should (string-match-p "Three +ssh +running +30s" (nth 2 (nth 2 sections))))
+      (should (string-match-p "Four +ssh +running +25s" (nth 3 (nth 2 sections)))))
+    ;; Without a pressure it says no number; with all the slots it says nothing.
+    (let ((section (car (harness-ui-slots-test--tool-sections
+                         (harness-ui-slots-test--tool-page
+                          (harness-ui-slots-test--tools
+                           (list (harness-ui-slots-test--machine "local:box" "this machine" 5 nil))))))))
+      (should (equal " Tool slots · this machine · 0 of 5 in use · held back from 18 by system load"
+                     (car section))))
+    (let ((section (car (harness-ui-slots-test--tool-sections
+                         (harness-ui-slots-test--tool-page
+                          (harness-ui-slots-test--tools
+                           (list (harness-ui-slots-test--machine "local:box" "this machine" 18 nil))))))))
+      (should-not (string-match-p "held back" (car section))))))
+
+(ert-deftest harness-ui-slots-tools-name-a-session-as-the-ui-knows-it ()
+  "The name of a call's session is the UI's, else the harness's, else a short id.
+A call that no session made is the harness's own."
+  (harness-ui-slots-test-with
+    (harness-ui-slots-test--cache "s-known" :name "Known to the UI" :status "blocked")
+    (let* ((tools (harness-ui-slots-test--tools
+                   (list (harness-ui-slots-test--machine
+                          "local:box" "this machine" 18
+                          (list (harness-ui-slots-test--use "s-known" "Said by the harness" "bash" "medium" 9.0)
+                                (harness-ui-slots-test--use "s-unknown" "Said by the harness" "bash" "medium" 8.0)
+                                (harness-ui-slots-test--use "abcdef123456" nil "bash" "medium" 7.0)
+                                (harness-ui-slots-test--use nil nil "bash" "medium" 6.0))))))
+           (section (car (harness-ui-slots-test--tool-sections (harness-ui-slots-test--tool-page tools)))))
+      (should (string-match-p "Known to the UI +bash +running +9s" (nth 2 section)))
+      ;; The icon is the session's status where the UI knows it.
+      (should (string-match-p (concat "\\` " (regexp-quote (substring-no-properties
+                                                             (harness-ui-status-icon "blocked")))
+                                      " +Known to the UI")
+                              (nth 2 section)))
+      (should (string-match-p "Said by the harness +bash +running +8s" (nth 3 section)))
+      (should (string-match-p "abcdef12 +bash +running +7s" (nth 4 section)))
+      (should (string-match-p "harness +bash +running +6s" (nth 5 section))))))
+
+(ert-deftest harness-ui-slots-tools-a-narrow-window-leaves-out-the-priority-and-the-tool ()
+  "A window too narrow for the table leaves out its Priority, then its Tool, not its names."
+  (harness-ui-slots-test-with
+    (let* ((tools (harness-ui-slots-test--tools
+                   (list (harness-ui-slots-test--machine
+                          "local:box" "this machine" 18
+                          (list (harness-ui-slots-test--use "s-1" "A name that is rather long" "bash" "high" 9.0))))))
+           (header (lambda (width)
+                     (nth 1 (car (harness-ui-slots-test--tool-sections
+                                  (harness-ui-slots-test--tool-page tools width)))))))
+      (should (string-match-p "Name +Tool +State +Time +Priority" (funcall header 100)))
+      (let ((narrow (funcall header 52)))
+        (should (string-match-p "Name +Tool +State +Time" narrow))
+        (should-not (string-match-p "Priority" narrow)))
+      (let ((narrower (funcall header 44)))
+        (should (string-match-p "Name +State +Time" narrower))
+        (should-not (string-match-p "Tool\\|Priority" narrower))))))
+
+(ert-deftest harness-ui-slots-tools-rows-open-the-session-and-tab-reaches-them ()
+  "A call's row opens its session and TAB goes to it after the tasks' rows.
+A call no session made has nothing to open, and says so."
+  (harness-ui-slots-test-with
+    (setq harness-ui-slots-test--tools-answer
+          (list 'data (harness-ui-slots-test--tools
+                       (list (harness-ui-slots-test--machine
+                              "local:box" "this machine" 18
+                              (list (harness-ui-slots-test--use "s-call" "Running a call" "bash" "medium" 9.0)
+                                    (harness-ui-slots-test--use nil nil "elisp" "medium" 8.0))
+                              (list (harness-ui-slots-test--use "s-wait" "Waiting for one" "bash" "high" 7.0 t)))))))
+    (let ((buffer (harness-ui-slots-test--open
+                   (harness-ui-slots-test--data :holders (seq-take (harness-ui-slots-test--busy) 2)))))
+      (with-current-buffer buffer
+        ;; Rows 0 and 1 are the tasks'; the calls', in the order drawn, follow.
+        (should (equal '(0 1 2 3 4) (mapcar #'car (harness-ui-slots--row-starts))))
+        (harness-ui-slots-test--goto-tool "tool:local:box:holder:s-call:bash:")
+        (should (equal 2 (get-text-property (point) 'harness-slot-index)))
+        (should (get-text-property (point) 'harness-slot-tool))
+        (harness-ui-slots-open)
+        (should (equal '(("s-call"))
+                       (mapcar (lambda (opened) (list (car opened))) harness-ui-slots-test--opened)))
+        ;; A call of the harness's own: the row is there, and there is nothing to open.
+        (harness-ui-slots-next-row)
+        (should (equal 3 (get-text-property (point) 'harness-slot-index)))
+        (should-error (harness-ui-slots-open) :type 'user-error)
+        (should (= 1 (length harness-ui-slots-test--opened)))
+        ;; A call waiting is a row too.
+        (harness-ui-slots-next-row)
+        (should (equal 4 (get-text-property (point) 'harness-slot-index)))
+        (should (equal "s-wait" (get-text-property (point) 'harness-slot-session)))
+        ;; TAB goes round to the first task.
+        (harness-ui-slots-next-row)
+        (should (equal 0 (get-text-property (point) 'harness-slot-index)))
+        ;; The session at point is the call's, for the commands that act on a session.
+        (harness-ui-slots-previous-row)
+        (should (equal "s-wait" (harness-ui-slots--session-at-point)))))))
+
+(ert-deftest harness-ui-slots-tools-the-page-asks-for-them-and-keeps-the-answer ()
+  "A page asks how the tool slots are used when it loads and shows the section.
+A harness without the module answers with an error and the page is
+without it; a page that had the section has it gone when the answer is
+an error."
+  (harness-ui-slots-test-with
+    (setq harness-ui-slots-test--tools-answer
+          (list 'data (harness-ui-slots-test--tools
+                       (list (harness-ui-slots-test--machine
+                              "local:box" "this machine" 18
+                              (list (harness-ui-slots-test--use "s-1" "Running a call" "bash" "medium" 9.0))))))
+          harness-ui-slots-test--answer (list 'data (harness-ui-slots-test--data)))
+    (let ((buffer (harness-slots "/home/me/src/acme/")))
+      (should (= 1 (length harness-ui-slots-test--tools-requests)))
+      (should (string-match-p "Tool slots · this machine · 1 of 18 in use"
+                              (harness-ui-slots-test--live-text buffer)))
+      ;; Asked again whenever the page asks for the tasks' slots again.
+      (with-current-buffer buffer (harness-ui-slots-refresh))
+      (should (= 2 (length harness-ui-slots-test--tools-requests)))
+      ;; A harness that cannot say takes the section away.
+      (setq harness-ui-slots-test--tools-answer '(fail "No such method"))
+      (with-current-buffer buffer (harness-ui-slots-refresh))
+      (should-not (string-match-p "Tool slots" (harness-ui-slots-test--live-text buffer))))
+    ;; A page of a harness that never had the module has nothing to show.
+    (kill-buffer harness-ui-slots--buffer-name)
+    (setq harness-ui-slots-test--tools-answer '(fail "No such method"))
+    (let ((buffer (harness-slots "/home/me/src/acme/")))
+      (should-not (string-match-p "Tool slots" (harness-ui-slots-test--live-text buffer))))))
+
+(ert-deftest harness-ui-slots-tools-a-change-the-harness-announces-is-shown ()
+  "`tool-slots/changed' brings the state, and a page a window shows is drawn with it.
+Nothing is asked of the harness; the same state again draws nothing; a
+page nobody shows keeps the state and is drawn when it is shown."
+  (harness-ui-slots-test-with
+    (let* ((one (harness-ui-slots-test--tools
+                 (list (harness-ui-slots-test--machine
+                        "local:box" "this machine" 18
+                        (list (harness-ui-slots-test--use "s-1" "First call" "bash" "medium" 9.0))))))
+           (two (harness-ui-slots-test--tools
+                 (list (harness-ui-slots-test--machine
+                        "local:box" "this machine" 18
+                        (list (harness-ui-slots-test--use "s-1" "First call" "bash" "medium" 10.0)
+                              (harness-ui-slots-test--use "s-2" "Second call" "elisp" "medium" 1.0))))))
+           (buffer (progn (setq harness-ui-slots-test--tools-answer (list 'data one))
+                          (harness-ui-slots-test--open (harness-ui-slots-test--data))))
+           (draws 0))
+      (cl-letf* ((draw (symbol-function 'harness-ui-slots--draw))
+                 ((symbol-function 'harness-ui-slots--draw)
+                  (lambda (text) (cl-incf draws) (funcall draw text))))
+        ;; Hidden: the state is taken, and nothing is drawn.
+        (harness-ui-slots--on-event "tool-slots/changed" (list two))
+        (should (equal two (buffer-local-value 'harness-ui-slots--tools buffer)))
+        (should (= 0 draws))
+        (should-not (string-match-p "Second call" (harness-ui-slots-test--live-text buffer)))
+        (let ((requests (length harness-ui-slots-test--requests))
+              (tool-requests (length harness-ui-slots-test--tools-requests)))
+          (harness-ui-slots-test-shown buffer
+            ;; Shown, it draws as it shows (the window change), with the state it has.
+            (harness-ui-slots--render)
+            (setq draws 0)
+            (should (string-match-p "Second call +elisp +running +1s" (harness-ui-slots-test--live-text buffer)))
+            ;; The same state again changes nothing; another is drawn at once.
+            (harness-ui-slots--on-event "tool-slots/changed" (list two))
+            (should (= 0 draws))
+            (harness-ui-slots--on-event "tool-slots/changed" (list one))
+            (should (= 1 draws))
+            (should-not (string-match-p "Second call" (harness-ui-slots-test--live-text buffer)))
+            ;; A state that says nothing of the tool slots takes the section away;
+            ;; an event with no state, and other events, leave the page as it is.
+            (harness-ui-slots--on-event "tool-slots/changed" nil)
+            (harness-ui-slots--on-event "tool-slots/other" (list two))
+            (should (= 1 draws))
+            (should (string-match-p "First call" (harness-ui-slots-test--live-text buffer))))
+          (should (= requests (length harness-ui-slots-test--requests)))
+          (should (= tool-requests (length harness-ui-slots-test--tools-requests))))))))
+
+(ert-deftest harness-ui-slots-tools-the-times-of-the-calls-run-while-a-window-shows-them ()
+  "A page with a call to time redraws each second, only while it is shown.
+The times run from the state the page has, asking the harness for
+nothing; the timer is there while a window shows a page with a call at
+work or waiting and in no other case, and is gone with the module."
+  (harness-ui-slots-test-with
+    (let* ((busy (harness-ui-slots-test--tools
+                  (list (harness-ui-slots-test--machine
+                         "local:box" "this machine" 18
+                         (list (harness-ui-slots-test--use "s-1" "Timed call" "bash" "medium" 41.0))))))
+           (idle (harness-ui-slots-test--tools
+                  (list (harness-ui-slots-test--machine "local:box" "this machine" 18 nil))))
+           (buffer (progn (setq harness-ui-slots-test--tools-answer (list 'data busy))
+                          (harness-ui-slots-test--open (harness-ui-slots-test--data))))
+           (real-float-time (symbol-function 'float-time))
+           (later 0.0))
+      (unwind-protect
+          (cl-letf (((symbol-function 'float-time)
+                     (lambda (&optional time)
+                       (if time (funcall real-float-time time) (+ (funcall real-float-time) later)))))
+            ;; Hidden: nobody needs the timer.
+            (harness-ui-slots--tool-timer-sync)
+            (should-not harness-ui-slots--tool-timer)
+            (harness-ui-slots-test-shown buffer
+              (harness-ui-slots--render)
+              (should (timerp harness-ui-slots--tool-timer))
+              (should (string-match-p "Timed call +bash +running +4[1-3]s"
+                                      (harness-ui-slots-test--live-text buffer)))
+              ;; A tick draws the later time, once, and asks for nothing.
+              (let ((requests (length harness-ui-slots-test--requests))
+                    (tool-requests (length harness-ui-slots-test--tools-requests)))
+                (setq later 20.0)
+                (harness-ui-slots--tool-tick)
+                (should (string-match-p "Timed call +bash +running +6[1-3]s\\|Timed call +bash +running +1m"
+                                        (harness-ui-slots-test--live-text buffer)))
+                (should (= requests (length harness-ui-slots-test--requests)))
+                (should (= tool-requests (length harness-ui-slots-test--tools-requests))))
+              ;; The last call ends: the timer stops.
+              (harness-ui-slots--on-event "tool-slots/changed" (list idle))
+              (should-not harness-ui-slots--tool-timer)
+              (harness-ui-slots--on-event "tool-slots/changed" (list busy))
+              (should (timerp harness-ui-slots--tool-timer)))
+            ;; The page is hidden again: the next tick stops the timer.
+            (harness-ui-slots--tool-tick)
+            (should-not harness-ui-slots--tool-timer)
+            ;; And a timer that runs when the module stops is stopped by it.
+            (harness-ui-slots-test-shown buffer
+              (harness-ui-slots--render)
+              (should (timerp harness-ui-slots--tool-timer))
+              (harness-ui-slots--shutdown)
+              (should-not harness-ui-slots--tool-timer)))
+        (harness-ui-slots--tool-timer-stop)))))
+
+(ert-deftest harness-ui-slots-tools-the-timer-needs-a-shown-page-with-a-call ()
+  "No window, no call to time, or a page gone: no timer."
+  (harness-ui-slots-test-with
+    (setq harness-ui-slots-test--tools-answer
+          (list 'data (harness-ui-slots-test--tools
+                       (list (harness-ui-slots-test--machine
+                              "local:box" "this machine" 18
+                              (list (harness-ui-slots-test--use "s-1" "Call" "bash" "medium" 1.0)))))))
+    (let ((buffer (harness-ui-slots-test--open (harness-ui-slots-test--data))))
+      (unwind-protect
+          (progn
+            (should-not (harness-ui-slots--tool-pages))
+            (harness-ui-slots-test-shown buffer
+              (should (equal (list buffer) (harness-ui-slots--tool-pages)))
+              (harness-ui-slots--render)
+              (should (timerp harness-ui-slots--tool-timer))
+              ;; The page is killed with its timer running: the tick finds no
+              ;; page and puts the timer away.
+              (let ((timer harness-ui-slots--tool-timer))
+                (kill-buffer buffer)
+                (harness-ui-slots--tool-tick)
+                (should-not harness-ui-slots--tool-timer)
+                (should-not (memq timer timer-list)))))
+        (harness-ui-slots--tool-timer-stop)))))
+
+(ert-deftest harness-ui-slots-tools-live-with-the-harness ()
+  "Against the real tool slots, through the in-process ACP connection.
+One slot, and three calls of a tool that holds until it is stopped: the
+first holds the slot, the others wait, the high priority one first.  The
+page, asked for the slots, lists them; the harness's own announcements
+-- a call ending, the next starting -- keep it current by themselves."
+  (harness-ui-slots-test-with-harness
+    (harness-test-load-module 'tool-slots)
+    (harness-test-load-module 'tool-slots-load)
+    (let* ((harness-tool-slots-tools '("live-probe"))
+           (harness-tool-slots-count 1)
+           (harness-tool-slots-burst 0)
+           (harness-tool-slots-load--notify-delay 0.05)
+           (held nil)
+           (sessions (mapcar (lambda (name)
+                               (plist-get (harness-call 'session/create :cwd dir :name name) :id))
+                             '("Probe one" "Probe two" "Probe three")))
+           (page nil))
+      (harness-call 'priority/set (nth 2 sessions) "high")
+      (harness-define-tool "live-probe"
+        :label "Probe" :description "A probe that holds until stopped" :kind 'exec
+        :handler (lambda (_input ctx)
+                   (harness-with-promise (resolve reject)
+                     (ignore reject)
+                     (push (cons (plist-get ctx :session-id) resolve) held))))
+      (unwind-protect
+          (let ((calls (mapcar (lambda (id)
+                                 (harness-tools--run-handler (harness-tool-get "live-probe") nil
+                                                             (list :cwd dir :session-id id)))
+                               sessions)))
+            (setq page (harness-slots dir))
+            (harness-ui-slots-test--live-shows page "Probe one +live-probe +running")
+            ;; The one that holds the slot, and the others by priority: three first.
+            (let ((text (harness-ui-slots-test--live-shows page "Probe three +live-probe +waiting #1")))
+              (should (string-match-p "Tool slots · this machine · 1 of 1 in use · 2 waiting" text))
+              (should (string-match-p "Probe two +live-probe +waiting #2" text)))
+            ;; The call holding the slot ends: the next in line has it, and the
+            ;; page shows that unasked.
+            (funcall (cdr (assoc (nth 0 sessions) held)) (harness-tool-ok "done"))
+            (harness-ui-slots-test--live-shows page "Probe three +live-probe +running")
+            (let ((text (harness-ui-slots-test--live-shows page "Probe two +live-probe +waiting #1")))
+              (should-not (string-match-p "Probe one" text))
+              (should (string-match-p "1 of 1 in use · 1 waiting" text)))
+            ;; And once every call is done, nothing is running.
+            (dolist (id (list (nth 2 sessions) (nth 1 sessions)))
+              (funcall (cdr (assoc id held)) (harness-tool-ok "done"))
+              (harness-test-wait
+               (lambda () (not (cl-some (lambda (machine)
+                                          (cl-some (lambda (user) (equal id (plist-get user :session)))
+                                                   (plist-get machine :holders)))
+                                        (harness-tool-slots-machines))))
+               5 "the call to end"))
+            (harness-ui-slots-test--live-shows page "0 of 1 in use")
+            (should (string-match-p "no call is running" (harness-ui-slots-test--live-text page)))
+            (dolist (call calls) (harness-await call 5)))
+        (dolist (entry held) (ignore-errors (funcall (cdr entry) (harness-tool-ok "stopped"))))
+        (harness-tool-slots-load--notify-cancel)))))
 
 (provide 'harness-ui-slots-test)
 ;;; harness-ui-slots-test.el ends here

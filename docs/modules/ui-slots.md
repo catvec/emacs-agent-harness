@@ -2,7 +2,7 @@
 
 # ui-slots
 
-The task slots page: the tasks that hold slots as the session list lists sessions, the queue and its waits by priority.
+The task slots page: the tasks that hold slots as the session list lists sessions, who is using the machine's tool slots, the queue and its waits by priority.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-slots.el](../../lisp/ui/harness-ui-slots.el)
@@ -19,8 +19,10 @@ waited lately -- and, above all that, every project's queue, to pause
 and resume them in one place.  `harness-slots` opens it; the harness
 answers it with `task/slots`, which counts the slots the way the
 scheduler does (a task's sub-agents, forks and the merge queue take
-none) and lists the queues.  These are the task slots, not the tool
-slots that give a busy machine's tool calls out by priority.
+none) and lists the queues.  These are the task slots; the page also
+shows the tool slots, which give a machine's tool calls out by
+priority (`tool-slots/status`), so the "who is using what" of both is
+in one place.
 
 The page reads, top to bottom (this one is 100 columns wide):
 
@@ -43,6 +45,14 @@ The page reads, top to bottom (this one is 100 columns wide):
    ►  Fix stuck model responses…   running       41m  ↑            52.0k/200k          Max just now
    ►  Plan task board polish       running        2m              9.1k/200k          Max 1m ago
      1 free
+
+  Tool slots · this machine · 3 of 5 in use · 2 waiting · held back from 18 by system load (1.8x)
+     Name                          Tool   State         Time  Priority
+   ►  Fix stuck model responses…   bash   running        41s
+   ►  Plan task board polish       elisp  running         2m
+      harness                      bash   running      1h01m
+      Plan session list rework     bash   waiting #1      12s  ↓
+      Compose box bundle           ssh    waiting #2       5s
 
   Queue · 4 waiting
     priority    waiting   longest   average
@@ -81,6 +91,24 @@ S-TAB go from row to row, SPC pops out what the task waits on and y
 and n answer a permission request, as in the list.  The
 first line's [Set limit] is the board's "N at a time" button
 (`harness-ui-tasks-set-max-running`).
+
+The tasks' slots are not the machine's: a task's slot decides how many
+tasks work at once, while a tool slot decides how many calls of the
+tools that start processes run at once on one machine, and only the
+first is the board's.  The section under the tasks at work shows the
+second, for each machine -- this one, and every other with a call at
+work or waiting -- from `tool-slots/status`: the calls that hold a
+slot, the longest at work first, then those waiting, in the order they
+will be served (`harness-ui-slots--tools-section`).  Its rows are the
+session list's again, for the session each call is made for: its
+status icon, its name (the link to it), its priority arrow; and the
+Tool, State (running, or waiting and its place in the line) and Time
+columns, which only the tool slots know.  A machine's heading counts
+its slots and says so when this machine's load holds them back and by
+how much.  Its times run to the second while a call is young, which
+the board's 15-second clock is too coarse for: the section has a timer
+of its own, running only while a window shows a page with a call at
+work or waiting (`harness-ui-slots--tool-tick`).
 
 The queues are the page's own and not a project's: one row for each
 project that has a task at work or waiting, or a queue paused by hand
@@ -123,6 +151,12 @@ than it must:
     it has, asking the harness for nothing; a request a task waits
     on, which comes or is answered, draws it again at once
     (`harness-ui-pending-changed-hook`);
+  - the tool slots are asked for with the slots (`tool-slots/status`),
+    and from then on the harness says when they change
+    (`tool-slots/changed`): it brings the state as it is, so the page
+    asks for nothing, and draws again when a window shows it;
+  - the times of the tool calls have a timer of their own, a second
+    apart, while a window shows a page with a call at work or waiting;
   - either way, a redraw that would draw the same text is skipped.
 
 S on a task board opens the page for the board's project, and C-c h Q
@@ -157,6 +191,11 @@ S on a task board opens the page for the board's project, and C-c h Q
 - `task/slots` ([tasks](tasks.md))
 - `task/suspend-all-queues` ([tasks](tasks.md))
 - `task/suspend-queue` ([tasks](tasks.md))
+- `tool-slots/status` ([tool-slots-load](tool-slots-load.md))
+
+### Events it hears over ACP
+
+- `tool-slots/changed` → `harness-ui-slots--on-event`
 
 ### Hooks it adds to
 

@@ -43,6 +43,16 @@
 ;; keeps the line of those waiting and hands the slots out.  This module
 ;; says how many slots a machine has (`harness-tool-slots--slots') and
 ;; how a waiting call ranks in the line: the priority of its session.
+;;
+;; Who is using the slots can be seen: a call asks its pool with the
+;; session it serves and the tool it runs, so the pool knows what each
+;; holder runs for whom, and since when, and each waiter too
+;; (`harness-tool-slots-machines', machine by machine).  That changes
+;; nothing about who is served: the session is what the call was ranked
+;; by already, and the tool is only known along with it.  Whenever who
+;; holds a slot, or waits for one, changes, the event
+;; `tool-slots/holders-changed' says so; the tool-slots-load module turns
+;; it into the `tool-slots/changed' a UI shows the slots by.
 
 ;;; Code:
 
@@ -98,10 +108,13 @@ machine's slots, or bind it in a test.")
 (defvar harness-tool-slots--machines (make-hash-table :test 'equal)
   "Machine key -> its slots, a pool of the harness-slots library.
 The pool allows `harness-tool-slots--slots' calls at once.  Each call
-waiting for a slot comes with the session it serves, and the priority
-of that session decides among them which is served next
-\(`harness-tool-slots--rank-of').  A machine keeps its pool once its
-last call is done.")
+asks with its data, `harness-tool-slots--data': the session it serves
+and the tool it runs.  The priority of the session decides among the
+calls waiting which is served next (`harness-tool-slots--rank-of').  A
+machine keeps its pool once its last call is done.")
+
+(harness-declare-event 'tool-slots/holders-changed
+  "(MACHINE) once who holds a tool slot of MACHINE, or waits for one, changed.")
 
 (defun harness-tool-slots--baseline ()
   "Return how many calls may run at once on one machine.
@@ -135,13 +148,30 @@ A call that has no session at all -- the harness itself asked -- waits
 as `harness-priority-default' does."
   (if session (harness-priority-of session) harness-priority-default))
 
-(defun harness-tool-slots--rank-of (session)
-  "Return the rank of a call waiting for a slot on behalf of SESSION.
-That is SESSION's priority as it is now, so raising a session's
-priority moves the calls it already has waiting.  It is the pool's rank
-function (`harness-slots-create'), and SESSION the data a call asks
-with; among calls of one rank the oldest goes first."
-  (harness-priority-rank (harness-tool-slots--priority session)))
+(defun harness-tool-slots--data (session tool)
+  "Return what a call of TOOL for SESSION asks a pool for a slot with.
+That is (:session SESSION :tool TOOL): SESSION a session id or nil, and
+TOOL the tool's name."
+  (list :session session :tool tool))
+
+(defun harness-tool-slots--data-field (data key)
+  "Return KEY, `:session' or `:tool', of DATA, what a call asked a pool with.
+A call that asked before the tool was noted -- one a reload kept, or one
+of the calls that waited in the slots from before pools -- asked with
+the bare session id, or nil: that is its session and no tool is known."
+  (if (and (consp data) (keywordp (car data)))
+      (plist-get data key)
+    (and (eq key :session) data)))
+
+(defun harness-tool-slots--rank-of (data)
+  "Return the rank of a call waiting for a slot, that asked with DATA.
+That is the priority of the session DATA names as it is now, so raising
+a session's priority moves the calls it already has waiting.  It is the
+pool's rank function (`harness-slots-create'), and DATA what a call asks
+with (`harness-tool-slots--data'); among calls of one rank the oldest
+goes first."
+  (harness-priority-rank
+   (harness-tool-slots--priority (harness-tool-slots--data-field data :session))))
 
 (defun harness-tool-slots--pool (machine)
   "Return the pool of slots of MACHINE, making it when it has none yet.
@@ -163,23 +193,38 @@ its limit, the old ones and the new."
         (puthash machine fresh harness-tool-slots--machines)
         (dolist (waiter (cdr pool))
           (harness-resolve (plist-get waiter :promise)
-                           (harness-slots-acquire fresh (plist-get waiter :session))))
+                           (harness-slots-acquire
+                            fresh (harness-tool-slots--data (plist-get waiter :session) nil))))
         fresh))))
+
+(defun harness-tool-slots--changed (machine)
+  "Say that who holds a slot of MACHINE, or waits for one, changed."
+  (harness-emit 'tool-slots/holders-changed machine))
 
 (defun harness-tool-slots--admit (machine)
   "Start the calls waiting for MACHINE while it has free slots.
 The calls waiting go by priority, the oldest first among equals
 \(`harness-slots-admit').  A module that raises a machine's limit while
 calls wait calls this, so they start without waiting for another call
-to finish."
-  (harness-slots-admit (harness-tool-slots--pool machine)))
+to finish.  A call that started is a change of who holds a slot
+\(`tool-slots/holders-changed')."
+  (let* ((pool (harness-tool-slots--pool machine))
+         (before (harness-slots-running pool)))
+    (harness-slots-admit pool)
+    (unless (= before (harness-slots-running pool))
+      (harness-tool-slots--changed machine))))
 
-(defun harness-tool-slots--acquire (machine session)
+(defun harness-tool-slots--acquire (machine session &optional tool)
   "Return a promise of a ticket for a slot of MACHINE for a call of SESSION.
 It resolves at once when MACHINE has a free slot, and otherwise when
 one is given back to it, by SESSION's priority then, oldest first among
-equals (`harness-slots-acquire')."
-  (harness-slots-acquire (harness-tool-slots--pool machine) session))
+equals (`harness-slots-acquire').  TOOL is the name of the tool the call
+runs, which the slot's holder is known by (`harness-tool-slots-machines').
+The call is either holding a slot or waiting for one when this returns,
+which is a change of who does (`tool-slots/holders-changed')."
+  (prog1 (harness-slots-acquire (harness-tool-slots--pool machine)
+                                (harness-tool-slots--data session tool))
+    (harness-tool-slots--changed machine)))
 
 (defun harness-tool-slots--give (machine)
   "Give back a slot of MACHINE that a call took before slots were pools.
@@ -264,7 +309,7 @@ keeps it for the user."
       (harness-log 'debug "tool-slots: %s" text)
       (harness-tool-slots--say ctx text))))
 
-(defun harness-tool-slots--finish (ticket settle value)
+(defun harness-tool-slots--finish (ticket settle value &optional machine)
   "Give back the slot TICKET holds, then settle a call with VALUE.
 SETTLE is the `resolve' or `reject' function of the call's promise.  The
 slot goes first, so a call waiting for it starts while this one is
@@ -272,8 +317,12 @@ worded.  SETTLE is called whatever the ticket does: a ticket that
 signals -- one made before a reload, say -- must not leave the promise
 pending, for the turn that waits for the call would never go on.  The
 error is not hidden: it goes on to the promise library, which logs it.
-Return nil."
-  (unwind-protect (funcall ticket)
+MACHINE, the machine the slot is of, is said to have changed holders
+once the slot is back, however the ticket went
+\(`tool-slots/holders-changed').  Return nil."
+  (unwind-protect
+      (unwind-protect (funcall ticket)
+        (when machine (harness-tool-slots--changed machine)))
     (funcall settle value))
   nil)
 
@@ -286,7 +335,7 @@ and settled even when giving it back fails (`harness-tool-slots--finish')."
            (machine (harness-tool-slots--machine tool input ctx))
            (asked (float-time)))
       (harness-then
-       (harness-tool-slots--acquire machine (plist-get ctx :session-id))
+       (harness-tool-slots--acquire machine (plist-get ctx :session-id) name)
        (lambda (ticket)
          (condition-case err
              (progn
@@ -296,10 +345,10 @@ and settled even when giving it back fails (`harness-tool-slots--finish')."
                ;; The call settles even if giving the slot back signals.
                (harness-then (funcall orig tool input ctx)
                              (lambda (value)
-                               (harness-tool-slots--finish ticket resolve value))
+                               (harness-tool-slots--finish ticket resolve value machine))
                              (lambda (err)
-                               (harness-tool-slots--finish ticket reject err))))
-           (error (harness-tool-slots--finish ticket reject err))))
+                               (harness-tool-slots--finish ticket reject err machine))))
+           (error (harness-tool-slots--finish ticket reject err machine))))
        (lambda (err) (funcall reject err))))))
 
 (defun harness-tool-slots--run-handler (orig tool input ctx)
@@ -310,6 +359,105 @@ handler starts; a call of any other tool runs as it always did."
   (if (harness-tool-slots--governed-p tool)
       (harness-tool-slots--hold orig tool input ctx)
     (funcall orig tool input ctx)))
+
+;;;; Who is using the slots
+
+;; What a UI shows of the slots: for each machine, the calls that hold a
+;; slot -- whose session, which tool, since when -- and those waiting,
+;; in the order they will be served.  It is read off the pools as they
+;; are, plain data a method can hand over (tool-slots-load's
+;; `tool-slots/status'); nothing here is kept apart from the pools.
+
+(defun harness-tool-slots--local-machine ()
+  "Return the key of the machine this harness runs on.
+It is the key `harness-tool-slots-default-machine' gives a call that
+runs here."
+  (concat "local:" (or (system-name) "machine")))
+
+(defun harness-tool-slots--session-facts (session facts)
+  "Return (NAME . PRIORITY) of SESSION, a session id or nil.
+NAME is the session's name, nil when it has none or the session module
+does not know it -- a session it does not know is nameless, not an
+error.  PRIORITY is the level it is served at, as the line of waiting
+calls goes by it (`harness-tool-slots--priority').  FACTS is a hash
+table of what was found already, which is where a session is looked up
+once: one with a dozen calls at work asks the session module once."
+  (or (gethash session facts)
+      (puthash session
+               (cons (and (stringp session)
+                          (harness-method-exists-p 'session/get)
+                          (condition-case nil
+                              (let ((name (plist-get (harness-call 'session/get session) :name)))
+                                (and (stringp name) (not (string-blank-p name)) name))
+                            (error nil)))
+                     (harness-tool-slots--priority session))
+               facts)))
+
+(defun harness-tool-slots--user (data facts)
+  "Return what is known of the call that asked a pool with DATA, as a plist.
+That is its :session, the :name of that session, the :tool and the
+:priority the session is served at now, as a level's name; FACTS is as
+for `harness-tool-slots--session-facts'."
+  (let* ((session (harness-tool-slots--data-field data :session))
+         (known (harness-tool-slots--session-facts session facts)))
+    (list :session session
+          :name (car known)
+          :tool (harness-tool-slots--data-field data :tool)
+          :priority (symbol-name (cdr known)))))
+
+(defun harness-tool-slots--machine-state (machine pool facts)
+  "Return who is using the slots of MACHINE, whose slots are POOL, as a plist.
+POOL is nil for a machine that has used none yet.  FACTS is as for
+`harness-tool-slots--session-facts'.  The plist is described by
+`harness-tool-slots-machines'."
+  (list :machine machine
+        :label (harness-tool-slots--machine-label machine)
+        :limit (if pool (harness-slots-limit pool) (harness-tool-slots--slots machine))
+        :running (if pool (harness-slots-running pool) 0)
+        :holders (and pool
+                      (mapcar (lambda (holder)
+                                (append (harness-tool-slots--user (plist-get holder :data) facts)
+                                        (list :started (plist-get holder :started))))
+                              (harness-slots-holders pool)))
+        :waiters (and pool
+                      (mapcar (lambda (waiter)
+                                (append (harness-tool-slots--user (plist-get waiter :data) facts)
+                                        (list :asked (plist-get waiter :asked))))
+                              (harness-slots-line pool)))))
+
+(defun harness-tool-slots-machines ()
+  "Return who is using the tool slots, a plist for each machine in use.
+The machines are this one, always, and then every other that has a call
+holding a slot or waiting for one, by name.  Each plist has
+  :machine  the machine's key, \"local:NAME\" or \"host:NAME\"
+  :label    how a person reads it: \"this machine\", or the host
+  :limit    how many calls may run at once on it now
+  :running  how many calls hold a slot, as the machine's pool counts them
+  :holders  the calls holding a slot, the one that has held it longest
+            first, each a plist of :session (the id of the session it
+            serves, nil for the harness's own call), :name (that
+            session's name, nil without one), :tool (the tool's name),
+            :priority (the session's, \"low\", \"medium\" or \"high\") and
+            :started (when it took the slot, a float time)
+  :waiters  the calls waiting, in the order they will be served, each
+            such a plist with :asked, when it began to wait, in place of
+            :started
+Calls that took their slot before a reload may not be listed: the pool
+did not note them then, though it counts them.  Asking changes nothing."
+  (let* ((facts (make-hash-table :test 'equal))
+         (local (harness-tool-slots--local-machine))
+         (others (cl-loop for machine being the hash-keys of harness-tool-slots--machines
+                          using (hash-values pool)
+                          when (and (not (consp pool))
+                                    (not (equal machine local))
+                                    (or (> (harness-slots-running pool) 0)
+                                        (> (harness-slots-waiting pool) 0)))
+                          collect machine)))
+    (mapcar (lambda (machine)
+              (let ((pool (gethash machine harness-tool-slots--machines)))
+                (harness-tool-slots--machine-state
+                 machine (and pool (not (consp pool)) pool) facts)))
+            (cons local (sort others #'string<)))))
 
 ;;;; The module
 
@@ -322,7 +470,8 @@ handler starts; a call of any other tool runs as it always did."
   "Stop holding slots, letting every call that waits run at once."
   (advice-remove 'harness-tools--run-handler #'harness-tool-slots--run-handler)
   (dolist (machine (hash-table-keys harness-tool-slots--machines))
-    (harness-slots-flush (harness-tool-slots--pool machine))))
+    (harness-slots-flush (harness-tool-slots--pool machine))
+    (harness-tool-slots--changed machine)))
 
 (harness-define-module 'tool-slots
   :doc "A few slots per machine for the tools that start processes."

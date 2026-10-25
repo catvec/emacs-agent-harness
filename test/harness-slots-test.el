@@ -339,5 +339,207 @@ The pool is brought up to date before a waiter is told it has a slot."
     (should (= 0 (harness-slots-waiting pool)))
     (should (harness-slots-test--ticket (harness-slots-acquire pool)))))
 
+;;;; Who holds a slot
+;;
+;; A pool notes each holder -- what it asked with and when it took its
+;; slot -- and lists the line of waiters in the order they will be
+;; served.  It is a record beside the count: the tests above are the
+;; proof that the scheduling is what it was, and these say what the
+;; record holds.
+
+(defun harness-slots-test--holder-data (pool)
+  "Return the DATA of the holders of POOL, the longest holding first."
+  (mapcar (lambda (holder) (plist-get holder :data)) (harness-slots-holders pool)))
+
+(ert-deftest harness-slots-holders-are-who-took-a-slot-and-since-when ()
+  "A holder is listed with the DATA it asked with and the time it got its slot.
+The waiters are not holders; they are, when a slot is given back to them,
+and from the time it is."
+  (let* ((pool (harness-slots-create :limit 2))
+         (before (float-time)))
+    (should-not (harness-slots-holders pool))
+    (let ((one (harness-slots-acquire pool '(:session "s1" :tool "bash")))
+          (two (harness-slots-acquire pool '(:session "s2" :tool "elisp")))
+          (third (harness-slots-acquire pool '(:session "s3" :tool "bash"))))
+      (let ((holders (harness-slots-holders pool))
+            (after (float-time)))
+        ;; In the order they got their slots; the third waits.
+        (should (equal '((:session "s1" :tool "bash") (:session "s2" :tool "elisp"))
+                       (mapcar (lambda (holder) (plist-get holder :data)) holders)))
+        (dolist (holder holders)
+          (should (<= before (plist-get holder :started) after)))
+        (should (= 2 (harness-slots-running pool)))
+        (should-not (harness-promise-settled-p third))
+        (ignore one)
+        ;; A slot goes back: the waiter has it, and is a holder from now on.
+        (let ((early (plist-get (car holders) :started)))
+          (harness-slots-test--give two)
+          (let ((now (harness-slots-holders pool)))
+            (should (equal '((:session "s1" :tool "bash") (:session "s3" :tool "bash"))
+                           (mapcar (lambda (holder) (plist-get holder :data)) now)))
+            (should (= early (plist-get (car now) :started)))
+            (should (>= (plist-get (cadr now) :started) after))))))))
+
+(ert-deftest harness-slots-a-ticket-drops-its-holder-once ()
+  "Giving a slot back takes its holder out of the list, however often it is called.
+A holder whose slot another asker was given is still listed once."
+  (let* ((pool (harness-slots-create :limit 2))
+         (one (harness-slots-acquire pool 'one))
+         (two (harness-slots-acquire pool 'two))
+         (ticket (harness-slots-test--ticket one)))
+    (should (equal '(one two) (harness-slots-test--holder-data pool)))
+    (funcall ticket)
+    (funcall ticket)
+    (funcall ticket)
+    (should (equal '(two) (harness-slots-test--holder-data pool)))
+    (should (= 1 (harness-slots-running pool)))
+    ;; The same data may hold two slots: giving one back drops one.
+    (let ((again (harness-slots-acquire pool 'two)))
+      (should (equal '(two two) (harness-slots-test--holder-data pool)))
+      (harness-slots-test--give two)
+      (should (equal '(two) (harness-slots-test--holder-data pool)))
+      (harness-slots-test--give again)
+      (should-not (harness-slots-holders pool))
+      (should (= 0 (harness-slots-running pool))))))
+
+(ert-deftest harness-slots-the-pool-is-up-to-date-when-a-waiter-starts ()
+  "The giver is no holder, and the waiter is one, by the time the waiter is told.
+A waiter that looks at the holders as it starts sees itself and not the
+holder whose slot it took."
+  (let* ((pool (harness-slots-create :limit 1))
+         (hold (harness-slots-acquire pool 'hold))
+         (seen nil))
+    (harness-then (harness-slots-acquire pool 'next)
+                  (lambda (_ticket)
+                    (setq seen (harness-slots-test--holder-data pool))
+                    nil))
+    (harness-slots-test--give hold)
+    (should (equal '(next) seen))))
+
+(ert-deftest harness-slots-a-raised-limit-makes-holders-of-those-it-admits ()
+  "Waiters that a raised limit admits become holders, longest-waiting first."
+  (let* ((limit 1)
+         (pool (harness-slots-create :limit (lambda () limit))))
+    (harness-slots-acquire pool 'hold)
+    (harness-slots-acquire pool 'a)
+    (harness-slots-acquire pool 'b)
+    (harness-slots-acquire pool 'c)
+    (should (equal '(hold) (harness-slots-test--holder-data pool)))
+    (setq limit 3)
+    (harness-slots-admit pool)
+    (should (equal '(hold a b) (harness-slots-test--holder-data pool)))
+    (should (equal '(c) (harness-slots-waiters pool)))
+    ;; A limit that fell stops no holder, and lists them all.
+    (setq limit 1)
+    (should (equal '(hold a b) (harness-slots-test--holder-data pool)))))
+
+(ert-deftest harness-slots-flush-forgets-the-holders-and-the-tickets-in-hand-keep-working ()
+  "A flush counts no one as holding a slot, those it started included.
+A ticket handed out before still works, and does not drop the holder of
+a slot taken after the flush."
+  (let* ((pool (harness-slots-create :limit 1))
+         (hold (harness-slots-acquire pool 'hold))
+         (waiter (harness-slots-acquire pool 'waiter)))
+    (should (equal '(hold) (harness-slots-test--holder-data pool)))
+    (harness-slots-flush pool)
+    (should-not (harness-slots-holders pool))
+    (should (functionp (harness-slots-test--ticket waiter)))
+    ;; The pool goes on as before, with a holder of the new count.
+    (let ((fresh (harness-slots-acquire pool 'fresh)))
+      (should (equal '(fresh) (harness-slots-test--holder-data pool)))
+      (harness-slots-test--give hold)
+      (harness-slots-test--give waiter)
+      (should (equal '(fresh) (harness-slots-test--holder-data pool)))
+      (harness-slots-test--give fresh)
+      (should-not (harness-slots-holders pool)))))
+
+(ert-deftest harness-slots-a-pool-from-before-holders-gives-its-slots-back ()
+  "A pool a reload kept, whose holders the record does not know, still works.
+Its tickets give their slots back, count down, and start the waiters;
+nothing signals for want of the record."
+  (let* ((pool (harness-slots-create :limit 1))
+         (hold (harness-slots-acquire pool 'hold))
+         (next (harness-slots-acquire pool 'next)))
+    ;; The record the old code never made.
+    (clrhash harness-slots--holders)
+    (should-not (harness-slots-holders pool))
+    (harness-slots-test--give hold)
+    (should (functionp (harness-slots-test--ticket next)))
+    (should (= 1 (harness-slots-running pool)))
+    ;; The waiter it started is a holder, as any new one is.
+    (should (equal '(next) (harness-slots-test--holder-data pool)))
+    (harness-slots-test--give next)
+    (should (= 0 (harness-slots-running pool)))
+    (should-not (harness-slots-holders pool))))
+
+(ert-deftest harness-slots-holders-are-copies ()
+  "Changing what `harness-slots-holders' returns changes nothing in the pool."
+  (let ((pool (harness-slots-create :limit 1)))
+    (harness-slots-acquire pool 'one)
+    (let ((holders (harness-slots-holders pool)))
+      (setf (plist-get (car holders) :data) 'changed)
+      (setf (car holders) nil))
+    (should (equal '(one) (harness-slots-test--holder-data pool)))))
+
+(ert-deftest harness-slots-the-line-is-in-the-order-they-will-be-served ()
+  "`harness-slots-line' lists the waiters by rank, the oldest first among equals.
+Each has its DATA, when it began to wait and its rank now; the waiters
+of `harness-slots-waiters' stay in the order they asked."
+  (let* ((ranks (list (cons 'hold 0) (cons 'low-old 1) (cons 'high-old 5)
+                      (cons 'low-new 1) (cons 'high-new 5)))
+         (pool (harness-slots-create :limit 1
+                                     :rank (lambda (data) (cdr (assq data ranks)))))
+         (before (float-time))
+         (hold (harness-slots-acquire pool 'hold)))
+    (dolist (data '(low-old high-old low-new high-new))
+      (harness-slots-acquire pool data))
+    (let ((line (harness-slots-line pool))
+          (after (float-time)))
+      (should (equal '(high-old high-new low-old low-new)
+                     (mapcar (lambda (entry) (plist-get entry :data)) line)))
+      (should (equal '(5 5 1 1) (mapcar (lambda (entry) (plist-get entry :rank)) line)))
+      (dolist (entry line)
+        (should (<= before (plist-get entry :asked) after)))
+      ;; The time each began to wait follows the order they asked in.
+      (should (equal '(low-old high-old low-new high-new)
+                     (mapcar (lambda (entry) (plist-get entry :data))
+                             (sort (copy-sequence line)
+                                   (lambda (a b) (< (plist-get a :asked) (plist-get b :asked))))))))
+    (should (equal '(low-old high-old low-new high-new) (harness-slots-waiters pool)))
+    ;; The ranks are read now: the oldest rises above the rest.
+    (setcdr (assq 'low-old ranks) 9)
+    (should (equal '(low-old high-old high-new low-new)
+                   (mapcar (lambda (entry) (plist-get entry :data)) (harness-slots-line pool))))
+    ;; And the slot that frees goes to whom the line says is first.
+    (harness-slots-test--give hold)
+    (should (equal '(low-old) (harness-slots-test--holder-data pool)))
+    (should (equal '(high-old high-new low-new)
+                   (mapcar (lambda (entry) (plist-get entry :data)) (harness-slots-line pool))))))
+
+(ert-deftest harness-slots-the-line-of-a-pool-without-a-rank-is-the-order-they-asked ()
+  "Without a rank function every waiter ranks 0 and the oldest is first."
+  (let ((pool (harness-slots-create :limit 1)))
+    (should-not (harness-slots-line pool))
+    (dolist (data '(hold a b c))
+      (harness-slots-acquire pool data))
+    (should (equal '((a 0) (b 0) (c 0))
+                   (mapcar (lambda (entry) (list (plist-get entry :data) (plist-get entry :rank)))
+                           (harness-slots-line pool))))))
+
+(ert-deftest harness-slots-the-line-keeps-a-waiter-from-before-asked-times ()
+  "A waiter the pool noted no time for is listed, with no time.
+A reload keeps the waiters of the code before it, which have none."
+  (let ((pool (harness-slots-create :limit 1)))
+    (harness-slots-acquire pool 'hold)
+    (harness-slots-acquire pool 'old)
+    (setf (harness-slots--pool-waiters pool)
+          (mapcar (lambda (waiter) (list :data (plist-get waiter :data)
+                                         :promise (plist-get waiter :promise)))
+                  (harness-slots--pool-waiters pool)))
+    (should (equal '((old nil 0))
+                   (mapcar (lambda (entry) (list (plist-get entry :data) (plist-get entry :asked)
+                                                 (plist-get entry :rank)))
+                           (harness-slots-line pool))))))
+
 (provide 'harness-slots-test)
 ;;; harness-slots-test.el ends here

@@ -70,8 +70,12 @@ OpenAI-compatible APIs and AWS Bedrock.
   `harness-tool-slots-load-high`, `harness-tool-slots-load-floor`). While
   they are held back every chat pins how many there are above its
   compose box, and says when the number changes in one note that opens
-  to the changes, not a message for each. The test suites run at idle
-  CPU and I/O priority, yielding to whatever you are doing.
+  to the changes, not a message for each. Who is using the slots is on
+  the **Task slots** page (see **Task board**): the calls holding each
+  machine's slots, with their sessions, tools and how long they have
+  run, and those waiting, in the order they will be served. The test
+  suites run at idle CPU and I/O priority, yielding to whatever you are
+  doing.
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
   queue. A per-project limit on running tasks starts the waiting ones
@@ -579,7 +583,7 @@ nil for nowhere.
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project (`a` assumes the one at point as the project, `r` resets; see [Looking at a task's worktree](#looking-at-a-tasks-worktree)) |
 | `w` | `harness-ui-tasks-assume-worktree` | On the task board, assume the worktree of the task at point as the project, or reset it if it is assumed already (see [Looking at a task's worktree](#looking-at-a-tasks-worktree)) |
-| `C-c h Q` | `harness-slots` | Show every project's queue -- pause and resume it, or every task and every queue at once (`P`, `u`, `U`, `s`, `S`) -- and the project's task slots: who holds each one and at which priority, who waits for one and for how long (`S` on the task board) |
+| `C-c h Q` | `harness-slots` | Show every project's queue -- pause and resume it, or every task and every queue at once (`P`, `u`, `U`, `s`, `S`) -- and the project's task slots: who holds each one and at which priority, who waits for one and for how long, and who is using the machine's tool slots (`S` on the task board) |
 | `C-c h S` | `harness-settings` | Show the settings page |
 | `C-c h z` | `harness-pet` | Show your companion pet, or the egg it hatches from |
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
@@ -3598,7 +3602,23 @@ with), `recap` writes the recaps on the cards,
   it has held its slot; a task blocked on a question or a permission
   request has, as in the list, the line saying what it waits on under
   its row, with its `[Allow]`, `[Deny]` or `[Answer…]` -- and how many
-  slots are free. Then the queue by priority, with how many wait and the
+  slots are free. Under them, **Tool slots** shows who is using the
+  machine's tool slots (see **Polite with your machine**), which are not
+  the board's: a table for this machine, and for every other with a call
+  at work or waiting, one row for each call holding a slot -- the
+  longest first -- and one for each waiting, in the order they will be
+  served. A row is the session list's again, for the session the call is
+  made for, with the status icon, the name (a click or `RET` opens its
+  session) and the priority arrow; *Tool* is the tool the call runs,
+  *State* says `running`, or `waiting #3` and its place in the line, and
+  *Time* how long it has held or waited for the slot. A call the harness
+  makes itself, for no session, is listed as `harness`; a session waiting
+  on a permission request has the buttons that answer it there too. The
+  machine's heading counts its slots (`3 of 5 in use · 2 waiting`) and
+  says when the load holds them back (`held back from 18 by system load
+  (1.8x)`). Those times run every second -- the board's clock is too
+  coarse for them -- and only while a window shows the page with a call
+  to time. Then the queue by priority, with how many wait and the
   longest and average wait so far, the next five in line (a task held
   back says what holds it: `paused`, `quota · resets 19:00`), and how
   long tasks waited for a slot over the last `harness-tasks-slot-wait-days`
@@ -3630,7 +3650,10 @@ with), `recap` writes the recaps on the cards,
   clock, and a request a task waits on, when it comes or is answered,
   draws it again at once; and a redraw that would change nothing is
   skipped. The harness answers it with `task/slots`, which counts the
-  slots as the scheduler does.
+  slots as the scheduler does, and with `tool-slots/status`, which says
+  who holds the machine's tool slots; from then on the harness's
+  `tool-slots/changed` brings that state again whenever a call starts,
+  waits or ends, so the page needs no request for it.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last

@@ -55,11 +55,35 @@ keeps the line of those waiting and hands the slots out.  This module
 says how many slots a machine has (`harness-tool-slots--slots`) and
 how a waiting call ranks in the line: the priority of its session.
 
+Who is using the slots can be seen: a call asks its pool with the
+session it serves and the tool it runs, so the pool knows what each
+holder runs for whom, and since when, and each waiter too
+(`harness-tool-slots-machines`, machine by machine).  That changes
+nothing about who is served: the session is what the call was ranked
+by already, and the tool is only known along with it.  Whenever who
+holds a slot, or waits for one, changes, the event
+`tool-slots/holders-changed` says so; the tool-slots-load module turns
+it into the `tool-slots/changed` a UI shows the slots by.
+
 ## Provides
+
+### Events
+
+- `tool-slots/holders-changed` — (MACHINE) once who holds a tool slot of MACHINE, or waits for one, changed.
 
 ### Options
 
 - `harness-tool-slots-burst` — Extra calls allowed on a machine over `harness-tool-slots-count`.
 - `harness-tool-slots-count` — How many calls of a governed tool may run at once on one machine.
 - `harness-tool-slots-tools` — Tools whose calls hold a slot of the machine they run on.
+
+## Uses
+
+### Methods it calls
+
+- `session/get` ([session](session.md)), when it is loaded
+
+### Events it emits
+
+- `tool-slots/holders-changed`
 

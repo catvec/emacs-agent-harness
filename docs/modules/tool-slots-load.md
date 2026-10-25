@@ -71,6 +71,17 @@ session's: the `tool-slots/status` method gives it, and the event
 so that a UI can show it, as the chat does while the slots are held
 back, pinned above its compose box (ui-tool-slots-load).
 
+The state also says who is using the slots: for each machine, which
+session's call of which tool holds each slot and since when, and who
+waits, in the order they will be served, at what priority
+(`harness-tool-slots-machines`).  That moves with every call that
+starts, waits or ends, far more often than the limit, so the event
+for it is held back a moment (`harness-tool-slots-load--notify-delay`)
+and is one for however many calls came and went meanwhile, with the
+state as it is when it is sent: a UI that shows the users of the
+slots, as the task slots page does, is brought up to date by it, and
+the sessions are told nothing.
+
 The limit is modulated by around advice on
 `harness-tool-slots--slots`, which is where the tool-slots plugin
 asks how many calls a machine may run; the extension point is the
@@ -83,11 +94,11 @@ the limit is the baseline again, as plain tool-slots leaves it.
 
 ### Methods
 
-- `tool-slots/status` — Return this machine's tool slots: (:limit :baseline :pressure :text :at).
+- `tool-slots/status` — Return the tool slots: (:limit :baseline :pressure :text :at :machines).
 
 ### Events
 
-- `tool-slots/changed` — (STATE) once the slots this machine allows changed, or the watch ended: STATE as `tool-slots/status` gives it.
+- `tool-slots/changed` — (STATE) once the slots changed -- this machine's limit, the watch ending, who holds a slot or waits for one: STATE as `tool-slots/status` gives it.
 
 ### Options
 
@@ -108,6 +119,10 @@ the limit is the baseline again, as plain tool-slots leaves it.
 - `session/list` ([session](session.md)), when it is loaded
 - `session/nodes` ([session](session.md)), when it is loaded
 - `session/update-node` ([session](session.md)), when it is loaded
+
+### Events it handles
+
+- `tool-slots/holders-changed` → `harness-tool-slots-load--notify-soon`
 
 ### Events it emits
 

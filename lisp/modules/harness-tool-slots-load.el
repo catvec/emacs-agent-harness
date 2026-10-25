@@ -61,6 +61,17 @@
 ;; so that a UI can show it, as the chat does while the slots are held
 ;; back, pinned above its compose box (ui-tool-slots-load).
 ;;
+;; The state also says who is using the slots: for each machine, which
+;; session's call of which tool holds each slot and since when, and who
+;; waits, in the order they will be served, at what priority
+;; (`harness-tool-slots-machines').  That moves with every call that
+;; starts, waits or ends, far more often than the limit, so the event
+;; for it is held back a moment (`harness-tool-slots-load--notify-delay')
+;; and is one for however many calls came and went meanwhile, with the
+;; state as it is when it is sent: a UI that shows the users of the
+;; slots, as the task slots page does, is brought up to date by it, and
+;; the sessions are told nothing.
+;;
 ;; The limit is modulated by around advice on
 ;; `harness-tool-slots--slots', which is where the tool-slots plugin
 ;; asks how many calls a machine may run; the extension point is the
@@ -444,31 +455,72 @@ goes while the message is on its way is skipped."
 ;; change as `tool-slots/changed'.
 
 (defun harness-tool-slots-load--state ()
-  "Return this machine's tool slots as a UI shows them.
-That is (:limit N :baseline B :pressure P :text TEXT :at TIME): N the
-slots in force, B the most there are -- the machine is held back while N
-is under B -- and, of the change that took N, P the load per processor
-that decided it, TEXT what the sessions were told and TIME when.  The
-last three are nil before the first change, and P when the watch was
-turned off."
+  "Return the tool slots as a UI shows them.
+That is (:limit N :baseline B :pressure P :text TEXT :at TIME :machines
+MACHINES): N the slots in force on this machine, B the most there are
+-- the machine is held back while N is under B -- and, of the change
+that took N, P the load per processor that decided it, TEXT what the
+sessions were told and TIME when.  The three are nil before the first
+change, and P when the watch was turned off.  MACHINES is who is using
+the slots, machine by machine (`harness-tool-slots-machines')."
   (let ((baseline (harness-tool-slots--baseline)))
     (list :limit (min baseline (or harness-tool-slots-load--limit baseline))
           :baseline baseline
           :pressure harness-tool-slots-load--changed-pressure
           :text harness-tool-slots-load--changed-text
-          :at harness-tool-slots-load--changed-at)))
+          :at harness-tool-slots-load--changed-at
+          :machines (harness-tool-slots-machines))))
 
 (harness-defmethod tool-slots/status ()
-  "Return this machine's tool slots: (:limit :baseline :pressure :text :at).
+  "Return the tool slots: (:limit :baseline :pressure :text :at :machines).
 :limit is how many calls of the governed tools may run at once on this
 machine now and :baseline how many would without the load watch, so the
 machine is held back while :limit is the smaller.  :pressure is the load
 per processor that took the limit, :text what the sessions were told of
-it and :at when, as `tool-slots/changed' announces them."
+it and :at when, as `tool-slots/changed' announces them.  :machines
+says who is using the slots, a plist for this machine and for every
+other that has a call holding a slot or waiting for one: :machine (its
+key), :label, :limit, :running (how many calls hold a slot) and the
+calls themselves, :holders, the longest at work first, each a plist of
+:session (its id), :name (the session's), :tool, :priority and :started
+\(a float time), and :waiters, in the order they will be served, the
+same with :asked, when the call began to wait, in place of :started."
   (harness-tool-slots-load--state))
 
 (harness-declare-event 'tool-slots/changed
-  "(STATE) once the slots this machine allows changed, or the watch ended: STATE as `tool-slots/status' gives it.")
+  "(STATE) once the slots changed -- this machine's limit, the watch ending, who holds a slot or waits for one: STATE as `tool-slots/status' gives it.")
+
+(defvar harness-tool-slots-load--notify-delay 0.2
+  "Seconds a change of who holds a slot waits before `tool-slots/changed' says so.
+Calls come and go in bursts -- a dozen sessions starting a test run each
+-- and one announcement carries them all.  The state is read when it is
+sent, not when the first call came, so nothing is left out; and a
+steady stream of calls still gets one every this many seconds, since the
+delay runs from the first change, not the last.")
+
+(defvar harness-tool-slots-load--notify-timer nil
+  "The timer that will announce who holds the slots, or nil when none is due.")
+
+(defun harness-tool-slots-load--notify-now ()
+  "Announce the tool slots as they are now, for a change of who holds them."
+  (setq harness-tool-slots-load--notify-timer nil)
+  (harness-emit 'tool-slots/changed (harness-tool-slots-load--state)))
+
+(defun harness-tool-slots-load--notify-soon (&rest _)
+  "Have `tool-slots/changed' say soon that who holds a slot, or waits, changed.
+On `tool-slots/holders-changed', with the machine, which it needs not.
+Once for the changes of the next `harness-tool-slots-load--notify-delay'
+seconds: while a timer is due, a change is already on its way."
+  (unless (timerp harness-tool-slots-load--notify-timer)
+    (setq harness-tool-slots-load--notify-timer
+          (run-at-time (max 0 harness-tool-slots-load--notify-delay) nil
+                       #'harness-tool-slots-load--notify-now))))
+
+(defun harness-tool-slots-load--notify-cancel ()
+  "Drop an announcement that is due, as the module stops."
+  (when (timerp harness-tool-slots-load--notify-timer)
+    (cancel-timer harness-tool-slots-load--notify-timer))
+  (setq harness-tool-slots-load--notify-timer nil))
 
 (defun harness-tool-slots-load--set (slots pressure)
   "Make SLOTS this machine's limit, nil for the baseline, and say so.
@@ -524,6 +576,8 @@ cannot report leaves the limit as it is."
   (setq harness-tool-slots-load--changed-at nil
         harness-tool-slots-load--changed-pressure nil
         harness-tool-slots-load--changed-text nil)
+  ;; Who holds a slot is told to the UIs along with the limit.
+  (harness-on 'tool-slots/holders-changed #'harness-tool-slots-load--notify-soon)
   ;; The machine may already be busy: take the first reading now.
   (harness-tool-slots-load--tick)
   (when (timerp harness-tool-slots-load--timer)
@@ -541,6 +595,8 @@ goes with the limit."
   (when (timerp harness-tool-slots-load--timer)
     (cancel-timer harness-tool-slots-load--timer))
   (setq harness-tool-slots-load--timer nil)
+  (harness-off (cons 'tool-slots/holders-changed #'harness-tool-slots-load--notify-soon))
+  (harness-tool-slots-load--notify-cancel)
   (advice-remove 'harness-tool-slots--slots
                  #'harness-tool-slots-load--slots-advice)
   (let ((held (and harness-tool-slots-load--limit t)))

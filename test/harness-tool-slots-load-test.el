@@ -113,6 +113,9 @@ and put back when a test took it off."
                 #'harness-tool-slots-load--slots-advice))
   (when (timerp harness-tool-slots-load--timer)
     (cancel-timer harness-tool-slots-load--timer))
+  ;; Nor does an announcement of who holds a slot, which an earlier
+  ;; test's calls left due, come in the middle of this one.
+  (harness-tool-slots-load--notify-cancel)
   (setq harness-tool-slots-load--timer nil
         harness-tool-slots-load--limit nil
         harness-tool-slots-load--changed-at nil
@@ -953,6 +956,186 @@ The sessions are not told, nor is a UI of slots that were not held back."
   (harness-test-load-module 'acp)
   (should (harness-acp--extension-allowed-p "tool-slots/status"))
   (should (memq 'tool-slots/changed harness-acp--forwarded-events)))
+
+;;;; Who is using the slots
+;;
+;; Beside the limit, the state says which session's call of which tool
+;; holds each slot and who waits, machine by machine, and the event
+;; announces it when that changes -- once for a burst of calls.
+
+(defun harness-tool-slots-load-test--machines (&optional state)
+  "Return the :machines of STATE, by default the state as it is now, keyed by machine."
+  (mapcar (lambda (machine) (cons (plist-get machine :machine) machine))
+          (plist-get (or state (harness-tool-slots-load--state)) :machines)))
+
+(ert-deftest harness-tool-slots-load-the-state-says-who-is-using-the-slots ()
+  "The state lists the calls using the slots, and `tool-slots/status' says the same.
+A call holding a slot is listed with its session, name, tool and since
+when; one waiting is, after it, with its priority.  This machine is
+there with no call too."
+  (harness-tool-slots-load-test-with-sessions
+    (let* ((cwd (harness-test-temp-dir))
+           (build (plist-get (harness-call 'session/create :cwd cwd :name "Fix the build") :id))
+           (docs (plist-get (harness-call 'session/create :cwd cwd :name "Write the docs") :id))
+           (harness-tool-slots-tools '("load-probe"))
+           (harness-tool-slots-count 1)
+           (harness-tool-slots-burst 0)
+           (harness-tool-slots-machine-function #'harness-tool-slots-load-test--machine))
+      (harness-tool-slots-load-test--probe "load-probe")
+      ;; Idle: this machine, listed, with nobody on it.
+      (let ((machines (plist-get (harness-tool-slots-load--state) :machines)))
+        (should (= 1 (length machines)))
+        (should (equal "this machine" (plist-get (car machines) :label)))
+        (should (= 0 (plist-get (car machines) :running)))
+        (should-not (plist-get (car machines) :holders)))
+      (harness-call 'priority/set docs "high")
+      (let* ((before (float-time))
+             (first (harness-tool-slots-load-test--call
+                     "load-probe" (list :cwd (file-name-as-directory cwd) :session-id build)))
+             (second (harness-tool-slots-load-test--call
+                      "load-probe" (list :cwd (file-name-as-directory cwd) :session-id docs)))
+             (after (float-time))
+             (state (harness-tool-slots-load--state))
+             (machine (cdr (assoc "local:test-machine" (harness-tool-slots-load-test--machines state)))))
+        (should (= 1 (plist-get machine :limit)))
+        (should (= 1 (plist-get machine :running)))
+        (let ((holder (car (plist-get machine :holders))))
+          (should (equal (list build "Fix the build" "load-probe" "medium")
+                         (list (plist-get holder :session) (plist-get holder :name)
+                               (plist-get holder :tool) (plist-get holder :priority))))
+          (should (<= before (plist-get holder :started) after)))
+        (let ((waiter (car (plist-get machine :waiters))))
+          (should (equal (list docs "Write the docs" "load-probe" "high")
+                         (list (plist-get waiter :session) (plist-get waiter :name)
+                               (plist-get waiter :tool) (plist-get waiter :priority))))
+          (should (<= before (plist-get waiter :asked) after)))
+        ;; The limit and the rest of the state are still there, and clients ask by name.
+        (should (= 1 (plist-get state :limit)))
+        (should (equal state (harness-call 'tool-slots/status)))
+        (harness-tool-slots-load-test--settle-all)
+        (should (equal "load-probe" (harness-tool-slots-load-test--content first)))
+        (should (equal "load-probe" (harness-tool-slots-load-test--content second)))))))
+
+(ert-deftest harness-tool-slots-load-the-limit-of-a-machine-is-the-one-in-force ()
+  "A machine held back lists the limit it is held to, and one that is not the baseline."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0)
+          (local (harness-tool-slots--local-machine)))
+      (should (= 8 (plist-get (cdr (assoc local (harness-tool-slots-load-test--machines))) :limit)))
+      (harness-tool-slots-load-test--move 1.5)
+      (should (= 4 (plist-get (cdr (assoc local (harness-tool-slots-load-test--machines))) :limit)))
+      (should (= 4 (plist-get (harness-tool-slots-load--state) :limit)))
+      ;; Another host is not held back by this machine's load.
+      (let ((harness-tool-slots-tools '("load-probe"))
+            (harness-tool-slots-machine-function (lambda (&rest _) "host:build")))
+        (harness-tool-slots-load-test--probe "load-probe")
+        (let ((call (harness-tool-slots-load-test--call "load-probe")))
+          (should (= 8 (plist-get (cdr (assoc "host:build" (harness-tool-slots-load-test--machines)))
+                                  :limit)))
+          (should (equal "build" (plist-get (cdr (assoc "host:build" (harness-tool-slots-load-test--machines)))
+                                            :label)))
+          (harness-tool-slots-load-test--settle-all)
+          (should (equal "load-probe" (harness-tool-slots-load-test--content call))))))))
+
+(ert-deftest harness-tool-slots-load-a-burst-of-calls-is-announced-once ()
+  "Calls starting, waiting and ending are announced after a moment, once.
+The announcement is the state as it is when it is sent, so it has all
+the calls of the burst; the next change is announced the same way.  No
+announcement comes at the moment of the change."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((harness-tool-slots-tools '("load-probe"))
+          (harness-tool-slots-count 2)
+          (harness-tool-slots-burst 0)
+          (harness-tool-slots-machine-function #'harness-tool-slots-load-test--machine)
+          (harness-tool-slots-load--notify-delay 0.05))
+      (harness-tool-slots-load-test--probe "load-probe")
+      (harness-tool-slots-load-test--listen)
+      (let ((calls (mapcar (lambda (id)
+                             (harness-tool-slots-load-test--call
+                              "load-probe" (list :cwd (file-name-as-directory default-directory)
+                                                 :session-id id)))
+                           '("s1" "s2" "s3" "s4"))))
+        (should-not harness-tool-slots-load-test--changes)
+        (harness-test-wait (lambda () harness-tool-slots-load-test--changes) 5 "the announcement")
+        ;; Let anything else that is due come too: there is nothing.
+        (accept-process-output nil 0.15)
+        (should (= 1 (length harness-tool-slots-load-test--changes)))
+        (let ((machine (cdr (assoc "local:test-machine"
+                                   (harness-tool-slots-load-test--machines
+                                    (car harness-tool-slots-load-test--changes))))))
+          (should (equal '("s1" "s2") (mapcar (lambda (h) (plist-get h :session))
+                                              (plist-get machine :holders))))
+          (should (equal '("s3" "s4") (mapcar (lambda (w) (plist-get w :session))
+                                              (plist-get machine :waiters)))))
+        ;; Two calls end and the waiters start: announced once again.
+        (setq harness-tool-slots-load-test--changes nil)
+        (harness-tool-slots-load-test--settle-oldest)
+        (harness-tool-slots-load-test--settle-oldest)
+        (should-not harness-tool-slots-load-test--changes)
+        (harness-test-wait (lambda () harness-tool-slots-load-test--changes) 5 "the next announcement")
+        (accept-process-output nil 0.15)
+        (should (= 1 (length harness-tool-slots-load-test--changes)))
+        (let ((machine (cdr (assoc "local:test-machine"
+                                   (harness-tool-slots-load-test--machines
+                                    (car harness-tool-slots-load-test--changes))))))
+          (should (equal '("s3" "s4") (mapcar (lambda (h) (plist-get h :session))
+                                              (plist-get machine :holders))))
+          (should-not (plist-get machine :waiters)))
+        (harness-tool-slots-load-test--settle-all)
+        (dolist (call calls) (harness-await call 5))))))
+
+(ert-deftest harness-tool-slots-load-a-steady-stream-is-still-announced ()
+  "The delay runs from the first change of a stretch, so a stream of calls never starves it.
+A change while an announcement is due adds none and moves none."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((harness-tool-slots-load--notify-delay 30))
+      (should-not harness-tool-slots-load--notify-timer)
+      (harness-tool-slots-load--notify-soon "one")
+      (let ((timer harness-tool-slots-load--notify-timer))
+        (should (timerp timer))
+        (harness-tool-slots-load--notify-soon "two")
+        (harness-tool-slots-load--notify-soon "three")
+        (should (eq timer harness-tool-slots-load--notify-timer)))
+      ;; It fires as it is due, and the next change starts the next.
+      (harness-tool-slots-load-test--listen)
+      (harness-tool-slots-load--notify-now)
+      (should (= 1 (length harness-tool-slots-load-test--changes)))
+      (should-not harness-tool-slots-load--notify-timer)
+      (harness-tool-slots-load--notify-soon "four")
+      (should (timerp harness-tool-slots-load--notify-timer))
+      (harness-tool-slots-load--notify-cancel)
+      (should-not harness-tool-slots-load--notify-timer))))
+
+(ert-deftest harness-tool-slots-load-the-announcement-follows-the-module ()
+  "The announcement is subscribed while the module runs, and a due one goes with it."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((harness-tool-slots-tools '("load-probe"))
+          (harness-tool-slots-count 2)
+          (harness-tool-slots-burst 0)
+          (harness-tool-slots-machine-function #'harness-tool-slots-load-test--machine)
+          (harness-tool-slots-load--notify-delay 30))
+      (harness-tool-slots-load-test--probe "load-probe")
+      ;; A call is a change that is announced soon.
+      (let ((call (harness-tool-slots-load-test--call "load-probe")))
+        (should (timerp harness-tool-slots-load--notify-timer))
+        (harness-tool-slots-load--shutdown)
+        ;; Stopped: the due announcement is gone, and a change brings none.
+        (should-not harness-tool-slots-load--notify-timer)
+        (harness-tool-slots-load-test--settle-all)
+        (harness-await call 5)
+        (let ((other (harness-tool-slots-load-test--call "load-probe")))
+          (should-not harness-tool-slots-load--notify-timer)
+          (harness-tool-slots-load-test--settle-all)
+          (harness-await other 5)))
+      ;; Started again, it is subscribed again, once.
+      (harness-tool-slots-load--init)
+      (harness-tool-slots-load--init)
+      (let ((call (harness-tool-slots-load-test--call "load-probe")))
+        (should (timerp harness-tool-slots-load--notify-timer))
+        (harness-tool-slots-load--notify-cancel)
+        (harness-tool-slots-load-test--settle-all)
+        (harness-await call 5)))))
 
 (ert-deftest harness-tool-slots-load-the-load-watch-going-off-is-told-in-the-note ()
   "Turning the watch off tells the sessions the baseline is back, in the note."

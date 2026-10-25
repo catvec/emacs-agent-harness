@@ -79,7 +79,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;report             ; A task's report: its final message and evidence, in a popout and in…
  ;;review             ; Reviewing a task where it is looked at: its report in full in its…
  ;;search             ; Search the sessions' transcripts: words, literal… (with session-search)
- ;;slots              ; The task slots page: the tasks that hold slots as the session list…
+ ;;slots              ; The task slots page: the tasks that hold slots… (with tool-slots-load)
  ;;tree               ; Conversation tree: the fork family of a session as a git-like graph.
  )
 ```
@@ -202,7 +202,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-search](ui-search.md) |  | [ui](ui.md) | Search the sessions' transcripts: words, literal text, regexps or meaning. |
 | [ui-secrets](ui-secrets.md) |  | [ui](ui.md) | Redact a secret from everything the harness stored, and name the secrets to mask. |
 | [ui-sessions](ui-sessions.md) | by default | [ui](ui.md) | Session list buffer. |
-| [ui-slots](ui-slots.md) |  | [ui](ui.md), [ui-tasks](ui-tasks.md) | The task slots page: the tasks that hold slots as the session list lists sessions, the queue and its waits by priority. |
+| [ui-slots](ui-slots.md) |  | [ui](ui.md), [ui-tasks](ui-tasks.md) | The task slots page: the tasks that hold slots as the session list lists sessions, who is using the machine's tool slots, the queue and its waits by priority. |
 | [ui-supervisor](ui-supervisor.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Supervisor mode: the chat header's segment and the V key that toggles it. |
 | [ui-tasks](ui-tasks.md) |  | [ui](ui.md) | Task mode: a kanban of one-session tasks with a compose box. |
 | [ui-tasks-search](ui-tasks-search.md) |  | [ui-tasks](ui-tasks.md), [ui-quick-search](ui-quick-search.md) | The task board's search: find tasks, sessions and commands or act on tasks in words, answered by a cheap model. |
@@ -314,7 +314,8 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `task/review` | [tasks](tasks.md) | [tasks](tasks.md) | [patch-review](patch-review.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
 | `todo-sync/done` | [todo-sync](todo-sync.md) | [todo-sync](todo-sync.md) |  |  |
 | `todo-sync/failed` | [todo-sync](todo-sync.md) | [todo-sync](todo-sync.md) |  |  |
-| `tool-slots/changed` | [tool-slots-load](tool-slots-load.md) | [tool-slots-load](tool-slots-load.md) | [ui-tool-slots-load](ui-tool-slots-load.md) | yes |
+| `tool-slots/changed` | [tool-slots-load](tool-slots-load.md) | [tool-slots-load](tool-slots-load.md) | [ui-slots](ui-slots.md), [ui-tool-slots-load](ui-tool-slots-load.md) | yes |
+| `tool-slots/holders-changed` | [tool-slots](tool-slots.md) | [tool-slots](tool-slots.md) | [tool-slots-load](tool-slots-load.md) |  |
 | `tools/file-written` | [tools](tools.md) | [tools-fs](tools-fs.md) |  | yes |
 | `tools/finished` | [tools](tools.md) | [tools](tools.md) | [supervisor](supervisor.md) |  |
 | `tools/note` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md) |  |

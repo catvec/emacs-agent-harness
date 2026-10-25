@@ -10116,6 +10116,13 @@ rank rose while it waited moves up the line.  `harness-slots-flush` lets
 every waiter run now and counts no one as holding a slot, which is what
 a module's shutdown does; `harness-slots-running`, `harness-slots-waiting`
 and `harness-slots-waiters` (the DATA of each, oldest first) read a pool.
+A pool also notes who is using it: `harness-slots-holders` returns each
+holder's DATA and when it took its slot, the longest holding first, and
+`harness-slots-line` the waiters in the order they would be served now,
+with when each began to wait and its rank.  That is a record beside the
+count rather than in the pool's structure -- a reload keeps the pools
+that exist, and a pool made before the record lacks nothing -- and it
+changes neither the count nor who is served.
 A pool is plain state in the process that makes it, with no timer and no
 module of its own.
 
@@ -10138,7 +10145,21 @@ The slots of a machine are a pool of the slots library (see slots): this
 module says how many a machine has (`harness-tool-slots--slots`) and how
 a waiting call ranks (the priority of its session), and the library
 counts the calls holding a slot, keeps the line of those waiting and
-hands the slots out.
+hands the slots out.  A call asks with its data
+(`harness-tool-slots--data`: the session it serves and the tool it runs),
+so the pool knows who is using a slot and for what, and
+`harness-tool-slots-machines` returns that as plain data: for this
+machine and every other with a call at work or waiting, its key, label,
+limit, count of calls at work, and the holders (session, its name, tool,
+priority, when the slot was taken) and waiters (the same, with when the
+call began to wait and in the order they will be served).  It is read
+off the pools when asked, and changes nothing.  A call that took its slot
+before a reload is counted but has no tool and no time, so it may be
+listed without them or not at all.  `tool-slots/holders-changed`, with
+the machine, is emitted whenever a call takes a slot, begins to wait,
+starts from the line or gives its slot back, and at the module's
+shutdown; tool-slots-load turns it into `tool-slots/changed`, one for a
+burst of calls, which UIs show the slots by (see tool-slots-load).
 
 Options:
 
@@ -10301,17 +10322,26 @@ The note is the history, and it stands where the first change of its
 stretch landed, far up a session that went on since.  How the slots
 stand now belongs to the machine, not to a session, so a UI gets it
 another way: `tool-slots/status` returns `(:limit N :baseline B
-:pressure P :text TEXT :at TIME)` -- N the slots in force and B the
-most there are, the machine being held back while N is the smaller, and
-of the change that took N the load per processor that decided it, what
-the sessions were told and when (nil before the first change) -- and the
-event `tool-slots/changed STATE` announces that state after every
-change, after the load watch is turned off while the slots were held
-back, and when the module stops while they were, so a UI never keeps a
-restriction that ended.  Both reach clients (the `tool-slots/` method
-prefix and the forwarded event of the ACP module).  The chat pins it
-above its compose box while N is under B (ui-tool-slots-load, see
-"Chat buffer").
+:pressure P :text TEXT :at TIME :machines M)` -- N the slots in force
+and B the most there are, the machine being held back while N is the
+smaller, and of the change that took N the load per processor that
+decided it, what the sessions were told and when (nil before the first
+change); M is who is using the slots (`harness-tool-slots-machines`, one
+plist per machine, this one first) -- and the event `tool-slots/changed
+STATE` announces that state after every change, after the load watch is
+turned off while the slots were held back, and when the module stops
+while they were, so a UI never keeps a restriction that ended.  Who
+holds a slot moves far more often than the limit, so it is announced
+another way: the module subscribes to `tool-slots/holders-changed` and
+sends `tool-slots/changed` once the changes of the next
+`harness-tool-slots-load--notify-delay` (0.2 s) have happened, the delay
+running from the first of them, so a burst of calls is one announcement
+and a steady stream still gets one; the state is read when it is sent,
+so the announcement has all of them.  The sessions are told nothing of
+that.  Both the method and the event reach clients (the `tool-slots/`
+method prefix and the forwarded event of the ACP module).  The chat pins
+N above its compose box while N is under B (ui-tool-slots-load, see
+"Chat buffer"), and the Task slots page shows M (see "Task slots page").
 
 The watch is around advice on `harness-tool-slots--slots`, added by the
 module's `:init` and removed by its `:shutdown`, which gives the
@@ -13460,6 +13490,34 @@ sessions run on the boards' clock (`harness-ui-tasks-tick-hook`), drawn
 from the answer it has, and a request a task waits on that comes or is
 answered draws it again at once (`harness-ui-pending-changed-hook`);
 an answer to an older request than the last is dropped.
+
+Under the tasks at work the page shows the machine's tool slots, which
+are not the task slots: `_harness/tool-slots/status` (`tool-slots/status`,
+see tool-slots-load) says who holds each machine's slots and who waits,
+and a table for this machine and for every other with a call at work or
+waiting lists the holders, the longest first, then the waiters in the
+order they will be served (`harness-ui-slots--tools-section`,
+`--tool-rows`).  The rows are the session list's again, for the session
+each call is made for; the Tool, State (running, or `waiting #N` and its
+place in the line) and Time columns are the slots' own
+(`harness-ui-slots--tool-columns`), and a call the harness made itself,
+for no session, is named `harness`.  A machine's heading counts its
+slots and says when this machine's load holds them back and by how much
+(`harness-ui-slots--tool-heading`).  Tool rows carry `harness-slot-key`,
+`harness-slot-index` for `TAB` and `harness-slot-session` for `RET` and
+the commands that act on a session, as task rows do
+(`harness-ui-slots--tool-row`), and they are numbered after the task
+rows so `TAB` crosses from one table to the other.  The page asks for
+the state with the task slots and keeps it in the buffer
+(`harness-ui-slots--tools`); from then on the harness's
+`tool-slots/changed` brings the state as it is, and a page a window shows
+is drawn at once (`harness-ui-slots--take-tools`), asking nothing.  A
+harness without the module answers with an error and the page has no
+such section.  The times on the tool rows run to the second while a call
+is young, which the board's clock is too coarse for: a timer of the
+page's own (`harness-ui-slots--tool-tick`, every
+`harness-ui-slots--tool-interval`, 1 s) draws the pages a window shows
+that have a call to time, and stops itself when there are none.
 
 The page's Queues section (`harness-ui-slots--queues-section`) is where
 every project's queue is managed.  It sits under the first line, above

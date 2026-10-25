@@ -9,8 +9,10 @@
 ;; and resume them in one place.  `harness-slots' opens it; the harness
 ;; answers it with `task/slots', which counts the slots the way the
 ;; scheduler does (a task's sub-agents, forks and the merge queue take
-;; none) and lists the queues.  These are the task slots, not the tool
-;; slots that give a busy machine's tool calls out by priority.
+;; none) and lists the queues.  These are the task slots; the page also
+;; shows the tool slots, which give a machine's tool calls out by
+;; priority (`tool-slots/status'), so the "who is using what" of both is
+;; in one place.
 ;;
 ;; The page reads, top to bottom (this one is 100 columns wide):
 ;;
@@ -33,6 +35,14 @@
 ;;    ►  Fix stuck model responses…   running       41m  ↑            52.0k/200k          Max just now
 ;;    ►  Plan task board polish       running        2m              9.1k/200k          Max 1m ago
 ;;      1 free
+;;
+;;   Tool slots · this machine · 3 of 5 in use · 2 waiting · held back from 18 by system load (1.8x)
+;;      Name                          Tool   State         Time  Priority
+;;    ►  Fix stuck model responses…   bash   running        41s
+;;    ►  Plan task board polish       elisp  running         2m
+;;       harness                      bash   running      1h01m
+;;       Plan session list rework     bash   waiting #1      12s  ↓
+;;       Compose box bundle           ssh    waiting #2       5s
 ;;
 ;;   Queue · 4 waiting
 ;;     priority    waiting   longest   average
@@ -71,6 +81,24 @@
 ;; and n answer a permission request, as in the list.  The
 ;; first line's [Set limit] is the board's "N at a time" button
 ;; (`harness-ui-tasks-set-max-running').
+;;
+;; The tasks' slots are not the machine's: a task's slot decides how many
+;; tasks work at once, while a tool slot decides how many calls of the
+;; tools that start processes run at once on one machine, and only the
+;; first is the board's.  The section under the tasks at work shows the
+;; second, for each machine -- this one, and every other with a call at
+;; work or waiting -- from `tool-slots/status': the calls that hold a
+;; slot, the longest at work first, then those waiting, in the order they
+;; will be served (`harness-ui-slots--tools-section').  Its rows are the
+;; session list's again, for the session each call is made for: its
+;; status icon, its name (the link to it), its priority arrow; and the
+;; Tool, State (running, or waiting and its place in the line) and Time
+;; columns, which only the tool slots know.  A machine's heading counts
+;; its slots and says so when this machine's load holds them back and by
+;; how much.  Its times run to the second while a call is young, which
+;; the board's 15-second clock is too coarse for: the section has a timer
+;; of its own, running only while a window shows a page with a call at
+;; work or waiting (`harness-ui-slots--tool-tick').
 ;;
 ;; The queues are the page's own and not a project's: one row for each
 ;; project that has a task at work or waiting, or a queue paused by hand
@@ -113,6 +141,12 @@
 ;;     it has, asking the harness for nothing; a request a task waits
 ;;     on, which comes or is answered, draws it again at once
 ;;     (`harness-ui-pending-changed-hook');
+;;   - the tool slots are asked for with the slots (`tool-slots/status'),
+;;     and from then on the harness says when they change
+;;     (`tool-slots/changed'): it brings the state as it is, so the page
+;;     asks for nothing, and draws again when a window shows it;
+;;   - the times of the tool calls have a timer of their own, a second
+;;     apart, while a window shows a page with a call at work or waiting;
 ;;   - either way, a redraw that would draw the same text is skipped.
 ;;
 ;; S on a task board opens the page for the board's project, and C-c h Q
@@ -446,15 +480,18 @@ the UI does not know, which stay empty."
   "Return the index of the column NAME among COLUMNS, specs, or nil."
   (cl-position name columns :key (lambda (column) (plist-get column :name)) :test #'equal))
 
-(defun harness-ui-slots--layout (sessions width now)
+(defun harness-ui-slots--layout (sessions width now &optional specs give-up)
   "Return (COLUMNS . FORMAT) for the table of SESSIONS in a window WIDTH wide.
 COLUMNS are the specs of `harness-ui-slots--columns' as of NOW and
-FORMAT theirs as `harness-ui-sessions-format' makes it.  The Name column
-is as wide as the longest name (`harness-ui-slots--name-width' at most)
-or as the room leaves; where that is less than
-`harness-ui-slots--name-min-width', the columns of
-`harness-ui-slots--give-up' are left out, one at a time."
-  (let* ((columns (harness-ui-slots--column-specs now))
+FORMAT theirs as `harness-ui-sessions-format' makes it; SPECS are the
+specs of another table's columns, which GIVE-UP names the ones to leave
+out first, the first first, in place of `harness-ui-slots--give-up'.
+The Name column is as wide as the longest name
+\(`harness-ui-slots--name-width' at most) or as the room leaves; where
+that is less than `harness-ui-slots--name-min-width', the columns of
+GIVE-UP are left out, one at a time."
+  (let* ((columns (or specs (harness-ui-slots--column-specs now)))
+         (give-up (or give-up harness-ui-slots--give-up))
          (longest (apply #'max 0 (mapcar (lambda (session) (string-width (or (plist-get session :name) "")))
                                          sessions)))
          (wanted (max 8 (min longest harness-ui-slots--name-width))))
@@ -466,19 +503,28 @@ or as the room leaves; where that is less than
                             sum (+ (plist-get column :width) (or (plist-get column :pad-right) 1))))))
       (while-let ((name (and (< (room) harness-ui-slots--name-min-width)
                              (cl-find-if (lambda (name) (harness-ui-slots--column-named columns name))
-                                         harness-ui-slots--give-up))))
+                                         give-up))))
         (setq columns (cl-remove name columns :key (lambda (column) (plist-get column :name))
                                  :test #'equal)))
       (cons columns (harness-ui-sessions-format columns (list (cons "Name" (max 8 (min wanted (room))))))))))
 
+(defun harness-ui-slots--name-indent (format)
+  "Return how many columns in the Name column of FORMAT starts in a row.
+That is where the lines under a row, which line up with the name, start."
+  (+ harness-ui-slots--padding
+     (cl-loop for spec across format
+              until (equal (car spec) "Name")
+              sum (+ (nth 1 spec) (or (plist-get (nthcdr 3 spec) :pad-right) 1)))))
+
 (defun harness-ui-slots--name-help (session)
   "Return the tooltip of the name in SESSION's row.
-It is the task's title, and what a click does."
+It is the task's title, and what a click does.  A call of a tool that
+no session made -- the harness's own -- has nothing to open."
   (harness-ui-one-line
    (format "%s · %s" (harness-ui-slots--fit (plist-get session :name) 200)
-           (if (plist-get session :id)
-               "mouse-1, RET: open its session"
-             "its session has not started yet"))))
+           (cond ((plist-get session :id) "mouse-1, RET: open its session")
+                 ((plist-member session :tool) "this call belongs to no session")
+                 (t "its session has not started yet")))))
 
 (defun harness-ui-slots--name-cell (cell session index)
   "Return CELL, the Name cell of SESSION's row, as the link to its session.
@@ -521,10 +567,7 @@ and `harness-slot-session'."
          (session (plist-get row :session))
          (cells (harness-ui-sessions-cells columns session))
          (name (harness-ui-slots--column-named columns "Name"))
-         (indent (+ harness-ui-slots--padding
-                    (cl-loop for spec across format
-                             until (equal (car spec) "Name")
-                             sum (+ (nth 1 spec) (or (plist-get (nthcdr 3 spec) :pad-right) 1)))))
+         (indent (harness-ui-slots--name-indent format))
          (id (plist-get holder :id)))
     (aset cells name (harness-ui-slots--name-cell (aref cells name) session (plist-get row :index)))
     (harness-ui-slots--with
@@ -554,6 +597,216 @@ columns, then how many slots are free."
      (if (and free (> free 0))
          (concat "   " (harness-ui-slots--dim (format "%d free" free)) "\n")
        ""))))
+
+;;;; The tool slots
+
+;; A machine's tool slots are not a project's tasks': they give the
+;; calls of the tools that start processes -- a shell command, a batch
+;; Emacs, a command on another host -- out to as many at once as the
+;; machine can bear, and whichever call comes while they are all taken
+;; waits its turn.  The section lists who is using them, the harness's
+;; `tool-slots/status' (a state kept in the buffer, `--tools'): a table
+;; for each machine -- this one, and any other with a call at work or
+;; waiting -- with a row for each call holding a slot, the longest first,
+;; then those waiting, in the order they will be served.  The rows are
+;; the session list's, as the tasks' above are: the status icon and name
+;; of the session the call is for, and its priority, a button that sets
+;; it; the tool, whether the call runs or waits and for how long are the
+;; slots' own.
+
+(defconst harness-ui-slots--tool-columns '("" "Name" "Tool" "State" "Time" "Priority")
+  "The columns of the table of the tool slots in use, left to right.
+The status icon, Name and Priority are the session list's own
+\(`harness-ui-sessions-column'), for the session a call is made for.
+Tool, State and Time are the slots': the tool the call runs, whether it
+runs or waits (and its place in the line), and for how long.")
+
+(defconst harness-ui-slots--tool-give-up '("Priority" "Tool")
+  "The columns a window too narrow for the tool slots leaves out, the first first.")
+
+(defconst harness-ui-slots--tool-name-max 14
+  "Columns the Tool column is wide at most: a longer tool name is cut.")
+
+(defconst harness-ui-slots--tool-state-width 11
+  "Columns the State column of the tool slots is wide: \"waiting #12\" fits.")
+
+(defvar-local harness-ui-slots--tools nil
+  "What `tool-slots/status' last said, a plist, or nil before it did.
+Its `:machines' say who is using the tool slots (see that method); the
+page takes the state when it asks and from each `tool-slots/changed'.")
+
+(defun harness-ui-slots--tool-session (user kind place now)
+  "Return the session of USER, a call using a tool slot, as the table draws it.
+USER is a holder or a waiter of a machine in `tool-slots/status'; KIND
+is `holder' or `waiter', and PLACE the waiter's place in the line, from
+1.  The session is the one the UI has cached under the call's, none for
+a call the harness made itself, with what the harness says of the call
+in front of it: the session's name, until the UI knows another, its
+priority, and the `:tool', `:tool-state' and `:tool-time' the table's
+own columns show, as of NOW."
+  (let* ((id (plist-get user :session))
+         (id (and (stringp id) (not (string-empty-p id)) id))
+         (cached (and id (harness-ui-session id)))
+         (waiter (eq kind 'waiter))
+         (since (plist-get user (if waiter :asked :started)))
+         (tool (plist-get user :tool)))
+    (append (list :id id
+                  :name (if id
+                            (harness-ui-session-name id (plist-get user :name))
+                          "harness")
+                  :ext (list :priority (harness-ui-slots--priority (plist-get user :priority)))
+                  :tool (if (stringp tool) tool "")
+                  :tool-state (if waiter (format "waiting #%d" place) "running")
+                  :tool-time (if (numberp since) (harness-ui-slots--duration (- now since)) ""))
+            cached
+            ;; A call at work is its session at work, until the UI says otherwise.
+            (list :status "running"))))
+
+(defun harness-ui-slots--tool-rows (machine now first-index)
+  "Return the rows of MACHINE's table, a machine of `tool-slots/status', as of NOW.
+The holders, the longest first, then the waiters, in the order they
+will be served.  Each is a plist of `:index' (its place among the page's
+rows, FIRST-INDEX for the first, where TAB goes), `:key' (which finds
+it again after a redraw) and `:session' (`harness-ui-slots--tool-session')."
+  (let ((index first-index)
+        (key (plist-get machine :machine))
+        rows)
+    (cl-flet ((add (kind user place)
+                (push (list :index index
+                            :key (format "tool:%s:%s:%s:%s:%s" key kind
+                                         (or (plist-get user :session) "-")
+                                         (or (plist-get user :tool) "-")
+                                         (plist-get user (if (eq kind 'waiter) :asked :started)))
+                            :session (harness-ui-slots--tool-session user kind place now))
+                      rows)
+                (cl-incf index)))
+      (dolist (holder (append (plist-get machine :holders) nil))
+        (add 'holder holder nil))
+      (cl-loop for waiter in (append (plist-get machine :waiters) nil)
+               for place from 1
+               do (add 'waiter waiter place)))
+    (nreverse rows)))
+
+(defun harness-ui-slots--tool-column-specs (tool-width)
+  "Return the specs of the columns of `harness-ui-slots--tool-columns'.
+TOOL-WIDTH is how wide the Tool column is.  The columns of the session
+list are its own; the others read what `harness-ui-slots--tool-session'
+put in the session they show."
+  (mapcar (lambda (name)
+            (pcase name
+              ("Tool" (list :name "Tool" :width tool-width :pad-right 2
+                            :cell (lambda (session _depth) (or (plist-get session :tool) ""))))
+              ("State" (list :name "State" :width harness-ui-slots--tool-state-width
+                             :cell (lambda (session _depth) (or (plist-get session :tool-state) ""))))
+              ("Time" (list :name "Time" :width 6 :right-align t :pad-right 2
+                            :cell (lambda (session _depth) (or (plist-get session :tool-time) ""))))
+              (_ (harness-ui-sessions-column name))))
+          harness-ui-slots--tool-columns))
+
+(defun harness-ui-slots--tool-layout (sessions width)
+  "Return (COLUMNS . FORMAT) for the tool slots table of SESSIONS, WIDTH wide.
+As `harness-ui-slots--layout' makes them for the tasks'; the Tool column
+is as wide as the longest tool name (`harness-ui-slots--tool-name-max'
+at most), and a window too narrow for it leaves out
+`harness-ui-slots--tool-give-up'."
+  (let ((tool-width (max 4 (min harness-ui-slots--tool-name-max
+                                (apply #'max 0 (mapcar (lambda (session)
+                                                         (string-width (or (plist-get session :tool) "")))
+                                                       sessions))))))
+    (harness-ui-slots--layout sessions width 0
+                              (harness-ui-slots--tool-column-specs tool-width)
+                              harness-ui-slots--tool-give-up)))
+
+(defun harness-ui-slots--tool-row (row columns format width)
+  "Return the text of ROW, one of `harness-ui-slots--tool-rows', as a table row.
+It is drawn in COLUMNS, of which FORMAT is the format, for a window
+WIDTH columns wide, as the rows of the tasks are (`harness-ui-slots--row'):
+the name of the session is the link to it, and a session blocked on a
+request has the line saying what it waits on under its row.  The text
+carries `harness-slot-key' to be found again after a redraw,
+`harness-slot-index' for TAB and `harness-slot-session', and
+`harness-slot-tool' to tell it from a task's row."
+  (let* ((session (plist-get row :session))
+         (cells (harness-ui-sessions-cells columns session))
+         (name (harness-ui-slots--column-named columns "Name"))
+         (id (plist-get session :id)))
+    (aset cells name (harness-ui-slots--name-cell (aref cells name) session (plist-get row :index)))
+    (harness-ui-slots--with
+     (with-temp-buffer
+       (harness-ui-sessions-insert-entry session cells format harness-ui-slots--padding
+                                         (harness-ui-slots--name-indent format) width)
+       (buffer-string))
+     (append (list 'harness-slot-key (plist-get row :key)
+                   'harness-slot-index (plist-get row :index)
+                   'harness-slot-tool t)
+             (and id (list 'harness-slot-session id))))))
+
+(defun harness-ui-slots--tool-heading (machine tools)
+  "Return the heading line of MACHINE's tool table, MACHINE of TOOLS.
+TOOLS is the answer of `tool-slots/status'.  It names the machine, says
+how many of its slots are in use and how many calls wait, and, for this
+machine, whether the load holds its slots back."
+  (let* ((limit (harness-ui-slots--number (plist-get machine :limit)))
+         (running (harness-ui-slots--number (plist-get machine :running)))
+         (waiting (length (plist-get machine :waiters)))
+         (baseline (plist-get tools :baseline))
+         (pressure (plist-get tools :pressure))
+         (held (and (stringp (plist-get machine :machine))
+                    (string-prefix-p "local:" (plist-get machine :machine))
+                    (numberp baseline) (< limit baseline))))
+    (concat " " (propertize "Tool slots" 'face 'harness-slots-heading-face)
+            (harness-ui-slots--dim (format " · %s" (or (plist-get machine :label)
+                                                       (plist-get machine :machine))))
+            (harness-ui-slots--dim (format " · %d of %d in use" running limit))
+            (if (> running limit)
+                (concat (harness-ui-slots--dim " · ")
+                        (propertize (format "%d over the limit" (- running limit)) 'face 'warning))
+              "")
+            (if (> waiting 0) (harness-ui-slots--dim (format " · %d waiting" waiting)) "")
+            (if held
+                (concat (harness-ui-slots--dim " · ")
+                        (propertize (format "held back from %d by system load%s" baseline
+                                            (if (numberp pressure) (format " (%.1fx)" pressure) ""))
+                                    'face 'warning))
+              "")
+            "\n")))
+
+(defun harness-ui-slots--tool-machine (machine tools width now first-index)
+  "Return MACHINE's section of the tool slots, for WIDTH columns at NOW.
+MACHINE is one of TOOLS, an answer of `tool-slots/status'.  Its heading,
+then a table of the calls using its slots (FIRST-INDEX is
+the place of the first row among the page's) -- or a line saying none
+does."
+  (let ((rows (harness-ui-slots--tool-rows machine now first-index)))
+    (concat
+     (harness-ui-slots--tool-heading machine tools)
+     (if (null rows)
+         (concat "   "
+                 (harness-ui-slots--dim (if (> (harness-ui-slots--number (plist-get machine :running)) 0)
+                                            "slots in use, by calls that are not listed"
+                                          "no call is running"))
+                 "\n")
+       (pcase-let ((`(,columns . ,format)
+                    (harness-ui-slots--tool-layout (mapcar (lambda (row) (plist-get row :session)) rows)
+                                                   width)))
+         (concat (harness-ui-sessions-header-row format harness-ui-slots--padding 'harness-slots-header-face)
+                 (mapconcat (lambda (row) (harness-ui-slots--tool-row row columns format width))
+                            rows "")))))))
+
+(defun harness-ui-slots--tools-section (tools width now first-index)
+  "Return the section of the tool slots of TOOLS, drawn for WIDTH columns at NOW.
+TOOLS is an answer of `tool-slots/status': a table for each machine in
+its `:machines', this one first.  FIRST-INDEX is the place the first row
+takes among the rows of the page, the tasks' before it.  Nothing without
+machines in TOOLS (a harness that does not say, or that was not asked)."
+  (let ((machines (and (consp tools) (append (plist-get tools :machines) nil)))
+        (index first-index))
+    (when machines
+      (mapconcat (lambda (machine)
+                   (prog1 (harness-ui-slots--tool-machine machine tools width now index)
+                     (cl-incf index (+ (length (plist-get machine :holders))
+                                       (length (plist-get machine :waiters))))))
+                 machines "\n"))))
 
 ;;;; Queues
 
@@ -957,12 +1210,14 @@ days DATA says."
 
 ;;;; The page
 
-(defun harness-ui-slots--text (data width now &optional dir error)
+(defun harness-ui-slots--text (data width now &optional dir error tools)
   "Return the page for DATA, an answer of `task/slots', as text.
 It is drawn for a window WIDTH columns wide at the time NOW (a float
 time).  DIR is the directory the page was opened for, which names the
 project until the harness says; ERROR, a string, says that asking again
-failed, and the page shows the last answer all the same."
+failed, and the page shows the last answer all the same.  TOOLS is the
+answer of `tool-slots/status', when the harness gave one: the section of
+the tool slots follows the tasks at work."
   (concat
    (harness-ui-slots--first-line data dir)
    (when error
@@ -972,6 +1227,9 @@ failed, and the page shows the last answer all the same."
      (concat queues "\n"))
    (harness-ui-slots--holders-section data width now)
    "\n"
+   (when-let* ((section (harness-ui-slots--tools-section
+                         tools width now (length (plist-get data :holders)))))
+     (concat section "\n"))
    (harness-ui-slots--queue-section data now)
    "\n"
    (harness-ui-slots--next-section data width now)
@@ -985,7 +1243,8 @@ last answer (`harness-ui-slots--text'), or a note that the first is
 awaited, or why it did not come."
   (cond
    (harness-ui-slots--data
-    (harness-ui-slots--text harness-ui-slots--data width now harness-ui-slots--dir harness-ui-slots--error))
+    (harness-ui-slots--text harness-ui-slots--data width now harness-ui-slots--dir harness-ui-slots--error
+                            harness-ui-slots--tools))
    (t
     (concat (harness-ui-slots--first-line nil harness-ui-slots--dir)
             "\n "
@@ -1103,10 +1362,12 @@ width of the buffer's windows and the time now, so this is cheap to ask
 for as often as the times on it change.  Return non-nil when it drew."
   (when (derived-mode-p 'harness-ui-slots-mode)
     (let ((text (harness-ui-slots--page (harness-ui-slots--width) (float-time))))
-      (when (or force (not (equal-including-properties text harness-ui-slots--drawn)))
-        (setq harness-ui-slots--drawn text)
-        (harness-ui-slots--draw text)
-        t))))
+      (prog1 (when (or force (not (equal-including-properties text harness-ui-slots--drawn)))
+               (setq harness-ui-slots--drawn text)
+               (harness-ui-slots--draw text)
+               t)
+        ;; The times of the calls at work run while a window shows them.
+        (harness-ui-slots--tool-timer-sync)))))
 
 (defun harness-ui-slots--on-resize ()
   "Draw the page again soon for the window it is in, once for a burst of changes.
@@ -1125,17 +1386,54 @@ CALLBACK is called with the answer, a plist (see `task/slots'), or
 ON-ERROR with why it failed."
   (harness-ui-call "_harness/task/slots" (list :cwd dir) callback on-error))
 
+(defun harness-ui-slots--fetch-tools (callback on-error)
+  "Ask the harness how the tool slots are used.
+CALLBACK is called with the answer, a plist (see `tool-slots/status'),
+or ON-ERROR with why it failed."
+  (harness-ui-call "_harness/tool-slots/status" nil callback on-error))
+
+(defun harness-ui-slots--load-tools (buffer)
+  "Ask how BUFFER's page's tool slots are used, and draw them when they come.
+A harness without the tool slots module answers with an error, which
+leaves the page without the section: there is nothing to say.  Once the
+page has the state, the harness's `tool-slots/changed' keeps it
+\(`harness-ui-slots--take-tools')."
+  (harness-ui-slots--fetch-tools
+   (lambda (state)
+     (when (buffer-live-p buffer)
+       (with-current-buffer buffer (harness-ui-slots--set-tools state t))))
+   (lambda (err)
+     (when (and (buffer-live-p buffer) (not (harness-ui-connection-replaced-p err)))
+       (with-current-buffer buffer (harness-ui-slots--set-tools nil t))))))
+
+(defun harness-ui-slots--set-tools (state &optional draw)
+  "Take STATE, what the harness says of its tool slots, into the current page.
+The page is drawn again when it differs from what it had and a window
+shows it, or DRAW -- the answer to a request the page made, as the
+tasks' is drawn; a page nobody sees draws when it is shown."
+  (unless (equal state harness-ui-slots--tools)
+    (setq harness-ui-slots--tools state)
+    (when (or draw (harness-ui-slots--shown-p (current-buffer)))
+      (harness-ui-slots--render))))
+
+(defun harness-ui-slots--take-tools (state)
+  "Take STATE, the tool slots as the harness now says they are, into every page."
+  (dolist (buffer (harness-ui-slots--buffers))
+    (with-current-buffer buffer (harness-ui-slots--set-tools state))))
+
 (defun harness-ui-slots--load (buffer)
   "Ask for the slots again for BUFFER's page, and draw them when they come.
 An answer to an earlier request than the last is dropped, so a slow one
 never replaces a newer.  A failure keeps the last answer on the page and
-says why above it."
+says why above it.  The tool slots are asked for too
+\(`harness-ui-slots--load-tools')."
   (with-current-buffer buffer
     (let ((generation (cl-incf harness-ui-slots--generation)))
       ;; Whatever it missed while hidden, this answer has.
       (setq harness-ui-slots--stale nil)
       (harness-ui-view-drawn)
       (unless harness-ui-slots--data (setq harness-ui-slots--loading t))
+      (harness-ui-slots--load-tools buffer)
       (harness-ui-slots--fetch
        harness-ui-slots--dir
        (lambda (data)
@@ -1198,9 +1496,72 @@ hidden, it is marked stale, to ask when it shows again."
 
 (defun harness-ui-slots--on-event (event args)
   "Have every page catch up with EVENT, with ARGS, when it may change their slots.
-On `harness-ui-event-functions'."
+On `harness-ui-event-functions'.  The tool slots are not asked for again:
+`tool-slots/changed' brings the state as it is (the first of ARGS)."
   (when (harness-ui-slots--event-p event args)
-    (mapc #'harness-ui-slots--follow (harness-ui-slots--buffers))))
+    (mapc #'harness-ui-slots--follow (harness-ui-slots--buffers)))
+  (when (and (equal event "tool-slots/changed") (consp (car args)))
+    (harness-ui-slots--take-tools (car args))))
+
+;;;; The times of the tool calls
+
+;; A tool call is over in seconds or minutes, and the table says how
+;; long each has run or waited, to the second while it is young.  The
+;; board's clock ticks every fifteen seconds, which is too coarse for
+;; that, so a timer of the page's own redraws it each second -- but only
+;; while a window shows a page with a call to time, and not at all when no
+;; call is at work or waiting: a page nobody looks at costs nothing.
+
+(defvar harness-ui-slots--tool-timer nil
+  "The timer that redraws the times of the tool calls, or nil when none runs.")
+
+(defconst harness-ui-slots--tool-interval 1.0
+  "Seconds between the redraws of the times of the tool calls.")
+
+(defun harness-ui-slots--tool-busy-p (tools)
+  "Non-nil when TOOLS, an answer of `tool-slots/status', has a call to time.
+That is one holding a slot of some machine, or waiting for one."
+  (and (consp tools)
+       (cl-some (lambda (machine)
+                  (or (plist-get machine :holders) (plist-get machine :waiters)))
+                (append (plist-get tools :machines) nil))
+       t))
+
+(defun harness-ui-slots--tool-pages ()
+  "Return the pages a window shows that have a tool call to time."
+  (cl-remove-if-not (lambda (buffer)
+                      (and (harness-ui-slots--shown-p buffer)
+                           (harness-ui-slots--tool-busy-p
+                            (buffer-local-value 'harness-ui-slots--tools buffer))))
+                    (harness-ui-slots--buffers)))
+
+(defun harness-ui-slots--tool-timer-stop ()
+  "Stop the timer of the times of the tool calls."
+  (when (timerp harness-ui-slots--tool-timer)
+    (cancel-timer harness-ui-slots--tool-timer))
+  (setq harness-ui-slots--tool-timer nil))
+
+(defun harness-ui-slots--tool-timer-sync ()
+  "Run the timer of the times of the tool calls exactly when a page needs it.
+Called whenever a page is drawn, which is when it comes to show a call,
+is shown, or stops doing either."
+  (if (harness-ui-slots--tool-pages)
+      (unless (timerp harness-ui-slots--tool-timer)
+        (setq harness-ui-slots--tool-timer
+              (run-with-timer harness-ui-slots--tool-interval harness-ui-slots--tool-interval
+                              #'harness-ui-slots--tool-tick)))
+    (harness-ui-slots--tool-timer-stop)))
+
+(defun harness-ui-slots--tool-tick ()
+  "Draw the pages that show a tool call again, for the times on them.
+Nothing is asked of the harness, and a page whose text reads the same is
+left alone (`harness-ui-slots--render').  With no such page the timer
+stops."
+  (let ((pages (harness-ui-slots--tool-pages)))
+    (if (null pages)
+        (harness-ui-slots--tool-timer-stop)
+      (dolist (buffer pages)
+        (with-current-buffer buffer (harness-ui-slots--render))))))
 
 (defun harness-ui-slots--on-window-change (window)
   "Ask again for the page WINDOW shows now, when it missed events while hidden.
@@ -1320,10 +1681,11 @@ project the current directory is in."
   "Show how the task slots of DIR's project are used.
 The tasks that hold the slots, as the session list lists sessions: their
 status, priority, context and cost, and for how long each has worked.
-Then the queue of tasks waiting for a slot by priority, who is next in
-line, and how long tasks waited lately.  DIR defaults to the project of
-the task board this is
-run from, else of the current directory.  See
+Then who is using the machine's tool slots -- each call's session, tool
+and how long it has run, and those waiting, with their priority -- then
+the queue of tasks waiting for a slot by priority, who is next in line,
+and how long tasks waited lately.  DIR defaults to the project of the
+task board this is run from, else of the current directory.  See
 `harness-ui-slots-mode' for the keys."
   (interactive)
   (let ((dir (file-name-as-directory (expand-file-name (or dir (harness-ui-slots--default-dir)))))
@@ -1357,6 +1719,8 @@ shows the slots of that queue's project instead."
      (session (funcall (harness-ui-session-opener position) session))
      ((get-text-property (point) 'harness-slot-task)
       (user-error "This task has not started its session yet"))
+     ((get-text-property (point) 'harness-slot-tool)
+      (user-error "This call belongs to no session"))
      ((get-text-property (point) 'harness-slot-queue) (harness-ui-slots-open-queue))
      (t (user-error "No task in a slot here")))))
 
@@ -1565,11 +1929,12 @@ rows wait on and the task boards' clock, and
   (remove-hook 'harness-ui-event-functions #'harness-ui-slots--on-event)
   (remove-hook 'harness-ui-pending-changed-hook #'harness-ui-slots--on-pending)
   (remove-hook 'harness-ui-tasks-tick-hook #'harness-ui-slots--on-tick)
+  (harness-ui-slots--tool-timer-stop)
   (when (eq (lookup-key harness-ui-map (kbd "Q")) #'harness-slots)
     (define-key harness-ui-map (kbd "Q") nil)))
 
 (harness-define-module 'ui-slots
-  :doc "The task slots page: the tasks that hold slots as the session list lists sessions, the queue and its waits by priority."
+  :doc "The task slots page: the tasks that hold slots as the session list lists sessions, who is using the machine's tool slots, the queue and its waits by priority."
   :requires '(ui ui-tasks)
   :init #'harness-ui-slots--init
   :shutdown #'harness-ui-slots--shutdown)
