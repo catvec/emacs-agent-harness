@@ -830,6 +830,101 @@ harness-compose-add-attachment | C-c C-a | Chat | Attach file — Attach PATH to
       (should (string-match-p "^harness-new-session | C-c h n | menu | " text))
       (should-not (string-match-p "^harness-tasks-search | " text)))))
 
+(defconst harness-tasks-search-test--phone-request
+  (concat
+   "{\"cwd\":\"%s\",\"query\":\"how do I attach an image to a task?\","
+   "\"opts\":{\"bias\":\"commands\","
+   "\"context\":{\"view\":\"buffer\",\"title\":\"Usage\",\"mode\":\"phone app\","
+   "\"session\":null,\"project\":\"%s\",\"client\":\"phone app\"},"
+   "\"commands\":["
+   "{\"command\":\"new-task\",\"keys\":\"Tasks › +\",\"where\":\"menu\","
+   "\"label\":\"Submit a new task\","
+   "\"doc\":\"Describe the work, attach pictures with the image button, send.\","
+   "\"here\":true},"
+   "{\"command\":\"open-usage\",\"keys\":null,\"where\":\"menu\","
+   "\"label\":\"Open usage\",\"doc\":\"Spend, tokens and plan quota.\",\"here\":true}]}}")
+  "What the harness's phone app sends `search/ask', as its JSON reads.
+Its \"commands\" are the app's own actions, with the taps that reach them
+where Emacs commands have keys.")
+
+(ert-deftest harness-tasks-search-ask-serves-the-phone-app ()
+  "The phone app asks over ACP in JSON, with its own catalogue and `:client':
+the model is told the engineer is on a phone app and the commands are the
+app's own, with the taps that reach them; the plan names the app's
+commands, whole, and encodes as the app reads it."
+  (harness-tasks-search-test-with
+    (setq harness-tasks-search-test--replies
+          '("{\"commands\":[\"new-task\"],\"answer\":\"Tap **+** on the Tasks screen, then the image button.\"}")
+          harness-tasks-search-test--requests nil)
+    (let* ((params (harness-json-parse
+                    (format harness-tasks-search-test--phone-request default-directory default-directory)))
+           (plan (harness-test-await (harness-acp--call-extension "search/ask" params) 10))
+           (text (harness-tasks-search-test--first)))
+      (should (equal "commands" (plist-get plan :bias)))
+      (should (equal "Tap **+** on the Tasks screen, then the image button." (plist-get plan :answer)))
+      (should (equal (list (list :command "new-task" :keys "Tasks › +" :where "menu"
+                                 :label "Submit a new task"
+                                 :doc "Describe the work, attach pictures with the image button, send."
+                                 :here t))
+                     (plist-get plan :commands)))
+      ;; Where it was asked, who asks, and what the commands are.
+      (should (string-match-p
+               "^Context: the phone app, on its “Usage” screen\\. Favour commands, then sessions; tasks count too\\. The engineer is on the harness's phone app, not in Emacs: the commands are that app's own actions (screens to open, things to do), and a command's keys are the taps that reach it\\.$"
+               text))
+      (should (string-match-p "^Commands (name | keys | where | what it does):
+new-task | Tasks › \\+ | menu | Submit a new task — Describe the work, attach pictures with the image button, send\\.$"
+                              text))
+      (should (string-match-p "^open-usage | menu | Open usage — Spend, tokens and plan quota\\.$" text))
+      ;; The plan goes back as JSON, which the app reads.
+      (let ((wire (harness-json-parse (harness-json-encode plan))))
+        (should (equal "new-task" (plist-get (car (plist-get wire :commands)) :command)))
+        (should (equal "Tasks › +" (plist-get (car (plist-get wire :commands)) :keys)))
+        (should (eq :false (plist-get wire :widened)))))))
+
+(ert-deftest harness-tasks-search-ask-says-which-screen-of-the-app ()
+  "A client says the same of the places the search has views for: the
+board, the session list and a chat read as they do in Emacs, then the
+sentence about the app's own commands, and a client's name never opens
+the door to a second line."
+  (harness-tasks-search-test-with
+    (let* ((here (harness-tasks-search-test--session "Write the release notes"))
+           (here8 (substring here 0 8))
+           (client "phone app"))
+      (cl-flet ((line (context bias)
+                  (harness-tasks-search-test--ask "anything" (list :bias bias :context context) "{\"show\":[]}")
+                  (cadr (split-string (harness-tasks-search-test--first) "\n"))))
+        (let ((sentence " The engineer is on the harness's phone app, not in Emacs: the commands are that app's own actions (screens to open, things to do), and a command's keys are the taps that reach it."))
+          (should (string-match-p
+                   (concat "^Context: the task board of project [^ ]+\\. Favour tasks; sessions and commands count too\\."
+                           (regexp-quote sentence) "$")
+                   (line (list :view "board" :client client) "tasks")))
+          (should (equal (concat "Context: the session list. Favour sessions, then commands; tasks count too." sentence)
+                         (line (list :view "sessions" :client client) "sessions")))
+          (should (equal (concat (format "Context: the chat of session “Write the release notes” (%s). Favour commands, then sessions; tasks count too."
+                                         here8)
+                                 sentence
+                                 (format " Leave session %s out of \"sessions\": the engineer is in it." here8))
+                         (line (list :view "chat" :title "Write the release notes" :session here :client client)
+                               "commands")))
+          ;; Nothing but the name: no screen to say.
+          (should (equal (concat "Context: the phone app. Favour commands, then sessions; tasks count too." sentence)
+                         (line (list :view "buffer" :client client) "commands")))
+          ;; A client's name is one short line.
+          (should (string-match-p
+                   "^Context: the phone app on a very long name[^\n]*…, on its “Usage” screen\\."
+                   (line (list :view "buffer" :title "Usage"
+                               :client "phone app on a very long name that goes on and on and on\nand on and on and on and on")
+                         "commands"))))
+        ;; Without a client, nothing changes: Emacs says so as ever.
+        (should (equal "Context: Emacs buffer “Usage” (some-mode). Favour commands, then sessions; tasks count too."
+                       (line (list :view "buffer" :title "Usage" :mode "some-mode") "commands")))))))
+
+(ert-deftest harness-tasks-search-system-prompt-knows-the-phone-app ()
+  "The one system prompt, which a warm process serves whatever asks, says
+what the commands are when the context line names a phone app."
+  (should (string-match-p "context line says the engineer is on a phone app" harness-tasks-search--system))
+  (should (string-match-p "never with Emacs keys or commands" harness-tasks-search--system)))
+
 (ert-deftest harness-tasks-search-ask-widens-when-nothing-matches ()
   "A search the model answers with nothing adds the sessions and commands
 that come nearest the query itself, and says so; a model that widens the

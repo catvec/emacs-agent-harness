@@ -21,6 +21,7 @@ import '../state/session_controller.dart';
 import '../state/settings_controller.dart';
 import '../state/task_controller.dart';
 import '../state/usage_controller.dart';
+import '../state/quick_search_history.dart';
 
 enum ConnectionPhase {
   disconnected,
@@ -108,6 +109,10 @@ class AppController extends ChangeNotifier {
   /// What was typed and not sent yet, which outlives the screens: see
   /// [DraftStore].
   final DraftStore drafts = DraftStore();
+
+  /// The lines searched with the quick search, which outlive the page the
+  /// search is done on: see [QuickSearchHistory].
+  final QuickSearchHistory quickSearchHistory = QuickSearchHistory();
   AcpClient? _client;
   HarnessApi? api;
   HarnessCapabilities? capabilities;
@@ -871,6 +876,11 @@ class AppController extends ChangeNotifier {
   }
 
   void closeSession() {
+    // Closed already: there is nothing to tell.  A conversation's screen
+    // tells it again as the framework takes the screen down, where whatever
+    // listens could not be rebuilt, which a caller that closes it first (see
+    // `QuickSearchHost.openTab`) spares them.
+    if (activeSessionId == null) return;
     activeSessionId = null;
     _notify();
   }

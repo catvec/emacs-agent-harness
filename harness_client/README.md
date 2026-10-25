@@ -207,6 +207,23 @@ time it opens. It asks again only when the harness does.
   Each screen asks for the exact methods it needs. A missing method turns off
   that one view or action at runtime; a plain ACP agent gets a small "Standard
   ACP agent" notice, three tabs instead of five, and a working chat.
+- **Finds anything in words.** A magnifying glass at the end of every header
+  (the five screens, and a conversation's; on a wide screen a *Search* row in
+  the sidebar) opens the quick search: one box to say what you want -- "how do
+  I attach an image to a task?", "where did I debug the merge queue?", "the
+  task about the docs", "get rid of the screenshots task" -- and an action to
+  tap, a session or a task to open, or the answer in words comes back. The
+  harness answers it: this is the search `C-c h /` opens in Emacs, the same
+  cheap model reading the same sessions and tasks by the same rules (the
+  harness's `search/ask`, `search/warm` and `task/search-apply`), and none of
+  it is done in the app. What only the app knows it sends along, as Emacs
+  sends its commands: the things it can do, and the taps that reach each
+  (*Tasks tab › +*), which is how a "how do I ...?" is answered about the
+  phone and not with Emacs keys. See [Quick search](#quick-search).
+
+  | The way in | A question | An order |
+  |---|---|---|
+  | ![A conversation's header with the search button at its end](screenshots/android-quick-search-way-in-chat.png) | ![The answer in words, then the actions that do it](screenshots/android-quick-search-answer.png) | ![Tasks, a session and an order waiting for a yes](screenshots/android-quick-search-tasks.png) |
 - **Feels at home on the platform.** Material 3 with warm paper surfaces on
   Android; Cupertino navigation, tab bar, switches, sheets, typography and
   motion on iOS and macOS. Wide screens get a sidebar and a list/detail split.
@@ -590,7 +607,7 @@ lib/src/models/       sessions, transcript reducer, tasks, usage, plan quota,
                       activity
 lib/src/services/     typed HarnessApi over ACP and _harness
 lib/src/state/        connection, sessions, tasks, usage, plan quota,
-                      interactions
+                      interactions, quick search
 lib/src/ui/           adaptive widgets, theme, screens and transcript widgets
 tool/                 preview ACP server, real-harness probe, phone installer,
                       pub cache check
@@ -630,6 +647,16 @@ e2e/                  Playwright mobile-emulated flows and screenshots
   the device cannot keep anything (the store did not open, or the last write
   of some key was refused or raised), which the connection form and Settings
   put on screen.
+- The quick search is three small pieces and the page that draws them.
+  `QuickSearchApi` is the harness's `search/warm`, `search/ask` and
+  `task/search-apply`, typed (`QuickSearchPlan` is what `search/ask` answers).
+  `quickCommands` is what the app tells the harness it can do, as the harness's
+  Emacs tells it its commands: names, labels, one line each, and the taps that
+  reach them, made from the app as it is now (capabilities, projects, settings).
+  `QuickSearchController`, one for each time the page opens, asks, drops the
+  answers nobody waits for, and proposes and does orders.  The home shell, which
+  implements `QuickSearchHost`, is what goes anywhere and does what a person
+  chose, once the page has closed: the page's result is a `QuickSearchChoice`.
 - `WebSocketAcpTransport` pings (`webSocketPingInterval`, 25 s) where
   `dart:io` can, closes a connection whose peer stops answering, and says why
   a connection ended (`AcpClient.closeReason`) in words the banner can show.
@@ -662,6 +689,7 @@ pieces in `lib/src/ui/adaptive/layout_widgets.dart`.
 | A message to the person | A **notice**, in the flow of the page under its header (`HarnessNotice`): a session that needs an answer, a failed action, a lost connection. |
 | How the next message is handled | Under the message field: the model and the permission mode (a choice each), then how full the context is and what the conversation has cost. |
 | A choice among a few things | A pill, in a sheet (`HarnessPill`), and only there. |
+| The way into the search | A magnifying glass at the end of every page's header (`HarnessPage`), so that it is in the same place on every page; a line in the sidebar of a wide screen. |
 | Lists of names (methods, events, models) | Plain words in a grid, grouped under the name of their group; never a pill each. |
 
 Text is one of nine roles (page title, sheet title, row title, body, subtitle,
@@ -670,6 +698,105 @@ meta, label, caption, mono) and nothing is set below 11 px. Space is on a
 page of text and cards is no wider than 840 points. `test/layout_test.dart`
 states these rules as geometry: where a notice is, which edges line up, that
 nothing overflows on a 320-point phone, and where there are no pills.
+
+## Quick search
+
+The button is `HarnessPage`'s: every page of the app with a header (the five
+screens, and a conversation) has a magnifying glass at the end of it, put there
+by the home shell (`QuickSearchEntry`), which is also what opens the search and
+what carries out what it is closed with.  A wide screen has a *Search* row at the
+top of its sidebar.  The page is `lib/src/ui/screens/quick_search_screen.dart`,
+its state `lib/src/state/quick_search_controller.dart`, and what the app tells
+the harness it can do `lib/src/state/quick_search_catalogue.dart`.
+
+| The way in | Nothing typed yet | Answered |
+|---|---|---|
+| ![The header of the sessions, with the search button at its end](screenshots/android-quick-search-way-in.png) | ![The box, the place it was opened from and lines to try, with the lines searched before](screenshots/android-quick-search-hint.png) | ![The answer in words, the actions that do it and a session that says it](screenshots/android-quick-search-answer.png) |
+
+What the app asks of the harness (`lib/src/services/quick_search_api.dart`) is
+what Emacs asks, so a line gets the answer there would be:
+
+- `search/warm` as the page opens, so that the model's process is up by the time
+  the line is typed; it says which model answers ("asking claude-haiku-4-5…").
+- `search/ask` with the line, **where it was typed** (`context`: the screen, the
+  conversation, the project, and `client: "phone app"`, which tells the model the
+  person is on the phone and its commands are the app's), **what to favour**
+  (`bias`) and **what the app can do** (`commands`).  The harness answers with a
+  plan: the answer in words (Markdown), a note, the actions, sessions and tasks
+  the line is about, best first, and the orders it proposes.  A search that finds
+  nothing is widened by the harness itself, once, and says so in its note.
+- `task/search-apply` with the orders a person said yes to.
+
+Nothing here reads a transcript, ranks a task or decides what a line means.  The
+app only draws the plan.
+
+- **Where you are sets what it favours.**  On the task board tasks come first, in
+  the list of sessions sessions, anywhere else (usage, the server page, the
+  settings, a conversation) the app's actions; it only favours, and the harness
+  reads the rest too.  The line under the box says it: "From the task board ·
+  favours tasks".  *Sessions* and *Actions*, under "Search again, favouring",
+  ask the same line again, favouring those.  Opened in a conversation, the search leaves that
+  conversation out of what it finds.
+- **The project** is the one the screen is on (the board's, when it is narrowed to
+  one; else the project of the latest work, which the usage and a new session
+  also start in).  Its tasks are what a search reads of the board; sessions are
+  found in every project.  When the harness has more than one project the line
+  with its name opens a menu to search another.
+- **A question gets an answer in words.**  "How do I attach an image to a task?"
+  is answered in a card above what was found, as the Markdown it is, whole, with
+  the name of the model; a line that only finds something, or orders something,
+  gets the list alone.
+- **Actions** are the app's own, and what the model names is only what the app
+  sent: the screens, a new session in the project and a new task, attaching
+  images, answering the session that needs you, refreshing, what can be done with
+  a task and with the queue, showing the archived tasks, a command for each
+  project (it narrows the board to it), the theme and the agent's thoughts (changed
+  at once), non-interactive mode, reconnecting, disconnecting, signing out,
+  staying signed in and the platform's style.  Each has the name it is called by,
+  a line of what it does (the harness's model reads 120 characters of it) and the
+  taps that reach it, as an Emacs command has its keys, so that the answer to "how
+  do I ...?" says where to tap.  What this harness cannot do (it has no task board,
+  no usage) is not offered.  A tap closes the search and does it, or goes where it
+  is done.
+- **Sessions** are found by their names and by what was said in them (the harness
+  searches every transcript), with the passage found and the words in it marked;
+  a tap opens the conversation.  **Tasks** are the board's, with where each stands
+  as the harness reads it: a tap opens the task's conversation, where a task is
+  handled, or shows it on the board when it has none; *Show on the board* does the
+  latter for one that has.
+- **Orders are proposed, never done unasked.**  "Stop the docs task" and "make the
+  parser task high priority" come back as a question -- *Stop “Fix the docs”?* --
+  with *Do it* and *Skip*; *Do it* has the harness do it (`task/search-apply`),
+  and the line under says how each went, "Archived “Fix the docs”" or "Could not
+  stop “Fix the docs”: it is not working", in the harness's words; the board is
+  read again.  What Emacs's board would run at once is asked about here too.
+- **It says what is happening.**  While it waits the page shows the line and the
+  model and has *Stop*, which gives up waiting (the model's own call goes on at
+  the harness and what it says is dropped when it comes); a failure says why in the
+  harness's words, with *Retry*; a search that found nothing says so; a harness
+  that is out of reach is waited for ("Reconnecting to the harness…", with what was
+  typed kept, and the search is back as the app is); one without the search (an
+  older one, or with its `tasks-search` module off) says so, and offers nothing it
+  cannot do.  The back arrow and the system's back close the page, and an answer
+  that comes after that is dropped; so does Escape on a keyboard that has it, where
+  Return searches (Shift-Return breaks the line) and a phone's search key does the
+  same.  The lines searched are kept for the life of the app and shown again as
+  *Recent*.
+
+| Waiting | Failed | Nothing found |
+|---|---|---|
+| ![The line, the model it is asked of and Stop](screenshots/android-quick-search-waiting.png) | ![The harness's words for why it failed, and Retry](screenshots/android-quick-search-failed.png) | ![Nothing found, and the buttons that ask again](screenshots/android-quick-search-nothing.png) |
+| ![The harness is out of reach: the line is kept, the search waits](screenshots/android-quick-search-reconnecting.png) | ![A harness without the search says so](screenshots/android-quick-search-unsupported.png) | ![An order done, and how it went](screenshots/android-quick-search-done.png) |
+
+| The Apple style | The dark theme | The task board's header |
+|---|---|---|
+| ![The same page on an iPhone](screenshots/ios-quick-search-answer.png) | ![The same page in the dark](screenshots/android-quick-search-answer-dark.png) | ![The search button at the end of the task board's header, after refresh and new task](screenshots/android-quick-search-way-in-tasks.png) |
+
+What Emacs's quick search has that the phone's does not: *Describe*, since the
+app's actions have no documentation to show; *All matches*, which opens the
+session search's own view (the app has none); and an *Open* that goes to the
+message the words were found in (a conversation opens at its end, and the passage
+found is shown under the session).
 
 ## Tool calls
 
@@ -872,6 +999,39 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   ends on one edge, a conversation has its model and mode under the message
   field and no pills under its title, nothing overflows on a 320-point phone,
   and the server page lists methods and events as text
+- the quick search (`test/quick_search_test.dart`, `quick_search_widget_test.dart`,
+  `quick_search_screenshots_test.dart`, `quick_search_real_harness_test.dart`):
+  what the harness answers is read into a plan (an answer, a note, actions,
+  sessions with the passage found, tasks, orders; what the harness leaves out
+  is `null`); the commands the app offers are named once each, in words, with a
+  description of at most the 120 characters the model reads, the taps that
+  reach them as their keys, and are left out where the harness cannot do them
+  (no task board, no usage), where they would change nothing (the theme in use)
+  and past forty projects; each does what it says (a setting at once, a screen
+  by the shell, a project narrows the board, a new session starts in the
+  project searched); the controller asks with where it was typed and the
+  catalogue, keeps the lines, drops the answer to a line that was asked over,
+  to one given up on and to a page that is gone, says a failure in the
+  harness's words, asks again favouring something else, proposes the orders
+  and does them only when told, says how each went and reads the board again;
+  on the whole app, against a fake harness whose search is scripted
+  (`test/support/quick_search_harness.dart`, which stands before the fake
+  harness and leaves it as it is): the button is in the header of each of the
+  five screens and a conversation, at its end, and in a wide screen's sidebar,
+  and opens the page with the box ready and the place said; an answer in words
+  is drawn as Markdown above the actions, which are tapped (a screen is shown,
+  a setting set, a project narrowed); sessions open as conversations and tasks
+  as their conversation or on the board; what the place favours is listed
+  first; an order waits for *Do it* or *Skip* and says how it went; the wait
+  names the line and the model and can be stopped, and what comes after is
+  dropped; nothing found, a failure with *Retry*, a harness out of reach (the
+  line kept, the search back with the connection), a harness without the
+  search, the way out by the arrow and by the system's back, the lines of
+  before, asking again, the project to search, and the Apple style.  The
+  pictures (written where `HARNESS_SHOTS` says) are of the page drawn as the app
+  draws it, with the fonts of a phone, in both styles and themes.  The last
+  file talks to a real harness (see *Against a real harness*) and is skipped
+  without one.
 - a lost connection (`test/reconnect_test.dart`, `reconnect_widget_test.dart`):
   a fake harness that drops the connection, refuses the next ones, goes silent
   or no longer knows the device's secret. The app notices, connects again by
@@ -979,6 +1139,28 @@ OK
 This checks the real `initialize`, `session/list`, `session/new` with
 `_harness` metadata, `session/prompt` streaming, activity, node replay and
 `_harness/session/nodes` shapes — not just the preview server.
+
+`tool/with_real_harness.sh` does what that run did by hand: it starts this
+checkout's harness headless, as the user's Emacs starts its own (an
+`emacs --batch` process that serves ACP on a loopback port), with every module
+and the demo provider -- which answers a prompt or a search from its words, and
+needs no account and no network -- and runs a command with the address in
+`HARNESS_REAL_ADDRESS` (and `HARNESS_REAL_TOKEN`, `HARNESS_REAL_CWD`), then stops
+the harness.  The suites that need a real harness skip without them, so this
+is how they run:
+
+```sh
+tool/with_real_harness.sh flutter test test/quick_search_real_harness_test.dart
+```
+
+`test/quick_search_real_harness_test.dart` is the quick search against the
+real `search/warm`, `search/ask` and `task/search-apply`, from the catalogue the
+app really builds: the plan of a question ("how do I attach an image to a
+task?") that the real harness encodes -- the answer in words, naming the app's
+action and the taps that reach it, not Emacs keys --, a session found by what
+was said in it with the passage and where the words are in it, a task found by
+its words, the order to archive it proposed and done, and a line nothing
+matches.  It is what keeps the app's idea of the plan the harness's own.
 
 ## Building the apps
 

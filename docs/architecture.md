@@ -7247,12 +7247,21 @@ text, and by nothing else.
     conversation tree, commands anywhere else.  It only favours: the
     model is given all three kinds whatever it favours.
   - `:context` where the query was typed, `(:view VIEW :title TITLE
-    :mode MODE :session ID :project DIR)`: VIEW is `"board"`,
-    `"chat"`, `"sessions"`, `"tree"` or another word for any other
-    buffer, TITLE and MODE that buffer's, ID the session the user is in,
-    which the answer leaves out, and DIR the project.  The model reads it
-    as one line ("Context: the chat of session ... Favour commands, then
-    sessions; tasks count too.").
+    :mode MODE :session ID :project DIR :client CLIENT)`: VIEW is
+    `"board"`, `"chat"`, `"sessions"`, `"tree"` or another word for any
+    other buffer, TITLE and MODE that buffer's, ID the session the user
+    is in, which the answer leaves out, and DIR the project.  The model
+    reads it as one line ("Context: the chat of session ... Favour
+    commands, then sessions; tasks count too.").  CLIENT is for a UI that
+    is not Emacs, and is what it calls itself in a few words (`"phone
+    app"`, the harness's Flutter client): the line then goes on to say
+    the user is on the harness's phone app, not in Emacs, that the
+    commands are that app's own actions, and that a command's keys are
+    the taps that reach it ("Tasks › +"); a view that names no screen
+    reads "the phone app, on its “Usage” screen" instead of "Emacs
+    buffer ...".  The system prompt says the same of the commands once,
+    for every client, so a warm process serves them all.  A context
+    without `:client` reads exactly as before.
   - `:commands` the commands the model may name, the UI's catalogue,
     each `(:command NAME :keys KEYS :where WHERE :label LABEL :doc DOC
     :here HERE)`, HERE true when the command runs where the query was

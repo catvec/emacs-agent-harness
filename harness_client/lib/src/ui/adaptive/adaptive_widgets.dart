@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme/harness_theme.dart';
+import '../widgets/quick_search_entry.dart';
 import 'platform_style.dart';
 
 /// What the home shell has to say to the person (an action that failed, a
@@ -43,6 +44,7 @@ class HarnessPage extends StatelessWidget {
     this.centerTitle = false,
     this.attentionNotice = true,
     this.maxContentWidth,
+    this.quickSearch = true,
   });
 
   final String title;
@@ -66,10 +68,30 @@ class HarnessPage extends StatelessWidget {
   /// edge.  Null: as wide as the screen (a board of columns).
   final double? maxContentWidth;
 
+  /// Whether the header has the button that opens the quick search, when the
+  /// app offers it here (see [QuickSearchEntry]): at its far end, where it is
+  /// on every page.
+  final bool quickSearch;
+
   @override
   Widget build(BuildContext context) {
     final cupertino = HarnessStyle.isCupertino(context);
     final chrome = HarnessChrome.maybeOf(context);
+    final search = quickSearch ? QuickSearchEntry.maybeOf(context) : null;
+    final headerActions = [
+      ...actions,
+      if (search != null)
+        HarnessIconButton(
+          key: QuickSearchEntry.buttonKey,
+          icon: adaptiveIcon(
+            context,
+            Icons.search_rounded,
+            CupertinoIcons.search,
+          ),
+          label: QuickSearchEntry.buttonLabel,
+          onPressed: search.open,
+        ),
+    ];
     // Always a column of the same shape, so that the body keeps its state
     // (a scroll position, what was typed) as notices come and go.
     final column = Column(
@@ -115,9 +137,12 @@ class HarnessPage extends StatelessWidget {
                   ),
           ),
           leading: leading,
-          trailing: actions.isEmpty
+          trailing: headerActions.isEmpty
               ? null
-              : Row(mainAxisSize: MainAxisSize.min, children: _spread(actions)),
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: _spread(headerActions),
+                ),
         ),
         child: Material(
           type: MaterialType.transparency,
@@ -154,7 +179,7 @@ class HarnessPage extends StatelessWidget {
                     18,
               ),
         leading: leading,
-        actions: actions,
+        actions: headerActions,
         centerTitle: centerTitle,
       ),
       body: SafeArea(top: false, child: content),

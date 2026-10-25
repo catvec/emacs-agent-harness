@@ -719,6 +719,15 @@ On a task board `C-c h /` is the board's own search, the one `/` starts
 there, which filters the board. The session list keeps `/` for its fuzzy
 filter; `C-c h /` opens the quick search there.
 
+The [phone app](harness_client/README.md#quick-search) has the same search,
+and it is this one: the app asks `search/ask` over ACP, as the popout does, with
+the actions it can do as `:commands` (each with the taps that reach it where an
+Emacs command has keys), where it was opened as `:context` (with `:client
+"phone app"`, which tells the model the commands are the app's and not
+Emacs's) and the project; it draws the plan the model's answer makes and asks
+`task/search-apply` to do the orders a person says yes to. Nothing of the search
+is done in the app.
+
 ### Chat buffers
 
 Each session is shown in a chat buffer: a read-only transcript with an

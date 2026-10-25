@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../../state/app_controller.dart';
+import '../../state/quick_search_catalogue.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../adaptive/mark.dart';
@@ -10,6 +11,8 @@ import '../format.dart';
 import '../navigation.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
+import '../widgets/quick_search_entry.dart';
+import 'quick_search_screen.dart';
 import 'session_screen.dart';
 import 'sessions_screen.dart';
 import 'settings_screen.dart';
@@ -26,7 +29,7 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
   String _tab = 'sessions';
 
   List<_Tab> _tabs(AppController app) => [
@@ -83,10 +86,67 @@ class _HomeShellState extends State<HomeShell> {
       setState(() => _tab = 'sessions');
       widget.app.openSession(id);
     } else {
-      Navigator.of(
-        context,
-      ).push(harnessRoute(context, (context) => SessionScreen(sessionId: id)));
+      Navigator.of(context).push(
+        harnessRoute(
+          context,
+          // The conversation has the quick search too, which then knows
+          // whose it is: what it finds leaves this session out.
+          (context) => QuickSearchEntry(
+            open: () => _searchFrom(
+              QuickSearchPlace.chat(
+                id,
+                title: widget.app.summaryFor(id)?.displayTitle,
+              ),
+            ),
+            child: SessionScreen(sessionId: id),
+          ),
+        ),
+      );
     }
+  }
+
+  /// The quick search of the screen that is open.
+  void _openQuickSearch() =>
+      _searchFrom(QuickSearchPlace(SearchOrigin.ofTab(_tab)));
+
+  /// Open the quick search from [place], and do what it is closed with: the
+  /// page closes first, so that what is chosen is done on the screens, not
+  /// on it.
+  Future<void> _searchFrom(QuickSearchPlace place) async {
+    final choice = await Navigator.of(context).push<QuickSearchChoice>(
+      harnessRoute(
+        context,
+        (context) => QuickSearchScreen(app: widget.app, place: place),
+      ),
+    );
+    if (choice != null && mounted) await choice(this);
+  }
+
+  @override
+  void openTab(String tab) {
+    final navigator = Navigator.of(context);
+    // A conversation on top of the screens is left first, and told so, rather
+    // than leaving that to its screen as it goes: it would tell the screens
+    // that listen while the framework takes it down, when they cannot be
+    // rebuilt.  (With the conversation beside the list, on a wide screen, it
+    // stays where it is.)
+    if (navigator.canPop()) widget.app.closeSession();
+    navigator.popUntil((route) => route.isFirst);
+    _select(tab);
+  }
+
+  @override
+  void openSession(String sessionId) => _openSession(sessionId);
+
+  @override
+  bool openNeedsYou() {
+    for (final session in widget.app.sessions) {
+      if (widget.app.needsAttention(session.id)) {
+        _openSession(session.id);
+        return true;
+      }
+    }
+    return false;
   }
 
   Widget _screen(String id) {
@@ -133,6 +193,12 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
+    // Every page under the shell has the way into the quick search in its
+    // header (see `HarnessPage`).
+    return QuickSearchEntry(open: _openQuickSearch, child: _shell(context));
+  }
+
+  Widget _shell(BuildContext context) {
     final app = widget.app;
     final tabs = _tabs(app);
     if (!tabs.any((tab) => tab.id == _tab)) {
@@ -157,7 +223,13 @@ class _HomeShellState extends State<HomeShell> {
         backgroundColor: Theme.of(context).colorScheme.surface,
         body: Row(
           children: [
-            _Sidebar(tabs: tabs, selected: _tab, onSelect: _select, app: app),
+            _Sidebar(
+              tabs: tabs,
+              selected: _tab,
+              onSelect: _select,
+              onSearch: _openQuickSearch,
+              app: app,
+            ),
             VerticalDivider(
               width: 1,
               color: Theme.of(context).colorScheme.outlineVariant,
@@ -307,12 +379,14 @@ class _Sidebar extends StatelessWidget {
     required this.tabs,
     required this.selected,
     required this.onSelect,
+    required this.onSearch,
     required this.app,
   });
 
   final List<_Tab> tabs;
   final String selected;
   final ValueChanged<String> onSelect;
+  final VoidCallback onSearch;
   final AppController app;
 
   @override
@@ -330,6 +404,11 @@ class _Sidebar extends StatelessWidget {
             color: theme.colorScheme.onSurface,
             subtitle: 'AGENT CLIENT',
           ),
+        ),
+        // The search is not a place: it is the way to any of them.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+          child: _SidebarSearch(onTap: onSearch),
         ),
         for (final tab in tabs)
           Padding(
@@ -417,6 +496,56 @@ class _Sidebar extends StatelessWidget {
       child: SizedBox(
         width: width,
         child: SafeArea(right: false, child: content),
+      ),
+    );
+  }
+}
+
+/// The row of the sidebar that opens the quick search.
+class _SidebarSearch extends StatelessWidget {
+  const _SidebarSearch({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cupertino = HarnessStyle.isCupertino(context);
+    final theme = Theme.of(context);
+    final muted = theme.colorScheme.onSurfaceVariant;
+    return Semantics(
+      button: true,
+      label: QuickSearchEntry.buttonLabel,
+      child: HarnessTap(
+        key: const Key('sidebar-quick-search'),
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: theme.colorScheme.outlineVariant),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                cupertino ? CupertinoIcons.search : Icons.search_rounded,
+                size: 19,
+                color: muted,
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Text(
+                  'Search',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: muted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

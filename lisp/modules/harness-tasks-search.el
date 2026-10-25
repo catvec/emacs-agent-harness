@@ -188,7 +188,7 @@ After that it is closed.")
 
 \"sessions\" lists the sessions the query is about, by id or the first 8 characters given, best first: the session to open, the conversation where something was discussed or done.
 
-\"commands\" lists the commands, by name exactly as listed, that do what the query asks or answer \"how do I ...\", best first, at most 5.
+\"commands\" lists the commands, by name exactly as listed, that do what the query asks or answer \"how do I ...\", best first, at most 5. When the context line says the engineer is on a phone app, the commands are that app's own actions, not Emacs commands: screens to open, settings to change, things to do on the phone, each with the taps that reach it where Emacs commands have keys. Answer \"how do I ...\" from what their descriptions say, in taps and screens, and never with Emacs keys or commands.
 
 \"do\" stays [] unless the query clearly orders a change. Each entry acts on one task. ACTION is one of:
 - archive: take a task off the board (\"get rid of\", \"remove\", \"delete\", \"hide\", \"clean up\"); a task at work is stopped first
@@ -404,20 +404,32 @@ else."
            (harness-tasks-search--project-name (harness-files-main-checkout project)))
           (t project))))
 
+(defun harness-tasks-search--client (context)
+  "The few words CONTEXT's `:client' names its client by, or nil.
+\"phone app\" for the harness's phone app.  Text of a client's own, so it
+is kept to one short line."
+  (when-let* ((client (harness-tasks-search--field context :client)))
+    (harness-tasks-search--squash client 40)))
+
 (defun harness-tasks-search--context-line (context bias root)
   "The line that tells the model where the query was typed and what to favour.
 CONTEXT is (:view VIEW :title TITLE :mode MODE :session ID :project
-PROJECT), any of them missing: VIEW \"board\" for a task board, \"chat\"
-for a session's chat, \"sessions\" for the session list, \"tree\" for a
-conversation tree, anything else for some other buffer, TITLE and MODE
-that buffer's.  BIAS is what the search favours (see
+PROJECT :client CLIENT), any of them missing: VIEW \"board\" for a task
+board, \"chat\" for a session's chat, \"sessions\" for the session list,
+\"tree\" for a conversation tree, anything else for some other buffer,
+TITLE and MODE that buffer's.  BIAS is what the search favours (see
 `harness-tasks-search--bias'), ROOT its project's root.  The session
-the engineer is in, ID, is to stay out of the answer."
+the engineer is in, ID, is to stay out of the answer.
+
+CLIENT, a few words such as \"phone app\", says the query was not typed in
+Emacs but in a client of the harness (see `harness-tasks-search--client'):
+the line then says so, and that the commands are the client's own."
   (let* ((title (harness-tasks-search--field context :title))
          (quoted (and title (format "“%s”" (harness-tasks-search--squash title 80))))
          (mode (harness-tasks-search--field context :mode))
          (sid (harness-tasks-search--field context :session))
          (id8 (and sid (harness-tasks-search--id8 sid)))
+         (client (harness-tasks-search--client context))
          (where
           (pcase (harness-tasks-search--str (plist-get context :view))
             ("board" (format "the task board of project %s" (harness-tasks-search--context-project context root)))
@@ -427,7 +439,9 @@ the engineer is in, ID, is to stay out of the answer."
                           (t "a chat")))
             ("sessions" "the session list")
             ("tree" (if quoted (format "the conversation tree of %s" quoted) "a conversation tree"))
-            (_ (cond ((and quoted mode) (format "Emacs buffer %s (%s)" quoted mode))
+            (_ (cond ((and client quoted) (format "the %s, on its %s screen" client quoted))
+                     (client (format "the %s" client))
+                     ((and quoted mode) (format "Emacs buffer %s (%s)" quoted mode))
                      (quoted (format "Emacs buffer %s" quoted))
                      (mode (format "an Emacs buffer (%s)" mode))
                      (t "an Emacs buffer"))))))
@@ -436,6 +450,9 @@ the engineer is in, ID, is to stay out of the answer."
               ("tasks" " Favour tasks; sessions and commands count too.")
               ("sessions" " Favour sessions, then commands; tasks count too.")
               (_ " Favour commands, then sessions; tasks count too."))
+            (if client
+                (format " The engineer is on the harness's %s, not in Emacs: the commands are that app's own actions (screens to open, things to do), and a command's keys are the taps that reach it." client)
+              "")
             (if id8 (format " Leave session %s out of \"sessions\": the engineer is in it." id8) ""))))
 
 (defun harness-tasks-search--text (root tasks query shown &optional context blocks)
@@ -1674,10 +1691,14 @@ finds too.  OPTS:
              the board, sessions in the session list or a conversation
              tree, commands anywhere else
   :context   where QUERY was typed: (:view VIEW :title TITLE :mode
-             MODE :session ID :project PROJECT), VIEW being \"board\",
-             \"chat\", \"sessions\", \"tree\" or another for any other
-             buffer, TITLE and MODE that buffer's, ID the session the
-             engineer is in, which the answer leaves out
+             MODE :session ID :project PROJECT :client CLIENT), VIEW
+             being \"board\", \"chat\", \"sessions\", \"tree\" or another for
+             any other buffer, TITLE and MODE that buffer's, ID the
+             session the engineer is in, which the answer leaves out,
+             CLIENT what a UI that is not Emacs calls itself, \"phone
+             app\" for the harness's, so that the model knows the
+             commands are that app's own actions, KEYS the taps that
+             reach one
   :shown     the ids the board shows now, which \"them\" in QUERY means
   :commands  the commands the model may name, the UI's catalogue: each
              (:command NAME :keys KEYS :where WHERE :label LABEL :doc
