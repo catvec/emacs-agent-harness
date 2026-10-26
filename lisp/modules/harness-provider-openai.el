@@ -925,11 +925,17 @@ past.  Without a status, the error's text is read the same way."
                                 ((harness-openai--stream-finished stream) nil)
                                 ((eq (car-safe err) 'cancelled)
                                  (harness-openai--stream-finish stream 'cancelled))
-                                (err (let ((e (cadr err)))
-                                       (when (and (consp e) (plist-get e :transient))
-                                         (setf (harness-openai--stream-error-kind stream) 'transport))
-                                       (harness-openai--stream-finish
-                                        stream 'error (harness-error-message e))))
+                                (err
+                                 ;; What the HTTP layer says of the failure, not
+                                 ;; what curl happened to print with it: the words
+                                 ;; (`harness-openai--transport-patterns') come from
+                                 ;; curl's standard error, which can still be on its
+                                 ;; way when the process ends, and a reset that
+                                 ;; reads "(curl 56)" alone was never tried again.
+                                 (when (harness-http-transient-error-p err)
+                                   (setf (harness-openai--stream-error-kind stream) 'transport))
+                                 (harness-openai--stream-finish
+                                  stream 'error (harness-error-message (cadr err))))
                                 ((or (null s) (< s 200) (>= s 300))
                                  (harness-openai--stream-finish
                                   stream 'error

@@ -808,6 +808,42 @@ the step layer can then retry one that had already streamed something."
       (should (eq 'rate-limit (plist-get (car (last events)) :error-kind)))
       (should (equal 7 (plist-get (car (last events)) :retry-after))))))
 
+(defun harness-provider-openai-test--fail-with (err)
+  "Complete a request whose HTTP layer fails with ERR; return the `done' event."
+  (let ((events nil))
+    (cl-letf (((symbol-function 'harness-http-request)
+               (lambda (_url &rest args)
+                 (harness-run-soon (plist-get args :callback) nil nil "" err)
+                 (make-harness-http-handle :url "x"))))
+      (harness-openai--complete harness-openai-test-endpoint
+                                (list :model "testrouter:m"
+                                      :messages '((:role user :content ((:type "text" :text "hi"))))
+                                      :on-event (lambda (e) (push e events))))
+      (harness-test-wait (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type)))) 5)
+      (car events))))
+
+(ert-deftest harness-provider-openai-transient-failure-needs-no-words-from-curl ()
+  "A failure is `transport' by what the HTTP layer says of it, not by curl's words.
+Curl's standard error comes on a pipe of its own and can be unread when
+the process has ended: the failure then reads as its meaning and its
+code alone, \"the connection was reset by the peer (curl 56)\", which no
+pattern in its text knows.  A stream cut in the middle was then not tried
+again, and the turn ended with the error; this happened about once in
+three hundred runs of a loaded machine."
+  (dolist (err '((curl "the connection was reset by the peer (curl 56)" :code 56 :kind transport :transient t)
+                 (curl "the server closed the connection without answering (curl 52)" :code 52 :kind transport :transient t)
+                 (curl "the transfer was cut short (curl 18)" :code 18 :kind transport :transient t)
+                 (curl "the host could not be resolved (curl 6)" :code 6 :kind transport :transient t)))
+    (let ((done (harness-provider-openai-test--fail-with err)))
+      (should (eq 'error (plist-get done :stop-reason)))
+      (should (equal (cadr err) (plist-get done :error)))
+      (should (eq 'transport (plist-get done :error-kind)))))
+  ;; What is not a connection's failure is not one for the words it has
+  ;; no more than for the code: a malformed URL, a failure to write.
+  (dolist (err '((curl "curl exited 3 (exit): URL using bad/illegal format" :code 3 :kind curl)
+                 (curl "curl exited 23 (exit): Failure writing output" :code 23 :kind curl)))
+    (should-not (plist-get (harness-provider-openai-test--fail-with err) :error-kind))))
+
 (ert-deftest harness-provider-openai-cancel-emits-done-once ()
   (harness-openai-test-with-fake '(("chat/completions" . (:hang t)))
     (let* ((events nil)

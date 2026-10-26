@@ -70,16 +70,23 @@ read-only; the working directory read-write; the `:writable` and
 `:readable` directories as they are given; and a private $TMPDIR,
 made for the command and removed when it ends.  $HOME keeps its
 path, but nothing in it can be read except what is shown there.
-MXC passes on none of the harness's environment, so the command's
-is written out whole: `process-environment` as it is when the
-command is wrapped, with TMPDIR, PWD, HARNESS_SANDBOX=mxc and a
-worktree's commit identity set.  `:network nil` denies the network,
-loopback included; otherwise it is open both ways, as bwrap leaves
-it.  `:read-only` leaves nothing writable but that $TMPDIR.  Unlike
-bwrap, MXC gives the command no PID namespace of its own; /tmp
-cannot be written there (a command uses $TMPDIR); and MXC hands the
-command's output on only when it ends, so the note under a running
-bash call shows none until then.
+That includes the ~/Library that Cocoa programs look in on their
+own, without asking $HOME: the NS build of Emacs, which loads its
+color list from ~/Library/Colors and writes it when it is short,
+aborts at startup if it cannot, even in a --batch process such as
+the file tools' worker and the elisp tool's child.  So Cocoa's home
+(CFFIXED_USER_HOME, which moves nothing else) is that same private
+directory, where such a program finds nothing and makes what it
+needs.  MXC passes on none of the harness's environment, so the
+command's is written out whole: `process-environment` as it is when
+the command is wrapped, with TMPDIR, CFFIXED_USER_HOME, PWD,
+HARNESS_SANDBOX=mxc and a worktree's commit identity set.
+`:network nil` denies the network, loopback included; otherwise it
+is open both ways, as bwrap leaves it.  `:read-only` leaves nothing
+writable but that $TMPDIR.  Unlike bwrap, MXC gives the command no
+PID namespace of its own; /tmp cannot be written there (a command
+uses $TMPDIR); and MXC hands the command's output on only when it
+ends, so the note under a running bash call shows none until then.
 
 Remote working directories (TRAMP) are never wrapped: the sandbox
 binaries and the mounts would have to exist on the remote host, and

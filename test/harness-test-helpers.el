@@ -207,12 +207,15 @@ sent as given, BODY a string of bytes.  OPTIONS is a plist: :chunks
 splits the body in that many pieces sent :delay seconds apart (the
 first one after :delay too), :no-length leaves Content-Length out,
 :reset-after K cuts the connection with a reset once K pieces went (0
-cuts it right after the headers).  A path's value may instead be a
-function of the number of requests that path has been sent so far (1
-the first), returning such a route, the symbol `reset' (answer nothing,
-closing the connection with a reset, as a proxy dropping it does) or
-`close' (close it, answering nothing).  A path ROUTES lacks gets a 404.
-`harness-test-http-url' makes addresses."
+cuts it right after the headers), a moment after, so that what went
+has reached the client: a reset right behind the data does not promise
+that on a busy machine (see `harness-test--http-reset-grace').  A
+path's value may instead be a function of the number of requests that
+path has been sent so far (1 the first), returning such a route, the
+symbol `reset' (answer nothing, closing the connection with a reset,
+as a proxy dropping it does) or `close' (close it, answering nothing).
+A path ROUTES lacks gets a 404.  `harness-test-http-url' makes
+addresses."
   (let ((attempts (make-hash-table :test 'equal)))
     (make-network-process
      :name "harness-test-http" :server t :host "127.0.0.1" :service t :family 'ipv4
@@ -233,6 +236,17 @@ closing the connection with a reset, as a proxy dropping it does) or
                        ('close (delete-process proc))
                        (_ (harness-test--http-answer proc route))))))))))
 
+(defconst harness-test--http-reset-grace 0.1
+  "Seconds between the last thing a route sent and the reset that cuts it off.
+A reset throws away what the server's kernel has not sent yet, and on a
+busy machine that can be the last piece, which a segment of data held
+back behind the headers' acknowledgement (Nagle) is: the client then
+sees a connection cut before any of the body, not in the middle of it,
+and a request it retries by itself, as one that got nowhere.  So the
+route sends without waiting (`harness-test--http-answer' sets TCP's
+no-delay) and waits this long before it cuts, for what it sent to be
+on its way and read.")
+
 (defun harness-test--http-reset (proc)
   "Close PROC so that curl sees a connection reset, as a dropped one does."
   (ignore-errors (set-network-process-option proc :linger (cons 1 0)))
@@ -252,6 +266,9 @@ closing the connection with a reset, as a proxy dropping it does) or
                            (setq i (+ i step)))
                          (nreverse out)))
                (send nil))
+    ;; Each piece goes out as it is written, not once the one before it is
+    ;; acknowledged.
+    (ignore-errors (set-network-process-option proc :nodelay t))
     (process-send-string
      proc (concat (format "HTTP/1.1 %d %s\r\n" status (if (< status 400) "OK" "Error"))
                   (mapconcat (lambda (h) (format "%s: %s\r\n" (car h) (cdr h))) headers "")
@@ -264,7 +281,7 @@ closing the connection with a reset, as a proxy dropping it does) or
                        (progn (ignore-errors (process-send-string proc (pop pieces)))
                               (if (> delay 0) (run-at-time delay nil send) (funcall send)))
                      (if reset-after
-                         (harness-test--http-reset proc)
+                         (run-at-time harness-test--http-reset-grace nil #'harness-test--http-reset proc)
                        (ignore-errors (process-send-eof proc)))))))
     (if (> delay 0) (run-at-time delay nil send) (funcall send))))
 

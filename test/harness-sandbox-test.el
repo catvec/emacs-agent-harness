@@ -1822,6 +1822,7 @@ it has the network."
            (process-environment (append (list "HARNESS_TEST_FIRST=one" "HARNESS_TEST_UNSET"
                                               "HARNESS_TEST_FIRST=two" "HARNESS_TEST_UNSET=set"
                                               "TMPDIR=/elsewhere/" "HARNESS_SANDBOX=outer"
+                                              "CFFIXED_USER_HOME=/elsewhere/home"
                                               "PWD=/elsewhere")
                                         process-environment))
            (build (lambda (&rest opts)
@@ -1860,6 +1861,10 @@ it has the network."
               (should (equal '("one") (funcall env "HARNESS_TEST_FIRST")))
               (should-not (funcall env "HARNESS_TEST_UNSET"))
               (should (equal (list (file-name-as-directory (funcall real tmp))) (funcall env "TMPDIR")))
+              ;; Cocoa's home is that directory too, once, in place of the
+              ;; harness's own: Seatbelt hides ~/Library, which an NS Emacs
+              ;; needs to start (see `harness-sandbox--mxc-command').
+              (should (equal (list (funcall real tmp)) (funcall env "CFFIXED_USER_HOME")))
               (should (equal '("mxc") (funcall env "HARNESS_SANDBOX")))
               (should (equal (list (directory-file-name cwd)) (funcall env "PWD")))
               (should (equal (list (getenv "PATH")) (funcall env "PATH")))
@@ -1875,13 +1880,18 @@ it has the network."
               (should (equal (mapcar real (list cwd granted readable system extra vendor))
                              (harness-plist-get-in config '(:filesystem :readonlyPaths))))
               (should (equal '("allow" "allow" "allow") (harness-sandbox-test--mxc-network config))))
+            ;; Read-only, Cocoa has its home all the same: the private
+            ;; TMPDIR is writable then too.
+            (should (equal (list (funcall real tmp))
+                           (harness-sandbox-test--mxc-env (funcall build :read-only t) "CFFIXED_USER_HOME")))
             ;; Without a private directory: nothing to remove, nothing
-            ;; writable read-only, and $TMPDIR as it was.
+            ;; writable read-only, and $TMPDIR and Cocoa's home as they were.
             (let ((config (harness-sandbox-test--mxc-config
                            (harness-sandbox--mxc-command "mxc-exec-mac" cwd '("true") :read-only t))))
               (should (equal "'true'" (harness-plist-get-in config '(:process :commandLine))))
               (should-not (harness-plist-get-in config '(:filesystem :readwritePaths)))
-              (should (equal '("/elsewhere/") (harness-sandbox-test--mxc-env config "TMPDIR")))))
+              (should (equal '("/elsewhere/") (harness-sandbox-test--mxc-env config "TMPDIR")))
+              (should (equal '("/elsewhere/home") (harness-sandbox-test--mxc-env config "CFFIXED_USER_HOME")))))
         (dolist (dir (list cwd tmp granted readable system extra))
           (delete-directory dir t))))))
 
@@ -2068,7 +2078,9 @@ output, its standard error and its exit status on."
   "End to end on any system, mxc-exec-mac being a stand-in that runs the
 command unconfined: the command `sandbox/wrap' gives runs in its
 directory with its environment, its output, standard error and exit
-status come back, and its private TMPDIR is gone afterwards."
+status come back, and its private TMPDIR is gone afterwards.  The
+command's Cocoa home is that directory, and a program that makes its
+~/Library there, as AppKit does, finds it writable."
   (harness-sandbox-test--setup)
   (skip-unless (file-executable-p "/bin/sh"))
   (let* ((bin (harness-test-temp-dir))
@@ -2077,7 +2089,9 @@ status come back, and its private TMPDIR is gone afterwards."
          (harness-sandbox-policy 'required)
          (harness-sandbox-backend 'auto)
          (harness-sandbox--mxc-system-dirs nil)
-         (process-environment (cons "HARNESS_TEST_PASSED=yes" process-environment)))
+         ;; A Cocoa home of the harness's own, which the command is not shown.
+         (process-environment (append (list "HARNESS_TEST_PASSED=yes" "CFFIXED_USER_HOME=/elsewhere/home")
+                                      process-environment)))
     (unwind-protect
         (progn
           (harness-sandbox-test--detect-on-macos (list (cons "mxc-exec-mac" fake)))
@@ -2085,12 +2099,17 @@ status come back, and its private TMPDIR is gone afterwards."
           (let* ((cmd (harness-call 'sandbox/wrap cwd
                                     (list "bash" "-c" (concat "pwd; echo \"sandbox=$HARNESS_SANDBOX passed=$HARNESS_TEST_PASSED\";"
                                                               " echo \"$TMPDIR\"; echo kept > \"$TMPDIR/scratch\" && cat \"$TMPDIR/scratch\";"
+                                                              " echo \"home=$CFFIXED_USER_HOME\";"
+                                                              " mkdir -p \"$CFFIXED_USER_HOME/Library/Colors\""
+                                                              " && echo x > \"$CFFIXED_USER_HOME/Library/Colors/Emacs.clr\""
+                                                              " && echo library-made;"
                                                               " echo made > made.txt; echo oops >&2; exit 7"))))
                  (tmpdir (car (harness-sandbox-test--mxc-env (harness-sandbox-test--mxc-config cmd) "TMPDIR")))
                  (r (harness-await (harness-run-command cmd :cwd cwd :timeout 60) 70)))
             (should (equal fake (car cmd)))
             (should (eql 7 (plist-get r :exit)))
-            (should (equal (list (directory-file-name cwd) "sandbox=mxc passed=yes" tmpdir "kept")
+            (should (equal (list (directory-file-name cwd) "sandbox=mxc passed=yes" tmpdir "kept"
+                                 (concat "home=" (directory-file-name tmpdir)) "library-made")
                            (split-string (plist-get r :stdout) "\n" t)))
             (should (equal "oops\n" (plist-get r :stderr)))
             (should (file-exists-p (expand-file-name "made.txt" cwd)))
@@ -2142,6 +2161,37 @@ TMPDIR but no other, reads nothing of the home directory, and with
               (should-not (file-exists-p (expand-file-name "ro.txt" cwd)))))
         (delete-directory cwd t)
         (delete-directory sibling t)))))
+
+(ert-deftest harness-sandbox-mxc-real-run-gives-cocoa-a-home ()
+  "Under the real MXC, on macOS, a command's Cocoa home is its private
+TMPDIR, a directory it can make its ~/Library in: the NS build of Emacs
+aborts at startup where it cannot, as it does for the real ~/Library,
+which Seatbelt hides.  $HOME is left as it was."
+  (harness-sandbox-test--setup)
+  (skip-unless (and (eq system-type 'darwin) (executable-find harness-sandbox-mxc-program)))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (harness-sandbox-policy 'required)
+           (process-environment (cons "CFFIXED_USER_HOME=/elsewhere/home" process-environment))
+           (run (lambda (script)
+                  (harness-await (harness-run-command
+                                  (harness-call 'sandbox/wrap cwd (list "sh" "-c" script))
+                                  :cwd cwd :timeout 60)
+                                 70))))
+      (unwind-protect
+          (let ((probe (funcall run "true")))
+            (unless (eql 0 (plist-get probe :exit))
+              (ert-skip (format "mxc-exec-mac cannot start here: %s" (string-trim (plist-get probe :stderr)))))
+            (let ((r (funcall run (concat "[ \"$CFFIXED_USER_HOME/\" = \"$TMPDIR\" ] && echo home-is-tmpdir; "
+                                          "mkdir -p \"$CFFIXED_USER_HOME/Library/Colors\" "
+                                          "&& echo x > \"$CFFIXED_USER_HOME/Library/Colors/Emacs.clr\" "
+                                          "&& echo library-made; "
+                                          "echo \"$HOME\""))))
+              (should (equal (concat "home-is-tmpdir\nlibrary-made\n" (directory-file-name home) "\n")
+                             (plist-get r :stdout)))))
+        (delete-directory cwd t)))))
 
 ;;;; Scratch directories
 

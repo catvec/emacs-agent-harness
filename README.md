@@ -1226,7 +1226,12 @@ confines a command with Seatbelt rather than with mounts: the same
 directories are readable or writable at their own paths, but the rest
 of `~` cannot be read rather than being emptied, `/tmp` cannot be
 written (each command gets a private `$TMPDIR` instead, removed when
-it ends), and a command's output arrives only once it exits.
+it ends), and a command's output arrives only once it exits. That
+private directory is also the command's Cocoa home (`CFFIXED_USER_HOME`;
+`$HOME` is left alone), since a Cocoa program, the macOS build of Emacs
+among them, looks for `~/Library` on its own, finds it hidden and, in
+Emacs's case, aborts at startup: without it the file tools and the
+`elisp` tool could not start Emacs in the sandbox.
 
 Every permission request offers the same five answers, under the same
 names and keys wherever it shows (the chat, BTW, the popout, an ACP

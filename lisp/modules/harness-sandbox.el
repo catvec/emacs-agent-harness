@@ -61,16 +61,23 @@
 ;; `:readable' directories as they are given; and a private $TMPDIR,
 ;; made for the command and removed when it ends.  $HOME keeps its
 ;; path, but nothing in it can be read except what is shown there.
-;; MXC passes on none of the harness's environment, so the command's
-;; is written out whole: `process-environment' as it is when the
-;; command is wrapped, with TMPDIR, PWD, HARNESS_SANDBOX=mxc and a
-;; worktree's commit identity set.  `:network nil' denies the network,
-;; loopback included; otherwise it is open both ways, as bwrap leaves
-;; it.  `:read-only' leaves nothing writable but that $TMPDIR.  Unlike
-;; bwrap, MXC gives the command no PID namespace of its own; /tmp
-;; cannot be written there (a command uses $TMPDIR); and MXC hands the
-;; command's output on only when it ends, so the note under a running
-;; bash call shows none until then.
+;; That includes the ~/Library that Cocoa programs look in on their
+;; own, without asking $HOME: the NS build of Emacs, which loads its
+;; color list from ~/Library/Colors and writes it when it is short,
+;; aborts at startup if it cannot, even in a --batch process such as
+;; the file tools' worker and the elisp tool's child.  So Cocoa's home
+;; (CFFIXED_USER_HOME, which moves nothing else) is that same private
+;; directory, where such a program finds nothing and makes what it
+;; needs.  MXC passes on none of the harness's environment, so the
+;; command's is written out whole: `process-environment' as it is when
+;; the command is wrapped, with TMPDIR, CFFIXED_USER_HOME, PWD,
+;; HARNESS_SANDBOX=mxc and a worktree's commit identity set.
+;; `:network nil' denies the network, loopback included; otherwise it
+;; is open both ways, as bwrap leaves it.  `:read-only' leaves nothing
+;; writable but that $TMPDIR.  Unlike bwrap, MXC gives the command no
+;; PID namespace of its own; /tmp cannot be written there (a command
+;; uses $TMPDIR); and MXC hands the command's output on only when it
+;; ends, so the note under a running bash call shows none until then.
 ;;
 ;; Remote working directories (TRAMP) are never wrapped: the sandbox
 ;; binaries and the mounts would have to exist on the remote host, and
@@ -1124,6 +1131,14 @@ bytes, which JSON cannot carry, is left out."
     (append (nreverse env)
             (cl-loop for (name . value) in overrides collect (concat name "=" value)))))
 
+(defconst harness-sandbox--mxc-cocoa-home-variable "CFFIXED_USER_HOME"
+  "The variable of MXC's environment that says where Cocoa looks for ~/Library.
+Core Foundation reads it before it asks the system for the home
+directory, so it moves only where a Cocoa program looks for ~/Library
+\(its preferences, caches, color lists), and not $HOME, which every
+other program reads.  The sandbox sets it to the command's private
+temporary directory (see `harness-sandbox--mxc-command').")
+
 (defun harness-sandbox--mxc-path (path)
   "Return the real path of PATH, as Seatbelt matches it, without a trailing slash."
   (directory-file-name (file-truename (expand-file-name path))))
@@ -1135,9 +1150,10 @@ PROGRAM is MXC's executor, mxc-exec-mac, given the whole description
 of the command as base64-encoded JSON (`--config-base64').  NETWORK,
 WRITABLE, READABLE and READ-ONLY are as for
 `harness-sandbox--bwrap-command'.  TMP is the command's private
-temporary directory, which `sandbox/wrap' makes: $TMPDIR names it, it
-is writable, and the command line removes it when COMMAND ends.  The
-SCRATCH directories are writable too, whatever READ-ONLY says (see
+temporary directory, which `sandbox/wrap' makes: $TMPDIR names it, so
+does the command's Cocoa home (see below), it is writable, and the
+command line removes it when COMMAND ends.  The SCRATCH directories
+are writable too, whatever READ-ONLY says (see
 `harness-sandbox--scratch-mounts').
 
 Seatbelt allows what it is told and denies the rest, on top of MXC's
@@ -1157,14 +1173,27 @@ Seatbelt matches the real one.  READ-ONLY makes every one of them
 read-only but TMP, so that the command writes nothing else.
 
 Nothing else is shown, the home directory's contents included: $HOME
-keeps its path, and only what is shown under it can be read.  NETWORK
-nil denies all network access; otherwise the host's network, loopback
-included, is open both ways, as bwrap leaves it.  The command gets
-exactly the environment `process-environment' holds now (one given to
-the process later does not reach it), with TMPDIR, PWD,
-HARNESS_SANDBOX=mxc and a worktree's commit identity set.  MXC sets it
-no timeout: the harness kills the process tree itself, and finds the
-command in it by its parent processes.
+keeps its path, and only what is shown under it can be read.
+
+Cocoa programs ignore $HOME: they ask the system where ~/Library is,
+and that is hidden too.  The NS build of Emacs aborts at startup on
+that, in a --batch process as in any other: it loads its color list
+from ~/Library/Colors and writes it back there when it is short, which
+Seatbelt refuses, and AppKit raises an exception that nothing catches.
+So the command's Cocoa home, CFFIXED_USER_HOME, is TMP: empty,
+writable and its own, where such a program finds nothing and makes
+what it needs, and what it makes goes with TMP.  The variable moves
+only where Cocoa looks for ~/Library, never $HOME, and it replaces one
+of the harness's own, which would name a directory the command is not
+shown.
+
+NETWORK nil denies all network access; otherwise the host's network,
+loopback included, is open both ways, as bwrap leaves it.  The command
+gets exactly the environment `process-environment' holds now (one
+given to the process later does not reach it), with TMPDIR,
+CFFIXED_USER_HOME, PWD, HARNESS_SANDBOX=mxc and a worktree's commit
+identity set.  MXC sets it no timeout: the harness kills the process
+tree itself, and finds the command in it by its parent processes.
 
 This only reads the file system: it writes nothing, TMP included."
   (let* ((cwd (directory-file-name (expand-file-name cwd)))
@@ -1208,7 +1237,10 @@ This only reads the file system: it writes nothing, TMP included."
                                (and tmp (concat "; s=$?; rm -rf -- " (harness-sandbox--sh-quote tmp)
                                                 "; exit $s"))))
          (env (harness-sandbox--mxc-env
-               (append (and tmp (list (cons "TMPDIR" (file-name-as-directory tmp))))
+               (append (and tmp (list (cons "TMPDIR" (file-name-as-directory tmp))
+                                      ;; Cocoa's home, which is TMP too (see
+                                      ;; `harness-sandbox--mxc-cocoa-home-variable').
+                                      (cons harness-sandbox--mxc-cocoa-home-variable tmp)))
                        ;; As Emacs sets it for a process it starts itself.
                        (list (cons "PWD" cwd)
                              (cons "HARNESS_SANDBOX" "mxc"))

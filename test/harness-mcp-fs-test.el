@@ -38,14 +38,44 @@
    (harness-call 'tools/execute session-id (list :id (harness-short-id) :name name :input input))
    60))
 
-(defmacro harness-mcp-fs-test-with-session (&rest body)
-  "Run BODY with the file tools in a real sandbox and a real session.
-`root' is the session's directory and `outside' one it was not given,
-with a file `secret' in it whose text `marker' names.  `link' is a link
-in `root' that leads to `outside'.  `(as NAME ...)' runs a tool as the
-session `sid'.  The permission chain allows everything; the tests skip
-when bwrap cannot start here."
-  (declare (indent 0))
+(defvar harness-sandbox-mxc-program)
+
+(defun harness-mcp-fs-test--require-backend (backend)
+  "Skip the test unless the sandbox BACKEND is the one in use here, and starts.
+BACKEND is `bwrap', which GNU/Linux has, or `mxc', MXC's mxc-exec-mac
+on macOS.  Call it after `harness-sandbox-detect'.  A function cannot
+use `skip-unless', which ERT gives the body of a test only."
+  (let ((in-use (lambda () (eq backend (plist-get (harness-call 'sandbox/status) :backend)))))
+    (pcase backend
+      ('bwrap
+       (unless (executable-find "bwrap") (ert-skip "no bwrap here"))
+       (unless (funcall in-use) (ert-skip "bwrap is not the sandbox in use")))
+      ('mxc
+       (unless (eq system-type 'darwin) (ert-skip "MXC is for macOS"))
+       (unless (executable-find harness-sandbox-mxc-program) (ert-skip "no mxc-exec-mac here"))
+       (unless (funcall in-use) (ert-skip "MXC is not the sandbox in use"))
+       ;; Skipped only when MXC cannot start at all, as on a macOS before
+       ;; 15: a worker that does not start under it is what the test is for.
+       (let* ((dir (harness-test-temp-dir))
+              (probe (unwind-protect
+                         (harness-await (harness-run-command (harness-call 'sandbox/wrap dir '("true"))
+                                                             :cwd dir :timeout 60)
+                                        70)
+                       (ignore-errors (delete-directory dir t)))))
+         (unless (eql 0 (plist-get probe :exit))
+           (ert-skip (format "mxc-exec-mac cannot start here: %s" (string-trim (plist-get probe :stderr)))))))
+      (_ (error "Unknown sandbox backend %S" backend)))))
+
+(defmacro harness-mcp-fs-test-with-session-on (backend &rest body)
+  "Run BODY with the file tools in a real session, in the sandbox BACKEND.
+BACKEND is `bwrap' or `mxc', not quoted; the test skips where it is not
+the sandbox in use here or cannot start (see
+`harness-mcp-fs-test--require-backend').  `root' is the session's
+directory and `outside' one it was not given, with a file `secret' in
+it whose text `marker' names.  `link' is a link in `root' that leads to
+`outside'.  `(as NAME ...)' runs a tool as the session `sid'.  The
+permission chain allows everything."
+  (declare (indent 1))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (dolist (m '(store project config provider provider-demo tools session agent priority perms
@@ -57,8 +87,7 @@ when bwrap cannot start here."
      (clrhash harness-perms--session-rules)
      (clrhash harness-perms--once-grants)
      (harness-sandbox-detect)
-     (skip-unless (executable-find "bwrap"))
-     (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+     (harness-mcp-fs-test--require-backend ',backend)
      (harness-add-filter 'permission/decide #'harness-mcp-fs-test--allow-all 1)
      (let* ((root (file-name-as-directory (harness-test-temp-dir)))
             (outside (file-name-as-directory (harness-test-temp-dir)))
@@ -77,6 +106,35 @@ when bwrap cannot start here."
            (harness-mcp-stop)
            (ignore-errors (delete-directory outside t))
            (ignore-errors (delete-directory root t)))))))
+
+(defmacro harness-mcp-fs-test-with-session (&rest body)
+  "Run BODY with the file tools in a real session, in bwrap.
+It is `harness-mcp-fs-test-with-session-on' with `bwrap': the tests
+skip where bwrap is not the sandbox in use here or cannot start."
+  (declare (indent 0))
+  `(harness-mcp-fs-test-with-session-on bwrap ,@body))
+
+(ert-deftest harness-mcp-fs-the-worker-starts-under-mxc-on-macos ()
+  "On macOS the worker, an Emacs, starts in the real MXC sandbox and serves the tools.
+Seatbelt hides ~/Library, and the NS build of Emacs aborts at startup,
+even for --batch, when it cannot make its color list there.  The worker
+is given a Cocoa home of its own for that (see
+`harness-sandbox--mxc-command'); without it every file tool fails with
+`The MCP server fs did not start: it exited (134)'.  Skipped except on a
+Mac with MXC."
+  (harness-mcp-fs-test-with-session-on mxc
+    (let ((r (as "write_file" :path "a/b.txt" :content "one\ntwo\n")))
+      (should-not (plist-get r :is-error))
+      (should (plist-get (plist-get r :meta) :sandboxed)))
+    (let ((r (as "read_file" :path "a/b.txt")))
+      (should-not (plist-get r :is-error))
+      (should (string-search "two" (plist-get r :content)))
+      (should (plist-get (plist-get r :meta) :sandboxed)))
+    (should (string-search "b.txt" (plist-get (as "list_dir" :path "a") :content)))
+    (let ((servers (harness-mcp-fs-test--fs-servers)))
+      (should (= 1 (length servers)))
+      (should (eq 'ready (plist-get (car servers) :state)))
+      (should (plist-get (car servers) :sandboxed)))))
 
 (ert-deftest harness-mcp-fs-the-tools-work-inside-in-the-sandbox ()
   "Each file tool works on the session's own directory, in the worker."

@@ -3586,19 +3586,25 @@ C-c C-w copies it.  C-M-n and C-M-p move between tool calls, which it is not."
                :node (list :id "b1" :kind "tool-call" :tool "bash" :call-id "bc1" :input (list :command "ls"))))
         (harness-chat--apply-update
          (list :sessionUpdate "_harness/node" :node (list :id "b1-out" :kind "tool-result" :call-id "bc1" :output "x")))
-        (let ((answer (harness-ui-chat-test-thread-answer harness-ui-chat-test--thread-meta))
-              (call (gethash "b1" harness-chat--blocks)))
+        (let* ((answer (harness-ui-chat-test-thread-answer harness-ui-chat-test--thread-meta))
+               (call (gethash "b1" harness-chat--blocks))
+               ;; Bash folds into a run, even alone: the run's summary line
+               ;; stands for the call, which is hidden under it.
+               (summary (marker-position
+                         (harness-chat-group-start
+                          (gethash (harness-chat-block-group call) harness-chat--groups)))))
           (harness-chat--apply-update
            (list :sessionUpdate "_harness/node" :node (list :id "u2" :kind "user" :content "last")))
           (goto-char (point-min))
           (harness-chat-next-message 2)
           (should (= (point) (harness-chat-block-start answer)))
           (harness-chat-previous-message)
-          (should (< (point) (harness-chat-block-start call)))
-          ;; The call is the one tool call to move to, past the answer.
+          (should (< (point) summary))
+          ;; The call is the one tool call to move to, past the answer: at
+          ;; its run's summary line, where it shows.
           (goto-char (point-min))
           (harness-chat-next-action)
-          (should (= (point) (harness-chat-block-start call)))
+          (should (= (point) summary))
           (should-error (harness-chat-next-action) :type 'user-error)
           (let ((kill-ring nil))
             (harness-chat-copy-last-response)
@@ -3701,6 +3707,13 @@ of the quote."
         (let ((refs (harness-ui-chat-test-refs (caar (harness-ui-chat-test-reply buf (harness-ui-chat-test-find buf "and the deploy"))))))
           (should (equal (list (list "you" "and the deploy?")) (mapcar (lambda (r) (list (plist-get r :who) (plist-get r :text))) refs))))
         (with-current-buffer buf (harness-compose-set "") (setq harness-compose-attachments nil))
+        ;; A call is folded into a run of its own, even alone, and what a
+        ;; fold hides is no part of a quote: open it to put point on the call.
+        (with-current-buffer buf
+          (let ((call (car (harness-ui-chat-test-blocks buf "tool-call"))))
+            (should (invisible-p (marker-position (harness-chat-block-start call))))
+            (harness-chat-toggle-group (harness-chat-block-group call))
+            (should-not (invisible-p (marker-position (harness-chat-block-start call))))))
         (let ((refs (harness-ui-chat-test-refs (caar (harness-ui-chat-test-reply buf (harness-ui-chat-test-find buf "ls -l"))))))
           (should (equal "tool" (plist-get (car refs) :who)))
           (should (equal "bash" (plist-get (car refs) :label)))

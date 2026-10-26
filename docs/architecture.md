@@ -4269,10 +4269,18 @@ decisions.
   a signal leaves it for macOS to clear).  MXC passes no environment on:
   the command gets `process-environment` (the first entry of a name
   wins, a bare name unsets it, an entry JSON cannot carry is left out)
-  with `TMPDIR`, `PWD`, `HARNESS_SANDBOX=mxc` and the git identity set;
-  `$HOME` keeps its path, unreadable but for what is shown.  The network
-  is allowed all ways (egress, ingress and host loopback, which MXC
-  takes only with ingress) or denied all ways.  `:read-only` leaves
+  with `TMPDIR`, `CFFIXED_USER_HOME`, `PWD`, `HARNESS_SANDBOX=mxc` and
+  the git identity set; `$HOME` keeps its path, unreadable but for what
+  is shown.  `CFFIXED_USER_HOME`, where Cocoa looks for `~/Library`
+  (and nothing else), is the same private directory as `$TMPDIR`: Cocoa
+  programs ignore `$HOME`, `~/Library` is hidden, and the NS build of
+  Emacs, which loads its color list from `~/Library/Colors` and writes
+  it there when it is short (`ns_init_colors`, which runs for `--batch`
+  too), aborts at startup on the exception AppKit raises -- so without
+  it the file tools' worker and the elisp tool's child never start on a
+  Mac.  It replaces a value the harness process has of its own.  The
+  network is allowed all ways (egress, ingress and host loopback, which
+  MXC takes only with ingress) or denied all ways.  `:read-only` leaves
   only `$TMPDIR` writable and shows CWD, the writable directories and
   the common git directory read-only.  Unlike bwrap the command gets no
   PID namespace (only a session of its own), `/tmp` cannot be written,
