@@ -64,6 +64,22 @@
 ;; content; otherwise it is left out, since a reasoning item without
 ;; one is not worth sending.
 ;;
+;; The reasoning effort is model-specific.  `reasoning.effort' may take
+;; none, minimal, low, medium, high, xhigh and max, but each model takes
+;; a subset: GPT-6 Astra rejects `none', and older models stop at
+;; `high'.  The account's model list may name a model's efforts
+;; (`supported_reasoning_levels'); the models OpenAI documents have
+;; theirs in `harness-responses--known-efforts', and a model of a newer
+;; family gets the conservative low-to-max ladder.  That set is the
+;; model's `:thinking-levels', so the picker and the tool arguments
+;; never offer one the model rejects, and every request fits its effort
+;; to the set (`harness-thinking-level-fit'): a request that asks for no
+;; thinking asks for `none' where it is taken and for the weakest effort
+;; where it is not.  Should a model still refuse the value, the answer
+;; names the values it takes; they are remembered for the model and the
+;; request is sent once more with the closest of them
+;; (`harness-responses--learn-rejected-effort').
+;;
 ;; Streaming.  The events are server-sent, and `harness-http-sse-parser'
 ;; hands each complete one here.  `response.output_text.delta' is text
 ;; and `response.reasoning_summary_text.delta' (the summary the model
@@ -91,11 +107,16 @@
 ;; `slug', `display_name' and `visibility'; the entries with
 ;; `visibility' "list" are the ones meant for a picker, and they become
 ;; the catalogue with the slug as the name and the display name as the
-;; label.  The list is asked again when the account changes, and cached
-;; for `harness-responses-models-ttl' seconds otherwise.  The route
-;; lists no context window and no price either, so a window is
-;; estimated by the catalogue (as for any provider that does not size a
-;; model) and `:tiers' is a setting rather than something to be read.
+;; label.  An entry may also name the reasoning efforts it takes
+;; (`supported_reasoning_levels' or `supported_reasoning_efforts'), and
+;; those become its `:thinking-levels'; one that does not gets the
+;; efforts of its entry in `harness-responses--known-efforts', or the
+;; conservative default (see "Reasoning" above).  The list is asked
+;; again when the account changes, and cached for
+;; `harness-responses-models-ttl' seconds otherwise.  The route lists no
+;; context window and no price either, so a window is estimated by the
+;; catalogue (as for any provider that does not size a model) and
+;; `:tiers' is a setting rather than something to be read.
 ;;
 ;; Registration.  The provider is registered only while an account with
 ;; a usable credential is signed in, and removed again when the last one
@@ -210,25 +231,128 @@ loaded, and an account that has to be signed in again, reject."
   "Return the URL the account's model list is fetched from."
   (concat (string-remove-suffix "/" harness-responses-base-url) "/models"))
 
+(defconst harness-responses--efforts
+  '("none" "minimal" "low" "medium" "high" "xhigh" "max")
+  "Reasoning efforts this route accepts, weakest first.")
+
+(defconst harness-responses--default-efforts
+  '("low" "medium" "high" "xhigh" "max")
+  "Reasoning efforts a model the catalogue says nothing about is taken to offer.
+`low' is the one effort every reasoning model takes, so a request that
+asks for no thinking can still ask for the least thinking a model has
+rather than `none', which some models reject: GPT-6 Astra answers HTTP
+400 for it.  A level a model does not take is corrected when the route
+names the values it does (see `harness-responses--learn-rejected-effort').")
+
+(defconst harness-responses--known-efforts
+  '(("\\`gpt-6-astra\\'" . ("low" "medium" "high" "xhigh" "max"))
+    ("\\`gpt-6\\.1-sol\\'" . ("low" "medium" "high" "xhigh" "max"))
+    ("\\`gpt-6-sol\\'" . ("none" "low" "medium" "high" "xhigh" "max"))
+    ("\\`gpt-5\\.6" . ("none" "low" "medium" "high" "xhigh" "max"))
+    ("\\`gpt-5\\.5\\'" . ("none" "low" "medium" "high" "xhigh"))
+    ("\\`gpt-5\\.4\\'" . ("none" "low" "medium" "high" "xhigh"))
+    ("\\`gpt-5\\.2\\'" . ("none" "low" "medium" "high" "xhigh"))
+    ("\\`gpt-5\\.1\\'" . ("none" "low" "medium" "high"))
+    ("\\`gpt-5\\'" . ("minimal" "low" "medium" "high")))
+  "Reasoning efforts of the plan's models, as OpenAI documents them.
+A model the plan lists may name its own levels
+\(`supported_reasoning_levels'), and those win over this table; a model
+of a newer family is taken to offer `harness-responses--default-efforts'
+until an answer names what it takes.  Each entry is a regexp over the
+model name and the efforts OpenAI's model page gives, weakest first.")
+
+(defvar harness-responses--efforts-by-model (make-hash-table :test 'equal)
+  "Model name -> the reasoning efforts it takes, weakest first.
+Filled from the account's model list when it names them, and from an
+answer that names the values it supports after a request asked for one
+it does not.  A model the hash lacks falls back to its entry in
+`harness-responses--known-efforts', then to
+`harness-responses--default-efforts'.")
+
+(defvar harness-responses--efforts-account nil
+  "The account `harness-responses--efforts-by-model' describes.
+The levels are the account's own, so another account's listing starts
+the table afresh.")
+
+(defun harness-responses--note-account (account)
+  "Forget the model efforts of another account, and remember ACCOUNT."
+  (unless (equal account harness-responses--efforts-account)
+    (clrhash harness-responses--efforts-by-model)
+    (setq harness-responses--efforts-account account)))
+
+(defun harness-responses--effort-list (value)
+  "Return the effort names in VALUE, weakest first, or nil.
+VALUE is an array of names or of objects with an `effort' field, as
+the plan's model list and an `unsupported_value' answer give them.
+Names the harness does not know are left out."
+  (let* ((items (cond ((stringp value) (list value))
+                      ((and (consp value) (keywordp (car value))) (list value))
+                      ((sequencep value) (append value nil))
+                      (t nil)))
+         (names (delq nil (mapcar (lambda (item)
+                                    (let ((name (cond ((stringp item) item)
+                                                      ((consp item) (plist-get item :effort))
+                                                      (t nil))))
+                                      (and (stringp name)
+                                           (member name harness-responses--efforts)
+                                           name)))
+                                  items))))
+    (when names
+      (sort (delete-dups (copy-sequence names))
+            (lambda (a b) (< (harness-thinking-level-rank a)
+                             (harness-thinking-level-rank b)))))))
+
+(defun harness-responses--entry-efforts (entry)
+  "Return the reasoning efforts ENTRY advertises, weakest first, or nil.
+The plan's model list may name them as `supported_reasoning_levels' or
+`supported_reasoning_efforts', as strings or as objects; OpenAI's
+compatible servers call the same thing `reasoning.supported_efforts'."
+  (harness-responses--effort-list
+   (or (plist-get entry :supported_reasoning_levels)
+       (plist-get entry :supported_reasoning_efforts)
+       (harness-plist-get-in entry '(:reasoning :supported_efforts))
+       (harness-plist-get-in entry '(:reasoning :supported_reasoning_levels))
+       (harness-plist-get-in entry '(:reasoning :supported_reasoning_efforts)))))
+
+(defun harness-responses--model-efforts (name)
+  "Return the reasoning efforts model NAME takes, weakest first."
+  (or (gethash name harness-responses--efforts-by-model)
+      (cdr (cl-find-if (lambda (entry)
+                         (string-match-p (car entry) (or name "")))
+                       harness-responses--known-efforts))
+      harness-responses--default-efforts))
+
+(defun harness-responses--resolve (name)
+  "Return what this provider knows of model NAME, or nil.
+A model the account's list has not named still offers the efforts
+`harness-responses--model-efforts' gives it, so the level check of a
+tool that starts a sub-agent on it does not see a model that offers
+none."
+  (when (and (stringp name) (not (string-empty-p name)))
+    (list :thinking-levels (harness-responses--model-efforts name))))
+
 (defun harness-responses--entry-model (entry)
   "Return the model plist of one ENTRY of the account's model list, or nil.
 The route lists each model with the `slug' that goes in a request and
 the `display_name' to show; an entry without a slug is skipped.  An
 entry marked with a `visibility' other than \"list\" is one the picker
-is not meant to show and is skipped too."
+is not meant to show and is skipped too.  The efforts the entry names
+become the model's `:thinking-levels'; an entry that names none, and a
+model the catalogue does not know, gets the ones
+`harness-responses--model-efforts' gives."
   (let ((slug (or (plist-get entry :slug) (plist-get entry :id)))
         (visibility (plist-get entry :visibility)))
     (when (and (stringp slug) (not (string-empty-p slug))
                (or (null visibility) (equal (format "%s" visibility) "list")))
       (let ((label (or (plist-get entry :display_name) (plist-get entry :name)))
-            (model (list :name slug
-                         ;; The route says nothing about how the model thinks;
-                         ;; these are the levels the reasoning effort takes, so
-                         ;; a session's level can be fitted to the model.
-                         :thinking-levels '("minimal" "low" "medium" "high" "xhigh" "max"))))
-        (when (and (stringp label) (not (string-empty-p label)))
-          (setq model (plist-put model :label label)))
-        model))))
+            (advertised (harness-responses--entry-efforts entry)))
+        (when (and advertised (not (gethash slug harness-responses--efforts-by-model)))
+          (puthash slug advertised harness-responses--efforts-by-model))
+        (let ((model (list :name slug
+                           :thinking-levels (harness-responses--model-efforts slug))))
+          (when (and (stringp label) (not (string-empty-p label)))
+            (setq model (plist-put model :label label)))
+          model)))))
 
 (defun harness-responses--parse-models (json)
   "Return the models of JSON, a model-list response, as model plists.
@@ -292,6 +416,7 @@ signing in as somebody else lists theirs."
            (< (- (float-time) (plist-get cache :at)) harness-responses--models-ttl))
       (harness-resolved (plist-get cache :models)))
      (t
+      (harness-responses--note-account account)
       (harness-then
        (harness-then (harness-responses--access-token)
                      (lambda (info) (harness-responses--fetch-models (plist-get info :token))))
@@ -587,27 +712,33 @@ what came before it."
         (cons (harness-responses--additional-tools-item tools) items)
       items)))
 
-(defconst harness-responses--efforts
-  '("none" "minimal" "low" "medium" "high" "xhigh" "max")
-  "Reasoning efforts this route accepts, weakest first.")
-
-(defun harness-responses--effort (level)
+(defun harness-responses--effort (level &optional efforts)
   "Return the reasoning effort of the harness thinking LEVEL, or nil.
-The levels are the same ladder; a level the route does not know yields
-nil and no effort is asked for, which leaves the model's own default."
+EFFORTS are the efforts the model takes, weakest first; a LEVEL they
+do not name becomes the nearest one they do (`harness-thinking-level-fit'),
+so nothing is asked for that the model rejects: `none' becomes the
+weakest effort a model without an off switch takes, and `max' becomes
+`xhigh' on a model that stops there.  Without EFFORTS the level goes
+out as it is when the route knows it, and nil otherwise."
   (let ((name (harness-responses--string (and level (if (eq level 'none) "none" level)))))
-    (and (member name harness-responses--efforts) name)))
-
-(defun harness-responses--reasoning (request)
-  "Return REQUEST's `reasoning' object, or nil for the model's default.
-`:no-thinking' wins over `:thinking', as it does for the other providers,
-and asks for the effort that turns reasoning off.  A summary is asked
-for whenever thinking is not off, which is what the chat shows as
-thinking: without it the model's reasoning never reaches the harness."
-  (let* ((off (plist-get request :no-thinking))
-         (level (if off "none" (harness-responses--effort (plist-get request :thinking)))))
     (cond
-     (off (list :effort "none"))
+     ((not (member name harness-responses--efforts)) nil)
+     (efforts (harness-thinking-level-fit name efforts))
+     (t name))))
+
+(defun harness-responses--reasoning (request &optional efforts)
+  "Return REQUEST's `reasoning' object, or nil for the model's default.
+EFFORTS are the reasoning efforts the model takes, weakest first; a
+request that asks for no thinking asks for `none' when the model takes
+it, else for the weakest effort it does, and never for a value it
+rejects.  `:no-thinking' wins over `:thinking', as it does for the
+other providers.  A summary is asked for whenever thinking is not off,
+which is what the chat shows as thinking: without it the model's
+reasoning never reaches the harness."
+  (let* ((off (plist-get request :no-thinking))
+         (level (harness-responses--effort (if off "none" (plist-get request :thinking)) efforts)))
+    (cond
+     (off (and level (list :effort level)))
      ((and level (equal level "none")) (list :effort "none"))
      (level (list :effort level :summary "auto"))
      (t (list :summary "auto")))))
@@ -615,16 +746,18 @@ thinking: without it the model's reasoning never reaches the harness."
 (defun harness-responses--body (name request)
   "Build the Responses request body for model NAME from REQUEST.
 `store: false' and `stream: true' are set on every request, as this
-route requires, and so is asking for the encrypted reasoning.  A key the
-route refuses is never written here; see the Commentary for the list,
-and for why a request's `:max-tokens' does not reach the wire."
+route requires, and so is asking for the encrypted reasoning.  The
+efforts NAME takes fit the one REQUEST asks for, so a model that does
+not take `none' or `max' is asked for a value it does.  A key the route
+refuses is never written here; see the Commentary for the list, and for
+why a request's `:max-tokens' does not reach the wire."
   (let ((body (list :model name
                     :input (harness-json-array (harness-responses--input request))
                     :store :false
                     :stream t
                     :include (harness-json-array '("reasoning.encrypted_content"))))
         (instructions (harness-responses--system-text request))
-        (reasoning (harness-responses--reasoning request)))
+        (reasoning (harness-responses--reasoning request (harness-responses--model-efforts name))))
     (when instructions
       (setq body (plist-put body :instructions instructions)))
     (when reasoning
@@ -970,9 +1103,79 @@ otherwise."
     (harness-responses--finish stream 'error text
                                (harness-responses-error-kind code status))))
 
-(defun harness-responses--start (stream request info)
+(defun harness-responses--rejected-efforts (body effort)
+  "Return the efforts BODY says the model takes, or nil.
+BODY is a pre-stream answer and EFFORT the reasoning effort the request
+asked for.  When the answer is an `unsupported_value' refusal of EFFORT,
+the values its message says the model supports are returned, weakest
+first; any other failure yields nil.  The route sometimes answers with
+a bare `detail' string rather than the usual error object, so a
+readable refusal counts too."
+  (let* ((json (and (stringp body) (not (string-blank-p body))
+                    (ignore-errors (harness-json-parse body))))
+         (error (and (listp json) (plist-get json :error)))
+         (code (cond ((stringp error) error)
+                     ((and (listp error) (plist-get error :code))
+                      (format "%s" (plist-get error :code)))))
+         (param (and (listp error)
+                     (let ((p (plist-get error :param)))
+                       (and p (format "%s" p)))))
+         (message (cond ((and (listp error) (plist-get error :message)) (plist-get error :message))
+                        ((and (listp json) (stringp (plist-get json :detail))) (plist-get json :detail))
+                        ((and (listp json) (stringp (plist-get json :message))) (plist-get json :message))
+                        ((and (null json) (stringp body) (not (string-blank-p body))) body)))
+         (rejected (and (stringp message)
+                        (string-match "Unsupported value: '\\([^']+\\)'" message)
+                        (match-string 1 message))))
+    (when (and (stringp effort)
+               (equal rejected effort)
+               (or (equal code "unsupported_value")
+                   (and (null code)
+                        (stringp message)
+                        (string-match-p "Unsupported value:" message)))
+               (stringp message)
+               (or (string-match-p "reasoning" (or param ""))
+                   ;; The plan route names the parameter.  A compatible
+                   ;; server may leave it out, and then the value refused
+                   ;; and the list of what the model takes are enough.
+                   (and (null param) (string-match-p "Supported values are:" message))))
+      (let ((tail (and (string-match "Supported values are:" message)
+                       (substring message (match-end 0))))
+            (values nil) (start 0))
+        (when tail
+          (while (string-match "'\\([^']+\\)'" tail start)
+            (push (match-string 1 tail) values)
+            (setq start (match-end 0)))
+          (when (null values)
+            (setq values (mapcar (lambda (s)
+                                   (string-trim (if (string-match "\\`and[ \t]+\\(.*\\)" s)
+                                                    (match-string 1 s)
+                                                  s)
+                                                "'\" "))
+                                 (split-string tail "[,;]" t)))))
+        (let ((known (cl-remove-if-not (lambda (v) (member v harness-responses--efforts))
+                                       values)))
+          (when known
+            (sort (delete-dups known)
+                  (lambda (a b) (< (harness-thinking-level-rank a)
+                                   (harness-thinking-level-rank b))))))))))
+
+(defun harness-responses--learn-rejected-effort (name body effort)
+  "Remember the efforts NAME takes when BODY refuses EFFORT.
+Return non-nil when the answer named them, so the request is worth
+sending again; nil otherwise."
+  (when-let* ((efforts (harness-responses--rejected-efforts body effort)))
+    (puthash name efforts harness-responses--efforts-by-model)
+    (harness-log 'info "responses: %s does not take reasoning effort %s; it takes %s, asking again"
+                 name effort (string-join efforts ", "))
+    t))
+
+(defun harness-responses--start (stream request info &optional attempt)
   "Send the request of STREAM, authenticated with the token in INFO.
-REQUEST is the harness request it was built from."
+REQUEST is the harness request it was built from.  ATTEMPT counts the
+times this request has been sent: a request refused because the model
+does not take the reasoning effort asked for is sent once more with
+the efforts the answer names."
   (if (harness-responses--stream-finished stream)
       nil
     (let* ((token (plist-get info :token))
@@ -1005,7 +1208,9 @@ REQUEST is the harness request it was built from."
                                        (concat (harness-responses--stream-raw stream) chunk))
                                (funcall sse chunk)))
                  :callback (lambda (status _headers body err)
-                             (let ((status (or status (harness-responses--stream-status stream))))
+                             (let* ((status (or status (harness-responses--stream-status stream)))
+                                    (raw (harness-responses--stream-raw stream))
+                                    (refusal (if (string-empty-p raw) (or body "") raw)))
                                (cond
                                 ((harness-responses--stream-finished stream) nil)
                                 ((eq (car-safe err) 'cancelled)
@@ -1014,10 +1219,21 @@ REQUEST is the harness request it was built from."
                                       stream 'error (harness-error-message (cadr err))
                                       (and (harness-http-transient-error-p err) 'transport)))
                                 ((and status (>= status 300))
-                                 (harness-responses--pre-stream-error
-                                  stream status
-                                  (let ((raw (harness-responses--stream-raw stream)))
-                                    (if (string-empty-p raw) (or body "") raw))))
+                                 (if (and (null attempt)
+                                          (member status '(400 422))
+                                          (harness-responses--learn-rejected-effort
+                                           (harness-responses--stream-name stream)
+                                           refusal
+                                           (plist-get (harness-responses--reasoning
+                                                       request
+                                                       (harness-responses--model-efforts
+                                                        (harness-responses--stream-name stream)))
+                                                      :effort)))
+                                     (progn
+                                       (setf (harness-responses--stream-status stream) nil
+                                             (harness-responses--stream-raw stream) "")
+                                       (harness-responses--start stream request info 1))
+                                   (harness-responses--pre-stream-error stream status refusal)))
                                 ;; A stream that ended without any terminal
                                 ;; event is a cut connection, not an answer.
                                 ((not (harness-responses--terminal-p stream))
@@ -1112,6 +1328,7 @@ nil when there is nothing to call the plan's models with."
           :doc "OpenAI's Responses API paid for by a ChatGPT plan (Sign in with ChatGPT)"
           :models #'harness-responses--models
           :complete #'harness-responses--complete
+          :resolve #'harness-responses--resolve
           :quota #'harness-responses--quota
           :capabilities '(:vision t :thinking t :quota t)
           :tiers harness-responses-tiers)

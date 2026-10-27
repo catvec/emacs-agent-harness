@@ -34,6 +34,17 @@ provider lists it, say), unless the endpoint names one with
 `:default-context`.  Endpoints without a /models route can list
 their models statically with `:models`.
 
+The reasoning effort is model-specific too.  OpenRouter's model list
+names the efforts a model takes in its `reasoning` object
+(`supported_efforts`, with `mandatory` saying that `none` is not
+one), and they become the model's `:thinking-levels`; the body fits
+the harness level asked for to them, so `max` and `xhigh` go out
+where the model takes them and a model that refuses `none` is asked
+for its weakest effort instead.  A server that names no efforts keeps
+the conservative mapping: high, medium and low as they are, `max`
+asked for as `high`, and the values older models do not take left
+out, which asks for no effort at all.
+
 A tool message holds text only, so the images a tool returned (the
 `:images` of a tool_result block, each with `:data` or a `:path`) go
 in the user message after the tool messages

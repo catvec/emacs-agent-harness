@@ -494,6 +494,53 @@ before a message of any other role: that is all the API checks."
         (should-not (plist-get body :reasoning_effort))
         (should-not (plist-get body :reasoning))))))
 
+(ert-deftest harness-provider-openai-effort-follows-the-model-levels ()
+  "An effort the model names goes out as itself, and one it does not is fitted.
+A model with no advertised levels keeps the conservative mapping: what
+older models take, and nothing for the rest, which leaves the default."
+  (should (equal "max" (harness-openai--effort "max" '("low" "medium" "high" "xhigh" "max"))))
+  (should (equal "xhigh" (harness-openai--effort "max" '("low" "medium" "high" "xhigh"))))
+  (should (equal "low" (harness-openai--effort "none" '("low" "medium" "high"))))
+  (should (equal "low" (harness-openai--effort "minimal" '("low" "medium" "high"))))
+  (should (equal "high" (harness-openai--effort "max")))
+  (should (equal "high" (harness-openai--effort "high")))
+  (should (equal "medium" (harness-openai--effort "medium")))
+  (should (equal "low" (harness-openai--effort "low")))
+  (should-not (harness-openai--effort "xhigh"))
+  (should-not (harness-openai--effort "none"))
+  (should-not (harness-openai--effort "minimal"))
+  (should-not (harness-openai--effort "bogus")))
+
+(ert-deftest harness-provider-openai-body-fits-the-effort-to-the-model ()
+  "The body asks for an effort the model's listing names.
+`max' and `xhigh' go out where the model takes them; a model that does
+not take `none' is asked for its weakest effort instead of failing."
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (let ((harness-openai--models-cache (make-hash-table :test 'eq)))
+      (puthash 'testrouter
+               (cons (float-time)
+                     (list '(:name "vendor/smart"
+                             :thinking-levels ("low" "medium" "high" "xhigh" "max"))))
+               harness-openai--models-cache)
+      (dolist (case '(("max" . "max") ("xhigh" . "xhigh") ("minimal" . "low")))
+        (harness-openai-test--complete
+         harness-openai-test-endpoint
+         `(:model "testrouter:vendor/smart" :thinking ,(car case)
+           :messages ((:role user :content ((:type "text" :text "hi"))))))
+        (should (equal (cdr case)
+                       (harness-plist-get-in (harness-openai-test--last-request-json)
+                                             '(:reasoning :effort)))))
+      (harness-openai-test--complete
+       harness-openai-test-endpoint
+       '(:model "testrouter:vendor/smart" :no-thinking t
+         :messages ((:role user :content ((:type "text" :text "hi"))))))
+      (should (equal "low"
+                     (harness-plist-get-in (harness-openai-test--last-request-json)
+                                           '(:reasoning :effort)))))))
+
 (ert-deftest harness-provider-openai-deepseek-replays-reasoning-content ()
   ;; DeepSeek's thinking mode rejects a tool-using history whose assistant
   ;; messages omit reasoning_content, so the recorded thinking goes back.
@@ -970,7 +1017,9 @@ sessions would leave it otherwise."
                               :pricing (:prompt "0.0000001" :completion "0.0000004"
                                         :input_cache_read "0.000000025" :input_cache_write "0.000000125")
                               :top_provider (:max_completion_tokens 32000 :context_length 200000)
-                              :supported_parameters ("tools" "reasoning" "temperature"))
+                              :supported_parameters ("tools" "reasoning" "temperature")
+                              :reasoning (:supported_efforts ["max" "xhigh" "high" "medium" "low" "none"]
+                                          :mandatory t))
                              (:id "vendor/plain" :context_length 8192
                               :pricing (:prompt "0.000001" :completion "0.000002")
                               :supported_parameters ("temperature"))))))))
@@ -987,7 +1036,8 @@ sessions would leave it otherwise."
       (should (= 200000 (plist-get smart :context-window)))
       (should (= 32000 (plist-get smart :max-output)))
       (should (equal '("text" "image") (plist-get smart :input-modalities)))
-      (should (equal '("low" "medium" "high") (plist-get smart :thinking-levels)))
+      (should (equal '("low" "medium" "high" "xhigh" "max")
+                     (plist-get smart :thinking-levels)))
       (should (harness-openai-test--approx 0.1 (plist-get pricing :input)))
       (should (harness-openai-test--approx 0.4 (plist-get pricing :output)))
       (should (harness-openai-test--approx 0.025 (plist-get pricing :cache-read)))
@@ -1010,6 +1060,24 @@ sessions would leave it otherwise."
                                  (make-harness-provider :id 'testrouter :label "T") smart)
                                 :id))))
     (harness-openai-clear-models-cache)))
+
+(ert-deftest harness-provider-openai-models-read-openrouter-reasoning-efforts ()
+  "OpenRouter names each model's reasoning efforts; they become its levels.
+`mandatory' is honoured by leaving out `none', which such a model
+refuses; a null list means every value is taken, and a `reasoning'
+object without the list exposes no effort choice at all."
+  (let ((endpoint harness-openai-test-endpoint))
+    (should (equal '("low" "medium" "high" "xhigh" "max")
+                   (harness-openai--entry-efforts
+                    endpoint '(:reasoning (:supported_efforts ["max" "xhigh" "high" "medium" "low"]
+                                           :mandatory t)))))
+    (should (equal '("none" "low" "high")
+                   (harness-openai--entry-efforts
+                    endpoint '(:reasoning (:supported_efforts ["high" "none" "low"])))))
+    (should (equal '("minimal" "low" "medium" "high" "xhigh" "max")
+                   (harness-openai--entry-efforts
+                    endpoint (list :reasoning (list :supported_efforts nil :mandatory t)))))
+    (should-not (harness-openai--entry-efforts endpoint '(:reasoning (:mandatory t))))))
 
 (ert-deftest harness-provider-openai-models-deepseek-effort-levels ()
   ;; DeepSeek reports the efforts it acts on; the catalogue offers exactly

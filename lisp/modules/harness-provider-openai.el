@@ -24,6 +24,17 @@
 ;; `:default-context'.  Endpoints without a /models route can list
 ;; their models statically with `:models'.
 ;;
+;; The reasoning effort is model-specific too.  OpenRouter's model list
+;; names the efforts a model takes in its `reasoning' object
+;; (`supported_efforts', with `mandatory' saying that `none' is not
+;; one), and they become the model's `:thinking-levels'; the body fits
+;; the harness level asked for to them, so `max' and `xhigh' go out
+;; where the model takes them and a model that refuses `none' is asked
+;; for its weakest effort instead.  A server that names no efforts keeps
+;; the conservative mapping: high, medium and low as they are, `max'
+;; asked for as `high', and the values older models do not take left
+;; out, which asks for no effort at all.
+;;
 ;; A tool message holds text only, so the images a tool returned (the
 ;; `:images' of a tool_result block, each with `:data' or a `:path') go
 ;; in the user message after the tool messages
@@ -280,17 +291,59 @@ registered immediately."
           :cache-read (or (harness-openai--price (plist-get pricing :input_cache_read)) input)
           :cache-write (or (harness-openai--price (plist-get pricing :input_cache_write)) input))))
 
+(defun harness-openai--effort-levels (value &optional mandatory)
+  "Return the effort names in VALUE, weakest first, or nil.
+VALUE is a JSON array of names, or of objects with an `effort' field,
+as OpenRouter's `reasoning' object and a model list may give them.
+MANDATORY non-nil removes `none', which such a model refuses."
+  (let* ((items (cond ((stringp value) (list value))
+                      ((and (consp value) (keywordp (car value))) (list value))
+                      ((sequencep value) (append value nil))
+                      (t nil)))
+         (levels (delq nil (mapcar (lambda (item)
+                                     (let ((name (cond ((stringp item) item)
+                                                       ((consp item) (plist-get item :effort))
+                                                       (t nil))))
+                                       (and (stringp name)
+                                            (member name harness-thinking-level-order)
+                                            name)))
+                                   items))))
+    (when mandatory
+      (setq levels (cl-remove "none" levels :test #'equal)))
+    (when levels
+      (sort (delete-dups (copy-sequence levels))
+            (lambda (a b) (< (harness-thinking-level-rank a)
+                             (harness-thinking-level-rank b)))))))
+
 (defun harness-openai--entry-efforts (endpoint entry)
   "Return the reasoning levels ENTRY advertises for ENDPOINT, or nil.
 DeepSeek lists them in `effort.supported_levels', the ladder its
-`reasoning_effort' really acts on.  An entry that reasons but does not
-list any gets its host's ladder: DeepSeek's low/high/max on a DeepSeek
-host, the levels a plain OpenAI reasoning model has otherwise.  A
-DeepSeek model that says nothing about reasoning still gets that ladder,
-since its thinking mode is on by default."
-  (let ((levels (plist-get (plist-get entry :effort) :supported_levels)))
+`reasoning_effort' really acts on.  OpenRouter lists them in its
+`reasoning' object: `supported_efforts' is the ladder, null there
+means every value is taken, and `mandatory' says `none' is not.  An
+entry that reasons but does not list any gets its host's ladder:
+DeepSeek's low/high/max on a DeepSeek host, the levels a plain OpenAI
+reasoning model has otherwise.  A DeepSeek model that says nothing
+about reasoning still gets that ladder, since its thinking mode is on
+by default."
+  (let* ((levels (plist-get (plist-get entry :effort) :supported_levels))
+         (reasoning (plist-get entry :reasoning))
+         (listing (and (listp reasoning) (plist-member reasoning :supported_efforts)))
+         (mandatory (and (listp reasoning)
+                         (harness-json-true-p (plist-get reasoning :mandatory))))
+         (supported (and listing
+                         (harness-openai--effort-levels
+                          (plist-get reasoning :supported_efforts) mandatory)))
+         (advertised (harness-openai--effort-levels
+                      (or (plist-get entry :supported_reasoning_levels)
+                          (plist-get entry :supported_reasoning_efforts)))))
     (cond ((and (listp levels) levels (cl-every #'stringp levels))
            (copy-sequence levels))
+          (supported supported)
+          (advertised advertised)
+          (listing
+           (harness-openai--effort-levels
+            harness-thinking-level-order mandatory))
           ((harness-openai--deepseek-p endpoint)
            (copy-sequence harness-openai--deepseek-efforts))
           ((member "reasoning" (plist-get entry :supported_parameters))
@@ -610,13 +663,32 @@ message that made the calls, so nothing may be put between them."
                                                   '(:type "object" :properties :empty)))))
           specs))
 
-(defun harness-openai--effort (level)
-  "Map the harness thinking LEVEL onto an OpenAI reasoning effort."
-  (pcase (harness-openai--string level)
-    ((or "max" "high") "high")
-    ("medium" "medium")
-    ("low" "low")
-    (_ nil)))
+(defun harness-openai--model-efforts (endpoint name)
+  "Return the reasoning efforts ENDPOINT's listing gives model NAME, or nil.
+A listing that has not arrived, and a model it does not name, yield
+nil, which leaves `harness-openai--effort' its old mapping."
+  (when-let* ((cached (gethash (plist-get endpoint :id) harness-openai--models-cache))
+              (model (cl-find name (cdr cached) :key (lambda (m) (plist-get m :name))
+                              :test #'equal)))
+    (plist-get model :thinking-levels)))
+
+(defun harness-openai--effort (level &optional levels)
+  "Map the harness thinking LEVEL onto an OpenAI reasoning effort.
+LEVELS are the efforts the model takes, weakest first, when its
+listing names them: LEVEL is fitted to them
+\(`harness-thinking-level-fit'), so a model that does not take `none'
+is asked for its weakest effort and one that does not take `max' for
+the strongest it has.  Without LEVELS the conservative mapping is
+kept: `max' and `high' are asked for as `high', and the values older
+models do not take are left out, which asks for no effort at all."
+  (let ((name (harness-openai--string level)))
+    (cond
+     ((not (member name harness-thinking-level-order)) nil)
+     (levels (harness-thinking-level-fit name levels))
+     ((member name '("max" "high")) "high")
+     ((equal name "medium") "medium")
+     ((equal name "low") "low")
+     (t nil))))
 
 (defconst harness-openai--deepseek-efforts '("low" "high" "max")
   "DeepSeek's reasoning efforts, weakest first.
@@ -652,14 +724,17 @@ provider (`harness-provider-claude--effort'), and a DeepSeek endpoint
 gets `reasoning_effort' \"none\", its off switch.  Without it a model
 whose thinking is on by default spends a short output budget on the
 reasoning and stops at `max-tokens' with no text, as a naming request's
-40 tokens did.  An endpoint with no off switch sends no effort, as
-before."
+40 tokens did.  A model whose listing names the efforts it takes is
+asked for one of those (`harness-openai--effort'): a model that does
+not take `none' gets its weakest effort instead, and one that takes
+`max' or `xhigh' gets it.  An endpoint with no such listing sends no
+effort when it knows no off switch, as before."
   (let* ((openrouter (harness-openai--openrouter-p endpoint))
          (deepseek (harness-openai--deepseek-p endpoint))
          (level (if (plist-get request :no-thinking) "none" (plist-get request :thinking)))
          (effort (if deepseek
                      (harness-openai--deepseek-effort level)
-                   (harness-openai--effort level)))
+                   (harness-openai--effort level (harness-openai--model-efforts endpoint name))))
          (tools (harness-openai--tools (plist-get request :tools)))
          (body (list :model name
                      :messages (harness-openai--messages request endpoint)

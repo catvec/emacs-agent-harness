@@ -2035,9 +2035,12 @@ and `:tools` lacks them.  `:no-thinking t` asks for no extended
 thinking, and wins over `:thinking` when both are sent.  Claude Code,
 which takes no `:max-tokens`, then runs the CLI with
 `MAX_THINKING_TOKENS=0`; a DeepSeek endpoint sends `reasoning_effort`
-"none", its off switch; an endpoint with no off switch sends nothing,
-so a model whose thinking is on by default may still think (see the
-auto-mode judge's retry below, which covers that).
+"none", its off switch; the Responses provider, whose models take only
+some of the efforts, asks for `none` where the model takes it and for
+the weakest effort it does where it does not; an endpoint with no off
+switch and no effort a model names sends nothing, so a model whose
+thinking is on by default may still think (see the auto-mode judge's
+retry below, which covers that).
 
 A REQUEST with `:ephemeral t` is a one-off question, such as the
 auto-mode judge's.  The provider answers it from the request alone, as
@@ -2584,6 +2587,19 @@ Studio, `max_model_len` of vLLM, `max_input_tokens` of LiteLLM), else
 the endpoint's `:default-context`, else the catalogue's estimate:
 plain OpenAI lists ids alone.
 
+The reasoning effort is model-specific.  OpenRouter names the efforts a
+model takes in its `reasoning` object (`supported_efforts`), with
+`mandatory` saying that `none` is not one of them; the catalogue takes
+them as the model's `:thinking-levels`, and the body fits the harness
+level to them (`harness-openai--effort`, via
+`harness-thinking-level-fit`): `max` and `xhigh` go out where the model
+takes them, and a request that asks for no thinking asks for the
+weakest effort a model without an off switch takes.  A model whose
+server names no efforts keeps the conservative mapping — high, medium
+and low as they are, `max` asked for as `high`, and the values older
+models do not take left out, which sends no effort at all.  DeepSeek's
+own ladder follows the same rule (see below).
+
 A `{"role":"tool"}` message holds text only, so the pictures a tool
 returned (the `:images` of a `tool_result` block, each with `:data` or
 only a `:path`, read when the request is built) go in the user message
@@ -2766,6 +2782,21 @@ and the provider is built to what it accepts:
   (the documented form that keeps each tool's own name, where a
   namespace would rename them), and `function_call_output` carries a
   tool result back.
+- The reasoning effort is fitted to the model.  `reasoning.effort` takes
+  a model-dependent subset of none, minimal, low, medium, high, xhigh
+  and max: GPT-6 Astra refuses `none`, and older models stop at `high`.
+  The account's model list may name the efforts a model takes
+  (`supported_reasoning_levels`), and those become its
+  `:thinking-levels`; a model it does not describe gets the efforts of
+  its entry in `harness-responses--known-efforts`, or a conservative
+  low-to-max ladder.  The picker and `spawn_agent` validation see only
+  what the model takes, and every request fits its level to that set
+  (`harness-responses--effort`, via `harness-thinking-level-fit`), so
+  `:no-thinking` asks for `none` where it is taken and for the weakest
+  effort where it is not.  Should a model still refuse a value, the
+  answer names the values it takes; they are remembered for the model
+  and the request is sent once more with the closest of them
+  (`harness-responses--learn-rejected-effort`).
 - Reasoning is replayed: a thinking block that carries a `:signature`
   goes back as a reasoning item with that signature as its
   `encrypted_content`, which stateless mode requires; a thinking block
@@ -2798,9 +2829,14 @@ and the provider is built to what it accepts:
 - The catalogue comes from `GET /v1/models` with the same token: entries
   whose `visibility` is `list`, `slug` as the model name and
   `display_name` as its label, cached for `harness-responses--models-ttl`
-  and listed again when the account changes.  A model with a window the
-  listing gives keeps it, and a name the listing lacks is estimated as
-  any other provider's is.
+  and listed again when the account changes.  An entry may also name the
+  reasoning efforts it takes (`supported_reasoning_levels` or
+  `supported_reasoning_efforts`), and those become its
+  `:thinking-levels`; one that does not gets the efforts of
+  `harness-responses--known-efforts` or the conservative default (see
+  "reasoning effort" above).  A model with a window the listing gives
+  keeps it, and a name the listing lacks is estimated as any other
+  provider's is.
 - Usage says `:billing 'subscription` and `:cost 0.0`: the plan pays,
   and this route gives no prices, so none is invented.  What the call
   would have cost at list prices is worked out from the catalogue as for

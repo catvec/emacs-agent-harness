@@ -41,9 +41,14 @@ It is a literal, not a credential, and the tests check it goes in the
 `Authorization' header and nowhere else.")
 
 (defun harness-responses-test--fake-request (url &rest args)
-  "Record a request to URL with ARGS and replay the matching canned response."
+  "Record a request to URL with ARGS and replay the matching canned response.
+A response that is `(:function FN)' is asked for the response to replay,
+which lets a test answer differently on each request to the same URL."
   (let* ((response (cdr (cl-find-if (lambda (cell) (string-match-p (car cell) url))
                                     harness-responses-test--responses)))
+         (response (if (plist-get response :function)
+                       (funcall (plist-get response :function))
+                     response))
          (handle (make-harness-http-handle :url url :callback (plist-get args :callback)
                                            :on-chunk (plist-get args :on-chunk)
                                            :started (float-time))))
@@ -75,6 +80,8 @@ leaks into the next one."
          (harness-responses-test--responses ,responses)
          (harness-responses--responses (make-hash-table :test 'equal))
          (harness-responses--models-cache nil)
+         (harness-responses--efforts-by-model (make-hash-table :test 'equal))
+         (harness-responses--efforts-account nil)
          (harness-provider--quota-status (make-hash-table :test 'eq))
          (auth-sources nil))
      (cl-letf (((symbol-function 'harness-http-request) #'harness-responses-test--fake-request)
@@ -465,7 +472,161 @@ whenever reasoning is not off."
                    (harness-responses--reasoning '(:thinking "high"))))
     (should (equal '(:effort "none") (harness-responses--reasoning '(:no-thinking t))))
     (should (equal '(:summary "auto") (harness-responses--reasoning '(:thinking "not-a-level"))))
-    (should (equal '(:summary "auto") (harness-responses--reasoning nil)))))
+    (should (equal '(:summary "auto") (harness-responses--reasoning nil)))
+    (should (equal "max" (harness-responses--effort "max")))
+    (should-not (harness-responses--effort "ultra"))))
+
+(ert-deftest harness-provider-responses-efforts-follow-the-model ()
+  "A model's own efforts decide which reasoning effort a request asks for.
+The documented models carry what their model page says; a model the
+catalogue does not know offers `low' through `max', the ladder every
+reasoning model of this generation takes.  No request asks for a value
+the model rejects: `none' becomes the weakest effort a model without an
+off switch takes, and an effort above a model's ceiling becomes the
+ceiling."
+  (harness-responses-test-with-fake nil
+    (should (equal '("low" "medium" "high" "xhigh" "max")
+                   (harness-responses--model-efforts "gpt-6-astra")))
+    (should (equal '("none" "low" "medium" "high" "xhigh" "max")
+                   (harness-responses--model-efforts "gpt-6-sol")))
+    (should (equal '("none" "low" "medium" "high" "xhigh")
+                   (harness-responses--model-efforts "gpt-5.5")))
+    (should (equal '("minimal" "low" "medium" "high")
+                   (harness-responses--model-efforts "gpt-5")))
+    (should (equal '("low" "medium" "high" "xhigh" "max")
+                   (harness-responses--model-efforts "an-unlisted-model")))
+    ;; GPT-6 Astra takes no `none'; its least thinking is `low'.
+    (should (equal '(:effort "low")
+                   (harness-responses--reasoning
+                    '(:no-thinking t) (harness-responses--model-efforts "gpt-6-astra"))))
+    ;; A model with an off switch still gets it.
+    (should (equal '(:effort "none")
+                   (harness-responses--reasoning
+                    '(:no-thinking t) (harness-responses--model-efforts "gpt-6-sol"))))
+    ;; max survives where the model takes it, and is lowered where it does not.
+    (should (equal '(:effort "max" :summary "auto")
+                   (harness-responses--reasoning
+                    '(:thinking "max") (harness-responses--model-efforts "gpt-6-astra"))))
+    (should (equal '(:effort "xhigh" :summary "auto")
+                   (harness-responses--reasoning
+                    '(:thinking "max") (harness-responses--model-efforts "gpt-5.5"))))
+    ;; minimal is not offered by Astra; low is the nearest it takes.
+    (should (equal '(:effort "low" :summary "auto")
+                   (harness-responses--reasoning
+                    '(:thinking "minimal") (harness-responses--model-efforts "gpt-6-astra"))))
+    ;; A model the listing has not named still says which levels it offers,
+    ;; so a sub-agent's level is checked against what the model really takes.
+    (should (equal '("low" "medium" "high" "xhigh" "max")
+                   (plist-get (harness-responses--resolve "gpt-6-astra") :thinking-levels)))
+    (should-not (harness-responses--resolve ""))))
+
+(ert-deftest harness-provider-responses-body-asks-for-an-effort-the-model-takes ()
+  "The body of a no-thinking request carries an effort the model takes.
+GPT-6 Astra rejects `none', and a naming or judge request on it failed
+with HTTP 400 before the body was fitted to the model."
+  (harness-responses-test-with-fake nil
+    (let ((request '(:no-thinking t
+                     :messages ((:role user :content ((:type "text" :text "hi")))))))
+      (should (equal '(:effort "low")
+                     (plist-get (harness-responses--body "gpt-6-astra" request) :reasoning)))
+      (should (equal '(:effort "none")
+                     (plist-get (harness-responses--body "gpt-6-sol" request) :reasoning)))
+      ;; An unknown model gets the safe ladder, not `none'.
+      (should (equal '(:effort "low")
+                     (plist-get (harness-responses--body "an-unlisted-model" request) :reasoning))))
+    (should (equal '(:effort "max" :summary "auto")
+                   (plist-get (harness-responses--body
+                               "gpt-6-astra"
+                               '(:thinking "max"
+                                 :messages ((:role user :content ((:type "text" :text "hi"))))))
+                              :reasoning)))))
+
+(ert-deftest harness-provider-responses-models-take-the-efforts-they-advertise ()
+  "The account's list can name a model's efforts as objects or as strings.
+They win over the documented table, and are ordered weakest first as
+the harness's thinking levels are."
+  (harness-responses-test-with-fake nil
+    (let ((harness-responses--efforts-by-model (make-hash-table :test 'equal)))
+      (let ((model (harness-responses--entry-model
+                    '(:slug "gpt-6-astra" :visibility "list"
+                      :supported_reasoning_levels ((:effort "max" :description "Most")
+                                                   (:effort "low" :description "Least"))))))
+        (should (equal '("low" "max") (plist-get model :thinking-levels))))
+      (let ((model (harness-responses--entry-model
+                    '(:slug "gpt-5.6-luna" :visibility "list"
+                      :supported_reasoning_efforts ["max" "none" "high" "low"]))))
+        (should (equal '("none" "low" "high" "max") (plist-get model :thinking-levels)))))))
+
+(ert-deftest harness-provider-responses-asks-again-with-an-effort-the-model-takes ()
+  "A model that refuses an effort is asked once more with one it takes.
+The values its answer names are remembered for later requests, so a
+new model needs to say once what it supports."
+  (let ((sent 0))
+    (harness-responses-test-with-fake
+        `(("/responses"
+           . (:function
+              ,(lambda ()
+                 (if (= 1 (cl-incf sent))
+                     (list :status 400
+                           :body (harness-json-encode
+                                  '(:error
+                                    (:message "Unsupported value: 'max' is not supported with the 'mystery-model' model. Supported values are: 'low', 'medium', 'high'."
+                                     :type "invalid_request_error" :param "reasoning.effort"
+                                     :code "unsupported_value"))))
+                   (list :chunks
+                         (list (harness-responses-test--sse
+                                (list :type "response.completed"
+                                      :response (list :id "resp_1" :status "completed"
+                                                      :output []
+                                                      :usage (list :input_tokens 9 :output_tokens 2)))))))))))
+      (let* ((events (car (harness-responses-test--complete
+                           '(:model "chatgpt:mystery-model" :thinking "max"
+                             :messages ((:role user :content ((:type "text" :text "hi"))))))))
+             (requests (reverse harness-responses-test--requests)))
+        (should (equal 2 (length requests)))
+        (should (equal '(:effort "max" :summary "auto")
+                       (plist-get (plist-get (car requests) :json) :reasoning)))
+        (should (equal '(:effort "high" :summary "auto")
+                       (plist-get (plist-get (cadr requests) :json) :reasoning)))
+        (should (eq 'end-turn (plist-get (harness-responses-test--done events) :stop-reason)))
+        (should (equal '("low" "medium" "high")
+                       (harness-responses--model-efforts "mystery-model")))))))
+
+(ert-deftest harness-provider-responses-learns-what-a-model-takes-when-it-refuses-none ()
+  "A model whose table entry is wrong is corrected by its own answer.
+GPT-6 Sol is documented to take `none'; a server that refuses it names
+`low' through `max', and the request is sent again with `low' rather
+than failing the turn."
+  (let ((sent 0))
+    (harness-responses-test-with-fake
+        `(("/responses"
+           . (:function
+              ,(lambda ()
+                 (if (= 1 (cl-incf sent))
+                     (list :status 400
+                           :body (harness-json-encode
+                                  '(:error
+                                    (:message "Unsupported value: 'none' is not supported with the 'gpt-6-sol' model. Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'."
+                                     :type "invalid_request_error" :param "reasoning.effort"
+                                     :code "unsupported_value"))))
+                   (list :chunks
+                         (list (harness-responses-test--sse
+                                (list :type "response.completed"
+                                      :response (list :id "resp_1" :status "completed"
+                                                      :output []
+                                                      :usage (list :input_tokens 9 :output_tokens 2)))))))))))
+      (let* ((events (car (harness-responses-test--complete
+                           '(:model "chatgpt:gpt-6-sol" :no-thinking t
+                             :messages ((:role user :content ((:type "text" :text "hi"))))))))
+             (requests (reverse harness-responses-test--requests)))
+        (should (equal 2 (length requests)))
+        (should (equal '(:effort "none")
+                       (plist-get (plist-get (car requests) :json) :reasoning)))
+        (should (equal '(:effort "low")
+                       (plist-get (plist-get (cadr requests) :json) :reasoning)))
+        (should (eq 'end-turn (plist-get (harness-responses-test--done events) :stop-reason)))
+        (should (equal '("low" "medium" "high" "xhigh" "max")
+                       (harness-responses--model-efforts "gpt-6-sol")))))))
 
 ;;;; The event stream
 
@@ -743,21 +904,38 @@ place a credential belongs."
 (ert-deftest harness-provider-responses-models-keep-only-the-listable-ones ()
   "The account's own listing becomes the catalogue, hiding what it marks hidden.
 The slug is the name that goes in a request and the display name is
-what a picker shows; a window is estimated, since this route lists none."
+what a picker shows; a window is estimated, since this route lists none.
+The efforts the listing names, or the ones its model is known to take,
+become the model's thinking levels."
   (harness-responses-test-with-fake
       `(("/models" . (:body ,(harness-json-encode
                               '(:models ((:slug "gpt-5" :display_name "GPT-5" :visibility "list")
                                          (:slug "internal-1" :display_name "Internal" :visibility "hidden")
+                                         (:slug "gpt-6-astra" :display_name "GPT-6 Astra" :visibility "list"
+                                           :supported_reasoning_levels ((:effort "max" :description "Most")
+                                                                        (:effort "xhigh" :description "More")
+                                                                        (:effort "high" :description "Hard")
+                                                                        (:effort "medium" :description "Everyday")
+                                                                        (:effort "low" :description "Least")))
                                          (:slug "gpt-4o" :display_name "GPT-4o" :visibility "list")))))))
     (let* ((models (harness-test-await (harness-responses--models)))
-           (first (car models)))
+           (first (car models))
+           (astra (nth 1 models)))
       (should (equal "https://api.openai.com/v1/models" (plist-get (car harness-responses-test--requests) :url)))
       (should (equal (concat "Bearer " harness-responses-test--token)
                      (cdr (assoc "Authorization" (plist-get (car harness-responses-test--requests) :headers)))))
-      (should (equal '("gpt-5" "gpt-4o") (mapcar (lambda (m) (plist-get m :name)) models)))
+      (should (equal '("gpt-5" "gpt-6-astra" "gpt-4o") (mapcar (lambda (m) (plist-get m :name)) models)))
       (should (equal "GPT-5" (plist-get first :label)))
-      (should (equal '("minimal" "low" "medium" "high" "xhigh" "max")
-                     (plist-get first :thinking-levels))))))
+      ;; The catalogue knows the efforts of the models OpenAI documents;
+      ;; gpt-5 takes minimal, GPT-6 Astra does not take none or minimal.
+      (should (equal '("minimal" "low" "medium" "high")
+                     (plist-get first :thinking-levels)))
+      (should (equal '("low" "medium" "high" "xhigh" "max")
+                     (plist-get astra :thinking-levels)))
+      (should (equal "GPT-6 Astra" (plist-get astra :label)))
+      ;; A model the catalogue says nothing about offers the safe ladder.
+      (should (equal '("low" "medium" "high" "xhigh" "max")
+                     (plist-get (nth 2 models) :thinking-levels))))))
 
 (ert-deftest harness-provider-responses-models-are-cached-until-refreshed ()
   "A listing is cached, and a refresh is what asks the account again.

@@ -73,6 +73,22 @@ when it carries a `:signature`, which is taken for its encrypted
 content; otherwise it is left out, since a reasoning item without
 one is not worth sending.
 
+The reasoning effort is model-specific.  `reasoning.effort` may take
+none, minimal, low, medium, high, xhigh and max, but each model takes
+a subset: GPT-6 Astra rejects `none`, and older models stop at
+`high`.  The account's model list may name a model's efforts
+(`supported_reasoning_levels`); the models OpenAI documents have
+theirs in `harness-responses--known-efforts`, and a model of a newer
+family gets the conservative low-to-max ladder.  That set is the
+model's `:thinking-levels`, so the picker and the tool arguments
+never offer one the model rejects, and every request fits its effort
+to the set (`harness-thinking-level-fit`): a request that asks for no
+thinking asks for `none` where it is taken and for the weakest effort
+where it is not.  Should a model still refuse the value, the answer
+names the values it takes; they are remembered for the model and the
+request is sent once more with the closest of them
+(`harness-responses--learn-rejected-effort`).
+
 Streaming.  The events are server-sent, and `harness-http-sse-parser`
 hands each complete one here.  `response.output_text.delta` is text
 and `response.reasoning_summary_text.delta` (the summary the model
@@ -100,11 +116,16 @@ account's own model list, an array of `models` whose entries carry
 `slug`, `display_name` and `visibility`; the entries with
 `visibility` "list" are the ones meant for a picker, and they become
 the catalogue with the slug as the name and the display name as the
-label.  The list is asked again when the account changes, and cached
-for `harness-responses-models-ttl` seconds otherwise.  The route
-lists no context window and no price either, so a window is
-estimated by the catalogue (as for any provider that does not size a
-model) and `:tiers` is a setting rather than something to be read.
+label.  An entry may also name the reasoning efforts it takes
+(`supported_reasoning_levels` or `supported_reasoning_efforts`), and
+those become its `:thinking-levels`; one that does not gets the
+efforts of its entry in `harness-responses--known-efforts`, or the
+conservative default (see "Reasoning" above).  The list is asked
+again when the account changes, and cached for
+`harness-responses-models-ttl` seconds otherwise.  The route lists no
+context window and no price either, so a window is estimated by the
+catalogue (as for any provider that does not size a model) and
+`:tiers` is a setting rather than something to be read.
 
 Registration.  The provider is registered only while an account with
 a usable credential is signed in, and removed again when the last one
