@@ -4288,7 +4288,11 @@ takes a task as well as a file (task:ID)."
         ;; newest of the conversation.
         (harness-chat--insert-top)
         (harness-chat--insert-queue)
-        (harness-ui-pending-insert-panels harness-ui-session-id)
+        (let ((pending-start (point)))
+          (harness-ui-pending-insert-panels harness-ui-session-id)
+          ;; Separate the request from the todo panel only when both show.
+          (when (and (> (point) pending-start) harness-chat--todos)
+            (insert "\n")))
 
         (harness-chat--insert-todos)
         (harness-chat--insert-panels)

@@ -8397,6 +8397,38 @@ buttons in it work.  Clearing the hook takes the panel away again."
         (harness-chat--render-tail)
         (should-not (harness-ui-chat-test-find buf "review banner"))))))
 
+(ert-deftest harness-ui-chat-request-todo-separation ()
+  "Questions and permissions have one blank line before either todo view."
+  (dolist (request '((:id "pq" :kind question :payload (:question "Which layout?"))
+                     (:id "pp" :kind permission :payload (:tool "bash" :title "Bash: echo" :kind exec :input (:command "echo")))))
+    (harness-ui-chat-test-with
+      (let* ((sid (harness-ui-chat-test-session))
+             (buf (harness-ui-chat-test-open sid)))
+        (harness-call 'session/set-todos sid '((:id "1" :text "Survey" :status "in-progress")))
+        (harness-call 'session/pending-add sid request)
+        (harness-test-wait (lambda () (with-current-buffer buf (and harness-chat--todos harness-chat--pending)))
+                           5 "request and todos")
+        (with-current-buffer buf
+          (dolist (choice '(folded open folded))
+            (setq harness-chat--todos-choice choice)
+            (harness-chat--render-tail)
+            (save-excursion
+              (goto-char (harness-ui-chat-test-find buf "Todo list"))
+              (beginning-of-line)
+              (should (equal "\n\n" (buffer-substring-no-properties (- (point) 2) (point))))
+              (should-not (eq (char-before (- (point) 2)) ?\n))))
+          ;; A request alone and todos alone gain no separator on redraw.
+          (setq harness-chat--todos nil)
+          (harness-chat--render-tail)
+          (should-not (harness-ui-chat-test-find buf "Todo list"))
+          (harness-ui-pending-remove sid (plist-get request :id))
+          (setq harness-chat--todos '((:text "Survey" :status "in-progress")))
+          (harness-chat--render-tail)
+          (save-excursion
+            (goto-char (harness-ui-chat-test-find buf "Todo list"))
+            (beginning-of-line)
+            (should (= (point) (marker-position harness-chat--transcript-end)))))))))
+
 (ert-deftest harness-ui-chat-top-functions-draw-first-in-the-tail ()
   "A buffer-local top function puts its lines first below the transcript.
 They come before the request waiting for you, the todo list and the
