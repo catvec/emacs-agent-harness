@@ -1729,9 +1729,28 @@ One the policy sets counts as not: it was not changed here."
                              #'harness-ui-config-customize-interface)
   (insert "\n"))
 
+(defvar harness-ui-config-load-hooks nil
+  "Hooks run when a settings page fetches its data, before it draws.
+A module whose section shows a state of its own (see
+`harness-ui-config-sections-functions') fetches that state here, so the
+section is drawn with it.")
+
+(defvar harness-ui-config-sections-functions nil
+  "Functions inserting sections of their own above the settings.
+Each is called with no arguments in the page's buffer, at the point the
+sections go, and inserts whatever it draws with the page's own helpers
+\(`harness-ui-config--insert-heading', `harness-ui-config--button').
+A module that is switched on once and looked at now and then -- a
+provider you sign in to, say -- belongs here rather than among the
+options: it has no value to edit, only a state to show and a button that
+changes it.  A section of this kind is drawn in both scopes, since it
+holds no value that layers.")
+
 (defun harness-ui-config--insert-settings ()
-  "Insert the sections of settings for the page's scope, then the others."
+  "Insert the sections of settings for the page's scope, then the others.
+The sections of `harness-ui-config-sections-functions' come first."
   (let ((settings (plist-get harness-ui-config--data :settings)))
+    (run-hooks 'harness-ui-config-sections-functions)
     (harness-ui-config--insert-sections settings)
     (if (eq harness-ui-config--scope 'project)
         (harness-ui-config--insert-global-only
@@ -1850,11 +1869,15 @@ with save and revert, and a load in progress or an error stay longest."
 ;;;; Loading
 
 (defun harness-ui-config--load (buffer)
-  "Fetch the settings of BUFFER's directory and draw them."
+  "Fetch the settings of BUFFER's directory and draw them.
+A section a module contributes (see `harness-ui-config-sections-functions')
+reads its own state; it is fetched here too, so that a section is drawn
+with what it shows rather than a blank while another request is out."
   (with-current-buffer buffer
     (let ((gen (cl-incf harness-ui-config--generation)))
       (setq harness-ui-config--loading t)
       (force-mode-line-update)
+      (run-hooks 'harness-ui-config-load-hooks)
       (harness-ui-call
        "_harness/config/describe" (list :cwd harness-ui-config--cwd)
        (lambda (data)

@@ -15,9 +15,9 @@ module needs something more, add it here first.
  State          session, agent, config, project, store, usage, insights, fallback,
                 retry, naming, judge, compaction, handoff, worktree, merge, tasks,
                 tasks-notify, supervisor, seed, skills, perms, decisions, sandbox,
-                notifications, secrets, redact, plugins
+                notifications, secrets, redact, plugins, chatgpt-plan
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
-                provider-bedrock, provider-copilot
+                provider-bedrock, provider-copilot, provider-responses
  Tool calls     mcp (the MCP host: tool servers the harness starts in the
                 session's sandbox, and the Emacs a client lends), tools,
                 tools-fs, tools-shell, tools-ssh, tools-emacs,
@@ -2689,6 +2689,80 @@ efforts, token prices as `:pricing`), or before `copilot login` from
 no session process runs.  `copilot:default` resolves to
 `harness-provider-copilot-default-model`, with that model's window,
 levels and prices.
+
+The Responses provider (`provider-responses`, `chatgpt:` models) is a
+native-loop provider speaking the public Responses API
+(`POST /v1/responses`) with a ChatGPT-plan access token, so an eligible
+ChatGPT Plus or Pro plan pays for inference with no API key
+(`chatgpt-plan`; requires provider, chatgpt-plan).  It is registered
+only while a credential exists, and it registers and unregisters on the
+`chatgpt-plan/accounts-changed` event, so signing in or out takes effect
+at once.  The route is a stricter OpenAI than the chat completions one,
+and the provider is built to what it accepts:
+
+- `store: false` and `stream: true` on every request, and the whole
+  history in `input`: there is no `previous_response_id`, so nothing is
+  kept on OpenAI's side and a resumed conversation is complete in every
+  request.
+- The system prompt goes in `instructions`.  An explicit
+  `{type:"message",role:"system"}` input item is rejected by this route,
+  so a system block of a request is folded into `instructions` rather
+  than sent as one (`harness-responses--system-text`).
+- `temperature`, `top_p`, `max_output_tokens`, `metadata`, `moderation`,
+  `prompt`, `background`, `conversation`, `previous_response_id`,
+  `truncation`, `user`, `prompt_cache_retention`, `safety_identifier`,
+  `max_tool_calls` and `multi_agent` are never sent, whatever a request
+  asks for.  `max_output_tokens` matters most: the route refuses it, so
+  a request's `:max-tokens` (a session name, a judge's answer) caps
+  nothing on the wire.  The cap is kept on the prompt side -- the
+  instruction to answer briefly stays -- and the size of the uncapped
+  request is logged once per request at debug level, since a harness
+  call that expected a small answer is served by the model's own
+  brevity, not by the API.
+- Tools go in one `additional_tools` item with `role: "developer"`
+  (the documented form that keeps each tool's own name, where a
+  namespace would rename them), and `function_call_output` carries a
+  tool result back.
+- Reasoning is replayed: a thinking block that carries a `:signature`
+  goes back as a reasoning item with that signature as its
+  `encrypted_content`, which stateless mode requires; a thinking block
+  without one is left out rather than sent unreadable.  A delivered
+  response is remembered keyed by its tool-call ids
+  (`harness-responses--responses`, the last
+  `harness-responses--responses-max`), so a message whose calls are all
+  remembered is replayed verbatim and only a half-remembered one is
+  rebuilt -- the same device as Bedrock's
+  (`harness-bedrock--remembered-content`).
+- Images go in as `input_image` parts (a data URL or a file read here),
+  never through the Files API, which this route does not offer; image
+  generation, file search, Code Interpreter, hosted MCP, `tool_search`
+  and audio/video input are not sent at all.
+- SSE events map to the harness's own: `response.output_text.delta` and
+  the reasoning summary deltas stream text and thinking,
+  `response.output_item.done` for a `function_call` becomes a `tool-call`
+  (its arguments parsed, kept `:raw` when they will not parse),
+  `response.completed` ends the turn, `response.incomplete` and
+  `response.failed` fail it.  A failure's structured `error.code` is
+  turned into a kind (`harness-responses-error-kind`), so
+  `subscription_sharing_usage_limit_exceeded` (429) is a quota failure
+  like any other, `subscription_sharing_user_not_eligible` (403) and
+  `invalid_user` (401) are refusals of the credential, and
+  `subscription_sharing_usage_unavailable` (503) and
+  `subscription_sharing_unsupported_capability` (400) say what they say
+  in the message the turn fails with.
+- The catalogue comes from `GET /v1/models` with the same token: entries
+  whose `visibility` is `list`, `slug` as the model name and
+  `display_name` as its label, cached for `harness-responses--models-ttl`
+  and listed again when the account changes.  A model with a window the
+  listing gives keeps it, and a name the listing lacks is estimated as
+  any other provider's is.
+- Usage says `:billing 'subscription` and `:cost 0.0`: the plan pays,
+  and this route gives no prices, so none is invented.  What the call
+  would have cost at list prices is worked out from the catalogue as for
+  every provider (`usage/price`, `:list-cost`), and `provider/quota`
+  reports the subscription honestly (`:billing` subscription, `:auth`
+  "chatgpt", `:plan-label` "ChatGPT plan", `:available` nil, since the
+  route reports no quota of its own).
 
 #### Looking like an ordinary Claude Code session (experimental)
 
@@ -8033,6 +8107,137 @@ made it is added to the scope.
   (with-eval-after-load 'harness-redact
     (add-to-list 'harness-redact--store-functions #'my-redact-stage t))
   ```
+
+### chatgpt-plan
+
+Sign in with ChatGPT (`lisp/modules/harness-chatgpt-plan.el`; requires
+nothing, so it loads on its own).  It signs a ChatGPT Plus or Pro
+account in over OAuth, keeps the credentials, and hands out access
+tokens; the provider that spends them is provider-responses, which
+requires it.  Nothing here is an API key: the plan pays, and no secret
+leaves with the code.
+
+The sign-in is Authorization Code with PKCE (S256) and a loopback
+callback, as OpenAI documents it for open-source clients
+(developers.openai.com/siwc/token-sharing-open-source):
+
+- The listener is a `make-network-process :server t` on `127.0.0.1`
+  started *before* the browser is opened (`harness-chatgpt-plan--listen`),
+  and only its port is chosen per attempt.  The same redirect URI goes to
+  the authorization endpoint and to the token endpoint.
+- A first sign-in registers dynamically:
+  `client_id=dynamic_agent_client` and the app's `agent_name_hint` go to
+  `POST {AUTH}/api/accounts/authorize` with `ext_agent_host_id`,
+  `response_type=code`, the redirect URI, the scopes and
+  `resource={API}`, a fresh `state`, `nonce` and PKCE verifier
+  (`harness-chatgpt-plan-authorize-url`).  The new-registration callback
+  returns the *issued* client id (`oaiapp_…`), which is persisted and
+  reused; `dynamic_agent_client` is never saved and never used for a
+  token exchange, and a registration that returns it, or nothing, fails
+  (`harness-chatgpt-plan--finish-callback`).
+- The code is exchanged at `POST {AUTH}/api/accounts/oauth/token`,
+  form-encoded, with the issued client id, the code, the verifier, the
+  same redirect URI and the same resource, and no secret.  The `state` of
+  a callback is checked before anything else, and the id token is checked
+  for issuer, audience (the issued client id), expiry, nonce and subject
+  (`harness-chatgpt-plan--validate-id-token`); its signature is not
+  verified, as it arrives over TLS from the token endpoint (OIDC Core
+  3.1.3.7, as harness-acp-remote.el reads its own).
+- `ext_agent_host_id` is a `urn:uuid:` generated once and kept in
+  `harness-chatgpt-plan-host-id-file`.  It names the host, is not a
+  credential, and is not masked.  (OpenAI prefers a JWK thumbprint URI;
+  the UUID form is the documented alternative.)
+- Credentials live in one JSON file,
+  `harness-chatgpt-plan-credentials-file` (by default `chatgpt-plan.json`
+  in the state directory), written whole, atomically and mode 0600, one
+  record per account keyed by the id token's subject, with the keys
+  spelled as OpenAI's documentation spells them (`client_id`,
+  `access_token`, `refresh_token`, …).  A file that cannot be parsed
+  reads as no accounts and says so in the log.
+- The tokens are registered as secret sources with the secrets module
+  when it is loaded (`secrets/add-source` with a `:file` and a
+  `:json-path`, never a value), so masking takes them out of tool output
+  and log lines.  Nothing else here logs a token, and none is ever put in
+  a URL.
+- Refresh is `grant_type=refresh_token` at the same token endpoint, with
+  the issued client id and no scope (the granted ones stay), and the
+  replacement refresh token is stored with the new access token.  It is
+  serialized inside this Emacs (one in flight per account,
+  `harness-chatgpt-plan--refreshes`) and across processes, by an
+  exclusively created lock file beside the credentials
+  (`harness-chatgpt-plan--acquire-lock`; a lock older than
+  `harness-chatgpt-plan-lock-stale` is broken, and one that cannot be
+  taken at all lets the refresh go ahead unguarded rather than never
+  happen).  The credentials are read again once the lock is held.
+  `invalid_grant`, `invalid_refresh_token`, `token_expired`,
+  `refresh_token_expired`, `refresh_token_invalidated` and
+  `refresh_token_reused` clear the tokens (keeping the identity, the
+  issued client id and the host id) and say the account must be signed in
+  again; `invalid_client` clears the issued client id too, so the next
+  sign-in registers anew; any other failure keeps the tokens and reports
+  the error.
+- Signing out revokes the refresh token at the `revocation_endpoint` of
+  `{AUTH}/.well-known/openid-configuration`, with
+  `token_type_hint=refresh_token` and the issued client id, then clears
+  the local tokens.  A revocation that cannot be confirmed is reported as
+  `:revocation "not confirmed: …"` in what signing out resolves with, and
+  the tokens are cleared all the same.
+
+Methods, all of which name no token:
+
+- `chatgpt-plan/status &optional ACCOUNT` → `harness-chatgpt-plan-status`:
+  `(:host-id :file :active :accounts :signed-in :plan-usage)`, each
+  account `(:id :label :email :subject :client-id :scopes :expires-at
+  :saved-at :signed-in :plan-usage :needs-sign-in)`.  `:plan-usage` is
+  non-nil only when the granted scopes contain
+  `chatgpt.tokens.use.direct`, which is what lets the plan pay: a sign-in
+  without it is kept, reported, and not offered for inference.
+- `chatgpt-plan/sign-in &optional ACCOUNT` → promise of the status of the
+  account, signing in again when ACCOUNT names one (reusing its issued
+  client id and sending its retained id token as `id_token_hint` and its
+  email as `login_hint`).  One attempt runs at a time; it fails after
+  `harness-chatgpt-plan-sign-in-timeout`, or at once when the user
+  refuses in the browser.
+- `chatgpt-plan/sign-out &optional ACCOUNT` → promise of the status left.
+- `chatgpt-plan/access-token &optional ACCOUNT` → promise of
+  `(:account :label :token :client-id :base-url :plan-usage)`, the token
+  refreshed first when it is within `harness-chatgpt-plan-refresh-margin`
+  of expiring.  It rejects when nobody is signed in or the refresh token
+  was refused, with a message naming what to run.
+
+Event `chatgpt-plan/accounts-changed STATUS`, emitted on a sign-in,
+sign-out or a change of credentials, with the status; provider-responses
+hears it and registers or removes its provider, and ui-chatgpt-plan,
+this module's UI half, reads the accounts again.  Commands:
+`harness-chatgpt-plan-sign-in`, `harness-chatgpt-plan-sign-out` and
+`harness-chatgpt-plan-status-interactive` (an account can also be named
+with a prefix argument).
+
+Its UI half (ui-chatgpt-plan, which the loader brings along with it)
+puts the two things you come to it to do where you look for them.  Every
+request made there is a person's to finish in a browser, so the page says
+it is waiting rather than looking frozen, and the message that follows
+says how it went:
+
+- A "ChatGPT plan" section at the top of `harness-settings`, above the
+  settings themselves: whether an account is signed in and whose it is,
+  whether its grant lets the plan pay, when its token lapses, and the
+  buttons [Sign in], and for a signed-in account [Sign in again] and
+  [Sign out].  A section rather than settings rows, since there is no value
+  to edit, only a state to show: the settings page draws the sections of
+  `harness-ui-config-sections-functions` before its own, and each reads
+  its state in `harness-ui-config-load-hooks`.  Nothing is drawn for a
+  harness whose chatgpt-plan module is not loaded.
+- `harness-chatgpt-plan-page` (`h` in a harness buffer, and in the harness
+  menu after Settings), one line per account -- whose it is, what it may
+  do, when its token lapses, its issued client id -- with `s` to sign in,
+  `o` to sign out, `RET` to sign the account of the line in again, and `g`
+  to read the state again.  It is what more than one account needs, where
+  the section acts on the active one.
+
+Neither page ever holds a token: `harness-chatgpt-plan-status` drops them
+before they cross the wire, and the browser is the only place a
+credential is typed.
 
 ### pet
 

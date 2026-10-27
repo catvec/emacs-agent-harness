@@ -23,6 +23,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;cache              ; Watches the sessions' prompt caches and says when one is about to…
  ;;cache-compact      ; Compacts a conversation just before its prompt cache lapses, while it…
  ;;cache-warm         ; Keeps a session's prompt cache warm while its user is around or a tool…
+ ;;chatgpt-plan       ; Sign in with ChatGPT: OAuth for open-source clients, credentials and…
  ;;commit-msg         ; A commit-msg hook stripping Claude attribution, in the repositories…
  ;;cost-compare       ; What the recorded usage would have cost at other models' prices.
  ;;cowboy             ; Ask what goes first when a message meets a session whose prompt cache…
@@ -56,6 +57,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;deepseek           ; DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing.
  ;;demo               ; Scripted provider for demos and tests.
  ;;openai             ; OpenAI-compatible chat completions provider (OpenAI, OpenRouter, local…
+ ;;responses          ; OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT).
  :tools
  ;;compact            ; The compact tool: an agent compacts its own conversation, on a running…
  ;;events             ; watch_events and unwatch_events: a session watches harness events, and…
@@ -94,6 +96,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [cache](cache.md) |  | [session](session.md) | Watches the sessions' prompt caches and says when one is about to lapse (cache/pre-expire), and whether the user is around. |
 | [cache-compact](cache-compact.md) |  | [session](session.md), [compaction](compaction.md), [cache](cache.md), [cowboy](cowboy.md) | Compacts a conversation just before its prompt cache lapses, while it is still hot in it, as the user saved for a cold cache and where they would not be asked. |
 | [cache-warm](cache-warm.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [cache](cache.md) | Keeps a session's prompt cache warm while its user is around or a tool runs: reads it again just before it lapses, for as long as that costs less than sending the conversation again. |
+| [chatgpt-plan](chatgpt-plan.md) |  |  | Sign in with ChatGPT: OAuth for open-source clients, credentials and refreshing. |
 | [commit-msg](commit-msg.md) |  | [config](config.md), [worktree](worktree.md) | A commit-msg hook stripping Claude attribution, in the repositories that turn it on. |
 | [compaction](compaction.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Summarise the transcript when it nears the context window, before a turn or in the middle of one; queue or interrupt one while a turn runs. |
 | [config](config.md) | by default | [project](project.md) | Layered settings through customize and dir-locals. |
@@ -122,6 +125,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [provider-deepseek](provider-deepseek.md) |  | [provider](provider.md), [provider-openai](provider-openai.md) | DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing. |
 | [provider-demo](provider-demo.md) |  | [provider](provider.md) | Scripted provider for demos and tests. |
 | [provider-openai](provider-openai.md) |  | [provider](provider.md) | OpenAI-compatible chat completions provider (OpenAI, OpenRouter, local servers). |
+| [provider-responses](provider-responses.md) |  | [provider](provider.md), [chatgpt-plan](chatgpt-plan.md) | OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT). |
 | [readonly](readonly.md) | by default | [session](session.md), [tools](tools.md) | Read-only sessions: the sessions a module's policy names (a supervisor, a task's write-up or plan) get only reading tools and read-only, offline bash, enforced by the harness. |
 | [recap](recap.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [tasks](tasks.md) | Write the recaps task cards and running chats show, with a short model call. |
 | [redact](redact.md) |  | [secrets](secrets.md), [session](session.md), [store](store.md) | Takes a secret out of the transcripts and every other copy the harness keeps. |
@@ -175,6 +179,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-cache-warm](ui-cache-warm.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | A session's prompt cache kept warm, in the UI: a flame and a countdown in the chat header, the user's activity reported, and /warm, K and the flame to set a period by hand. |
 | [ui-carry](ui-carry.md) |  | [ui](ui.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) | The panel that asks how to carry a conversation over: a cold prompt cache, a model switch. |
 | [ui-chat](ui-chat.md) | by default | [ui](ui.md) | The chat buffer: transcript, pending panel, queue, attachments and compose box. |
+| [ui-chatgpt-plan](ui-chatgpt-plan.md) |  |  | Sign in with ChatGPT from the settings page, with the accounts and what they may do. |
 | [ui-children](ui-children.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Running sub-agents of a session, pinned above its compose box: name, progress and elapsed time. |
 | [ui-commit-msg](ui-commit-msg.md) |  | [ui](ui.md) | M-x harness-commit-msg-uninstall: take the harness's commit-msg hook out of a repository. |
 | [ui-compact](ui-compact.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Compact a session's conversation by hand, choosing the kind at a known cost. |
@@ -240,6 +245,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `cache/pre-expire` | [cache](cache.md) | [cache](cache.md) | [cache-compact](cache-compact.md), [cache-warm](cache-warm.md) |  |
 | `cache/presence-changed` | [cache](cache.md) | [cache](cache.md) | [cache-warm](cache-warm.md) |  |
 | `cache/warm-changed` | [cache-warm](cache-warm.md) | [cache-warm](cache-warm.md) | [ui-cache-warm](ui-cache-warm.md) | yes |
+| `chatgpt-plan/accounts-changed` | [chatgpt-plan](chatgpt-plan.md) | [chatgpt-plan](chatgpt-plan.md) | [provider-responses](provider-responses.md), [ui-chatgpt-plan](ui-chatgpt-plan.md) | yes |
 | `compaction/done` | [compaction](compaction.md) | [compaction](compaction.md) | [pet](pet.md) |  |
 | `compaction/failed` | [compaction](compaction.md) | [compaction](compaction.md) |  |  |
 | `config/changed` | [config](config.md) | [config](config.md), [perms](perms.md) | [pet](pet.md), [tasks](tasks.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
@@ -401,9 +407,11 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-tasks-feedback-additions-functions` | [patch-review](patch-review.md), [tasks](tasks.md) | [patch-review](patch-review.md) |
 | `harness-thread-ref-functions` | [ui-chat](ui-chat.md) |  |
 | `harness-ui-cache-warm-functions` | [ui-cache-warm](ui-cache-warm.md) |  |
+| `harness-ui-config-load-hooks` |  | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
+| `harness-ui-config-sections-functions` | [ui-config](ui-config.md) | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
 | `harness-ui-connected-hook` | [ui](ui.md) | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |
-| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
+| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-linking-context-functions` | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |
@@ -418,7 +426,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-question-functions` | [ui](ui.md) | [ui-pending](ui-pending.md) |
 | `harness-ui-quota-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-tasks](ui-tasks.md), [ui-usage](ui-usage.md) |
 | `harness-ui-rate-functions` | [ui](ui.md) | [ui-sessions](ui-sessions.md) |
-| `harness-ui-redraw-hook` | [ui](ui.md) | [ui-acp-remote](ui-acp-remote.md), [ui-chat](ui-chat.md), [ui-config](ui-config.md), [ui-insights](ui-insights.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
+| `harness-ui-redraw-hook` | [ui](ui.md) | [ui-acp-remote](ui-acp-remote.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-config](ui-config.md), [ui-insights](ui-insights.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-report-compose-functions` | [ui-report](ui-report.md) | [ui-review](ui-review.md) |
 | `harness-ui-report-panel-functions` | [ui-report](ui-report.md) | [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) |
 | `harness-ui-review-changes-functions` | [ui-review](ui-review.md) | [ui-patch-review](ui-patch-review.md) |

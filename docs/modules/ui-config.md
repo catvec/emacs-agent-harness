@@ -76,6 +76,10 @@ not saved yet and point.
 
 ## Provides
 
+### Hooks
+
+- `harness-ui-config-sections-functions` — Functions inserting sections of their own above the settings.
+
 ### Commands
 
 - `harness-settings` — Show every harness setting for DIRECTORY's project, Global or Project.
