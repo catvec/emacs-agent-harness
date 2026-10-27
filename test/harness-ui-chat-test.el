@@ -7283,7 +7283,7 @@ linked to the one it was denied as."
 (defun harness-ui-chat-test-check-groups (buf)
   "Check that every group of BUF is sound and return the groups, oldest first.
 Its members are distinct blocks folded into it, oldest first, starting
-and ending with a call, and its overlay hides them and nothing else."
+with a call, and its overlay hides them and nothing else."
   (with-current-buffer buf
     (let ((groups (sort (hash-table-values harness-chat--groups)
                         (lambda (a b) (< (harness-chat-group-start a) (harness-chat-group-start b))))))
@@ -7294,7 +7294,6 @@ and ending with a call, and its overlay hides them and nothing else."
           (should (equal members (delete-dups (copy-sequence members))))
           (should (cl-every (lambda (b) (equal (harness-chat-block-group b) (harness-chat-group-id g))) blocks))
           (should (equal "tool-call" (harness-chat-block-kind (car blocks))))
-          (should (equal "tool-call" (harness-chat-block-kind (car (last blocks)))))
           (should (cl-every (lambda (a b) (< (harness-chat-block-start a) (harness-chat-block-start b)))
                             blocks (cdr blocks)))
           (should (= (overlay-start ov) (1- (harness-chat-block-start (car blocks)))))
@@ -7302,7 +7301,7 @@ and ending with a call, and its overlay hides them and nothing else."
       groups)))
 
 (ert-deftest harness-ui-chat-coalesces-across-thinking ()
-  "Thinking between coalescable calls folds into their group; around them it stays out.
+  "Thinking after coalescable calls folds into their group; before them it stays out.
 A model that thinks before every call made runs of none."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
@@ -7330,26 +7329,26 @@ A model that thinks before every call made runs of none."
                            (group (car groups))
                            (thoughts (harness-ui-chat-test-blocks buf "thinking"))
                            (calls (harness-ui-chat-test-blocks buf "tool-call"))
-                           (summary (harness-ui-chat-test-find buf "4 tool calls: Read file ×2, Search files, Find files · thinking ×3")))
+                           (summary (harness-ui-chat-test-find buf "4 tool calls: Read file ×2, Search files, Find files · thinking ×4")))
                       (should (= 1 (length groups)))
                       (should (= 5 (length thoughts)))
                       ;; The four reads and the three thoughts between them, in order.
                       (should (equal (harness-chat-group-members group)
                                      (mapcar #'harness-chat-block-id
                                              (list (nth 0 calls) (nth 1 thoughts) (nth 1 calls) (nth 2 thoughts)
-                                                   (nth 2 calls) (nth 3 thoughts) (nth 3 calls)))))
+                                                   (nth 2 calls) (nth 3 thoughts) (nth 3 calls) (nth 4 thoughts)))))
                       (should summary)
                       (should-not (invisible-p summary))
-                      (dolist (b (list (nth 1 thoughts) (nth 2 thoughts) (nth 3 thoughts) (nth 0 calls) (nth 3 calls)))
+                      (dolist (b (list (nth 1 thoughts) (nth 2 thoughts) (nth 3 thoughts) (nth 4 thoughts) (nth 0 calls) (nth 3 calls)))
                         (should (invisible-p (harness-chat-block-start b))))
                       ;; The thinking that opens the turn and the one before
                       ;; the edit stay out, around the summary.
-                      (dolist (b (list (nth 0 thoughts) (nth 4 thoughts) (nth 4 calls)))
+                      (dolist (b (list (nth 0 thoughts) (nth 4 calls)))
                         (should-not (harness-chat-block-group b))
                         (should-not (invisible-p (harness-chat-block-start b))))
                       (should (< (harness-chat-block-start (nth 0 thoughts))
                                  summary
-                                 (harness-chat-block-start (nth 4 thoughts))))
+                                 (harness-chat-block-start (nth 4 calls))))
                       ;; The turn's sender line stays on its first block.
                       (should (harness-chat-block-head (nth 0 thoughts)))
                       ;; Expanding shows the calls and the thoughts, still collapsed.
@@ -7542,6 +7541,40 @@ and either change closed the groups the user had opened."
           (should (open-p "n-a1"))
           (should (= 2 (length (harness-ui-chat-test-check-groups buf))))
           (should-not (invisible-p (harness-ui-chat-test-find buf "Now the rest"))))))))
+
+(ert-deftest harness-ui-chat-live-auxiliaries-join-tool-group ()
+  "Streamed thinking and slot hints join the current fold, also on regroup."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-flet ((node (n) (harness-chat--on-node n))
+                  (call (id) (harness-chat--on-node
+                              (list :id id :kind "tool-call" :tool "read_file"
+                                    :call-id id :title id :input '(:path "a")))))
+          (node '(:id "before" :kind "hint" :content "standalone"))
+          (call "c1")
+          (harness-chat--on-chunk '(:_harness (:nodeId "t1") :content (:text "Thinking")) "thinking")
+          (let* ((b (gethash "t1" harness-chat--blocks))
+                 (g (gethash (harness-chat-block-group b) harness-chat--groups)))
+            (should g)
+            (should (invisible-p (harness-chat-block-start b)))
+            (harness-chat-toggle-group (harness-chat-group-id g))
+            (node '(:id "slot" :kind "hint" :content "Slots changed"
+                    :meta (:fold (:key "tool-slots-load" :title "Slots" :items ((:text "one") (:text "two"))))))
+            (should (harness-chat-group-expanded g))
+            (should-not (invisible-p (harness-chat-block-start (gethash "slot" harness-chat--blocks))))
+            (call "c2")
+            (should (equal '("c1" "t1" "slot" "c2") (harness-chat-group-members g)))
+            (harness-chat--regroup-keeping-open)
+            (setq g (gethash (harness-chat-block-group b) harness-chat--groups))
+            (should (harness-chat-group-expanded g))
+            (should (equal '("c1" "t1" "slot" "c2") (harness-chat-group-members g)))
+            (harness-chat-toggle-group (harness-chat-group-id g))
+            (should (invisible-p (harness-chat-block-start (gethash "slot" harness-chat--blocks))))
+            (node '(:id "other" :kind "hint" :content "Important"))
+            (should-not (harness-chat-block-group (gethash "other" harness-chat--blocks)))
+            (should-not (harness-chat-block-group (gethash "before" harness-chat--blocks)))))))))
 
 (ert-deftest harness-ui-chat-groups-from-the-first-call ()
   "The first coalescable call opens a run; later calls join it.

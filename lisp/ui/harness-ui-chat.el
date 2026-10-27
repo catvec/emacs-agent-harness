@@ -3357,6 +3357,14 @@ it folds into their group with them."
   (when-let* ((b (gethash id harness-chat--blocks)))
     (equal (harness-chat-block-kind b) "thinking")))
 
+(defun harness-chat--group-auxiliary-p (id)
+  "Non-nil when ID is thinking or a slot-load notice."
+  (or (harness-chat--thinking-block-p id)
+      (when-let* ((block (gethash id harness-chat--blocks)))
+        (and (equal (harness-chat-block-kind block) "hint")
+             (equal (plist-get (harness-node-fold (harness-chat-block-node block)) :key)
+                    "tool-slots-load")))))
+
 (defun harness-chat--run-calls (ids)
   "Return how many of the blocks IDS are coalescable tool calls."
   (cl-count-if #'harness-chat--coalescable-block-p ids))
@@ -3424,8 +3432,8 @@ arriving for one of them changes it."
 
 (defun harness-chat--maybe-coalesce (id)
   "Fold block ID into a run of coalescable tool calls when there is one.
-Only the newest block joins a run, with the thinking since the call
-before it: the transcript grows at its end, and a result arriving for
+Only the newest block joins a run, with thinking and slot notices since
+the call before it: the transcript grows at its end, and a result arriving for
 an older call must not pull it into a run (`harness-chat--regroup'
 groups a whole transcript).  A block whose result shows media is not
 folded, and one that was folded before its result arrived is taken
@@ -3436,6 +3444,13 @@ once it waits on the user, until it is answered."
      ((or (harness-chat--block-shows-media-p block) (harness-chat--waiting-p block))
       (harness-chat--uncoalesce block))
      ((and (equal id (car harness-chat--order))
+           (harness-chat--group-auxiliary-p id)
+           (not (harness-chat-block-group block)))
+      (when-let* ((previous (gethash (cadr harness-chat--order) harness-chat--blocks))
+                  (gid (harness-chat-block-group previous))
+                  (group (gethash gid harness-chat--groups)))
+        (harness-chat--extend-group group (list id))))
+     ((and (equal id (car harness-chat--order))
            (harness-chat--coalescable-block-p id)
            (not (harness-chat-block-group block)))
       ;; Walk back over the run ID ends: coalescable calls and the
@@ -3443,15 +3458,15 @@ once it waits on the user, until it is answered."
       (let ((run (list id)) (rest (cdr harness-chat--order)) (gid nil))
         (while (and rest (not gid)
                     (or (harness-chat--coalescable-block-p (car rest))
-                        (harness-chat--thinking-block-p (car rest))))
+                        (harness-chat--group-auxiliary-p (car rest))))
           (if-let* ((g (harness-chat-block-group (gethash (car rest) harness-chat--blocks))))
               (setq gid g)
             (push (car rest) run)
             (setq rest (cdr rest))))
         (if-let* ((group (and gid (gethash gid harness-chat--groups))))
             (harness-chat--extend-group group run)
-          ;; Thinking before the run's first call stays out of it.
-          (while (harness-chat--thinking-block-p (car run)) (pop run))
+          ;; Auxiliary blocks before the run's first call stay out of it.
+          (while (harness-chat--group-auxiliary-p (car run)) (pop run))
           (when (>= (harness-chat--run-calls run) harness-chat--coalesce-threshold)
             (harness-chat--make-group run))))))))
 
@@ -3498,18 +3513,17 @@ and the others are folded, as `harness-chat--regroup' makes them."
 
 (defun harness-chat--regroup ()
   "Recompute every coalesced run over the rendered transcript.
-A run is coalescable tool calls with nothing but thinking between them;
-the thinking before its first call and after its last stays out."
+A run starts with a coalescable call and includes subsequent calls,
+thinking and slot-load notices, until another kind of block ends it."
   (harness-chat--clear-groups)
   (let ((run nil))                      ; Newest first.
     (cl-flet ((flush ()
-                (while (and run (harness-chat--thinking-block-p (car run))) (pop run))
                 (when (>= (harness-chat--run-calls run) harness-chat--coalesce-threshold)
                   (harness-chat--make-group (nreverse run)))
                 (setq run nil)))
       (dolist (id (reverse harness-chat--order))
         (if (or (harness-chat--coalescable-block-p id)
-                (and run (harness-chat--thinking-block-p id)))
+                (and run (harness-chat--group-auxiliary-p id)))
             (push id run)
           (flush)))
       (flush))))
@@ -3631,6 +3645,7 @@ both places."
             (b (harness-chat--new-block (list :id id :kind kind :content delta))))
         (setf (harness-chat-block-streamed b) t)
         (harness-chat--append-block b)
+        (harness-chat--maybe-coalesce id)
         (harness-chat--follow windows)))
      ((and (not (harness-chat-block-streamed block))
            (equal delta (harness-chat-block-content block)))
