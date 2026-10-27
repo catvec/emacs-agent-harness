@@ -1166,11 +1166,9 @@ woken when the target stops, answers, and only then is reported."
      ;; target's own branch: the wake report cites the target's reply.
      ((string-match-p "done waiting" text)
       '((:type text :delta "all done") (:type done :stop-reason end-turn)))
-     ;; The target stays busy long enough for the waiter to register its
-     ;; wait on it (the parent spawns it, then the waiter's first call).
+     ;; The target is held by the test until the waiter is registered.
      ((string-match-p "long job" text)
-      '((:type wait :seconds 2.5)
-        (:type text :delta "the long job is done")
+      '((:type text :delta "the long job is done")
         (:type done :stop-reason end-turn)))
      ((string-match-p "sub-agent report" text)
       '((:type text :delta "noted") (:type done :stop-reason end-turn)))
@@ -1192,31 +1190,35 @@ It ends the turn while it waits, so the parent still counts it as work
 outstanding; its report comes once the wait wakes it and its next turn
 ends."
   (harness-tools-agent-test-with
-    (harness-test-load-module 'tools-sessions)
-    (let* ((harness-provider-demo-script-override #'harness-tools-agent-test--waiting-script)
-           (target (harness-tools-agent-test-session)))
-      (setq harness-tools-agent-test--target target)
-      (setq harness-provider-demo--delay 0.5)
+   (harness-test-load-module 'tools-sessions)
+   (let* ((harness-provider-demo-script-override #'harness-tools-agent-test--waiting-script)
+          (target (harness-tools-agent-test-session)))
+     (setq harness-tools-agent-test--target target)
+     (harness-test-with-held-demo
+      (lambda (request) (equal target (plist-get (plist-get request :session) :id)))
+      "the long job is done"
       (harness-call 'agent/prompt target "long job")
       (let* ((sid (harness-tools-agent-test-session))
-             (turn (harness-test-await (harness-call 'agent/prompt sid "delegate the waiting") 30))
-             (cid (plist-get (car (harness-call 'session/list (list :parent-id sid))) :id)))
-        (should (eq 'end-turn (plist-get turn :stop-reason)))
-        (should cid)
-        ;; The waiter's turn ends while it waits for the target.
-        (harness-test-wait (lambda () (and (not (harness-call 'agent/running cid))
-                                           (eq 'idle (plist-get (harness-call 'session/get cid) :status))))
-                           10 "the waiting sub-agent")
-        ;; ... so it is not reported, and both sessions count it as work.
-        (should-not (harness-tools-agent-test-reports sid))
-        (should (string-match-p "Sub-agent waiter running" (harness-call 'agent/outstanding sid)))
-        (should (string-match-p "Waiting on" (harness-call 'agent/outstanding cid)))
-        ;; The target stops: the wait wakes the waiter, which answers, and
-        ;; only then does the report reach the parent.
-        (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 20 "the report")
-        (should (string-match-p "all done"
-                                (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
-        (should-not (harness-call 'agent/outstanding sid))))))
+	     (turn (harness-test-await (harness-call 'agent/prompt sid "delegate the waiting") 30))
+	     (cid (plist-get (car (harness-call 'session/list (list :parent-id sid))) :id)))
+	(should (eq 'end-turn (plist-get turn :stop-reason)))
+	(should cid)
+	;; The waiter's turn ends while it waits for the target.
+	(harness-test-wait (lambda () (and (not (harness-call 'agent/running cid))
+					   (eq 'idle (plist-get (harness-call 'session/get cid) :status))))
+			   10 "the waiting sub-agent")
+	;; ... so it is not reported, and both sessions count it as work.
+	(should-not (harness-tools-agent-test-reports sid))
+	(should (string-match-p "Sub-agent waiter running" (harness-call 'agent/outstanding sid)))
+	(should (string-match-p "Waiting on" (harness-call 'agent/outstanding cid)))
+	;; The target stops: the wait wakes the waiter, which answers, and
+	;; only then does the report reach the parent.
+	(should harness-test-finish-demo)
+	(funcall harness-test-finish-demo)
+	(harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 20 "the report")
+	(should (string-match-p "all done"
+				(plist-get (car (harness-tools-agent-test-reports sid)) :content)))
+	(should-not (harness-call 'agent/outstanding sid)))))))
 
 ;;;; Stopping what a session runs outside its turn
 
@@ -1424,31 +1426,35 @@ Its wait (`session_wait') is a cheap registration a stop leaves alone:
 nothing is said to be stopped, the sub-agent stays outstanding, and its
 report comes once the wait wakes it, as it does without a stop."
   (harness-tools-agent-test-with
-    (harness-test-load-module 'tools-sessions)
-    (let* ((harness-provider-demo-script-override #'harness-tools-agent-test--waiting-script)
-           (target (harness-tools-agent-test-session)))
-      (setq harness-tools-agent-test--target target)
-      (setq harness-provider-demo--delay 0.5)
+   (harness-test-load-module 'tools-sessions)
+   (let* ((harness-provider-demo-script-override #'harness-tools-agent-test--waiting-script)
+          (target (harness-tools-agent-test-session)))
+     (setq harness-tools-agent-test--target target)
+     (harness-test-with-held-demo
+      (lambda (request) (equal target (plist-get (plist-get request :session) :id)))
+      "the long job is done"
       (harness-call 'agent/prompt target "long job")
       (let* ((sid (harness-tools-agent-test-session))
-             (turn (harness-test-await (harness-call 'agent/prompt sid "delegate the waiting") 30))
-             (cid (plist-get (car (harness-call 'session/list (list :parent-id sid))) :id)))
-        (should (eq 'end-turn (plist-get turn :stop-reason)))
-        (harness-test-wait (lambda () (and (not (harness-call 'agent/running cid))
-                                           (eq 'idle (plist-get (harness-call 'session/get cid) :status))))
-                           10 "the waiting sub-agent")
-        (should-not (harness-call 'agent/stop-outstanding sid "its task was returned to the queue"))
-        ;; It goes on waiting, outstanding, and is not marked as stopped.
-        (should (string-match-p "Sub-agent waiter running" (harness-call 'agent/outstanding sid)))
-        (should (string-match-p "Waiting on" (harness-call 'agent/outstanding cid)))
-        (should-not (plist-get (gethash cid harness-tools-agent--children) :stopped))
-        (should-not (harness-tools-agent-test-reports sid))
-        ;; The wait wakes it, and it is reported as having finished.
-        (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 20 "the report")
-        (let ((content (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
-          (should (string-match-p "\\`Sub-agent report: waiter (session [^)]+) finished\\." content))
-          (should (string-match-p "all done" content)))
-        (should-not (harness-call 'agent/outstanding sid))))))
+	     (turn (harness-test-await (harness-call 'agent/prompt sid "delegate the waiting") 30))
+	     (cid (plist-get (car (harness-call 'session/list (list :parent-id sid))) :id)))
+	(should (eq 'end-turn (plist-get turn :stop-reason)))
+	(harness-test-wait (lambda () (and (not (harness-call 'agent/running cid))
+					   (eq 'idle (plist-get (harness-call 'session/get cid) :status))))
+			   10 "the waiting sub-agent")
+	(should-not (harness-call 'agent/stop-outstanding sid "its task was returned to the queue"))
+	;; It goes on waiting, outstanding, and is not marked as stopped.
+	(should (string-match-p "Sub-agent waiter running" (harness-call 'agent/outstanding sid)))
+	(should (string-match-p "Waiting on" (harness-call 'agent/outstanding cid)))
+	(should-not (plist-get (gethash cid harness-tools-agent--children) :stopped))
+	(should-not (harness-tools-agent-test-reports sid))
+	;; The wait wakes it, and it is reported as having finished.
+	(should harness-test-finish-demo)
+	(funcall harness-test-finish-demo)
+	(harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 20 "the report")
+	(let ((content (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
+	  (should (string-match-p "\\`Sub-agent report: waiter (session [^)]+) finished\\." content))
+	  (should (string-match-p "all done" content)))
+	(should-not (harness-call 'agent/outstanding sid)))))))
 
 (ert-deftest harness-tools-agent-stop-outstanding-does-not-merge-a-worktree-sub-agent ()
   "A stopped sub-agent in its own worktree is not merged back as finished work.

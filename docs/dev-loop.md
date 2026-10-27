@@ -87,6 +87,10 @@ change can break while you work and save the whole suite for the end:
   run to make once, before handing work in, not after every edit; a
   plan step or a sub-agent does not each need their own.
 
+The runner uses at most four suites at once by default; set
+`HARNESS_TEST_JOBS` to choose another limit. [Test performance](test-performance.md)
+describes the shared fixtures, timing cache and remaining slow checks.
+
 A run keeps every suite's whole output: `scripts/.dev/test-logs/<suite>.log`,
 ending with `== FILE exit STATUS DATE ==` so a log left by an earlier run
 is recognisable, and the run's own lines and summary in

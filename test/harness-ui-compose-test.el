@@ -764,7 +764,7 @@ what they are, as the empty box does, until words are typed in them."
   (skip-unless (executable-find "curl"))
   (harness-ui-compose-test-with
     (let* ((server (harness-test-http-serve
-                    `(("/slow.webm" 200 (("Content-Type" . "video/webm")) ,(make-string 40000 ?w) :chunks 40 :delay 0.2))))
+                    `(("/slow.webm" 200 (("Content-Type" . "video/webm")) ,(make-string 40000 ?w) :chunks 2 :pause-after 1))))
            (url (harness-test-http-url server "/slow.webm"))
            (started (lambda ()
                       (harness-compose-download url)

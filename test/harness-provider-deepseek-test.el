@@ -159,11 +159,15 @@ listing keeps what was listed."
               (should (>= (plist-get lab :context-window) 1048576)))
             (should (= 2097152 (plist-get (harness-call 'provider/model "deepseek:deepseek-flash")
                                           :context-window)))
-            ;; DeepSeek cannot be reached: what it listed stays.
-            (delete-process server)
-            (should (equal (mapcar (lambda (m) (plist-get m :name)) models)
-                           (mapcar (lambda (m) (plist-get m :name))
-                                   (harness-test-await (funcall list-models t)))))))
+            ;; A failed listing keeps the old catalogue.  The HTTP path was
+            ;; exercised above; no second curl and retry delays are needed.
+            (let ((asked nil))
+              (cl-letf (((symbol-function 'harness-openai--fetch-models)
+                         (lambda (_endpoint) (setq asked t) (harness-rejected '(error "offline")))))
+                (should (equal (mapcar (lambda (m) (plist-get m :name)) models)
+                               (mapcar (lambda (m) (plist-get m :name))
+                                       (harness-test-await (funcall list-models t)))))
+                (should asked)))))
       (when (process-live-p server) (delete-process server))
       (harness-provider-unregister 'deepseek)
       (setq harness-deepseek--registered nil

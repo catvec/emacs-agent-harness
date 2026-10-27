@@ -13,6 +13,9 @@
 (require 'cl-lib)
 (require 'harness-test-helpers)
 (require 'harness-module-docs)
+;; The production loader runs compiled Lisp; avoid interpreting the scanner
+;; for every form of the real source tree in the integration checks below.
+(harness-load-compiled (expand-file-name "lisp/harness-module-docs.el" harness-test-root))
 
 (defconst harness-module-docs-test--alpha
   ";;; harness-alpha.el --- Alpha  -*- lexical-binding: t; -*-
@@ -303,9 +306,9 @@ to it in BODY."
       (with-temp-file (expand-file-name "gone.md" out)
         (insert harness-module-docs-header "\n\n# gone\n"))
       (with-temp-file (expand-file-name "guide.md" out) (insert "# A guide\n"))
+      (dolist (f written) (set-file-times f (seconds-to-time (- (float-time) 60))))
       (let ((before (mapcar (lambda (f) (cons f (harness-module-docs-test--read f))) written))
             (times (mapcar (lambda (f) (file-attribute-modification-time (file-attributes f))) written)))
-        (sleep-for 0.01)
         (should (equal (harness-module-docs-generate out) written))
         (dolist (f before) (should (equal (harness-module-docs-test--read (car f)) (cdr f))))
         ;; Unchanged pages are not written again.

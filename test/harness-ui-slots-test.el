@@ -12,6 +12,8 @@
 ;;; Code:
 
 (require 'harness-test-helpers)
+
+(declare-function harness-tasks--schedule "harness-tasks")
 (require 'harness-ui)
 (require 'harness-ui-slots)
 
@@ -2148,41 +2150,43 @@ page counts three at work again."
 The tasks at work go on while the queue is paused, and the waiting one
 starts only once it is resumed.  The Queues buttons do it for both."
   (harness-ui-slots-test-with-harness
-    (let* ((harness-tasks-max-running 1)
-           (other (harness-test-temp-dir))
-           (name (file-name-nondirectory (directory-file-name other)))
-           (a1 (plist-get (harness-call 'task/submit dir "Here, working") :id))
-           (b1 (plist-get (harness-call 'task/submit other "There, working") :id))
-           (b2 (plist-get (harness-call 'task/submit other "There, waiting") :id))
-           (page (harness-slots dir)))
-      (harness-test-wait (lambda () (and (eq 'active (harness-ui-slots-test--live-state a1))
-                                         (eq 'active (harness-ui-slots-test--live-state b1))
-                                         (eq 'pending (harness-ui-slots-test--live-state b2))))
-                         5 "the tasks to be where they should")
-      (harness-ui-slots-test--live-shows page (format "%s +running +1 +1 +– +– +\\[Pause\\]" (regexp-quote name)))
-      ;; The other project's [Pause].
-      (with-current-buffer page (harness-ui-slots-test--push (format "%s +running .*\\[Pause\\]" (regexp-quote name))))
-      (harness-ui-slots-test--live-shows page (format "%s +paused +1 +1 +– +– +\\[Resume\\]" (regexp-quote name)))
-      (harness-ui-slots-test--live-shows page "Queues · 2 · 1 paused")
-      (should (harness-json-true-p (plist-get (harness-call 'task/settings other) :queue-suspended)))
-      (should-not (harness-json-true-p (plist-get (harness-call 'task/settings dir) :queue-suspended)))
-      ;; The task at work goes on, and is done: the slot is free, the queue paused.
-      (harness-call 'task/complete b1)
-      (accept-process-output nil 0.3)
-      (should (eq 'pending (harness-ui-slots-test--live-state b2)))
-      ;; [Resume] on the same row: the waiting task starts.
-      (with-current-buffer page (harness-ui-slots-test--push (format "%s +paused .*\\[Resume\\]" (regexp-quote name))))
-      (harness-test-wait (lambda () (eq 'active (harness-ui-slots-test--live-state b2))) 8 "the waiting task to start")
-      (harness-ui-slots-test--live-shows page (format "%s +running +1 +– +– +– +\\[Pause\\]" (regexp-quote name)))
-      ;; The Queues buttons, for every queue at once.
-      (with-current-buffer page (harness-ui-slots-test--push "Queues +\\[Pause all\\]"))
-      (harness-ui-slots-test--live-shows page "Queues · 2 · 2 paused")
-      (should (cl-every (lambda (q) (eq t (plist-get q :suspended)))
-                        (plist-get (harness-call 'task/queues) :queues)))
-      (with-current-buffer page (harness-ui-slots-test--push "Queues +\\[Pause all\\] \\[Resume all\\]"))
-      (harness-ui-slots-test--live-shows page "Queues · 2\n")
-      (should-not (cl-some (lambda (q) (eq t (plist-get q :suspended)))
-                           (plist-get (harness-call 'task/queues) :queues))))))
+   (let* ((harness-tasks-max-running 1)
+          (other (harness-test-temp-dir))
+          (name (file-name-nondirectory (directory-file-name other)))
+          (_projects (dolist (root (list dir other))
+                       (harness-test-mark-project root)))
+          (a1 (plist-get (harness-call 'task/submit dir "Here, working") :id))
+          (b1 (plist-get (harness-call 'task/submit other "There, working") :id))
+          (b2 (plist-get (harness-call 'task/submit other "There, waiting") :id))
+          (page (harness-slots dir)))
+     (harness-test-wait (lambda () (and (eq 'active (harness-ui-slots-test--live-state a1))
+                                        (eq 'active (harness-ui-slots-test--live-state b1))
+                                        (eq 'pending (harness-ui-slots-test--live-state b2))))
+                        5 "the tasks to be where they should")
+     (harness-ui-slots-test--live-shows page (format "%s +running +1 +1 +– +– +\\[Pause\\]" (regexp-quote name)))
+     ;; The other project's [Pause].
+     (with-current-buffer page (harness-ui-slots-test--push (format "%s +running .*\\[Pause\\]" (regexp-quote name))))
+     (harness-ui-slots-test--live-shows page (format "%s +paused +1 +1 +– +– +\\[Resume\\]" (regexp-quote name)))
+     (harness-ui-slots-test--live-shows page "Queues · 2 · 1 paused")
+     (should (harness-json-true-p (plist-get (harness-call 'task/settings other) :queue-suspended)))
+     (should-not (harness-json-true-p (plist-get (harness-call 'task/settings dir) :queue-suspended)))
+     ;; The task at work goes on, and is done: the slot is free, the queue paused.
+     (harness-call 'task/complete b1)
+     (harness-tasks--schedule)
+     (should (eq 'pending (harness-ui-slots-test--live-state b2)))
+     ;; [Resume] on the same row: the waiting task starts.
+     (with-current-buffer page (harness-ui-slots-test--push (format "%s +paused .*\\[Resume\\]" (regexp-quote name))))
+     (harness-test-wait (lambda () (eq 'active (harness-ui-slots-test--live-state b2))) 8 "the waiting task to start")
+     (harness-ui-slots-test--live-shows page (format "%s +running +1 +– +– +– +\\[Pause\\]" (regexp-quote name)))
+     ;; The Queues buttons, for every queue at once.
+     (with-current-buffer page (harness-ui-slots-test--push "Queues +\\[Pause all\\]"))
+     (harness-ui-slots-test--live-shows page "Queues · 2 · 2 paused")
+     (should (cl-every (lambda (q) (eq t (plist-get q :suspended)))
+                       (plist-get (harness-call 'task/queues) :queues)))
+     (with-current-buffer page (harness-ui-slots-test--push "Queues +\\[Pause all\\] \\[Resume all\\]"))
+     (harness-ui-slots-test--live-shows page "Queues · 2\n")
+     (should-not (cl-some (lambda (q) (eq t (plist-get q :suspended)))
+                          (plist-get (harness-call 'task/queues) :queues))))))
 
 (ert-deftest harness-ui-slots-live-shows-a-queue-held-for-quota ()
   "A project whose waiting tasks are out of quota is held, and says for what.

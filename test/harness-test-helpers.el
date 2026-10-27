@@ -175,8 +175,13 @@ repository's own plugins (`harness-test-plugin-directories')."
                        (append '("lisp/modules" "lisp/ui") (harness-test-plugin-directories)))))
     (unless file (error "No module %s" name))
     ;; Its source is what the module records as its file, as at start.
+    ;; Tests bind the state directory to a fresh directory for each case.
+    ;; Keep module compilations for this Emacs process outside that directory
+    ;; so every case can reuse them.  The normal freshness checks still apply.
     (let ((harness--defining-module name)
-          (harness--defining-file file))
+          (harness--defining-file file)
+          (harness-compile-subdirectory
+           (expand-file-name "module-elc/" harness-test-state-root)))
       (harness-load-compiled file))
     (harness-module-start name)))
 
@@ -187,6 +192,116 @@ repository's own plugins (`harness-test-plugin-directories')."
           (harness-state-directory dir))
      (unwind-protect (progn ,@body)
        (ignore-errors (delete-directory dir t)))))
+
+(defun harness-test-share-compilation (&rest subdirectories)
+  "Share compiled SUBDIRECTORIES between isolated states in this suite.
+Each test keeps its own state, while the ordinary harness loader checks
+and reuses compiled files in a directory owned by this Emacs process.
+Use separate subdirectories for processes that may compile concurrently."
+  (dolist (subdirectory subdirectories)
+    (let ((cache (expand-file-name subdirectory harness-test-state-root))
+          (link (expand-file-name subdirectory harness-state-directory)))
+      (make-directory cache t)
+      (make-symbolic-link cache link))))
+
+(defun harness-test-mark-project (directory)
+  "Mark DIRECTORY as a project without invoking Git.
+This is only a project-discovery fixture, not a working repository."
+  (make-directory (expand-file-name ".git" directory) t))
+
+(defvar harness-test-clock-offset 0
+  "Seconds added to the real clock inside `harness-test-with-clock'.")
+
+(defmacro harness-test-with-clock (&rest body)
+  "Run BODY with a clock that `harness-test-clock-fire' can advance.
+The clock continues to advance in real time, so asynchronous waits retain
+their normal deadlines.  Explicit arguments to `float-time' are unchanged."
+  (declare (indent 0))
+  `(let ((harness-test-clock-offset 0)
+         (real-float-time (symbol-function 'float-time)))
+     (cl-letf (((symbol-function 'float-time)
+                (lambda (&optional time)
+                  (if time (funcall real-float-time time)
+                    (+ harness-test-clock-offset (funcall real-float-time))))))
+       ,@body)))
+
+(defun harness-test-clock-fire (timer at)
+  "Advance the test clock to AT and fire the scheduled TIMER immediately."
+  (unless (memq timer timer-list) (error "Timer is not scheduled"))
+  (cl-incf harness-test-clock-offset (max 0 (- at (float-time))))
+  (timer-event-handler timer))
+
+(defun harness-test-fire-debounce (key)
+  "Fire the scheduled debounce for KEY immediately, if there is one."
+  (when-let* ((timer (gethash key harness--debounce-timers)))
+    (timer-event-handler timer)))
+
+(defun harness-test-capture-timer (seconds fn)
+  "Run FN and return the one-shot timer it schedules for SECONDS.
+The real timer is left scheduled so the test can fire it explicitly."
+  (let ((original (symbol-function 'run-at-time)) timer)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (time repeat function &rest args)
+                 (let ((scheduled (apply original time repeat function args)))
+                   (when (and (equal time seconds) (null repeat))
+                     (when timer (error "More than one timer matched %s" seconds))
+                     (setq timer scheduled))
+                   scheduled))))
+      (funcall fn))
+    (unless timer (error "No timer matched %s" seconds))
+    timer))
+
+(defmacro harness-test-with-command-watchdog (name &rest body)
+  "Run BODY with the watchdog of command NAME available for explicit firing.
+Bind `harness-test-command-timer' and `harness-test-command-timeout' to
+the actual timer and requested timeout.  The timer is set far ahead so
+the test can wait for the subprocess to be ready, then call
+`timer-event-handler' on it.  Fire it on cleanup too if still pending."
+  (declare (indent 1))
+  `(let ((original-command (symbol-function 'harness-run-command))
+         (original-timer (symbol-function 'run-at-time))
+         (harness-test-command-timer nil)
+         (harness-test-command-timeout nil))
+     (unwind-protect
+         (cl-letf (((symbol-function 'harness-run-command)
+                    (lambda (command &rest options)
+                      (if (equal (plist-get options :name) ,name)
+                          (let ((timeout (or (plist-get options :timeout) 120)))
+                            (cl-letf (((symbol-function 'run-at-time)
+                                       (lambda (time repeat function &rest args)
+                                         (if (and (equal time timeout) (null repeat)
+                                                  (null harness-test-command-timer))
+                                             (progn
+                                               (setq harness-test-command-timeout time)
+                                               (setq harness-test-command-timer
+                                                     (apply original-timer 3600 repeat function args)))
+                                           (apply original-timer time repeat function args)))))
+                              (apply original-command command options)))
+                        (apply original-command command options)))))
+           ,@body)
+       (when (memq harness-test-command-timer timer-list)
+         (timer-event-handler harness-test-command-timer)))))
+
+(defmacro harness-test-with-held-demo (predicate text &rest body)
+  "Run BODY, holding the demo request matching PREDICATE until released.
+Call the bound `harness-test-finish-demo' to finish it with TEXT.  Other
+requests continue through the real demo provider."
+  (declare (indent 2))
+  `(let ((demo-complete (symbol-function 'harness-provider-demo--complete))
+         (match-request ,predicate)
+         (harness-test-finish-demo nil))
+     (cl-letf (((symbol-function 'harness-provider-demo--complete)
+                (lambda (request)
+                  (if (funcall match-request request)
+                      (let ((on-event (plist-get request :on-event)))
+                        (setq harness-test-finish-demo
+                              (lambda ()
+                                (funcall on-event (list :type 'text :delta ,text))
+                                (funcall on-event '(:type done :stop-reason end-turn))))
+                        (funcall on-event '(:type start))
+                        (list :cancel (lambda () (funcall on-event '(:type done :stop-reason cancelled)))))
+                    (funcall demo-complete request)))))
+       ,@body)))
 
 (defun harness-test-wait (pred &optional timeout message)
   "Spin the event loop until PRED returns non-nil or TIMEOUT seconds pass.
@@ -205,7 +320,8 @@ Signal an error mentioning MESSAGE on timeout.  Return PRED's value."
 ROUTES maps a path to (STATUS HEADERS BODY . OPTIONS): HEADERS an alist
 sent as given, BODY a string of bytes.  OPTIONS is a plist: :chunks
 splits the body in that many pieces sent :delay seconds apart (the
-first one after :delay too), :no-length leaves Content-Length out,
+first one after :delay too); :pause-after sends that many pieces then
+holds the connection open until the client closes it; :no-length leaves Content-Length out,
 :reset-after K cuts the connection with a reset once K pieces went (0
 cuts it right after the headers), a moment after, so that what went
 has reached the client: a reset right behind the data does not promise
@@ -257,6 +373,7 @@ on its way and read.")
   (pcase-let* ((`(,status ,headers ,body . ,options) route)
                (chunks (max 1 (or (plist-get options :chunks) 1)))
                (delay (or (plist-get options :delay) 0))
+               (pause-after (plist-get options :pause-after))
                (reset-after (plist-get options :reset-after))
                (size (length body))
                (step (max 1 (ceiling size chunks)))
@@ -265,7 +382,7 @@ on its way and read.")
                            (push (substring body i (min size (+ i step))) out)
                            (setq i (+ i step)))
                          (nreverse out)))
-               (send nil))
+               (send nil) (sent 0))
     ;; Each piece goes out as it is written, not once the one before it is
     ;; acknowledged.
     (ignore-errors (set-network-process-option proc :nodelay t))
@@ -279,7 +396,9 @@ on its way and read.")
                    (if (and pieces (or (null reset-after)
                                        (> (length pieces) (- chunks reset-after))))
                        (progn (ignore-errors (process-send-string proc (pop pieces)))
-                              (if (> delay 0) (run-at-time delay nil send) (funcall send)))
+                              (cl-incf sent)
+                              (unless (and pause-after (>= sent pause-after))
+                                (if (> delay 0) (run-at-time delay nil send) (funcall send))))
                      (if reset-after
                          (run-at-time harness-test--http-reset-grace nil #'harness-test--http-reset proc)
                        (ignore-errors (process-send-eof proc)))))))

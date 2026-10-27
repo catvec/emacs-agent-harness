@@ -9,6 +9,7 @@
 (defvar harness-merge--holds)
 (defvar harness-merge--calls)
 (defvar harness-merge--timers)
+(defvar harness-agent--cancel-grace)
 (defvar harness-merge--hold-timeout)
 (defvar harness-session-interrupted-output)
 (defvar harness-merge-conflict-resolver)
@@ -485,11 +486,21 @@ the merge was aborted, which happens once."
     (harness-merge-test--conflict-setup wt root)
     (harness-define-tool "stall" :label "Stall" :description "never returns" :kind 'read
                          :handler (lambda (_input _ctx) (harness-with-promise (resolve reject) (ignore resolve reject))))
-    (let ((harness-merge--hold-timeout 0.5) (finished nil) (resolvers nil)
+    (let ((harness-merge--hold-timeout 60) (finished nil) (resolvers nil)
           (harness-provider-demo-script-override '((:type tool-call :id "w-1" :name "stall" :input nil))))
       (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
       (harness-on 'merge/resolver (lambda (_c _p r) (push r resolvers)))
       (harness-call 'merge/enqueue child parent)
+      ;; Wait for the resolver to be running its stalled tool, then fire the
+      ;; actual conflict timer without relying on wall-clock delays.
+      (harness-test-wait (lambda () (and resolvers (gethash child harness-merge--timers)
+                                        (eq 'tool (plist-get (harness-call 'agent/activity (car resolvers)) :phase))))
+                         10 "the resolver to run its tool")
+      (let ((cancel-timer
+             (harness-test-capture-timer
+              harness-agent--cancel-grace
+              (lambda () (timer-event-handler (gethash child harness-merge--timers))))))
+        (timer-event-handler cancel-timer))
       (harness-test-wait (lambda () finished) 10 "aborted")
       (should (equal (list (list child parent 'aborted)) finished))
       (let ((result (car (harness-merge-test--outside child 'tool-result))))

@@ -818,19 +818,21 @@ request, which is left waiting, and the waiting approval (a plist the status giv
       (harness-acp-remote-test-send c (list :jsonrpc "2.0" :method "$/ping" :params (list :x (make-string 70000 ?a))))
       (should (harness-acp-remote-test-signed-in-p c)))
     ;; And one that does nothing to sign in is closed in time.
-    (let ((harness-acp-remote--preauth-timeout 0.2)
-          (c (harness-acp-remote-test-connect)))
-      (sleep-for 0.3)
-      (harness-acp-remote--close-idle)
-      (harness-test-wait (lambda () (harness-acp-remote-test-ws-closed c)) 15 "the connection to close"))
+    (harness-test-with-clock
+      (let ((harness-acp-remote--preauth-timeout 30)
+            (c (harness-acp-remote-test-connect)))
+        (cl-incf harness-test-clock-offset 31)
+        (harness-acp-remote--close-idle)
+        (harness-test-wait (lambda () (harness-acp-remote-test-ws-closed c)) 15 "the connection to close")))
     ;; One that asks to sign in has the time it takes, from its last try.
-    (let ((harness-acp-remote--preauth-timeout 0.4)
-          (c (harness-acp-remote-test-connect)))
-      (sleep-for 0.3)
-      (harness-acp-remote-test-start-sign-in c)
-      (sleep-for 0.3)
-      (harness-acp-remote--close-idle)
-      (should-not (harness-acp-remote-test-ws-closed c)))))
+    (harness-test-with-clock
+      (let ((harness-acp-remote--preauth-timeout 30)
+            (c (harness-acp-remote-test-connect)))
+        (cl-incf harness-test-clock-offset 25)
+        (harness-acp-remote-test-start-sign-in c)
+        (cl-incf harness-test-clock-offset 10)
+        (harness-acp-remote--close-idle)
+        (should-not (harness-acp-remote-test-ws-closed c))))))
 
 (ert-deftest harness-acp-remote-a-connection-with-no-session-hears-nothing-of-the-harness ()
   "No session update, event or request reaches a client that has not signed in, and it answers for nothing."

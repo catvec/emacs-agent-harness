@@ -370,8 +370,9 @@ board a window shows again loads its tasks anew, which draws it."
           (cl-letf (((symbol-function 'harness-ui-tasks--render) (lambda (&rest _) (cl-incf drawn)))
                     ((symbol-function 'harness-ui-tasks--fetch) (lambda (&rest _) (cl-incf fetched))))
            (cl-flet ((scheduled (key) (harness-ui-tasks-test--scheduled-p key board))
-                    (settle () (let ((deadline (+ (float-time) 0.6)))
-                                 (while (< (float-time) deadline) (accept-process-output nil 0.05)))))
+                    (settle ()
+                      (dolist (key '(harness-ui-view-catch-up harness-ui-tasks harness-ui-tasks-refresh))
+                        (harness-test-fire-debounce (list key board)))))
             (should (window-live-p window))
             ;; A board with tasks draws as the sessions change.
             (with-current-buffer board (setq harness-ui-tasks--tasks (list (list :id "t-1" :prompt "Task"))))
@@ -4185,53 +4186,61 @@ The switch is on the heading, right after its count rather than at the
 end of the line, and the header line has none.  A click on it resumes,
 and the waiting task starts."
   (harness-ui-tasks-test-with
-    (let ((harness-tasks-max-running 1))
-      (harness-ui-tasks-test--type-and-submit board "First task")
-      (harness-ui-tasks-test--type-and-submit board "Waiting task")
-      (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: running\\]\n\\(.\\|\n\\)*Waiting task")
-      (with-current-buffer board
-        (goto-char (point-min))
-        (should (eq 'harness-ui-tasks-toggle-queue (key-binding (kbd "P"))))
-        ;; Beside the count: two plain spaces, no stretch of space
-        ;; pushing it to the right of the line.
-        (search-forward "[Queue: running]")
-        (let ((at (match-beginning 0)))
-          (should (eq 'pending (get-text-property at 'harness-task-section)))
-          (should (button-at at))
-          (should (equal "Pending  1  " (buffer-substring-no-properties (- at 12) at)))
-          (should-not (text-property-not-all (- at 12) at 'display nil))
-          (should (string-match-p "\\`Queue running.*Click or P to suspend"
-                                  (harness-ui-tasks--queue-help nil nil at))))
-        (should-not (string-match-p "Queue" (harness-ui-tasks--header most-positive-fixnum)))
-        (goto-char (point-min))
-        (execute-kbd-macro "P"))
-      ;; Suspended: the heading's switch says so, and so does the box.
-      (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: suspended\\]\n")
-      (with-current-buffer board
-        (should-not (string-match-p "Queue" (harness-ui-tasks--header most-positive-fixnum)))
-        (should (string-match-p "\\`Queue suspended.*Click or P to resume"
-                                (harness-ui-tasks--queue-help nil nil (point-min))))
-        (should (string-match-p "queue suspended" (harness-ui-tasks--new-settings-line))))
-      ;; The waiting task stays pending while the queue is suspended, and
-      ;; its card says so, the facts coming with the tasks a moment later.
-      (let ((id (harness-ui-tasks-test--card-id board "Waiting task")))
-        (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
-        (harness-test-wait
-         (lambda () (with-current-buffer board
-                      (plist-get (cl-find id harness-ui-tasks--tasks
-                                          :key (lambda (task) (plist-get task :id)) :test #'equal)
-                                 :queue-suspended)))
-         5 "the board to hear the queue is suspended")
-        (harness-ui-tasks-test--show-subtitle board "Waiting task")
-        (should (string-match-p "queue suspended" (harness-ui-tasks-test--card-text board "Waiting task")))
-        ;; A click on the switch resumes, which starts it.
-        (with-current-buffer board
-          (goto-char (point-min))
-          (search-forward "[Queue: suspended]")
-          (push-button (match-beginning 0)))
-        (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
-                           5 "the waiting task to start")
-        (harness-ui-tasks-test--wait-text board "Pending  0  \\[Queue: running\\]\n")))))
+   (let ((harness-tasks-max-running 1)
+         ;; Keep the first task in its slot until the queue is suspended.
+         (harness-provider-demo-script-override '((:type text :delta "Working on it."))))
+     (unwind-protect
+         (progn
+	   (harness-ui-tasks-test--type-and-submit board "First task")
+	   (harness-ui-tasks-test--type-and-submit board "Waiting task")
+	   (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: running\\]\n\\(.\\|\n\\)*Waiting task")
+	   (with-current-buffer board
+             (goto-char (point-min))
+             (should (eq 'harness-ui-tasks-toggle-queue (key-binding (kbd "P"))))
+             ;; Beside the count: two plain spaces, no stretch of space
+             ;; pushing it to the right of the line.
+             (search-forward "[Queue: running]")
+             (let ((at (match-beginning 0)))
+               (should (eq 'pending (get-text-property at 'harness-task-section)))
+               (should (button-at at))
+               (should (equal "Pending  1  " (buffer-substring-no-properties (- at 12) at)))
+               (should-not (text-property-not-all (- at 12) at 'display nil))
+               (should (string-match-p "\\`Queue running.*Click or P to suspend"
+                                       (harness-ui-tasks--queue-help nil nil at))))
+             (should-not (string-match-p "Queue" (harness-ui-tasks--header most-positive-fixnum)))
+             (goto-char (point-min))
+             (execute-kbd-macro "P"))
+	   ;; Suspended: the heading's switch says so, and so does the box.
+	   (harness-ui-tasks-test--wait-text board "Pending  1  \\[Queue: suspended\\]\n")
+	   (with-current-buffer board
+             (should-not (string-match-p "Queue" (harness-ui-tasks--header most-positive-fixnum)))
+             (should (string-match-p "\\`Queue suspended.*Click or P to resume"
+                                     (harness-ui-tasks--queue-help nil nil (point-min))))
+             (should (string-match-p "queue suspended" (harness-ui-tasks--new-settings-line))))
+	   ;; The waiting task stays pending while the queue is suspended, and
+	   ;; its card says so, the facts coming with the tasks a moment later.
+	   (let ((id (harness-ui-tasks-test--card-id board "Waiting task")))
+             (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+             (harness-test-wait
+              (lambda () (with-current-buffer board
+			   (plist-get (cl-find id harness-ui-tasks--tasks
+                                               :key (lambda (task) (plist-get task :id)) :test #'equal)
+                                      :queue-suspended)))
+              5 "the board to hear the queue is suspended")
+             (harness-ui-tasks-test--show-subtitle board "Waiting task")
+             (should (string-match-p "queue suspended" (harness-ui-tasks-test--card-text board "Waiting task")))
+             ;; Free the slot while suspended, so resuming the queue starts it.
+             (harness-call 'task/cancel (harness-ui-tasks-test--card-id board "First task"))
+             ;; A click on the switch resumes, which starts it.
+             (with-current-buffer board
+               (goto-char (point-min))
+               (search-forward "[Queue: suspended]")
+               (push-button (match-beginning 0)))
+             (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
+				5 "the waiting task to start")
+             (harness-ui-tasks-test--wait-text board "Pending  0  \\[Queue: running\\]\n")))
+       (dolist (task (harness-call 'task/list default-directory))
+         (harness-call 'task/cancel (plist-get task :id)))))))
 
 (declare-function harness-tasks--schedule "harness-tasks")
 

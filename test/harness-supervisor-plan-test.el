@@ -328,8 +328,17 @@ first, so they win."
 
 (defun harness-supervisor-plan-test-wait-state (sid id state &optional n timeout)
   "Wait until step ID of the Nth plan of session SID is in STATE."
-  (harness-test-wait (lambda () (equal state (harness-supervisor-plan-test-state sid id n)))
-                     (or timeout 15) (format "step %s to be %s" id state)))
+  (condition-case err
+      (harness-test-wait (lambda () (equal state (harness-supervisor-plan-test-state sid id n)))
+                         (or timeout 15) (format "step %s to be %s" id state))
+    (error
+     (message "Supervisor test diagnostics: plan=%S requests=%S live=%S running=%S nodes=%S"
+              (ignore-errors (harness-supervisor-plan-test-plan sid n))
+              harness-supervisor-plan-test--requests
+              (hash-table-keys harness-supervisor--live)
+              (ignore-errors (harness-call 'agent/running))
+              (ignore-errors (harness-call 'session/nodes sid)))
+     (signal (car err) (cdr err)))))
 
 (defun harness-supervisor-plan-test-worker (sid id)
   "Wait until the worker of step ID of session SID runs; return its session id."

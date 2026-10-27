@@ -2428,25 +2428,22 @@ moved later the window is a new one, which may start lower."
   (should-not (harness-provider-claude--cache-ttl-of nil)))
 
 (ert-deftest harness-provider-claude-usage-says-when-the-cache-was-used ()
-  "A turn's usage says when its last request used the prompt cache, as
-that request started rather than when the turn ended, and the lifetime
-its writes asked for: the hour Claude Code asks for on a subscription,
-five minutes with an API key."
+  "Usage names the request's start and the lifetime its cache writes asked for."
   (harness-provider-claude-test--setup)
-  (pcase-dolist (`(,auth . ,ttl) '(("subscription" . 3600) ("api" . 300)))
-    (let* ((process-environment (append (list (concat "HARNESS_FAKE_CLAUDE_AUTH=" auth)
-                                              "HARNESS_FAKE_CLAUDE_PAUSE=1")
-                                        process-environment))
-           (sid (concat "cache-" auth))
-           (before (float-time))
-           ;; The reply streams with a pause of a second after the request started.
-           (events (car (harness-provider-claude-test--run
-                         (harness-provider-claude-test--request sid "slow-text"))))
-           (after (float-time))
+  (dolist (ttl '(3600 300))
+    (let* ((sid (format "cache-%d" ttl))
+           (usage (list :input_tokens 5 :output_tokens 1 :cache_read_input_tokens 2000
+                        :cache_creation_input_tokens 100
+                        :cache_creation (list :ephemeral_1h_input_tokens (if (= ttl 3600) 100 0)
+                                              :ephemeral_5m_input_tokens (if (= ttl 300) 100 0))))
+           ;; The request starts at 100, its streamed message ends at 103.
+           (events (harness-provider-claude-test--play
+                    sid (list 100 (harness-provider-claude-test--message-start "msg" usage)
+                              103 (harness-provider-claude-test--assistant "msg" usage)
+                              (harness-provider-claude-test--result usage))))
            (u (harness-provider-claude-test--find events 'usage)))
       (should (= ttl (plist-get u :cache-ttl)))
-      (should (<= before (plist-get u :cache-at) after))
-      (should (>= (- after (plist-get u :cache-at)) 0.9))
+      (should (= 100 (plist-get u :cache-at)))
       ;; The turn's time goes with it; the lifetime stays for the session.
       (should-not (gethash sid harness-provider-claude--cache-at))
       (should (= ttl (gethash sid harness-provider-claude--cache-ttl)))

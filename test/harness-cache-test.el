@@ -156,11 +156,13 @@ before it lapses, whatever the lifetime."
   "`cache/pre-expire' comes once, ahead of the lapse, with what the handlers
 need: when it lapses, the lifetime, the lead, the model and the context."
   (harness-cache-test-with
+   (harness-test-with-clock
     (let ((harness-cache--lead-min 0.5) (harness-cache--lead-max 0.5) (harness-cache--too-late 0.1))
       (let* ((sid (harness-cache-test-session 2.0 0))
              (expires (harness-cache-test--expires sid)))
         (should-not harness-cache-test--events)
-        (harness-test-wait (lambda () harness-cache-test--events) 5 "the event")
+        (let ((watch (gethash sid harness-cache--watched)))
+          (harness-test-clock-fire (plist-get watch :timer) (plist-get watch :fire)))
         (should (< (float-time) expires))
         (should (equal 1 (length harness-cache-test--events)))
         (pcase-let ((`(,heard ,info) (car harness-cache-test--events)))
@@ -174,25 +176,28 @@ need: when it lapses, the lifetime, the lead, the model and the context."
           (should-not (plist-get info :running)))
         ;; Not again for the same moment, though the session changes.
         (harness-call 'session/hint sid "something happened")
-        (sit-for 0.3)
         (should (equal 1 (length harness-cache-test--events)))
-        (should-not (harness-call 'cache/watching sid))))))
+        (should-not (harness-call 'cache/watching sid)))))))
 
 (ert-deftest harness-cache-a-request-that-read-the-cache-moves-the-moment-on ()
   "A request that reads the cache moves the lapse, and the event with it: the
 one set for the earlier moment never comes, and the one for the new moment
 does.  This is what makes a refresh go on by itself."
   (harness-cache-test-with
+   (harness-test-with-clock
     (let ((harness-cache--lead-min 0.4) (harness-cache--lead-max 0.4) (harness-cache--too-late 0.1))
       (let* ((sid (harness-cache-test-session 1.6 0))
-             (first (harness-cache-test--expires sid)))
-        (sit-for 0.5)
+             (first (harness-cache-test--expires sid))
+             (first-timer (plist-get (gethash sid harness-cache--watched) :timer)))
+        (cl-incf harness-test-clock-offset 0.5)
         ;; A request at 0.5 s keeps the cache another 1.6 s.
         (harness-cache-test-stamp sid 1.6 0)
         (let ((second (harness-cache-test--expires sid)))
           (should (> second first))
           (should (= second (plist-get (harness-call 'cache/watching sid) :expires)))
-          (harness-test-wait (lambda () harness-cache-test--events) 5 "the event")
+          (should-not (memq first-timer timer-list))
+          (let ((watch (gethash sid harness-cache--watched)))
+            (harness-test-clock-fire (plist-get watch :timer) (plist-get watch :fire)))
           (should (equal 1 (length harness-cache-test--events)))
           (should (= second (plist-get (cadr (car harness-cache-test--events)) :expires)))
           (should (>= (float-time) (- second 0.5)))
@@ -200,8 +205,9 @@ does.  This is what makes a refresh go on by itself."
           (setq harness-cache-test--events nil)
           (harness-cache-test-stamp sid 1.6 0)
           (should (> (harness-cache-test--expires sid) second))
-          (harness-test-wait (lambda () harness-cache-test--events) 5 "the next event")
-          (should (equal 1 (length harness-cache-test--events))))))))
+          (let ((watch (gethash sid harness-cache--watched)))
+            (harness-test-clock-fire (plist-get watch :timer) (plist-get watch :fire)))
+          (should (equal 1 (length harness-cache-test--events)))))))))
 
 (ert-deftest harness-cache-watcher-has-nothing-to-say-for-a-cache-that-is-gone ()
   "No timer is set for a session without a cache, one that lapsed, one with
