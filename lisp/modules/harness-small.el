@@ -83,7 +83,8 @@ the call's end: the caller is sent `harness-small-restart-event' to
 forget what the failed try had gathered, the wait `harness-retry-backoff'
 asks for is taken (a rate limit's Retry-After honoured, else a growing,
 jittered backoff), and the request is sent again, at most
-`harness-retry-max-attempts' times.  The `done' of the last try, whatever
+`harness-retry-max-attempts' times, exactly as a step of a turn is.
+The `done' of the last try, whatever
 it says, is the one the caller reads.  A request that raises instead of
 failing is handed over as a `done' with `:stop-reason' error, so a caller
 handles it the one way.
@@ -116,7 +117,7 @@ retry."
          (receive (ev serial)
            ;; Only the try in flight speaks, and a `done' is its last word.
            (when (and (not cancelled) (= serial tries))
-             (if (and (eq (plist-get ev :type) 'done) (< tries most) (harness-small-retryable-p ev))
+             (if (and (eq (plist-get ev :type) 'done) (<= tries most) (harness-small-retryable-p ev))
                  ;; A failure worth another try: the half answer is
                  ;; forgotten, the wait the failure asks for is taken, and
                  ;; the request is sent again.

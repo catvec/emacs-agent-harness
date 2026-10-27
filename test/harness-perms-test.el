@@ -464,6 +464,39 @@ first, as `provider/complete' passed them to `session/internal-start'."
       (should (eq 'allow (plist-get d :behavior)))
       (should (equal "harmless" (plist-get d :reason))))))
 
+(ert-deftest harness-perms-auto-mode-recovers-from-a-rate-limited-judge ()
+  "A judge that answers 429 at first still decides the call.
+This is the field's bug: DeepSeek under load rate limited the judge's
+request, which nothing tried again, so a call nobody judged was put to
+the user.  The judge's request is an ordinary one-off call, so
+`harness-small-ask' now waits the rate limit out and asks again."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((attempts 0)
+         (harness-retry-delay 0.01)
+         (harness-retry-jitter 0)
+         (harness-perms-auto-model "judge:x"))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (req)
+                  (let ((cb (plist-get req :on-event))
+                        (n (cl-incf attempts)))
+                    (run-at-time 0.01 nil
+                                 (lambda ()
+                                   (if (= n 1)
+                                       (funcall cb (list :type 'done :stop-reason 'error
+                                                         :error "HTTP 429: Too many requests"
+                                                         :error-kind 'rate-limit))
+                                     (funcall cb (list :type 'text :delta "{\"decision\":\"allow\",\"reason\":\"ordinary work\"}"))
+                                     (funcall cb (list :type 'done :stop-reason 'end-turn))))))
+                  (list :cancel #'ignore)))
+    (let ((d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (equal "ordinary work" (plist-get d :reason)))
+      ;; Asked twice: the 429 was waited out, not turned into no verdict.
+      (should (= 2 attempts))
+      (should-not (plist-get d :no-verdict)))))
+
 (ert-deftest harness-perms-judge-sees-the-call-alone ()
   "The judge rules on the safety of one call, with nothing else to go on.
 Its request is one-off (`:ephemeral'), so the provider brings no

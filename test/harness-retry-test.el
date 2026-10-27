@@ -152,22 +152,22 @@ An exit the program chose, with a message, ends the turn as before."
       (should (= 2 (length harness-retry-test-requests)))
       (should (cl-some (lambda (h) (string-match-p "\\`the provider's process died: claude exited with status 9; trying again" h))
                        (harness-retry-test-hints id)))))
-  (should (eq 'process (harness-retry--kind '(:error "claude exited with status 137: Killed"))))
-  (should-not (harness-retry--kind '(:error "claude exited with status 1: Invalid API key")))
-  (should-not (harness-retry--kind '(:error "claude exited with status 90"))))
+  (should (eq 'process (harness-retry-kind '(:error "claude exited with status 137: Killed"))))
+  (should-not (harness-retry-kind '(:error "claude exited with status 1: Invalid API key")))
+  (should-not (harness-retry-kind '(:error "claude exited with status 90"))))
 
 (ert-deftest harness-retry-honours-retry-after ()
   "A rate limit that asked for a wait is waited for, its delay capped."
   (should (= 3 (let ((harness-retry-delay 0.5) (harness-retry-jitter 0))
-                 (harness-retry--delay 1 '(:retry-after 3)))))
+                 (harness-retry-backoff 1 '(:retry-after 3)))))
   (should (= 30.0 (let ((harness-retry-delay 1) (harness-retry-jitter 0)
                         (harness-retry-max-delay 30.0))
-                    (harness-retry--delay 1 '(:retry-after 600)))))
+                    (harness-retry-backoff 1 '(:retry-after 600)))))
   ;; Never sooner than the backoff: a server's wait is a minimum.
   (should (= 10.0 (let ((harness-retry-delay 10) (harness-retry-jitter 0))
-                    (harness-retry--delay 1 '(:retry-after 3)))))
+                    (harness-retry-backoff 1 '(:retry-after 3)))))
   (should (= 4.0 (let ((harness-retry-delay 1) (harness-retry-jitter 0))
-                   (harness-retry--delay 3 '(:retry-after nil))))) ; 1, 2, 4
+                   (harness-retry-backoff 3 '(:retry-after nil))))) ; 1, 2, 4
   (harness-retry-test-with
     (let ((harness-retry-delay 0.05))
       (harness-retry-test-define-provider

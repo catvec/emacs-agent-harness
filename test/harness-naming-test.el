@@ -608,6 +608,40 @@ attempt, and the naming module made one request all the same."
 
 ;;;; Who is named
 
+(ert-deftest harness-naming-recovers-from-a-rate-limited-naming-model ()
+  "A naming model that answers 429 at first names the session all the same.
+This is the field's bug: DeepSeek under load rate limited the request of
+a session's name, which nothing tried again, so the session stayed
+unnamed.  The request is an ordinary one-off call, so `harness-small-ask'
+now waits the rate limit out and asks again."
+  (harness-naming-test-with
+    (let* ((attempts 0)
+           (harness-retry-delay 0.01)
+           (harness-retry-jitter 0))
+      (harness-define-provider 'naming-429
+        :label "Rate limited at first"
+        :complete (lambda (request)
+                    (let ((on-event (plist-get request :on-event))
+                          (n (cl-incf attempts)))
+                      (run-at-time 0.005 nil
+                                   (lambda ()
+                                     (if (= n 1)
+                                         (funcall on-event (list :type 'done :stop-reason 'error
+                                                                 :error "HTTP 429: Too many requests"
+                                                                 :error-kind 'rate-limit))
+                                       (funcall on-event (list :type 'text :delta "Fix the parser"))
+                                       (funcall on-event '(:type done :stop-reason end-turn))))))
+                    (list :cancel #'ignore)))
+      (unwind-protect
+          (let ((id (harness-naming-test-session :model "naming-429:m")))
+            (harness-call 'session/append id '(:kind user :content "fix the parser, it drops comments"))
+            (should (equal "Fix the parser" (harness-await (harness-call 'naming/name id '(:opening t)))))
+            ;; Asked twice: the 429 was waited out, not given up on.
+            (should (= 2 attempts))
+            (should (equal "Fix the parser" (harness-naming-test-name id))))
+        (remhash 'naming-429 harness-providers)
+        (harness-provider--forget 'naming-429)))))
+
 (ert-deftest harness-naming-auto-p-filter-holds-naming-off ()
   "A `naming/auto-p' filter keeps a session from being named as its turn starts.
 Task mode holds it off a session whose task's title is on its way."
