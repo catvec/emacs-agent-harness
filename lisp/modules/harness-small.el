@@ -89,11 +89,16 @@ failing is handed over as a `done' with `:stop-reason' error, so a caller
 handles it the one way.
 
 OPTS also take `:label', a few words naming the call in the log (\"small
-call\" by default), and `:on-event' as above.  Return a handle plist with
-`:cancel', a function that stops the call and any wait for a retry."
+call\" by default); `:retries', how many times the call may be tried again
+after the first (`harness-retry-max-attempts' by default, 0 for a caller
+that does its own trying); and `:on-event' as above.  Return a handle
+plist with `:cancel', a function that stops the call and any wait for a
+retry."
   (let* ((on-event (or (plist-get opts :on-event) #'ignore))
          (label (or (plist-get opts :label) "small call"))
-         (most (max 0 (or harness-retry-max-attempts 0)))
+         (most (if (plist-member opts :retries)
+                   (max 0 (or (plist-get opts :retries) 0))
+                 (max 0 (or harness-retry-max-attempts 0))))
          (body (harness-plist-remove request :on-event))
          (tries 0) (handle nil) (timer nil) (cancelled nil))
     (cl-labels

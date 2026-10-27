@@ -81,6 +81,9 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+;; The written summary is one of the harness's own one-off calls
+;; (`harness-small-ask'), tried again when a provider fails transiently.
+(require 'harness-small)
 
 (defvar harness-state-directory)
 (defvar harness-model)
@@ -623,6 +626,9 @@ the compiled one is gone."
             "--batch" "-Q"
             "-L" harness-directory
             "-L" (expand-file-name "lisp" harness-directory)
+            ;; The modules the scan file requires (`harness-small', and the
+            ;; step retry it takes its kinds and waits from).
+            "-L" (expand-file-name "lisp/modules" harness-directory)
             "-l" (harness-insights--scan-file)
             "-f" "harness-insights-scan-main")
       :cwd dir :timeout harness-insights--scan-timeout :name "harness-insights"
@@ -1057,9 +1063,11 @@ ends it with an error."
                                        (lambda ()
                                          (funcall finish nil (list 'error "the model took too long"))
                                          (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
+              ;; A one-off call through `harness-small-ask': a provider's
+              ;; bad minute -- a rate limit, a connection cut -- is waited
+              ;; out and the summary asked for again.
               (setq handle
-                    (harness-call
-                     'provider/complete
+                    (harness-small-ask
                      (list :model model
                            :session (list :id sid :cwd (file-name-as-directory (harness-insights--directory)))
                            ;; Recorded as an internal session, which
@@ -1070,10 +1078,14 @@ ends it with an error."
                            :messages (list (list :role 'user :content (list (list :type "text" :text text))))
                            :tools nil
                            :no-thinking t
-                           :max-tokens harness-insights--narrative-max-tokens
+                           :max-tokens harness-insights--narrative-max-tokens)
+                     (list :label "insights"
                            :on-event
                            (lambda (ev)
                              (pcase (plist-get ev :type)
+                               ;; A try that failed is thrown away: so is
+                               ;; what it wrote.
+                               ('restart (setq reply ""))
                                ('text (setq reply (concat reply (or (plist-get ev :delta) ""))))
                                ('usage (unless (harness-method-exists-p 'session/internal-start)
                                          (harness-insights--record-usage model project ev)))

@@ -76,6 +76,9 @@
 (require 'harness-util)
 (require 'harness-files)
 (require 'harness-priority)
+;; The search model is asked with one of the harness's own one-off calls
+;; (`harness-small-ask'), tried again when a provider fails transiently.
+(require 'harness-small)
 
 (defvar harness-state-directory)
 
@@ -1382,26 +1385,31 @@ seconds, and when the provider ends the request with an error."
                                  (funcall finish nil (list 'error (format "The model took longer than %ds"
                                                                           harness-tasks-search--timeout)))
                                  (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
+      ;; A one-off call through `harness-small-ask': a provider's bad
+      ;; minute -- a rate limit, a connection cut -- is waited out and the
+      ;; search model asked again, as a step of a turn would be.
       (setq handle
-            (harness-call
-             'provider/complete
+            (harness-small-ask
              (append (harness-tasks-search--request (plist-get search :model) (plist-get search :session))
                      (list :messages messages
                            ;; Recorded as an internal session, which
                            ;; records the usage too.
-                           :job "Task search" :job-project (plist-get search :root)
-                           :on-event
-                           (lambda (ev)
-                             (pcase (plist-get ev :type)
-                               ('text (setq text (concat text (or (plist-get ev :delta) ""))))
-                               ('usage (unless (harness-method-exists-p 'session/internal-start)
-                                         (harness-tasks-search--record search ev)))
-                               ('done
-                                (let ((reason (plist-get ev :stop-reason)))
-                                  (if (memq reason '(error cancelled))
-                                      (funcall finish nil (list 'error (format "The model failed: %s"
-                                                                               (or (plist-get ev :error) reason))))
-                                    (funcall finish t text)))))))))))))
+                           :job "Task search" :job-project (plist-get search :root)))
+             (list :label "task search"
+                   :on-event
+                   (lambda (ev)
+                     (pcase (plist-get ev :type)
+                       ;; A try that failed is thrown away: so is what it wrote.
+                       ('restart (setq text ""))
+                       ('text (setq text (concat text (or (plist-get ev :delta) ""))))
+                       ('usage (unless (harness-method-exists-p 'session/internal-start)
+                                 (harness-tasks-search--record search ev)))
+                       ('done
+                        (let ((reason (plist-get ev :stop-reason)))
+                          (if (memq reason '(error cancelled))
+                              (funcall finish nil (list 'error (format "The model failed: %s"
+                                                                       (or (plist-get ev :error) reason))))
+                            (funcall finish t text))))))))))))
 
 (defun harness-tasks-search--user (text)
   "A user message of TEXT."

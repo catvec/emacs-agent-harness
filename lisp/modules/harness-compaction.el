@@ -150,6 +150,9 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; A summary is one of the harness's own one-off calls
+;; (`harness-small-ask'), tried again when a provider fails transiently.
+(require 'harness-small)
 
 (defvar harness-provider-fallback-context-window)
 
@@ -1273,15 +1276,21 @@ the compaction node otherwise, where the model never reads it."
          (text "") (usage nil))
     (harness-log 'info "compaction: summarising %s with %s (%s context, %s tokens)"
                  session-id model context estimate)
-    (harness-call
-     'provider/complete
+    ;; A one-off call through `harness-small-ask': a provider's bad minute
+    ;; -- a rate limit, a connection cut -- is waited out and the summary
+    ;; asked for again, as a step of a turn would be.  A try that failed
+    ;; left no summary behind, so the retry cannot duplicate one.
+    (harness-small-ask
      (list :model model :session session
            :system harness-compaction--system-prompt
            :messages messages :tools nil :provider-state state
-           :max-tokens harness-compaction--max-tokens
+           :max-tokens harness-compaction--max-tokens)
+     (list :label "compaction"
            :on-event
            (lambda (ev)
              (pcase (plist-get ev :type)
+               ;; A try that failed is thrown away: so is what it wrote.
+               ('restart (setq text "" usage nil))
                ('text (setq text (concat text (plist-get ev :delta))))
                ('usage (setq usage ev))
                ('done

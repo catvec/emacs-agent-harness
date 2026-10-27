@@ -94,6 +94,9 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-cache)
+;; The refresh is one of the harness's own one-off calls, sent through
+;; `harness-small-ask', which its caller turns the trying off for.
+(require 'harness-small)
 
 (declare-function harness-agent-step-request "harness-agent" (session-id state on-event))
 (declare-function harness-agent-last-request "harness-agent" (session-id))
@@ -416,7 +419,7 @@ hears `cache/warm-changed'."
 
 ;;;; Reading the cache once more
 
-(defun harness-cache-warm--request (sid on-event)
+(defun harness-cache-warm--request (sid)
   "Return the request that reads session SID's conversation once more.
 For a session that waits for the user, it is what the agent's next step
 would send (`harness-agent-step-request') with a short message at the end,
@@ -424,20 +427,20 @@ the answer to which is never read: a few tokens at most.  A provider that
 holds the conversation itself is sent the message alone, in its process.
 For a session whose turn waits on a tool, it is the request the turn's
 latest step sent (`harness-agent-last-request'), which the step after the
-tool will start as.  The provider is told it is a refresh.  ON-EVENT
-listens to it."
+tool will start as.  The provider is told it is a refresh.  It carries no
+`:on-event': `harness-small-ask' adds the one its caller gives."
   (let ((session (harness-call 'session/get sid)))
     (if (harness-cache-warm--running-p sid)
         (append (harness-plist-remove (harness-agent-last-request sid) :on-event :max-tokens)
-                (list :on-event on-event :max-tokens harness-cache-warm--max-tokens :cache-refresh t))
+                (list :max-tokens harness-cache-warm--max-tokens :cache-refresh t))
       (let* ((model (plist-get session :model))
              (state (harness-call 'session/provider-state sid model))
-             (request (harness-agent-step-request sid state on-event))
+             (request (harness-agent-step-request sid state nil))
              (ping (list :role 'user :content (list (list :type "text" :text harness-cache-warm-message))))
              (messages (if (harness-cache-warm--hosted-p session)
                            (list ping)
                          (append (plist-get request :messages) (list ping)))))
-        (append (harness-plist-remove request :messages)
+        (append (harness-plist-remove request :messages :on-event)
                 (list :messages messages :max-tokens harness-cache-warm--max-tokens :cache-refresh t))))))
 
 (defun harness-cache-warm--budget-block (sid)
@@ -608,10 +611,15 @@ is sent and `harness-cache-warm--finish' for what comes of it."
                                  (unless done
                                    (cancel)
                                    (finish (list :type 'done :stop-reason 'error :error "it took too long"))))))
-      (condition-case err
-          (setq handle (harness-call 'provider/complete
-                                     (harness-cache-warm--request sid #'on-event)))
-        (error (finish (list :type 'done :stop-reason 'error :error (harness-error-short-message err))))))
+      ;; A one-off call through `harness-small-ask'.  This module tries a
+      ;; refresh that failed again itself, on its own clock, and only while
+      ;; the cache it reads still lasts (`harness-cache-warm--failed'): the
+      ;; helper's own trying is off, so a provider having a bad minute is
+      ;; not waited out twice over.
+      (setq handle
+            (harness-small-ask
+             (harness-cache-warm--request sid)
+             (list :label "cache warm" :retries 0 :on-event #'on-event))))
     promise))
 
 ;;;; The event
