@@ -761,6 +761,36 @@ argument was the panel's number: the command gets none."
       (set-marker origin nil)
       (set-marker start nil))))
 
+(defface harness-compose-panel-target-face
+  '((t :inherit highlight))
+  "Face used briefly to identify the panel receiving a compose key."
+  :group 'harness)
+
+(defun harness-compose--target-changed (overlay after _beg _end &optional _length)
+  "Remove target OVERLAY before its text is changed or redrawn.
+AFTER is non-nil after the change."
+  (unless after (delete-overlay overlay)))
+
+(defun harness-compose--show-panel-target (panel keys command)
+  "Briefly show PANEL, then run COMMAND for KEYS there.
+The indicator is removed even if input is cancelled or COMMAND fails."
+  (let ((overlay (make-overlay (car panel) (cdr panel))))
+    (unwind-protect
+        (progn
+          (overlay-put overlay 'harness-compose-panel-target t)
+          (overlay-put overlay 'face 'harness-compose-panel-target-face)
+          (overlay-put overlay 'modification-hooks '(harness-compose--target-changed))
+          ;; The target cannot be known until the key is read.  Show it before
+          ;; dispatch, even for commands that immediately replace the panel.
+          (unless noninteractive
+            (redisplay t)
+            (sit-for 0.5))
+          (unless (and (overlay-buffer overlay)
+                       (eq (overlay-buffer overlay) (current-buffer)))
+            (user-error "Panel changed before the key could be pressed"))
+          (harness-compose--press-on-panel keys command (overlay-start overlay)))
+      (delete-overlay overlay))))
+
 (defun harness-compose-panel-key (&optional n)
   "Press a key on a panel above the box, from the box.
 The panels are the parts of the buffer above the box that bind keys of
@@ -790,7 +820,7 @@ said, and nothing runs."
             (setq idle t)
           (when (= (cl-incf found) n)
             (setq command candidate)))))
-    (cond (command (harness-compose--press-on-panel keys command pos))
+    (cond (command (harness-compose--show-panel-target panel keys command))
           ((> found 0) (user-error "Fewer than %d panels above the box have %s" n key))
           (idle (user-error "%s has nothing to act on from the box: it works on what point is on" key))
           (t (user-error "No panel above the box has %s" key)))))
