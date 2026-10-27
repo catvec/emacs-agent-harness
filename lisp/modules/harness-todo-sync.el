@@ -73,6 +73,9 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; The todo list is asked for with one of the harness's own one-off calls
+;; (`harness-small-ask'), tried again when a provider fails transiently.
+(require 'harness-small)
 
 (declare-function harness-agent-strip-result-images "harness-agent" (messages))
 
@@ -525,22 +528,25 @@ when the provider fails, and when the answer takes longer than
                                (lambda ()
                                  (finish nil "the model took too long")
                                  (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
-      (condition-case err
-          (setq handle
-                (harness-call
-                 'provider/complete
-                 (append request
-                         (list :on-event
-                               (lambda (ev)
-                                 (pcase (plist-get ev :type)
-                                   ('text (setq text (concat text (or (plist-get ev :delta) ""))))
-                                   ('done
-                                    (let ((reason (plist-get ev :stop-reason)))
-                                      (if (memq reason '(error cancelled))
-                                          (finish nil (or (plist-get ev :error) (format "%s" reason)))
-                                        (finish t text))))
-                                   (_ nil)))))))
-        (error (finish nil (harness-error-message err)))))
+      ;; A one-off call through `harness-small-ask': a provider's bad
+      ;; minute -- a rate limit, a connection cut -- is waited out and the
+      ;; question asked again, as a step of a turn would be.
+      (setq handle
+            (harness-small-ask
+             request
+             (list :label "todo sync"
+                   :on-event
+                   (lambda (ev)
+                     (pcase (plist-get ev :type)
+                       ;; A try that failed is thrown away: so is what it wrote.
+                       ('restart (setq text ""))
+                       ('text (setq text (concat text (or (plist-get ev :delta) ""))))
+                       ('done
+                        (let ((reason (plist-get ev :stop-reason)))
+                          (if (memq reason '(error cancelled))
+                              (finish nil (or (plist-get ev :error) (format "%s" reason)))
+                            (finish t text))))
+                       (_ nil)))))))
     promise))
 
 (defun harness-todo-sync--dumb-request (session model prompt)

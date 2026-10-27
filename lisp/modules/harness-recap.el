@@ -49,6 +49,9 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; A recap is one of the harness's own one-off calls (`harness-small-ask'),
+;; tried again when a provider fails transiently.
+(require 'harness-small)
 
 ;; Settings of the tasks module (harness-tasks.el); a recap is a task
 ;; card's, so its knobs live with the other task settings.
@@ -337,17 +340,22 @@ RECAP, or rejects with why there is none."
                          ;; the user's, ask for no thinking (a model that
                          ;; thinks by default would spend the whole budget
                          ;; on the reasoning and stop at `max-tokens').
-                         :no-thinking (null harness-tasks-recap-thinking)
-                         :on-event
-                         (lambda (ev)
-                           (pcase (plist-get ev :type)
-                             ('text (setq text (concat text (plist-get ev :delta))))
-                             ('done (funcall finish (plist-get ev :stop-reason) (plist-get ev :error))))))
+                         :no-thinking (null harness-tasks-recap-thinking))
                    (and harness-tasks-recap-thinking
                         (list :thinking harness-tasks-recap-thinking)))))
-    (condition-case err
-        (harness-call 'provider/complete request)
-      (error (funcall finish nil (harness-error-message err))))
+    ;; A one-off call through `harness-small-ask': a provider's bad minute
+    ;; -- a rate limit, a connection cut -- is waited out and the recap
+    ;; asked for again, as a step of a turn would be.
+    (harness-small-ask
+     request
+     (list :label "recap"
+           :on-event
+           (lambda (ev)
+             (pcase (plist-get ev :type)
+               ;; A try that failed is thrown away: so is what it wrote.
+               ('restart (setq text ""))
+               ('text (setq text (concat text (plist-get ev :delta))))
+               ('done (funcall finish (plist-get ev :stop-reason) (plist-get ev :error)))))))
     promise))
 
 (defun harness-recap--start (task session)

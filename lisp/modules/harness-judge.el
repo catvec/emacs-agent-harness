@@ -45,6 +45,9 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; A judge's question is one of the harness's own one-off calls, so a
+;; provider that fails transiently has it asked again (`harness-small-ask').
+(require 'harness-small)
 
 (defvar harness-model)
 
@@ -322,53 +325,57 @@ internal session, in which the request is recorded (see
          (ask (messages round budget)
            (let ((serial (cl-incf live)))
              (setq text "" thinking "" pending nil)
-             (condition-case err
-                 (let ((h (harness-call
-                           'provider/complete
-                           (list :model model
-                                 ;; One question, alone: no earlier turns,
-                                 ;; no project instructions.
-                                 :ephemeral t
-                                 :session (list :id (format "%s-%s" (plist-get session :id) suffix)
-                                                :cwd (plist-get session :cwd) :host (plist-get session :host))
-                                 ;; Recorded as an internal session made for
-                                 ;; the session asking.
-                                 :job (and job (if retried (format "%s (retry)" job) job))
-                                 :job-parent (and job (plist-get session :id))
-                                 :system system
-                                 :messages messages
-                                 :tools specs
-                                 ;; Thinking would spend the output first.
-                                 :no-thinking t
-                                 :max-tokens budget
-                                 :on-event
-                                 (lambda (ev)
-                                   (let ((respond (plist-get ev :respond)))
-                                     (if (or settled (/= serial live))
-                                         ;; A hosted loop still asking a judge
-                                         ;; that is over is told so.
-                                         (when (and respond (eq (plist-get ev :type) 'tool-call))
-                                           (ignore-errors
-                                             (funcall respond (list :content "This question is over."
-                                                                    :is-error t))))
-                                       (pcase (plist-get ev :type)
-                                         ('text (setq text (concat text (or (plist-get ev :delta) ""))))
-                                         ('thinking (setq thinking (concat thinking (or (plist-get ev :delta) ""))))
-                                         ('tool-call
-                                          (cond ((plist-get ev :builtin)
-                                                 ;; The provider's own tool, which a
-                                                 ;; judge is never offered: not a lookup.
-                                                 nil)
-                                                (respond (hosted ev respond))
-                                                (t (push (list :id (plist-get ev :id) :name (plist-get ev :name)
-                                                               :input (plist-get ev :input))
-                                                         pending))))
-                                         ('done (done ev messages round budget))))))))))
-                   ;; Unless it ended already, or another took its place.
-                   (when (and (= serial live) (not (eql ended serial)) (not settled))
-                     (setq handle h)))
-               (error
-                (fail (format "it failed: %s" (harness-truncate-end (harness-error-message err) 200))))))))
+             ;; The request is a one-off call through `harness-small-ask':
+             ;; a provider that rate limits or cuts the connection has the
+             ;; question asked again, and the half reply of the failed try is
+             ;; dropped, before the judge reads it as its answer.
+             (let ((h (harness-small-ask
+                       (list :model model
+                             ;; One question, alone: no earlier turns,
+                             ;; no project instructions.
+                             :ephemeral t
+                             :session (list :id (format "%s-%s" (plist-get session :id) suffix)
+                                            :cwd (plist-get session :cwd) :host (plist-get session :host))
+                             ;; Recorded as an internal session made for
+                             ;; the session asking.
+                             :job (and job (if retried (format "%s (retry)" job) job))
+                             :job-parent (and job (plist-get session :id))
+                             :system system
+                             :messages messages
+                             :tools specs
+                             ;; Thinking would spend the output first.
+                             :no-thinking t
+                             :max-tokens budget)
+                       (list :label label
+                             :on-event
+                             (lambda (ev)
+                               (let ((respond (plist-get ev :respond)))
+                                 (if (or settled (/= serial live))
+                                     ;; A hosted loop still asking a judge
+                                     ;; that is over is told so.
+                                     (when (and respond (eq (plist-get ev :type) 'tool-call))
+                                       (ignore-errors
+                                         (funcall respond (list :content "This question is over."
+                                                                :is-error t))))
+                                   (pcase (plist-get ev :type)
+                                     ;; A try that failed is thrown away: so
+                                     ;; is what it wrote and asked for.
+                                     ('restart (setq text "" thinking "" pending nil))
+                                     ('text (setq text (concat text (or (plist-get ev :delta) ""))))
+                                     ('thinking (setq thinking (concat thinking (or (plist-get ev :delta) ""))))
+                                     ('tool-call
+                                      (cond ((plist-get ev :builtin)
+                                             ;; The provider's own tool, which a
+                                             ;; judge is never offered: not a lookup.
+                                             nil)
+                                            (respond (hosted ev respond))
+                                            (t (push (list :id (plist-get ev :id) :name (plist-get ev :name)
+                                                           :input (plist-get ev :input))
+                                                     pending))))
+                                     ('done (done ev messages round budget))))))))))
+               ;; Unless it ended already, or another took its place.
+               (when (and (= serial live) (not (eql ended serial)) (not settled))
+                 (setq handle h))))))
       (cond
        ((not (and model (harness-method-exists-p 'provider/complete)))
         (fail "no model could be asked"))

@@ -86,6 +86,9 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; The pet's one-off question goes through `harness-small-ask', which
+;; tries it again when a provider fails transiently.
+(require 'harness-small)
 
 (defvar harness-state-directory)
 (defvar harness-model)
@@ -712,7 +715,10 @@ The reply holds at most MAX-TOKENS tokens.  The call is a one-off
 \(`:ephemeral'), without extended thinking (`:no-thinking'), under a
 session id of its own that is closed when it ends; its cost is recorded
 under PROJECT, by the internal session that records the call (see
-`session/internal-start'), else here.  It fails after
+`session/internal-start'), else here.  It goes through
+`harness-small-ask' like every one-off call the harness makes, so a
+provider having a bad minute -- a rate limit, a connection cut -- is
+waited out and the line asked for again.  It fails after
 `harness-pet--timeout' seconds, and when the provider ends it with an
 error."
   (if (null model)
@@ -731,8 +737,7 @@ error."
                                            (funcall finish nil (list 'error "The model took too long"))
                                            (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
                 (setq handle
-                      (harness-call
-                       'provider/complete
+                      (harness-small-ask
                        (list :model model
                              :session (list :id sid :cwd (file-name-as-directory (harness-pet--directory)))
                              ;; Recorded as an internal session, which
@@ -748,10 +753,14 @@ error."
                              ;; One line wants no extended thinking, which a
                              ;; cheap model would spend its time on first.
                              :no-thinking t
-                             :max-tokens max-tokens
+                             :max-tokens max-tokens)
+                       (list :label "pet"
                              :on-event
                              (lambda (ev)
                                (pcase (plist-get ev :type)
+                                 ;; A try that failed is thrown away: so is
+                                 ;; what it wrote.
+                                 ('restart (setq reply ""))
                                  ('text (setq reply (concat reply (or (plist-get ev :delta) ""))))
                                  ('usage (unless (harness-method-exists-p 'session/internal-start)
                                            (harness-pet--record-usage model project ev)))

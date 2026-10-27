@@ -216,6 +216,9 @@
 (require 'harness-util)
 (require 'harness-tools)
 (require 'harness-readonly)
+;; The session judge is one of the harness's own one-off calls
+;; (`harness-small-ask'), tried again when a provider fails transiently.
+(require 'harness-small)
 
 (defvar harness-perms-dir-tool)
 (defvar harness-supervisor--ending)
@@ -1015,9 +1018,12 @@ after it are all fine."
 Return a promise of the verdict, t (supervise) or `:false' (hands-on).
 The request is `:ephemeral', with no tools, no thinking and no provider
 state, so the session's own conversation never sees it and it can run
-beside the session's first turn.  The promise rejects when the session
-has no model to ask, the provider fails, the model gives no usable word,
-or it takes longer than `harness-supervisor--judge-timeout'."
+beside the session's first turn.  It goes through `harness-small-ask' like
+every one-off call the harness makes, so a provider having a bad minute --
+a rate limit, a connection cut -- is waited out and the verdict asked for
+again.  The promise rejects when the session has no model to ask, the
+provider fails, the model gives no usable word, or it takes longer than
+`harness-supervisor--judge-timeout'."
   (let ((promise (harness-make-promise))
         (model (harness-supervisor--judge-model session))
         (reply "") (timer nil) (handle nil))
@@ -1034,40 +1040,41 @@ or it takes longer than `harness-supervisor--judge-timeout'."
                              (finish nil (format "the model took longer than %ss"
                                                  harness-supervisor--judge-timeout))
                              (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
-        (condition-case err
-            (setq handle
-                  (harness-call
-                   'provider/complete
-                   (list :model model :ephemeral t
-                         :session (list :id (format "%s-judge" (plist-get session :id))
-                                        :cwd (plist-get session :cwd)
-                                        :host (plist-get session :host))
-                         ;; Recorded as an internal session made for SESSION.
-                         :job "Session judge" :job-parent (plist-get session :id)
-                         :system harness-supervisor--judge-system-prompt
-                         :messages (list (list :role 'user
-                                               :content (list (list :type "text"
-                                                                    :text (harness-supervisor--judge-question text)))))
-                         :tools nil :no-thinking t
-                         :max-tokens harness-supervisor--judge-max-tokens
-                         :on-event
-                         (lambda (ev)
-                           (pcase (plist-get ev :type)
-                             ('text (setq reply (concat reply (or (plist-get ev :delta) ""))))
-                             ('done
-                              (let ((verdict (and (not (memq (plist-get ev :stop-reason) '(error cancelled)))
-                                                  (harness-supervisor--judge-verdict reply))))
-                                (cond
-                                 ((memq (plist-get ev :stop-reason) '(error cancelled))
-                                  (finish nil (or (plist-get ev :error)
-                                                  (format "%s" (plist-get ev :stop-reason)))))
-                                 (verdict (finish t verdict))
-                                 (t (finish nil (if (harness-string-blank-p reply)
-                                                    "the model answered nothing"
-                                                  (format "the model answered %S"
-                                                          (harness-truncate-end (string-trim reply) 80))))))))
-                             (_ nil))))))
-          (error (finish nil (harness-error-message err))))))
+        (setq handle
+              (harness-small-ask
+               (list :model model :ephemeral t
+                     :session (list :id (format "%s-judge" (plist-get session :id))
+                                    :cwd (plist-get session :cwd)
+                                    :host (plist-get session :host))
+                     ;; Recorded as an internal session made for SESSION.
+                     :job "Session judge" :job-parent (plist-get session :id)
+                     :system harness-supervisor--judge-system-prompt
+                     :messages (list (list :role 'user
+                                           :content (list (list :type "text"
+                                                                :text (harness-supervisor--judge-question text)))))
+                     :tools nil :no-thinking t
+                     :max-tokens harness-supervisor--judge-max-tokens)
+               (list :label "session judge"
+                     :on-event
+                     (lambda (ev)
+                       (pcase (plist-get ev :type)
+                         ;; A try that failed is thrown away: so is what it wrote.
+                         ('restart (setq reply ""))
+                         ('text (setq reply (concat reply (or (plist-get ev :delta) ""))))
+                         ('done
+                          (let ((verdict (and (not (memq (plist-get ev :stop-reason) '(error cancelled)))
+                                              (harness-supervisor--judge-verdict reply))))
+                            (cond
+                             ((memq (plist-get ev :stop-reason) '(error cancelled))
+                              (finish nil (or (plist-get ev :error)
+                                              (format "%s" (plist-get ev :stop-reason)))))
+                             (verdict (finish t verdict))
+                             (t (finish nil (if (harness-string-blank-p reply)
+                                                "the model answered nothing"
+                                              (format "the model answered %S"
+                                                      (harness-truncate-end (string-trim reply) 80))))))))
+                         ;; Nothing else to gather.
+                         (_ nil))))))))
       promise)))
 
 ;;;; The note of the judgement
