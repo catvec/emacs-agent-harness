@@ -474,6 +474,12 @@ content, the call's name and arguments -- goes back as it came."
     (cl-loop for (key value) on item by #'cddr
              unless (eq key :status)
              do (setq out (plist-put out key value)))
+    ;; JSON parsing maps an empty array to nil, which would encode as
+    ;; null on replay.  Reasoning summaries must be arrays on the wire.
+    (when (and (equal (plist-get out :type) "reasoning")
+               (plist-member out :summary)
+               (null (plist-get out :summary)))
+      (setq out (plist-put out :summary [])))
     out))
 
 ;;;; Input items

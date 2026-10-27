@@ -408,6 +408,29 @@ content and the model keeps the chain of thought it had."
       ;; The lifecycle status is a response's bookkeeping and is dropped.
       (should-not (plist-member (nth 2 inputs) :status)))))
 
+(ert-deftest harness-provider-responses-replays-empty-reasoning-summary-as-array ()
+  "An empty summary survives parsing and replay as an array on the wire."
+  (harness-responses-test-with-fake
+      `(("/responses" . (:chunks
+                          (,(harness-responses-test--sse
+                             (list :type "response.completed"
+                                   :response (harness-responses-test--streamed-response)))))))
+    (harness-responses-test--complete
+     '(:model "chatgpt:gpt-5" :messages ((:role user :content "go"))))
+    (harness-responses-test--complete
+     '(:model "chatgpt:gpt-5"
+       :messages ((:role user :content "go")
+                  (:role assistant :content ((:type "tool_use" :id "call_1"
+                                              :name "echo" :input (:value "a"))))
+                  (:role tool :content ((:type "tool_result" :tool_use_id "call_1"
+                                         :content "a!"))))))
+    (let* ((json (harness-json-encode (harness-responses-test--last-body)))
+           (body (json-parse-string json :object-type 'plist :array-type 'array))
+           (reasoning (aref (plist-get body :input) 1)))
+      (should (equal "reasoning" (plist-get reasoning :type)))
+      (should (equal [] (plist-get reasoning :summary)))
+      (should (equal "ENCRYPTED-1" (plist-get reasoning :encrypted_content))))))
+
 (ert-deftest harness-provider-responses-body-rebuilds-a-half-remembered-message ()
   "A message only half remembered is rebuilt, not sent as a mixture.
 Sending some of the response's items and making up the rest would tell
