@@ -64,8 +64,10 @@ case $SOCKET in
      else SOCKPATH="$DEVDIR/run/$SOCKET"; fi ;;
 esac
 
-# Never let a wedged daemon hang the script (or a caller) forever.
+# Bound each command, and probe an existing daemon more quickly.  A probe
+# timeout means it may be busy, not that it is safe to start another one.
 DEV_TIMEOUT=${HARNESS_DEV_TIMEOUT:-60}
+DEV_PROBE_TIMEOUT=${HARNESS_DEV_PROBE_TIMEOUT:-5}
 # A socket's address holds about a hundred bytes (104 on macOS, 108 on
 # Linux), which the path of a socket in a session's temporary directory
 # can pass: emacsclient then connects from that directory, by a relative
@@ -78,31 +80,62 @@ ec() {
   case $SOCKET in */*) ;; *) [ -S "$DEVDIR/run/$SOCKET" ] || s=$SOCKET ;; esac
   case $SOCKET in
     */*) if [ ${#SOCKET} -gt 100 ]; then
-           (cd "${SOCKET%/*}" && exec timeout "$DEV_TIMEOUT" emacsclient -s "./$NAME" "$@")
+           (cd "${SOCKET%/*}" && exec timeout "$DEV_TIMEOUT" emacsclient -a false -s "./$NAME" "$@")
            return
          fi ;;
   esac
-  (cd "$HERE" && timeout "$DEV_TIMEOUT" emacsclient -s "$s" "$@")
+  (cd "$HERE" && timeout "$DEV_TIMEOUT" emacsclient -a false -s "$s" "$@")
 }
-alive() { ec --eval t >/dev/null 2>&1; }
+alive() { DEV_TIMEOUT=$DEV_PROBE_TIMEOUT ec --eval t >/dev/null 2>&1; }
+not_responding() {
+  echo "daemon $SOCKET did not respond within ${DEV_PROBE_TIMEOUT}s; it may be busy or stuck. Cancel its operation in its frame (C-g). If open_harness opened it, explicitly call open_harness with restart=true; otherwise stop this daemon manually before retrying (unsaved work in the instance will be lost)." >&2
+}
 
 cmd=${1:-status}; shift || true
 case "$cmd" in
   start)
-    if alive; then echo "daemon $SOCKET already running"; else
+    if alive; then
+      echo "daemon $SOCKET already running"
+    else
+      status=$?
+      if [ "$status" -eq 124 ]; then not_responding; exit 1; fi
       if [ -n "${HARNESS_SANDBOX:-}" ]; then
         echo "dev.sh: warning: in the harness sandbox ($HARNESS_SANDBOX) this Emacs ends with the command that started it; for one that stays, call the open_harness tool and drive it with the commands it lists" >&2
       fi
       # Started in the checkout, which the daemon names its socket through.
       (cd "$ROOT" && emacs -Q --daemon="$SOCKET" -l "$ROOT/scripts/harness-dev.el" >"$DEVDIR/daemon.log" 2>&1)
-      for _ in $(seq 1 50); do alive && break; sleep 0.2; done
-      alive || { echo "daemon failed to start"; cat "$DEVDIR/daemon.log"; exit 1; }
+      started=0
+      for _ in $(seq 1 50); do
+        if alive; then started=1; break; else status=$?; fi
+        if [ "$status" -eq 124 ]; then not_responding; exit 1; fi
+        sleep 0.2
+      done
+      [ "$started" = 1 ] || { echo "daemon failed to start"; cat "$DEVDIR/daemon.log"; exit 1; }
     fi
-    ec --eval '(progn (harness-dev-frame) t)' >/dev/null && echo "daemon $SOCKET up, frame ready" ;;
+    if ec --eval '(progn (harness-dev-frame) t)' >/dev/null; then
+      echo "daemon $SOCKET up, frame ready"
+    else
+      status=$?
+      echo "daemon $SOCKET could not create its frame (exit $status); see $DEVDIR/daemon.log" >&2
+      exit "$status"
+    fi ;;
   stop)
-    alive && ec --eval '(kill-emacs)' >/dev/null 2>&1; echo "stopped" ;;
-  restart) "$SELF" stop; sleep 0.5; "$SELF" start ;;
-  status) if alive; then echo "running"; else echo "not running"; exit 1; fi ;;
+    if alive; then
+      if ec --eval '(kill-emacs)' >/dev/null; then echo "stopped"; else
+        status=$?; echo "daemon $SOCKET could not be stopped (exit $status)" >&2; exit "$status"
+      fi
+    else
+      status=$?
+      if [ "$status" -eq 124 ]; then not_responding; exit 1; fi
+      echo "not running"
+    fi ;;
+  restart) "$SELF" stop && { sleep 0.5; "$SELF" start; } ;;
+  status)
+    if alive; then echo "running"; else
+      status=$?
+      if [ "$status" -eq 124 ]; then not_responding; else echo "not running"; fi
+      exit 1
+    fi ;;
   eval) ec --eval "$*" ;;
   # An Elisp string: only \ and " are escaped.  The shell's quoting of
   # printf %q would not do, as Lisp drops the backslash before a space.

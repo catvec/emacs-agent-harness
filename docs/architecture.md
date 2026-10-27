@@ -9566,7 +9566,7 @@ TRAMP prefixes come from the session host):
 | `review_threads` | Review threads | status (open/closed), task (default: the session's own) | meta (tools-review; task sessions only; lists the threads of the task's review with the comments the user sent, by id; needs no approval: `harness-perms--auto-allow-tools`) |
 | `review_comment` | Review comment | thread (an id, or the start of one), body, status (open/closed), file, line, side (new/old), task (default: the session's own) | meta (tools-review; task sessions only; answers a thread, or starts one on the change or on a file and line, and may close or reopen the thread -- the thread of a reply of the user's in a thread started in the chat is named by the marker after it; the comment records the session, this call and the commit the session is at, and the result keeps which thread and comment on the node, for the chat; needs no approval: `harness-perms--auto-allow-tools`) |
 | `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
-| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; it runs the checkout's `scripts/dev.sh` and the Elisp that daemon loads outside the sandbox, code the session may have written, so it is an exec call decided by the mode as bash is and is not among the tools that need no approval) |
+| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done), restart (explicitly stop the instance first, discarding unsaved work) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; it runs the checkout's `scripts/dev.sh` and the Elisp that daemon loads outside the sandbox, code the session may have written, so it is an exec call decided by the mode as bash is and is not among the tools that need no approval) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
@@ -9680,14 +9680,17 @@ eval, errors, reload, stop) prefixed with that socket (which of its
 names, below).  `path` defaults to the session's worktree, else its
 cwd; a directory that is not a checkout
 (`harness.el` and `scripts/dev.sh` side by side) is refused.  The bus
-method `harness-dev/open PATH &optional FOCUS` does the same for the UI
-(focus raises the frame); Open harness, which the plugin's UI half adds
-to the menu of a task board's review card whose worktree is such a
-checkout (`harness-ui-tasks-action-functions`), calls it.  As it loads
-the plugin adds `harness-dev/` to `harness-acp-extra-method-prefixes`,
-the tool to `harness-perms-extra-auto-allow-tools`, so the agent needs
-no approval to use it, and to `harness-tool-slots-tools`, since a call
-starts a whole Emacs.
+method `harness-dev/open PATH &optional FOCUS RESTART` does the same for
+the UI (focus raises the frame); Open harness, which the plugin's UI
+half adds to the menu of a task board's review card whose worktree is
+such a checkout (`harness-ui-tasks-action-functions`), calls it.  An
+unresponsive instance is not treated as dead: a probe reports the
+problem and `restart` explicitly stops it before starting another,
+losing unsaved work in that instance.  The harness never restarts
+itself.  As it loads the plugin adds `harness-dev/` to
+`harness-acp-extra-method-prefixes`, and the tool to
+`harness-tool-slots-tools`, since a call starts a whole Emacs.  The tool
+runs outside the sandbox and the permission mode decides it.
 
 Without `HARNESS_DEV_SOCKET_DIR`, as when scripts/dev.sh is run by
 hand, the socket is in the checkout, at `scripts/.dev/run/SOCKET`

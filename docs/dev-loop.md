@@ -27,6 +27,27 @@ sandbox, code the session may have written in its worktree, so it is an
 ask and accept-edits mode, weighed by the judge in auto mode and for a user
 who is away, allowed in yolo mode), not one that needs no approval.
 
+If an existing instance's responsiveness probe times out, `open_harness`
+and `dev.sh start` report that it may be busy rather than starting a second
+daemon.  `open_harness` also catches a refused connection when it can see
+the daemon is still running.  Cancel the operation in its frame with `C-g`
+and retry, or explicitly call `open_harness` with `restart: true` to stop an
+instance it opened and open a new one.  **Restart discards unsaved work in
+the instance**, so use it only when that is acceptable; it never restarts the
+harness that runs the tool itself, and requires a readable process table to
+verify that the old daemon stopped.  The equivalent ACP call is
+`harness-dev/open` with its third argument true.
+
+`dev.sh status`, `stop` and `restart` likewise report a probe timeout instead
+of claiming the daemon stopped.  A refused connection, however, is still
+reported as not running by the script, even if a wedged daemon's listen queue
+is full; verify its process before trying another start.  A daemon started
+directly with `dev.sh` uses a different socket from `open_harness`: if `C-g`
+cannot free it, identify and stop that daemon manually before retrying,
+accepting the loss of unsaved work.  `HARNESS_DEV_PROBE_TIMEOUT` changes the
+script's five-second responsiveness limit; `HARNESS_DEV_TIMEOUT` still bounds
+other emacsclient commands.
+
 The daemon's socket lives in the checkout, at
 `scripts/.dev/run/SOCKET`, not where Emacs puts sockets by default
 (`$XDG_RUNTIME_DIR/emacs/`).  So an agent's `bash` tool, whose sandbox

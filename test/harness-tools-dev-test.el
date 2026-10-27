@@ -19,6 +19,10 @@
 (defvar harness-tools-dev--check-timer)
 (defvar harness-tools-dev--own-socket)
 (defvar harness-tools-dev--processes-function)
+(defvar harness-tools-dev--probe-timeout)
+(defvar harness-tools-dev--exit-timeout)
+(defvar harness-tools-dev--kill-grace)
+(defvar harness-tools-dev--starting)
 (defvar harness-session--tmp-root)
 (defvar harness-sandbox-policy)
 (defvar harness-perms-extra-auto-allow-tools)
@@ -346,6 +350,288 @@ mode decides it as it decides bash."
       ;; address, which holds about a hundred bytes.
       (let ((harness-session--tmp-root nil))
         (should (< (length (harness-tools-dev-socket-path (harness-tools-dev-socket dir))) 100))))))
+
+(ert-deftest harness-tools-dev-start-reports-launcher-failures ()
+  "A silent failure names its exit status or timeout instead of ending in a colon."
+  (harness-tools-dev-test-with
+    (let ((dir (harness-test-harness-checkout)))
+      (dolist (case '(((timeout "" "") . "timed out after")
+                      ((7 "" "") . "exit status 7")
+                      ((1 "" "frame failed") . "frame failed")))
+        (let ((result (car case)))
+          (cl-letf (((symbol-function 'harness-tools-dev--probe)
+                     (lambda (&rest _) (harness-resolved nil)))
+                    ((symbol-function 'harness-tools-dev--run)
+                     (lambda (&rest _)
+                       (harness-resolved (list :exit (nth 0 result) :stdout (nth 1 result)
+                                               :stderr (nth 2 result))))))
+            (let ((answer (harness-test-await (harness-tools-dev--open (list :path dir) (list :cwd dir)))))
+              (should (plist-get answer :is-error))
+              (should (string-search (cdr case) (plist-get answer :content)))
+              (should-not (gethash (harness-tools-dev-socket dir) harness-tools-dev--starting)))))))))
+
+(ert-deftest harness-tools-dev-does-not-replace-an-unresponsive-instance ()
+  "A timed-out probe aborts before even an older checkout's launcher runs."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (path (harness-tools-dev-socket-path socket))
+           (probes nil))
+      (harness-tools-dev--make-socket-dir)
+      (with-temp-file path)
+      (cl-letf (((symbol-function 'harness-run-command)
+                 (lambda (command &rest keys)
+                   (push (list command keys) probes)
+                   (harness-resolved '(:exit timeout :stdout "" :stderr "")))))
+        (let ((answer (harness-test-await (harness-tools-dev--open (list :path dir) (list :cwd dir)))))
+          (should (plist-get answer :is-error))
+          (should (string-search "did not respond" (plist-get answer :content)))
+          (should (string-search "restart=true" (plist-get answer :content)))
+          (should (string-search "unsaved work" (plist-get answer :content)))
+          (should-not (file-exists-p (expand-file-name "invocation.log" dir)))
+          (should-not (gethash socket harness-tools-dev--starting))
+          (should (= 1 (length probes)))
+          (should (equal (concat "./" socket) (nth 4 (caar probes))))
+          (should (equal (file-name-directory path) (plist-get (cadar probes) :cwd))))))))
+
+(ert-deftest harness-tools-dev-refused-socket-with-live-daemon-is-not-stale ()
+  "A wedged daemon can refuse connections when its socket backlog fills."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (path (harness-tools-dev-socket-path socket))
+           (running (list (list :socket socket :pid 1234)))
+           (harness-tools-dev--processes-function (lambda () running))
+           (script-ran nil))
+      (harness-tools-dev--make-socket-dir)
+      (with-temp-file path)
+      (cl-letf (((symbol-function 'harness-run-command)
+                 (lambda (&rest _) (harness-resolved '(:exit 1 :stdout "" :stderr "Connection refused"))))
+                ((symbol-function 'harness-tools-dev--run)
+                 (lambda (&rest _) (setq script-ran t) (harness-resolved '(:exit 0 :stdout "" :stderr "")))))
+        (dolist (state (list running :unavailable))
+          (setq running state)
+          (let ((answer (harness-test-await (harness-tools-dev--open (list :path dir) (list :cwd dir)))))
+            (should (plist-get answer :is-error))
+            (should (string-search "did not respond" (plist-get answer :content)))
+            (should-not script-ran)))
+        ;; Only when the process table confirms it is stale may start proceed.
+        (setq running nil)
+        (should-not (plist-get (harness-test-await (harness-tools-dev--open (list :path dir) (list :cwd dir)))
+                               :is-error))
+        (should script-ran)))))
+
+(ert-deftest harness-tools-dev-probes-an-older-instance-by-name ()
+  "An older instance can have its socket in Emacs's default directory."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (running (list (list :socket socket :pid 1234)))
+           (harness-tools-dev--processes-function (lambda () running))
+           (command nil)
+           (script-ran nil))
+      (should-not (file-exists-p (harness-tools-dev-socket-path socket)))
+      (cl-letf (((symbol-function 'harness-run-command)
+                 (lambda (args &rest _) (setq command args)
+                   (harness-resolved '(:exit timeout :stdout "" :stderr ""))))
+                ((symbol-function 'harness-tools-dev--run)
+                 (lambda (&rest _) (setq script-ran t) (harness-resolved nil))))
+        (dolist (state (list running :unavailable))
+          (setq running state)
+          (let ((answer (harness-test-await (harness-tools-dev--open (list :path dir) (list :cwd dir)))))
+            (should (plist-get answer :is-error))
+            (should (string-search "did not respond" (plist-get answer :content)))
+            (should (equal socket (cadr (member "-s" command))))
+            (should-not script-ran)))
+        ;; When the process table is unavailable and no socket file is
+        ;; known, a quick failure by name may mean there is no daemon.
+        (cl-letf (((symbol-function 'harness-run-command)
+                   (lambda (&rest _) (harness-resolved '(:exit 1 :stdout "" :stderr "no socket"))))
+                  ((symbol-function 'harness-tools-dev--run)
+                   (lambda (&rest _) (setq script-ran t)
+                     (harness-resolved '(:exit 0 :stdout "started" :stderr "")))))
+          (should-not (plist-get (harness-test-await
+                                  (harness-tools-dev--open (list :path dir) (list :cwd dir)))
+                                 :is-error))
+          (should script-ran))))))
+
+(ert-deftest harness-tools-dev-explicit-restart-preserves-holders ()
+  "An explicit restart stops the old instance and keeps its other holders."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir)))
+      (harness-tools-dev-test--session "old" :cwd dir :status 'running)
+      (harness-tools-dev-test--session "new" :cwd dir :status 'running)
+      (should-not (plist-get (harness-tools-dev-test--open dir "old" t) :is-error))
+      (let ((answer (harness-test-await
+                     (harness-tools-dev--open (list :path dir :restart t)
+                                              (list :session-id "new" :cwd dir)))))
+        (should-not (plist-get answer :is-error))
+        (should (equal (list socket) harness-tools-dev-test--asked))
+        (should (= 3 (length (harness-test-dev-invocations dir))))
+        (should (equal '("old" "new") (plist-get (harness-tools-dev--find socket) :sessions)))
+        (should (plist-get (harness-tools-dev--find socket) :user)))
+      ;; It must never kill the harness actually serving this session.
+      (let ((harness-tools-dev--own-socket socket))
+        (let ((answer (harness-tools-dev--open (list :path dir :restart t) (list :cwd dir))))
+          (should (plist-get answer :is-error))
+          (should (string-search "this harness runs in" (plist-get answer :content)))))
+      (should (= 3 (length (harness-test-dev-invocations dir)))))))
+
+(ert-deftest harness-tools-dev-restart-refuses-to-start-if-stop-failed ()
+  "A daemon still alive after a requested stop is not replaced."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (answer nil))
+      (harness-tools-dev-test--session "old" :cwd dir :status 'running)
+      (harness-tools-dev-test--open dir "old")
+      (cl-letf (((symbol-function 'harness-tools-dev--daemon-pids) (lambda (&rest _) '(1234)))
+                ((symbol-function 'harness-tools-dev--stop-socket)
+                 (lambda (sock &rest _) (harness-tools-dev--forget sock) (harness-resolved nil))))
+        (setq answer (harness-test-await
+                      (harness-tools-dev--open (list :path dir :restart t) (list :cwd dir)))))
+      (should (plist-get answer :is-error))
+      (should (string-search "Could not stop" (plist-get answer :content)))
+      (should (= 1 (length (harness-test-dev-invocations dir))))
+      (should (equal '("old") (plist-get (harness-tools-dev--find socket) :sessions)))
+      (should-not (gethash socket harness-tools-dev--starting)))))
+
+(ert-deftest harness-tools-dev-restart-renews-other-holders-links ()
+  "The old holders' hard links point to the new socket after a restart."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (fixed (harness-tools-dev-socket-path socket))
+           (tmp (lambda (id) (expand-file-name id harness-session--tmp-root)))
+           (old-link (expand-file-name socket (funcall tmp "old")))
+           (new-link (expand-file-name socket (funcall tmp "new")))
+           (inode (lambda (file) (file-attribute-inode-number (file-attributes file)))))
+      (harness-register-method 'session/tmp-dir
+                               (lambda (id)
+                                 (make-directory (funcall tmp id) t)
+                                 (funcall tmp id)))
+      (dolist (id '("old" "new"))
+        (harness-tools-dev-test--session id :cwd dir :status 'running))
+      (should-not (plist-get (harness-tools-dev-test--open dir "old") :is-error))
+      (let ((old-inode (funcall inode old-link)))
+        ;; The replacement has a different inode; the old hard link keeps
+        ;; the previous one alive until it is repointed.
+        (cl-letf (((symbol-function 'harness-tools-dev--ask-to-exit)
+                   (lambda (&rest _) (delete-file fixed) (harness-resolved nil))))
+          (should-not (plist-get (harness-test-await
+                                  (harness-tools-dev--open (list :path dir :restart t)
+                                                           (list :session-id "new" :cwd dir)))
+                                 :is-error)))
+        (should-not (equal old-inode (funcall inode fixed)))
+        (should (equal (funcall inode fixed) (funcall inode old-link)))
+        (should (equal (funcall inode fixed) (funcall inode new-link)))))))
+
+(ert-deftest harness-tools-dev-restart-waits-for-an-existing-stop-and-keeps-holders ()
+  "A stop already in progress must not erase the previous holders."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (gate (harness-make-promise)))
+      (harness-tools-dev-test--session "old" :cwd dir :status 'running)
+      (harness-tools-dev-test--session "new" :cwd dir :status 'running)
+      (harness-tools-dev-test--open dir "old" t)
+      (cl-letf (((symbol-function 'harness-tools-dev--ask-to-exit)
+                 (lambda (&rest _) gate)))
+        (let* ((stop (harness-call 'harness-dev/stop dir))
+               (restart (harness-tools-dev--open (list :path dir :restart t)
+                                                  (list :session-id "new" :cwd dir))))
+          (should-not (harness-promise-settled-p restart))
+          (harness-resolve gate nil)
+          (should (harness-test-await stop))
+          (should-not (plist-get (harness-test-await restart) :is-error))
+          (should (equal '("old" "new") (plist-get (harness-tools-dev--find socket) :sessions)))
+          (should (plist-get (harness-tools-dev--find socket) :user)))))))
+
+(ert-deftest harness-tools-dev-open-waits-for-a-restart-to-finish ()
+  "Another open cannot run the launcher while an explicit restart runs."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (stop-gate (harness-make-promise))
+           (start-gate (harness-make-promise))
+           (calls 0))
+      (dolist (id '("old" "restart" "other"))
+        (harness-tools-dev-test--session id :cwd dir :status 'running))
+      (harness-tools-dev-test--open dir "old")
+      (cl-letf (((symbol-function 'harness-tools-dev--ask-to-exit)
+                 (lambda (&rest _) stop-gate))
+                ((symbol-function 'harness-tools-dev--probe)
+                 (lambda (&rest _) (harness-resolved nil)))
+                ((symbol-function 'harness-tools-dev--run)
+                 (lambda (&rest _)
+                   (cl-incf calls)
+                   (if (= calls 1) start-gate
+                     (harness-resolved '(:exit 0 :stdout "started" :stderr ""))))))
+        (let* ((restart (harness-tools-dev--open (list :path dir :restart t)
+                                                  (list :session-id "restart" :cwd dir)))
+               (open (harness-tools-dev--open (list :path dir)
+                                               (list :session-id "other" :cwd dir))))
+          (should-not (harness-promise-settled-p open))
+          (should (= 0 calls))
+          (harness-resolve stop-gate nil)
+          (should (= 1 calls))
+          (should-not (harness-promise-settled-p open))
+          (harness-resolve start-gate '(:exit 0 :stdout "started" :stderr ""))
+          (should-not (plist-get (harness-test-await restart) :is-error))
+          (should-not (plist-get (harness-test-await open) :is-error))
+          (should (= 2 calls))
+          (should (equal '("old" "restart" "other")
+                         (plist-get (harness-tools-dev--find socket) :sessions))))))))
+
+(ert-deftest harness-tools-dev-restart-preserves-a-new-holder-if-focus-fails ()
+  "A failed focus after startup must not undo the newly recorded holder."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir)))
+      (harness-tools-dev-test--session "old" :cwd dir :status 'running)
+      (harness-tools-dev-test--session "new" :cwd dir :status 'running)
+      (harness-tools-dev-test--open dir "old")
+      (cl-letf (((symbol-function 'harness-tools-dev--probe)
+                 (lambda (&rest _) (harness-resolved nil)))
+                ((symbol-function 'harness-tools-dev--run)
+                 (lambda (_dir args &rest _)
+                   (if (equal (car args) "eval")
+                       (harness-rejected '(error "focus failed"))
+                     (harness-resolved '(:exit 0 :stdout "started" :stderr ""))))))
+        (let ((answer (harness-test-await
+                       (harness-tools-dev--open (list :path dir :focus t :restart t)
+                                                (list :session-id "new" :cwd dir)))))
+          (should (plist-get answer :is-error))
+          (should (equal '("old" "new") (plist-get (harness-tools-dev--find socket) :sessions)))
+          (should (plist-get (harness-tools-dev--find socket) :user)))))))
+
+(ert-deftest harness-tools-dev-restart-requires-a-process-table ()
+  "A restart cannot succeed when it cannot verify the old daemon stopped."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (running nil)
+           (harness-tools-dev--processes-function (lambda () running)))
+      (harness-tools-dev-test--session "old" :cwd dir :status 'running)
+      (harness-tools-dev-test--open dir "old")
+      ;; Do not touch an instance when its state cannot be checked at all.
+      (setq running :unavailable)
+      (let ((answer (harness-tools-dev--open (list :path dir :restart t) (list :cwd dir))))
+        (should (plist-get answer :is-error))
+        (should (string-search "process table unavailable" (plist-get answer :content)))
+        (should-not harness-tools-dev-test--asked))
+      ;; Nor claim success when the table disappears during the stop.
+      (setq running nil)
+      (cl-letf (((symbol-function 'harness-tools-dev--ask-to-exit)
+                 (lambda (&rest _) (setq running :unavailable) (harness-resolved nil))))
+        (let ((answer (harness-test-await
+                       (harness-tools-dev--open (list :path dir :restart t) (list :cwd dir)))))
+          (should (plist-get answer :is-error))
+          (should (string-search "process table unavailable" (plist-get answer :content)))))
+      (should (= 1 (length (harness-test-dev-invocations dir))))
+      (should (equal '("old") (plist-get (harness-tools-dev--find socket) :sessions)))
+      (should-not (gethash socket harness-tools-dev--starting)))))
 
 (ert-deftest harness-tools-dev-socket-directory-is-private ()
   "The sockets' directory is private, in a root of the user's own.
@@ -758,6 +1044,61 @@ directory, under its name."
           (when (listp left)
             (dolist (daemon left) (ignore-errors (signal-process (plist-get daemon :pid) 'kill)))))))))
 
+(ert-deftest harness-tools-dev-recovers-a-real-wedged-daemon-on-request ()
+  "A real stuck Emacs is diagnosed, then stopped only on explicit restart."
+  (harness-tools-dev-test-with
+    (skip-unless (listp (harness-tools-dev-processes)))
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (path (harness-tools-dev-socket-path socket))
+           (emacs (expand-file-name invocation-name invocation-directory))
+           (harness-tools-dev--probe-timeout 0.5)
+           (harness-tools-dev--exit-timeout 0.5)
+           (harness-tools-dev--kill-grace 0.1)
+           (harness-tools-dev--processes-function
+            (lambda ()
+              (let ((all (harness-tools-dev-processes)))
+                (if (listp all)
+                    (cl-remove-if-not (lambda (daemon) (equal socket (plist-get daemon :socket))) all)
+                  all)))))
+      (skip-unless (< (length path) 100))
+      (harness-tools-dev--make-socket-dir)
+      (with-temp-file (expand-file-name "scripts/harness-dev.el" dir)
+        (insert ";; A daemon without a GUI, for this test.\n"))
+      ;; The replacement launcher really starts a new daemon under the same socket.
+      (with-temp-file (expand-file-name "scripts/dev.sh" dir)
+        (insert "#!/bin/sh\nexec " (shell-quote-argument emacs)
+                " -Q --daemon=\"$HARNESS_DEV_SOCKET_DIR/$HARNESS_DEV_SOCKET\""
+                " -l \"$PWD/scripts/harness-dev.el\"\n"))
+      (set-file-modes (expand-file-name "scripts/dev.sh" dir) #o755)
+      (unwind-protect
+          (progn
+            (should (eql 0 (call-process emacs nil nil nil "-Q" (concat "--daemon=" path)
+                                         "-l" (expand-file-name "scripts/harness-dev.el" dir))))
+            (let* ((old (car (harness-test-wait (lambda () (funcall harness-tools-dev--processes-function))
+                                                10 "the test daemon")))
+                   (pid (plist-get old :pid)))
+              ;; A client timeout does not interrupt the Lisp it started.
+              (let ((r (harness-test-await
+                        (harness-run-command (list (harness-tools-dev--emacsclient) "-s" path
+                                                   "--eval" "(while t)")
+                                             :timeout 0.5))))
+                (should (eq 'timeout (plist-get r :exit))))
+              (let ((answer (harness-test-await (harness-tools-dev--open (list :path dir) (list :cwd dir)))))
+                (should (plist-get answer :is-error))
+                (should (string-search "did not respond" (plist-get answer :content)))
+                (should (member pid (harness-tools-dev--daemon-pids socket))))
+              (let ((answer (harness-test-await
+                             (harness-tools-dev--open (list :path dir :restart t) (list :cwd dir)) 30)))
+                (should-not (plist-get answer :is-error))
+                (should-not (member pid (harness-tools-dev--daemon-pids socket)))
+                (should (harness-tools-dev--daemon-pids socket))
+                (let ((r (harness-test-await (harness-tools-dev--probe dir socket))))
+                  (should-not r)))))
+        (let ((left (funcall harness-tools-dev--processes-function)))
+          (when (listp left)
+            (dolist (daemon left) (ignore-errors (signal-process (plist-get daemon :pid) 'kill)))))))))
+
 ;;;; The real scripts/dev.sh
 
 (defun harness-tools-dev-test--real-checkout ()
@@ -853,6 +1194,8 @@ With neither, the name is left to Emacs's default directory, as before."
             ;; after the socket's name.
             (should (member (format "emacs %s -Q --daemon=%s -l %sscripts/harness-dev.el" state path dir) calls))
             (should clients)
+            ;; A missing socket must not let ALTERNATE_EDITOR start an Emacs.
+            (should (cl-every (lambda (call) (string-search " -a false -s " call)) clients))
             (should (equal (list path) (delete-dups (mapcar #'harness-tools-dev-test--socket-arg clients)))))
           ;; A path, whatever the directory says.
           (let ((r (harness-tools-dev-test--dev-sh dir bin (list (concat "HARNESS_DEV_SOCKET=" path)
@@ -921,6 +1264,49 @@ It starts it all the same: one command may start, drive and stop it."
             (should (string-match-p "already running" (nth 1 again)))
             (should (equal "" (nth 2 again))))
           (should-not (cl-some (lambda (call) (string-prefix-p "emacs " call)) (harness-tools-dev-test--calls bin))))
+      (dolist (d (list dir bin sockets)) (delete-directory d t)))))
+
+(ert-deftest harness-tools-dev-dev-sh-refuses-a-timed-out-probe ()
+  "An unresponsive daemon is not declared dead or replaced by another one."
+  (let* ((dir (harness-tools-dev-test--real-checkout))
+         (bin (harness-tools-dev-test--fake-bin))
+         (env '("HARNESS_DEV_SOCKET=harness-dev-0123456789ab"
+                "HARNESS_DEV_PROBE_TIMEOUT=0.1")))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "emacsclient" bin)
+            (insert "#!/bin/sh\nsleep 3\n"))
+          (set-file-modes (expand-file-name "emacsclient" bin) #o755)
+          (dolist (command '("start" "status" "stop" "restart"))
+            (let ((r (harness-tools-dev-test--dev-sh dir bin env command)))
+              (should-not (eql 0 (car r)))
+              (should (string-search "did not respond" (nth 2 r)))
+              (should (string-search "unsaved work" (nth 2 r)))
+              (should-not (string-search "not running" (nth 1 r)))
+              (should-not (harness-tools-dev-test--calls bin)))))
+      (dolist (d (list dir bin)) (delete-directory d t)))))
+
+(ert-deftest harness-tools-dev-dev-sh-frame-failure-is-visible ()
+  "An error from creating the frame is not silently reported as failure."
+  (let* ((dir (harness-tools-dev-test--real-checkout))
+         (bin (harness-tools-dev-test--fake-bin))
+         (sockets (harness-test-temp-dir))
+         (env (list "HARNESS_DEV_SOCKET=harness-dev-0123456789ab"
+                    (concat "HARNESS_DEV_SOCKET_DIR=" sockets))))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "emacsclient" bin)
+            (insert "#!/bin/sh\n"
+                    "case \"$*\" in *harness-dev-frame*) echo 'display cannot be opened' >&2; exit 1 ;; esac\n"
+                    "while [ $# -gt 0 ]; do\n"
+                    "  if [ \"$1\" = -s ]; then [ -e \"$2\" ]; exit; fi\n"
+                    "  shift\n"
+                    "done\nexit 1\n"))
+          (set-file-modes (expand-file-name "emacsclient" bin) #o755)
+          (let ((r (harness-tools-dev-test--dev-sh dir bin env "start")))
+            (should-not (eql 0 (car r)))
+            (should (string-search "display cannot be opened" (nth 2 r)))
+            (should (string-search "could not create its frame" (nth 2 r)))))
       (dolist (d (list dir bin sockets)) (delete-directory d t)))))
 
 ;;;; From the sandbox
