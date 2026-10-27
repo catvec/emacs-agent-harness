@@ -1661,6 +1661,30 @@ task that waits to be started."
       (should-not (string-match-p "backlog"
                                   (harness-tools-sessions--task-line (harness-call 'task/get backlog)))))))
 
+(ert-deftest harness-tools-sessions-task-control-park-roundtrip ()
+  "task_control parks a paused task and queues it without clearing its pause."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run
+                                      me "task_submit" '(:prompt "Keep this task")) :meta)
+                          :task-id)))
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "pause"))
+      (let* ((before (harness-call 'task/get id))
+             (text (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "park")))
+             (parked (harness-call 'task/get id)))
+        (should (string-match-p "Parked in the backlog" text))
+        (should (eq 'backlog (plist-get parked :column)))
+        (should (string-match-p "parked in backlog, waits to be queued or started, paused"
+                                (harness-tools-sessions--task-line parked)))
+        (dolist (key '(:id :prompt :session :paused))
+          (should (equal (plist-get before key) (plist-get parked key))))
+        (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "queue"))
+        (let ((queued (harness-call 'task/get id)))
+          (should (eq 'pending (plist-get queued :column)))
+          (should (equal (plist-get before :paused) (plist-get queued :paused)))
+          (should (equal (plist-get before :session) (plist-get queued :session))))))))
+
 (ert-deftest harness-tools-sessions-task-submit-main-tree ()
   "task_submit passes main_tree through; the result and task_list say so."
   (harness-tools-sessions-test-with

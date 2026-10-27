@@ -352,6 +352,7 @@ here logs, emits or returns one.
 - `task/hand-in-plan` (session-id title plan) — Hand in PLAN, titled TITLE, for the task SESSION-ID plans; return the task.
 - `task/list` (&optional cwd) — Return the tasks of CWD's project, oldest first; every task without CWD.
 - `task/merge` (id) — Queue task ID's branch for the merge queue again (after a failed merge).
+- `task/park` (id) — Move pending task ID out of the queue into the backlog without starting it.
 - `task/pause` (id) — Pause task ID: back in the pending queue, and held there until resumed.
 - `task/pause-all` (&optional cwd) — Pause every task of CWD's project, of every project without CWD.
 - `task/prompt` (id text &optional attachments opts) — Send TEXT and ATTACHMENTS to the session of task ID: a follow-up, or steering.

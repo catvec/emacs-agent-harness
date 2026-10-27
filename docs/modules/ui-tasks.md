@@ -313,6 +313,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-next` — Move to the next task.
 - `harness-ui-tasks-open` — Open the session of the task at point in POSITION.
 - `harness-ui-tasks-open-other` — Open the session of the task at point in a position read from the user.
+- `harness-ui-tasks-park` — Move the pending task at point to Backlog without stopping or rewriting it.
 - `harness-ui-tasks-pause` — Pause the task at point: back in the pending queue, held there until resumed.
 - `harness-ui-tasks-previous` — Move to the previous task.
 - `harness-ui-tasks-queue` — Put the backlog task at point back in the pending queue.
@@ -372,6 +373,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `task/for-session` ([tasks](tasks.md))
 - `task/list` ([tasks](tasks.md))
 - `task/merge` ([tasks](tasks.md))
+- `task/park` ([tasks](tasks.md))
 - `task/pause` ([tasks](tasks.md))
 - `task/prompt` ([tasks](tasks.md))
 - `task/queue` ([tasks](tasks.md))

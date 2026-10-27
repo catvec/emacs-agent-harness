@@ -1781,7 +1781,7 @@ change its settings."
   (harness-ui-tasks-test-with
     (with-current-buffer board
       (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
-      (should-not (lookup-key harness-ui-tasks-board-map (kbd "B")))
+      (should (eq (lookup-key harness-ui-tasks-board-map (kbd "B")) 'harness-ui-tasks-park))
       (should-not (string-match-p "Bulk" (harness-ui-tasks--header most-positive-fixnum)))
       (should-not (string-match-p "Bulk\\|EDITING" (harness-ui-tasks-test--tail-text board)))
       (should-not (string-match-p "Bulk" (format "%S" (get 'harness-ui-tasks-mode 'harness-menu-group))))
@@ -4314,6 +4314,33 @@ backlog task stays where it is."
         (should (eq 'pending (plist-get task :column)))
         (should-not (plist-get task :backlog)))
       (should (string-match-p "Backlog  0" (harness-ui-tasks-test--board-text board))))))
+
+(ert-deftest harness-ui-tasks-park-controls-and-returned-presentation ()
+  "The pending menu and B park; a parked return is not a fresh write-up."
+  (harness-ui-tasks-test-with
+    (let* ((task (harness-ui-tasks-test--waiting "t-park" "Returned work" 1
+                                                   :session "s-park" :returned 3.0
+                                                   :paused 4.0 :return-reason "sent-back"))
+           (parked (append (list :backlog t :parked t :column "backlog") task))
+           (called nil))
+      (with-current-buffer board
+        (setq harness-ui-tasks--tasks (list task))
+        (harness-ui-tasks--render)
+        (harness-ui-tasks-test--goto-card board "Returned work")
+        (should (eq (key-binding (kbd "B")) 'harness-ui-tasks-park))
+        (should (member '("Backlog" harness-ui-tasks-park) (harness-ui-tasks--actions task)))
+        (cl-letf (((symbol-function 'harness-ui-tasks--request-then)
+                   (lambda (&rest args) (setq called args))))
+          (harness-ui-tasks-park))
+        (should (equal (car called) "_harness/task/park"))
+        (should (equal (cadr called) '(:id "t-park")))
+        (should (equal '("Queue it" "Start now")
+                       (take 2 (mapcar #'car (harness-ui-tasks--actions parked)))))
+        (should-not (member "Refine" (mapcar #'car (harness-ui-tasks--actions parked))))
+        (should-not (member "Edit" (mapcar #'car (harness-ui-tasks--actions parked))))
+        (should (string-match-p "paused" (harness-ui-tasks--pending-detail parked nil nil)))
+        (should (string-match-p "sent back from review" (harness-ui-tasks--pending-detail parked nil nil)))
+        (should-not (string-match-p "written up" (harness-ui-tasks--pending-detail parked nil nil)))))))
 
 (declare-function harness-ui-tasks-toggle-backlog-mode "harness-ui-tasks")
 (declare-function harness-ui-tasks--backlog-mode-help "harness-ui-tasks")

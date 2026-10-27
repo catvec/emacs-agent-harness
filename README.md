@@ -3514,7 +3514,16 @@ with), `recap` writes the recaps on the cards,
   *Backlog* is its own section, and the queue never starts one of
   those: `Q` on a backlog card (or its [Queue it] button) puts it back
   in *Pending*, where it starts by itself as soon as a slot frees, and
-  `s` starts it at once. Right after its count, the *Backlog* heading
+  `s` starts it at once. To move a waiting *Pending* task the other way,
+  right-click its card and choose **[Backlog]**, or press `B` on the card
+  (`task_control` also has
+  a `park` action). This does not cancel or rewrite it: its prompt,
+  session, worktree, branch, priority and review feedback stay intact,
+  and returned work resumes where it stopped. Running and review tasks
+  cannot be parked: pause or return a running task first, or send review
+  feedback back before parking it. A pause stays in force after parking
+  and queueing; the pending queue also respects project suspension.
+  Parking never triggers auto queueing. Right after its count, the *Backlog* heading
   has the project's switch between the two ways out, **[Manual queue]**,
   the default, and **[Auto queue]**: click it, or press `W`. With the
   auto queue a task joins *Pending* by itself as soon as its write-up

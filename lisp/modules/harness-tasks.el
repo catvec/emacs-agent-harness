@@ -1153,14 +1153,12 @@ slot (`harness-tasks--outranks-p')."
 
 (defun harness-tasks--refinement-p (task)
   "Non-nil when a turn of TASK's session refines it rather than does it.
-That is while it is refining, and while it waits in the backlog with
-the session that wrote it up -- never a task returned to pending, whose
-session has the work and whose next turn carries on with it.  Every
-task has a session from submission, so the backlog is what tells a
-write-up from work waiting for a slot: `harness-tasks--to-pending'
-clears it."
+That is while it is refining, and while a written-up task waits in the
+backlog.  A task parked there from the pending queue is not refining:
+its session and prompt remain those of the work it was waiting to do."
   (or (eq (plist-get task :state) 'refining)
-      (and (eq (plist-get task :state) 'pending) (harness-tasks--backlog-p task))))
+      (and (eq (plist-get task :state) 'pending) (harness-tasks--backlog-p task)
+           (not (harness-json-true-p (plist-get task :parked))))))
 
 (defun harness-tasks--plan-p (task)
   "Non-nil when TASK's write-up is a plan (Plan mode, `task/submit' with `:plan').
@@ -1170,11 +1168,12 @@ the plan is written for (see Plan mode above)."
 
 (defun harness-tasks--written-up-p (task)
   "Non-nil when TASK's prompt is a write-up of the request in `:note'.
-That is a backlog task, and one the user queued from the backlog
+That is a written-up backlog task, and one the user queued from the backlog
 \(`task/queue'): it waits for a slot like any other queued task, but
 its work still opens with the write-up and the request it came from
 \(`harness-tasks--start-text')."
-  (or (harness-tasks--backlog-p task)
+  (or (and (harness-tasks--backlog-p task)
+           (not (harness-json-true-p (plist-get task :parked))))
       (not (harness-string-blank-p (plist-get task :note)))))
 
 (defun harness-tasks--turn-p (task)
@@ -2030,7 +2029,7 @@ session named as the turn starts.  This never signals."
 That is the model of the session it has, else the one it will get: a
 backlog task's refining one, another's working one."
   (or (plist-get (harness-tasks--session task) :model)
-      (plist-get (if (harness-tasks--backlog-p task)
+      (plist-get (if (harness-tasks--refinement-p task)
                      (harness-tasks--refine-settings task)
                    (harness-tasks--work-settings task))
                  :model)
@@ -3388,7 +3387,7 @@ task started by hand was not waiting for a slot and records nothing."
     (puthash id t harness-tasks--starting)
     (remhash id harness-tasks--message-starts)
     (remhash id harness-tasks--superseding)
-    (apply #'harness-tasks--set id :state 'active :backlog nil :outcome nil :error nil
+    (apply #'harness-tasks--set id :state 'active :backlog nil :parked nil :outcome nil :error nil
            :duplicate-of nil :returned nil :paused nil :started started :finished nil :queued-at nil
            (and waits (list :waits waits)))
     (cond
@@ -3582,7 +3581,7 @@ it is not named again; else the title still on its way names it
 \(`harness-tasks--named').  A context limit the settings carry is the
 task setting's cap, and the session's transcript says so
 \(`harness-tasks--say-context-limit')."
-  (let* ((settings (if (harness-tasks--backlog-p task)
+  (let* ((settings (if (harness-tasks--refinement-p task)
                        (harness-tasks--refine-settings task)
                      (harness-tasks--work-settings task)))
          (session (apply #'harness-call 'session/create
@@ -4146,13 +4145,14 @@ is for the caller to do, else when the stopped turn ends
 TASK waits in the queue (`harness-tasks--before-turn')."
   (format "task %s is waiting for a slot (%s); the message is delivered when it starts"
           (plist-get task :id)
-          (pcase (harness-tasks--return-reason task)
-            ('sent-back "sent back from review")
-            ('preempted (format "pre-empted by task %s" (plist-get task :preempted-by)))
-            ('reclaimed (format "slot taken back by task %s" (plist-get task :preempted-by)))
-            ('quota "waiting for quota")
-            ('budget "waiting for its budget")
-            (_ "paused"))))
+          (if (harness-json-true-p (plist-get task :parked)) "in the backlog"
+            (pcase (harness-tasks--return-reason task)
+              ('sent-back "sent back from review")
+              ('preempted (format "pre-empted by task %s" (plist-get task :preempted-by)))
+              ('reclaimed (format "slot taken back by task %s" (plist-get task :preempted-by)))
+              ('quota "waiting for quota")
+              ('budget "waiting for its budget")
+              (_ "paused")))))
 
 (defun harness-tasks--holds-turns-p (task from)
   "Non-nil when TASK's session takes no turn started by a message from FROM.
@@ -4166,12 +4166,16 @@ message, the harness's own, a sub-agent reporting back -- does not
 begin, and its message waits for that start.  The user's own message
 starts the task, as `task/start' does, unless it waits with their
 feedback (`sent-back'): then it is more of that feedback, and waits
-too."
-  (and (harness-tasks--queued-p task)
-       (harness-tasks--returned-p task)
-       (or (eq (harness-tasks--return-reason task) 'sent-back)
-           (harness-sender-kind from))
-       t))
+too.  A parked task holds every session turn until explicitly started or
+queued, so a message or a late report cannot start its work in the
+backlog."
+  (or (and (eq (plist-get task :state) 'pending)
+           (harness-json-true-p (plist-get task :parked)))
+      (and (harness-tasks--queued-p task)
+           (harness-tasks--returned-p task)
+           (or (eq (harness-tasks--return-reason task) 'sent-back)
+               (harness-sender-kind from))
+           t)))
 
 (defun harness-tasks--before-turn (value next session)
   "Hold back a turn of SESSION while its task waits, or to start it.
@@ -5947,8 +5951,29 @@ view."
       (error "Task %s is not waiting in the backlog (%s)" id (or (plist-get task :state) "?")))
     (when (harness-tasks--turn-p task)
       (error "Task %s is still being written up; wait for it or stop it" id))
-    (prog1 (harness-tasks--set id :backlog nil :queued-at (float-time))
+    (prog1 (harness-tasks--set id :backlog nil :parked nil :queued-at (float-time))
       (harness-tasks--schedule))))
+
+(harness-defmethod task/park (id)
+  "Move pending task ID out of the queue into the backlog without starting it.
+Only a task waiting in pending can be parked; a running turn, a task
+still starting or stopping, a backlog task, or a task in review is
+refused.  No turn is cancelled and no write-up is run.  Its identity,
+prompt, session, worktree, branch, priority, review feedback, return
+history and pause are kept.  A returned task resumes its existing work
+when started, not a fresh write-up.  Parked tasks stay in the backlog
+regardless of the project's auto-queue mode.  `task/queue' puts one
+back in pending, honoring its pause and the project's queue suspension;
+`task/start' explicitly starts it.  Return the task's view."
+  (let ((task (harness-tasks--get id)))
+    (unless (and (eq (plist-get task :state) 'pending)
+                 (not (harness-tasks--backlog-p task)))
+      (error "Task %s is not waiting in the pending queue" id))
+    (when (or (harness-tasks--turn-p task)
+              (gethash id harness-tasks--starting)
+              (gethash id harness-tasks--returning))
+      (error "Task %s is still starting or stopping; wait for it" id))
+    (harness-tasks--set id :backlog t :parked t)))
 
 (harness-defmethod task/return-to-pending (id)
   "Stop the turn of active task ID and put it back in the pending queue.
@@ -6128,7 +6153,8 @@ follows the start's own carry-on."
       (error "Task %s was archived and its worktree removed; submit a new task" id))
     (cond
      ((and (harness-tasks--returned-p task)
-           (or (harness-tasks--task-suspended-p task)
+           (or (harness-json-true-p (plist-get task :parked))
+               (harness-tasks--task-suspended-p task)
                (eq (harness-tasks--return-reason task) 'sent-back)
                (harness-tasks--hold task)))
       (harness-log 'info "task %s: keeping the message until it starts again" id)
