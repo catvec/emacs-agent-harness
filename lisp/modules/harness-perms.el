@@ -6086,6 +6086,10 @@ can approve the call in the chat as any other denied call."
   "Install the `permission/decide' chain and the steering after denials.
 Grants until a turn ends are dropped from here on when it ends.  Safe
 to call again."
+  ;; The command-reading guard was removed in favor of sandbox mounts.
+  ;; Reload preserves the bus but unbinds deleted functions, so a session
+  ;; upgraded from that version can still have its now-void stage at 7.
+  (harness-remove-filter 'permission/decide 'harness-perms--sandbox-guard)
   (harness-set-filter-failure 'permission/decide #'harness-perms--stage-failed)
   (harness-on 'tools/finished #'harness-perms--forget-once)
   (harness-add-filter 'permission/decide #'harness-perms--dir-request 5)

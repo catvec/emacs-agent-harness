@@ -3624,6 +3624,29 @@ decides such a command as it decides any other."
       (should (eq 'allow (plist-get (harness-perms-test--decide (harness-perms-test--bash command)) :behavior))))
     (should-not asked)))
 
+(ert-deftest harness-perms-reload-removes-retired-sandbox-guard ()
+  "Reloading repairs the stale stage left by removing the sandbox guard."
+  (harness-perms-test--setup :permission-mode 'yolo)
+  ;; Reload unbinds deleted functions, but the bus survives the reload.
+  (should-not (fboundp 'harness-perms--sandbox-guard))
+  (harness-add-filter 'permission/decide 'harness-perms--sandbox-guard 7)
+  (let ((decision (harness-perms-test--decide
+                   (harness-perms-test--bash "pwd"))))
+    (should (eq 'deny (plist-get decision :behavior)))
+    (should (string-match-p "harness-perms--sandbox-guard"
+                            (plist-get decision :reason))))
+  ;; Exercise the module lifecycle used by reload, without resetting the bus.
+  (harness-modules-init)
+  (harness-modules-init)
+  (should-not (cl-find 'harness-perms--sandbox-guard
+                       (gethash 'permission/decide harness--filters) :key #'cdr))
+  (should (eq 'allow (plist-get (harness-perms-test--decide
+                                (harness-perms-test--bash "pwd")) :behavior)))
+  ;; Repair must retain the directory jail, even in yolo mode.
+  (should (eq 'deny (harness-perms-test--behavior
+                    "read_file" 'read
+                    (expand-file-name "secret" (harness-test-temp-dir))))))
+
 (ert-deftest harness-perms-rules-type-names-every-key ()
   "The settings page offers each part of a standing rule by name."
   (require 'harness-test-helpers)
