@@ -1144,8 +1144,9 @@ typed; empty text picks nothing."
                         (display-sort-function . identity)
                         (cycle-sort-function . identity))
                     (complete-with-action action rows string pred)))))
-    ;; Not known yet (the harness is starting): ask, and take what is typed.
-    (when empty (ignore-errors (harness-ui-refresh-models)))
+    ;; The caller fetched the catalogue (`harness-ui-config--model-pick');
+    ;; one the harness could not answer leaves nothing known, and text is
+    ;; taken as the id it is.
     (harness-ui-config--model-input
      (completing-read (format-prompt (concat (or (widget-get widget :tag) "Model")
                                              (if empty " (no models listed yet: type an id)" ""))
@@ -1169,6 +1170,12 @@ typed; empty text picks nothing."
 
 (defun harness-ui-config--model-pick (button &rest _)
   "Pick a value for the model widget of BUTTON, in the minibuffer.
+The catalogue is fetched first, as the model switcher fetches it, so a
+provider that just became available -- one a sign-in registers -- is
+offered, where the cache the page was drawn with has none of its
+models.  The picker opens either way, over what is known, when the
+harness cannot answer.
+
 A pick of a setting saves it at once, like a menu's; one of an entry of
 a list is an edit, saved with the list.  Should the page be drawn again
 while the picker is open, a setting's pick goes to the setting drawn."
@@ -1176,17 +1183,19 @@ while the picker is open, a setting's pick goes to the setting drawn."
          (setting (harness-ui-config--setting-of widget))
          (whole (and setting (eq widget (car (widget-get setting :children)))))
          (buffer (current-buffer))
-         (picked (harness-ui-config--model-read widget)))
-    (when (and picked (buffer-live-p buffer))
-      (with-current-buffer buffer
-        (let ((target (cond ((harness-ui-config--live-p widget setting) widget)
-                            (whole
-                             (when-let* ((now (harness-ui-config--widget (widget-get setting :key)))
-                                         (child (car (widget-get now :children))))
-                               (and (eq (widget-type child) 'harness-ui-config-model) child))))))
-          (if target
-              (harness-ui-config--model-set target (car picked))
-            (message "The page changed meanwhile: pick again")))))))
+         (pick (lambda (&rest _)
+                 (let ((picked (harness-ui-config--model-read widget)))
+                   (when (and picked (buffer-live-p buffer))
+                     (with-current-buffer buffer
+                       (let ((target (cond ((harness-ui-config--live-p widget setting) widget)
+                                           (whole
+                                            (when-let* ((now (harness-ui-config--widget (widget-get setting :key)))
+                                                        (child (car (widget-get now :children))))
+                                              (and (eq (widget-type child) 'harness-ui-config-model) child))))))
+                         (if target
+                             (harness-ui-config--model-set target (car picked))
+                           (message "The page changed meanwhile: pick again")))))))))
+    (harness-ui-refresh-models pick pick)))
 
 ;;;;; Summaries
 

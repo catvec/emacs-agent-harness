@@ -71,7 +71,7 @@ only the models allowed, and a tier's model is chosen among them.
 
 ### Events
 
-- `provider/models-updated` — (MODELS) after a provider's models were cached; MODELS is the whole catalogue.
+- `provider/models-updated` — (MODELS) after the catalogue changed -- a provider's models were cached, or a provider was removed; MODELS is the whole catalogue.
 - `provider/quota-updated` — (PROVIDER-ID QUOTA) when a provider learns new billing or quota information.
 - `provider/request-started` — (PROVIDER-ID REQUEST) when a completion starts.
 

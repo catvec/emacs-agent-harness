@@ -1150,13 +1150,20 @@ comes, or when naming it failed."
 (defvar harness-ui--models-seen nil
   "(CONNECTION . MODELS): the catalogue last fetched, and over which connection.")
 
-(defun harness-ui-refresh-models (&optional callback)
+(defun harness-ui-refresh-models (&optional callback on-error)
   "Reload the model catalogue cache, then call CALLBACK with the models.
 Every view redraws (`harness-ui-redraw-hook') when the catalogue is new:
 it changed, or it is the first over this connection.  The harness says
 the catalogue was updated (`provider/models-updated') whenever a
-provider settles, mostly with nothing new, and a redraw fetches and
-renders every chat buffer again."
+provider settles or a provider comes or goes, mostly with nothing new,
+and a redraw fetches and renders every chat buffer again.
+
+ON-ERROR is called with the failure when the harness cannot answer, and
+CALLBACK is not called then; without it the failure is reported in the
+echo area, or ignored when there is no CALLBACK.  A caller that has
+something to show anyway -- a picker over the cache it holds -- passes
+one, so that a harness that cannot answer does not leave the command
+with nothing."
   (harness-ui-call "_harness/provider/models" nil
                    (lambda (models)
                      (let ((new (not (and (eq harness-ui-connection (car harness-ui--models-seen))
@@ -1166,7 +1173,7 @@ renders every chat buffer again."
                        (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
                        (when new (run-hooks 'harness-ui-redraw-hook)))
                      (when callback (funcall callback models)))
-                   (unless callback #'ignore)))
+                   (or on-error (unless callback #'ignore))))
 
 ;;;; Tool catalogue cache
 ;;

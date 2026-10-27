@@ -318,6 +318,23 @@ A models function that takes an argument is told when a refresh asks."
       ;; Nothing to relist for a provider that is not there.
       (should-not (harness-provider-relist 'test-nobody)))))
 
+(ert-deftest harness-provider-removing-one-announces-the-catalogue ()
+  "Removing a provider tells clients the catalogue changed.
+Its models are gone, and a picker still offering them would fail a
+switch to one -- a signed-out ChatGPT plan, say -- so the harness says
+so, and the catalogue clients ask for again has them gone."
+  (harness-provider-test-with (test-going)
+    (let ((announced 0) (last 'unset))
+      (harness-provider-test-static 'test-going '(("m" . 200000)))
+      (should (member "test-going:m"
+                      (mapcar (lambda (m) (plist-get m :id))
+                              (harness-test-await (harness-call 'provider/models)))))
+      (harness-on 'provider/models-updated
+                  (lambda (models) (cl-incf announced) (setq last models)))
+      (should (harness-provider-unregister 'test-going))
+      (harness-test-wait (lambda () (>= announced 1)) 2 "the catalogue announced when it went")
+      (should-not (member "test-going:m" (mapcar (lambda (m) (plist-get m :id)) last))))))
+
 (ert-deftest harness-provider-tier-model-prefers-declared-tiers ()
   "A provider's `:tiers' names the model each tier uses, over its price."
   (harness-provider-test-with (test-tiered)

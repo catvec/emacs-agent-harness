@@ -70,11 +70,16 @@ Each is a plist with these keys:
   "What the last model picker offered: (PROMPT DEFAULT ROWS).
 Each of ROWS is (GROUP CANDIDATE ANNOTATION).")
 
+(defvar harness-ui-config-test--picked nil
+  "Non-nil once the model picker was answered.")
+
 (defmacro harness-ui-config-test-picking (answer &rest body)
-  "Run BODY answering the model picker with ANSWER.
+  "Run BODY, which opens the model picker, and answer it with ANSWER.
 ANSWER is text, answered as typed, or a function of the candidates
-that returns the answer.  `harness-ui-config-test--picker' then says
-what the picker offered."
+that returns the answer.  `harness-ui-config--model-pick' fetches the
+catalogue before it opens the picker, so BODY may return first: the
+picker is waited for.  `harness-ui-config-test--picker' then says what
+it offered."
   (declare (indent 1))
   `(cl-letf (((symbol-function 'completing-read)
               (lambda (prompt table _pred _require _initial _history &optional default &rest _)
@@ -85,9 +90,13 @@ what the picker offered."
                        (answer ,answer))
                   (setq harness-ui-config-test--picker
                         (list prompt default
-                              (mapcar (lambda (c) (list (funcall group c nil) c (funcall note c))) all)))
+                              (mapcar (lambda (c) (list (funcall group c nil) c (funcall note c))) all))
+                        harness-ui-config-test--picked t)
                   (if (functionp answer) (funcall answer all) answer)))))
-     ,@body))
+     (setq harness-ui-config-test--picked nil)
+     (prog1 (progn ,@body)
+       ;; The catalogue is fetched first: the picker opens from a timer.
+       (harness-test-wait (lambda () harness-ui-config-test--picked) 5 "the model picker"))))
 
 (defun harness-ui-config-test-candidate (regexp)
   "Return a function picking the first candidate matching REGEXP."
@@ -795,6 +804,45 @@ stopped drawing at that setting and never set its widgets up."
                                             (list :key "harness-fallback-models"
                                                   :type (prin1-to-string
                                                          '(repeat (string :names (provider model))))))))))
+
+(ert-deftest harness-ui-config-model-picker-asks-for-the-catalogue-first ()
+  "The page's model picker fetches the catalogue before it offers models.
+A provider that became available while the page was drawn -- one a
+sign-in registers -- is in the answer, where the cache the page holds
+has none of its models; and the picker still opens, over that cache,
+when the harness cannot answer."
+  (require 'harness-ui-config)
+  (let* ((harness-ui--models (make-hash-table :test 'equal))
+         (harness-ui--models-seen nil)
+         (harness-ui-connection 'test)
+         (widget (list 'harness-ui-config-model :names '(model) :value "" :from nil))
+         (buffer (generate-new-buffer " *model picker*"))
+         (refresh nil) (answered nil) (failed nil) (offered nil))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cl-letf (((symbol-function 'harness-ui-refresh-models)
+                     (lambda (&optional callback on-error)
+                       (setq refresh t answered callback failed on-error)))
+                    ((symbol-function 'harness-ui-config--setting-of) #'ignore)
+                    ((symbol-function 'harness-ui-config--model-read)
+                     (lambda (_widget)
+                       (setq offered (harness-ui-config--model-rows '(model) nil nil))
+                       nil)))
+            (harness-ui-config--model-pick (list :parent widget))
+            ;; The catalogue is fetched, and the picker waits for it.
+            (should refresh)
+            (should-not offered)
+            (puthash "chatgpt:gpt-5.6-sol"
+                     '(:id "chatgpt:gpt-5.6-sol" :label "GPT-5.6 Sol" :provider "chatgpt"
+                           :provider-label "ChatGPT plan" :context-window 400000)
+                     harness-ui--models)
+            (funcall answered nil)
+            (should (member "chatgpt:gpt-5.6-sol" (mapcar (lambda (row) (nth 2 row)) offered)))
+            ;; A harness that cannot answer still opens the picker.
+            (setq offered nil)
+            (funcall failed 'boom)
+            (should offered)))
+      (kill-buffer buffer))))
 
 ;;;; A policy
 

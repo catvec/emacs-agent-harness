@@ -1505,6 +1505,28 @@ first over a connection (another harness may know other models)."
       (harness-ui-refresh-models)
       (should (= 3 redrawn)))))
 
+(ert-deftest harness-ui-models-refresh-tells-a-caller-that-it-failed ()
+  "A caller with something to show anyway hears of a failed catalogue fetch.
+The settings page's model picker falls back to the cache it holds, and
+does not leave the command with nothing when the harness cannot answer."
+  (let ((harness-ui--models (make-hash-table :test 'equal))
+        (harness-ui--models-seen nil)
+        (harness-ui-connection 'first)
+        (called nil) (failed nil) (handler 'unset))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (_method _params _callback on-error)
+                 (setq handler on-error)
+                 (when on-error (funcall on-error '(boom))))))
+      (harness-ui-refresh-models (lambda (_models) (setq called t))
+                                 (lambda (err) (setq failed err)))
+      (should-not called)
+      (should (equal '(boom) failed))
+      ;; With a callback and no handler the harness's own reporter has it.
+      (setq handler 'unset)
+      (harness-ui-refresh-models (lambda (_models) (setq called t)))
+      (should-not called)
+      (should-not handler))))
+
 (ert-deftest harness-ui-model-window-says-when-it-is-estimated ()
   "The model picker marks a window the catalogue estimated with a tilde."
   (should (equal "1.00M" (harness-ui-format-model-window '(:context-window 1000000))))

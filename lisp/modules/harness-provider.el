@@ -506,11 +506,17 @@ KEY is `:warm', `:close', `:resolve' or `:embed'."
 
 (defun harness-provider-unregister (id)
   "Remove provider ID from the registry and forget its models.
-Return non-nil when a provider was registered under ID."
-  (prog1 (and (gethash id harness-providers) t)
+The catalogue loses them, so clients are told
+\(`provider/models-updated'), from the command loop: a picker still
+offers them otherwise.  Return non-nil when a provider was registered
+under ID."
+  (let ((there (and (gethash id harness-providers) t)))
     (remhash id harness-providers)
     (remhash id harness-provider--lifecycle)
-    (harness-provider--forget id)))
+    (harness-provider--forget id)
+    (when there
+      (harness-emit-later 'provider/models-updated harness-provider--models))
+    there))
 
 (defun harness-provider-parse-model (model-id)
   "Split MODEL-ID \"provider:name\" into (PROVIDER-SYMBOL . NAME)."
@@ -1476,7 +1482,7 @@ docs/architecture.md."
           (t (harness-as-promise (funcall fn))))))
 
 (harness-declare-event 'provider/models-updated
-                       "(MODELS) after a provider's models were cached; MODELS is the whole catalogue.")
+                       "(MODELS) after the catalogue changed -- a provider's models were cached, or a provider was removed; MODELS is the whole catalogue.")
 (harness-declare-event 'provider/request-started "(PROVIDER-ID REQUEST) when a completion starts.")
 (harness-declare-event 'provider/quota-updated
                        "(PROVIDER-ID QUOTA) when a provider learns new billing or quota information.")
