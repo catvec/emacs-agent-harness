@@ -804,7 +804,7 @@ it is rather than asked to be shown whole."
 ;;;; Auto-scroll
 
 (defun harness-chat--at-bottom-p (&optional window)
-  "Non-nil when WINDOW shows the end of the transcript.
+  "Non-nil when WINDOW follows the newest content or the compose box.
 WINDOW defaults to the first window showing the buffer; without one
 the buffer counts as at the bottom.
 Never call this from a header-line or mode-line `:eval': it measures
@@ -815,8 +815,9 @@ the call would run again inside itself, without end.  The header reads
     (or (null w)
         (not (eq (window-buffer w) (current-buffer)))
         (null harness-chat--transcript-end)
-        (>= (window-point w) harness-chat--transcript-end)
-        (pos-visible-in-window-p (max (point-min) (1- (marker-position harness-chat--transcript-end))) w))))
+        ;; Point in a panel is not a request to follow the compose box.
+        (and harness-compose-start (>= (window-point w) harness-compose-start))
+        (pos-visible-in-window-p (max (point-min) (1- (point-max))) w))))
 
 (defvar harness-chat--to-pin nil
   "Windows to pin to the end of their chat once a slice of messages is handled.
@@ -924,7 +925,7 @@ are rendered.  A window showing it does this
          (let ((buf (current-buffer)))
            (harness-run-soon (lambda ()
                                (when (buffer-live-p buf)
-                                 (with-current-buffer buf (harness-chat--load t)))))))
+                                 (with-current-buffer buf (harness-chat--load)))))))
         (harness-chat--stale (harness-chat--catch-up)))
   (harness-ui-view-drawn))
 
@@ -941,32 +942,37 @@ first display and the next streamed chunk snaps it to the bottom."
                (>= (window-point window) harness-chat--transcript-end))
       (harness-chat--pin window))))
 
+(defun harness-chat--position-anchor (pos)
+  "Record POS relative to its transcript block, with an absolute fallback."
+  (let* ((node (get-text-property pos 'harness-chat-node))
+         (block (and node harness-chat--blocks (gethash node harness-chat--blocks))))
+    (list node (and block (- pos (harness-chat-block-start block))) pos)))
+
+(defun harness-chat--anchor-position (anchor)
+  "Find ANCHOR in the rebuilt transcript."
+  (pcase-let* ((`(,node ,offset ,pos) anchor)
+               (block (and node harness-chat--blocks (gethash node harness-chat--blocks))))
+    (if block
+        (min (+ (harness-chat-block-start block) offset) (harness-chat-block-end block))
+      (min pos (point-max)))))
+
 (defun harness-chat--window-anchors ()
-  "Return (WINDOW BOTTOM NODE OFFSET START) for every window on the buffer.
-NODE and OFFSET locate the window start inside a block, so it can be
-found again after the transcript is rebuilt."
+  "Record each window's follow state, start and point before a rebuild."
   (mapcar (lambda (w)
-            (let* ((start (window-start w))
-                   (node (get-text-property start 'harness-chat-node))
-                   (block (and node harness-chat--blocks (gethash node harness-chat--blocks))))
-              (list w (harness-chat--at-bottom-p w) node
-                    (and block (- start (harness-chat-block-start block)))
-                    start)))
+            (list w (harness-chat--at-bottom-p w)
+                  (harness-chat--position-anchor (window-start w))
+                  (harness-chat--position-anchor (window-point w))))
           (harness-chat--windows)))
 
 (defun harness-chat--restore-anchors (anchors)
-  "Put the windows of ANCHORS back where `harness-chat--window-anchors' saw them."
-  (pcase-dolist (`(,w ,bottom ,node ,offset ,start) anchors)
-    (when (window-live-p w)
+  "Restore each window in ANCHORS after rebuilding the transcript."
+  (pcase-dolist (`(,w ,bottom ,start ,point) anchors)
+    (when (and (window-live-p w) (eq (window-buffer w) (current-buffer)))
       (if bottom
           (progn (set-window-point w (or harness-compose-end (point-max)))
                  (harness-chat--pin w))
-        (let ((block (and node (gethash node harness-chat--blocks))))
-          (set-window-start w (if block
-                                  (min (+ (harness-chat-block-start block) offset)
-                                       (harness-chat-block-end block))
-                                (min start (point-max)))
-                            t))))))
+        (set-window-point w (harness-chat--anchor-position point))
+        (set-window-start w (harness-chat--anchor-position start) t)))))
 
 ;;;; Rendering: pieces
 
@@ -3767,7 +3773,7 @@ is on the last node drawn already, and nothing is loaded."
                             (harness-chat--turn-changed))
         ("session/nodes-removed" (harness-chat--on-nodes-removed (cadr args)))
         ("session/head-moved" (unless (harness-chat--head-shown-p (cadr args))
-                                (harness-chat--load t))))
+                                (harness-chat--load))))
       (force-mode-line-update))))
 
 (defun harness-chat--turn-changed ()
@@ -4293,7 +4299,14 @@ takes a task as well as a file (task:ID)."
          (inhibit-read-only t)
          (buffer-undo-list t)
          (bottom (harness-chat--bottom-windows))
-         (windows (mapcar (lambda (w) (cons w (window-start w))) (harness-chat--windows))))
+         (windows (mapcar (lambda (w)
+                            (list w (window-start w) (window-point w)
+                                  (and (>= (window-start w) harness-chat--transcript-end)
+                                       (- (window-start w) harness-chat--transcript-end))
+                                  (and (>= (window-point w) harness-chat--transcript-end)
+                                       (- (window-point w) harness-chat--transcript-end))
+                                  (get-char-property (window-point w) 'harness-compose-panel)))
+                          (harness-chat--windows))))
     (save-excursion
       (delete-region harness-chat--transcript-end (point-max))
       (goto-char harness-chat--transcript-end)
@@ -4321,16 +4334,32 @@ takes a task as well as a file (task:ID)."
         (harness-compose-insert nil (harness-chat--box-help))))
     (cond (offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
           (in-tail (goto-char harness-compose-end)))
-    (dolist (w windows)
-      (cond ((not (window-live-p (car w))))
-            ;; A window following the conversation keeps showing the newest
-            ;; lines, so a new panel or queue entry never lands off screen.
-            ((memq (car w) bottom)
-             (unless (eq (car w) (selected-window))
-               (set-window-point (car w) harness-compose-end))
-             (harness-chat--pin-soon (car w)))
-            ((< (cdr w) harness-chat--transcript-end)
-             (set-window-start (car w) (cdr w) t))))
+    (pcase-dolist (`(,w ,start ,point ,start-offset ,point-offset ,on-panel) windows)
+      (when (and (window-live-p w) (eq (window-buffer w) (current-buffer)))
+        (if (memq w bottom)
+            ;; A following window shows new panels and queued messages too.
+            (progn
+              (unless (eq w (selected-window))
+                (set-window-point w harness-compose-end))
+              (harness-chat--pin-soon w))
+          ;; Deleting the tail moves window point (including in other windows).
+          ;; Keep each reader on the same part of a panel or todo instead.
+          (let ((new-point (if point-offset
+                               (min (+ harness-chat--transcript-end point-offset) (point-max))
+                             point)))
+            ;; A panel that has gone away cannot retain its old point.  Put
+            ;; it in the box, where a key pressed from that panel can return
+            ;; to the draft; a panel still present retains its row.
+            (when (and on-panel (not (get-char-property new-point 'harness-compose-panel)))
+              (setq new-point harness-compose-start))
+            (unless (and (eq w (selected-window)) offset)
+              (set-window-point w new-point)))
+          (set-window-start w (if start-offset
+                                  (min (+ harness-chat--transcript-end start-offset) (point-max))
+                                start) t))))
+    ;; Restoring a displayed window can also change the buffer's point when
+    ;; that window is selected.  Keep the compose cursor at its saved offset.
+    (when offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
     ;; The new tail went in where the activity line was: put it back,
     ;; under the queued messages and above the rest.
     (harness-chat--refresh-activity)))
@@ -4791,7 +4820,7 @@ pending module report on (`harness-chat--on-session')."
              (when (buffer-live-p buf)
                (with-current-buffer buf
                  (if (harness-chat--windows)
-                     (harness-chat--load (harness-chat--at-bottom-p))
+                     (harness-chat--load)
                    (setq harness-chat--redraw-pending t)
                    (harness-ui-view-note-stale)
                    (harness-chat--fetch-session)))))

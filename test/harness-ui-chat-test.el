@@ -2448,6 +2448,73 @@ The call and its result appear as any tool call's would."
         (harness-chat--append-local-block "hint" "again")
         (should harness-chat--unseen)))))
 
+(ert-deftest harness-ui-chat-redraw-preserves-independent-window-positions ()
+  "A scrolled reader stays put through tail and transcript redraws."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window))
+           (other nil))
+      (unwind-protect
+          (progn
+            (dotimes (i 80) (harness-call 'session/hint sid (format "line %d" i)))
+            (harness-test-wait (lambda () (with-current-buffer buf (= 80 (length harness-chat--order)))) 5 "hints rendered")
+            (set-window-buffer w buf)
+            (setq other (split-window w nil 'below))
+            (set-window-buffer other buf)
+            (with-current-buffer buf
+              (let* ((id (nth 40 harness-chat--order))
+                     (block (gethash id harness-chat--blocks))
+                     (start (harness-chat-block-start block))
+                     (cursor (+ start 2))
+                     (nodes (mapcar (lambda (node-id)
+                                      (harness-chat-block-node (gethash node-id harness-chat--blocks)))
+                                    harness-chat--order)))
+                (set-window-start w start t)
+                (set-window-point w cursor)
+                (set-window-point other harness-compose-end)
+                (harness-chat--pin other)
+                (let ((anchors (harness-chat--window-anchors)))
+                  (should-not (cadr (assq w anchors)))
+                  (should (cadr (assq other anchors)))
+                  (harness-chat--render-tail)
+                  (should (= (window-start w) start))
+                  (should (= (window-point w) cursor))
+                  (harness-chat--render-nodes nodes)
+                  (harness-chat--restore-anchors anchors)
+                  (let ((rebuilt (gethash id harness-chat--blocks)))
+                    (should (= (window-start w) (harness-chat-block-start rebuilt)))
+                    (should (= (window-point w) (+ 2 (harness-chat-block-start rebuilt)))))
+                  (should (= (window-point other) harness-compose-end))))))
+        (when (window-live-p other) (delete-window other))))))
+
+(ert-deftest harness-ui-chat-tail-redraw-keeps-a-panel-reader-in-place ()
+  "A reader in a long panel does not follow the compose box on redraw."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window))
+           (lines 100))
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (setq-local harness-chat-panel-functions
+                    (list (lambda () (concat (make-string lines ?x) "\n"
+                                             (mapconcat (lambda (n) (format "panel %d" n))
+                                                        (number-sequence 1 100) "\n") "\n"))))
+        (harness-chat--render-tail)
+        (goto-char harness-chat--transcript-end)
+        (forward-line 24)
+        (let ((start (point)))
+          (set-window-start w start t)
+          (forward-line 2)
+          (set-window-point w (point))
+          (should-not (harness-chat--at-bottom-p w))
+          (let ((old-point (window-point w)))
+            (setq lines 120)
+            (harness-chat--render-tail)
+            (should (= start (window-start w)))
+            (should (= old-point (window-point w)))))))))
+
 (ert-deftest harness-ui-chat-header-reads-the-cached-notice ()
   "The header shows the newer-messages notice without measuring the window.
 Measuring it (`pos-visible-in-window-p') formats the window's header
