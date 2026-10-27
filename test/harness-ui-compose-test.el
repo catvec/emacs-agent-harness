@@ -318,6 +318,23 @@ words of your own above it, only the card goes."
     (should (equal "Intro.\nWhy?" (harness-compose-text)))
     (should-not harness-compose-attachments)))
 
+(ert-deftest harness-ui-compose-thread-cards-have-display-only-spacing ()
+  "Card gaps survive redraw without changing text or reply associations."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (insert "First.")
+    (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+    (insert "Second.")
+    (harness-ui-compose-test--draw)
+    (should (equal "\n[reply 1]\nFirst.\n[reply 2]\nSecond." (harness-compose-text)))
+    (should (= 2 (length harness-compose--token-overlays)))
+    (dolist (ov harness-compose--token-overlays)
+      (should (equal "\n" (substring-no-properties (overlay-get ov 'before-string)))))
+    (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+      (should (equal "" text))
+      (should (equal '("First." "Second.")
+                     (mapcar (lambda (a) (plist-get a :response)) atts))))))
+
 (ert-deftest harness-ui-compose-thread-removing-the-first-card-keeps-the-words-in-order ()
   "Removing the first of two cards takes the line it left for your own message
 with it when nothing is on that line: the words under it are the message's now,

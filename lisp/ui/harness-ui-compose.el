@@ -1923,6 +1923,10 @@ with HINT, a string, after its [×]."
                                       'face (list 'harness-compose-token-face harness-compose--face)
                                       props)))
     (when thread
+      ;; The token starts a line, but the preceding reply need not end in
+      ;; a blank one.  Keep this gap entirely in the display: inserting a
+      ;; newline into the draft would change the reply's text and bounds.
+      (overlay-put ov 'before-string (propertize "\n" 'face harness-compose--face))
       (overlay-put ov 'harness-compose-room (harness-compose--thread-chip-room))
       (overlay-put ov 'harness-compose-hint hint))
     (dolist (p (seq-partition props 2)) (overlay-put ov (car p) (cadr p)))
