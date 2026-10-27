@@ -9,6 +9,7 @@ Summarise the transcript when it nears the context window, before a turn or in t
 - **Loaded:** by default
 - **Requires:** [session](session.md), [provider](provider.md), [agent](agent.md)
 - **Required by:** [cache-compact](cache-compact.md), [cowboy](cowboy.md), [tools-compact](tools-compact.md)
+- **Brings along:** [small](small.md) (its file requires it)
 
 ## About
 
@@ -185,7 +186,6 @@ the token count progressively.
 - `agent/running` ([agent](agent.md))
 - `agent/show-waiting` ([agent](agent.md))
 - `provider/capabilities` ([provider](provider.md))
-- `provider/complete` ([provider](provider.md))
 - `provider/fork` ([provider](provider.md))
 - `provider/model` ([provider](provider.md))
 - `provider/tier-model` ([provider](provider.md))

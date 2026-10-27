@@ -8,7 +8,7 @@ The Insights report: figures and a written summary of the work, for any provider
 - **Source:** [lisp/modules/harness-insights.el](../../lisp/modules/harness-insights.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [store](store.md)
-- **Brings along:** [ui-insights](ui-insights.md) (its UI)
+- **Brings along:** [ui-insights](ui-insights.md) (its UI), [small](small.md) (its file requires it)
 
 ## About
 

@@ -8,6 +8,7 @@ Name nameless sessions with a cheap model as soon as their first message is sent
 - **Source:** [lisp/modules/harness-naming.el](../../lisp/modules/harness-naming.el)
 - **Loaded:** by default
 - **Requires:** [session](session.md), [provider](provider.md), [agent](agent.md)
+- **Brings along:** [small](small.md) (its file requires it)
 
 ## About
 
@@ -86,7 +87,6 @@ how their sessions are titled: task mode asks for ticket titles.
 - `agent/running` ([agent](agent.md))
 - `provider/capabilities` ([provider](provider.md))
 - `provider/close` ([provider](provider.md))
-- `provider/complete` ([provider](provider.md))
 - `provider/fork` ([provider](provider.md))
 - `provider/tier-model` ([provider](provider.md))
 - `session/exists-p` ([session](session.md))

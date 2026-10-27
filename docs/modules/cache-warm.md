@@ -8,7 +8,7 @@ Keeps a session's prompt cache warm while its user is around or a tool runs: rea
 - **Source:** [lisp/modules/harness-cache-warm.el](../../lisp/modules/harness-cache-warm.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [session](session.md), [provider](provider.md), [agent](agent.md), [cache](cache.md)
-- **Brings along:** [ui-cache-warm](ui-cache-warm.md) (its UI)
+- **Brings along:** [ui-cache-warm](ui-cache-warm.md) (its UI), [small](small.md) (its file requires it)
 
 ## About
 
@@ -123,7 +123,6 @@ it lapse would have:
 - `cache/claim` ([cache](cache.md))
 - `compaction/resend-cost` ([compaction](compaction.md)), when it is loaded
 - `provider/capabilities` ([provider](provider.md))
-- `provider/complete` ([provider](provider.md))
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
 - `session/hint` ([session](session.md))

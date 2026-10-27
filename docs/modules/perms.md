@@ -9,6 +9,7 @@ Directory jail, directory requests, permission modes, auto judge, user prompts w
 - **Loaded:** by default
 - **Requires:** [config](config.md), [tools](tools.md)
 - **Required by:** [access](access.md)
+- **Brings along:** [small](small.md) (its file requires it)
 
 ## About
 

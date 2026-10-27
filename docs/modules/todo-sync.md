@@ -8,7 +8,7 @@ Keep a session's todo list true to its work: every few steps a cheap model rewri
 - **Source:** [lisp/modules/harness-todo-sync.el](../../lisp/modules/harness-todo-sync.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [session](session.md), [provider](provider.md), [agent](agent.md)
-- **Brings along:** [ui-todo-sync](ui-todo-sync.md) (its UI)
+- **Brings along:** [ui-todo-sync](ui-todo-sync.md) (its UI), [small](small.md) (its file requires it)
 
 ## About
 
@@ -100,7 +100,6 @@ a list now, and `todo-sync/state` says how a session stands.
 ### Methods it calls
 
 - `provider/capabilities` ([provider](provider.md))
-- `provider/complete` ([provider](provider.md))
 - `provider/fork` ([provider](provider.md))
 - `provider/tier-model` ([provider](provider.md))
 - `session/exists-p` ([session](session.md))

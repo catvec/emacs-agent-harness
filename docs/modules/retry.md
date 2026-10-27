@@ -35,9 +35,18 @@ keeping it busy.
 A provider that knows names its failure's kind in `:error-kind`
 (`transport` or `rate-limit`, see `harness-provider-openai`); a
 transport failure that arrives as text alone (a CLI provider's, say)
-is read the same way by `harness-retry--kind`.  So is a CLI
+is read the same way by `harness-retry-kind`.  So is a CLI
 provider's process killed mid-turn (out of memory, say): the next
 try starts it again.
+
+The harness's own one-off calls -- a session's name, the permission
+judge, a recap, a summary (see harness-small.el) -- are no step of a
+turn, so `agent/step-error` never sees them; they take the same
+treatment from the same code, to which `harness-small` adds nothing
+but the request itself: `harness-retry-kind` says whether their
+failure is worth another try, and `harness-retry-backoff` how long to
+wait.  One place decides for both what a provider's bad minute looks
+like and how long the harness waits it out.
 
 ## Provides
 

@@ -8,7 +8,7 @@ A companion pet: hatched with random bones, named and voiced by a cheap model, g
 - **Source:** [lisp/modules/harness-pet.el](../../lisp/modules/harness-pet.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [store](store.md), [provider](provider.md)
-- **Brings along:** [ui-pet](ui-pet.md) (its UI)
+- **Brings along:** [ui-pet](ui-pet.md) (its UI), [small](small.md) (its file requires it)
 
 ## About
 
@@ -123,7 +123,6 @@ its experience; growing a level is something it may remark upon.
 
 - `project/name` ([project](project.md)), when it is loaded
 - `provider/close` ([provider](provider.md))
-- `provider/complete` ([provider](provider.md))
 - `provider/tier-model` ([provider](provider.md))
 - `session/get` ([session](session.md)), when it is loaded
 - `session/internal-start` ([session](session.md)), when it is loaded

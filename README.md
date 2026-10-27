@@ -21,7 +21,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   time; a rate limit waits the `Retry-After` it asked for. An answer cut
   in the middle is retried as a step, and the partial answer the failed
   step had streamed is dropped rather than sent to the model twice
-  (`harness-http-max-retries`, `harness-retry-max-attempts`). When the
+  (`harness-http-max-retries`, `harness-retry-max-attempts`). The
+  harness's own one-off calls -- a session's name, the permission
+  judge, a recap, a compaction's summary -- are tried again the same
+  way, from the same code: a 429 there no longer leaves a session
+  unnamed or a call nobody judged. When the
   harness process stops in the middle of a turn, the sessions it cut
   short carry on once it is back, unless you had cancelled them; a
   sub-agent's permission prompt nobody answers is denied after ten
@@ -5771,7 +5775,7 @@ with it.
 
 | Area | Core | Enabled by you |
 |---|---|---|
-| Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `priority` `usage` `naming` | `cowboy` `cache` `cache-warm` `cache-compact` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` `todo-sync` |
+| Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `small` `priority` `usage` `naming` | `cowboy` `cache` `cache-warm` `cache-compact` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` `todo-sync` |
 | Tasks and git | `worktree` | `tasks` `tasks-notify` `tasks-search` `recap` `merge` `patch-review` |
 | Safety | `perms` `sandbox` `access` `readonly` | `tool-slots` `tool-slots-load` `secrets` `redact` `judge` |
 | Providers | `provider` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |

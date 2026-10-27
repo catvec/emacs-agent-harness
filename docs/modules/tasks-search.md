@@ -8,7 +8,7 @@ Search the harness with a cheap model: tasks and actions on them, sessions, comm
 - **Source:** [lisp/modules/harness-tasks-search.el](../../lisp/modules/harness-tasks-search.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [tasks](tasks.md), [provider](provider.md), [session-search](session-search.md)
-- **Brings along:** [ui-tasks-search](ui-tasks-search.md) (its UI), [priority](priority.md) (its file requires it)
+- **Brings along:** [ui-tasks-search](ui-tasks-search.md) (its UI), [priority](priority.md) (its file requires it), [small](small.md) (its file requires it)
 
 ## About
 
@@ -100,7 +100,6 @@ stay out of it.  What a search costs goes to the usage records
 - `project/name` ([project](project.md)), when it is loaded
 - `project/root` ([project](project.md)), when it is loaded
 - `provider/close` ([provider](provider.md))
-- `provider/complete` ([provider](provider.md))
 - `provider/tier-model` ([provider](provider.md))
 - `provider/warm` ([provider](provider.md))
 - `session/exists-p` ([session](session.md)), when it is loaded

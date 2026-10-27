@@ -8,6 +8,7 @@ Write the recaps task cards and running chats show, with a short model call.
 - **Source:** [lisp/modules/harness-recap.el](../../lisp/modules/harness-recap.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [session](session.md), [provider](provider.md), [agent](agent.md), [tasks](tasks.md)
+- **Brings along:** [small](small.md) (its file requires it)
 
 ## About
 
@@ -66,7 +67,6 @@ one's.
 ### Methods it calls
 
 - `agent/running` ([agent](agent.md))
-- `provider/complete` ([provider](provider.md))
 - `provider/tier-model` ([provider](provider.md))
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))

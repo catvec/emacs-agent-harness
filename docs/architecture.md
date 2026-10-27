@@ -5026,7 +5026,7 @@ answer, or a transport failure that outlived those tries.
   connection-level failure curl reported, and a stream that ended
   without headers that way) or `rate-limit` (HTTP 429), or, without a
   kind, whose error text reads as one of those
-  (`harness-retry--transient-text-p`: "connection reset", "empty
+  (`harness-retry-transient-p`: "connection reset", "empty
   reply", "could not resolve", "timed out", "rate limit"...).  Quota
   and billing failures are the fallback module's and are never answered
   here; neither is a failure another handler already answered.
@@ -5043,7 +5043,7 @@ answer, or a transport failure that outlived those tries.
 - A step tried again runs with the partial answer the failed one
   streamed already dropped by the agent (`session/discard-nodes'), so
   a retry cannot duplicate content.  A turn cancelled while it waits
-  tries nothing (`harness-retry--wait').
+  tries nothing (`harness-retry-wait').
 
 The HTTP layer's own retries (`harness-http'): a request that failed
 transiently -- curl exits 6, 7, 28 before the response began, 35, 52,
@@ -5063,10 +5063,25 @@ a request whose own timeout fired are never retried.
 
 The providers that speak HTTP ask for it: the OpenAI-compatible ones
 (DeepSeek included) and Bedrock pass `:retry t' for every completion.
-So a lost connection is repeated for the harness's own calls -- a
-task's title, a permission judge, a recap -- which no step layer covers
-(they are no agent step), as well as for a turn's.  The Claude Code CLI
-retries its own API calls.
+So a lost connection *before the answer began* is repeated for the
+harness's own calls -- a task's title, a permission judge, a recap --
+which no step layer covers (they are no agent step), as well as for a
+turn's.  The Claude Code CLI retries its own API calls.
+
+A failure that got further, though -- a 429 answered with a body, a
+stream cut in the middle, a process that died -- arrives as a `done'
+event, and the HTTP layer is behind by then.  A turn's step reaches
+`agent/step-error' above; the harness's own one-off calls have no step,
+so they go through `small` (lisp/modules/harness-small.el) instead,
+which tries one again by the same code: `harness-retry-kind` says
+whether its failure is worth another try -- `transport`, `rate-limit`
+or `process` -- and `harness-retry-backoff` how long to wait, bounded by
+`harness-retry-max-attempts` and honouring the Retry-After a rate limit
+asked for.  Before the try, the caller is sent `(:type restart)` to
+drop the half answer the failed try streamed.  A small call holds no
+provider state, so a retry cannot send its conversation twice; a failure
+no retry gets past (a refusal, a login, an account out of quota) is the
+call's end, as it always was.
 
 A CLI provider's process killed by a signal mid-turn (its failure text
 reads "exited with status N" for N in 6, 9, 11, 13, 15, 134, 137, 139,
@@ -5076,6 +5091,42 @@ as a shell reports them, 128 + the signal) is the kind `process`
 failure with the hint "the provider's process died: ...".  The next
 try starts the process again.  An exit the program chose (status 1 and
 a message, an invalid key) is not retried.
+
+### small
+
+One place every one-off model call the harness makes on its own is made
+from, so that one place decides how such a call is sent and how it
+survives a provider having a bad minute.  The calls are the harness's
+own, beside any conversation: a session's name, the permission judge
+and the summary of a prompt, the session judge, a recap, a compaction's
+summary, the Insights summary, the companion pet, the task board's
+search, the todo sync's question.
+
+- `harness-small-ask REQUEST &optional OPTS` sends REQUEST (a
+  `provider/complete` request without `:on-event`, which this adds) and
+  hands every event to OPTS' `:on-event`.  It returns a handle with
+  `:cancel`.
+- A failure a retry gets past -- `harness-small-retryable-p`, which is
+  `harness-retry-kind`'s `transport`, `rate-limit` or `process` -- is
+  not the call's end: the caller is sent `(:type restart)` to drop the
+  half answer the failed try streamed, `harness-retry-backoff` is waited
+  (a rate limit's Retry-After honoured), and the request is sent again,
+  at most `harness-retry-max-attempts` times.  The `done` of the last try
+  is the one the caller reads.  The kind and the wait are the *same
+  code* the step retry uses (`retry`, lisp/modules/harness-retry.el), so
+  a small call and a step of a turn fail alike and are tried again
+  alike.
+- `:retries` in OPTS overrides how many times the call may be tried
+  again after the first: the cache warmer passes 0, doing its own trying
+  on its own clock (a refresh is tried only while the cache it reads
+  still lasts).
+- A request that raises is handed over as a `done` with `:stop-reason`
+  error, so a caller handles it one way.
+- The module keeps no state and starts nothing.  Its callers `require`
+  it and do not list `small` among their modules' requirements (as they
+  do with `judge`, see lisp/modules/harness-judge.el), so each loads on
+  its own.  It is in the core's closure (`retry`'s), so it loads by
+  default.
 
 ### resilience
 

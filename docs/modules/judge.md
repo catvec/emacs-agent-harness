@@ -8,6 +8,7 @@ Judges: one-off questions to the simple tier of a session's model, read as a dec
 - **Source:** [lisp/modules/harness-judge.el](../../lisp/modules/harness-judge.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** nothing
+- **Brings along:** [small](small.md) (its file requires it)
 
 ## About
 

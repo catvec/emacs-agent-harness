@@ -133,6 +133,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [session](session.md) | by default | [store](store.md), [project](project.md) | Session records, conversation DAG, queue and pending requests. |
 | [session-search](session-search.md) |  | [store](store.md), [session](session.md) | Searches session transcripts: an SQLite full-text index, grep, and semantic search by embeddings. |
 | [skills](skills.md) |  | [tools](tools.md) | Skill discovery (SKILL.md directories), search, loading and prompt index. |
+| [small](small.md) | by default |  | One-off model calls the harness makes on its own, tried again like a step of a turn when they fail transiently. |
 | [store](store.md) | by default |  | JSON, JSONL and SQLite persistence under the state directory. |
 | [supervisor](supervisor.md) |  | [session](session.md), [agent](agent.md), [tools](tools.md), [readonly](readonly.md) | Supervisor mode: sessions that plan and delegate, enforced by the harness. |
 | [tasks](tasks.md) |  | [store](store.md), [project](project.md), [session](session.md), [agent](agent.md) | Task mode: one session per task, through review and the merge queue, with a limit of tasks at once per project, started by priority. |
