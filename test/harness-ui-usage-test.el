@@ -234,7 +234,11 @@ their sum; TAB, RET, w and the heading's button show and hide them."
   (harness-ui-usage-test-with
     (let* ((now (float-time))
            (project (file-name-as-directory dir))
-           (other "/tmp/harness-usage-other/"))
+           (other (file-name-as-directory (make-temp-file "harness-usage-other-" t))))
+      ;; Both usage rows name real projects, independent of any checkout
+      ;; another suite may create around the temporary directory.
+      (harness-ui-usage-test--git project "init" "-q")
+      (harness-ui-usage-test--git other "init" "-q")
       (harness-ui-usage-test-record now project "demo:scripted" 1.5)
       (harness-ui-usage-test-record (- now 3600) project "demo:other" 0.5 200 20)
       (harness-ui-usage-test-record (- now (* 2 86400)) other "demo:scripted" 2.0)

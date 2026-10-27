@@ -3371,6 +3371,10 @@ links its .claude/skills to OUTSIDE.  None is in the session's roots."
          (cwd (plist-get harness-perms-test--session :cwd))
          (harness-skills-plugins-directory (harness-test-temp-dir))
          (harness-skills-directories (list skills #'harness-skills-project-directories)))
+    ;; Give this fixture its own project root.  A temporary ancestor can
+    ;; itself be a checkout while another suite is running.
+    (unless (zerop (call-process "git" nil nil nil "init" "-q" cwd))
+      (error "Could not create the skills test project"))
     (harness-perms-test--write (expand-file-name "commit/SKILL.md" skills) "---\nname: commit\n---\nCommit.\n")
     (harness-perms-test--write (expand-file-name "commit/reference.md" skills) "Reference.\n")
     (harness-perms-test--write (expand-file-name "SKILL.md" linked) "Linked.\n")
