@@ -5205,7 +5205,15 @@ naming no plan model, is not sent one to plan: it would start it."
              harness-ui-tasks--settings (not (plist-member harness-ui-tasks--settings :plan-model)))
     (user-error "This harness does not plan tasks: update it, or switch to Submit or Refine (%s)"
                 (substitute-command-keys "\\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-cycle-mode]")))
-  (pcase-let* ((`(,text . ,atts) (harness-compose-take))
+  (pcase-let* ((`(,text . ,atts)
+                (if (and (eq (car harness-ui-tasks--target) 'reject)
+                         (string-blank-p (harness-compose-text))
+                         (null harness-compose-attachments)
+                         (fboundp 'harness-ui-review--pending-p)
+                         (harness-ui-review--pending-p
+                          (harness-ui-tasks--find (cdr harness-ui-tasks--target))))
+                    (cons "" nil)
+                  (harness-compose-take)))
                (target harness-ui-tasks--target)
                (mode harness-ui-tasks--mode)
                (buffer (current-buffer))
@@ -5655,7 +5663,10 @@ Lisp, FEEDBACK is sent at once."
   (let ((task (harness-ui-tasks--review-task)))
     (cond
      ((null feedback) (harness-ui-tasks--set-compose "" (cons 'reject (plist-get task :id))))
-     ((harness-string-blank-p feedback) (user-error "Sending a task back needs feedback"))
+     ((and (harness-string-blank-p feedback)
+           (not (and (fboundp 'harness-ui-review--pending-p)
+                     (harness-ui-review--pending-p task))))
+      (user-error "Sending a task back needs feedback"))
      (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
                                         "Sending the task back" #'harness-ui-tasks--say-sent-back)))))
 

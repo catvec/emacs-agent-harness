@@ -1255,6 +1255,43 @@ longer drafts.  An empty box sends them alone."
         (should (string-prefix-p "My review comments on your branch task/fix" feedback))
         (should (string-search "Why two?" feedback))))))
 
+(defun harness-ui-patch-review-test--reply-alone (surface)
+  "Send an existing thread's reply from SURFACE, but reject nothing."
+  (harness-ui-patch-review-test-with-task
+      (let* ((_popout (harness-ui-patch-review-test--changes board id))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (set (harness-ui-patch-review--r-set review))
+             (chat (and (eq surface 'chat) (harness-chat-buffer sid))))
+        (when chat
+          (harness-test-wait (lambda () (gethash sid harness-ui-review--tasks))
+                             5 "the chat review task"))
+        (with-current-buffer (or chat board)
+          (unless chat
+            (setq harness-ui-tasks--target (cons 'reject id)))
+          (should-error (if chat (harness-chat-send) (harness-ui-tasks-submit))
+                        :type 'user-error))
+        (let ((root (harness-ui-patch-review-test--comment-on
+                     review "a.el" '(:new . 2) "Existing comment" :sent (float-time))))
+          (change-review-reply set root "Please explain this."
+                               :author (change-review-user "Noah" "noah@example.org")))
+        (harness-test-wait (lambda () (harness-call 'patch-review/drafts id))
+                           5 "the reply draft to reach the harness")
+        (with-current-buffer (or chat board)
+          (if chat (harness-chat-send) (harness-ui-tasks-submit)))
+        (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :feedback))
+                           10 "the reply to reach the task")
+        (let* ((feedback (plist-get (harness-call 'task/get id) :feedback))
+               (text (plist-get (car feedback) :text)))
+          (should (= 1 (length feedback)))
+          (should (= 2 (length (split-string text "Please explain this\\.")))))
+        (should-not (harness-call 'patch-review/drafts id)))))
+
+(ert-deftest harness-ui-patch-review-reply-alone-from-chat ()
+  (harness-ui-patch-review-test--reply-alone 'chat))
+
+(ert-deftest harness-ui-patch-review-reply-alone-from-board ()
+  (harness-ui-patch-review-test--reply-alone 'board))
+
 (ert-deftest harness-ui-patch-review-places-threads-in-the-newest-version ()
   "A thread is on the line it is on now: moved down by lines added above it,
 marked changed when its line was edited, the same where nothing happened.
