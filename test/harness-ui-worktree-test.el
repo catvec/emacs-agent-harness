@@ -570,9 +570,11 @@ Other tests' leftovers, which the same keys may hold, are not BUFFER's."
     keys))
 
 (defun harness-ui-worktree-test--settle (buffer)
-  "Wait until nothing is scheduled for BUFFER: its statuses and sessions have settled."
-  (harness-test-wait (lambda () (not (harness-ui-worktree-test--pending-for buffer)))
-                     10 "the redraws scheduled for the list"))
+  "Fire the debounced redraws scheduled for BUFFER."
+  (let ((count 0) keys)
+    (while (setq keys (harness-ui-worktree-test--pending-for buffer))
+      (should (< (cl-incf count) 100))
+      (dolist (key keys) (harness-test-fire-debounce key)))))
 
 (defun harness-ui-worktree-test--sync-sessions ()
   "Wait for the harness's sessions to reach the cache, which they replace.
@@ -712,8 +714,7 @@ not redraw when shown either; one that missed a rename does."
                   (harness-ui-worktree-test-column "Sessions"))
                 (changed (&optional (n 1))
                   (dotimes (_ n) (run-hooks 'harness-ui-sessions-changed-hook))
-                  (harness-ui-worktree-test--settle buf)
-                  (accept-process-output nil 0.3)))
+                  (harness-ui-worktree-test--settle buf)))
         (harness-ui-worktree-test--settle buf)
         (harness-ui-worktree-test--sync-sessions)
         (should (equal "" (cell)))
@@ -744,8 +745,8 @@ not redraw when shown either; one that missed a rename does."
           (should (eq 'sessions (buffer-local-value 'harness-ui-worktree--stale buf)))
           (switch-to-buffer buf)
           (with-current-buffer buf (harness-ui-worktree--shown))
-          (harness-test-wait (lambda () (= 1 redraws)) 10 "the redraw of a list shown again")
           (harness-ui-worktree-test--settle buf)
+          (should (= 1 redraws))
           (should (string-match-p "Renamed worker" (cell)))
           ;; Hidden for changes that alter nothing: shown, it draws nothing.
           (setq redraws 0)
@@ -755,7 +756,6 @@ not redraw when shown either; one that missed a rename does."
           (switch-to-buffer buf)
           (with-current-buffer buf (harness-ui-worktree--shown))
           (harness-ui-worktree-test--settle buf)
-          (accept-process-output nil 0.3)
           (should (= 0 redraws))
           (should-not (buffer-local-value 'harness-ui-worktree--stale buf)))
         (ignore-errors (kill-buffer "*elsewhere*"))))))
@@ -797,7 +797,8 @@ worktrees that did."
               (harness-ui-worktree-test--session 1 wt :name "Feature worker")
               (run-hooks 'harness-ui-sessions-changed-hook)
               (should (pending))
-              (harness-test-wait (lambda () (>= redraws 1)) 10 "the redraw of a list that is shown")
+              (harness-ui-worktree-test--settle buf)
+              (should (>= redraws 1))
               (should-not (stale))
               (harness-ui-worktree-test--settle buf)
               ;; Hidden, it is left alone: nothing is redrawn, and no timer is even started.
@@ -813,12 +814,12 @@ worktrees that did."
               (harness-ui-worktree--on-assumed)
               (should-not (pending))
               (should (eq 'redraw (stale)))
-              (accept-process-output nil 0.4)
               (should (= 0 redraws))
               (should (= 0 loads))
               ;; Shown again, it redraws: the sessions are all it missed.
               (show)
-              (harness-test-wait (lambda () (>= redraws 1)) 10 "the redraw of a list shown again")
+              (harness-ui-worktree-test--settle buf)
+              (should (>= redraws 1))
               (should-not (stale))
               (should (equal "" (with-current-buffer buf (harness-ui-view-indicator))))
               (harness-ui-worktree-test--settle buf)
@@ -833,12 +834,12 @@ worktrees that did."
               (run-hooks 'harness-ui-sessions-changed-hook)
               (should-not (pending))
               (should (eq 'reload (stale)))
-              (accept-process-output nil 0.5)
               (should (= 0 loads))
               (should (= 0 redraws))
               ;; Shown again, the list is fetched anew, once.
               (show)
-              (harness-test-wait (lambda () (= 1 loads)) 10 "the reload of a list shown again")
+              (harness-ui-worktree-test--settle buf)
+              (should (= 1 loads))
               (should-not (stale))
               (harness-ui-worktree-test-wait-rows 2)
               (harness-ui-worktree-test--settle buf)

@@ -85,19 +85,20 @@ What the connection receives collects under the property `got'."
 (ert-deftest harness-claude-plugin-test-write-leaves-current-files-alone ()
   "A directory that is up to date is not written again; an outdated file is."
   (harness-claude-plugin-test--with-state
-    (let* ((dir (harness-claude-plugin-write))
-           (mcp (expand-file-name ".mcp.json" dir))
-           (stamp (file-attribute-modification-time (file-attributes mcp))))
-      (sleep-for 1.1)
-      (should (equal (harness-claude-plugin-write) dir))
-      (should (equal (file-attribute-modification-time (file-attributes mcp)) stamp))
-      (with-temp-file mcp (insert "{}"))
-      (harness-claude-plugin-write)
-      (should (string-match-p "mcpServers" (harness-read-file mcp)))
-      ;; Its mode is put back too.
-      (set-file-modes (expand-file-name "bin/harness-mcp-relay" dir) #o644)
-      (harness-claude-plugin-write)
-      (should (file-executable-p (expand-file-name "bin/harness-mcp-relay" dir))))))
+   (let* ((dir (harness-claude-plugin-write))
+          (mcp (expand-file-name ".mcp.json" dir)))
+     ;; Give a rewrite a distinguishable timestamp without waiting for the clock.
+     (set-file-times mcp (seconds-to-time (- (float-time) 60)))
+     (let ((stamp (file-attribute-modification-time (file-attributes mcp))))
+       (should (equal (harness-claude-plugin-write) dir))
+       (should (equal (file-attribute-modification-time (file-attributes mcp)) stamp)))
+     (with-temp-file mcp (insert "{}"))
+     (harness-claude-plugin-write)
+     (should (string-match-p "mcpServers" (harness-read-file mcp)))
+     ;; Its mode is put back too.
+     (set-file-modes (expand-file-name "bin/harness-mcp-relay" dir) #o644)
+     (harness-claude-plugin-write)
+     (should (file-executable-p (expand-file-name "bin/harness-mcp-relay" dir))))))
 
 (ert-deftest harness-claude-plugin-test-private-directories ()
   "The plugin's directories are the user's own, and a shared one is not used."

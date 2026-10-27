@@ -43,6 +43,8 @@ first.  Finished tasks are done at once unless BODY turns
 `harness-tasks-require-verification' on."
   (declare (indent 0))
   `(harness-test-with-temp-state
+     ;; Notifications name the fixture project, even under a parent checkout.
+     (harness-test-mark-project dir)
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent tasks acp

@@ -146,14 +146,16 @@ oldest first."
     (let ((port (let ((p (make-network-process :name "harness-test-port" :server t :host "127.0.0.1"
                                                :service t :family 'ipv4 :noquery t)))
                   (prog1 (process-contact p :service) (delete-process p)))))
-      (pcase-let ((`(,_dl ,err . ,_) (harness-http-test--download (format "http://127.0.0.1:%d/x" port) file)))
+      ;; Retry behavior has its own tests; this checks cleanup after failure.
+      (pcase-let ((`(,_dl ,err . ,_) (harness-http-test--download (format "http://127.0.0.1:%d/x" port)
+                                                                  file :retry 0)))
         (should (stringp err))
         (should-not (file-exists-p file))))))
 
 (ert-deftest harness-http-download-stops-when-asked ()
   (skip-unless (executable-find "curl"))
   (let* ((server (harness-test-http-serve
-                  `(("/slow" 200 (("Content-Type" . "video/webm")) ,(make-string 40000 ?s) :chunks 40 :delay 0.2)
+                  `(("/slow" 200 (("Content-Type" . "video/webm")) ,(make-string 40000 ?s) :chunks 2 :pause-after 1)
                     ("/page" 200 (("Content-Type" . "text/html; charset=utf-8")) "<html>hi</html>"))))
          (file (expand-file-name "x.part" (harness-test-temp-dir)))
          (calls 0) (error nil) (dl nil))
@@ -275,7 +277,7 @@ oldest first."
   (skip-unless (executable-find "curl"))
   (let* ((server (harness-test-http-serve
                   `(("/slow" 200 (("Content-Type" . "video/webm")) ,(make-string 40000 ?s)
-                     :chunks 40 :delay 0.2))))
+                     :chunks 2 :pause-after 1))))
          (file (expand-file-name "x.part" (harness-test-temp-dir)))
          (calls 0) (error nil) (dl nil) (settled-at nil))
     (unwind-protect

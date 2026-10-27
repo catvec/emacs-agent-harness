@@ -12,6 +12,8 @@
 
 (require 'harness-test-helpers)
 
+(defvar harness-fallback--timer)
+
 (defvar harness-openai-endpoints)
 (defvar harness-deepseek-always-register)
 (declare-function harness-define-provider "harness-provider")
@@ -346,6 +348,7 @@ entry that works, and goes back to its own model on the turn after the
 limit resets, without anyone clearing the mark: Claude Max first, and
 DeepSeek while Claude's quota is used up."
   (harness-fallback-test-with
+   (harness-test-with-clock
     (setq harness-fallback-models '("alpha" "beta"))
     (harness-call 'fallback/mark "alpha" :until (+ (float-time) 1.2) :reason "5h window used up")
     (let ((sid (harness-fallback-test-session "alpha:a-mid")))
@@ -355,14 +358,16 @@ DeepSeek while Claude's quota is used up."
                        (harness-fallback-test-hints sid)))
       ;; The window resets: the mark ends on its own, and the turn after
       ;; it goes back without anyone clearing it.
-      (harness-test-wait (lambda () (not (gethash "alpha" harness-fallback--marks))) 5 "the mark to end")
+      (harness-test-clock-fire harness-fallback--timer
+                               (+ 1 (plist-get (gethash "alpha" harness-fallback--marks) :until)))
+      (should-not (gethash "alpha" harness-fallback--marks))
       (setq harness-fallback-test-requests nil)
       (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "two") :stop-reason)))
       (should (equal '("alpha:a-mid") (harness-fallback-test-models-asked)))
       (should (equal "alpha:a-mid" (plist-get (harness-call 'session/get sid) :model)))
       (should (cl-some (lambda (h) (string-match-p "Alpha works again, so this session goes back to a-mid" h))
                        (harness-fallback-test-hints sid)))
-      (should-not (plist-get (harness-call 'fallback/status) :moved)))))
+      (should-not (plist-get (harness-call 'fallback/status) :moved))))))
 
 (ert-deftest harness-fallback-climbs-back-up-the-list ()
   "While its own model is still out, a session moves back up the list as
@@ -601,6 +606,7 @@ scoping the used-up window to one model narrows a whole-provider mark."
 (ert-deftest harness-fallback-marks-persist-and-expire ()
   "Marks survive a restart until they end; ending one is announced."
   (harness-fallback-test-with
+   (harness-test-with-clock
     (harness-call 'fallback/mark "alpha" :kind "billing" :reason "Insufficient Balance")
     (harness-call 'fallback/mark "beta:b-pro" :until (+ (float-time) 1.2))
     (puthash "gone" (list :key "gone" :until (- (float-time) 1)) harness-fallback--marks)
@@ -620,13 +626,15 @@ scoping the used-up window to one model narrows a whole-provider mark."
     (let ((changed 0))
       (harness-on 'fallback/changed (lambda () (cl-incf changed)))
       (harness-fallback--schedule)
-      (harness-test-wait (lambda () (not (gethash "beta:b-pro" harness-fallback--marks))) 5 "the mark to end")
+      (harness-test-clock-fire harness-fallback--timer
+                               (+ 1 (plist-get (gethash "beta:b-pro" harness-fallback--marks) :until)))
+      (should-not (gethash "beta:b-pro" harness-fallback--marks))
       (should (> changed 0))
       (should (gethash "alpha" harness-fallback--marks)))
     ;; A provider's clear takes its models' marks along.
     (harness-call 'fallback/mark "alpha:a-top")
     (harness-call 'fallback/clear "alpha")
-    (should-not (gethash "alpha:a-top" harness-fallback--marks))))
+    (should-not (gethash "alpha:a-top" harness-fallback--marks)))))
 
 (ert-deftest harness-fallback-status-describes-entries ()
   "The status names each entry, what it stands for and whether it is out."

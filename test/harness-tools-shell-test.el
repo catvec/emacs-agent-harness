@@ -419,23 +419,29 @@ rest of the home directory stays hidden."
   "A timed-out command takes its children with it."
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir
-    (let* ((pidfile (expand-file-name "child.pid" root))
-           ;; Unconfined, whether or not an earlier test loaded the
-           ;; sandbox: in bwrap's PID namespace $! is a number of that
-           ;; namespace, which says nothing about a process out here.
-           (harness-sandbox-policy 'off)
-           (r (harness-tools-shell-test--call
-               "bash"
-               :command (format "sleep 300 & echo $! > %s; wait" (shell-quote-argument pidfile))
-               :timeout 2)))
-      (should (eq 'timeout (plist-get (plist-get r :meta) :exit)))
-      (should (file-exists-p pidfile))
-      (let ((child (string-to-number (string-trim (with-temp-buffer (insert-file-contents pidfile) (buffer-string))))))
-        (should (> child 0))
-        (let ((deadline (+ (float-time) 5)))
-          (while (and (eql 0 (signal-process child 0)) (< (float-time) deadline))
-            (sleep-for 0.1)))
-        (should-not (eql 0 (signal-process child 0)))))))
+   (harness-test-with-command-watchdog "harness-bash"
+				       (let* ((pidfile (expand-file-name "child.pid" root))
+					      ;; Unconfined, whether or not an earlier test loaded the
+					      ;; sandbox: in bwrap's PID namespace $! is a number of that
+					      ;; namespace, which says nothing about a process out here.
+					      (harness-sandbox-policy 'off)
+					      (promise (harness-call 'tools/execute nil
+								     (list :id "c1" :name "bash"
+									   :input (list :command (format "sleep 300 & echo $! > %s; wait"
+													 (shell-quote-argument pidfile))
+											:timeout 2)))))
+					 (harness-test-wait (lambda () (file-exists-p pidfile)) 10 "the child to start")
+					 (should (= 2 harness-test-command-timeout))
+					 (timer-event-handler harness-test-command-timer)
+					 (let ((r (harness-test-await promise 10)))
+					   (should (eq 'timeout (plist-get (plist-get r :meta) :exit))))
+					 (should (file-exists-p pidfile))
+					 (let ((child (string-to-number (string-trim (with-temp-buffer (insert-file-contents pidfile) (buffer-string))))))
+					   (should (> child 0))
+					   (let ((deadline (+ (float-time) 5)))
+					     (while (and (eql 0 (signal-process child 0)) (< (float-time) deadline))
+					       (sleep-for 0.1)))
+					   (should-not (eql 0 (signal-process child 0))))))))
 
 ;;;; bash: sandbox options from a module
 
@@ -799,26 +805,32 @@ This is the freeze this design exists for: a `call-process' waiting on
 a child never yields, so nothing in the evaluating Emacs can end it."
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir
-    (let* ((pidfile (expand-file-name "blocked.pid" root))
-           (command (format "echo $$ > %s; sleep 300" (shell-quote-argument pidfile)))
-           (code (format "(call-process \"sh\" nil nil nil \"-c\" %S)" command))
-           (start (float-time))
-           (harness--process-kill-grace 0.3)
-           ;; Unconfined, whether or not an earlier test loaded the
-           ;; sandbox: in bwrap's PID namespace $$ is a number of that
-           ;; namespace, which says nothing about a process out here.
-           (harness-sandbox-policy 'off)
-           (r (harness-tools-shell-test--call "elisp" :timeout 1 :code code)))
-      (should (plist-get r :is-error))
-      (should (string-search "timed out" (plist-get r :content)))
-      (should (< (- (float-time) start) 15))
-      (should (file-exists-p pidfile))
-      (let ((pid (string-to-number (string-trim (with-temp-buffer (insert-file-contents pidfile) (buffer-string))))))
-        (should (> pid 0))
-        (let ((deadline (+ (float-time) 5)))
-          (while (and (eql 0 (signal-process pid 0)) (< (float-time) deadline))
-            (sleep-for 0.1)))
-        (should-not (eql 0 (signal-process pid 0)))))))
+   (harness-test-with-command-watchdog "harness-elisp"
+				       (let* ((pidfile (expand-file-name "blocked.pid" root))
+					      (command (format "echo $$ > %s; sleep 300" (shell-quote-argument pidfile)))
+					      (code (format "(call-process \"sh\" nil nil nil \"-c\" %S)" command))
+					      (start (float-time))
+					      (harness--process-kill-grace 0.3)
+					      ;; Unconfined, whether or not an earlier test loaded the
+					      ;; sandbox: in bwrap's PID namespace $$ is a number of that
+					      ;; namespace, which says nothing about a process out here.
+					      (harness-sandbox-policy 'off)
+					      (promise (harness-call 'tools/execute nil
+								     (list :id "c1" :name "elisp" :input (list :timeout 1 :code code)))))
+					 (harness-test-wait (lambda () (file-exists-p pidfile)) 10 "the blocked child to start")
+					 (should (= 6 harness-test-command-timeout))
+					 (timer-event-handler harness-test-command-timer)
+					 (let ((r (harness-test-await promise 10)))
+					   (should (plist-get r :is-error))
+					   (should (string-search "timed out" (plist-get r :content)))
+					   (should (< (- (float-time) start) 15)))
+					 (should (file-exists-p pidfile))
+					 (let ((pid (string-to-number (string-trim (with-temp-buffer (insert-file-contents pidfile) (buffer-string))))))
+					   (should (> pid 0))
+					   (let ((deadline (+ (float-time) 5)))
+					     (while (and (eql 0 (signal-process pid 0)) (< (float-time) deadline))
+					       (sleep-for 0.1)))
+					   (should-not (eql 0 (signal-process pid 0))))))))
 
 (ert-deftest harness-tools-shell-elisp-never-runs-in-the-users-emacs ()
   "The elisp tool always evaluates in the background Emacs.
@@ -1254,30 +1266,40 @@ line, since a pid it could report is one of bwrap's PID namespace."
   (harness-sandbox-detect)
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (harness-tools-shell-test-in-dir
-    (let* ((harness-sandbox-policy 'required)
-           (harness--process-kill-grace 0.3)
-           ;; A duration no other process sleeps for names this one.
-           (marker (format "300.%06d%d" (random 1000000) (emacs-pid)))
-           (code (format "(call-process \"sh\" nil nil nil \"-c\" \"touch started; exec sleep %s\")" marker))
-           (running (lambda ()
-                      (cl-some (lambda (pid)
-                                 (member marker (split-string
-                                                 (or (alist-get 'args (process-attributes pid)) ""))))
-                               (list-system-processes))))
-           (start (float-time))
-           (r (harness-tools-shell-test--call "elisp" :timeout 2 :code code)))
-      (when (string-search "bwrap:" (plist-get r :content))
-        (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
-      (should (plist-get r :is-error))
-      (should (string-search "timed out" (plist-get r :content)))
-      (should (plist-get (plist-get r :meta) :sandboxed))
-      (should (< (- (float-time) start) 15))
-      ;; It did start the process it then waited on.
-      (should (file-exists-p (expand-file-name "started" root)))
-      (let ((deadline (+ (float-time) 5)))
-        (while (and (funcall running) (< (float-time) deadline))
-          (sleep-for 0.1)))
-      (should-not (funcall running)))))
+   (harness-test-with-command-watchdog "harness-elisp"
+				       (let* ((harness-sandbox-policy 'required)
+					      (harness--process-kill-grace 0.3)
+					      ;; A duration no other process sleeps for names this one.
+					      (marker (format "300.%06d%d" (random 1000000) (emacs-pid)))
+					      (code (format "(call-process \"sh\" nil nil nil \"-c\" \"touch started; exec sleep %s\")" marker))
+					      (running (lambda ()
+							 (cl-some (lambda (pid)
+								    (member marker (split-string
+										    (or (alist-get 'args (process-attributes pid)) ""))))
+								  (list-system-processes))))
+					      (start (float-time))
+					      (promise (harness-call 'tools/execute nil
+								     (list :id "c1" :name "elisp" :input (list :timeout 2 :code code)))))
+					 (harness-test-wait (lambda () (or (funcall running) (harness-promise-settled-p promise)))
+							    10 "the sandboxed blocked child to start")
+					 (when (harness-promise-settled-p promise)
+					   (let ((r (harness-test-await promise 10)))
+					     (when (string-search "bwrap:" (plist-get r :content))
+					       (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+					     (ert-fail (format "Sandboxed child exited before blocking: %S" r))))
+					 (should (= 7 harness-test-command-timeout))
+					 (timer-event-handler harness-test-command-timer)
+					 (let ((r (harness-test-await promise 10)))
+					   (should (plist-get r :is-error))
+					   (should (string-search "timed out" (plist-get r :content)))
+					   (should (plist-get (plist-get r :meta) :sandboxed))
+					   (should (< (- (float-time) start) 15)))
+					 ;; It did start the process it then waited on.
+					 (should (file-exists-p (expand-file-name "started" root)))
+					 (let ((deadline (+ (float-time) 5)))
+					   (while (and (funcall running) (< (float-time) deadline))
+					     (sleep-for 0.1)))
+					 (should-not (funcall running))))))
 
 (ert-deftest harness-tools-shell-bwrap-read-only-elisp ()
   "Under the real bwrap the background Emacs of a session whose handler

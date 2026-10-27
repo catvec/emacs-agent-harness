@@ -885,6 +885,12 @@ it reads all of it from the cache, so a demo session is kept warm like any."
 
 ;;;; All of it, by the watcher
 
+(defun harness-cache-warm-test--fire-watcher (sid)
+  "Advance the test clock to SID's next watcher and fire its real timer."
+  (let ((watch (gethash sid harness-cache--watched)))
+    (should watch)
+    (harness-test-clock-fire (plist-get watch :timer) (plist-get watch :fire))))
+
 (ert-deftest harness-cache-warm-goes-on-until-the-user-is-gone ()
   "The watcher says the cache is about to lapse, the module reads it again, the
 new stamp sets the watcher for the next lapse; and at that lapse the user has
@@ -892,34 +898,40 @@ been gone for the warm period, so the cache is left to lapse.  A cache that
 lasts two seconds, a lead of 0.4 and a grace of 1.5 stand for five minutes,
 ten seconds and six."
   (harness-cache-warm-test-with
+   (harness-test-with-clock
     (let ((harness-cache--lead-min 0.4) (harness-cache--lead-max 0.4)
           (harness-cache--too-late 0.1) (harness-cache--grace-min 1.5))
       (let ((sid (harness-cache-warm-test-session "api:m" 2.0 0)))
         ;; Active 0.4 seconds, kept warm 1.5 more: until 1.9 s after, past
         ;; the first lapse, at 1.6 s.
         (harness-call 'cache/active sid)
-        (harness-test-wait (lambda () harness-cache-warm-test--requests) 6 "the first refresh")
+        (harness-cache-warm-test--fire-watcher sid)
         (harness-cache-warm-test--wait-idle)
         (should (= 1 (gethash sid harness-cache-warm--counts 0)))
         ;; The lapse after that, 1.6 seconds on, is past the period.
-        (sit-for 2.4)
+        (harness-cache-warm-test--fire-watcher sid)
         (should (equal 1 (length harness-cache-warm-test--requests)))
         (should-not (harness-call 'cache/claimed sid))
-        (should-not (harness-call 'cache/warm sid))))))
+        (should-not (harness-call 'cache/warm sid)))))))
 
 (ert-deftest harness-cache-warm-goes-on-while-the-user-keeps-showing-signs-of-life ()
   "A user who keeps typing keeps the cache warm through several lapses."
   (harness-cache-warm-test-with
+   (harness-test-with-clock
     (let ((harness-cache--lead-min 0.4) (harness-cache--lead-max 0.4)
           (harness-cache--too-late 0.1) (harness-cache--grace-min 0.1))
-      (let ((sid (harness-cache-warm-test-session "api:m" 2.0 0))
-            (deadline (+ (float-time) 5.5)))
-        (while (< (float-time) deadline)
+      (let ((sid (harness-cache-warm-test-session "api:m" 2.0 0)))
+        (dotimes (i 3)
+          ;; The latest sign of life is just before this cache's lapse.
+          (let ((watch (gethash sid harness-cache--watched)))
+            (cl-incf harness-test-clock-offset
+                     (max 0 (- (plist-get watch :fire) (float-time) 0.05))))
           (harness-call 'cache/active sid)
-          (sit-for 0.2))
+          (harness-cache-warm-test--fire-watcher sid)
+          (harness-cache-warm-test--wait-idle (1+ i)))
         (should (>= (length harness-cache-warm-test--requests) 3))
         ;; Every refresh came ahead of the lapse it was for.
-        (should (> (plist-get (harness-call 'cache/warm sid) :refreshes) 2))))))
+        (should (> (plist-get (harness-call 'cache/warm sid) :refreshes) 2)))))))
 
 (provide 'harness-cache-warm-test)
 ;;; harness-cache-warm-test.el ends here

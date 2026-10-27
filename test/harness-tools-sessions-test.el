@@ -86,11 +86,13 @@
 
 (ert-deftest harness-tools-sessions-list-and-filters ()
   (harness-tools-sessions-test-with
+    (harness-test-mark-project default-directory)
     (let* ((me (harness-tools-sessions-test-session :name "Me"))
            (other (harness-tools-sessions-test-session :name "Parser fixer"))
            (child (harness-tools-sessions-test-session :name "Child" :parent-id other :kind 'subagent))
            (closed (harness-tools-sessions-test-session :name "Old one"))
            (elsewhere (let ((default-directory (harness-test-temp-dir)))
+                        (harness-test-mark-project default-directory)
                         (harness-tools-sessions-test-session :name "Elsewhere"))))
       (harness-call 'session/deactivate closed)
       (let ((text (harness-tools-sessions-test-ok me "session_list" nil)))
@@ -805,11 +807,14 @@ can never come."
 (ert-deftest harness-tools-sessions-wait-on-several-sub-agents-mode-any ()
   "Several sub-agents, mode any and all: as with any other sessions."
   (harness-tools-sessions-test-with
+   (harness-test-with-held-demo
+    (lambda (request) (string-match-p "slow" (harness-provider-demo--last-user-text request)))
+    "slow done"
     (let* ((harness-provider-demo--delay 0.01)
            (harness-provider-demo-script-override
             (lambda (request)
               (if (string-match-p "slow" (harness-provider-demo--last-user-text request))
-                  '((:type wait :seconds 3) (:type text :delta "slow done") (:type done :stop-reason end-turn))
+                  '((:type text :delta "slow done") (:type done :stop-reason end-turn))
                 '((:type text :delta "fast done") (:type done :stop-reason end-turn)))))
            (watcher (harness-tools-sessions-test-session :name "Watcher"))
            (parent (harness-tools-sessions-test-session :name "Parent"))
@@ -825,13 +830,14 @@ can never come."
         (should (string-match-p "Done waiting" text))
         (should (harness-call 'agent/running slow)))
       ;; all: a second wait is woken for the slow one too.
-      (let ((text (harness-tools-sessions-test-wait-report
-                   watcher (harness-tools-sessions-test-ok
-                            watcher "session_wait"
-                            (list :session_ids (list slow fast) :until "stopped"
-                                  :timeout_seconds 10)))))
-        (should (string-match-p "Done waiting" text))
-        (should-not (harness-call 'agent/running slow))))))
+      (let ((wait (harness-tools-sessions-test-ok
+                   watcher "session_wait"
+                   (list :session_ids (list slow fast) :until "stopped" :timeout_seconds 10))))
+        (should harness-test-finish-demo)
+        (funcall harness-test-finish-demo)
+        (let ((text (harness-tools-sessions-test-wait-report watcher wait)))
+          (should (string-match-p "Done waiting" text))
+          (should-not (harness-call 'agent/running slow))))))))
 
 (ert-deftest harness-tools-sessions-wait-settles-without-events ()
   "A wait settles even when no subscribed event announces the change.
@@ -1148,9 +1154,10 @@ changes in the caller's result; the other session is told, this one not."
   "A change to a running session leaves a hint saying it takes effect
 from its next request."
   (harness-tools-sessions-test-with
-    (let* ((harness-provider-demo--delay 0.5)
-           (me (harness-tools-sessions-test-session :name "Me"))
-           (other (harness-tools-sessions-test-session :name "Busy")))
+   (let* ((me (harness-tools-sessions-test-session :name "Me"))
+          (other (harness-tools-sessions-test-session :name "Busy")))
+     (harness-test-with-held-demo
+      (lambda (request) (equal other (plist-get (plist-get request :session) :id))) "done"
       (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "long job"))
       (should (eq 'running (plist-get (harness-call 'session/get other) :status)))
       (let ((text (harness-tools-sessions-test-ok
@@ -1160,7 +1167,9 @@ from its next request."
                               (harness-tools-sessions-test-hints other))))
         (should (string-match-p "Thinking the model's default → low, set by session «Me»" hint))
         (should (string-match-p "takes effect from its next request" hint)))
-      (harness-tools-sessions-test-idle other))))
+      (should harness-test-finish-demo)
+      (funcall harness-test-finish-demo)
+      (harness-tools-sessions-test-idle other)))))
 
 (ert-deftest harness-tools-sessions-settings-refuses-what-is-not-its ()
   "Permission mode, non-interactive, directories, the working directory
@@ -1338,20 +1347,21 @@ moves it at once, keeping its old directory when asked to."
   "A session running a turn moves when it ends; moving it back to where
 it works cancels that, without asking."
   (harness-tools-sessions-test-with
-    (harness-test-load-module 'perms)
-    (let* ((harness-provider-demo--delay 0.5)
-           (new (harness-test-temp-dir))
-           (me (harness-tools-sessions-test-session :name "Me"))
-           (other (harness-tools-sessions-test-session :name "Busy"))
-           (move (lambda ()
-                   (let ((p (harness-call 'tools/execute me (list :id (harness-short-id) :name "session_move"
-                                                                  :input (list :session_id other :directory new)))))
-                     (let ((request (harness-tools-sessions-test-prompt me)))
-                       (should (string-match-p "when the turn it is running ends"
-                                               (plist-get (plist-get request :payload) :reason)))
-                       (harness-call 'permission/answer me (plist-get request :id) "allow-once"))
-                     (should (string-match-p "Busy is running a turn; it moves to"
-                                             (plist-get (harness-test-await p 5) :content)))))))
+   (harness-test-load-module 'perms)
+   (let* ((new (harness-test-temp-dir))
+          (me (harness-tools-sessions-test-session :name "Me"))
+          (other (harness-tools-sessions-test-session :name "Busy"))
+          (move (lambda ()
+                  (let ((p (harness-call 'tools/execute me (list :id (harness-short-id) :name "session_move"
+                                                                 :input (list :session_id other :directory new)))))
+                    (let ((request (harness-tools-sessions-test-prompt me)))
+                      (should (string-match-p "when the turn it is running ends"
+                                              (plist-get (plist-get request :payload) :reason)))
+                      (harness-call 'permission/answer me (plist-get request :id) "allow-once"))
+                    (should (string-match-p "Busy is running a turn; it moves to"
+                                            (plist-get (harness-test-await p 5) :content)))))))
+     (harness-test-with-held-demo
+      (lambda (request) (equal other (plist-get (plist-get request :session) :id))) "done"
       (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "long job"))
       (funcall move)
       (should (equal default-directory (plist-get (harness-call 'session/get other) :cwd)))
@@ -1361,8 +1371,10 @@ it works cancels that, without asking."
                                                               (list :session_id other :directory default-directory))))
       (should-not (plist-get (harness-call 'session/get other) :move))
       (funcall move)
+      (should harness-test-finish-demo)
+      (funcall harness-test-finish-demo)
       (harness-tools-sessions-test-idle other)
-      (harness-test-wait (lambda () (equal new (plist-get (harness-call 'session/get other) :cwd))) 5 "the move"))))
+      (harness-test-wait (lambda () (equal new (plist-get (harness-call 'session/get other) :cwd))) 5 "the move")))))
 
 (ert-deftest harness-tools-sessions-move-refusals-ask-nobody ()
   "A move that cannot be made fails at once, nobody asked: a session in

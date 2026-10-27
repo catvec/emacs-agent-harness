@@ -4,7 +4,7 @@
 #   scripts/test.sh FILE... [SELECTOR]   only these files (optionally an ERT selector)
 #   scripts/test.sh --changed            only the suites the working tree's changes touch
 # Set HARNESS_INTEGRATION=1 to include tests that talk to real models.
-# Set HARNESS_TEST_JOBS to how many files run at once (default: CPUs).
+# Set HARNESS_TEST_JOBS to how many files run at once (default: up to 4).
 # Set HARNESS_TEST_TIMEOUT to kill one file after N seconds (default 900).
 # Set HARNESS_TEST_TIMINGS to the run-time cache's path (default
 # scripts/.dev/test-timings), used to start the slowest suites first.
@@ -55,6 +55,7 @@ fi
 TIMEOUT=${HARNESS_TEST_TIMEOUT:-900}
 JOBS=${HARNESS_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}
 [ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
+if [ -z "${HARNESS_TEST_JOBS:-}" ] && [ "$JOBS" -gt 4 ]; then JOBS=4; fi
 TIMINGS=${HARNESS_TEST_TIMINGS:-$ROOT/scripts/.dev/test-timings}
 LOGS=${HARNESS_TEST_LOGS:-$ROOT/scripts/.dev/test-logs}
 if ! mkdir -p "$LOGS"; then
@@ -175,7 +176,7 @@ trap 'rm -rf "$WORK"' EXIT
 ordered() {
   [ -f "$TIMINGS" ] || { printf '%s\n' "${files[@]}"; return; }
   for f in "${files[@]}"; do
-    t=$(awk -v k="$(basename "$f")" '$1 == k { print $2 }' "$TIMINGS")
+    t=$(awk -v k="$(basename "$f" .el)" '$1 == k { print $2 }' "$TIMINGS")
     printf '%s %s\n' "${t:-0}" "$f"
   done | sort -k1,1 -rn | cut -d' ' -f2-
 }
@@ -213,9 +214,20 @@ for f in $(ordered); do
 done
 wait
 
-if [ -s "$WORK/timings" ]; then
+if [ "$selector" = t ] && [ -s "$WORK/timings" ]; then
   mkdir -p "$(dirname "$TIMINGS")"
-  sort -k1,1 "$WORK/timings" >"$TIMINGS"
+  # A targeted run should update its suites without forgetting the rest.
+  # An ERT selector is not representative of the whole suite, so do not
+  # record those runs at all.
+  if [ -f "$TIMINGS" ]; then
+    awk 'NR == FNR { time[$1] = $2; next }
+         !($1 in time) { print }
+         END { for (suite in time) print suite, time[suite] }' \
+      "$WORK/timings" "$TIMINGS" | sort -k1,1 >"$WORK/merged-timings"
+  else
+    sort -k1,1 "$WORK/timings" >"$WORK/merged-timings"
+  fi
+  cp "$WORK/merged-timings" "$TIMINGS"
 fi
 
 REPORT=$WORK/report.txt

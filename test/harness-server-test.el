@@ -57,14 +57,16 @@ its way out is written to a process that is exiting."
 (defconst harness-server-test--init
   (concat ";; -*- lexical-binding: t -*-\n"
           "(with-eval-after-load 'harness-config\n"
-          "  (eval '(harness-defmethod config/test-block () \"Block 2 s.\" (sleep-for 2) \"done\") t))\n"
+          "  (eval '(harness-defmethod config/test-block (fifo) \"Block until FIFO is written.\"\n"
+          "    (call-process \"sh\" nil nil nil \"-c\" \"touch \\\"$2\\\"; exec cat \\\"$1\\\"\"\n"
+          "                  \"sh\" fifo (concat fifo \".ready\")) \"done\") t))\n"
           "(with-eval-after-load 'harness-tools-shell\n"
           "  (eval '(harness-defmethod config/test-tool (name input) \"Run tool NAME with INPUT, allowed.\"\n"
           "     (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 1)\n"
           "     (harness-call 'tools/execute nil (list :id \"t1\" :name name :input input))) t))\n")
   "Init file of the harness process in these tests.
-It defines `config/test-block', which blocks the process's thread for 2
-seconds, and `config/test-tool', which runs a tool, any call allowed.")
+It defines `config/test-block', which blocks the process on a FIFO until
+the test releases it, and `config/test-tool', which runs a tool, any call allowed.")
 
 (defun harness-server-test--tool (request name &rest input)
   "Run tool NAME with INPUT in the harness process; return its result.
@@ -77,6 +79,8 @@ REQUEST sends a request over a connection to the process, such as
 The harness process loads `harness-server-test--init'."
   (declare (indent 0))
   `(harness-test-with-temp-state
+     ;; UI and child compile into separate caches, shared across this suite.
+     (harness-test-share-compilation "elc" "elc-server")
      (harness-test-reset-bus)
      (let* ((init (expand-file-name "server-init.el" harness-state-directory))
             (harness-process t)
@@ -102,17 +106,31 @@ The harness process loads `harness-server-test--init'."
 (ert-deftest harness-server-blocking-work-never-blocks-the-ui ()
   (harness-server-test-with-process
     (harness-test-await (harness-ui-request "_harness/session/list") 30)
-    (let* ((ticks nil)
-           (timer (run-at-time 0 0.05 (lambda () (push (float-time) ticks))))
-           (p (harness-ui-request "_harness/config/test-block")))
-      (unwind-protect (should (equal "done" (harness-test-await p 10)))
-        (cancel-timer timer))
-      (let ((gaps (cl-loop for (a b) on (nreverse ticks) while b collect (- b a))))
-        (should (> (length gaps) 20))
-        ;; A UI the harness blocked would miss its 2 s of ticks; a busy
-        ;; machine, running other suites meanwhile, delays one by a
-        ;; tenth or two.
-        (should (< (apply #'max gaps) 0.5))))))
+    (let* ((fifo (expand-file-name "block.fifo" harness-state-directory))
+           (ready (concat fifo ".ready"))
+           (ticks 0) (writer nil) (timer nil) (p nil))
+      (should (zerop (call-process "mkfifo" nil nil nil fifo)))
+      (unwind-protect
+          (progn
+            (setq p (harness-ui-request "_harness/config/test-block" (list :fifo fifo)))
+            (harness-test-wait (lambda () (file-exists-p ready)) 10 "the harness to block")
+            ;; The child has reached the blocking read.  The UI must still
+            ;; service timers while that read is waiting.
+            (setq timer (run-at-time 0 0.01 (lambda () (cl-incf ticks))))
+            (harness-test-wait (lambda () (>= ticks 3)) 10 "the UI timers")
+            (should-not (harness-promise-settled-p p))
+            (setq writer (make-process :name "release-server-test" :noquery t
+                                       :command (list "sh" "-c" "printf x > \"$1\"" "sh" fifo)))
+            (should (equal "done" (harness-test-await p 10))))
+        (when timer (cancel-timer timer))
+        ;; Release the child on failure too; never block the test process on
+        ;; opening the FIFO while the other process is still starting.
+        (when (and (not writer) (file-exists-p ready))
+          (setq writer (make-process :name "release-server-test" :noquery t
+                                     :command (list "sh" "-c" "printf x > \"$1\"" "sh" fifo))))
+        (when writer
+          (ignore-errors (harness-test-wait (lambda () (not (process-live-p writer))) 2 "the FIFO writer to exit"))
+          (when (process-live-p writer) (delete-process writer)))))))
 
 (ert-deftest harness-server-loop-runs-timers-that-timers-start ()
   "In the harness process, a timer that a timer starts runs when it is due.
@@ -277,6 +295,7 @@ evaluates in the background (never in a client, and a call that asks
 for one is refused), the tools about the user's Emacs say none is
 attached, and the client is never sent a tool's request."
   (harness-test-with-temp-state
+    (harness-test-share-compilation "elc" "elc-server")
     (harness-test-reset-bus)
     (setq harness-acp--server-enabled nil)
     (harness-test-load-module 'acp)
@@ -320,6 +339,7 @@ attached, and the client is never sent a tool's request."
   "Started from an init file, the process spawns after `emacs-startup-hook',
 so settings made later in the init file are forwarded."
   (harness-test-with-temp-state
+    (harness-test-share-compilation "elc" "elc-server")
     (harness-test-reset-bus)
     (let ((harness-process t)
           (harness-enabled-modules t)
@@ -363,6 +383,7 @@ The options it sets for itself stay its own whatever the policy says:
 were they the policy's, it would take itself for a UI, load the UI's
 modules and listen beyond this machine."
   (harness-test-with-temp-state
+    (harness-test-share-compilation "elc" "elc-server")
     (harness-test-reset-bus)
     (let* ((init (expand-file-name "server-init.el" harness-state-directory))
            (policy (expand-file-name "policy.el" harness-state-directory))

@@ -1116,6 +1116,7 @@ timer waits while no bubble shows a saying."
 pet's recap of one of them; what the pet said about a task's work stays
 in that task's chat.  A recap leaves the bubble as any saying does."
   (harness-ui-pet-test-with
+   (harness-test-with-clock
     (let ((harness-acp--server-enabled nil))
       (harness-test-load-module 'tasks))
     (clrhash harness-tasks--table)
@@ -1160,11 +1161,14 @@ in that task's chat.  A recap leaves the bubble as any saying does."
             (should-not (string-search "Bold move." (harness-ui-pet-test--figure-text board)))
             (should (string-search "is still at it" (harness-ui-pet-test--figure-text board)))
             ;; And the recap leaves in its time, the pet's name back.
+            (should (timerp harness-ui-pet--fade-timer))
+            (harness-test-clock-fire harness-ui-pet--fade-timer
+                                     (+ (float-time) harness-ui-pet-saying-lifetime 0.1))
             (harness-test-wait (lambda () (not (string-search "is still at it"
                                                               (harness-ui-pet-test--figure-text board))))
                                5 "the recap to leave")
             (should (string-search (plist-get harness-ui-pet--current :name) (harness-ui-pet-test--figure-text board))))
-        (kill-buffer board)))))
+        (kill-buffer board))))))
 
 (ert-deftest harness-ui-pet-asks-nothing-while-nobody-looks ()
   "While no frame of this Emacs has focus, the pet is seen nowhere: the harness

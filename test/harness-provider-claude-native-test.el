@@ -929,33 +929,48 @@ Nothing in the harness works round the policy: the plugin is dropped."
 Its watchdog used to fire into whatever turn was running by then, kill
 that turn's process and turn the plugin off for every session."
   (harness-provider-claude-native-test--with
-    (let ((harness-provider-claude-plugin t)
-          (harness-provider-claude--plugin-wait 1.0)
-          (harness-provider-claude--plugin-poll 0.05)
-          (first-events nil)
-          (second-events nil))
-      (let ((process-environment (cons "HARNESS_FAKE_CLAUDE_PLUGIN=never" process-environment)))
-        (harness-provider-claude-native-test--run-async
-         (harness-provider-claude-native-test--request "p12" "hi")
-         (lambda (ev) (push ev first-events)))
-        (accept-process-output nil 0.2)
-        ;; A second message replaces the first before the plugin's server was up.
-        (harness-provider-claude-native-test--run-async
-         (harness-provider-claude-native-test--request "p12" "hi again")
-         (lambda (ev) (push ev second-events)))
-        (harness-test-wait (lambda () (harness-provider-claude-native-test--find second-events 'done))
-                           15 "the second turn to end")
-        (should (equal "superseded by a new request"
-                       (plist-get (harness-provider-claude-native-test--find first-events 'done) :error)))
-        ;; Exactly one fallback, the second message's, and one end.
-        (should (= 1 (length (harness-provider-claude-native-test--find second-events 'done t))))
-        (should (= 1 (length (harness-provider-claude-native-test--find second-events 'hint t))))
-        (should (string-match-p "did not come up in time"
-                                (plist-get (harness-provider-claude-native-test--find second-events 'hint) :text)))
-        (should (eq 'end-turn (plist-get (harness-provider-claude-native-test--find second-events 'done) :stop-reason)))
-        ;; And nothing more fires once the first wait's own deadline has passed.
-        (accept-process-output nil 2.0)
-        (should (= 1 (length (harness-provider-claude-native-test--find second-events 'hint t))))))))
+   (let ((harness-provider-claude-plugin t)
+         (harness-provider-claude--plugin-wait 60.0)
+         (harness-provider-claude--plugin-poll 0.05)
+         (first-events nil)
+         (second-events nil))
+     (let ((process-environment (cons "HARNESS_FAKE_CLAUDE_PLUGIN=never" process-environment)))
+       (harness-provider-claude-native-test--run-async
+        (harness-provider-claude-native-test--request "p12" "hi")
+        (lambda (ev) (push ev first-events)))
+       (let* ((entry (harness-test-wait
+                      (lambda () (let ((e (gethash "p12" harness-provider-claude--sessions)))
+                                   (and e (harness-provider-claude-session-plugin-gate e) e)))
+                      10 "the first plugin wait"))
+              (old-timer (car (harness-provider-claude-session-plugin-gate entry))))
+         ;; A second message replaces the first before the plugin is up.
+         (harness-provider-claude-native-test--run-async
+          (harness-provider-claude-native-test--request "p12" "hi again")
+          (lambda (ev) (push ev second-events)))
+         (let ((new-timer
+                (harness-test-wait
+                 (lambda ()
+                   (let* ((e (gethash "p12" harness-provider-claude--sessions))
+                          (timer (and e (car (harness-provider-claude-session-plugin-gate e)))))
+                     (and (timerp timer) (not (eq timer old-timer)) timer)))
+                 10 "the second plugin wait")))
+           (should-not (memq old-timer timer-list))
+           ;; Simulate the old callback arriving late while the new wait lives.
+           (apply (timer--function old-timer) (timer--args old-timer))
+           (should-not (harness-provider-claude-native-test--find second-events 'hint))
+           (should (memq new-timer timer-list))
+           (timer-event-handler new-timer)))
+       (harness-test-wait (lambda () (harness-provider-claude-native-test--find second-events 'done))
+                          15 "the second turn to end")
+       (should (equal "superseded by a new request"
+                      (plist-get (harness-provider-claude-native-test--find first-events 'done) :error)))
+       ;; Exactly one fallback, the second message's, and one end.
+       (should (= 1 (length (harness-provider-claude-native-test--find second-events 'done t))))
+       (should (= 1 (length (harness-provider-claude-native-test--find second-events 'hint t))))
+       (should (string-match-p "did not come up in time"
+                               (plist-get (harness-provider-claude-native-test--find second-events 'hint) :text)))
+       (should (eq 'end-turn (plist-get (harness-provider-claude-native-test--find second-events 'done) :stop-reason)))
+       (should (= 1 (length (harness-provider-claude-native-test--find second-events 'hint t))))))))
 
 (ert-deftest harness-provider-claude-native-cancel-while-waiting-kills-the-process ()
   "A message cancelled before it was sent takes its process with it: the CLI never got what it carried.

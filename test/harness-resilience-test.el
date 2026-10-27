@@ -9,6 +9,7 @@
 (defvar harness-agent--turns)
 (defvar harness-tools-agent--children)
 (defvar harness-resilience--tick-seconds)
+(defvar harness-resilience--timer)
 (defvar harness-resilience--progress)
 (defvar harness-resilience--stalled)
 (defvar harness-resilience-prompt-timeout)
@@ -395,6 +396,7 @@ the user; the parent then gets the sub-agent's report as usual."
 (ert-deftest harness-resilience-users-own-prompts-wait-for-the-user ()
   "The user's own session waits for the user, however long it takes."
   (harness-resilience-test-with
+   (harness-test-with-clock
     (let ((harness-resilience-prompt-timeout 0.1)
           (harness-provider-demo-script-override
            '((:type tool-call :id "r1" :name "risky" :input (:command "rm -rf build"))
@@ -402,10 +404,10 @@ the user; the parent then gets the sub-agent's report as usual."
           (sid (harness-resilience-test-session)))
       (harness-call 'agent/prompt sid "clean up")
       (harness-test-wait (lambda () (harness-call 'session/pending sid)) 10 "the permission prompt")
-      (accept-process-output nil 0.5)
+      (cl-incf harness-test-clock-offset 10)
       (harness-resilience--check-prompts)
       (should (harness-call 'session/pending sid))
-      (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status))))))
+      (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))))))
 
 ;;;; Watchdog
 
@@ -414,6 +416,7 @@ the user; the parent then gets the sub-agent's report as usual."
 The session says so, `resilience/stalled' is emitted, the user is
 notified."
   (harness-resilience-test-with
+   (harness-test-with-clock
     (let* ((harness-resilience--stall-after 0.3)
            (harness-provider-demo-script-override
             '((:type wait :seconds 3600) (:type done :stop-reason end-turn)))
@@ -421,8 +424,10 @@ notified."
            (sid (harness-resilience-test-session :name "Quiet")))
       (harness-on 'resilience/stalled (lambda (id seconds) (push (cons id seconds) stalled)))
       (harness-call 'agent/prompt sid "think hard")
-      ;; The checks run on their own.
-      (harness-test-wait (lambda () stalled) 10 "the watchdog")
+      ;; Advance the clock and fire the real repeating watchdog timer.
+      (cl-incf harness-test-clock-offset 1)
+      (timer-event-handler harness-resilience--timer)
+      (should stalled)
       (should (equal sid (caar stalled)))
       (should (> (cdar stalled) 0.3))
       (should (cl-find-if (lambda (n) (string-match-p "\\`No progress for 1 minute (waiting for the model): the turn may be stuck"
@@ -433,15 +438,18 @@ notified."
         (should (equal "stalled" (plist-get note :kind)))
         (should (equal sid (plist-get note :session))))
       ;; Once per stall.
-      (accept-process-output nil 0.5)
+      (timer-event-handler harness-resilience--timer)
       (should (= 1 (length stalled)))
       ;; Progress re-arms it.
       (harness-emit 'agent/stream sid "n1" 'text "x")
-      (harness-test-wait (lambda () (= 2 (length stalled))) 10 "the second stall"))))
+      (cl-incf harness-test-clock-offset 1)
+      (timer-event-handler harness-resilience--timer)
+      (should (= 2 (length stalled)))))))
 
 (ert-deftest harness-resilience-watchdog-gives-a-tool-its-timeout ()
   "A tool call may run as long as its timeout allows without being reported."
   (harness-resilience-test-with
+   (harness-test-with-clock
     (harness-define-tool "slow" :label "Slow" :description "takes its time" :kind 'read :timeout 1000
                          :handler (lambda (_input _ctx) (harness-make-promise)))
     (let* ((harness-resilience--stall-after 0.2)
@@ -452,10 +460,10 @@ notified."
       (harness-on 'resilience/stalled (lambda (id _seconds) (push id stalled)))
       (harness-call 'agent/prompt sid "be slow")
       (harness-resilience-test--wait-call sid "slow")
-      (accept-process-output nil 0.8)
-      (harness-resilience--check-stalls)
+      (cl-incf harness-test-clock-offset 1)
+      (timer-event-handler harness-resilience--timer)
       (should (harness-call 'agent/running sid))
-      (should-not stalled))))
+      (should-not stalled)))))
 
 (provide 'harness-resilience-test)
 ;;; harness-resilience-test.el ends here

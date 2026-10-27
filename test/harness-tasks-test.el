@@ -26,6 +26,7 @@
 (defvar harness-fallback--moved)
 (defvar harness-fallback--quotas)
 (defvar harness-fallback--notified)
+(defvar harness-fallback--timer)
 (defvar harness-fallback-models)
 (defvar harness-usage--holds)
 (defvar harness-usage--warned)
@@ -3852,8 +3853,16 @@ the task's own session.  With one slot, the next task starts meanwhile."
               (should (eq 'active (harness-tasks-test-state b)))
               (harness-tasks-test-wait-state b 'review))
             ;; Give up on the merge, which stops the resolution.
-            (harness-call 'merge/cancel sid)
-            (harness-call 'agent/cancel resolving)
+            (let ((cancel-timer
+                   (harness-test-capture-timer
+                    harness-agent--cancel-grace
+                    (lambda ()
+                      (harness-call 'merge/cancel sid)
+                      ;; A fresh resolver is stopped by merge/cancel; when
+                      ;; the task resolves its own conflict, stop it here.
+                      (when (eq resolver 'child)
+                        (harness-call 'agent/cancel resolving))))))
+              (timer-event-handler cancel-timer))
             (harness-test-wait (lambda () (not (harness-call 'agent/running resolving))) 10
                                "the resolution to stop")))))))
 
@@ -5489,6 +5498,8 @@ Resuming starts the waiting tasks again, up to the limit."
   (harness-tasks-test-with
     (harness-tasks-test--settle)
     (let ((other (harness-test-temp-dir)) id)
+      (dolist (root (list default-directory other))
+        (harness-test-mark-project root))
       (let ((harness-tasks-max-running 0))
         (harness-call 'task/suspend-queue default-directory)
         (setq id (harness-tasks-test-submit "waits for the queue"))
@@ -7381,6 +7392,7 @@ Nothing is out, no budget is set and the fallback list is empty."
 Its card says why and until when; once the mark ends the queue starts it
 again, in its own session, told that the quota is back."
   (harness-tasks-test-with-holds
+   (harness-test-with-clock
     (let* ((resets (+ (float-time) 1))
            (harness-provider-demo-script-override (harness-tasks-test--out-of-quota resets))
            (id (harness-tasks-test-submit "Fix the parser"))
@@ -7403,10 +7415,11 @@ again, in its own session, told that the quota is back."
       (should (eq 'pending (harness-tasks-test-state id)))
       ;; The mark ends by itself, and the queue starts the task.
       (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
+      (harness-test-clock-fire harness-fallback--timer (+ resets 1))
       (harness-tasks-test-wait-state id 'done)
       (should (harness-tasks-test--said sid harness-tasks--quota-message))
       (should-not (harness-tasks-test--hold-of id))
-      (should-not (plist-get (harness-tasks-test-task id) :return-reason)))))
+      (should-not (plist-get (harness-tasks-test-task id) :return-reason))))))
 
 (ert-deftest harness-tasks-quota-cleared-by-hand-starts-the-task ()
   "Clearing the mark starts the task at once, without waiting for it to end."
@@ -7630,6 +7643,7 @@ The hold is not stored with it: the fallback's marks are, and the
 scheduler that runs as the harness comes up finds the task held by them
 again; the end of the marks starts it."
   (harness-tasks-test-with-holds
+   (harness-test-with-clock
     (let* ((resets (+ (float-time) 3))
            (harness-provider-demo-script-override (harness-tasks-test--out-of-quota resets))
            (id (harness-tasks-test-submit "Fix the parser")))
@@ -7643,7 +7657,8 @@ again; the end of the marks starts it."
         (should (equal "quota" (harness-tasks-test--hold-kind id)))
         (should (= resets (plist-get (plist-get task :hold) :until))))
       (setq harness-provider-demo-script-override harness-tasks-test--quick-script)
-      (harness-tasks-test-wait-state id 'done))))
+      (harness-test-clock-fire harness-fallback--timer (+ resets 1))
+      (harness-tasks-test-wait-state id 'done)))))
 
 (ert-deftest harness-tasks-pause-of-a-task-still-starting-keeps-its-worktree ()
   "A task paused while its worktree is made launches nothing when it is ready.
@@ -7895,6 +7910,8 @@ all lets the queue go on, a project's tasks or everybody's."
     (harness-tasks-test--settle)
     (let* ((harness-tasks-max-running 0)
            (other (harness-test-temp-dir))
+           (_projects (dolist (root (list default-directory other))
+                        (harness-test-mark-project root)))
            (a (harness-tasks-test-submit "here, waiting"))
            (b (harness-tasks-test-submit "there, waiting" other)))
       (should (= 2 (length (plist-get (harness-call 'task/suspend-all-queues) :projects))))
@@ -7923,6 +7940,8 @@ all lets the queue go on, a project's tasks or everybody's."
     (harness-tasks-test--settle)
     (let* ((harness-tasks-max-running 0)
            (other (harness-test-temp-dir)))
+      (dolist (root (list default-directory other))
+        (harness-test-mark-project root))
       (harness-tasks-test-submit "here, waiting")
       (harness-tasks-test-submit "there, waiting" other)
       (harness-call 'task/suspend-queue other)

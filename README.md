@@ -6113,6 +6113,11 @@ failing suite's log path.
 doing -- a game, an editor, a build -- and uses what the machine has
 left, which on an idle machine is all of it. Set `HARNESS_TEST_NICE=0`
 or `HARNESS_TEST_IONICE=0` to run them at the usual priority.
+It runs up to four suites at once by default; set `HARNESS_TEST_JOBS` to
+choose a different limit.
+The shared fixtures for advancing clocks, firing watchdogs and holding
+responses are described in [Test performance](docs/test-performance.md),
+along with the latest measurements and remaining slow tests.
 
 `M-x harness-reload` (`C-c h R`) checks and byte-compiles every source
 file, then reloads the harness in place, keeping running sessions. If

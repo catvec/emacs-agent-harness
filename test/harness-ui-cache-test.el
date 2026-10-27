@@ -801,7 +801,7 @@ While a compaction the panel started runs, the line says so."
        (clrhash harness-ui--sessions)
        (clrhash harness-ui--live)
        (unwind-protect
-           (progn ,@body)
+           (harness-test-with-clock ,@body)
          (maphash (lambda (_ b) (when (buffer-live-p b) (kill-buffer b))) harness-chat--buffers)
          (clrhash harness-chat--buffers)
          (dolist (c (copy-sequence harness-acp--clients))
@@ -844,6 +844,12 @@ the request."
   "Return BUFFER's text, without properties."
   (with-current-buffer buffer (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun harness-ui-cache-test--expire (buffer)
+  "Advance to the cache expiration and fire BUFFER's scheduled timer."
+  (with-current-buffer buffer
+    (should (timerp harness-ui-cache--timer))
+    (harness-test-clock-fire harness-ui-cache--timer (+ harness-ui-cache--due 0.001))))
+
 (defun harness-ui-cache-test--idle (seconds)
   "Let timers and processes run for SECONDS, with no input."
   (let ((end (+ (float-time) seconds)))
@@ -874,7 +880,7 @@ cache lapses again."
           (should (timerp harness-ui-cache--timer))
           (should (= (plist-get cache :expires) harness-ui-cache--due))))
       ;; It comes on its own.
-      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel")
+      (harness-ui-cache-test--expire buffer)
       (should (>= (float-time) (plist-get (plist-get (harness-ui-session sid) :cache) :expires)))
       (should (string-match-p "Prompt cache expired  at [0-9:]+, 2 seconds after its last use"
                               (harness-ui-cache-test--text buffer)))
@@ -883,7 +889,7 @@ cache lapses again."
       (with-current-buffer buffer (should-not harness-ui-cache--timer))
       ;; Sent again, it goes with the message, before the UI has heard the
       ;; session runs, and stays away while the request runs.
-      (let ((harness-provider-demo--delay 0.4))
+      (let ((harness-provider-demo--delay 0.05))
         (with-current-buffer buffer
           (goto-char harness-compose-end)
           (insert "again")
@@ -896,7 +902,7 @@ cache lapses again."
       (harness-test-wait (lambda () (with-current-buffer buffer (timerp harness-ui-cache--timer)))
                          5 "the timer to be set again")
       (should-not (harness-ui-cache-test--shows-p buffer))
-      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel again")
+      (harness-ui-cache-test--expire buffer)
       ;; A buffer opened once it lapsed shows it at once.
       (kill-buffer buffer)
       (should (harness-ui-cache-test--shows-p (harness-ui-cache-test--open sid))))))
@@ -953,7 +959,7 @@ lapses, without any input, as for a session whose turn ended by itself."
               (when (< (float-time) expires)
                 (should-not shown)))
             ;; The panel comes by itself once the cache lapsed.
-            (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel")
+            (harness-ui-cache-test--expire buffer)
             (should (>= (float-time) (plist-get (plist-get (harness-ui-session sid) :cache) :expires)))
             (should (string-match-p "Prompt cache expired  at [0-9:]+, 3 seconds after its last use"
                                     (harness-ui-cache-test--text buffer)))
@@ -981,9 +987,9 @@ panel, however long they wait; one that used the cache does, meanwhile."
       (harness-ui-cache-test--send cached-buffer "cached")
       (should-not (plist-get (harness-ui-session new) :cache))
       (should-not (plist-get (harness-ui-session plain) :cache))
-      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p cached-buffer)) 10 "the cache panel")
+      (harness-ui-cache-test--expire cached-buffer)
       ;; Well past the lifetime.
-      (harness-ui-cache-test--idle 1.5)
+      (cl-incf harness-test-clock-offset 1.5)
       (dolist (buffer (list new-buffer plain-buffer))
         (should-not (harness-ui-cache-test--shows-p buffer))
         (should-not (string-match-p "Prompt cache expired" (harness-ui-cache-test--text buffer)))
@@ -1110,7 +1116,7 @@ the conversation is compacted, as nothing of it is cached any more."
                            :id))
            (buffer (harness-ui-cache-test--open sid)))
       (harness-ui-cache-test--send buffer "first")
-      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel")
+      (harness-ui-cache-test--expire buffer)
       ;; The demo model is priced: the estimate gives both summaries a cost.
       (harness-test-wait (lambda () (string-match-p "Brief summary (~\\$" (harness-ui-cache-test--text buffer)))
                          5 "the costs")
@@ -1146,7 +1152,7 @@ does point, at the offset it had, though the tail is drawn again."
                            :id))
            (buffer (harness-ui-cache-test--open sid)))
       (harness-ui-cache-test--send buffer "first")
-      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel")
+      (harness-ui-cache-test--expire buffer)
       (should (string-match-p "\n   from the box: C-c \\. b\n" (harness-ui-cache-test--text buffer)))
       (with-current-buffer buffer
         (goto-char harness-compose-end)
@@ -1216,7 +1222,7 @@ lapsed, it is back."
                            :id))
            (buffer (harness-ui-cache-test--open sid)))
       (harness-ui-cache-test--send buffer "first")
-      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel")
+      (harness-ui-cache-test--expire buffer)
       (let ((stale (harness-ui-session sid))
             (harness-provider-demo-script-override harness-ui-cache-test--held))
         (should (equal "idle" (harness-ui-cache-test--status sid)))
