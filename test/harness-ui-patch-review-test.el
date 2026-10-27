@@ -415,7 +415,7 @@ Nothing else does: the board has no button for them."
         (should (string-match-p "^  ▾ docs/  1 file  \\+1 −0$" text))
         (should (string-match-p "^      A  é\\.txt +\\+1 −0$" text))
         (should (string-match-p "^    M  img\\.bin +binary$" text))
-        (should (string-match-p "^  RET or a click compares a file in Ediff" text))
+        (should (string-match-p "^  RET: compare" text))
         (should-not (string-search "keep.el" text)))
       (with-current-buffer popout
         (goto-char (harness-ui-patch-review--row-start id 0))
@@ -1023,7 +1023,7 @@ that was looked at is not taken for one that was approved."
         (should (string-search "approved" (get-text-property 0 'help-echo approved)))
         (should (string-search "viewed, not approved" (get-text-property 0 'help-echo viewed)))
         (should (string-search "not viewed yet" (get-text-property 0 'help-echo untouched))))
-      (should (string-search "✔ approved, ✓ only viewed" harness-ui-patch-review--hint)))))
+      (should (string-search "✔ approved, ✓ only viewed" harness-ui-patch-review--hint-detail)))))
 
 (ert-deftest harness-ui-patch-review-opens-from-a-sessions-history ()
   "C-c C-d in a task's session shows its report with the changes, and the
@@ -2108,7 +2108,7 @@ and RET on it act in the report."
       (harness-ui-patch-review-test--wait-text popout "^Changes (6) .*   2 open, 1 closed \\[Threads\\]")
       (let ((text (harness-ui-patch-review-test--text popout)))
         ;; Below the files, under a heading with the filter buttons.
-        (should (< (string-match "^  RET or a click compares a file" text)
+        (should (< (string-match "^  RET: compare" text)
                    (string-match "^Threads  \\[open 2\\] +to review 0 +closed 1 +all 3" text)
                    (string-match "^  ▾ a\\.el +1 thread$" text)))
         ;; The change as a whole first, then the files in the order of the diff.

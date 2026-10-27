@@ -593,7 +593,8 @@ the user that settings outrank it."
           (should hint)
           (should (string-match-p "Bash" (plist-get hint :text)))
           (should (string-match-p "bash" (plist-get hint :text)))
-          (should (string-match-p "outrank the harness" (plist-get hint :text)))
+          (should (string-match-p "Check Claude Code permission settings" (plist-get hint :text)))
+          (should (string-match-p "Reason: Permission to use Bash has been denied" (plist-get hint :text)))
           (should (eq 'end-turn (plist-get (harness-provider-claude-native-test--find events 'done) :stop-reason))))))))
 
 (ert-deftest harness-provider-claude-native-managed-rules-only ()

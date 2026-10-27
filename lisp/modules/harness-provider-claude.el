@@ -2261,11 +2261,8 @@ round it."
                    name (harness-provider-claude-session-id entry) why)
       (harness-provider-claude--emit
        entry (list :type 'hint
-                   :text (format (concat "Claude Code refused to run its %s, which stands in for %s: its own"
-                                         " permission rules decided, and its settings files and an"
-                                         " organisation's managed settings outrank the harness (see the"
-                                         " settings harness-provider-claude-native-permissions and"
-                                         " harness-provider-claude-permission-args).  It said: %s")
+                   :text (format (concat "Claude Code denied %s (harness %s). Check Claude Code permission settings"
+                                         " and harness-provider-claude-native-permissions. Reason: %s")
                                  name builtin why)))))))
 
 ;;;; Account, billing and quota
@@ -2939,7 +2936,7 @@ without asking (`harness-provider-claude--note-foreign-tool')."
                        (mapconcat (lambda (s) (format "%s" (plist-get s :name))) others ", "))
           (harness-provider-claude--emit
            entry (list :type 'hint
-                       :text (format "Claude Code also loaded MCP servers of yours (%s), which the plugin mode cannot keep out. Their tools are offered to the model. The harness refuses their calls unless your Claude Code settings allow them, and then Claude Code runs them without asking the harness."
+                       :text (format "Claude Code also loaded MCP servers: %s. Their tools are offered to the model; Claude Code may run allowed tools without asking the harness. The harness refuses calls it is asked to approve."
                                      (mapconcat (lambda (s) (format "%s" (plist-get s :name))) others ", "))))))
     (dolist (server servers)
       (when (and (equal (plist-get server :name) "harness")

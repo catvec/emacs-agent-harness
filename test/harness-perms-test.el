@@ -4668,7 +4668,7 @@ rule lost when the harness restarted.  Nothing else is touched."
       (dolist (p calls) (should (equal "ran" (plist-get (harness-test-await p) :content)))))
     (pcase-let ((`(,first ,second) (harness-perms-test--notes sid)))
       (should (eq 'offered (plist-get (harness-node-permission first) :undo)))
-      (should (equal "Allowing every t_exec call for this session (already so: nothing new to undo)"
+      (should (equal "Allowing every t_exec call for this session (already set; no change)"
                      (plist-get second :content)))
       (should-not (plist-member (harness-node-permission second) :undo))
       (should (eq 'none (car (harness-perms-test--undo sid second))))

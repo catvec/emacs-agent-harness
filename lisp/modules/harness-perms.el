@@ -4953,7 +4953,7 @@ the answer goes on.  Return the note, or nil."
                (decision (and new (harness-perms--record-decision session-id record text)))
                (note (harness-call 'session/append session-id
                                    (list :kind 'hint
-                                         :content (concat text (if new "" " (already so: nothing new to undo)"))
+                                         :content (concat text (if new "" " (already set; no change)"))
                                          :meta (append (list :permission (if new (append record (list :undo 'offered)) record))
                                                        (and decision (list :decision (plist-get decision :id))))))))
           (when decision

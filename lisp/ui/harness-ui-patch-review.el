@@ -2535,7 +2535,7 @@ again.  The library's commands act on the thread or the comment at point.")
   (define-key map (kbd "P") #'change-review-ui-previous-thread)
   (define-key map (kbd "f") #'change-review-ui-cycle-filter))
 
-(defconst harness-ui-patch-review--thread-hint
+(defconst harness-ui-patch-review--thread-hint-detail
   "RET compares the file at the thread's line or shows where a comment was made, r replies, e edits a draft, k deletes one and K a thread of drafts, x closes a thread or opens it again, o follows an agent's comment, c comments on the change as a whole, f changes which threads show."
   "What the changes say under the heading of the threads.")
 
@@ -2585,7 +2585,8 @@ thread or comment at point and its buttons draw the section again."
                 (propertize (change-review-ui-threads-heading set filter)
                             'harness-ui-patch-review-threads t 'wrap-prefix "  ")
                 (if compact ""
-                  (propertize (concat "  " harness-ui-patch-review--thread-hint "\n")
+                  (propertize (concat "  " "RET: open  r: reply  x: close/reopen  f: filter  (hover for more)\n")
+                              'help-echo harness-ui-patch-review--thread-hint-detail
                               'face 'harness-hint-face 'wrap-prefix "  "))
                 (harness-ui-patch-review--wrap-headers
                  (change-review-ui-threads-string
@@ -3360,7 +3361,7 @@ its key.  COMPACT uses shorter words."
        (format "Nothing differs between %s and %s." old-name (harness-ui-patch-review--new-name review)))
       (_ (format "The branch changes nothing against %s." (harness-ui-patch-review--r-base review))))))
 
-(defconst harness-ui-patch-review--hint
+(defconst harness-ui-patch-review--hint-detail
   "RET or a click compares a file in Ediff (a directory: folds it), n and p move between files, a approves one (✔ approved, ✓ only viewed: only the approved are skipped), A all of them, V takes the files the newest commit left alone as viewed; s and u switch skipping the approved files and approving those you go through without a comment, t the tree, d chooses the diff shown, T goes to the threads, e on a thread edits one of its drafts, k deletes one and K the thread when it is only drafts, m marks a thread the agent closed as reviewed (M all of them).  In Ediff c comments, r replies, e edits a draft or goes to the box, k deletes a draft and K a thread of drafts, N and P go to the next and previous file, q comes back."
   "What the report says under the changes.")
 
@@ -3505,7 +3506,8 @@ file Ediff compares marked, and no line of keys."
                                           :compact compact :avail avail :current (eql current index))
                                          "\n")))
                (if compact ""
-                 (concat (propertize (concat "  " harness-ui-patch-review--hint)
+                 (concat (propertize (concat "  " "RET: compare  a: approve  n/p: files  T: threads  (hover for more)")
+                                     'help-echo harness-ui-patch-review--hint-detail
                                      'face 'harness-hint-face 'wrap-prefix "  ")
                          "\n"))))
      (if (or (harness-ui-patch-review--r-tip review)
