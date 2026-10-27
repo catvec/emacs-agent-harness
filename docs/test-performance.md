@@ -48,10 +48,13 @@ vary with the machine.
 The latest run's supervisor suite timed out waiting for a plan to be
 recorded. Its first suite rerun timed out in a different test with the same
 symptom; a subsequent suite run and eight sequential runs of the two affected
-tests passed. The cause is not established. Its wait helper prints the plan,
-requests, live work and session nodes on a future timeout to aid diagnosis.
-Do not interpret the passing rerun as proof that the intermittent issue is
-fixed.
+tests passed. A later full run found that a supervisor approval fixture could
+inherit a parent project's settings from `/tmp`, disabling supervision. The
+supervisor session fixtures now mark their own temporary projects; a regression
+test verifies that they ignore a parent project's supervisor setting. This is
+a plausible cause of the earlier timeouts, but their logs do not establish it.
+The wait helper prints the plan, requests, live work and session nodes on a
+future timeout to aid diagnosis.
 
 The longest remaining cases include the standalone vendored-library suites,
 real server restarts, TRAMP, process-tree termination, and exhaustive QR and

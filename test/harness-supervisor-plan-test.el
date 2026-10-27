@@ -282,9 +282,11 @@ and the tiers map to the demo models simple, medium and hard."
 
 (defun harness-supervisor-plan-test-session (&rest plist)
   "Create a supervising demo session with PLIST's settings; return its id."
-  (plist-get (apply #'harness-call 'session/create :cwd (harness-test-temp-dir)
-                    :model "demo:scripted" plist)
-             :id))
+  (let ((cwd (harness-test-temp-dir)))
+    (harness-test-mark-project cwd)
+    (plist-get (apply #'harness-call 'session/create :cwd cwd
+                      :model "demo:scripted" plist)
+               :id)))
 
 (defun harness-supervisor-plan-test-step-input (id &rest props)
   "Return the input of step ID of a plan, PROPS overriding its defaults.

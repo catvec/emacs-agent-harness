@@ -142,13 +142,33 @@ The demo provider plays the model through the script of the test."
 
 (defun harness-supervisor-test-session (&rest plist)
   "Create a demo session with PLIST's settings; return its id."
-  (plist-get (apply #'harness-call 'session/create :cwd (harness-test-temp-dir)
-                    :model "demo:scripted" plist)
-             :id))
+  (let ((cwd (harness-test-temp-dir)))
+    (harness-test-mark-project cwd)
+    (plist-get (apply #'harness-call 'session/create :cwd cwd
+                      :model "demo:scripted" plist)
+               :id)))
 
 (defun harness-supervisor-test-get (sid)
   "Return the supervisor setting of session SID, as the session holds it."
   (plist-get (plist-get (harness-call 'session/get sid) :ext) :supervisor))
+
+(ert-deftest harness-supervisor-test-session-ignores-parent-project-settings ()
+  "A session fixture is its own project even beneath a configured project."
+  (harness-supervisor-test-with
+    (let ((parent (harness-test-temp-dir)))
+      (unwind-protect
+          (progn
+            (harness-test-mark-project parent)
+            (with-temp-file (expand-file-name ".dir-locals.el" parent)
+              (insert "((nil . ((harness-supervisor . nil))))"))
+            (let ((parent-session (plist-get (harness-call 'session/create
+                                                           :cwd parent :model "demo:scripted")
+                                             :id)))
+              (should (eq :false (harness-supervisor-test-get parent-session))))
+            (let ((temporary-file-directory parent))
+              (should (eq t (harness-supervisor-test-get
+                             (harness-supervisor-test-session))))))
+        (delete-directory parent t)))))
 
 (defun harness-supervisor-test-confined (value)
   "Stub `sandbox/confined-p': answer VALUE, or signal when it is `error'."
