@@ -1047,5 +1047,148 @@ recorded, and a record that cannot start keeps no event from the caller."
       (should (equal (list (list :type 'done :stop-reason 'end-turn)) got))
       (should (= 1 (length (harness-provider-test-internal)))))))
 
+;;;; Plan quota
+
+(ert-deftest harness-provider-quota-windows-are-named-by-their-length ()
+  "A plan's window is named by how long it lasts, whatever reported it.
+The chat header and the usage dashboard know `5h' and `7d', so a week
+reported by a server that calls it its secondary window still reads as
+the same window a Claude plan reports."
+  (should (equal '("5h" "Current session (5 hours)")
+                 (harness-provider-quota-window-name 300)))
+  (should (equal '("7d" "This week, all models")
+                 (harness-provider-quota-window-name 10080)))
+  (should (equal '("1d" "1-day window")
+                 (harness-provider-quota-window-name 1440)))
+  (should (equal '("2h" "Current session (2 hours)")
+                 (harness-provider-quota-window-name 120)))
+  (should-not (harness-provider-quota-window-name nil)))
+
+(ert-deftest harness-provider-quota-usage-never-ticks-down-within-a-window ()
+  "A stale report of the same window cannot lower what the quota shows.
+Two reset times a second apart are the same window; a later reset
+starts it over, so its usage stands as the new report says."
+  (let* ((window (lambda (used resets)
+                   (list :name "5h" :label "Current session (5 hours)"
+                         :used used :resets resets)))
+         (old (list (funcall window 0.7 2000000000.0)))
+         (stale (list (funcall window 0.2 2000000000.5)))
+         (reset (list (funcall window 0.0 2000003600.0)))
+         (merged (harness-provider-quota-merge-windows old stale)))
+    (should (= 0.7 (plist-get (car merged) :used)))
+    (should (= 2000000000.5 (plist-get (car merged) :resets)))
+    (should (= 0.0 (plist-get (car (harness-provider-quota-merge-windows old reset)) :used)))
+    ;; Windows only the new report has follow it whole.
+    (should (= 2 (length (harness-provider-quota-merge-windows
+                          old (append stale (list (list :name "7d" :label "This week"
+                                                        :used 0.1 :resets 300)))))))))
+
+(ert-deftest harness-provider-quota-limit-status-follows-the-fullest-window ()
+  "The limit status is the plan's, from its fullest window.
+Nothing reported means nothing to say; a window at 90% warns, and one
+used up says the limit is reached."
+  (should-not (harness-provider-quota-limit-status nil))
+  (should (equal "allowed" (harness-provider-quota-limit-status '((:used 0.4)))))
+  (should (equal "allowed_warning" (harness-provider-quota-limit-status '((:used 0.2) (:used 0.9)))))
+  (should (equal "rejected" (harness-provider-quota-limit-status '((:used 1.0))))))
+
+(ert-deftest harness-provider-plan-rate-limit-headers-read-the-codex-family ()
+  "The `x-codex-*' headers of a ChatGPT-plan answer become quota changes.
+A plain API answer carries none, and then says nothing about a plan."
+  (let ((changes (harness-provider-plan-rate-limit-headers
+                  '(("x-codex-primary-used-percent" . "41")
+                    ("x-codex-primary-window-minutes" . "300")
+                    ("x-codex-primary-reset-at" . "2000000000")
+                    ("x-codex-secondary-used-percent" . "12")
+                    ("x-codex-secondary-window-minutes" . "10080")
+                    ("x-codex-plan-type" . "plus")
+                    ("x-codex-credits-has-credits" . "true")
+                    ("x-codex-credits-unlimited" . "false")
+                    ("x-codex-credits-balance" . "62500.0")))))
+    (should (plist-get changes :available))
+    (should (equal '("5h" "7d")
+                   (mapcar (lambda (w) (plist-get w :name)) (plist-get changes :windows))))
+    (should (= 0.41 (plist-get (car (plist-get changes :windows)) :used)))
+    (should (equal "plus" (plist-get changes :plan)))
+    (should (equal "ChatGPT Plus" (plist-get changes :plan-label)))
+    (should (equal '(:has-credits t :unlimited nil :balance "62500.0")
+                   (plist-get changes :credits)))
+    (let ((status (harness-provider-quota-update nil changes)))
+      (should (equal "allowed" (plist-get status :limit-status)))
+      ;; A used-up window is the plan's limit, whatever its windows say.
+      (should (equal "rejected"
+                     (plist-get (harness-provider-quota-update
+                                 nil (harness-provider-plan-rate-limit-headers
+                                      '(("x-codex-primary-used-percent" . "100")
+                                        ("x-codex-primary-window-minutes" . "10080"))))
+                                :limit-status)))))
+  ;; The fields count percent: one is one percent, not a whole window.
+  (should (= 0.01 (plist-get (car (plist-get (harness-provider-plan-rate-limit-headers
+                                              '(("x-codex-primary-used-percent" . "1")
+                                                ("x-codex-primary-window-minutes" . "300")))
+                                             :windows))
+                             :used)))
+  (should-not (harness-provider-plan-rate-limit-headers
+               '(("content-type" . "application/json")))))
+
+(ert-deftest harness-provider-plan-rate-limits-read-the-stream-object ()
+  "The `rate_limits' object of a Codex stream reports the same windows.
+Its windows may be given in seconds, and its false booleans are false."
+  (let* ((changes (harness-provider-plan-rate-limits
+                   '(:primary (:used_percent 92 :window_minutes 300 :resets_at 2000000000)
+                     :secondary (:used_percent 12 :limit_window_seconds 604800
+                                 :resets_at 2000600000)
+                     :plan_type "plus"
+                     :credits (:has_credits t :unlimited :false :balance "62500.0"))))
+         (status (harness-provider-quota-update nil changes))
+         (windows (plist-get status :windows)))
+    (should (equal '("5h" "7d") (mapcar (lambda (w) (plist-get w :name)) windows)))
+    (should (= 0.92 (plist-get (car windows) :used)))
+    (should (= 10080 (plist-get (cadr windows) :minutes)))
+    (should (equal "allowed_warning" (plist-get status :limit-status)))
+    (should (equal "plus" (plist-get status :plan)))
+    (should (equal '(:has-credits t :unlimited nil :balance "62500.0")
+                   (plist-get status :credits)))
+    ;; A window nothing used yet is reported, not dropped as false.
+    (should (= 0.0 (plist-get (car (plist-get (harness-provider-plan-rate-limits
+                                               '(:primary (:used_percent 0
+                                                          :window_minutes 300)))
+                                              :windows))
+                              :used)))
+    (should-not (harness-provider-plan-rate-limits '(:input_tokens 3)))))
+
+(ert-deftest harness-provider-quota-publish-keeps-and-announces-what-changed ()
+  "What a provider reports is kept, and announced only when it changes.
+The account's base billing stays under a report; the report's plan
+label wins over the base's, and a later report without one keeps it."
+  (harness-provider-quota-forget 'testquota)
+  (unwind-protect
+      (let (seen)
+        (harness-on 'provider/quota-updated
+                    (lambda (pid quota) (push (cons pid quota) seen)))
+        (let* ((base '(:billing subscription :auth "chatgpt" :plan-label "ChatGPT plan"))
+               (first (harness-provider-quota-publish
+                       'testquota base
+                       '(:windows ((:name "5h" :label "Current session (5 hours)" :used 0.4)))))
+               (again (harness-provider-quota-publish
+                       'testquota base
+                       '(:windows ((:name "5h" :label "Current session (5 hours)" :used 0.4)))))
+               (named (harness-provider-quota-publish
+                       'testquota base '(:plan "plus" :plan-label "ChatGPT Plus"))))
+          (should (eq 'subscription (plist-get first :billing)))
+          (should (equal "chatgpt" (plist-get first :auth)))
+          (should (equal "allowed" (plist-get first :limit-status)))
+          (should (equal first again))
+          (should (equal "ChatGPT Plus" (plist-get named :plan-label)))
+          ;; The window the first report named is still the quota's.
+          (should (equal '("5h") (mapcar (lambda (w) (plist-get w :name))
+                                         (plist-get named :windows))))
+          ;; Only the two reports that changed something were announced.
+          (should (= 2 (length seen)))
+          (should (eq 'testquota (caar seen)))
+          (should (equal "ChatGPT Plus" (plist-get (cdar seen) :plan-label)))
+          (should (equal named (harness-provider-quota-status 'testquota)))))
+    (harness-provider-quota-forget 'testquota)))
+
 (provide 'harness-provider-test)
 ;;; harness-provider-test.el ends here

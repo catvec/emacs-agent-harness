@@ -192,13 +192,16 @@ days\" rather than after a set time; this is the low end, its models'
 `:cache-ttl' capability (see `harness-provider-cache-ttl').")
 
 (defun harness-openai--capabilities (endpoint)
-  "Return the static capability plist for ENDPOINT."
+  "Return the static capability plist for ENDPOINT.
+`:quota' says the endpoint reports a plan's quota, which a server that
+spends a ChatGPT plan does in its answers (see \"Plan quota\" below).
+An endpoint may replace all of this with its own `:capabilities'."
   (or (plist-get endpoint :capabilities)
       (pcase (harness-openai--flavor endpoint)
         ('openrouter '(:vision t :thinking t :pricing dynamic :cost-reported t))
         ;; DeepSeek reports vision per model, so the endpoint does not claim it.
         ('deepseek (list :thinking t :cache-ttl harness-openai-deepseek-cache-ttl))
-        (_ '(:vision t :thinking t)))))
+        (_ '(:vision t :thinking t :quota t)))))
 
 (defun harness-openai--host (endpoint)
   "Return the host part of ENDPOINT's base URL."
@@ -778,11 +781,14 @@ the endpoint's label alone."
 
 (defun harness-openai--usage-event (usage endpoint)
   "Build the usage event from an OpenAI USAGE object for ENDPOINT.
-OpenAI-compatible endpoints bill per token, so the event says `api'.
-DeepSeek's `prompt_tokens' includes the cached tokens, so they are
-split: `:input' counts the cache misses, `:cache-read' the hits, and
-`:context' both.  A DeepSeek endpoint is recognized by its flavor, by
-an official host, or by the cache fields the server reports."
+An endpoint that bills per token says `api'; one whose answers carry a
+ChatGPT plan's windows is paid by that plan, so its calls cost nothing
+and say `subscription', as Claude Code's do
+\(`harness-openai--plan-status').  DeepSeek's `prompt_tokens' includes
+the cached tokens, so they are split: `:input' counts the cache misses,
+`:cache-read' the hits, and `:context' both.  A DeepSeek endpoint is
+recognized by its flavor, by an official host, or by the cache fields
+the server reports."
   (let* ((input (or (plist-get usage :prompt_tokens) 0))
          (hit (or (plist-get usage :prompt_cache_hit_tokens)
                   (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens))
@@ -790,16 +796,22 @@ an official host, or by the cache fields the server reports."
          (miss (or (plist-get usage :prompt_cache_miss_tokens)
                    (max 0 (- input hit))))
          (cost (plist-get usage :cost))
+         (plan (harness-openai--plan-status endpoint))
          (deepseek (or (harness-openai--deepseek-p endpoint)
                        (harness-openai--deepseek-usage-p usage))))
-    (list :type 'usage
-          :input (if deepseek miss input)
-          :output (or (plist-get usage :completion_tokens) 0)
-          :cache-read (if deepseek hit (or (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens)) 0))
-          :cache-write 0
-          :cost (and (numberp cost) cost)
-          :billing 'api
-          :context (if deepseek (+ miss hit) input))))
+    (append
+     (list :type 'usage
+           :input (if deepseek miss input)
+           :output (or (plist-get usage :completion_tokens) 0)
+           :cache-read (if deepseek hit (or (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens)) 0))
+           :cache-write 0)
+     (if plan
+         ;; The plan pays, as it does for Claude Code: the call is not
+         ;; billed, and its value at API prices is priced from the
+         ;; catalogue (`session/usage-add').
+         (list :cost 0.0 :billing 'subscription :plan (plist-get plan :plan))
+       (list :cost (and (numberp cost) cost) :billing 'api))
+     (list :context (if deepseek (+ miss hit) input)))))
 
 (defconst harness-openai--transport-patterns
   (concat "connection reset\\|recv failure\\|send failure\\|empty reply\\|broken pipe"
@@ -913,7 +925,11 @@ past.  Without a status, the error's text is read the same way."
                                (setq status s)
                                (setf (harness-openai--stream-status stream) s)
                                (when-let* ((after (harness-http-retry-after headers)))
-                                 (setf (harness-openai--stream-retry-after stream) after)))
+                                 (setf (harness-openai--stream-retry-after stream) after))
+                               ;; A refused answer carries the plan's windows
+                               ;; too, which is how a turn learns when the
+                               ;; limit it ran into resets.
+                               (harness-openai--note-plan-headers endpoint on-event headers))
                  :on-chunk (lambda (chunk)
                              (if (and status (or (< status 200) (>= status 300)))
                                  (setq raw (concat raw chunk))
@@ -949,6 +965,80 @@ past.  Without a status, the error's text is read the same way."
                       (when-let* ((h (harness-openai--stream-http stream)))
                         (harness-http-cancel h))
                       (harness-openai--stream-finish stream 'cancelled))))))
+
+;;;; Plan quota
+;;
+;; An OpenAI-compatible endpoint may spend somebody's ChatGPT plan: the
+;; Codex route and the servers that front it answer with the plan's
+;; windows in `x-codex-*' response headers, and an answer that reached a
+;; limit says so in the error it fails with.  Those windows are reported
+;; through `provider/quota', in the shape the other plans use (see
+;; \"Plan quota\" in harness-provider.el), and a turn is told of them as
+;; it runs, so a session's header shows them and the fallback module
+;; moves off a provider whose plan is used up.
+;;
+;; Nothing is asked for here: the headers come with answers the harness
+;; makes anyway, so reporting costs no request.  An endpoint whose
+;; answers never carry them reports nothing, which is what
+;; `provider/quota' answers nil for.
+
+(defun harness-openai--plan-changes (headers)
+  "Return the plan quota changes response HEADERS report, or nil.
+A server that reports a plan's windows spends a plan, so the calls are
+a subscription's: that is said here, with what the headers name.  The
+headers are read whatever the endpoint claims, since it is they that
+show the plan being spent."
+  (when-let* ((changes (harness-provider-plan-rate-limit-headers headers)))
+    (append changes (harness-openai--subscription-status))))
+
+(defun harness-openai--publish-plan (endpoint changes)
+  "Publish CHANGES about ENDPOINT's plan quota under what it knows.
+Return the new status.  Nothing is emitted for an endpoint whose quota
+did not change, which is every ordinary answer."
+  (harness-provider-quota-publish
+   (plist-get endpoint :id)
+   (harness-openai--subscription-status)
+   changes))
+
+(defun harness-openai--subscription-status ()
+  "Return what an endpoint that spends a ChatGPT plan says about billing.
+Its answers cover the calls, so they are a subscription's rather than
+per-token ones.  The plan's own name, when the server reports one,
+comes with the windows and wins over this."
+  (list :billing 'subscription
+        :auth "chatgpt-plan"))
+
+(defun harness-openai--plan-status (endpoint)
+  "Return ENDPOINT's plan status when its calls are a subscription's, or nil.
+An endpoint whose answers carried a plan's windows spends a plan, so
+its calls are covered rather than billed, exactly as Claude Code's
+are."
+  (let ((status (harness-provider-quota-status (plist-get endpoint :id))))
+    (when (eq (harness-billing-of status) 'subscription)
+      status)))
+
+(defun harness-openai--note-plan-headers (endpoint on-event headers)
+  "Note the plan windows ENDPOINT's response HEADERS carry.
+ON-EVENT, a stream's listener, hears the new windows as a `quota' event
+when they changed, which is how a running turn learns of them."
+  (when-let* ((changes (harness-openai--plan-changes headers)))
+    (let* ((before (harness-provider-quota-status (plist-get endpoint :id)))
+           (status (harness-openai--publish-plan endpoint changes))
+           (windows (plist-get status :windows)))
+      (when (and on-event windows
+                 (not (equal windows (plist-get before :windows))))
+        (funcall on-event (list :type 'quota :windows windows))))))
+
+(defun harness-openai--quota (endpoint &optional refresh)
+  "Return a promise of ENDPOINT's billing and quota, as `provider/quota' documents.
+The plan's windows are the ones its answers last carried; REFRESH makes
+no request, since an OpenAI-compatible server has no route to ask for
+them, and is accepted for the interface's sake.  Nil until an answer
+reports a plan."
+  (ignore refresh)
+  (harness-resolved
+   (when-let* ((status (harness-provider-quota-status (plist-get endpoint :id))))
+     (harness-provider-quota-update (harness-openai--subscription-status) status))))
 
 ;;;; Embeddings
 
@@ -1026,6 +1116,7 @@ flag and returns a promise of model plists, as the models function of
       :models (or (plist-get endpoint :models-fn)
                   (lambda (&optional refresh) (harness-openai--models endpoint refresh)))
       :complete (lambda (request) (harness-openai--complete endpoint request))
+      :quota (lambda (&optional refresh) (harness-openai--quota endpoint refresh))
       :embed (lambda (name texts opts) (harness-openai--embed endpoint name texts opts))
       :capabilities (harness-openai--capabilities endpoint)
       :tiers (plist-get endpoint :tiers))

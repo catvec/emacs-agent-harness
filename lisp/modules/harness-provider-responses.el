@@ -679,11 +679,22 @@ when it does not.  See `harness-responses--error-kinds' for the kinds."
   "Accumulated state of one streamed Responses request."
   on-event name http model finished (status nil) (raw "") (error nil) (error-kind nil)
   retry-after usage stop-reason calls items cancelled
+  quota-told ; the plan windows the turn was last told about
   (progress (make-hash-table :test 'equal)))
 
 (defun harness-responses--emit (stream event)
   "Send EVENT to STREAM's listener."
   (funcall (harness-responses--stream-on-event stream) event))
+
+(defun harness-responses--emit-quota (stream)
+  "Tell STREAM's turn about the plan windows last reported, once per change.
+A provider's `quota' event is how the turn learns of them: the session
+keeps them for its header and the tool that shows its own details."
+  (let ((windows (plist-get (harness-provider-quota-status harness-responses-provider-id)
+                            :windows)))
+    (when (and windows (not (equal windows (harness-responses--stream-quota-told stream))))
+      (setf (harness-responses--stream-quota-told stream) windows)
+      (harness-responses--emit stream (list :type 'quota :windows windows)))))
 
 (defun harness-responses--call-slot (stream index)
   "Return the accumulator of function call INDEX of STREAM, making it once."
@@ -840,6 +851,16 @@ read and dropped."
            (let ((delta (plist-get json :delta)))
              (when (and (stringp delta) (not (string-empty-p delta)))
                (harness-responses--emit stream (list :type 'thinking :delta delta)))))
+          ;; A Codex stream reports the plan's windows as an event of its
+          ;; own as well as in the headers; both are read, as the same
+          ;; merge keeps whatever is newer.
+          ((or "codex.rate_limits" "rate_limits")
+           (when-let* ((changes (harness-provider-plan-rate-limits
+                                 (or (plist-get json :rate_limits) json))))
+             (harness-provider-quota-publish
+              harness-responses-provider-id
+              (harness-responses--account-status) changes)
+             (harness-responses--emit-quota stream)))
           ("response.completed" (harness-responses--event-completed stream (plist-get json :response)))
           ("response.failed" (harness-responses--event-failed stream (plist-get json :response)))
           ("response.incomplete" (harness-responses--event-incomplete stream (plist-get json :response)))
@@ -963,8 +984,14 @@ REQUEST is the harness request it was built from."
                  ;; connection failed before any of the answer arrived; the
                  ;; HTTP layer never repeats one that delivered bytes.
                  :retry t
-                 :on-headers (lambda (status _headers)
-                               (setf (harness-responses--stream-status stream) status))
+                 :on-headers (lambda (status headers)
+                               (setf (harness-responses--stream-status stream) status)
+                               ;; The plan's windows come with every answer, so
+                               ;; the quota is kept current without a request
+                               ;; of its own; a 429 carries them too, and they
+                               ;; are what says when the limit resets.
+                               (when (harness-responses--plan-headers headers)
+                                 (harness-responses--emit-quota stream)))
                  :on-chunk (lambda (chunk)
                              (if (and (harness-responses--stream-status stream)
                                       (>= (harness-responses--stream-status stream) 300))
@@ -1026,21 +1053,42 @@ fails with a `done' event saying so."
 
 ;;;; Quota
 
-(defun harness-responses--quota (&optional _refresh)
-  "Return a promise of what is known about the account's billing.
-The ChatGPT plan pays for these calls, so the billing is a subscription
-and there is no balance to report; the account's email and the granted
-scopes come from the sign-in, without any token."
+(defun harness-responses--account-status ()
+  "Return how the signed-in account's calls are paid, as `provider/quota' says.
+The ChatGPT plan pays for these calls, so the billing is a subscription;
+the account's email comes from the sign-in, without any token."
   (let* ((status (harness-responses--status))
          (accounts (plist-get status :accounts))
          (account (cl-find-if (lambda (a) (plist-get a :plan-usage)) accounts)))
-    (harness-resolved
-     (when (or account accounts)
-       (list :billing 'subscription
-             :auth "chatgpt"
-             :plan-label "ChatGPT plan"
-             :account (list :email (plist-get (or account (car accounts)) :email))
-             :available nil)))))
+    (when (or account accounts)
+      (list :billing 'subscription
+            :auth "chatgpt"
+            :plan-label "ChatGPT plan"
+            :account (list :email (plist-get (or account (car accounts)) :email))))))
+
+(defun harness-responses--plan-headers (headers)
+  "Note the plan windows the response HEADERS report, and return the new status.
+Every answer this route sends for a ChatGPT plan carries the plan's
+windows in `x-codex-*' headers (`harness-provider-plan-rate-limit-headers'),
+so the quota costs no request of its own.  A change is announced as
+`provider/quota-updated'."
+  (when-let* ((changes (harness-provider-plan-rate-limit-headers headers)))
+    (harness-provider-quota-publish harness-responses-provider-id
+                                    (harness-responses--account-status)
+                                    changes)))
+
+(defun harness-responses--quota (&optional refresh)
+  "Return a promise of the account's billing and the plan's quota.
+The shape is the one `provider/quota' documents.  The windows are the
+ones the account's answers last carried; this route has no endpoint to
+ask for them, so REFRESH makes no request and is only accepted for the
+interface's sake.  Without a signed-in account there is nothing to
+report."
+  (ignore refresh)
+  (harness-resolved
+   (when-let* ((base (harness-responses--account-status)))
+     (harness-provider-quota-update
+      base (harness-provider-quota-status harness-responses-provider-id)))))
 
 ;;;; Registration
 
@@ -1059,7 +1107,7 @@ nil when there is nothing to call the plan's models with."
           :models #'harness-responses--models
           :complete #'harness-responses--complete
           :quota #'harness-responses--quota
-          :capabilities '(:vision t :thinking t)
+          :capabilities '(:vision t :thinking t :quota t)
           :tiers harness-responses-tiers)
         (setq harness-responses--registered t)
         harness-responses-provider-id)

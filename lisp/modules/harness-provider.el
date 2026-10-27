@@ -1467,13 +1467,342 @@ first go."
   (let ((arity (func-arity fn)))
     (or (eq (cdr arity) 'many) (>= (cdr arity) 1))))
 
+;;;; Plan quota
+;;
+;; A provider that spends somebody's subscription reports it through
+;; `provider/quota', in one shape whatever the plan: its windows, each
+;; a name, a label, the fraction used and when it resets.  The rules
+;; below are the ones every such provider shares, so that a plan looks
+;; the same in the chat header, the usage dashboard, the fallback list
+;; and the task board's holds whoever reported it: a window is named by
+;; how long it is, its usage never goes down while it is the same
+;; window (a report of the same window that says less is stale), and
+;; the plan's limit status follows from its fullest window.
+
+(defconst harness-provider-quota-window-reset-tolerance 2
+  "Seconds within which two reset times of a quota window count as one.
+Two reports of the same window can differ by a second of rounding, one
+ISO time losing its fraction; a difference of no more than this is the
+same window, a larger one is the window after a reset.")
+
+(defun harness-provider-quota-time (value)
+  "Return VALUE, epoch seconds or an ISO 8601 string, as a float time, or nil."
+  (cond ((numberp value)
+         ;; A server may report milliseconds where seconds are expected.
+         (float (if (> value 100000000000) (/ value 1000.0) value)))
+        ((and (stringp value) (not (string-empty-p value)))
+         (if (string-match-p "\\`[0-9]+\\'" value)
+             (harness-provider-quota-time (string-to-number value))
+           (condition-case nil (float-time (parse-iso8601-time-string value)) (error nil))))))
+
+(defun harness-provider-plan-percent (value)
+  "Return VALUE, a used percentage (0-100), as the fraction quota windows use.
+The fields that carry it are named `used-percent' and `used_percent':
+they count percent, so 1 is one percent and 100 is all of the window."
+  (when (numberp value)
+    (max 0.0 (/ (float value) 100.0))))
+
+(defun harness-provider-quota-window-name (minutes)
+  "Return (NAME LABEL) of a plan window MINUTES long.
+Five hours is (\"5h\" \"Current session (5 hours)\") and a week is
+\(\"7d\" \"This week, all models\"), the names a plan's windows go by
+whatever provider reported them, so a chat header adds an OpenAI plan's
+window to a Claude one's alike.  Another length keeps its hours or days."
+  (when (and (numberp minutes) (> minutes 0))
+    (let ((minutes (round minutes)))
+      (cond
+       ((>= minutes 10080)
+        (list "7d" "This week, all models"))
+       ((= minutes 300)
+        (list "5h" "Current session (5 hours)"))
+       ((zerop (mod minutes 1440))
+        (let ((days (/ minutes 1440)))
+          (list (format "%dd" days) (format "%d-day window" days))))
+       (t
+        (let ((hours (max 1 (round (/ minutes 60.0)))))
+          (list (format "%dh" hours)
+                (format "Current session (%s)" (if (= hours 1) "1 hour"
+                                                  (format "%d hours" hours))))))))))
+
+(defun harness-provider-quota-same-window-p (old new)
+  "Non-nil when quota windows OLD and NEW are the same window.
+A quota window's usage only accrues until it resets, so a reset time
+that is not later by more than
+`harness-provider-quota-window-reset-tolerance' is still the same
+window, and a stale snapshot of it must not lower what it shows.  A
+window without a reset time keeps the one it has."
+  (let ((a (plist-get old :resets))
+        (b (plist-get new :resets)))
+    (or (null a) (null b)
+        (<= (- b a) harness-provider-quota-window-reset-tolerance))))
+
+(defun harness-provider-quota-merge-window (old new)
+  "Return quota window OLD updated with NEW, never lowering its usage.
+Within one window (`harness-provider-quota-same-window-p') usage only
+grows, so a newer snapshot whose `:used' is lower is stale and the
+higher figure stands; the window's other fields still take NEW's.  Once
+the window reset, NEW is a new window and stands whole."
+  (let ((merged (harness-plist-merge old new)))
+    (if (harness-provider-quota-same-window-p old new)
+        (plist-put merged :used (max (or (plist-get old :used) 0)
+                                     (or (plist-get new :used) 0)))
+      merged)))
+
+(defun harness-provider-quota-merge-windows (old new)
+  "Return quota windows OLD updated with NEW ones, matched by name.
+Each matched window merges without lowering its usage
+\(`harness-provider-quota-merge-window'); windows only in NEW follow."
+  (let ((name (lambda (w) (plist-get w :name))))
+    (append (mapcar (lambda (w)
+                      (let ((n (cl-find (plist-get w :name) new :key name :test #'equal)))
+                        (if n (harness-provider-quota-merge-window w n) w)))
+                    old)
+            (cl-remove-if (lambda (n) (cl-find (plist-get n :name) old :key name :test #'equal))
+                          new))))
+
+(defun harness-provider-quota-limit-status (windows)
+  "Return the limit status plan WINDOWS amount to, or nil.
+That is `rejected' when one of them is used up, `allowed_warning' when
+one is at least 90% used, `allowed' when there are windows and nothing
+warns, and nil when there are none."
+  (cond
+   ((cl-some (lambda (w) (>= (or (plist-get w :used) 0) 1.0)) windows) "rejected")
+   ((cl-some (lambda (w) (>= (or (plist-get w :used) 0) 0.9)) windows) "allowed_warning")
+   (windows "allowed")
+   (t nil)))
+
+(defun harness-provider-quota-update (old changes)
+  "Return the quota status OLD updated with CHANGES.
+CHANGES is what a provider just learned, in the shape `provider/quota'
+returns; OLD what it knew.  Windows merge without lowering their usage
+\(see `harness-provider-quota-merge-windows'), and, unless CHANGES says
+what it is itself, the limit status follows the windows."
+  (let ((new (harness-plist-merge old changes)))
+    (when (and (plist-member changes :windows)
+               (plist-get old :windows)
+               (plist-get changes :windows))
+      (setq new (plist-put new :windows
+                           (harness-provider-quota-merge-windows
+                            (plist-get old :windows) (plist-get changes :windows)))))
+    (when (and (plist-member changes :windows)
+               (not (plist-member changes :limit-status)))
+      (setq new (plist-put new :limit-status
+                           (harness-provider-quota-limit-status (plist-get new :windows)))))
+    new))
+
+(defvar harness-provider--quota-status (make-hash-table :test 'eq)
+  "Provider id -> the billing and quota status it last reported.
+What `harness-provider-quota-publish' keeps, and
+`harness-provider-quota-status' returns, so that a provider with no way
+to fetch its plan's quota on demand can report what its answers
+carried.")
+
+(defun harness-provider-quota-status (provider-id)
+  "Return what PROVIDER-ID last reported about billing and quota, or nil.
+The value has the shape `provider/quota' documents."
+  (gethash (if (stringp provider-id) (intern provider-id) provider-id)
+           harness-provider--quota-status))
+
+(defun harness-provider-quota-publish (provider-id base changes)
+  "Merge CHANGES into PROVIDER-ID's quota status, under BASE, and announce it.
+BASE is what the provider knows besides the report, such as how the
+account is billed and whose it is: a default the status keeps where the
+report says nothing (`:plan-label' a plan named by an earlier answer
+stands, say), and CHANGES win over both.  Event
+`provider/quota-updated' fires only when the status changed.  Return
+the new status."
+  (let* ((id (if (stringp provider-id) (intern provider-id) provider-id))
+         (old (gethash id harness-provider--quota-status))
+         (new (harness-provider-quota-update (harness-plist-merge base old) changes)))
+    (puthash id new harness-provider--quota-status)
+    (unless (equal old new)
+      (harness-emit 'provider/quota-updated id new))
+    new))
+
+(defun harness-provider-quota-forget (provider-id)
+  "Forget what PROVIDER-ID last reported about billing and quota."
+  (remhash (if (stringp provider-id) (intern provider-id) provider-id)
+           harness-provider--quota-status))
+
+;;;; ChatGPT plan rate limits
+;;
+;; An OpenAI server that spends a ChatGPT plan reports the plan's
+;; windows with every answer: `x-codex-primary-*' and
+;; `x-codex-secondary-*' response headers (a window's used percentage,
+;; its length in minutes, when it resets) and, in the stream of a Codex
+;; request, a `rate_limits' object carrying the same fields plus the
+;; plan's type and its credits.  Both providers that can spend such a
+;; plan read them here -- the ChatGPT-plan one and an OpenAI-compatible
+;; endpoint in front of one -- and report them through `provider/quota'
+;; like any other plan.
+
+(defconst harness-provider-plan-header-prefixes '("x-codex")
+  "Prefixes of the response headers that report a ChatGPT plan's windows.
+Codex reads the family `x-codex'; a server that meters a limit of its
+own names it in `x-codex-active-limit', which is kept beside the
+windows it describes.")
+
+(defun harness-provider-plan-header (name headers)
+  "Return the value of header NAME among HEADERS, or nil.
+HEADERS is an alist of lower-case names, as the HTTP layer hands them
+over; NAME is matched without regard to case."
+  (cdr (assoc-string name headers t)))
+
+(defun harness-provider-plan-header-window (prefix kind headers)
+  "Return the plan window KIND (primary or secondary) HEADERS report, or nil.
+PREFIX is `harness-provider-plan-header-prefixes' family of headers,
+such as \"x-codex\"; KIND is \"primary\" or \"secondary\"."
+  (let* ((base (format "%s-%s" prefix kind))
+         (used (harness-provider-plan-header (concat base "-used-percent") headers))
+         (minutes (harness-provider-plan-header (concat base "-window-minutes") headers))
+         (reset (harness-provider-plan-header (concat base "-reset-at") headers))
+         (after (harness-provider-plan-header (concat base "-reset-after-seconds") headers))
+         (used (and (stringp used) (string-to-number used))))
+    (when (numberp used)
+      (let* ((minutes (and (stringp minutes) (string-to-number minutes)))
+             (named (harness-provider-quota-window-name minutes))
+             (resets (cond ((and reset (string-match-p "\\`[0-9.]+\\'" reset))
+                            (harness-provider-quota-time (string-to-number reset)))
+                           ((and after (string-match-p "\\`[0-9.]+\\'" after))
+                            (+ (float-time) (string-to-number after))))))
+        (append (list :name (or (car named) kind)
+                      :label (or (cadr named) (format "Plan window (%s)" kind))
+                      :used (harness-provider-plan-percent used))
+                (when (numberp minutes) (list :minutes minutes))
+                (when resets (list :resets resets)))))))
+
+(defun harness-provider-plan-flag (value)
+  "Return VALUE, a JSON boolean or the text of one in a header, as t or nil.
+A header carries \"true\" and \"false\" as strings, which are not booleans
+themselves: \"false\" is not true."
+  (cond ((stringp value)
+         (pcase (downcase (string-trim value))
+           ("true" t) ("1" t) ("yes" t) ("false" nil) ("0" nil) (_ (not (string-empty-p value)))))
+        (t (and (harness-json-true-p value) t))))
+
+(defun harness-provider-plan-credits (has unlimited balance)
+  "Return the plan's credits as quota reports them, or nil.
+HAS, UNLIMITED and BALANCE are what the server said about them: whether
+any are left, whether they never run out, and what is left, which is
+kept as the server wrote it (a string in a header, a number in JSON)
+since its unit is not documented."
+  (when (or (harness-provider-plan-flag has) (harness-provider-plan-flag unlimited) balance)
+    (list :has-credits (harness-provider-plan-flag has)
+          :unlimited (harness-provider-plan-flag unlimited)
+          :balance (and (or (stringp balance) (numberp balance)) balance))))
+
+(defun harness-provider-plan-label (plan)
+  "Return the display name of a ChatGPT plan id PLAN (\"plus\" gives \"ChatGPT Plus\")."
+  (when (and (stringp plan) (not (string-empty-p plan)))
+    (concat "ChatGPT " (capitalize (replace-regexp-in-string "[-_]" " " (downcase plan))))))
+
+(defun harness-provider-plan-rate-limit-headers (headers)
+  "Return the ChatGPT plan rate limits HEADERS report, or nil.
+The value is a plist of the changes a provider publishes with
+`harness-provider-quota-publish': `:available', `:windows', and what
+the server said besides (`:plan', `:plan-label', `:credits',
+`:limit-reached', `:promo', `:limit'), with `:updated' and
+`:limit-status'.  Nil when HEADERS report no plan window at all, so an
+ordinary API response adds nothing to a provider's quota."
+  (let (windows plan credits reached promo limit)
+    (dolist (prefix harness-provider-plan-header-prefixes)
+      (dolist (kind '("primary" "secondary"))
+        (when-let* ((window (harness-provider-plan-header-window prefix kind headers)))
+          (setq windows (append windows (list window)))))
+      (setq plan (or plan (harness-provider-plan-header (concat prefix "-plan-type") headers)))
+      (setq reached (or reached (harness-provider-plan-header
+                                 (concat prefix "-rate-limit-reached-type") headers)))
+      (setq promo (or promo (harness-provider-plan-header (concat prefix "-promo-message") headers)))
+      (setq limit (or limit (harness-provider-plan-header (concat prefix "-active-limit") headers)))
+      (when-let* ((has (harness-provider-plan-header
+                        (concat prefix "-credits-has-credits") headers)))
+        (setq credits (harness-provider-plan-credits
+                       has
+                       (harness-provider-plan-header (concat prefix "-credits-unlimited") headers)
+                       (harness-provider-plan-header (concat prefix "-credits-balance") headers)))))
+    (when (or windows plan credits reached)
+      (append
+       (list :updated (float-time))
+       (when windows (list :available t :windows windows))
+       (when (and plan (not (string-empty-p plan)))
+         (list :plan (downcase plan) :plan-label (harness-provider-plan-label plan)))
+       (when credits (list :credits credits))
+       (when (and reached (not (string-empty-p reached)))
+         (list :limit-reached reached :limit-status "rejected"))
+       (when (and promo (not (string-empty-p promo))) (list :promo promo))
+       (when (and limit (not (string-empty-p limit))) (list :limit limit))))))
+
+(defun harness-provider-plan-window-json (window)
+  "Return the plan window a `rate_limits' object's WINDOW entry describes, or nil.
+WINDOW is one of its `primary' or `secondary' objects, whose fields are
+`used_percent', `window_minutes' (or `limit_window_seconds') and
+`resets_at' (or `reset_at', or how long until then)."
+  (when (consp window)
+    (let* ((used (harness-provider-plan-percent
+                  (if (plist-member window :used_percent)
+                      (plist-get window :used_percent)
+                    (plist-get window :percent))))
+           (minutes (or (plist-get window :window_minutes)
+                        (let ((seconds (or (plist-get window :limit_window_seconds)
+                                           (plist-get window :window_seconds))))
+                          (and (numberp seconds) (> seconds 0) (/ seconds 60.0)))))
+           (named (harness-provider-quota-window-name minutes))
+           (resets (or (harness-provider-quota-time (or (plist-get window :resets_at)
+                                                        (plist-get window :reset_at)))
+                       (let ((after (or (plist-get window :resets_in_seconds)
+                                        (plist-get window :reset_after_seconds))))
+                         (and (numberp after) (+ (float-time) after))))))
+      (when (numberp used)
+        (append (list :name (or (car named) "limit")
+                      :label (or (cadr named) "Plan window")
+                      :used used)
+                (when (numberp minutes) (list :minutes (round minutes)))
+                (when resets (list :resets resets)))))))
+
+(defun harness-provider-plan-rate-limits (json)
+  "Return the ChatGPT plan rate limits JSON, a `rate_limits' object, describes.
+The object is what a Codex request's stream carries: `primary' and
+`secondary' windows, the plan's `plan_type', its `credits', and
+`rate_limit_reached_type' when a limit is reached.  The value has the
+shape `harness-provider-plan-rate-limit-headers' returns, or nil when
+JSON says nothing about a plan window."
+  (when (consp json)
+    (let* ((windows (delq nil (mapcar (lambda (key)
+                                        (harness-provider-plan-window-json (plist-get json key)))
+                                      '(:primary :secondary))))
+           (plan (or (plist-get json :plan_type) (plist-get json :planType)))
+           (reached (or (plist-get json :rate_limit_reached_type)
+                        (plist-get json :rateLimitReachedType)))
+           (credits (plist-get json :credits))
+           (promo (plist-get json :promo_message))
+           (limit (or (plist-get json :limit_name) (plist-get json :limit_id))))
+      (when (or windows plan credits reached)
+        (append
+         (list :updated (float-time))
+         (when windows (list :available t :windows windows))
+         (when (and (stringp plan) (not (string-empty-p plan)))
+           (list :plan (downcase plan) :plan-label (harness-provider-plan-label plan)))
+         (when (consp credits)
+           (when-let* ((value (harness-provider-plan-credits
+                               (plist-get credits :has_credits)
+                               (plist-get credits :unlimited)
+                               (plist-get credits :balance))))
+             (list :credits value)))
+         (when (and (stringp reached) (not (string-empty-p reached)))
+           (list :limit-reached reached :limit-status "rejected"))
+         (when (and (stringp promo) (not (string-empty-p promo))) (list :promo promo))
+         (when (and (stringp limit) (not (string-empty-p limit))) (list :limit limit)))))))
+
 (harness-defmethod provider/quota (provider-id &optional refresh)
   "Return a promise of PROVIDER-ID's billing and quota information, or of nil.
 PROVIDER-ID is a symbol or its name.  REFRESH non-nil asks the provider
 to fetch fresh data first.  The value is (:billing api|subscription|nil
 :plan ID :plan-label LABEL :windows ((:name :label :used FRACTION
-:resets FLOAT ...) ...) :extra PLIST :updated FLOAT ...); see
-docs/architecture.md."
+:resets FLOAT ...) ...) :extra PLIST :credits PLIST :updated FLOAT ...);
+see docs/architecture.md.  A plan's windows are named for how long they
+last (`harness-provider-quota-window-name'), whatever provider reports
+them, so a subscription's quota reads the same in a chat header, the
+usage dashboard, the fallback list and a task's hold."
   (let* ((p (harness-provider-get (if (stringp provider-id) (intern provider-id) provider-id)))
          (fn (and p (harness-provider-quota-fn p))))
     (cond ((null fn) (harness-resolved nil))

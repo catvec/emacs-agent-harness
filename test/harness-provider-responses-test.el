@@ -75,6 +75,7 @@ leaks into the next one."
          (harness-responses-test--responses ,responses)
          (harness-responses--responses (make-hash-table :test 'equal))
          (harness-responses--models-cache nil)
+         (harness-provider--quota-status (make-hash-table :test 'eq))
          (auth-sources nil))
      (cl-letf (((symbol-function 'harness-http-request) #'harness-responses-test--fake-request)
                ((symbol-function 'harness-responses--status)
@@ -210,6 +211,7 @@ arguments, and finally the completed response."
        (should (equal "ChatGPT plan" (harness-provider-label provider)))
        (should (eq t (plist-get (harness-provider-capabilities provider) :thinking)))
        (should (eq t (plist-get (harness-provider-capabilities provider) :vision)))
+       (should (eq t (plist-get (harness-provider-capabilities provider) :quota)))
        ;; The plan's models are the provider's own listing, so the
        ;; tiers are what the setting names rather than a price.
        (should (harness-provider-tiers provider)))
@@ -795,6 +797,98 @@ price here; a tier is a name pattern or nothing."
     ;; With nobody signed in there is nothing to report at all.
     (let ((harness-responses-test--status nil))
       (should-not (harness-test-await (harness-responses--quota))))))
+
+(ert-deftest harness-provider-responses-plan-headers-become-quota ()
+  "The plan windows the route sends with every answer are the account's quota.
+They are published through the generic interface, so the plan reads the
+same in a chat header, the usage dashboard and the fallback list as a
+Claude plan does, and the running turn hears of them once."
+  (harness-provider-quota-forget 'chatgpt)
+  (harness-responses-test-with-fake
+      `(("/responses"
+         . (:headers (("x-codex-primary-used-percent" . "41")
+                      ("x-codex-primary-window-minutes" . "300")
+                      ("x-codex-primary-reset-at" . "2000000000")
+                      ("x-codex-secondary-used-percent" . "12")
+                      ("x-codex-secondary-window-minutes" . "10080")
+                      ("x-codex-secondary-reset-at" . "2000600000")
+                      ("x-codex-plan-type" . "plus"))
+            :chunks (,(harness-responses-test--sse
+                       '(:type "response.output_text.delta" :delta "ok")
+                       (list :type "response.completed"
+                             :response (harness-responses-test--streamed-response)))))))
+    (harness-responses-test-with-provider
+     (harness-responses-refresh)
+     (let (updates)
+       (harness-on 'provider/quota-updated
+                   (lambda (pid quota) (push (cons pid quota) updates)))
+       (let* ((events (car (harness-responses-test--complete
+                            '(:model "chatgpt:gpt-5"
+                              :messages ((:role user :content ((:type "text" :text "hi"))))))))
+              (quota (harness-test-await (harness-call 'provider/quota 'chatgpt)))
+              (heard (harness-responses-test--events events 'quota)))
+         ;; The turn heard the windows, once, before it was over.
+         (should (= 1 (length heard)))
+         (should (equal '("5h" "7d")
+                        (mapcar (lambda (w) (plist-get w :name)) (plist-get (car heard) :windows))))
+         ;; The announcement carries the same plan as the generic method.
+         (should (= 1 (length updates)))
+         (should (eq 'chatgpt (caar updates)))
+         (should (equal (plist-get quota :windows) (plist-get (cdar updates) :windows)))
+         ;; The account is the plan's, the windows named as every plan's.
+         (should (eq 'subscription (plist-get quota :billing)))
+         (should (equal "chatgpt" (plist-get quota :auth)))
+         (should (equal "plus" (plist-get quota :plan)))
+         (should (equal "ChatGPT Plus" (plist-get quota :plan-label)))
+         (should (equal "a@example.com" (harness-plist-get-in quota '(:account :email))))
+         (should (plist-get quota :available))
+         (should (equal '("5h" "7d")
+                        (mapcar (lambda (w) (plist-get w :name)) (plist-get quota :windows))))
+         (should (= 0.41 (plist-get (car (plist-get quota :windows)) :used)))
+         (should (= 2000000000.0 (plist-get (car (plist-get quota :windows)) :resets)))
+         (should (equal "allowed" (plist-get quota :limit-status))))))))
+
+(ert-deftest harness-provider-responses-rate-limits-event-becomes-quota ()
+  "A `codex.rate_limits' event reports the plan's windows as the headers do.
+The stream carries the same windows as a JSON object; a turn whose
+answer brings no such header still reports its plan, and the windows
+are named by how long they last rather than by the server's slot names."
+  (harness-provider-quota-forget 'chatgpt)
+  (harness-responses-test-with-fake
+      `(("/responses"
+         . (:chunks (,(harness-responses-test--sse
+                       '(:type "codex.rate_limits"
+                         :rate_limits
+                         (:primary (:used_percent 92
+                                    :window_minutes 300
+                                    :resets_at 2000000000)
+                          :secondary (:used_percent 12
+                                      :limit_window_seconds 604800
+                                      :resets_at 2000600000)
+                          :plan_type "plus"
+                          :credits (:has_credits t :unlimited :false
+                                                 :balance "62500.0")))
+                       (list :type "response.completed"
+                             :response (harness-responses-test--streamed-response)))))))
+    (harness-responses-test-with-provider
+     (harness-responses-refresh)
+     (let* ((events (car (harness-responses-test--complete
+                          '(:model "chatgpt:gpt-5"
+                            :messages ((:role user :content ((:type "text" :text "hi"))))))))
+            (quota (harness-test-await (harness-call 'provider/quota 'chatgpt)))
+            (heard (harness-responses-test--events events 'quota))
+            (windows (plist-get quota :windows)))
+       (should (= 1 (length heard)))
+       (should (equal '("5h" "7d") (mapcar (lambda (w) (plist-get w :name)) windows)))
+       (should (= 0.92 (plist-get (car windows) :used)))
+       (should (= 10080 (plist-get (cadr windows) :minutes)))
+       (should (= 0.12 (plist-get (cadr windows) :used)))
+       ;; A warning window is what the plan's limit status follows.
+       (should (equal "allowed_warning" (plist-get quota :limit-status)))
+       (should (equal "plus" (plist-get quota :plan)))
+       (should (equal "ChatGPT Plus" (plist-get quota :plan-label)))
+       (should (equal '(:has-credits t :unlimited nil :balance "62500.0")
+                      (plist-get quota :credits)))))))
 
 (provide 'harness-provider-responses-test)
 ;;; harness-provider-responses-test.el ends here

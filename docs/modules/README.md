@@ -275,7 +275,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `pet/said` | [pet](pet.md) | [pet](pet.md) | [ui-pet](ui-pet.md) | yes |
 | `provider/models-updated` | [provider](provider.md) | [provider](provider.md) | [session](session.md) | yes |
 | `provider/pricing-warning` | [provider-deepseek](provider-deepseek.md) | [provider-deepseek](provider-deepseek.md) |  | yes |
-| `provider/quota-updated` | [provider](provider.md) | [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md) | [fallback](fallback.md), [usage](usage.md) | yes |
+| `provider/quota-updated` | [provider](provider.md) | [provider](provider.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md) | [fallback](fallback.md), [usage](usage.md) | yes |
 | `provider/request-started` | [provider](provider.md) | [provider](provider.md) | [provider-deepseek](provider-deepseek.md) |  |
 | `question/answered` | [tools-question](tools-question.md) | [tools-question](tools-question.md) | [cache](cache.md) | yes |
 | `question/asked` | [tools-question](tools-question.md) | [tools-question](tools-question.md) | [acp](acp.md) |  |

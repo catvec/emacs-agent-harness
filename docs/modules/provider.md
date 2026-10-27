@@ -93,5 +93,6 @@ only the models allowed, and a tier's model is chosen among them.
 ### Events it emits
 
 - `provider/models-updated`
+- `provider/quota-updated`
 - `provider/request-started`
 

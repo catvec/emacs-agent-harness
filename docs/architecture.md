@@ -2267,6 +2267,7 @@ the provider reports none:
  :windows ((:name "5h" :label "Current session (5 hours)" :used FRACTION
             :resets FLOAT :severity "normal" :active BOOL :model "Fable") ...)
  :extra (:enabled BOOL :used F :limit F :currency "USD" :disabled-reason "...")
+ :credits (:has-credits BOOL :unlimited BOOL :balance "...")
  :limit-status "allowed"|"allowed_warning"|"rejected"
  :using-extra BOOL                  ; calls draw on extra usage, billed at API prices
  :updated FLOAT)                    ; when the windows were last reported
@@ -2276,6 +2277,37 @@ Event `provider/quota-updated PROVIDER-ID QUOTA` fires whenever a
 provider learns something new; the UI caches QUOTA from it, and the
 usage module counts `:extra :used` in month budgets over everything
 (see usage).
+
+Every plan's quota is read the same way, whichever provider reports it.
+A window is named by its length (`harness-provider-quota-window-name`:
+`5h` for 300 minutes, `7d` for a week), so the chat header, the usage
+dashboard, the fallback list and a task's hold know a plan's window
+whatever the server called it.  Within one window usage never goes
+down: a later report whose reset time is no more than
+`harness-provider-quota-window-reset-tolerance` seconds away is the
+same window, and if it says less it is stale, while a later reset
+starts the window over (`harness-provider-quota-merge-windows`).
+`:limit-status` follows the fullest window (`allowed_warning` from 90%
+used, `rejected` at 100%), and a server that says a limit is reached
+says so itself (`:limit-reached`).  A provider with no route to ask for
+its plan keeps what its answers reported (`harness-provider-quota-status`)
+and announces each change (`harness-provider-quota-publish`), so
+`provider/quota` answers from it and REFRESH makes no request.
+
+An OpenAI answer that spends a ChatGPT plan reports that plan in
+`x-codex-primary-*` and `x-codex-secondary-*` response headers, and a
+Codex stream in a `codex.rate_limits` event
+(`harness-provider-plan-rate-limit-headers`,
+`harness-provider-plan-rate-limits`).  Both the OpenAI-compatible
+provider and the Responses provider read them: the billing is a
+subscription, `:auth` is `"chatgpt-plan"` or `"chatgpt"`, the plan's
+type (`x-codex-plan-type`, `plan_type`) is `:plan` and its label
+(`plus` gives "ChatGPT Plus"), and `x-codex-credits-*` becomes
+`:credits`.  A plain API endpoint's answers carry no windows, so it
+reports no quota.  Once an endpoint's plan has paid for a call, that
+call is recorded as the plan's, with no cost and the value at API
+prices priced from the catalogue, as a Claude Code plan's calls are;
+an endpoint that never reported a plan records per-token billing.
 
 The Claude provider learns the billing from the `account` of each CLI
 process's initialize answer:
@@ -2567,6 +2599,17 @@ on every later turn.  The agent gives this provider pictures only for a
 model that lists image input; a DeepSeek model lists it only when its
 catalogue entry says `:vision`.
 
+An endpoint that spends a ChatGPT plan reports it through
+`provider/quota`: an answer carrying `x-codex-primary-*` or
+`x-codex-secondary-*` headers (a window's used percentage, its length
+in minutes, when it resets) is a subscription whose windows are named
+`5h` and `7d` (`harness-provider-plan-rate-limit-headers`), with the
+plan's type and `x-codex-credits-*` beside them.  This costs no request
+of its own, since the plan has no endpoint to ask; the turn is told the
+windows once, as a `quota` event, and `provider/quota` answers from
+what the last answer reported.  A plain endpoint's answers carry no
+such headers, and it reports no quota.
+
 The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
 OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
 harness-provider-openai.el, which splits DeepSeek's cached input out of
@@ -2749,7 +2792,9 @@ and the provider is built to what it accepts:
   `invalid_user` (401) are refusals of the credential, and
   `subscription_sharing_usage_unavailable` (503) and
   `subscription_sharing_unsupported_capability` (400) say what they say
-  in the message the turn fails with.
+  in the message the turn fails with.  A `codex.rate_limits` (or bare
+  `rate_limits`) event reports the plan's windows, which become the
+  provider's quota as the headers of every answer do.
 - The catalogue comes from `GET /v1/models` with the same token: entries
   whose `visibility` is `list`, `slug` as the model name and
   `display_name` as its label, cached for `harness-responses--models-ttl`
@@ -2760,9 +2805,11 @@ and the provider is built to what it accepts:
   and this route gives no prices, so none is invented.  What the call
   would have cost at list prices is worked out from the catalogue as for
   every provider (`usage/price`, `:list-cost`), and `provider/quota`
-  reports the subscription honestly (`:billing` subscription, `:auth`
-  "chatgpt", `:plan-label` "ChatGPT plan", `:available` nil, since the
-  route reports no quota of its own).
+  reports the subscription (`:billing` subscription, `:auth` "chatgpt",
+  `:plan-label` "ChatGPT plan" until an answer names the plan) with the
+  plan's windows, as the `x-codex-*` headers or a `codex.rate_limits`
+  event report them.  There is no endpoint to ask for them, so REFRESH
+  makes no request.
 
 #### Looking like an ordinary Claude Code session (experimental)
 

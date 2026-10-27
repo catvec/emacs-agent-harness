@@ -124,6 +124,9 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
                                        :default-context 4096)
           (should (harness-provider-get 'local))
           (should (equal "Local" (harness-provider-label (harness-provider-get 'local))))
+          ;; Every endpoint answers the generic quota method, even when
+          ;; its answers never report a plan (it then answers nil).
+          (should (harness-provider-quota-fn (harness-provider-get 'local)))
           (let ((models (harness-test-await (funcall (harness-provider-models-fn (harness-provider-get 'local))))))
             (should (equal '("llama" "qwen") (mapcar (lambda (m) (plist-get m :name)) models)))
             (should (= 4096 (plist-get (car models) :context-window)))
@@ -1167,6 +1170,123 @@ A model no field sizes has none: the catalogue estimates it."
       (should (equal '(:type done :stop-reason end-turn) (car (last second))))
       (should (string-match-p "ZEBRA-4242" (harness-openai-test--text second)))
       (should (cl-find 'usage second :key (lambda (e) (plist-get e :type)))))))
+
+;;;; Plan quota
+
+(ert-deftest harness-provider-openai-plan-headers-become-quota ()
+  "The plan windows a server reports with its answers are its quota.
+An OpenAI-compatible endpoint that spends a ChatGPT plan sends the
+plan's windows as `x-codex-*' headers on every answer; they are
+reported through `provider/quota', in the shape a plan's quota has, and
+a running turn hears of them once."
+  (let ((endpoint '(:id testplan :label "ChatGPT plan endpoint"
+                    :base-url "https://chatgpt.example/backend-api/codex/v1"
+                    :api-key "sk-test-plan"))
+        (events nil))
+    (harness-provider-quota-forget 'testplan)
+    (harness-openai-test-with-fake
+        `(("chat/completions"
+           . (:headers (("x-codex-primary-used-percent" . "41")
+                        ("x-codex-primary-window-minutes" . "300")
+                        ("x-codex-primary-reset-at" . "2000000000")
+                        ("x-codex-secondary-used-percent" . "12")
+                        ("x-codex-secondary-window-minutes" . "10080")
+                        ("x-codex-secondary-reset-at" . "2000600000")
+                        ("x-codex-plan-type" . "plus"))
+              :chunks (,(harness-openai-test--sse
+                         '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                         "[DONE]")))))
+      (harness-openai--complete
+       endpoint
+       (list :model "testplan:gpt-6" :on-event (lambda (e) (push e events))
+             :messages '((:role user :content ((:type "text" :text "hi"))))))
+      (harness-test-wait (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type))))
+                         5 "done event"))
+    ;; The turn heard the windows, once, before it was over.
+    (should (= 1 (length (cl-remove-if-not (lambda (e) (eq (plist-get e :type) 'quota))
+                                           events))))
+    ;; The quota the provider reports is the plan's, named as every plan's.
+    (let ((quota (harness-test-await (harness-openai--quota endpoint))))
+      (should (eq 'subscription (plist-get quota :billing)))
+      (should (equal "chatgpt-plan" (plist-get quota :auth)))
+      (should (plist-get quota :available))
+      (should (equal "plus" (plist-get quota :plan)))
+      (should (equal "ChatGPT Plus" (plist-get quota :plan-label)))
+      (should (equal '("5h" "7d") (mapcar (lambda (w) (plist-get w :name))
+                                          (plist-get quota :windows))))
+      (should (= 0.41 (plist-get (car (plist-get quota :windows)) :used)))
+      (should (= 2000000000.0 (plist-get (car (plist-get quota :windows)) :resets)))
+      (should (equal "allowed" (plist-get quota :limit-status))))))
+
+(ert-deftest harness-provider-openai-plan-pays-for-the-calls ()
+  "A call an endpoint's plan pays for is a subscription's, as Claude Code's are.
+The plan's answers carry windows, and a call they cover costs nothing
+and names the plan: a session's header then shows the plan and its
+windows rather than a price the user is not charged.  An endpoint that
+never reported a plan keeps the per-token billing it had."
+  (let ((endpoint '(:id testplanpaid :base-url "https://chatgpt.example/backend-api/codex/v1"))
+        (usage '(:prompt_tokens 100 :completion_tokens 7)))
+    (harness-provider-quota-forget 'testplanpaid)
+    (should (equal '(:type usage :input 100 :output 7 :cache-read 0 :cache-write 0
+                     :cost nil :billing api :context 100)
+                   (harness-openai--usage-event usage endpoint)))
+    (harness-provider-quota-publish
+     'testplanpaid (harness-openai--subscription-status)
+     (harness-provider-plan-rate-limit-headers
+      '(("x-codex-primary-used-percent" . "41")
+        ("x-codex-primary-window-minutes" . "300")
+        ("x-codex-plan-type" . "plus"))))
+    (should (equal '(:type usage :input 100 :output 7 :cache-read 0 :cache-write 0
+                     :cost 0.0 :billing subscription :plan "plus" :context 100)
+                   (harness-openai--usage-event usage endpoint)))
+    (harness-provider-quota-forget 'testplanpaid)))
+
+(ert-deftest harness-provider-openai-quota-is-nil-without-a-plan-report ()
+  "An endpoint whose answers carry no plan window reports no quota.
+A local server or a plain per-token endpoint has none, and inventing one
+would show a plan the user does not have."
+  (harness-provider-quota-forget 'testopenai)
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (harness-openai-test--complete harness-openai-test-openai-endpoint
+                                   '(:model "testopenai:gpt-x"
+                                     :messages ((:role user :content ((:type "text" :text "hi"))))))
+    (should-not (harness-test-await (harness-openai--quota harness-openai-test-openai-endpoint)))))
+
+(ert-deftest harness-provider-openai-plan-windows-never-tick-down ()
+  "A later answer that reports less of the same window does not lower it.
+The report of a plan's window only grows until the window resets; a
+server that answers out of order must not make the quota go backwards."
+  (let* ((first (harness-provider-plan-rate-limit-headers
+                 '(("x-codex-primary-used-percent" . "95")
+                   ("x-codex-primary-window-minutes" . "300")
+                   ("x-codex-primary-reset-at" . "2000000000"))))
+         (stale (harness-provider-plan-rate-limit-headers
+                 '(("x-codex-primary-used-percent" . "20")
+                   ("x-codex-primary-window-minutes" . "300")
+                   ("x-codex-primary-reset-at" . "2000000001"))))
+         (reset (harness-provider-plan-rate-limit-headers
+                 '(("x-codex-primary-used-percent" . "0")
+                   ("x-codex-primary-window-minutes" . "300")
+                   ("x-codex-primary-reset-at" . "2000003600"))))
+         (status (harness-provider-quota-update nil first)))
+    ;; The same window reporting less is stale: the higher figure stands.
+    (setq status (harness-provider-quota-update status stale))
+    (should (= 0.95 (plist-get (car (plist-get status :windows)) :used)))
+    (should (equal "allowed_warning" (plist-get status :limit-status)))
+    ;; The window after a reset starts over, and the status follows it.
+    (setq status (harness-provider-quota-update status reset))
+    (should (= 0.0 (plist-get (car (plist-get status :windows)) :used)))
+    (should (equal "allowed" (plist-get status :limit-status)))
+    ;; A used-up window says the plan's limit is reached.
+    (should (equal "rejected"
+                   (plist-get (harness-provider-quota-update
+                               nil (harness-provider-plan-rate-limit-headers
+                                    '(("x-codex-primary-used-percent" . "100")
+                                      ("x-codex-primary-window-minutes" . "10080"))))
+                              :limit-status)))))
 
 ;;;; Customize type
 
