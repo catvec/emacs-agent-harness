@@ -231,6 +231,10 @@
 (require 'harness-config)
 (require 'harness-tools)
 (require 'harness-policy)
+;; The permission judge and the summary of a prompt are one-off calls the
+;; harness makes on its own: `harness-small-ask' tries them again when a
+;; provider fails transiently, as a step of a turn is tried again.
+(require 'harness-small)
 
 (defvar harness-state-directory)
 (defvar harness-directory)
@@ -3660,57 +3664,59 @@ value and NEXT continues the chain."
                                          (setq failure (format "it took longer than %ss" harness-perms--auto-timeout))
                                          (funcall finish decision)
                                          (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
-                    (condition-case err
-                        (setq handle
-                              (harness-call
-                               'provider/complete
-                               (list :model model
-                                     ;; A verdict on this call alone: no earlier
-                                     ;; verdicts, no project instructions.
-                                     :ephemeral t
-                                     :session (list :id (format "%s-perms" (plist-get session :id))
-                                                    :cwd (plist-get session :cwd) :host (plist-get session :host))
-                                     ;; Recorded as an internal session made
-                                     ;; for the session asking.
-                                     :job (if (= n 1) "Permission judge" "Permission judge (retry)")
-                                     :job-parent (plist-get session :id)
-                                     :system system
-                                     :messages (list (list :role 'user
-                                                           :content (list (list :type "text"
-                                                                                :text (harness-perms--judge-text request)))))
-                                     :tools nil
-                                     ;; A verdict needs no extended thinking,
-                                     ;; which would spend the output first.
-                                     :no-thinking t
-                                     :max-tokens (if (= n 1)
-                                                     harness-perms--judge-max-tokens
-                                                   harness-perms--judge-retry-max-tokens)
-                                     :on-event
-                                     (lambda (ev)
-                                       (when (= live attempt)
-                                         (when (eq (plist-get ev :type) 'done)
-                                           (setq failure (harness-perms--judge-failure ev text)))
-                                         (pcase (plist-get ev :type)
-                                           ('text
-                                            (setq text (concat text (or (plist-get ev :delta) ""))))
-                                           ('done
-                                            (let ((verdict (harness-perms--parse-verdict text)))
-                                              (cond
-                                               (verdict (funcall finish verdict))
-                                               ((and (= n 1) (eq (plist-get ev :stop-reason) 'max-tokens))
-                                                (harness-log
-                                                 'info
-                                                 "perms: auto judge ran out of output tokens for %s; asking once more"
-                                                 (plist-get request :tool))
-                                                (ask 2))
-                                               (t
-                                                (harness-log 'warn "%s" (harness-perms--no-verdict-message
-                                                                         (plist-get request :tool) ev text))
-                                                (funcall finish decision)))))))))))
-                      (error
-                       (harness-log 'warn "perms: auto judge failed: %S" err)
-                       (setq failure (format "it failed: %s" (harness-error-message err)))
-                       (funcall finish decision))))))
+                    ;; A one-off call through `harness-small-ask': a
+                    ;; provider's bad minute -- a rate limit, a connection
+                    ;; cut -- is waited out and the verdict asked for again,
+                    ;; as a step of a turn would be.
+                    (setq handle
+                          (harness-small-ask
+                           (list :model model
+                                 ;; A verdict on this call alone: no earlier
+                                 ;; verdicts, no project instructions.
+                                 :ephemeral t
+                                 :session (list :id (format "%s-perms" (plist-get session :id))
+                                                :cwd (plist-get session :cwd) :host (plist-get session :host))
+                                 ;; Recorded as an internal session made
+                                 ;; for the session asking.
+                                 :job (if (= n 1) "Permission judge" "Permission judge (retry)")
+                                 :job-parent (plist-get session :id)
+                                 :system system
+                                 :messages (list (list :role 'user
+                                                       :content (list (list :type "text"
+                                                                            :text (harness-perms--judge-text request)))))
+                                 :tools nil
+                                 ;; A verdict needs no extended thinking,
+                                 ;; which would spend the output first.
+                                 :no-thinking t
+                                 :max-tokens (if (= n 1)
+                                                 harness-perms--judge-max-tokens
+                                               harness-perms--judge-retry-max-tokens))
+                           (list :label "perms judge"
+                                 :on-event
+                                 (lambda (ev)
+                                   (when (= live attempt)
+                                     (pcase (plist-get ev :type)
+                                       ;; A try that failed is thrown away:
+                                       ;; so is what it wrote.
+                                       ('restart (setq text "" failure nil))
+                                       ('text
+                                        (setq text (concat text (or (plist-get ev :delta) ""))))
+                                       ('done
+                                        (setq failure (harness-perms--judge-failure ev text))
+                                        (let ((verdict (harness-perms--parse-verdict text)))
+                                          (cond
+                                           (verdict (funcall finish verdict))
+                                           ((and (= n 1) (eq (plist-get ev :stop-reason) 'max-tokens))
+                                            (harness-log
+                                             'info
+                                             "perms: auto judge ran out of output tokens for %s; asking once more"
+                                             (plist-get request :tool))
+                                            (ask 2))
+                                           (t
+                                            (harness-log 'warn "%s" (harness-perms--no-verdict-message
+                                                                     (plist-get request :tool) ev text))
+                                            (funcall finish decision)))))
+                                       (_ nil))))))))))
           (ask 1))))))
 
 ;;;; Auto mode: the rules Claude Code's own auto mode follows
@@ -4553,13 +4559,14 @@ left."
       (unless (string-empty-p text)
         (harness-truncate-end text harness-perms--summary-chars)))))
 
-(defun harness-perms--summary-request (session model text n on-event)
+(defun harness-perms--summary-request (session model text n)
   "Return the request that asks MODEL for the summary TEXT asks for, call number N.
 It is SESSION's, in its place, and `:ephemeral': one question alone, no
 earlier turns, no project instructions, no thinking, a small output
 budget (`harness-perms--summary-max-tokens', and for the second call
 `harness-perms--summary-retry-max-tokens'), recorded as an internal
-session made for SESSION.  ON-EVENT gets its events."
+session made for SESSION.  It is sent through `harness-small-ask', which
+adds the `:on-event'."
   (list :model model
         :ephemeral t
         :session (list :id (format "%s-summary" (plist-get session :id))
@@ -4572,8 +4579,7 @@ session made for SESSION.  ON-EVENT gets its events."
         :no-thinking t
         :max-tokens (if (= n 1)
                         harness-perms--summary-max-tokens
-                      harness-perms--summary-retry-max-tokens)
-        :on-event on-event))
+                      harness-perms--summary-retry-max-tokens)))
 
 (defun harness-perms--ask-summary (session model text)
   "Ask MODEL for the summary TEXT asks for, in SESSION's place.
@@ -4607,22 +4613,25 @@ its output budget is asked for once more (`harness-perms--summary-request')."
          (ask (n)
            ;; Each request keeps its own reply and only speaks while it
            ;; is the live one, so an event of one that ran out cannot
-           ;; answer for its retry.
+           ;; answer for its retry.  The call is a one-off one through
+           ;; `harness-small-ask', so a rate limit or a connection cut is
+           ;; waited out and the summary asked for again.
            (let ((reply "") (live (setq attempt n)))
-             (condition-case err
-                 (let ((h (harness-call
-                           'provider/complete
-                           (harness-perms--summary-request
-                            session model text n
-                            (lambda (ev)
-                              (when (and (= live attempt) (not settled))
-                                (pcase (plist-get ev :type)
-                                  ('text (setq reply (concat reply (or (plist-get ev :delta) ""))))
-                                  ('done (ended n reply ev)))))))))
-                   ;; Unless it ended already, or its retry took its place.
-                   (when (and (= live attempt) (not settled))
-                     (setq handle h)))
-               (error (fail (format "it failed: %s" (harness-truncate-end (harness-error-message err) 200))))))))
+             (let ((h (harness-small-ask
+                       (harness-perms--summary-request session model text n)
+                       (list :label "perms summary"
+                             :on-event
+                             (lambda (ev)
+                               (when (and (= live attempt) (not settled))
+                                 (pcase (plist-get ev :type)
+                                   ;; A try that failed is thrown away: so
+                                   ;; is what it wrote.
+                                   ('restart (setq reply ""))
+                                   ('text (setq reply (concat reply (or (plist-get ev :delta) ""))))
+                                   ('done (ended n reply ev)))))))))
+               ;; Unless it ended already, or its retry took its place.
+               (when (and (= live attempt) (not settled))
+                 (setq handle h))))))
       (setq timer (run-at-time harness-perms--summary-timeout nil
                                (lambda ()
                                  (fail (format "it took longer than %ss" harness-perms--summary-timeout))

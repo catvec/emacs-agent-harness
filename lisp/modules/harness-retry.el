@@ -26,9 +26,18 @@
 ;; A provider that knows names its failure's kind in `:error-kind'
 ;; (`transport' or `rate-limit', see `harness-provider-openai'); a
 ;; transport failure that arrives as text alone (a CLI provider's, say)
-;; is read the same way by `harness-retry--kind'.  So is a CLI
+;; is read the same way by `harness-retry-kind'.  So is a CLI
 ;; provider's process killed mid-turn (out of memory, say): the next
 ;; try starts it again.
+;;
+;; The harness's own one-off calls -- a session's name, the permission
+;; judge, a recap, a summary (see harness-small.el) -- are no step of a
+;; turn, so `agent/step-error' never sees them; they take the same
+;; treatment from the same code, to which `harness-small' adds nothing
+;; but the request itself: `harness-retry-kind' says whether their
+;; failure is worth another try, and `harness-retry-backoff' how long to
+;; wait.  One place decides for both what a provider's bad minute looks
+;; like and how long the harness waits it out.
 
 ;;; Code:
 
@@ -87,7 +96,7 @@ exit the program chose, status 1 with a message, is no such failure.")
   "Session id -> how many times its running turn tried a step again.
 Reset when a turn starts and when it ends.")
 
-(defun harness-retry--transient-text-p (text)
+(defun harness-retry-transient-p (text)
   "Non-nil when TEXT says the failure was a transient one.
 TEXT is read in lower case; a failure a provider named with
 `:error-kind' never needs this."
@@ -96,14 +105,16 @@ TEXT is read in lower case; a failure a provider named with
          (or (string-match-p harness-retry--transport-patterns text)
              (string-match-p harness-retry--rate-limit-patterns text)))))
 
-(defun harness-retry--kind (failure)
+(defun harness-retry-kind (failure)
   "Return the kind of FAILURE worth trying again, or nil.
-FAILURE is what `agent/step-error' passes.  A kind a provider named is
-used as it is: `transport', `rate-limit' and `process' are this
-module's, anything else (a quota, a refused login) is another module's.
-Without a kind, the error's text is read for a connection that failed,
-a limit that was hit, or a provider process that died of a signal
-\(`harness-retry--process-death-patterns')."
+FAILURE is what `agent/step-error' passes, or the `done' event of one
+of the harness's own one-off calls (`harness-small-ask'): both carry the
+provider's `:error-kind', `:error' and `:retry-after' the same way.  A
+kind a provider named is used as it is: `transport', `rate-limit' and
+`process' are this module's, anything else (a quota, a refused login)
+is another module's.  Without a kind, the error's text is read for a
+connection that failed, a limit that was hit, or a provider process
+that died of a signal (`harness-retry--process-death-patterns')."
   (let ((kind (let ((k (plist-get failure :error-kind)))
                 (and k (intern (format "%s" k)))))
         (text (plist-get failure :error)))
@@ -111,15 +122,17 @@ a limit that was hit, or a provider process that died of a signal
           (kind nil)
           ((and (stringp text) (string-match-p harness-retry--rate-limit-patterns (downcase text)))
            'rate-limit)
-          ((harness-retry--transient-text-p text) 'transport)
+          ((harness-retry-transient-p text) 'transport)
           ((and (stringp text) (string-match-p harness-retry--process-death-patterns text))
            'process))))
 
-(defun harness-retry--delay (attempt failure)
-  "Seconds to wait before the ATTEMPT-th try of FAILURE's step.
+(defun harness-retry-backoff (attempt failure)
+  "Seconds to wait before the ATTEMPT-th try of a step or call that FAILURE failed.
 A provider that asked to slow down (Retry-After, in the failure's
 `:retry-after') is waited for first, capped at `harness-retry-max-delay';
-otherwise the wait doubles per try, spread by `harness-retry-jitter'."
+otherwise the wait doubles per try, spread by `harness-retry-jitter'.
+Both the step layer (`harness-retry--step-error') and the harness's own
+one-off calls (`harness-small-ask') wait what this returns."
   (let* ((base (* harness-retry-delay (expt 2 (1- (max 1 attempt)))))
          (jitter (* base (or harness-retry-jitter 0) (/ (random 1000) 1000.0)))
          (asked (plist-get failure :retry-after)))
@@ -127,12 +140,12 @@ otherwise the wait doubles per try, spread by `harness-retry-jitter'."
          (max (if (numberp asked) (max 0.0 asked) 0.0)
               (+ base jitter)))))
 
-(defun harness-retry--wait (seconds)
+(defun harness-retry-wait (seconds)
   "Return a promise that settles after SECONDS."
   (harness-with-promise (resolve reject)
     (run-at-time seconds nil (lambda () (funcall resolve t)))))
 
-(defun harness-retry--say (kind failure)
+(defun harness-retry-say (kind failure)
   "Return what a hint says about FAILURE of KIND."
   (format "%s: %s"
           (pcase kind
@@ -153,31 +166,31 @@ the session on) is left alone."
   (let ((decision value))
     (unless (plist-get value :retry)
       (condition-case err
-          (when-let* ((kind (harness-retry--kind failure)))
+          (when-let* ((kind (harness-retry-kind failure)))
             (let* ((sid (plist-get session :id))
                    (attempt (1+ (gethash sid harness-retry--attempts 0)))
                    (most (or harness-retry-max-attempts 0)))
               (if (> attempt most)
                   (harness-call 'session/hint
                                 sid (format "%s; giving up after %d %s"
-                                            (harness-retry--say kind failure) most
+                                            (harness-retry-say kind failure) most
                                             (if (= most 1) "try" "tries")))
-                (let ((delay (harness-retry--delay attempt failure)))
+                (let ((delay (harness-retry-backoff attempt failure)))
                   (puthash sid attempt harness-retry--attempts)
                   (harness-call 'session/hint
                                 sid (format "%s; trying again in %s (%d of %d)"
-                                            (harness-retry--say kind failure)
-                                            (harness-retry--duration delay) attempt most))
+                                            (harness-retry-say kind failure)
+                                            (harness-retry-duration delay) attempt most))
                   (setq decision (list :retry t :reason "a transient failure"
                                        :delay delay))))))
         (error (harness-log 'warn "retry: after the failure of %s: %S"
                             (plist-get session :id) err))))
     (if-let* ((delay (plist-get decision :delay)))
-        (harness-then (harness-retry--wait delay) (lambda (_) (funcall next decision)))
+        (harness-then (harness-retry-wait delay) (lambda (_) (funcall next decision)))
       (funcall next decision)))
   nil)
 
-(defun harness-retry--duration (seconds)
+(defun harness-retry-duration (seconds)
   "Return SECONDS as a short span, for a hint."
   (if (< seconds 1)
       (format "%.1f s" seconds)

@@ -54,6 +54,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-small)
 
 (declare-function harness-agent-strip-result-images "harness-agent" (messages))
 
@@ -254,6 +255,8 @@ storing the name unless the session's name is no longer BEFORE."
   (let ((text ""))
     (lambda (ev)
       (pcase (plist-get ev :type)
+        ;; A try that failed is thrown away: so is what it wrote.
+        ('restart (setq text ""))
         ('text (setq text (concat text (plist-get ev :delta))))
         ('done
          (let* ((reason (plist-get ev :stop-reason))
@@ -269,16 +272,18 @@ storing the name unless the session's name is no longer BEFORE."
         (_ nil)))))
 
 (defun harness-naming--request (session state promise)
-  "Name SESSION from its whole conversation with provider STATE, settling PROMISE."
+  "Name SESSION from its whole conversation with provider STATE, settling PROMISE.
+A one-off call through `harness-small-ask', so a provider that rate
+limits or cuts the connection has the title asked for again."
   (let ((sid (plist-get session :id)))
-    (harness-call
-     'provider/complete
+    (harness-small-ask
      (list :model (plist-get session :model) :session session
            ;; Recorded as an internal session made for SESSION.
            :job "Auto-name" :job-parent sid
            :system (harness-naming--system-prompt session)
            :messages (harness-naming--messages sid)
-           :tools nil :provider-state state :max-tokens harness-naming--max-tokens
+           :tools nil :provider-state state :max-tokens harness-naming--max-tokens)
+     (list :label "naming"
            :on-event (harness-naming--on-event sid (plist-get session :name) promise)))))
 
 (defun harness-naming--ask (model session system opening)
@@ -288,10 +293,12 @@ SESSION is the session record the request carries, `:id', `:cwd' and
 `:host' only; SYSTEM its system prompt.  The request stands on its
 own: no transcript, no provider state, no tools and no thinking, and
 `:ephemeral', so a hosted provider answers it apart from any session's
-conversation.  The promise rejects with a message when the provider
-fails (at once or later), when the reply holds no usable title, and
-when `harness-naming--timeout' seconds pass first, which cancels the
-request."
+conversation.  It goes through `harness-small-ask' like every one-off
+call the harness makes, so a provider having a bad minute -- a rate
+limit, a connection cut -- is waited out and the title asked for again.
+The promise rejects with a message when the provider fails (at once or
+later), when the reply holds no usable title, and when
+`harness-naming--timeout' seconds pass first, which cancels the request."
   (let ((promise (harness-make-promise))
         (text "") (timer nil) (handle nil))
     (cl-flet ((finish (ok value)
@@ -302,30 +309,30 @@ request."
                                (lambda ()
                                  (finish nil "the model took too long")
                                  (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
-      (condition-case err
-          (setq handle
-                (harness-call
-                 'provider/complete
-                 (list :model model :session session :ephemeral t :system system
-                       ;; Recorded as an internal session, made for the
-                       ;; session named when it is one.
-                       :job "Auto-name" :job-parent (plist-get session :id)
-                       :messages (list (list :role 'user :content (harness-naming--opening-blocks opening)))
-                       :tools nil :no-thinking t :max-tokens harness-naming--max-tokens
-                       :on-event
-                       (lambda (ev)
-                         (pcase (plist-get ev :type)
-                           ('text (setq text (concat text (plist-get ev :delta))))
-                           ('done
-                            (let ((reason (plist-get ev :stop-reason))
-                                  (name (harness-naming-sanitise text)))
-                              (cond ((memq reason '(error cancelled))
-                                     (finish nil (or (plist-get ev :error) (format "%s" reason))))
-                                    ((null name) (finish nil "the model returned no usable title"))
-                                    (t (finish t name)))))
-                           (_ nil))))))
-        (error (finish nil (harness-error-message err)))))
-    promise))
+      (setq handle
+            (harness-small-ask
+             (list :model model :session session :ephemeral t :system system
+                   ;; Recorded as an internal session, made for the
+                   ;; session named when it is one.
+                   :job "Auto-name" :job-parent (plist-get session :id)
+                   :messages (list (list :role 'user :content (harness-naming--opening-blocks opening)))
+                   :tools nil :no-thinking t :max-tokens harness-naming--max-tokens)
+             (list :label "naming"
+                   :on-event
+                   (lambda (ev)
+                     (pcase (plist-get ev :type)
+                       ;; A try that failed is thrown away: so is what it wrote.
+                       ('restart (setq text ""))
+                       ('text (setq text (concat text (plist-get ev :delta))))
+                       ('done
+                        (let ((reason (plist-get ev :stop-reason))
+                              (name (harness-naming-sanitise text)))
+                          (cond ((memq reason '(error cancelled))
+                                 (finish nil (or (plist-get ev :error) (format "%s" reason))))
+                                ((null name) (finish nil "the model returned no usable title"))
+                                (t (finish t name)))))
+                       (_ nil))))))
+      promise)))
 
 (defun harness-naming--opening-request (session promise)
   "Name SESSION from its opening message with the naming model, settling PROMISE.
