@@ -1601,6 +1601,7 @@ and a window is scrolled once a slice, to the end of the text still."
       (set-window-buffer w buf)
       (with-current-buffer buf
         (set-window-point w harness-compose-end)
+        (harness-chat--pin w)
         (harness-chat--apply-update (list :sessionUpdate "_harness/node"
                                           :node (list :id "n-burst" :kind "assistant" :content ""))))
       (cl-letf (((symbol-function 'harness-chat--pin)
@@ -2423,6 +2424,7 @@ The call and its result appear as any tool call's would."
       (set-window-buffer w buf)
       (with-current-buffer buf
         (set-window-point w harness-compose-end)
+        (harness-chat--pin w)
         (should (harness-chat--at-bottom-p w))
         (set-window-start w (point-min))
         (set-window-point w (point-min))
@@ -2508,12 +2510,191 @@ The call and its result appear as any tool call's would."
           (set-window-start w start t)
           (forward-line 2)
           (set-window-point w (point))
-          (should-not (harness-chat--at-bottom-p w))
+          (should-not (harness-chat--following-p w))
           (let ((old-point (window-point w)))
             (setq lines 120)
             (harness-chat--render-tail)
             (should (= start (window-start w)))
             (should (= old-point (window-point w)))))))))
+
+(ert-deftest harness-ui-chat-redraw-keeps-each-window-at-its-own-place ()
+  "`harness-chat-redraw' keeps a scrolled reader while another window follows.
+The following window may be the one `harness-chat--at-bottom-p' measures
+first.  Its following must not pin every window of the buffer to the
+bottom: the redraw restores each window's own anchor instead."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (follower (selected-window))
+           (reader nil))
+      (unwind-protect
+          (progn
+            (dotimes (i 80) (harness-call 'session/hint sid (format "line %d" i)))
+            (harness-test-wait (lambda () (with-current-buffer buf (= 80 (length harness-chat--order))))
+                               5 "hints rendered")
+            (set-window-buffer follower buf)
+            (setq reader (split-window follower nil 'below))
+            (set-window-buffer reader buf)
+            (with-current-buffer buf
+              (let* ((id (nth 40 harness-chat--order))
+                     (block (gethash id harness-chat--blocks)))
+                ;; The selected window follows the end; the other reads far above.
+                (goto-char harness-compose-end)
+                (set-window-point follower harness-compose-end)
+                (harness-chat--pin follower)
+                (should (harness-chat--at-bottom-p follower))
+                (set-window-start reader (harness-chat-block-start block) t)
+                (set-window-point reader (+ 2 (harness-chat-block-start block)))
+                (should-not (harness-chat--at-bottom-p reader))
+                (harness-chat-redraw)
+                (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn")
+                (let ((rebuilt (gethash id harness-chat--blocks)))
+                  (should rebuilt)
+                  (should (= (window-start reader) (harness-chat-block-start rebuilt)))
+                  (should (= (window-point reader) (+ 2 (harness-chat-block-start rebuilt))))
+                  (should (harness-chat--at-bottom-p follower))
+                  (should (= (window-point follower) harness-compose-end))))))
+        (when (window-live-p reader) (delete-window reader))))))
+
+(ert-deftest harness-ui-chat-tail-redraw-keeps-a-panel-reader-through-lines-above ()
+  "Lines added above a panel do not move a reader off the panel.
+The reader's place is its panel id (`harness-compose-panel') and the
+offset into it, not an offset from the transcript's end: a queued
+message, a top line or a todo change above the panel shifts every
+offset from the transcript, but not the reader's row of the panel."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window))
+           (extra 0)
+           (panel (concat (mapconcat (lambda (n) (format "panel %d" n))
+                                     (number-sequence 1 60) "\n")
+                          "\n")))
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (setq-local harness-chat-panel-functions
+                    (list (lambda () (propertize panel 'harness-compose-panel "p1")))
+                    harness-chat-top-functions
+                    (list (lambda () (concat (make-string extra ?t) "\n"))))
+        (harness-chat--render-tail)
+        (goto-char harness-chat--transcript-end)
+        (search-forward "panel 26")
+        (goto-char (match-beginning 0))
+        (set-window-start w (point) t)
+        (forward-line 2)
+        (set-window-point w (point))
+        (let* ((old-point (window-point w))
+               (old-region (harness-chat--tail-region-at old-point))
+               (old-offset (- old-point (cdr old-region)))
+               (old-text (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+               (old-start-region (harness-chat--tail-region-at (window-start w)))
+               (old-start-offset (- (window-start w) (cdr old-start-region))))
+          (should (equal '(panel "p1") (car old-region)))
+          (should-not (harness-chat--following-p w))
+          (setq extra 40)
+          ;; A new closure, as rendering the panel again makes: the id keeps
+          ;; the reader's place where the function's identity would not.
+          (setq-local harness-chat-panel-functions
+                      (list (lambda () (propertize panel 'harness-compose-panel "p1"))))
+          (harness-chat--render-tail)
+          (let* ((new-region (harness-chat--tail-region-at (window-point w)))
+                 (new-start-region (harness-chat--tail-region-at (window-start w))))
+            (should (equal '(panel "p1") (car new-region)))
+            (should (= old-offset (- (window-point w) (cdr new-region))))
+            (should (equal old-text
+                           (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+            (should (equal (car old-start-region) (car new-start-region)))
+            (should (= old-start-offset (- (window-start w) (cdr new-start-region))))
+            (should-not (= (window-point w) harness-compose-start))))))))
+
+(ert-deftest harness-ui-chat-tail-redraw-keeps-a-todo-reader-through-lines-above ()
+  "A reader on a todo item stays on it when lines are added above.
+Todo items have no `harness-compose-panel' property: the todo list is
+anchored as a section of its own, not by the transcript's end."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window))
+           (extra 0))
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (setq-local harness-chat--todos
+                    (harness-chat--normalise-todos
+                     (mapcar (lambda (n) (list :text (format "todo item %d" n) :status "pending"))
+                             (number-sequence 1 12)))
+                    harness-chat--todos-choice 'open
+                    harness-chat-top-functions
+                    (list (lambda () (concat (make-string extra ?t) "\n"))))
+        (harness-chat--render-tail)
+        (goto-char harness-chat--transcript-end)
+        (search-forward "todo item 3")
+        (goto-char (match-beginning 0))
+        (set-window-start w (point) t)
+        (set-window-point w (point))
+        (let* ((old-point (window-point w))
+               (old-region (harness-chat--tail-region-at old-point))
+               (old-offset (- old-point (cdr old-region)))
+               (old-text (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+          (should (equal '(todos) (car old-region)))
+          (setq extra 40)
+          (harness-chat--render-tail)
+          (let ((new-region (harness-chat--tail-region-at (window-point w))))
+            (should (equal '(todos) (car new-region)))
+            (should (= old-offset (- (window-point w) (cdr new-region))))
+            (should (equal old-text
+                           (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+            (should-not (= (window-point w) harness-compose-start))))))))
+
+(ert-deftest harness-ui-chat-tail-redraw-puts-point-in-the-box-only-when-the-panel-is-gone ()
+  "A panel that went away leaves its reader in the compose box.
+A panel still drawn keeps the reader on its row; only a panel the new
+draw does not have sends point to the box, where its keys no longer
+act on anything."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window))
+           (panel (mapconcat (lambda (n) (format "panel %d" n))
+                             (number-sequence 1 40) "\n")))
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (setq-local harness-chat-panel-functions
+                    (list (lambda () (propertize panel 'harness-compose-panel "p1"))))
+        (harness-chat--render-tail)
+        (goto-char harness-chat--transcript-end)
+        (search-forward "panel 20")
+        (goto-char (match-beginning 0))
+        (set-window-start w (point) t)
+        (set-window-point w (point))
+        (should-not (harness-chat--following-p w))
+        (setq-local harness-chat-panel-functions nil)
+        (harness-chat--render-tail)
+        (should (= (window-point w) harness-compose-start))))))
+
+(ert-deftest harness-ui-chat-scrolled-window-with-point-in-the-box-is-not-following ()
+  "A window scrolled up while its point stayed in the box is not following.
+A scrollbar or `set-window-start' can move the start without moving
+point; pinning such a window would yank its reader back to the end."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window)))
+      (dotimes (i 80) (harness-call 'session/hint sid (format "line %d" i)))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 80 (length harness-chat--order))))
+                         5 "hints rendered")
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (goto-char harness-compose-end)
+        (set-window-point w harness-compose-end)
+        (let ((start (harness-chat-block-start (gethash (nth 40 harness-chat--order)
+                                                        harness-chat--blocks))))
+          (set-window-start w start t)
+          (should-not (harness-chat--at-bottom-p w))
+          (should-not (memq w (harness-chat--bottom-windows)))
+          (harness-chat--render-tail)
+          (should (= (window-start w) start))
+          (should (= (window-point w) harness-compose-end)))))))
+
 
 (ert-deftest harness-ui-chat-header-reads-the-cached-notice ()
   "The header shows the newer-messages notice without measuring the window.
