@@ -117,6 +117,13 @@ which batch Emacs would print."
   (cl-remove-if-not (lambda (ov) (plist-get (overlay-get ov 'harness-compose-attachment) :thread))
                     harness-compose--token-overlays))
 
+(defun harness-ui-compose-test--box-height (&optional window)
+  "Return the height of the box in WINDOW, in pixels, as it shows.
+The display of a card and the blank line above it count; the text does
+not change."
+  (cdr (window-text-pixel-size (or window (selected-window))
+                               harness-compose-start harness-compose-end)))
+
 (ert-deftest harness-ui-compose-thread-is-a-card-with-its-words-under-it ()
   "A reply in a thread is an attachment with a token, [reply 1], on a line of
 its own and the words under it: the token shows as a card that says what the
@@ -319,7 +326,9 @@ words of your own above it, only the card goes."
     (should-not harness-compose-attachments)))
 
 (ert-deftest harness-ui-compose-thread-cards-have-display-only-spacing ()
-  "Card gaps survive redraw without changing text or reply associations."
+  "A card after another reply shows a blank line above it, in the display only.
+The first card has none.  The blank line is one screen line, the text taken
+and the replies' words do not change, and drawing again adds no other."
   (harness-ui-compose-test-with
     (harness-compose-add-thread (list harness-ui-compose-test--ref))
     (insert "First.")
@@ -328,12 +337,87 @@ words of your own above it, only the card goes."
     (harness-ui-compose-test--draw)
     (should (equal "\n[reply 1]\nFirst.\n[reply 2]\nSecond." (harness-compose-text)))
     (should (= 2 (length harness-compose--token-overlays)))
-    (dolist (ov harness-compose--token-overlays)
-      (should (equal "\n" (substring-no-properties (overlay-get ov 'before-string)))))
+    (let* ((cards (harness-ui-compose-test--cards))
+           (first (nth 0 cards))
+           (second (nth 1 cards))
+           (gapped (harness-ui-compose-test--box-height)))
+      (should-not (overlay-get first 'harness-compose-gap))
+      (should-not (overlay-get first 'before-string))
+      (should (overlay-get second 'harness-compose-gap))
+      (should (equal "\n" (substring-no-properties (overlay-get second 'before-string))))
+      ;; The gap is one screen line: a box drawn without it is a line shorter.
+      (cl-letf (((symbol-function 'harness-compose--blank-line-before-p) (lambda (&rest _) t)))
+        (harness-ui-compose-test--draw)
+        (should (= (+ (harness-ui-compose-test--box-height) (frame-char-height))
+                   gapped)))
+      ;; Drawing again leaves it as it was: a gap does not pile up, and the
+      ;; cards keep their places.
+      (harness-ui-compose-test--draw)
+      (should (= gapped (harness-ui-compose-test--box-height)))
+      (should (= 2 (length (harness-ui-compose-test--cards))))
+      (should (overlay-get (nth 1 (harness-ui-compose-test--cards)) 'harness-compose-gap)))
     (pcase-let ((`(,text . ,atts) (harness-compose-take)))
       (should (equal "" text))
       (should (equal '("First." "Second.")
                      (mapcar (lambda (a) (plist-get a :response)) atts))))))
+
+(ert-deftest harness-ui-compose-thread-gap-follows-a-reply-with-words ()
+  "A card with no card above it has no gap, nor has one whose reply is empty:
+the line where those words go is already blank there, and a gap would make two."
+  (harness-ui-compose-test-with
+    ;; A card alone in the box keeps its one line for your message above it.
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (harness-ui-compose-test--draw)
+    (let ((card (car (harness-ui-compose-test--cards))))
+      (should-not (overlay-get card 'harness-compose-gap))
+      (should-not (overlay-get card 'before-string))))
+  (harness-ui-compose-test-with
+    ;; Your own words above the first card: still no gap, the card stands
+    ;; under them as it did.
+    (harness-compose-set "My own words.")
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (insert "An answer.")
+    (harness-ui-compose-test--draw)
+    (let ((card (car (harness-ui-compose-test--cards))))
+      (should-not (overlay-get card 'harness-compose-gap))
+      (should-not (overlay-get card 'before-string))
+      (should (= 1 (length (harness-ui-compose-test--cards))))))
+  (harness-ui-compose-test-with
+    ;; Two cards, the first with no words under it: `harness-compose--card-break'
+    ;; already left the line for those words, so the second card adds none.
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (harness-compose-add-thread (list '(:kind "chat" :node "n-2" :who "plan" :text "Step two")))
+    (harness-ui-compose-test--draw)
+    (should (equal "\n[reply 1]\n\n[reply 2]\n" (harness-compose-text)))
+    (dolist (card (harness-ui-compose-test--cards))
+      (should-not (overlay-get card 'harness-compose-gap))
+      (should-not (overlay-get card 'before-string)))))
+
+(ert-deftest harness-ui-compose-thread-gap-leaves-other-chips-alone ()
+  "A file's chip has no gap: only a reply's card gets one, and only after another."
+  (harness-ui-compose-test-with
+    (let ((file (expand-file-name "notes.txt" dir)))
+      (with-temp-file file (insert "notes"))
+      (harness-compose-set "See ")
+      (harness-compose--attach (harness-compose--file-attachment file))
+      (harness-ui-compose-test--draw)
+      (let ((chip (harness-ui-compose-test--chip "@notes.txt")))
+        (should chip)
+        (should-not (overlay-get chip 'harness-compose-gap))
+        (should-not (string-search "\n" (substring-no-properties
+                                         (or (overlay-get chip 'before-string) ""))))
+        ;; Its icon and name are what they were.
+        (should (string-prefix-p (substring-no-properties (harness-ui-icon 'harness-icon-file))
+                                 (harness-ui-compose-test--chip-shows chip)))
+        (should (equal "@notes.txt" (substring-no-properties (overlay-get chip 'display)))))
+      ;; A card under the file's line is the first card: no gap either.
+      (harness-compose-add-thread (list harness-ui-compose-test--ref))
+      (insert "An answer.")
+      (harness-ui-compose-test--draw)
+      (let ((card (car (harness-ui-compose-test--cards))))
+        (should card)
+        (should-not (overlay-get card 'harness-compose-gap))
+        (should-not (overlay-get card 'before-string))))))
 
 (ert-deftest harness-ui-compose-thread-removing-the-first-card-keeps-the-words-in-order ()
   "Removing the first of two cards takes the line it left for your own message
@@ -2850,7 +2934,7 @@ copies its path."
             (notes (expand-file-name "notes.txt" proj))
             (chipped nil))
         (advice-add 'harness-compose--inline-chip :before
-                    (lambda (_beg _end att) (push (plist-get att :path) chipped))
+                    (lambda (_beg _end att &rest _) (push (plist-get att :path) chipped))
                     '((name . harness-ui-compose-test)))
         (unwind-protect
             (progn

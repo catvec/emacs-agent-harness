@@ -1924,27 +1924,52 @@ together."
       (setq want (nreverse kept))
       ;; What a card says of the key out of its reply depends on where
       ;; point is, so it is part of what is shown (`harness-compose--card-hint').
-      (let ((cards (cl-loop for w in want
-                            when (plist-get (nth 2 w) :thread)
-                            collect (cons (nth 2 w) (cons (nth 0 w) (nth 1 w))))))
+      ;; A card after another gets a blank display line above it, unless
+      ;; the reply above already left one.  The first card stands under
+      ;; your own message as it is, and a chip that is not a card has no
+      ;; gap at all.
+      (let* ((cards (cl-loop for w in want
+                             when (plist-get (nth 2 w) :thread)
+                             collect (cons (nth 2 w) (cons (nth 0 w) (nth 1 w)))))
+             (first-card (car (car (harness-compose--thread-spans
+                                    text harness-compose-attachments)))))
         (setq want (mapcar (lambda (w)
-                             (append w (list (and (plist-get (nth 2 w) :thread)
-                                                  (harness-compose--card-hint (nth 2 w) cards)))))
+                             (let ((att (nth 2 w)))
+                               (append w
+                                       (list (and (plist-get att :thread)
+                                                  (not (eq att first-card))
+                                                  (not (harness-compose--blank-line-before-p (nth 0 w))))
+                                             (and (plist-get att :thread)
+                                                  (harness-compose--card-hint att cards))))))
                            want)))
       (unless (equal want (mapcar (lambda (ov) (list (overlay-start ov) (overlay-end ov)
                                                      (overlay-get ov 'harness-compose-attachment)
                                                      (overlay-get ov 'harness-compose-room)
+                                                     (overlay-get ov 'harness-compose-gap)
                                                      (overlay-get ov 'harness-compose-hint)))
                                   harness-compose--token-overlays))
         (mapc #'delete-overlay harness-compose--token-overlays)
         (setq harness-compose--token-overlays
-              ;; The hint is for a card: the other chips are made as they were.
-              (mapcar (lambda (w) (apply #'harness-compose--inline-chip (nth 0 w) (nth 1 w) (nth 2 w)
-                                         (and (nth 4 w) (list (nth 4 w)))))
+              ;; The gap and the hint are for a card: the other chips are made as they were.
+              (mapcar (lambda (w) (harness-compose--inline-chip
+                                   (nth 0 w) (nth 1 w) (nth 2 w) (nth 4 w) (nth 5 w)))
                       want)))
       (harness-compose--show-thread-rails))))
 
-(defun harness-compose--inline-chip (beg end att &optional hint)
+(defun harness-compose--blank-line-before-p (pos)
+  "Return non-nil when the line above POS in the box is already blank.
+POS is where a card's token starts, at the beginning of its line: a
+card that follows a reply with no words under it already has the line
+where those words go (`harness-compose--card-break'), and needs no
+other."
+  (let ((start (marker-position harness-compose-start)))
+    (or (<= pos (1+ start))
+        (save-excursion
+          (goto-char (1- pos))
+          (string-blank-p (buffer-substring-no-properties
+                           (line-beginning-position) (line-end-position)))))))
+
+(defun harness-compose--inline-chip (beg end att &optional gap hint)
   "Return the overlay showing the token from BEG to END of attachment ATT.
 Every kind of attachment shows the same way: what it is first -- an
 image's thumbnail a line high, the icon of a file or a task
@@ -1956,7 +1981,8 @@ The token's display is a string, so point never rests inside it: the
 command loop moves it to an edge.  A reply in a thread shows as the
 card of the thread instead (`harness-compose--thread-card'), in as many
 columns as the windows have (`harness-compose--thread-chip-room'), and
-with HINT, a string, after its [×]."
+with HINT, a string, after its [×].  With GAP, a blank line shows above
+the card, in the display only."
   (let* ((ov (make-overlay beg end nil t nil))
          (thread (plist-get att :thread))
          (props (list 'help-echo (if thread
@@ -1986,10 +2012,12 @@ with HINT, a string, after its [×]."
                                       'face (list 'harness-compose-token-face harness-compose--face)
                                       props)))
     (when thread
-      ;; The token starts a line, but the preceding reply need not end in
-      ;; a blank one.  Keep this gap entirely in the display: inserting a
-      ;; newline into the draft would change the reply's text and bounds.
-      (overlay-put ov 'before-string (propertize "\n" 'face harness-compose--face))
+      (when gap
+        ;; The token starts a line, but the reply above it need not end in
+        ;; a blank one.  Keep this gap entirely in the display: inserting a
+        ;; newline into the draft would change the reply's text and bounds.
+        (overlay-put ov 'before-string (propertize "\n" 'face harness-compose--face)))
+      (overlay-put ov 'harness-compose-gap gap)
       (overlay-put ov 'harness-compose-room (harness-compose--thread-chip-room))
       (overlay-put ov 'harness-compose-hint hint))
     (dolist (p (seq-partition props 2)) (overlay-put ov (car p) (cadr p)))
