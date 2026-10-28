@@ -1552,18 +1552,30 @@ come alone, as for the card's buttons."
        ;; A backlog task waits for you; one being written up is steered
        ;; or stopped, like a refining task in the pending column was.
        ('backlog
-        (cond
-         ((harness-ui-tasks--refining-p task)
-          '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
-            ("Stop" harness-ui-tasks-cancel)))
-         ((plist-get task :returned)
-          '(("Queue it" harness-ui-tasks-queue) ("Start now" harness-ui-tasks-start)
-            ("Open" harness-ui-tasks-open) ("Reply" harness-ui-tasks-reply)
-            ("Drop" harness-ui-tasks-cancel)))
-         (t
-          '(("Queue it" harness-ui-tasks-queue) ("Start now" harness-ui-tasks-start)
-            ("Edit" harness-ui-tasks-edit) ("Open" harness-ui-tasks-open)
-            ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel)))))
+        (let ((actions
+               (cond
+                ((harness-ui-tasks--refining-p task)
+                 '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
+                   ("Stop" harness-ui-tasks-cancel)))
+                ((plist-get task :returned)
+                 '(("Queue it" harness-ui-tasks-queue) ("Start now" harness-ui-tasks-start)
+                   ("Open" harness-ui-tasks-open) ("Reply" harness-ui-tasks-reply)
+                   ("Drop" harness-ui-tasks-cancel)))
+                (t
+                 (append
+                  '(("Queue it" harness-ui-tasks-queue) ("Start now" harness-ui-tasks-start)
+                    ("Edit" harness-ui-tasks-edit) ("Open" harness-ui-tasks-open))
+                  ;; A parked task keeps the prompt it waited with: a
+                  ;; write-up would rewrite it, which its card does not
+                  ;; offer (`harness-ui-tasks-refine').
+                  (unless (harness-json-true-p (plist-get task :parked))
+                    '(("Refine" harness-ui-tasks-refine)))
+                  '(("Drop" harness-ui-tasks-cancel)))))))
+          ;; A paused parked task is resumed first, as a paused task in
+          ;; Pending is: only a parked task can be paused in the backlog.
+          (if (harness-ui-tasks--paused-p task)
+              (cons '("Resume" harness-ui-tasks-resume) actions)
+            actions)))
        ('needs-input
         (pcase (plist-get (harness-ui-tasks--pending task) :kind)
           ("permission" '(("Allow" harness-ui-tasks-allow) ("Deny" harness-ui-tasks-deny)
@@ -5442,13 +5454,19 @@ that are not paused.  A pause is kept across a restart."
   "Resume the paused task at point: the queue starts it when its turn comes.
 It goes by priority within the limit, as any waiting task does, and not
 while the queue is suspended (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-queue]) or the task waits for quota or a
-budget; it carries on where it stopped.  \\[harness-ui-tasks-start] starts it at once instead."
+budget; it carries on where it stopped.  A task parked in the backlog
+stays there: resuming it only ends the pause, and \\[harness-ui-tasks-queue]
+queues it, \\[harness-ui-tasks-start] starts it at once."
   (interactive)
-  (let ((task (harness-ui-tasks--task)))
+  (let* ((task (harness-ui-tasks--task))
+         (parked (and (harness-ui-tasks--backlog-p task)
+                      (harness-json-true-p (plist-get task :parked)))))
     (harness-ui-tasks--require-paused task)
     (harness-ui-tasks--request-then "_harness/task/resume" (list :id (plist-get task :id))
                                     "Resuming the task")
-    (message "Resumed")))
+    (if parked
+        (message "Resumed; it stays in the backlog until queued or started")
+      (message "Resumed"))))
 
 (defun harness-ui-tasks--priority-shown (id priority)
   "Show task ID at PRIORITY at once, the reload behind it confirming.
@@ -5558,12 +5576,17 @@ its next start while the queue is suspended."
 A queued task is written up and then waits for you to start it.  For a
 backlog task the compose box takes your feedback, and the write-up is
 done again with it.  A write-up that stopped is retried, and a task
-whose write-up refused it as a duplicate is written up all the same."
+whose write-up refused it as a duplicate is written up all the same.
+A task parked in the backlog is refused: it keeps the prompt it waited
+with, and Edit changes it."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (cond
      ((or (not (harness-ui-tasks--unstarted-p task)) (plist-get task :returned))
       (user-error "Only tasks that have not started can be refined"))
+     ((and (harness-ui-tasks--backlog-p task)
+           (harness-json-true-p (plist-get task :parked)))
+      (user-error "This task is parked in the backlog; queue or start it, or edit its prompt"))
      ((harness-ui-tasks--writing-p task) (user-error "Already being written up"))
      ((and (equal (plist-get task :state) "pending") (plist-get task :session))
       (harness-ui-tasks--set-compose "" (cons 'refine (plist-get task :id))))
@@ -6075,10 +6098,13 @@ search and the settings are concerned: they are its own."
 
 (defconst harness-ui-tasks--backlog-hints
   '("Message…  sending stops the write-up and starts the task"
-    "Message…  sending starts the task")
+    "Message…  sending starts the task"
+    "Message…  kept; sending does not start it")
   "What this session's compose box asks for while its task is in the backlog.
 The first while a write-up runs, which the message stops and starts the
-task; the second while the task waits, when the message starts it.")
+task; the second while the task waits, when the message starts it; the
+third while a parked task waits in the backlog, where a message is kept
+for its start but starts nothing (`task/park').")
 
 (defun harness-ui-tasks--chat-buffer (sid)
   "Return the live chat buffer showing session SID, or nil.
@@ -6192,16 +6218,21 @@ and offers the card's [Start now] and, while it waits, [Queue it]."
      "   " (propertize title 'face 'bold 'wrap-prefix "   ") "\n"
      "   " (propertize line 'face 'harness-hint-face 'wrap-prefix "   ") "\n"
      "   " start queue "\n"
-     "   " (propertize (if writing
-                         "C-c C-c stops it and starts the task; Refine on the board sends feedback"
-                       "C-c C-c sends a message, which starts the task")
+     "   " (propertize (cond
+                         (writing
+                          "C-c C-c stops it and starts the task; Refine on the board sends feedback")
+                         ((harness-json-true-p (plist-get task :parked))
+                          "C-c C-c sends a message, kept until the task is queued or started")
+                         (t "C-c C-c sends a message, which starts the task"))
                      'face 'harness-hint-face)
      "\n ")))
 
 (defun harness-ui-tasks--backlog-placeholder (task shown)
   "Say in the compose box what a message does for TASK, shown when SHOWN.
 The message starts the task, and stops a write-up still running, which
-is what the box says.  A box another module gave a hint is left alone."
+is what the box says -- except for a parked task, whose message is kept
+and starts nothing until the task is queued or started.  A box another
+module gave a hint is left alone."
   (cond
    ((not shown)
     (when (member harness-chat-placeholder harness-ui-tasks--backlog-hints)
@@ -6211,6 +6242,9 @@ is what the box says.  A box another module gave a hint is left alone."
     nil)
    ((harness-ui-tasks--writing-p task)
     (setq-local harness-chat-placeholder (nth 0 harness-ui-tasks--backlog-hints)))
+   ((and (harness-ui-tasks--backlog-p task)
+         (harness-json-true-p (plist-get task :parked)))
+    (setq-local harness-chat-placeholder (nth 2 harness-ui-tasks--backlog-hints)))
    (t (setq-local harness-chat-placeholder (nth 1 harness-ui-tasks--backlog-hints)))))
 
 (defun harness-ui-tasks--backlog-panel ()

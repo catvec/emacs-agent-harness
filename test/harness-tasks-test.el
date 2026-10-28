@@ -2034,6 +2034,106 @@ Its work still opens with the write-up and the request it came from."
         (should (equal sid (harness-tasks-test-session-id id)))
         (should (harness-tasks-test--said sid harness-tasks--paused-message))))))
 
+(ert-deftest harness-tasks-a-refused-turn-leaves-a-parked-task-unchanged ()
+  "A turn refused while its task is parked says nothing about the task.
+A parked task holds every turn of its session (`harness-tasks--before-turn'),
+and the refusal ends `blocked'; no end of a turn -- blocked, error or
+end-turn -- may make the task active, move it out of the backlog, or
+drop its pause or return."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let* ((id (harness-tasks-test-submit "Parked work"))
+             (sid (harness-tasks-test-session-id id)))
+        ;; Partway through its work, paused and returned, as a task the
+        ;; user moves to the backlog by hand may be.
+        (harness-tasks--set id :returned 3.0 :return-reason 'sent-back :sent-back 3.0)
+        (harness-call 'task/pause id)
+        (harness-call 'task/park id)
+        (let ((before (harness-tasks-test-task id)))
+          (should (eq 'backlog (plist-get before :column)))
+          (let ((result (harness-test-await
+                         (harness-call-async 'agent/prompt sid "Start without asking"))))
+            (should (eq 'blocked (plist-get result :stop-reason))))
+          (harness-tasks-test--settle)
+          (let ((after (harness-tasks-test-task id)))
+            (dolist (key '(:state :column :outcome :backlog :parked :paused
+                           :returned :return-reason :session :prompt))
+              (should (equal (plist-get before key) (plist-get after key)))))
+          ;; Nothing ran: the refused turn left no answer behind.
+          (should-not (harness-tasks-test--running-p sid))
+          (should-not (cl-find 'assistant (harness-call 'session/nodes sid)
+                               :key (lambda (n) (plist-get n :kind))))
+          ;; The other ways a turn ends change nothing either.
+          (dolist (reason '(error end-turn))
+            (harness-tasks--on-turn-ended sid reason)
+            (let ((after (harness-tasks-test-task id)))
+              (should (eq 'pending (plist-get after :state)))
+              (should (eq 'backlog (plist-get after :column)))
+              (should (plist-get after :parked))
+              (should (plist-get after :paused))))
+          ;; Still the parked task it was: queueing takes it out, and its
+          ;; pause and return are kept for the start.
+          (harness-call 'task/queue id)
+          (let ((queued (harness-tasks-test-task id)))
+            (should (eq 'pending (plist-get queued :column)))
+            (should-not (plist-get queued :parked))
+            (should (plist-get queued :paused))
+            (should (= 3.0 (plist-get queued :returned)))))))))
+
+(ert-deftest harness-tasks-refining-a-parked-task-clears-its-marker ()
+  "A parked task written up afresh is a write-up, not parked work.
+Its marker goes as the write-up starts, so the finished write-up takes
+feedback and never holds the session as a parked task's."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (let* ((id (harness-tasks-test-submit "Original prompt"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-call 'task/park id)
+        (should (plist-get (harness-tasks-test-task id) :parked))
+        (harness-call 'task/refine id)
+        (should-not (plist-get (harness-tasks-test-task id) :parked))
+        (should (harness-tasks--refinement-p (harness-tasks-test-task id)))
+        (harness-tasks-test-wait-state id 'pending)
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'backlog (plist-get task :column)))
+          (should-not (plist-get task :parked))
+          (should (harness-tasks--refinement-p task))
+          (should (harness-tasks--written-up-p task))
+          (should (equal harness-tasks-test-write-up (plist-get task :prompt))))
+        ;; Feedback on the write-up reaches its session: it is no parked
+        ;; task whose turns are held.
+        (harness-call 'task/prompt id "Make it shorter")
+        (harness-test-wait
+         (lambda () (member "Make it shorter" (harness-tasks-test-user-texts sid)))
+         10 "the write-up feedback to reach the session")
+        (harness-tasks-test-wait-state id 'pending)
+        (should (eq 'backlog (plist-get (harness-tasks-test-task id) :column)))))))
+
+(ert-deftest harness-tasks-leaving-the-parked-state-clears-its-marker ()
+  "Returning a parked task to pending, or superseding its write-up, unpark it.
+`:parked' is about waiting in the backlog for the queue's work, so a
+task that leaves that state does not keep it: a stale marker would hold
+every turn of a queued task."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "Returned work")))
+        (harness-call 'task/park id)
+        (harness-tasks--to-pending id)
+        (let ((task (harness-tasks-test-task id)))
+          (should-not (plist-get task :parked))
+          (should-not (plist-get task :backlog))
+          (should (eq 'pending (plist-get task :state)))
+          (should (eq 'pending (plist-get task :column)))))
+      (let ((id (harness-tasks-test-submit "Superseded write-up")))
+        (harness-call 'task/park id)
+        (harness-tasks--abandon-write-up (harness-tasks-test-task id))
+        (let ((task (harness-tasks-test-task id)))
+          (should-not (plist-get task :parked))
+          (should-not (plist-get task :backlog))
+          (should (eq 'active (plist-get task :state))))))))
+
 ;;;; Backlog mode: written-up tasks queued by hand, or by themselves
 
 (defun harness-tasks-test--backlog-mode (&optional cwd)

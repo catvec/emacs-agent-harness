@@ -2445,7 +2445,10 @@ already paused stays as it was.  Return the task's view."
 
 (defun harness-tasks--unpause (id)
   "End the pause of task ID; the queue starts it when its turn comes.
-A task that is not paused stays as it was.  Return the task's view."
+A task parked in the backlog (`task/park') stays there, unpaused: the
+queue never starts a backlog task, so `task/queue' or `task/start' takes
+it out.  A task that is not paused stays as it was.  Return the task's
+view."
   (let ((task (harness-tasks--get id)))
     (if (not (harness-tasks--paused-p task))
         (harness-tasks--put task)
@@ -4116,6 +4119,7 @@ Return the task's view."
   (let ((now (float-time)))
     (apply #'harness-tasks--set id
            :state 'pending :returned now :queued-at now :backlog nil
+           :parked nil
            :return-reason 'returned :preempted-by nil
            :outcome nil :error nil :waiting nil :finished nil
            :merge-status nil :merge-attempts 0
@@ -4478,7 +4482,7 @@ Return the task's view."
   (let ((id (plist-get task :id)))
     (puthash id t harness-tasks--superseding)
     (remhash id harness-tasks--message-starts)
-    (harness-tasks--set id :state 'active :backlog nil :queued-at nil
+    (harness-tasks--set id :state 'active :backlog nil :parked nil :queued-at nil
                         :outcome nil :error nil :duplicate-of nil :finished nil
                         :waiting "starting the task")))
 
@@ -4562,7 +4566,10 @@ restart, gets the task itself."
       (let* ((task (harness-tasks--get id))
              (session (harness-tasks--session task)))
         ;; Out of the queue, if it was in it: it waits for the user now.
-        (harness-tasks--set id :state 'refining :backlog t :outcome nil :error nil :duplicate-of nil
+        ;; A parked task is written up afresh from here, so the marker
+        ;; that says it waits for the pending queue's work goes too.
+        (harness-tasks--set id :state 'refining :backlog t :parked nil
+                            :outcome nil :error nil :duplicate-of nil
                             :queued-at nil
                             :note (or (plist-get task :note) (plist-get task :prompt)))
         (if session
@@ -4871,6 +4878,15 @@ starts again when the hold ends (`harness-tasks--refresh-holds')."
         (harness-log 'info "task %s: the write-up it superseded ended; starting it" id)
         (harness-tasks--start (harness-tasks--get id)))
        ((harness-tasks--refinement-p task) (harness-tasks--finish-refinement id reason))
+       ;; A parked task waits in the backlog, where no turn of its own
+       ;; runs: every turn its session took was refused
+       ;; (`harness-tasks--before-turn'), so how that turn ended says
+       ;; nothing about the task.  It stays parked, paused or returned as
+       ;; it was, whatever reason the refusal ended on.
+       ((and (eq (plist-get task :state) 'pending)
+             (harness-tasks--backlog-p task)
+             (harness-json-true-p (plist-get task :parked)))
+        (setq skip t))
        ((harness-tasks--queued-p task)
         (setq skip (harness-tasks--returned-p task)))
        ;; Every provider out of quota, or a hard budget spent: no failure
@@ -6033,7 +6049,9 @@ The queue starts it by priority within the limit, unless its project's
 queue is suspended or it is held for quota or a budget meanwhile
 \(`harness-tasks--hold'); it carries on where it stopped, told by the
 harness it was paused.  `task/start' starts it at once instead.  A task
-that is not paused stays as it was.  Return the task."
+parked in the backlog (`task/park') stays there: resuming it only ends
+the pause, and `task/queue' or `task/start' takes it out.  A task that
+is not paused stays as it was.  Return the task."
   (harness-tasks--unpause id)
   (harness-call 'task/get id))
 
@@ -6074,9 +6092,10 @@ Return (:ids IDS), the tasks paused."
 (harness-defmethod task/resume-all (&optional cwd)
   "End the pause of every paused task of CWD's project (every project without).
 The queue then starts them as slots are free, by priority, as it starts
-any waiting task, and not while their project's queue is suspended.  One
-scheduling pass follows, after every pause is ended.  Return (:ids IDS),
-the tasks resumed."
+any waiting task, and not while their project's queue is suspended.  A
+task parked in the backlog stays there, unpaused, until it is queued or
+started.  One scheduling pass follows, after every pause is ended.
+Return (:ids IDS), the tasks resumed."
   (harness-tasks--load)
   (let* ((project (and cwd (harness-tasks--project cwd)))
          (ids nil))

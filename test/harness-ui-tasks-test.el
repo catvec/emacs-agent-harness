@@ -4316,12 +4316,17 @@ backlog task stays where it is."
       (should (string-match-p "Backlog  0" (harness-ui-tasks-test--board-text board))))))
 
 (ert-deftest harness-ui-tasks-park-controls-and-returned-presentation ()
-  "The pending menu and B park; a parked return is not a fresh write-up."
+  "The pending menu and B park; a parked return is not a fresh write-up.
+A parked task that never worked keeps its prompt too: its card offers no
+Refine, and paused, it offers Resume first."
   (harness-ui-tasks-test-with
     (let* ((task (harness-ui-tasks-test--waiting "t-park" "Returned work" 1
                                                    :session "s-park" :returned 3.0
                                                    :paused 4.0 :return-reason "sent-back"))
            (parked (append (list :backlog t :parked t :column "backlog") task))
+           (fresh (harness-ui-tasks-test--waiting "t-fresh" "Parked work" 2
+                                                   :session "s-fresh" :paused 5.0))
+           (fresh-parked (append (list :backlog t :parked t :column "backlog") fresh))
            (called nil))
       (with-current-buffer board
         (setq harness-ui-tasks--tasks (list task))
@@ -4334,13 +4339,25 @@ backlog task stays where it is."
           (harness-ui-tasks-park))
         (should (equal (car called) "_harness/task/park"))
         (should (equal (cadr called) '(:id "t-park")))
-        (should (equal '("Queue it" "Start now")
+        ;; Paused and parked, it is resumed first, as in Pending.
+        (should (equal '("Resume" "Queue it")
                        (take 2 (mapcar #'car (harness-ui-tasks--actions parked)))))
         (should-not (member "Refine" (mapcar #'car (harness-ui-tasks--actions parked))))
         (should-not (member "Edit" (mapcar #'car (harness-ui-tasks--actions parked))))
         (should (string-match-p "paused" (harness-ui-tasks--pending-detail parked nil nil)))
         (should (string-match-p "sent back from review" (harness-ui-tasks--pending-detail parked nil nil)))
-        (should-not (string-match-p "written up" (harness-ui-tasks--pending-detail parked nil nil)))))))
+        (should-not (string-match-p "written up" (harness-ui-tasks--pending-detail parked nil nil)))
+        ;; A parked task that never worked is no fresh write-up either.
+        (should (equal '("Resume" "Queue it")
+                       (take 2 (mapcar #'car (harness-ui-tasks--actions fresh-parked)))))
+        (should-not (member "Refine" (mapcar #'car (harness-ui-tasks--actions fresh-parked))))
+        (should (member '("Edit" harness-ui-tasks-edit)
+                        (harness-ui-tasks--actions fresh-parked)))
+        (with-current-buffer board
+          (setq harness-ui-tasks--tasks (list fresh-parked))
+          (harness-ui-tasks--render)
+          (harness-ui-tasks-test--goto-card board "Parked work")
+          (should-error (harness-ui-tasks-refine) :type 'user-error))))))
 
 (declare-function harness-ui-tasks-toggle-backlog-mode "harness-ui-tasks")
 (declare-function harness-ui-tasks--backlog-mode-help "harness-ui-tasks")
@@ -6097,6 +6114,38 @@ The compose box says that sending a message there starts the task."
                                          (harness-ui-tasks-test--chat-text chat))))
          5 "the banner to go")
         (should-not (plist-get (harness-call 'task/get id) :backlog))))))
+
+(ert-deftest harness-ui-tasks-parked-session-banner-says-a-message-starts-nothing ()
+  "A parked task's session says a message starts nothing; queue or start it.
+The banner keeps [Start now] and [Queue it] and says the task was moved
+from Pending; the compose box says a message is kept for the start."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'ui-chat)
+    (let ((harness-tasks-max-running 0))
+      (let* ((id (plist-get (harness-call 'task/submit default-directory "Parked work") :id))
+             (sid (plist-get (harness-call 'task/get id) :session)))
+        (harness-call 'task/pause id)
+        (harness-call 'task/park id)
+        (let ((chat (harness-ui-tasks-test--chat sid)))
+          (harness-ui-tasks-test--wait-chat-text chat "Waiting in the Backlog")
+          (let ((text (harness-ui-tasks-test--chat-text chat)))
+            (should (string-match-p "Moved from Pending" text))
+            (should (string-match-p "\\[Start now\\]" text))
+            (should (string-match-p "\\[Queue it\\]" text))
+            (should (string-match-p "kept until the task is queued or started" text))
+            (should-not (string-match-p "a message starts the task" text)))
+          (with-current-buffer chat
+            (should (equal "Message…  kept; sending does not start it"
+                           harness-chat-placeholder)))
+          ;; [Queue it] takes it out of the backlog, its pause and prompt kept.
+          (harness-ui-tasks-test--push-chat-button chat "[Queue it]")
+          (harness-test-wait (lambda () (not (plist-get (harness-call 'task/get id) :parked)))
+                             10 "the task to be queued")
+          (let ((task (harness-call 'task/get id)))
+            (should (eq 'pending (plist-get task :state)))
+            (should-not (plist-get task :backlog))
+            (should (plist-get task :paused))
+            (should (equal "Parked work" (plist-get task :prompt)))))))))
 
 (ert-deftest harness-ui-tasks-backlog-session-banner-supersedes-write-up ()
   "A write-up running in its session says so, and [Start now] supersedes it.

@@ -3508,8 +3508,8 @@ with), `recap` writes the recaps on the cards,
     the work of a submitted or refined task supervises or not as its
     switch says.
 
-  A refined or planned task waits in *Backlog*, across restarts, until
-  you start it with `s`. *Pending* holds only the tasks
+  A refined, planned or parked task waits in *Backlog*, across restarts,
+  until you start it with `s`. *Pending* holds only the tasks
   waiting for a slot, which the queue starts by itself as slots free;
   *Backlog* is its own section, and the queue never starts one of
   those: `Q` on a backlog card (or its [Queue it] button) puts it back
@@ -3523,7 +3523,9 @@ with), `recap` writes the recaps on the cards,
   cannot be parked: pause or return a running task first, or send review
   feedback back before parking it. A pause stays in force after parking
   and queueing; the pending queue also respects project suspension.
-  Parking never triggers auto queueing. Right after its count, the *Backlog* heading
+  Resuming a parked task (`U`, or [Resume] on its card) ends the pause
+  but leaves it in *Backlog*; queue it or start it to run it. Parking
+  never triggers auto queueing. Right after its count, the *Backlog* heading
   has the project's switch between the two ways out, **[Manual queue]**,
   the default, and **[Auto queue]**: click it, or press `W`. With the
   auto queue a task joins *Pending* by itself as soon as its write-up
