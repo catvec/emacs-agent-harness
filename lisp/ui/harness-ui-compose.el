@@ -766,15 +766,39 @@ argument was the panel's number: the command gets none."
   "Face used briefly to identify the panel receiving a compose key."
   :group 'harness)
 
+(defcustom harness-compose-panel-target-delay 0.5
+  "Seconds the panel receiving a compose key is shown before it runs.
+A host that draws again meanwhile removes the highlight, and the key
+runs all the same, on the panel drawn in the panel's place."
+  :type 'number
+  :group 'harness)
+
 (defun harness-compose--target-changed (overlay after _beg _end &optional _length)
   "Remove target OVERLAY before its text is changed or redrawn.
 AFTER is non-nil after the change."
   (unless after (delete-overlay overlay)))
 
+(defun harness-compose--panel-named (id)
+  "Return the panel named ID nearest above the box, as (START . END), or nil.
+A host that draws its panels again while the target shows (`ID' is the
+panel's `harness-compose-panel' value) leaves the panel there, though the
+text, and the overlay over it, are new."
+  (let ((pos (harness-compose--front)) panel found)
+    (while (and (not found) (setq panel (harness-compose--panel-before pos)))
+      (setq pos (car panel))
+      (when (equal id (get-char-property pos 'harness-compose-panel))
+        (setq found panel)))
+    found))
+
 (defun harness-compose--show-panel-target (panel keys command)
   "Briefly show PANEL, then run COMMAND for KEYS there.
-The indicator is removed even if input is cancelled or COMMAND fails."
-  (let ((overlay (make-overlay (car panel) (cdr panel))))
+The indicator is removed even if input is cancelled or COMMAND fails.
+A host may draw its panels again while it shows: the overlay goes then
+(`harness-compose--target-changed'), and the panel is found again by
+name, the key running on the one drawn in its place.  Only a panel that
+is gone stops the key, with a `user-error'."
+  (let ((overlay (make-overlay (car panel) (cdr panel)))
+        (id (get-char-property (car panel) 'harness-compose-panel)))
     (unwind-protect
         (progn
           (overlay-put overlay 'harness-compose-panel-target t)
@@ -784,11 +808,20 @@ The indicator is removed even if input is cancelled or COMMAND fails."
           ;; dispatch, even for commands that immediately replace the panel.
           (unless noninteractive
             (redisplay t)
-            (sit-for 0.5))
-          (unless (and (overlay-buffer overlay)
-                       (eq (overlay-buffer overlay) (current-buffer)))
-            (user-error "Panel changed before the key could be pressed"))
-          (harness-compose--press-on-panel keys command (overlay-start overlay)))
+            (sit-for (or harness-compose-panel-target-delay 0)))
+          (if (and (overlay-buffer overlay)
+                   (eq (overlay-buffer overlay) (current-buffer)))
+              (harness-compose--press-on-panel keys command (overlay-start overlay))
+            (let ((again (harness-compose--panel-named id)))
+              (unless again
+                (user-error "The panel above the box is gone; %s was not pressed"
+                            (key-description keys)))
+              (let ((pos (car again))
+                    (command (harness-compose--panel-command keys (car again))))
+                (unless command
+                  (user-error "The panel above the box no longer has %s"
+                              (key-description keys)))
+                (harness-compose--press-on-panel keys command pos)))))
       (delete-overlay overlay))))
 
 (defun harness-compose-panel-key (&optional n)

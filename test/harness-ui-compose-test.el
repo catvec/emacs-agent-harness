@@ -2400,6 +2400,8 @@ The keys go through the command loop, as typed."
                                    (lambda (o) (overlay-get o 'harness-compose-panel-target))
                                    (overlays-in (point-min) (point-max)))))
                      (should (= (length targets) 1))
+                     (should (eq 'harness-compose-panel-target-face
+                                 (overlay-get (car targets) 'face)))
                      (push (cons (overlay-start (car targets))
                                  (overlay-end (car targets))) seen))
                    t)))
@@ -2412,6 +2414,50 @@ The keys go through the command loop, as typed."
                               (overlays-in (point-min) (point-max))))
       (execute-kbd-macro "x")
       (should (equal "draftx" (harness-compose-text))))))
+
+(ert-deftest harness-ui-compose-panel-key-survives-a-redraw-while-the-target-shows ()
+  "A host redraw during the indication does not stop the key it shows.
+The board and the chat draw their panels again while C-c . waits; that
+removes the highlight, and the key still runs on the panel drawn in its
+place, unless the panel itself is gone."
+  (harness-ui-compose-test-with
+    (setq harness-ui-compose-test--panels (harness-ui-compose-test--two-panels))
+    (harness-ui-compose-test--draw)
+    (harness-compose-set "draft")
+    (goto-char (+ harness-compose-start 2))
+    (let ((harness-ui-compose-test--pressed nil)
+          (noninteractive nil)
+          (two (+ (point-min) (length "The transcript.\nPanel one\n"))))
+      (cl-letf (((symbol-function 'sit-for)
+                 (lambda (&rest _) (harness-ui-compose-test--draw) t)))
+        (harness-ui-compose-test--panel-key "k"))
+      (should (equal `(("two" "k" ,two)) harness-ui-compose-test--pressed))
+      (should (= (point) (+ harness-compose-start 2)))
+      (should (equal "draft" (harness-compose-text)))
+      (should-not (cl-find-if (lambda (o) (overlay-get o 'harness-compose-panel-target))
+                              (overlays-in (point-min) (point-max))))
+      ;; The panel drawn again is found by name even when it moved: a
+      ;; panel drawn above it shifts it down.
+      (setq harness-ui-compose-test--pressed nil)
+      (cl-letf (((symbol-function 'sit-for)
+                 (lambda (&rest _)
+                   (setq harness-ui-compose-test--panels
+                         (cons (list "zero" "Panel zero\n"
+                                     (harness-ui-compose-test--panel-map "zero" "k"))
+                               (harness-ui-compose-test--two-panels)))
+                   (harness-ui-compose-test--draw)
+                   t)))
+        (harness-ui-compose-test--panel-key "k"))
+      (should (equal `(("two" "k" ,(+ two (length "Panel zero\n"))))
+                     harness-ui-compose-test--pressed))
+      ;; No panel of that name left: the key is not pressed anywhere.
+      (setq harness-ui-compose-test--pressed nil
+            harness-ui-compose-test--panels (list (car (harness-ui-compose-test--two-panels))))
+      (cl-letf (((symbol-function 'sit-for)
+                 (lambda (&rest _) (harness-ui-compose-test--draw) t)))
+        (let ((err (should-error (harness-ui-compose-test--panel-key "k") :type 'user-error)))
+          (should (string-match-p "panel above the box is gone" (cadr err)))))
+      (should-not harness-ui-compose-test--pressed))))
 
 (ert-deftest harness-ui-compose-panel-target-cleans-up-on-quit-error-and-redraw ()
   (harness-ui-compose-test-with
