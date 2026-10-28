@@ -539,6 +539,95 @@ nil for nowhere.
 
 ### Key bindings
 
+#### Grouped keyboard menus and migration map
+
+After `C-c h`, **all new menu continuations are plain keys**: `=` opens
+command groups, then `s` sessions, `o` session settings, or `t` tasks, then
+the displayed action key. For example, `C-c h = t v` verifies the task at
+point on a board. `C-c h ?` shows the general command menu, whose Groups
+column also opens this selector with `=`. `C-g` cancels a menu; it is not
+part of any action sequence. The task group shows board actions only when
+opened on a board. Its board-opening entries are available elsewhere.
+
+**Before → after, one action per row.** In the after column, `=` means
+press the literal equals key; every key after `C-c h` is unmodified (except
+`RET` and uppercase letters, which use Shift). `? =` also opens the group
+selector. The before column lists the former direct shortcut or a board-local
+key, not an abolished shortcut: **all those old paths still work**. `? KEY`
+means the existing `C-c h ?` menu (not necessarily a global direct binding).
+`board KEY` applies to the task at point on a task board; board-only entries
+in the new task menu are hidden outside the board.
+
+| Action | Before | New path after `C-c h` |
+|---|---|---|
+| Open group selector | none | `=` |
+| New session | `n` | `= s n` |
+| Switch session | `s` | `= s s` |
+| Session list | `l` | `= s l` |
+| Search sessions | `g` | `= s g` |
+| Conversation tree | `t` | `= s t` |
+| Fork session | `f` | `= s f` |
+| Cancel turn | `k` | `= s k` |
+| Delete session | `D` | `= s d` |
+| Model | `m` | `= o m` |
+| Model for all | `M` | `= o M` |
+| Thinking | `T` | `= o t` |
+| Thinking for all | `H` | `= o T` |
+| Permission mode | `p` | `= o p` |
+| Context limit | `e` | `= o e` |
+| Toggle non-interactive | `i` | `= o i` |
+| Non-interactive for all | `I` | `= o I` |
+| Move session | `W` | `= o w` |
+| Project task board | `a` | `= t a` |
+| All-project task board | `G` | `= t G` |
+| Open task session | `board RET` | `= t RET` |
+| Start task | `board s` | `= t s` |
+| Queue task | `board Q` | `= t Q` |
+| Message task | `board m` | `= t m` |
+| Stop/drop task | `board k` | `= t k` |
+| Pause task | `board u` | `= t u` |
+| Resume task | `board U` | `= t U` |
+| Verify task | `board v` | `= t v` |
+| Send task back | `board R` | `= t R` |
+| Merge task again | `board M` | `= t M` |
+| Archive/restore task | `board x` | `= t x` |
+| Delete task | `board D` | `= t D` |
+| New task | `board a` | `= t n` |
+| Search board | `board /` | `= t /` |
+| Suspend/resume queue | `board P` | `= t P` |
+| Refresh board | `board g` | `= t g` |
+
+For instance `C-c h = t v` is four keys after `C-c` (`h`, `=`, `t`, `v`),
+not a direct `C-c h t` shortcut. That direct `t` **still opens the
+conversation tree**. On a board, `n` still denies a pending request; the new
+`= t n` opens the new-task composer (the old board key is `a`). This extra
+selector level avoids stealing any existing single-key binding; it is a
+trade-off, not a claim that the task menu is immediately under `C-c h t`.
+
+**Unchanged direct `C-c h` map** (the commands and descriptions in the table
+below remain the migration aliases):
+
+| Category | Keys after `C-c h` (before = after) |
+|---|---|
+| Session / chat | `n s o O > < l g t f b k C K D F W` |
+| Session settings / priority | `m M T H p e i I + - y Y V j d` |
+| Tasks / projects | `a G w Q` |
+| Other views / tools | `/ u A B S z r c P h v R L ?` |
+
+Module-dependent keys appear only when their modules are enabled (`h` is the
+ChatGPT-plan page, if enabled). No existing plain-key path was displaced:
+`C-c h t` remains the conversation tree, `C-c h a` remains the task board,
+and `C-c h y` can be overridden by the remote-control module's device
+approval command; `C-c h = o` does not reuse that disputed key. The earlier
+*proposal* for these groups used `C-c h C-s`, `C-c h C-o`, `C-c h C-t`;
+those Control-key paths are removed on reload, not migration aliases. Use
+`C-c h = s`, `= o`, `= t` instead. To find commands not in these compact
+groups, use `C-c h ?` or `C-c h /`; the board's own context-sensitive `?`
+menu and keys remain available. If another mode shadows `C-c h`, invoke
+`M-x harness-groups-menu` or `M-x harness-menu`. These menus use the existing
+transient infrastructure, independently of module-declarations v2
+(`t-1zfbic8x`).
+
 | Key | Command | Description |
 |---|---|---|
 | `C-c h n` | `harness-new-session` | Start a new session in a directory |

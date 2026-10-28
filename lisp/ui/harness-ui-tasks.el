@@ -6681,6 +6681,34 @@ or sent back."
            (task (cadr entry)))
       (harness-ui-tasks-visit-task (plist-get task :id) (car entry) (plist-get task :session)))))
 
+(transient-define-prefix harness-task-menu ()
+  "Task board and task-at-point commands.
+Task actions apply to the task at point on a task board."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
+  [["Boards"
+    ("a" "This project" harness-tasks)
+    ("G" "All projects" harness-tasks-all)]
+   ["Task at point (on a board)"
+    :if (lambda () (derived-mode-p 'harness-ui-tasks-mode))
+    ("RET" "Open session" harness-ui-tasks-open)
+    ("s" "Start" harness-ui-tasks-start)
+    ("Q" "Queue" harness-ui-tasks-queue)
+    ("m" "Message" harness-ui-tasks-reply)
+    ("k" "Stop or drop" harness-ui-tasks-cancel)
+    ("u" "Pause" harness-ui-tasks-pause)
+    ("U" "Resume" harness-ui-tasks-resume)
+    ("v" "Verify" harness-ui-tasks-verify)
+    ("R" "Send back" harness-ui-tasks-reject)
+    ("M" "Merge again" harness-ui-tasks-merge)
+    ("x" "Archive or restore" harness-ui-tasks-archive)
+    ("D" "Delete" harness-ui-tasks-delete)]
+   ["Board"
+    :if (lambda () (derived-mode-p 'harness-ui-tasks-mode))
+    ("n" "New task" harness-ui-tasks-compose)
+    ("/" "Search" harness-ui-tasks-search)
+    ("P" "Suspend or resume queue" harness-ui-tasks-toggle-queue)
+    ("g" "Refresh" harness-ui-tasks-refresh)]])
+
 ;;;; Module
 
 (defun harness-ui-tasks--init ()

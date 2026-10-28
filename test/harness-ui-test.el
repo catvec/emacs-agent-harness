@@ -271,6 +271,90 @@ KEYS default to C-g, which closes the menu."
            (buffer-substring-no-properties (point-min) (point-max)))
     (execute-kbd-macro (kbd (or keys "C-g")))))
 
+(ert-deftest harness-ui-grouped-shortcuts-preserve-old-bindings ()
+  (should (eq (lookup-key harness-ui-map (kbd "=")) 'harness-groups-menu))
+  (dolist (key '("C-s" "C-o" "C-t"))
+    (should-not (lookup-key harness-ui-map (kbd key))))
+  (let ((harness-ui-map (copy-keymap harness-ui-map)))
+    (unwind-protect
+        (progn (harness-ui-tasks--init)
+               (should-not (lookup-key harness-ui-map (kbd "C-t")))
+               (should (eq (lookup-key harness-ui-map (kbd "a")) 'harness-tasks)))
+      (harness-ui-tasks--shutdown)))
+  (should (eq (lookup-key harness-ui-map (kbd "n")) 'harness-new-session))
+  ;; The tree module installs this direct shortcut when it is enabled.
+  (let ((harness-ui-map (copy-keymap harness-ui-map)))
+    (harness-ui-tree--init)
+    (should (eq (lookup-key harness-ui-map (kbd "t")) 'harness-tree)))
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "Sessions, settings & tasks" text)))
+    (call-interactively #'harness-groups-menu)
+    (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+      (should (string-match-p "Tasks…" text))
+      (should (string-match-p "Sessions…" text)))
+    (execute-kbd-macro (kbd "C-g"))
+    (call-interactively #'harness-task-menu)
+    (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+      (should (string-match-p "This project" text))
+      (should-not (string-match-p "Task at point" text)))
+    (execute-kbd-macro (kbd "C-g")))
+  (harness-ui-test-with-menu-buffer #'harness-ui-tasks-mode
+    (call-interactively #'harness-task-menu)
+    (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+      (should (string-match-p "Task at point" text))
+      (should (string-match-p "Verify" text)))
+    (execute-kbd-macro (kbd "C-g"))))
+
+(ert-deftest harness-ui-grouped-shortcut-dispatches-from-keyboard ()
+  "A global prefix opens a group and its next key runs in the source buffer."
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (let ((harness-global-mode t)
+          (source (current-buffer))
+          called)
+      (cl-letf (((symbol-function 'harness-switch-session)
+                 (lambda () (interactive) (setq called (current-buffer)))))
+        (execute-kbd-macro (kbd "C-c h ="))
+        (should (string-match-p "Command groups" (with-current-buffer transient--buffer-name
+                                                   (buffer-string))))
+        (execute-kbd-macro (kbd "s"))
+        (should (string-match-p "Switch" (with-current-buffer transient--buffer-name
+                                           (buffer-string))))
+        (execute-kbd-macro (kbd "s"))
+        (should (eq called source))
+        (should-not transient--prefix)))))
+
+(ert-deftest harness-ui-grouped-task-action-dispatches-with-plain-keys ()
+  "The task group runs an action from the board without another Control key."
+  (harness-ui-test-with-menu-buffer #'harness-ui-tasks-mode
+    (let ((harness-global-mode t)
+          (source (current-buffer))
+          called)
+      (cl-letf (((symbol-function 'harness-ui-tasks-verify)
+                 (lambda () (interactive) (setq called (current-buffer)))))
+        (execute-kbd-macro (kbd "C-c h = t"))
+        (should (string-match-p "Task at point" (with-current-buffer transient--buffer-name
+                                                   (buffer-string))))
+        (execute-kbd-macro (kbd "v"))
+        (should (eq called source))
+        (should-not transient--prefix)))))
+
+(ert-deftest harness-ui-grouped-task-new-does-not-steal-board-deny ()
+  "The new-task group key and the board's existing `n' remain distinct."
+  (should (eq (lookup-key harness-ui-tasks-board-map (kbd "n"))
+              'harness-ui-tasks-deny))
+  (should (eq (lookup-key harness-ui-tasks-board-map (kbd "a"))
+              'harness-ui-tasks-compose))
+  (harness-ui-test-with-menu-buffer #'harness-ui-tasks-mode
+    (let ((harness-global-mode t)
+          (source (current-buffer))
+          called)
+      (cl-letf (((symbol-function 'harness-ui-tasks-compose)
+                 (lambda () (interactive) (setq called (current-buffer)))))
+        (execute-kbd-macro (kbd "C-c h = t n"))
+        (should (eq called source))
+        (should-not transient--prefix)))))
+
 (ert-deftest harness-ui-menu-elsewhere-shows-only-its-own-groups ()
   (harness-ui-test-with-menu-buffer #'fundamental-mode
     (let ((text (harness-ui-test-menu)))

@@ -5368,12 +5368,60 @@ leaves the buffer's commands out, never the whole menu."
      harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
     ("R" "Reload harness" harness-reload)
     ("U" "Update harness" harness-update)
-    ("L" "Log" harness-show-log)]]
+    ("L" "Log" harness-show-log)]
+   ["Groups"
+    ("=" "Sessions, settings & tasks…" harness-groups-menu)]]
   ;; The commands of the buffer the menu is opened from, when its modes
   ;; list some in their `harness-menu-group'.
   [:class transient-columns
    :description (lambda () harness-ui--menu-heading)
    :setup-children harness-ui--menu-buffer-children])
+
+;; A plain-key group entry leaves all original one-key shortcuts intact.
+;; These menus are ordinary transients, independent of module declarations.
+(transient-define-prefix harness-groups-menu ()
+  "Discover the grouped harness commands."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
+  [["Command groups"
+    ("s" "Sessions…" harness-session-menu)
+    ("o" "Session settings…" harness-settings-menu)
+    ("t" "Tasks…" harness-task-menu
+     :if (lambda () (harness-ui--command-available-p 'harness-task-menu)))]])
+
+(transient-define-prefix harness-session-menu ()
+  "Session commands."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
+  [["Sessions"
+    ("n" "New" harness-new-session)
+    ("s" "Switch" harness-switch-session)
+    ("l" "List" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
+    ("g" "Search" harness-search-sessions :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))
+    ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
+    ("f" "Fork" harness-fork-session)
+    ("k" "Cancel turn" harness-cancel-turn)
+    ("d" "Delete" harness-delete-session)]])
+
+(transient-define-prefix harness-settings-menu ()
+  "Session settings commands."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
+  [["Session settings"
+    ("m" "Model" harness-set-model)
+    ("M" "Model for all" harness-set-model-all)
+    ("t" "Thinking" harness-set-thinking)
+    ("T" "Thinking for all" harness-set-thinking-all)
+    ("p" "Permission mode" harness-set-permission-mode)
+    ("e" "Context limit" harness-set-context-limit)
+    ("i" "Non-interactive" harness-toggle-non-interactive)
+    ("I" "Non-interactive for all" harness-set-non-interactive-all)
+    ("w" "Move session" harness-move-session)]])
+
+;; Clear the Control-key group entries installed by older versions on reload.
+(dolist (binding '(("C-s" . harness-session-menu)
+                   ("C-o" . harness-settings-menu)
+                   ("C-t" . harness-task-menu)))
+  (when (eq (lookup-key harness-ui-map (kbd (car binding))) (cdr binding))
+    (define-key harness-ui-map (kbd (car binding)) nil t)))
+(define-key harness-ui-map (kbd "=") #'harness-groups-menu)
 
 ;;;; Module
 
