@@ -78,6 +78,7 @@ leaks into the next one."
   (declare (indent 1))
   `(let ((harness-responses-test--requests nil)
          (harness-responses-test--responses ,responses)
+         (harness-responses-test--status harness-responses-test--status)
          (harness-responses--responses (make-hash-table :test 'equal))
          (harness-responses--models-cache nil)
          (harness-responses--efforts-by-model (make-hash-table :test 'equal))
@@ -985,6 +986,68 @@ price here; a tier is a name pattern or nothing."
 
 ;;;; Quota
 
+(ert-deftest harness-provider-responses-codex-quota-requires-explicit-account ()
+  "No CLI is run before opt-in; an unrelated account cannot expose numbers."
+  (harness-responses-test-with-fake nil
+    (let ((harness-responses-codex-quota-account nil)
+          (reads 0))
+      (cl-letf (((symbol-function 'harness-codex-quota-read)
+                 (lambda () (cl-incf reads) (harness-resolved nil))))
+        (should-not (plist-get (harness-test-await (harness-responses--quota)) :windows))
+        (should (= 0 reads))
+        (let ((harness-responses-codex-quota-account "other@example.com"))
+          (should-not (plist-get (harness-test-await (harness-responses--quota)) :windows))
+          (should (= 0 reads)))))))
+
+(ert-deftest harness-provider-responses-codex-quota-is-informational ()
+  "Even a full Codex window is only a reference for a separately logged-in app."
+  (harness-responses-test-with-fake nil
+    (let ((harness-responses-codex-quota-account "a@example.com")
+          (harness-responses--codex-quota-cache nil)
+          (harness-responses--codex-quota-fetching nil)
+          (reads 0))
+      (cl-letf (((symbol-function 'harness-codex-quota-read)
+                 (lambda ()
+                   (cl-incf reads)
+                   (harness-resolved
+                    '(:status ok :email "a@example.com"
+                      :quota (:source "codex-cli" :windows ((:name "5h" :used 1.0
+                                                            :resets 2000000000.0))
+                              :informational t :plan "plus" :plan-label "ChatGPT Plus"))))))
+        (let ((quota (harness-test-await (harness-responses--quota))))
+          (should (equal "ChatGPT Plus" (plist-get quota :plan-label)))
+          (should (equal "codex-cli" (plist-get quota :source)))
+          (should (plist-get quota :informational))
+          (should-not (plist-get quota :limit-status))
+          (should (string-match-p "may have a separate" (plist-get quota :quota-note)))
+          (should (= 1 reads))
+          (harness-test-await (harness-responses--quota))
+          (should (= 1 reads))
+          (harness-test-await (harness-responses--quota t))
+          (should (= 2 reads)))
+        (let ((harness-responses-test--status
+               '(:active "acct-2" :accounts ((:id "acct-2" :email "other@example.com"
+                                              :plan-usage t)))))
+          (let ((quota (harness-test-await (harness-responses--quota))))
+            (should-not (plist-get quota :windows))
+            (should (string-match-p "differs" (plist-get quota :quota-note)))))))))
+
+(ert-deftest harness-provider-responses-codex-quota-rejects-mismatched-cli-account ()
+  "Matching the configured SIWC email is not enough: check Codex too."
+  (harness-responses-test-with-fake nil
+    (let ((harness-responses-codex-quota-account "a@example.com")
+          (harness-responses--codex-quota-cache nil)
+          (harness-responses--codex-quota-fetching nil))
+      (cl-letf (((symbol-function 'harness-codex-quota-read)
+                 (lambda ()
+                   (harness-resolved
+                    '(:status ok :email "stranger@example.com"
+                      :quota (:windows ((:name "5h" :used 0.5))))))))
+        (let ((quota (harness-test-await (harness-responses--quota))))
+          (should-not (plist-get quota :windows))
+          (should (string-match-p "different ChatGPT account"
+                                  (plist-get quota :quota-note))))))))
+
 (ert-deftest harness-provider-responses-quota-is-a-subscription ()
   "The plan is the billing; there is no balance and no invented cost."
   (harness-responses-test-with-fake nil
@@ -994,7 +1057,11 @@ price here; a tier is a name pattern or nothing."
       (should (equal "ChatGPT plan" (plist-get quota :plan-label)))
       (should (equal "a@example.com" (harness-plist-get-in quota '(:account :email))))
       (should-not (plist-get quota :cost))
-      (should-not (plist-get quota :available)))
+      (should-not (plist-get quota :available))
+      ;; SIWC does not provide numerical quota; a simulated response with
+      ;; Codex headers is not what real SIWC replies presently send.
+      (should (string-match-p "OpenAI does not report" (plist-get quota :quota-note)))
+      (should (equal "https://chatgpt.com/settings/usage" (plist-get quota :quota-url))))
     ;; With nobody signed in there is nothing to report at all.
     (let ((harness-responses-test--status nil))
       (should-not (harness-test-await (harness-responses--quota))))))
@@ -1090,6 +1157,87 @@ are named by how long they last rather than by the server's slot names."
        (should (equal "ChatGPT Plus" (plist-get quota :plan-label)))
        (should (equal '(:has-credits t :unlimited nil :balance "62500.0")
                       (plist-get quota :credits)))))))
+
+(ert-deftest harness-provider-responses-own-windows-win-over-in-flight-codex ()
+  "The app's own response supersedes a late, full Codex CLI reference."
+  (harness-responses-test-with-fake nil
+    (let ((harness-responses-codex-quota-account "a@example.com")
+          (harness-responses--codex-quota-cache nil)
+          (harness-responses--codex-quota-fetching nil)
+          (read (harness-make-promise)))
+      (cl-letf (((symbol-function 'harness-codex-quota-read) (lambda () read)))
+        (let ((waiting (harness-responses--quota)))
+          (harness-responses--publish-own-quota
+           '(:windows ((:name "5h" :used 0.22 :resets 2000000000.0))))
+          (harness-resolve read
+                           '(:status ok :email "a@example.com"
+                             :quota (:source "codex-cli" :informational t
+                                     :windows ((:name "5h" :used 1.0)))))
+          (let ((quota (harness-test-await waiting)))
+            (should (equal "responses" (plist-get quota :source)))
+            (should-not (plist-get quota :informational))
+            (should (= 0.22 (plist-get (car (plist-get quota :windows)) :used)))
+            (should (equal "responses" (plist-get (harness-provider-quota-status 'chatgpt)
+                                                    :source)))))))))
+
+(ert-deftest harness-provider-responses-discard-in-flight-reads-on-account-change ()
+  "An old read must not reattach to a new account or poison its cache."
+  (harness-responses-test-with-fake nil
+    (let ((harness-responses-codex-quota-account "a@example.com")
+          (harness-responses--codex-quota-cache nil)
+          (harness-responses--codex-quota-fetching nil)
+          (harness-responses--codex-quota-generation 0)
+          (old (harness-make-promise)) (new (harness-make-promise))
+          (reads 0))
+      (harness-responses-test-with-provider
+        (cl-letf (((symbol-function 'harness-codex-quota-read)
+                   (lambda () (cl-incf reads) (if (= reads 1) old new))))
+          (let ((waiting (harness-responses--quota)))
+            (setq harness-responses-test--status
+                  '(:active "acct-2" :accounts ((:id "acct-2" :email "b@example.com"
+                                                :plan-usage t)))
+                  harness-responses-codex-quota-account "b@example.com")
+            (harness-responses--on-accounts-changed)
+            (let ((next (harness-responses--quota)))
+              (harness-resolve old '(:status ok :email "a@example.com"
+                                     :quota (:windows ((:name "5h" :used 0.8)))))
+              (should-not (harness-provider-quota-status 'chatgpt))
+              (harness-resolve new '(:status ok :email "b@example.com"
+                                     :quota (:windows ((:name "5h" :used 0.3)))))
+              (dolist (promise (list waiting next))
+                (let ((quota (harness-test-await promise)))
+                  (should (equal "b@example.com" (harness-plist-get-in quota '(:account :email))))
+                  (should (= 0.3 (plist-get (car (plist-get quota :windows)) :used)))))
+              (should (= 2 reads))
+              (should (equal "b@example.com" (plist-get harness-responses--codex-quota-cache :for))))))))))
+
+(ert-deftest harness-provider-responses-failed-refresh-removes-old-codex-windows ()
+  "A failed fresh read must not leave yesterday's Codex figures on display."
+  (harness-responses-test-with-fake nil
+    (let ((harness-responses-codex-quota-account "a@example.com")
+          (harness-responses--codex-quota-cache nil)
+          (harness-responses--codex-quota-fetching nil)
+          (reads 0))
+      (cl-letf (((symbol-function 'harness-codex-quota-read)
+                 (lambda () (cl-incf reads)
+                   (harness-resolved (if (= reads 1)
+                                         '(:status ok :email "a@example.com"
+                                           :quota (:windows ((:name "5h" :used 0.5))))
+                                       '(:status no-quota))))))
+        (should (plist-get (harness-test-await (harness-responses--quota)) :windows))
+        (let ((quota (harness-test-await (harness-responses--quota t))))
+          (should-not (plist-get quota :windows))
+          (should-not (plist-get (harness-provider-quota-status 'chatgpt) :windows))
+          (should (string-match-p "did not report" (plist-get quota :quota-note))))))))
+
+(ert-deftest harness-provider-responses-opt-in-change-keeps-own-quota ()
+  "Changing Codex association cannot remove the app's authoritative windows."
+  (harness-responses-test-with-fake nil
+    (harness-responses--publish-own-quota '(:windows ((:name "5h" :used 0.4))))
+    (harness-responses--on-config-changed 'harness-responses-codex-quota-account)
+    (let ((quota (harness-test-await (harness-responses--quota))))
+      (should (= 0.4 (plist-get (car (plist-get quota :windows)) :used)))
+      (should-not (plist-get quota :informational)))))
 
 (provide 'harness-provider-responses-test)
 ;;; harness-provider-responses-test.el ends here

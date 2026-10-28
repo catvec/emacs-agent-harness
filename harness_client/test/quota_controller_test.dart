@@ -198,6 +198,37 @@ void main() {
       );
     });
 
+    test(
+      'fetches a newly signed-in ChatGPT provider without reconnect',
+      () async {
+        final rig = await _rig();
+        final quota = rig.app.quota!;
+        expect(quota.of('chatgpt'), isNull);
+        expect(rig.harness.connects, 1);
+        rig.harness.chatgptProvider = true;
+        rig.harness.quotas['chatgpt'] = {
+          'billing': 'subscription',
+          'plan': 'plus',
+          'plan-label': 'ChatGPT Plus',
+          'windows': [
+            {'name': '5h', 'used': 0.34},
+            {'name': '7d', 'used': 0.61},
+          ],
+        };
+        // Provider registration announces models, not necessarily quota.
+        rig.harness.announce('provider/models-updated');
+        await _until(
+          () => quota.of('chatgpt') != null,
+          what: 'the new provider',
+        );
+        expect(rig.harness.connects, 1);
+        expect(quota.labelOf('chatgpt'), 'ChatGPT plan');
+        expect(quota.forModel('chatgpt:gpt-6-sol')!.planLabel, 'ChatGPT Plus');
+        expect(quota.of('chatgpt')!.windows.map((w) => w.percent), [34, 61]);
+        expect(rig.asked, contains('chatgpt'));
+      },
+    );
+
     test('says it is loading while it is asked', () async {
       final rig = await _rig();
       final quota = rig.app.quota!;

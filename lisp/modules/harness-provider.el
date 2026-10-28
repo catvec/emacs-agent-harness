@@ -1626,15 +1626,13 @@ the new status."
 
 ;;;; ChatGPT plan rate limits
 ;;
-;; An OpenAI server that spends a ChatGPT plan reports the plan's
-;; windows with every answer: `x-codex-primary-*' and
-;; `x-codex-secondary-*' response headers (a window's used percentage,
-;; its length in minutes, when it resets) and, in the stream of a Codex
-;; request, a `rate_limits' object carrying the same fields plus the
-;; plan's type and its credits.  Both providers that can spend such a
-;; plan read them here -- the ChatGPT-plan one and an OpenAI-compatible
-;; endpoint in front of one -- and report them through `provider/quota'
-;; like any other plan.
+;; Some Codex-compatible servers report a plan's windows in
+;; `x-codex-primary-*' and `x-codex-secondary-*' response headers or a
+;; `rate_limits' stream object.  Native Sign in with ChatGPT requests at
+;; /v1/responses do not currently get those fields: they must never be
+;; assumed to report numerical limits.  When the fields do arrive, both
+;; the Responses provider and compatible endpoints map them to the
+;; same generic `provider/quota' shape.
 
 (defconst harness-provider-plan-header-prefixes '("x-codex")
   "Prefixes of the response headers that report a ChatGPT plan's windows.

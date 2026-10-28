@@ -231,12 +231,15 @@ insufficient balance or credit, a used-up quota or usage limit."
              (or (not (numberp limit)) (not (numberp used)) (< used limit))))))
 
 (defun harness-fallback--full-windows (quota &optional now)
-  "Return the windows of QUOTA used up and resetting after NOW."
-  (let ((now (or now (float-time))))
-    (cl-remove-if-not (lambda (w)
-                        (and (numberp (plist-get w :used)) (>= (plist-get w :used) 1.0)
-                             (numberp (plist-get w :resets)) (> (plist-get w :resets) now)))
-                      (plist-get quota :windows))))
+  "Return the windows of QUOTA used up and resetting after NOW.
+Informational windows from a separately signed-in account cannot hold
+a provider's sessions: its limits may differ from this app's."
+  (unless (plist-get quota :informational)
+    (let ((now (or now (float-time))))
+      (cl-remove-if-not (lambda (w)
+                          (and (numberp (plist-get w :used)) (>= (plist-get w :used) 1.0)
+                               (numberp (plist-get w :resets)) (> (plist-get w :resets) now)))
+                        (plist-get quota :windows)))))
 
 (defun harness-fallback--window-models (pid window)
   "Return the ids of provider PID's models the scoped WINDOW limits."

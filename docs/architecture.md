@@ -2297,8 +2297,8 @@ its plan keeps what its answers reported (`harness-provider-quota-status`)
 and announces each change (`harness-provider-quota-publish`), so
 `provider/quota` answers from it and REFRESH makes no request.
 
-An OpenAI answer that spends a ChatGPT plan reports that plan in
-`x-codex-primary-*` and `x-codex-secondary-*` response headers, and a
+A Codex-compatible endpoint may report a ChatGPT plan in
+`x-codex-primary-*` and `x-codex-secondary-*` response headers, or a
 Codex stream in a `codex.rate_limits` event
 (`harness-provider-plan-rate-limit-headers`,
 `harness-provider-plan-rate-limits`).  Both the OpenAI-compatible
@@ -2306,8 +2306,11 @@ provider and the Responses provider read them: the billing is a
 subscription, `:auth` is `"chatgpt-plan"` or `"chatgpt"`, the plan's
 type (`x-codex-plan-type`, `plan_type`) is `:plan` and its label
 (`plus` gives "ChatGPT Plus"), and `x-codex-credits-*` becomes
-`:credits`.  A plain API endpoint's answers carry no windows, so it
-reports no quota.  Once an endpoint's plan has paid for a call, that
+`:credits`.  Native Sign in with ChatGPT requests to `/v1/responses`
+currently carry neither these windows nor a supported quota endpoint;
+`provider/quota` explains the absence instead of inventing numbers.
+A plain API endpoint's answers carry no windows, so it reports no quota.
+Once an endpoint's plan has paid for a call, that
 call is recorded as the plan's, with no cost and the value at API
 prices priced from the catalogue, as a Claude Code plan's calls are;
 an endpoint that never reported a plan records per-token billing.
@@ -2824,8 +2827,9 @@ and the provider is built to what it accepts:
   `subscription_sharing_usage_unavailable` (503) and
   `subscription_sharing_unsupported_capability` (400) say what they say
   in the message the turn fails with.  A `codex.rate_limits` (or bare
-  `rate_limits`) event reports the plan's windows, which become the
-  provider's quota as the headers of every answer do.
+  `rate_limits`) event, if provided, reports the plan's windows, which
+  become the provider's own quota. Native SIWC does not currently send
+  either numerical windows or an endpoint to fetch them.
 - The catalogue comes from `GET /v1/models` with the same token: entries
   whose `visibility` is `list`, `slug` as the model name and
   `display_name` as its label, cached for `harness-responses--models-ttl`
@@ -2842,10 +2846,24 @@ and the provider is built to what it accepts:
   would have cost at list prices is worked out from the catalogue as for
   every provider (`usage/price`, `:list-cost`), and `provider/quota`
   reports the subscription (`:billing` subscription, `:auth` "chatgpt",
-  `:plan-label` "ChatGPT plan" until an answer names the plan) with the
-  plan's windows, as the `x-codex-*` headers or a `codex.rate_limits`
-  event report them.  There is no endpoint to ask for them, so REFRESH
-  makes no request.
+  `:plan-label` "ChatGPT plan" until an answer names the plan). The
+  native SIWC route currently sends no numerical quota, so the Usage
+  view explains this and links to https://chatgpt.com/settings/usage.
+  If inference does report `x-codex-*` headers or a `codex.rate_limits`
+  event, those windows become the app's own quota.
+
+  To show reference figures while native SIWC omits them, first run
+  `codex login` with the same ChatGPT account; then in the Usage view
+  confirm that account with **Connect Codex quota…** (or set the global
+  `harness-responses-codex-quota-account` option to its email). This is
+  opt-in and off by default. A short-lived `codex app-server --stdio`
+  calls `account/read` and `account/rateLimits/read`, checks both emails,
+  and never copies Codex credentials or queries ChatGPT's internal APIs
+  using the SIWC token. Its 5-hour/7-day figures are labeled Codex CLI
+  *informational*, not this app's limit: app-specific and workspace
+  limits can differ. They never block inference or trigger fallback.
+  The app's own response windows, if received, supersede the reference.
+  Disconnect in Usage to stop reading the CLI.
 
 #### Looking like an ordinary Claude Code session (experimental)
 

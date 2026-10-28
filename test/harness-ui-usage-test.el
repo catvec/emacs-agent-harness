@@ -639,6 +639,90 @@ there are, and d on it says where to change it."
           (should (string-match-p "bills per token (ANTHROPIC_API_KEY)" text))
           (should-not (string-match-p "budgets count billed cost" text)))))))
 
+(ert-deftest harness-ui-usage-chatgpt-explains-missing-quota-and-links-to-usage ()
+  "When SIWC sends no numerical quota, explain why and offer official usage."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (harness-ui--store-quota
+     "chatgpt"
+     '(:billing "subscription" :plan-label "ChatGPT plan"
+       :account (:email "test@example.org")
+       :quota-note "OpenAI does not report this app's numerical quota. Connect Codex CLI for a reference."
+       :quota-url "https://chatgpt.com/settings/usage"))
+    (let ((text (harness-ui-usage-test-open)) opened)
+      (should (string-match-p "no quota reported yet" text))
+      (should (string-match-p "OpenAI does not report this app's numerical quota" text))
+      (should (string-match-p (regexp-quote "[Open ChatGPT usage]") text))
+      (should (string-match-p (regexp-quote "[Connect Codex quota…]") text))
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (setq opened url))))
+        (harness-ui-usage-test-click-button "no quota reported yet" "Open ChatGPT usage")
+        (should (equal "https://chatgpt.com/settings/usage" opened))))))
+
+(ert-deftest harness-ui-usage-connect-codex-requires-confirmation ()
+  "Only affirmative consent saves the selected SIWC email as a global option."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (harness-ui--store-quota
+     "chatgpt" '(:billing "subscription" :account (:email "test@example.org")
+                 :quota-url "https://chatgpt.com/settings/usage"))
+    (harness-ui-usage-test-open)
+    (let (request prompt refreshed (answer nil))
+      (cl-letf (((symbol-function 'yes-or-no-p)
+                 (lambda (text) (setq prompt text) answer))
+                ((symbol-function 'harness-ui-call)
+                 (lambda (method params done &optional _error)
+                   (setq request (list method params)) (funcall done t)))
+                ((symbol-function 'harness-ui-refresh-quota)
+                 (lambda (provider refresh &optional _done)
+                   (setq refreshed (list provider refresh)))))
+        (harness-ui-usage-test-click-button "no quota reported yet" "Connect Codex quota")
+        (should (string-match-p "different limits" prompt))
+        (should-not request)
+        (setq answer t)
+        (harness-ui-usage-test-click-button "no quota reported yet" "Connect Codex quota")
+        (should (equal "_harness/config/set" (car request)))
+        (should (equal "harness-responses-codex-quota-account"
+                       (plist-get (cadr request) :key)))
+        (should (equal "\"test@example.org\"" (plist-get (cadr request) :value)))
+        (should (eq t (plist-get (cadr request) :printed)))
+        (should (equal "global" (plist-get (cadr request) :scope)))
+        (should (equal '("chatgpt" t) refreshed))))))
+
+(ert-deftest harness-ui-usage-codex-reference-is-labeled-and-disconnects ()
+  "Codex windows stay visibly separate from the app's own inference limit."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (let* ((now (float-time))
+           (quota (list :billing "subscription" :plan "plus" :plan-label "ChatGPT Plus"
+                        :account '(:email "test@example.org")
+                        :source "codex-cli" :informational t :codex-configured t
+                        :quota-note "Codex CLI usage (informational): this app may have a separate plan limit."
+                        :quota-url "https://chatgpt.com/settings/usage"
+                        :windows (list (list :name "5h" :label "Current session (5 hours)"
+                                             :used 0.34 :resets (+ now 3600))
+                                       (list :name "7d" :label "This week, all models"
+                                             :used 0.76 :resets (+ now 604800)))))
+           (session '(:model "chatgpt:gpt-5" :usage (:billing "subscription" :cost 0)))
+           (requests nil))
+      (harness-ui--store-quota "chatgpt" quota)
+      (let ((text (harness-ui-usage-test-open))
+            (spend (harness-ui-format-spend session t)))
+        (should (string-match-p "Codex CLI reference (not this app's limit)" text))
+        (should (string-match-p "Current session (5 hours).*34%" text))
+        (should (string-match-p "This week, all models.*76%" text))
+        (should (string-match-p "Disconnect Codex quota" text))
+        (should (string-match-p "Codex.*5h 34%.*7d 76%" (substring-no-properties spend)))
+        (should (string-match-p "app may have a separate plan limit"
+                                (get-text-property 0 'help-echo spend))))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params done &optional _error)
+                   (setq requests (list method params)) (funcall done t)))
+                ((symbol-function 'harness-ui-refresh-quota) (lambda (&rest _) nil)))
+        (harness-ui-usage-test-click-button "Codex CLI reference" "Disconnect Codex quota")
+        (should (equal "_harness/config/unset" (car requests)))
+        (should (equal "harness-responses-codex-quota-account" (plist-get (cadr requests) :key)))
+        (should (equal "global" (plist-get (cadr requests) :scope)))))))
+
 (ert-deftest harness-ui-spend-says-who-pays ()
   "Session costs read as prices when billed per token and as the plan otherwise."
   (harness-ui-usage-test-with

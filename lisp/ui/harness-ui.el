@@ -783,6 +783,11 @@ answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
          (run-hooks 'harness-ui-redraw-hook))
        (when (member event '("provider/models-updated" "harness/reloaded"))
          (harness-ui-refresh-models))
+       (when (or (member event '("provider/models-updated" "chatgpt-plan/accounts-changed"))
+                 (and (equal event "config/changed")
+                      (equal (format "%s" (car args))
+                             "harness-responses-codex-quota-account")))
+         (harness-ui-refresh-quotas))
        (when (equal event "provider/quota-updated")
          (harness-ui--store-quota (car args) (cadr args)))
        (when (equal event "usage/rate-updated")
@@ -1581,7 +1586,8 @@ showing it in the echo area moves nothing."
                     (t (format "%s cost %s." subject (harness-format-cost cost)))))
              (when (memq billing '(subscription extra-usage))
                (append (mapcar #'harness-ui-describe-window (plist-get quota :windows))
-                       (list (harness-ui-describe-extra (plist-get quota :extra)))))
+                       (list (harness-ui-describe-extra (plist-get quota :extra))
+                             (plist-get quota :quota-note))))
              (list "mouse-1: usage and plan quota")))
       "\n"))))
 
@@ -1605,7 +1611,8 @@ is made when it is asked for (`harness-ui-session-help-function')."
                      ((> cost 0) (concat (harness-format-cost cost) "+" name))
                      (t name)))
          (windows (and with-quota planned (harness-ui-quota-headline-windows quota))))
-    (propertize (concat text (mapconcat (lambda (w) (concat " · " (harness-ui-format-window w))) windows ""))
+    (propertize (concat text (if windows (if (plist-get quota :informational) " · Codex" "") "")
+                        (mapconcat (lambda (w) (concat " · " (harness-ui-format-window w))) windows ""))
                 'help-echo (if lazy
                                (harness-ui-session-help-function
                                 session (if subject

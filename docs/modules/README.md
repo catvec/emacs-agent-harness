@@ -248,7 +248,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `chatgpt-plan/accounts-changed` | [chatgpt-plan](chatgpt-plan.md) | [chatgpt-plan](chatgpt-plan.md) | [provider-responses](provider-responses.md), [ui-chatgpt-plan](ui-chatgpt-plan.md) | yes |
 | `compaction/done` | [compaction](compaction.md) | [compaction](compaction.md) | [pet](pet.md) |  |
 | `compaction/failed` | [compaction](compaction.md) | [compaction](compaction.md) |  |  |
-| `config/changed` | [config](config.md) | [config](config.md), [perms](perms.md) | [pet](pet.md), [tasks](tasks.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
+| `config/changed` | [config](config.md) | [config](config.md), [perms](perms.md) | [pet](pet.md), [provider-responses](provider-responses.md), [tasks](tasks.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `cowboy/asked` | [cowboy](cowboy.md) | [cowboy](cowboy.md) |  |  |
 | `cowboy/decided` | [cowboy](cowboy.md) | [cowboy](cowboy.md) |  |  |
 | `decision/changed` | [decisions](decisions.md) | [decisions](decisions.md) | [ui-decisions](ui-decisions.md) | yes |

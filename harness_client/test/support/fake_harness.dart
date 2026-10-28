@@ -214,6 +214,10 @@ class FakeHarness {
   /// of the providers that report one.  An older harness does not.
   final bool quota;
 
+  /// The ChatGPT provider can register after the app connected and loaded
+  /// the first provider list (for example, after a second login).
+  bool chatgptProvider = false;
+
   /// What each provider that reports its quota last said, as
   /// `provider/quota` answers: Claude on a Max plan, Copilot on a Pro one.
   /// A provider that says nothing is not in the map.
@@ -2106,6 +2110,12 @@ class FakeHarness {
       }
       if (method == '_harness/provider/list') {
         _respond(id, [
+          if (chatgptProvider)
+            {
+              'id': 'chatgpt',
+              'label': 'ChatGPT plan',
+              'capabilities': {'quota': quota},
+            },
           {
             'id': 'claude',
             'label': 'Claude',

@@ -138,6 +138,8 @@ class ProviderQuota {
     this.billing,
     this.plan,
     this.planLabel,
+    this.quotaNote,
+    this.informational = false,
     this.auth,
     this.email,
     this.organization,
@@ -157,6 +159,8 @@ class ProviderQuota {
       billing: _nonBlank(asString(wire['billing'])),
       plan: _nonBlank(asString(wire['plan'])),
       planLabel: _nonBlank(asString(wire['plan-label'] ?? wire['planLabel'])),
+      quotaNote: _nonBlank(asString(wire['quota-note'] ?? wire['quotaNote'])),
+      informational: asBool(wire['informational']),
       auth: _nonBlank(asString(wire['auth'])),
       email: _nonBlank(asString(account['email'])),
       organization: _nonBlank(asString(account['organization'])),
@@ -184,6 +188,11 @@ class ProviderQuota {
   /// "max": the plan's id, and "Claude Max" its name.
   final String? plan;
   final String? planLabel;
+
+  /// Why numerical windows are unavailable, or why they are informational
+  /// rather than the app's own limits (as for a separate Codex CLI login).
+  final String? quotaNote;
+  final bool informational;
 
   /// Where the credentials come from: "claude.ai", "ANTHROPIC_API_KEY".
   final String? auth;
@@ -389,6 +398,7 @@ class SpendStatus {
         '$subject cost ${formatMoney(cost)}.',
       if (onPlan && quota != null) ...[
         for (final window in quota.windows) window.describe(now: now),
+        if (quota.quotaNote != null) quota.quotaNote!,
         if (quota.extra != null) quota.extra!.describe(),
       ],
     ];

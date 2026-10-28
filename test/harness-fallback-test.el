@@ -561,6 +561,16 @@ paying for calls, or the window coming back, lifts the mark."
                     (list :windows (list (list :name "5h" :used 1.0 :resets (- (float-time) 10)))))
       (should-not (harness-fallback-out-p "alpha:a-mid")))))
 
+(ert-deftest harness-fallback-ignores-informational-codex-window ()
+  "Codex CLI's exhausted window does not hold a SIWC provider's sessions."
+  (harness-fallback-test-with
+    (harness-emit 'provider/quota-updated 'alpha
+                  (list :billing 'subscription :informational t :source "codex-cli"
+                        :windows (list (list :name "5h" :used 1.0
+                                             :resets (+ (float-time) 3600)))))
+    (should-not (gethash "alpha" harness-fallback--marks))
+    (should-not (harness-fallback-out-p "alpha:a-mid"))))
+
 (ert-deftest harness-fallback-window-scoped-to-a-model-marks-that-model ()
   "A used-up window of one model leaves the provider's others: the
 provider's entry carries on with its other model of the same tier."

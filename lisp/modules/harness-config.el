@@ -200,7 +200,7 @@ reader of the layers skips it (see `harness-config--layered-keys').")
     (spending
      :title "Spending"
      :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."
-     :keys (harness-budget))
+     :keys (harness-budget harness-responses-codex-quota-account))
     (compaction
      :title "Compaction"
      :doc "What stands in for a conversation that grew too long, whether a turn that outgrows its context limit is compacted in its middle or only before the next one, and which model writes a brief summary.  Compacting by hand offers every kind, with what each costs."

@@ -1022,8 +1022,11 @@ class AppController extends ChangeNotifier {
       case 'config/changed':
       case 'provider/models-updated':
         unawaited(refreshServer());
-        // A reloaded harness may have other providers to ask.
-        if (event == 'harness/reloaded') unawaited(quota?.load());
+        // Reload the provider list when a provider appears after sign-in,
+        // too: its first quota may be available before it emits an update.
+        if (event == 'harness/reloaded' || event == 'provider/models-updated') {
+          unawaited(quota?.load());
+        }
       case 'usage/budgets-changed':
         unawaited(
           usage?.load(project: selectedProject, showSpinner: false) ??

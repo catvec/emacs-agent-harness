@@ -706,9 +706,25 @@ every label, folded ones too, so unfolding moves no column."
          ("allowed_warning" (insert (propertize "  Close to the plan's limit.\n" 'face 'warning))))
        (when (harness-json-true-p (plist-get quota :using-extra))
          (insert (propertize "  Calls are drawing on extra usage, billed at API prices.\n" 'face 'warning)))
+       (when (and (plist-get quota :informational) (plist-get quota :windows))
+         (insert (propertize "  Codex CLI reference (not this app's limit):\n" 'face 'harness-dim-face)))
        (if (plist-get quota :windows)
            (mapc #'harness-ui-usage--insert-window (plist-get quota :windows))
          (insert (propertize "  no quota reported yet\n" 'face 'harness-dim-face)))
+       (when-let* ((note (plist-get quota :quota-note)))
+         (insert "  " (propertize note 'face 'harness-dim-face) "\n"))
+       (when-let* ((url (plist-get quota :quota-url)))
+         (insert "  ")
+         (harness-ui-button "[Open ChatGPT usage]" (lambda () (browse-url url))
+                            :help "Open the plan's own usage in your browser")
+         (when (equal provider "chatgpt")
+           (insert "  ")
+           (if (harness-json-true-p (plist-get quota :codex-configured))
+               (harness-ui-button "[Disconnect Codex quota]" #'harness-ui-usage--disconnect-codex
+                                  :help "Stop reading Codex CLI's usage")
+             (harness-ui-button "[Connect Codex quota…]" #'harness-ui-usage--connect-codex
+                                :help "Opt in to read a separately signed-in Codex CLI account")))
+         (insert "\n"))
        (when-let* ((extra (harness-ui-describe-extra (plist-get quota :extra))))
          (insert "  " (propertize extra 'face 'harness-dim-face) "\n"))
        (when-let* ((updated (plist-get quota :updated)))
@@ -1055,6 +1071,37 @@ so neither a refresh nor a fold scrolls it."
   "Reload the dashboard."
   (interactive)
   (harness-ui-usage--load (current-buffer)))
+
+(defun harness-ui-usage--connect-codex ()
+  "Opt in to displaying a separately signed-in Codex CLI account's usage.
+The user confirms which SIWC account it belongs to; neither login's
+credentials are read or copied by the UI."
+  (interactive)
+  (let ((email (harness-plist-get-in (harness-ui-quota "chatgpt") '(:account :email))))
+    (if (not (and (stringp email) (not (string-empty-p email))))
+        (message "Select a ChatGPT account before connecting Codex quota")
+      (when (yes-or-no-p
+             (format (concat "After `codex login' as %s, show its Codex usage here? "
+                             "Codex and this app may have different limits. ") email))
+        (harness-ui-call
+         "_harness/config/set"
+         (list :key "harness-responses-codex-quota-account"
+               :value (prin1-to-string email) :printed t :scope "global"
+               :cwd default-directory)
+         (lambda (_) (harness-ui-refresh-quota "chatgpt" t)
+           (message "Reading Codex CLI quota for %s" email))
+         (lambda (err) (message "Could not connect Codex quota: %s" (harness-error-message err))))))))
+
+(defun harness-ui-usage--disconnect-codex ()
+  "Stop reading the Codex CLI account's usage for this plan."
+  (interactive)
+  (harness-ui-call
+   "_harness/config/unset"
+   (list :key "harness-responses-codex-quota-account" :scope "global"
+         :cwd default-directory)
+   (lambda (_) (harness-ui-refresh-quota "chatgpt" t)
+     (message "Codex quota disconnected"))
+   (lambda (err) (message "Could not disconnect Codex quota: %s" (harness-error-message err)))))
 
 (defun harness-ui-usage-refresh-plan ()
   "Ask every provider that reports quota for fresh billing and quota data.

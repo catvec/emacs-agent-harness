@@ -144,6 +144,7 @@ another Emacs.
 ### Options
 
 - `harness-responses-base-url` — Base URL of the Responses API a ChatGPT plan pays for.
+- `harness-responses-codex-quota-account` — Email whose Codex CLI quota may be displayed beside this ChatGPT plan.
 - `harness-responses-tiers` — Model names or id regexps the ChatGPT plan names for the tiers.
 
 ## Uses
@@ -156,4 +157,5 @@ another Emacs.
 ### Events it handles
 
 - `chatgpt-plan/accounts-changed` → `harness-responses--on-accounts-changed`
+- `config/changed` → `harness-responses--on-config-changed`
 

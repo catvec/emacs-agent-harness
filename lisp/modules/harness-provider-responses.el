@@ -135,11 +135,45 @@
 (require 'harness-http)
 (require 'harness-provider)
 (require 'harness-chatgpt-plan)
+(require 'harness-codex-quota)
 
 ;;;; Customisation
 
 (defconst harness-responses-provider-id 'chatgpt
   "Provider id of the ChatGPT plan, whose model ids are \"chatgpt:NAME\".")
+
+(defcustom harness-responses-codex-quota-account nil
+  "Email whose Codex CLI quota may be displayed beside this ChatGPT plan.
+Nil (the default) means no Codex process is started and no other login is
+read.  To opt in, sign in with `codex login' and set this to the email
+of the ChatGPT account you signed in to here.  The CLI must report the
+same email; if the selected account changes, its numbers are hidden.
+This is an explicit association of two separately signed-in accounts.
+Codex limits are informational: SIWC may have a separate app-specific
+allowance, so Codex's 100% must never block inference in the harness."
+  :type '(choice (const :tag "Off" nil) (string :tag "Confirmed account email"))
+  :group 'harness)
+
+(defconst harness-responses--codex-quota-ttl 60
+  "Seconds to keep a Codex CLI quota read before asking the CLI again.")
+
+(defvar harness-responses--codex-quota-cache nil
+  "Last Codex CLI read, (:for EMAIL :at TIME :result RESULT).")
+
+(defvar harness-responses--codex-quota-fetching nil
+  "In-flight Codex read, (:for EMAIL :promise PROMISE).")
+
+(defvar harness-responses--codex-quota-generation 0
+  "Incremented on an account or opt-in change to discard in-flight reads.")
+
+(defun harness-responses--forget-codex-quota (&optional all)
+  "Discard a Codex read and its reference; with ALL, discard own quota too."
+  (cl-incf harness-responses--codex-quota-generation)
+  (setq harness-responses--codex-quota-cache nil
+        harness-responses--codex-quota-fetching nil)
+  (when (or all (plist-get (harness-provider-quota-status harness-responses-provider-id)
+                           :informational))
+    (harness-provider-quota-forget harness-responses-provider-id)))
 
 (defconst harness-responses--request-timeout 1800
   "Maximum seconds one Responses request may take, including streaming.
@@ -829,8 +863,11 @@ when it does not.  See `harness-responses--error-kinds' for the kinds."
   "Tell STREAM's turn about the plan windows last reported, once per change.
 A provider's `quota' event is how the turn learns of them: the session
 keeps them for its header and the tool that shows its own details."
-  (let ((windows (plist-get (harness-provider-quota-status harness-responses-provider-id)
-                            :windows)))
+  (let* ((status (harness-provider-quota-status harness-responses-provider-id))
+         ;; A separately signed-in Codex account is only a reference: its
+         ;; windows must not be treated as the running turn's own limits.
+         (windows (unless (plist-get status :informational)
+                    (plist-get status :windows))))
     (when (and windows (not (equal windows (harness-responses--stream-quota-told stream))))
       (setf (harness-responses--stream-quota-told stream) windows)
       (harness-responses--emit stream (list :type 'quota :windows windows)))))
@@ -996,9 +1033,7 @@ read and dropped."
           ((or "codex.rate_limits" "rate_limits")
            (when-let* ((changes (harness-provider-plan-rate-limits
                                  (or (plist-get json :rate_limits) json))))
-             (harness-provider-quota-publish
-              harness-responses-provider-id
-              (harness-responses--account-status) changes)
+             (harness-responses--publish-own-quota changes)
              (harness-responses--emit-quota stream)))
           ("response.completed" (harness-responses--event-completed stream (plist-get json :response)))
           ("response.failed" (harness-responses--event-failed stream (plist-get json :response)))
@@ -1281,36 +1316,144 @@ The ChatGPT plan pays for these calls, so the billing is a subscription;
 the account's email comes from the sign-in, without any token."
   (let* ((status (harness-responses--status))
          (accounts (plist-get status :accounts))
-         (account (cl-find-if (lambda (a) (plist-get a :plan-usage)) accounts)))
-    (when (or account accounts)
+         (active (plist-get status :active))
+         (account (if active
+                      (cl-find active accounts :key (lambda (a) (plist-get a :id)) :test #'equal)
+                    (car accounts))))
+    (when account
       (list :billing 'subscription
             :auth "chatgpt"
             :plan-label "ChatGPT plan"
-            :account (list :email (plist-get (or account (car accounts)) :email))))))
+            :account (list :email (plist-get account :email))))))
+
+(defun harness-responses--publish-own-quota (changes)
+  "Publish CHANGES actually reported by this app's inference response.
+A Codex CLI reference must not be merged into authoritative SIWC windows."
+  (when (plist-get (harness-provider-quota-status harness-responses-provider-id)
+                   :informational)
+    (harness-provider-quota-forget harness-responses-provider-id))
+  (harness-provider-quota-publish
+   harness-responses-provider-id (harness-responses--account-status)
+   (append changes '(:source "responses" :informational nil))))
 
 (defun harness-responses--plan-headers (headers)
-  "Note the plan windows the response HEADERS report, and return the new status.
-Every answer this route sends for a ChatGPT plan carries the plan's
-windows in `x-codex-*' headers (`harness-provider-plan-rate-limit-headers'),
-so the quota costs no request of its own.  A change is announced as
-`provider/quota-updated'."
+  "Note the plan windows the response HEADERS report, if any.
+SIWC currently sends no numerical windows.  A compatible endpoint may
+send `x-codex-*' headers; only those answers are authoritative for this
+app and supersede any informational Codex CLI reference."
   (when-let* ((changes (harness-provider-plan-rate-limit-headers headers)))
-    (harness-provider-quota-publish harness-responses-provider-id
-                                    (harness-responses--account-status)
-                                    changes)))
+    (harness-responses--publish-own-quota changes)))
+
+(defconst harness-responses--quota-url "https://chatgpt.com/settings/usage"
+  "The official place to see a ChatGPT plan's own usage.")
+
+(defun harness-responses--codex-account ()
+  "Return the selected SIWC account's email when explicitly associated.
+The email must match the user's opt-in setting; Codex's email is checked
+separately before its usage is ever shown."
+  (let* ((status (harness-responses--status))
+         (selected (plist-get status :active))
+         (account (cl-find selected (plist-get status :accounts)
+                           :key (lambda (a) (plist-get a :id)) :test #'equal))
+         (email (plist-get account :email)))
+    (when (and (stringp harness-responses-codex-quota-account)
+               (stringp email)
+               (string-equal-ignore-case email harness-responses-codex-quota-account)
+               (harness-json-true-p (plist-get account :plan-usage)))
+      email)))
+
+(defun harness-responses--codex-result (result email)
+  "Return a display-only quota for Codex RESULT if it matches EMAIL.
+No value from another account crosses into the provider's quota."
+  (let ((reason (pcase (plist-get result :status)
+                  ('ok (if (and (stringp (plist-get result :email))
+                                (string-equal-ignore-case email (plist-get result :email)))
+                           nil
+                         "Codex CLI is signed in to a different ChatGPT account; its usage is hidden."))
+                  ('no-account "Sign in to Codex CLI with the same ChatGPT account (`codex login').")
+                  ('no-quota "Codex CLI did not report numerical plan limits.")
+                  ('missing "Codex CLI is not available; install it and run `codex login'.")
+                  (_ "Could not read Codex CLI plan usage; check its sign-in and refresh again."))))
+    (if reason
+        (list :quota-note reason)
+      (append (plist-get result :quota)
+              (list :limit-status nil :informational t :quota-note
+                    "Codex CLI usage (informational): this app may have a separate plan limit.")))))
+
+(defun harness-responses--codex-read (email refresh)
+  "Return a promise of Codex's indicative quota for EMAIL.
+A recent result is reused unless REFRESH asks anew.  Concurrent reads
+share a process; errors are cached briefly so failed reads do not spawn
+a subprocess for every UI refresh."
+  (if (and (not (harness-json-true-p refresh))
+           (equal email (plist-get harness-responses--codex-quota-cache :for))
+           (< (- (float-time) (or (plist-get harness-responses--codex-quota-cache :at) 0))
+              harness-responses--codex-quota-ttl))
+      (harness-resolved (plist-get harness-responses--codex-quota-cache :result))
+    (or (and (equal email (plist-get harness-responses--codex-quota-fetching :for))
+             (plist-get harness-responses--codex-quota-fetching :promise))
+        (let ((shared (harness-make-promise))
+              (generation harness-responses--codex-quota-generation))
+          (setq harness-responses--codex-quota-fetching (list :for email :promise shared))
+          (harness-then
+           (harness-codex-quota-read)
+           (lambda (result)
+             (when (and (= generation harness-responses--codex-quota-generation)
+                        (eq shared (plist-get harness-responses--codex-quota-fetching :promise)))
+               (setq harness-responses--codex-quota-fetching nil)
+               (setq harness-responses--codex-quota-cache
+                     (list :for email :at (float-time)
+                           :result (harness-responses--codex-result result email))))
+             (harness-resolve shared (harness-responses--codex-result result email)))
+           (lambda (_err)
+             (when (eq shared (plist-get harness-responses--codex-quota-fetching :promise))
+               (setq harness-responses--codex-quota-fetching nil))
+             (harness-resolve shared '(:quota-note "Could not read Codex CLI plan usage."))))
+          shared))))
 
 (defun harness-responses--quota (&optional refresh)
-  "Return a promise of the account's billing and the plan's quota.
-The shape is the one `provider/quota' documents.  The windows are the
-ones the account's answers last carried; this route has no endpoint to
-ask for them, so REFRESH makes no request and is only accepted for the
-interface's sake.  Without a signed-in account there is nothing to
-report."
-  (ignore refresh)
-  (harness-resolved
-   (when-let* ((base (harness-responses--account-status)))
-     (harness-provider-quota-update
-      base (harness-provider-quota-status harness-responses-provider-id)))))
+  "Return the signed-in account's billing and numerical quota, if known.
+SIWC does not expose a numerical usage endpoint; until its own answers
+report windows, an explicitly associated Codex CLI login can supply a
+read-only, informational reference.  Codex usage never determines
+whether this app may make a request or whether fallback should run."
+  (if-let* ((base (harness-responses--account-status)))
+      (let* ((status (harness-provider-quota-status harness-responses-provider-id))
+           (own (and status (not (plist-get status :informational))
+                     (plist-get status :windows)))
+           (email (harness-responses--codex-account))
+           (generation harness-responses--codex-quota-generation)
+           (note (cond
+                  (own nil)
+                  ((not harness-responses-codex-quota-account)
+                   "OpenAI does not report this app's numerical quota. To show Codex CLI usage, sign in with `codex login' and connect that account here.")
+                  ((not email)
+                   "The selected ChatGPT account differs from the confirmed Codex quota account; usage is hidden.")
+                  (t nil)))
+           (basic (append base (list :quota-url harness-responses--quota-url
+                                     :codex-configured (and harness-responses-codex-quota-account t))
+                          (when note (list :quota-note note)))))
+      (cond
+       (own (harness-resolved (harness-provider-quota-update basic status)))
+       ((not email) (harness-resolved basic))
+       (t (harness-then
+           (harness-responses--codex-read email refresh)
+           (lambda (changes)
+             ;; A response or account switch during a read must not reattach
+             ;; the old account's reference when it completes.
+             (if (or (/= generation harness-responses--codex-quota-generation)
+                     (not (equal email (harness-responses--codex-account))))
+                 (harness-responses--quota)
+               (let ((current (harness-provider-quota-status harness-responses-provider-id)))
+                 (if (and (plist-get current :windows)
+                          (not (plist-get current :informational)))
+                     (harness-provider-quota-update basic current)
+                   (if (plist-get changes :windows)
+                       (harness-provider-quota-publish harness-responses-provider-id basic changes)
+                     (when (plist-get current :informational)
+                       (harness-provider-quota-forget harness-responses-provider-id))
+                     (harness-provider-quota-update basic changes))))))))))
+    (harness-resolved nil)))
 
 ;;;; Registration
 
@@ -1362,12 +1505,19 @@ accounts of the ChatGPT plan signed in."
 
 (defun harness-responses--on-accounts-changed (&rest _)
   "Register or remove the provider when the ChatGPT accounts change."
+  (harness-responses--forget-codex-quota t)
   (harness-responses-refresh))
+
+(defun harness-responses--on-config-changed (key &rest _)
+  "Forget a Codex reference after its confirmed account option KEY changes."
+  (when (eq key 'harness-responses-codex-quota-account)
+    (harness-responses--forget-codex-quota)))
 
 (defun harness-responses--init ()
   "Register the provider if an account is signed in, and listen for changes."
   (harness-responses-refresh)
-  (harness-on 'chatgpt-plan/accounts-changed #'harness-responses--on-accounts-changed))
+  (harness-on 'chatgpt-plan/accounts-changed #'harness-responses--on-accounts-changed)
+  (harness-on 'config/changed #'harness-responses--on-config-changed))
 
 (harness-define-module 'provider-responses
   :doc "OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT)."

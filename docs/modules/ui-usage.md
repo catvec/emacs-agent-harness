@@ -104,6 +104,7 @@ read from the current theme.
 ### Methods it calls
 
 - `config/set` ([config](config.md))
+- `config/unset` ([config](config.md))
 - `fallback/clear` ([fallback](fallback.md))
 - `fallback/status` ([fallback](fallback.md))
 - `session/get` ([session](session.md))

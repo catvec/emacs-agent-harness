@@ -332,6 +332,76 @@ void main() {
       expect(find.text('DeepSeek'), findsNothing);
     });
 
+    testWidgets('shows a newly registered ChatGPT plan and its windows', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _pump(tester, rig);
+      await _toUsage(tester);
+      rig.harness.chatgptProvider = true;
+      rig.harness.quotas['chatgpt'] = {
+        'billing': 'subscription',
+        'plan': 'plus',
+        'plan-label': 'ChatGPT Plus',
+        'informational': true,
+        'source': 'codex-cli',
+        'quota-note': 'Codex CLI quota may differ from this app’s limits.',
+        'windows': [
+          {'name': '5h', 'label': 'Current session (5 hours)', 'used': 0.34},
+          {'name': '7d', 'label': 'This week, all models', 'used': 0.61},
+        ],
+      };
+      rig.harness.announce('provider/models-updated');
+      for (var i = 0; i < 20 && rig.app.quota?.of('chatgpt') == null; i++) {
+        await _settle(tester, 1);
+      }
+      await tester.scrollUntilVisible(
+        find.text('ChatGPT Plus'),
+        200,
+        scrollable: _usageScrollable(),
+      );
+      expect(find.text('ChatGPT plan'), findsOneWidget);
+      expect(find.text('ChatGPT Plus'), findsOneWidget);
+      expect(
+        find.text('Codex CLI quota may differ from this app’s limits.'),
+        findsOneWidget,
+      );
+      expect(find.text('34%'), findsOneWidget);
+      expect(find.text('61%'), findsOneWidget);
+    });
+
+    testWidgets('explains when ChatGPT does not report numerical limits', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _pump(tester, rig);
+      await _toUsage(tester);
+      rig.harness.chatgptProvider = true;
+      rig.harness.quotas['chatgpt'] = {
+        'billing': 'subscription',
+        'plan-label': 'ChatGPT plan',
+        'quota-note':
+            'OpenAI does not report this app’s quota; check ChatGPT usage.',
+      };
+      rig.harness.announce('provider/models-updated');
+      for (var i = 0; i < 20 && rig.app.quota?.of('chatgpt') == null; i++) {
+        await _settle(tester, 1);
+      }
+      await tester.scrollUntilVisible(
+        find.text(
+          'OpenAI does not report this app’s quota; check ChatGPT usage.',
+        ),
+        200,
+        scrollable: _usageScrollable(),
+      );
+      expect(
+        find.text(
+          'OpenAI does not report this app’s quota; check ChatGPT usage.',
+        ),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('lists the extra usage a plan allows', (tester) async {
       final rig = await _rig();
       await _pump(tester, rig);

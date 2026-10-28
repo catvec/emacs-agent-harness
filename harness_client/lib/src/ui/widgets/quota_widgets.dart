@@ -258,7 +258,13 @@ class PlanDetails extends StatelessWidget {
             HarnessColors.amber,
             Icons.add_card_rounded,
           ),
-        if (quota.windows.isEmpty)
+        if (quota.quotaNote != null || quota.informational)
+          _Notice(
+            quota.quotaNote ?? 'Codex CLI quota is informational; this app may have separate limits.',
+            HarnessColors.amber,
+            Icons.info_outline_rounded,
+          ),
+        if (quota.windows.isEmpty && quota.quotaNote == null)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: Text('No quota reported yet.', style: quiet),
