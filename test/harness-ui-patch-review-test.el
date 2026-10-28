@@ -418,6 +418,15 @@ Nothing else does: the board has no button for them."
         (should (string-match-p "^    M  img\\.bin +binary$" text))
         (should (string-match-p "^  RET: compare" text))
         (should-not (string-search "keep.el" text)))
+      ;; The short hint keeps the full key list on hover.
+      (with-current-buffer popout
+        (goto-char (point-min))
+        (re-search-forward "^  RET: compare")
+        (let ((at (line-beginning-position)))
+          (should (eq (get-text-property at 'help-echo)
+                      harness-ui-patch-review--hint-detail))
+          (should (string-search "RET or a click compares a file in Ediff"
+                                 (get-text-property at 'help-echo)))))
       (with-current-buffer popout
         (goto-char (harness-ui-patch-review--row-start id 0))
         (should (eq #'harness-ui-patch-review-ediff (key-binding (kbd "RET"))))
@@ -2213,6 +2222,15 @@ and RET on it act in the report."
         ;; Open threads at first: the closed one of b.el is behind the filter.
         (should-not (string-search "Who used b3?" text))
         (should-not (string-search "Other threads" text)))
+      ;; The threads' short hint too keeps its full keys on hover.
+      (with-current-buffer popout
+        (goto-char (point-min))
+        (re-search-forward "^  RET: compare/jump")
+        (let ((at (line-beginning-position)))
+          (should (eq (get-text-property at 'help-echo)
+                      harness-ui-patch-review--thread-hint-detail))
+          (should (string-search "RET compares the file at the thread's line"
+                                 (get-text-property at 'help-echo)))))
       ;; T goes to the section in the same buffer: no view of its own opens.
       (with-current-buffer popout
         (goto-char (harness-ui-patch-review--row-start id 0))

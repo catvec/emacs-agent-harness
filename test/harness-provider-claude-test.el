@@ -1949,8 +1949,10 @@ alone, and `provider/close' ends it."
          (hint (harness-provider-claude-test--find events 'hint))
          (result (harness-provider-claude-test--find events 'tool-result)))
     (should-not (harness-provider-claude-test--find events 'tool-call))
-    (should (string-match-p "refused to run echo" (plist-get hint :text)))
+    (should (string-match-p "denied harness tool echo" (plist-get hint :text)))
+    (should (string-match-p "settings or managed policy outrank the harness" (plist-get hint :text)))
     (should (string-match-p "harness-provider-claude-permission-args" (plist-get hint :text)))
+    (should (string-match-p "Reason: " (plist-get hint :text)))
     ;; The CLI's error result comes through and the turn goes on.
     (should (equal "toolu_fake_1" (plist-get result :id)))
     (should (plist-get result :is-error))

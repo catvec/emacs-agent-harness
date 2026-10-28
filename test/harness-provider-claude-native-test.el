@@ -593,7 +593,9 @@ the user that settings outrank it."
           (should hint)
           (should (string-match-p "Bash" (plist-get hint :text)))
           (should (string-match-p "bash" (plist-get hint :text)))
-          (should (string-match-p "Check Claude Code permission settings" (plist-get hint :text)))
+          (should (string-match-p "settings or managed policy outrank the harness" (plist-get hint :text)))
+          (should (string-match-p "harness-provider-claude-native-permissions" (plist-get hint :text)))
+          (should (string-match-p "harness-provider-claude-permission-args" (plist-get hint :text)))
           (should (string-match-p "Reason: Permission to use Bash has been denied" (plist-get hint :text)))
           (should (eq 'end-turn (plist-get (harness-provider-claude-native-test--find events 'done) :stop-reason))))))))
 
@@ -756,7 +758,9 @@ once."
              (hint (harness-provider-claude-native-test--find events 'hint)))
         (should hint)
         (should (string-match-p "mcp__other__query" (plist-get hint :text)))
-        (should (string-match-p "refuses such a call when Claude Code asks it" (plist-get hint :text)))
+        (should (string-match-p "ran mcp__other__query from your MCP server other" (plist-get hint :text)))
+        (should (string-match-p "allowed it without asking the harness" (plist-get hint :text)))
+        (should (string-match-p "refuses such calls when Claude Code asks it" (plist-get hint :text)))
         (should-not (harness-provider-claude-native-test--find events 'tool-call))
         (should (eq 'end-turn (plist-get (harness-provider-claude-native-test--find events 'done) :stop-reason)))))))
 

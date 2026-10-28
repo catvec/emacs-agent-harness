@@ -2555,7 +2555,7 @@ again.  The library's commands act on the thread or the comment at point.")
 
 (defconst harness-ui-patch-review--thread-hint-detail
   "RET compares the file at the thread's line or shows where a comment was made, r replies, e edits a draft, k deletes one and K a thread of drafts, x closes a thread or opens it again, o follows an agent's comment, c comments on the change as a whole, f changes which threads show."
-  "What the changes say under the heading of the threads.")
+  "The full key list the threads show on hover.")
 
 (defun harness-ui-patch-review--text-width (&optional margin)
   "Return how wide to draw threads in the current buffer, less MARGIN columns.
@@ -2603,7 +2603,7 @@ thread or comment at point and its buttons draw the section again."
                 (propertize (change-review-ui-threads-heading set filter)
                             'harness-ui-patch-review-threads t 'wrap-prefix "  ")
                 (if compact ""
-                  (propertize (concat "  " "RET: open  r: reply  x: close/reopen  f: filter  (hover for more)\n")
+                  (propertize (concat "  " "RET: compare/jump  r: reply  x: close/reopen  f: filter  (hover for more)\n")
                               'help-echo harness-ui-patch-review--thread-hint-detail
                               'face 'harness-hint-face 'wrap-prefix "  "))
                 (harness-ui-patch-review--wrap-headers
@@ -3381,7 +3381,7 @@ its key.  COMPACT uses shorter words."
 
 (defconst harness-ui-patch-review--hint-detail
   "RET or a click compares a file in Ediff (a directory: folds it), n and p move between files, a approves one (✔ approved, ✓ only viewed: only the approved are skipped), A all of them, V takes the files the newest commit left alone as viewed; s and u switch skipping the approved files and approving those you go through without a comment, t the tree, d chooses the diff shown, T goes to the threads, e on a thread edits one of its drafts, k deletes one and K the thread when it is only drafts, m marks a thread the agent closed as reviewed (M all of them).  In Ediff c comments, r replies, e edits a draft or goes to the box, k deletes a draft and K a thread of drafts, N and P go to the next and previous file, q comes back."
-  "What the report says under the changes.")
+  "The full key list the changes show on hover.")
 
 (defun harness-ui-patch-review--tree-width (&optional frame)
   "Return how many columns wide the tree beside Ediff is in FRAME.

@@ -2144,7 +2144,7 @@ reads in its result."
             (plist-put spawn :foreign-tools (cons server (plist-get spawn :foreign-tools))))
           (harness-provider-claude--emit
            entry (list :type 'hint
-                       :text (format "Claude Code called %s, a tool of an MCP server of yours (%s), not one of the harness's. The harness refuses such a call when Claude Code asks it; where your Claude Code settings allow the tool, Claude Code runs it without asking, and the harness does not decide."
+                       :text (format "Claude Code ran %s from your MCP server %s, not a harness tool; your Claude Code settings allowed it without asking the harness. The harness refuses such calls when Claude Code asks it."
                                      name server))))))))
 
 (defun harness-provider-claude--handle-assistant (entry message &optional checkpoint sub-agent)
@@ -2252,17 +2252,18 @@ round it."
                    name (harness-provider-claude-session-id entry) why)
       (harness-provider-claude--emit
        entry (list :type 'hint
-                   :text (format (concat "Claude Code refused to run %s; its permission rules must let"
-                                         " the harness's tools through (see the setting"
-                                         " harness-provider-claude-permission-args).  It said: %s")
+                   :text (format (concat "Claude Code denied harness tool %s. Its settings or managed policy"
+                                         " outrank the harness (see harness-provider-claude-permission-args)."
+                                         " Reason: %s")
                                  (harness-provider-claude--strip-prefix name) why))))
      (builtin
       (harness-log 'warn "provider-claude: Claude Code denied its %s for %s: %s"
                    name (harness-provider-claude-session-id entry) why)
       (harness-provider-claude--emit
        entry (list :type 'hint
-                   :text (format (concat "Claude Code denied %s (harness %s). Check Claude Code permission settings"
-                                         " and harness-provider-claude-native-permissions. Reason: %s")
+                   :text (format (concat "Claude Code denied %s (harness %s). Its settings or managed policy"
+                                         " outrank the harness (see harness-provider-claude-native-permissions"
+                                         " and harness-provider-claude-permission-args). Reason: %s")
                                  name builtin why)))))))
 
 ;;;; Account, billing and quota

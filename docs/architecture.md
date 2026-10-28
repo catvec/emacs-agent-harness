@@ -3717,8 +3717,8 @@ stage's label, else `gate`; the access module's judgements and the
   ~/proj/lisp/" for a directory), with the record
   in its `:meta` `:permission` (see Node).  A rule or a grant that was
   there already gives a note with nothing to undo (no `:undo`, and the
-  text says "already so").  allow-once records nothing and gives no
-  note, the turn grant of the agent's own request included.  What a
+  text says "already set; no change").  allow-once records nothing and
+  gives no note, the turn grant of the agent's own request included.  What a
   new note records is also a lasting decision of the kind `permission`
   (`decision/record`, see "decisions"), whose id the note's `:meta`
   `:decision` holds: undone and redone by id, from any session.

@@ -220,6 +220,24 @@ say in the report that a screenshot was not possible, and hand in what
 does show the work -- a rendered image or chart, the harness log, or
 the tool call that ran the command -- rather than describing it.
 
+## Review and permission messages
+
+Review changes shows the common keys briefly; hover over either key hint for
+its full list, including Ediff and thread commands. For example, the file
+hint starts `RET: compare  a: approve  n/p: files  T: threads`, and the
+threads hint `RET: compare/jump  r: reply  x: close/reopen  f: filter`.
+
+A Claude Code native-tool denial identifies both tools, both settings and the
+reason, e.g. `Claude Code denied Bash (harness bash). Its settings or managed
+policy outrank the harness (see harness-provider-claude-native-permissions and
+harness-provider-claude-permission-args). Reason: Permission denied`.
+`harness-provider-claude-permission-args` controls what the harness asks of
+Claude Code; its settings and managed policy can override that.
+Plugin mode can also load other MCP servers: their tools are offered to the
+model, and Claude Code may run allowed calls without consulting the harness,
+which refuses foreign calls when asked. A repeated lasting permission answer
+is marked `already set; no change` and offers no new undo.
+
 ## Screenshots
 
 `scripts/media.sh` takes the pictures in `docs/media` again, all of
@@ -227,19 +245,3 @@ them or the ones named (`scripts/media.sh chat tasks`), in an `emacs -Q`
 of its own with a demo project and scripted agents, on a private
 display.  [screenshots.md](screenshots.md) says how it works and how to
 add or change a picture when a view changes.
-
-### Review and permission messages
-
-Review changes shows the common keys briefly; hover over either key hint for
-its full list, including Ediff and thread commands. For example, the file
-hint starts `RET: compare  a: approve  n/p: files  T: threads`.
-
-A Claude Code native-tool denial identifies both tools and the reason, e.g.
-`Claude Code denied Bash (harness bash). Check Claude Code permission settings
-and harness-provider-claude-native-permissions. Reason: Permission denied`.
-Claude Code's settings and managed policy can override the harness's requested
-permissions; `harness-provider-claude-permission-args` controls those requests.
-Plugin mode can also load other MCP servers: their tools are offered to the
-model, and Claude Code may run allowed calls without consulting the harness.
-The harness refuses foreign calls when asked. A repeated lasting permission
-answer is marked `already set; no change` and offers no new undo.

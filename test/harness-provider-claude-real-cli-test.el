@@ -368,8 +368,10 @@ command are, and a managed deny rule refuses a command without asking."
         (should (equal '("write_file" "bash") (harness-real-cli-test--names events 'tool-permission)))
         (should (plist-get curl :is-error))
         (should (string-match-p "has been denied" (plist-get curl :content)))
-        (should (string-match-p "outrank the harness"
-                                (plist-get (car (harness-real-cli-test--of events 'hint)) :text)))
+        (let ((text (plist-get (car (harness-real-cli-test--of events 'hint)) :text)))
+          (should (string-match-p "settings or managed policy outrank the harness" text))
+          (should (string-match-p "harness-provider-claude-native-permissions" text))
+          (should (string-match-p "Reason: Permission to use Bash has been denied" text)))
         (should (file-exists-p (expand-file-name "made.txt" (plist-get result :dir))))))))
 
 ;;;; The plugin
