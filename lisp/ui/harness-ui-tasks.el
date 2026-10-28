@@ -5231,12 +5231,14 @@ naming no plan model, is not sent one to plan: it would start it."
     (user-error "This harness does not plan tasks: update it, or switch to Submit or Refine (%s)"
                 (substitute-command-keys "\\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-cycle-mode]")))
   (pcase-let* ((`(,text . ,atts)
+                ;; An empty box sends the review's pending replies when it
+                ;; has any; which it has is the harness's to say, and this
+                ;; Emacs may have no review of the task loaded.  So do not
+                ;; refuse the empty box here: `task/reject' takes the drafts
+                ;; it holds, and says feedback is needed when there are none.
                 (if (and (eq (car harness-ui-tasks--target) 'reject)
                          (string-blank-p (harness-compose-text))
-                         (null harness-compose-attachments)
-                         (fboundp 'harness-ui-review--pending-p)
-                         (harness-ui-review--pending-p
-                          (harness-ui-tasks--find (cdr harness-ui-tasks--target))))
+                         (null harness-compose-attachments))
                     (cons "" nil)
                   (harness-compose-take)))
                (target harness-ui-tasks--target)
@@ -5706,18 +5708,20 @@ to the limit of tasks at once: with no slot free it takes the slot of
 a task at work it outranks, which goes back to the queue, or waits in
 the queue with your feedback when every task at work goes first.  With
 a prefix argument the feedback is read in the minibuffer instead; from
-Lisp, FEEDBACK is sent at once."
+Lisp, FEEDBACK is sent at once.  FEEDBACK that is empty or blank sends
+the pending replies of the task's review, if it has any: the harness
+decides from the drafts it holds, which this Emacs may not have loaded,
+and says feedback is needed when it has none."
   (interactive (list (and current-prefix-arg
                           (progn (harness-ui-tasks--review-task) (read-string "Feedback: ")))))
   (let ((task (harness-ui-tasks--review-task)))
-    (cond
-     ((null feedback) (harness-ui-tasks--set-compose "" (cons 'reject (plist-get task :id))))
-     ((and (harness-string-blank-p feedback)
-           (not (and (fboundp 'harness-ui-review--pending-p)
-                     (harness-ui-review--pending-p task))))
-      (user-error "Sending a task back needs feedback"))
-     (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
-                                        "Sending the task back" #'harness-ui-tasks--say-sent-back)))))
+    (if (null feedback)
+        (harness-ui-tasks--set-compose "" (cons 'reject (plist-get task :id)))
+      ;; Leaving it to the harness tells it to take the review's drafts,
+      ;; even when this Emacs has no review of the task loaded to see them.
+      (harness-ui-tasks--request-then "_harness/task/reject"
+                                      (list :id (plist-get task :id) :feedback feedback)
+                                      "Sending the task back" #'harness-ui-tasks--say-sent-back))))
 
 (defun harness-ui-tasks--count-tasks (n)
   "N tasks in words: \"task\" for one, \"3 tasks\" for more."

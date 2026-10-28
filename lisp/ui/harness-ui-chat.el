@@ -5056,7 +5056,6 @@ session opens as it is, and the first message sent from it resumes it."
 
 (declare-function harness-ui-review--task "harness-ui-review" (sid))
 (declare-function harness-ui-review--reviewing-p "harness-ui-review" (task))
-(declare-function harness-ui-review--pending-p "harness-ui-review" (task))
 (declare-function harness-ui-review--send "harness-ui-review" (text attachments))
 
 (defvar-local harness-chat-send-function nil
@@ -5182,15 +5181,18 @@ A module showing something of its own in this buffer
      ((and question picked)
       (harness-chat--answer-question (plist-get question :id)
                                      (harness-ui-pending-compose-answer harness-ui-session-id question "")))
-     ;; An empty review box can still send pending code-review replies.
-     ;; Use task/reject directly: an empty session prompt is not a message.
+     ;; An empty review box can still send pending code-review replies,
+     ;; which the harness may hold without this Emacs having loaded them:
+     ;; send it back directly, and let the harness take the drafts it has.
+     ;; An empty session prompt is not a message.
      ((and (not question) (not harness-chat-send-function)
            (string-empty-p typed) (null harness-compose-attachments)
            (not harness-chat--dead)
            (fboundp 'harness-ui-review--task)
-           (let ((task (harness-ui-review--task harness-ui-session-id)))
-             (and (harness-ui-review--reviewing-p task)
-                  (harness-ui-review--pending-p task))))
+           (harness-ui-review--reviewing-p
+            (harness-ui-review--task harness-ui-session-id)))
+      (harness-chat--drop-edited-queue-item)
+      (harness-chat--clear-compose)
       (harness-ui-review--send "" nil))
      ;; A module whose panel owns the box takes its text.
      (harness-chat-send-function

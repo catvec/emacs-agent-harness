@@ -1101,11 +1101,29 @@ come with them."
 
 (defun harness-ui-patch-review--pending-p (task)
   "Return non-nil when the review of TASK has drafts to send with its feedback.
+A draft whose text is blank is no feedback and does not count: sending
+with only such a draft is the empty send it looks like.  The review has
+to be loaded here to know (`harness-ui-patch-review--pending-known-p');
+the harness checks the drafts it holds when the task is sent back, and
+takes them, if any, whatever this Emacs has loaded.
 On `harness-ui-review-pending-functions'."
   (when-let* ((review (and (plist-get task :id)
                            (harness-ui-patch-review--known (plist-get task :id))))
               (set (harness-ui-patch-review--r-set review)))
-    (and (change-review-drafts set) t)))
+    (and (cl-some (lambda (draft)
+                    (not (harness-string-blank-p (change-review-comment-body draft))))
+                  (change-review-drafts set))
+         t)))
+
+(defun harness-ui-patch-review--pending-known-p (task)
+  "Return non-nil when the drafts of TASK's review are known here.
+That is once this Emacs has the review and has fetched its threads from
+the harness.  On `harness-ui-review-pending-known-functions'."
+  (when-let* ((review (and (plist-get task :id)
+                           (harness-ui-patch-review--known (plist-get task :id)))))
+    (and (harness-ui-patch-review--r-set review)
+         (harness-ui-patch-review--r-synced review)
+         t)))
 
 ;;;; Where the branch is
 
@@ -5675,6 +5693,7 @@ the review again."
   (add-hook 'change-review-changed-functions #'harness-ui-patch-review--on-comment)
   (with-eval-after-load 'harness-ui-review
     (add-hook 'harness-ui-review-pending-functions #'harness-ui-patch-review--pending-p)
+    (add-hook 'harness-ui-review-pending-known-functions #'harness-ui-patch-review--pending-known-p)
     (add-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel))
   (with-eval-after-load 'harness-ui-chat
     (add-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat))
@@ -5692,6 +5711,7 @@ the review again."
   (remove-hook 'harness-ui-event-functions #'harness-ui-patch-review--on-event)
   (remove-hook 'change-review-changed-functions #'harness-ui-patch-review--on-comment)
   (remove-hook 'harness-ui-review-pending-functions #'harness-ui-patch-review--pending-p)
+  (remove-hook 'harness-ui-review-pending-known-functions #'harness-ui-patch-review--pending-known-p)
   (remove-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel)
   (remove-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat)
   (when (boundp 'harness-ui-linking-handlers)

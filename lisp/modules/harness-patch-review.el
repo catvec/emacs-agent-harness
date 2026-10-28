@@ -1110,7 +1110,8 @@ the threads, also when no comment is on a file and so quotes nothing."
   "Return the drafts of TASK's review as text to add to its feedback, or nil.
 On `harness-tasks-feedback-additions-functions'.  WORDS are what the user
 sends the task back with.  The text is the drafts, if there are any,
-quoted from the diff; the function marks them sent once the task is sent
+quoted from the diff; a draft whose text is blank is no feedback and is
+left out.  The function marks the drafts it sent once the task is sent
 back, and keeps WORDS, if there are any, as a thread on the change as a
 whole, sent: the review has a record of what each round said."
   (let* ((id (plist-get task :id))
@@ -1118,7 +1119,10 @@ whole, sent: the review has a record of what each round said."
          ;; the tasks module leaves them out of WORDS (`harness-tasks--words').
          (words (and (stringp words) (not (string-blank-p words)) (string-trim words)))
          (set (harness-patch-review--set-for id (and words t)))
-         (drafts (and set (change-review-drafts set))))
+         (drafts (and set
+                      (cl-remove-if (lambda (draft)
+                                      (harness-string-blank-p (change-review-comment-body draft)))
+                                    (change-review-drafts set)))))
     (when (or drafts words)
       (let ((round (length (plist-get task :feedback))))
         (cons (and drafts (harness-patch-review--render task set drafts))

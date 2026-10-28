@@ -47,9 +47,15 @@
 ;; needs nothing of its own: the harness takes any message the user
 ;; sends the session of a task in review for the feedback that sends it
 ;; back, wherever it was written (`harness-tasks--on-message'); another
-;; session's agent's message is no review and does not.  The report's box
-;; sends it back itself (`harness-ui-review--send' through
-;; `harness-ui-report-compose-functions').  Its keys,
+;; session's agent's message is no review and does not.  An empty box is
+;; enough while the review holds drafts, the replies to its comments:
+;; `harness-chat-send' then sends the task back itself
+;; (`harness-ui-review--send'), leaving the harness to take the drafts it
+;; holds, which this Emacs may not have loaded; with none it is the empty
+;; send it looks like.  The report's box sends it back itself
+;; (`harness-ui-review--send' through `harness-ui-report-compose-functions'),
+;; and there the review is loaded, so it can say there is nothing to
+;; send before sending.  Its keys,
 ;; C-c C-v to verify and C-c C-x to send back, are those of
 ;; `harness-ui-review-minor-mode', on only while the banner shows: the
 ;; rest of the time the buffer's own keys stand, C-c C-v attaching the
@@ -100,6 +106,26 @@ same.  The harness adds that to whatever sends the task back.")
 (defun harness-ui-review--pending-p (task)
   "Return non-nil when the review of TASK has something to send with its feedback."
   (and (run-hook-with-args-until-success 'harness-ui-review-pending-functions task) t))
+
+(defvar harness-ui-review-pending-known-functions nil
+  "Functions that say whether a review's drafts are known to this Emacs.
+Each is called with the TASK, which waits for review, and returns
+non-nil when this Emacs has the task's review loaded, so that
+`harness-ui-review-pending-functions' can tell whether it has anything
+to send.  A module that keeps a review adds one; with none, there is no
+review here, and an empty box is the empty send it is.  While a module
+has not loaded the review, an empty box still goes to the harness,
+which takes the drafts it holds: this Emacs may be another client, or
+one that started after the replies were made.")
+
+(defun harness-ui-review--pending-known-p (task)
+  "Return non-nil when this Emacs knows whether TASK's review has drafts.
+With no function on `harness-ui-review-pending-known-functions' it knows
+there are none: no module here keeps a review.  A module that keeps one
+says so once it has the review loaded, so that this Emacs can tell the
+empty box from one whose replies it has not heard of."
+  (or (null harness-ui-review-pending-known-functions)
+      (and (run-hook-with-args-until-success 'harness-ui-review-pending-known-functions task) t)))
 
 (defvar harness-ui-review-changes-functions nil
   "Functions that draw the changes of a task under review in its banner.
@@ -206,9 +232,18 @@ The report popout's box under the banner sends this way
 \(`harness-ui-report-compose-functions'); a session's box is the
 session's own, the harness taking any message the user sends the
 task's session for the feedback that sends it back
-\(`harness-tasks--on-message')."
+\(`harness-tasks--on-message'), and its empty box sending this way
+\(`harness-chat-send').
+
+An empty box sends the drafts of the review, the replies to its
+comments, when it has any.  This Emacs says there are none only when it
+has the review loaded (`harness-ui-review--pending-known-p'); without
+it the harness decides, taking the drafts it holds, as it does for a
+message.  The report's box always has its review, and says there is
+nothing to send before sending."
   (let ((task (harness-ui-review--current-task)))
     (if (and (harness-string-blank-p text) (null attachments)
+             (harness-ui-review--pending-known-p task)
              (not (harness-ui-review--pending-p task)))
         (user-error "Sending it back needs feedback")
       (harness-ui-call "_harness/task/reject"
@@ -457,9 +492,14 @@ less its [Review Changes] button.  While it shows, the review keys are on, and
 the box under it sends TASK back (`harness-ui-review--report-compose')."
   (let ((review (harness-ui-review--reviewing-p task)))
     (harness-ui-review--keys review)
-    ;; An empty box sends the task back when the review has drafts to send.
+    ;; An empty box sends the task back when the review has drafts to send;
+    ;; until this Emacs has loaded them, the harness decides.
     (setq-local harness-ui-popout-empty-ok-function
-                (and review (lambda () (harness-ui-review--pending-p (harness-ui-report-task)))))
+                (and review
+                     (lambda ()
+                       (let ((task (harness-ui-report-task)))
+                         (or (not (harness-ui-review--pending-known-p task))
+                             (harness-ui-review--pending-p task))))))
     (and review (harness-ui-review--face (harness-ui-review--banner task nil t)))))
 
 (defun harness-ui-review--report-compose (task)

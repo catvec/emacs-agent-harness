@@ -59,6 +59,7 @@
 (declare-function harness-tasks--set "harness-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks--find "harness-ui-tasks")
+(declare-function harness-patch-review--set-for "harness-patch-review" (id &optional create))
 (declare-function harness-ui-report-popout "harness-ui-report")
 (declare-function harness-acp--drop-client "harness-acp")
 (declare-function ediff-toggle-split "ediff-util" ())
@@ -1255,29 +1256,70 @@ longer drafts.  An empty box sends them alone."
         (should (string-prefix-p "My review comments on your branch task/fix" feedback))
         (should (string-search "Why two?" feedback))))))
 
+(defun harness-ui-patch-review-test--server-reply (id body)
+  "Add BODY as a draft reply to a thread of task ID's review, in the harness.
+The thread is a comment of the reviewer's, sent; the reply waits to go
+with the feedback.  No review of ID is loaded in the UI: only the
+harness holds them, as after a restart or from another client."
+  (let* ((set (harness-patch-review--set-for id t))
+         (root (change-review-comment set "Existing comment"
+                                      :author (change-review-user "Noah" "noah@example.org")
+                                      :sent (float-time))))
+    (change-review-reply set root body
+                         :author (change-review-user "Noah" "noah@example.org"))))
+
 (defun harness-ui-patch-review-test--reply-alone (surface)
-  "Send an existing thread's reply from SURFACE, but reject nothing."
+  "Send an existing thread's reply from SURFACE, but reject nothing.
+The harness holds the reply, not the UI: SURFACE sends it without any
+top-level feedback, and it reaches the task once."
   (harness-ui-patch-review-test-with-task
-      (let* ((_popout (harness-ui-patch-review-test--changes board id))
-             (review (gethash id harness-ui-patch-review--reviews))
-             (set (harness-ui-patch-review--r-set review))
-             (chat (and (eq surface 'chat) (harness-chat-buffer sid))))
+      (let ((chat (and (eq surface 'chat) (harness-chat-buffer sid))))
         (when chat
           (harness-test-wait (lambda () (gethash sid harness-ui-review--tasks))
-                             5 "the chat review task"))
+                             5 "the chat review task")
+          ;; The review is loaded here, as the chat's banner loads it: the
+          ;; empty box is then refused here, with no need to ask the harness.
+          (harness-test-await
+           (harness-ui-patch-review--sync
+            (harness-ui-patch-review--review-for (harness-call 'task/get id))))
+          (should (harness-ui-patch-review--pending-known-p
+                   (harness-ui-review--task sid))))
+        ;; Nothing to send: the review the chat loaded says so, and the
+        ;; harness refuses it where no review is loaded.  The task stays.
         (with-current-buffer (or chat board)
           (unless chat
             (setq harness-ui-tasks--target (cons 'reject id)))
-          (should-error (if chat (harness-chat-send) (harness-ui-tasks-submit))
-                        :type 'user-error))
-        (let ((root (harness-ui-patch-review-test--comment-on
-                     review "a.el" '(:new . 2) "Existing comment" :sent (float-time))))
-          (change-review-reply set root "Please explain this."
-                               :author (change-review-user "Noah" "noah@example.org")))
-        (harness-test-wait (lambda () (harness-call 'patch-review/drafts id))
-                           5 "the reply draft to reach the harness")
+          (if chat
+              (should-error (harness-chat-send) :type 'user-error)
+            (harness-ui-tasks-submit)))
+        (should (eq 'review (plist-get (harness-call 'task/get id) :state)))
+        (should-not (plist-get (harness-call 'task/get id) :feedback))
+        (unless chat
+          (harness-test-wait
+           (lambda ()
+             (with-current-buffer board
+               (string-match-p "needs feedback" (harness-ui-patch-review-test--text board))))
+           5 "the board to say the feedback is needed"))
+        ;; A reply in a thread, which the harness holds alone, is feedback.
+        (harness-ui-patch-review-test--server-reply id "Please explain this.")
+        (when chat
+          ;; Sending does not depend on the UI having the review: drop what
+          ;; the chat's banner loaded, as a restart would have left it, and
+          ;; type spaces only, which send nothing of themselves.
+          (remhash id harness-ui-patch-review--reviews)
+          (with-current-buffer chat
+            (goto-char harness-compose-end)
+            (insert "   ")))
+        (unless chat
+          ;; No report was opened: the board never loaded the review.
+          (should-not (harness-ui-patch-review--known id)))
         (with-current-buffer (or chat board)
+          (unless chat
+            (setq harness-ui-tasks--target (cons 'reject id)))
           (if chat (harness-chat-send) (harness-ui-tasks-submit)))
+        (when chat
+          (with-current-buffer chat
+            (should (equal "" (harness-compose-text)))))
         (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :feedback))
                            10 "the reply to reach the task")
         (let* ((feedback (plist-get (harness-call 'task/get id) :feedback))
@@ -1290,7 +1332,60 @@ longer drafts.  An empty box sends them alone."
   (harness-ui-patch-review-test--reply-alone 'chat))
 
 (ert-deftest harness-ui-patch-review-reply-alone-from-board ()
+  ;; The board has no report open, so this is the harness holding the reply.
   (harness-ui-patch-review-test--reply-alone 'board))
+
+(ert-deftest harness-ui-patch-review-reply-alone-from-the-reject-prefix ()
+  "R with an empty minibuffer sends the harness's pending reply back alone."
+  (harness-ui-patch-review-test-with-task
+    (harness-ui-patch-review-test--server-reply id "Please explain this.")
+    (with-current-buffer board
+      (goto-char (point-min))
+      (search-forward "Fix the flaky test")
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+        (let ((current-prefix-arg '(4)))
+          (call-interactively #'harness-ui-tasks-reject))))
+    (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :feedback))
+                       10 "the reply to reach the task")
+    (let ((feedback (plist-get (harness-call 'task/get id) :feedback)))
+      (should (= 1 (length feedback)))
+      (should (= 2 (length (split-string (plist-get (car feedback) :text)
+                                         "Please explain this\\.")))))
+    (should-not (harness-call 'patch-review/drafts id))))
+
+(ert-deftest harness-ui-patch-review-a-blank-reply-is-no-feedback ()
+  "A reply of whitespace is no reply: it does not send a task back, and it
+counts for nothing in the review the UI draws either."
+  (harness-ui-patch-review-test-with-task
+    ;; The harness holds a thread and a reply that is only spaces.
+    (harness-ui-patch-review-test--server-reply id "   ")
+    ;; The board, with no review loaded, leaves the empty box to the
+    ;; harness, which finds no feedback in the reply.
+    (with-current-buffer board
+      (setq harness-ui-tasks--target (cons 'reject id))
+      (harness-ui-tasks-submit))
+    (should (eq 'review (plist-get (harness-call 'task/get id) :state)))
+    (should-not (plist-get (harness-call 'task/get id) :feedback))
+    (harness-test-wait
+     (lambda ()
+       (with-current-buffer board
+         (string-match-p "needs feedback" (harness-ui-patch-review-test--text board))))
+     5 "the board to say the feedback is needed")
+    ;; The reply is still a draft, waiting for words.
+    (let ((drafts (harness-call 'patch-review/drafts id)))
+      (should (= 1 (length drafts)))
+      (should (string-blank-p (plist-get (car drafts) :body))))
+    ;; The UI's own review counts no draft to send: a blank one is none.
+    (let* ((task (harness-call 'task/get id))
+           (review (harness-ui-patch-review--review-for task))
+           (set (harness-ui-patch-review--r-set review))
+           (root (change-review-comment set "Existing comment"
+                                        :author (change-review-user "Noah" "noah@example.org")
+                                        :sent (float-time))))
+      (change-review-reply set root "   "
+                           :author (change-review-user "Noah" "noah@example.org"))
+      (should (change-review-drafts set))
+      (should-not (harness-ui-patch-review--pending-p task)))))
 
 (ert-deftest harness-ui-patch-review-places-threads-in-the-newest-version ()
   "A thread is on the line it is on now: moved down by lines added above it,
