@@ -4517,7 +4517,11 @@ takes a task as well as a file (task:ID)."
         (let ((pending-start (point)))
           (harness-ui-pending-insert-panels harness-ui-session-id)
           ;; Separate the request from the todo panel only when both show.
+          ;; A panel `harness-ui-pending-panel-functions' drew may leave its
+          ;; last line without a newline: it gets one, then the blank line.
           (when (and (> (point) pending-start) harness-chat--todos)
+            (unless (eq (char-before) ?\n)
+              (insert "\n"))
             (insert "\n")))
 
         (harness-chat--insert-todos)

@@ -8854,37 +8854,116 @@ buttons in it work.  Clearing the hook takes the panel away again."
         (harness-chat--render-tail)
         (should-not (harness-ui-chat-test-find buf "review banner"))))))
 
+(defun harness-ui-chat-test-blank-line-before-p (pos)
+  "Non-nil when POS starts a line that a blank line precedes.
+A blank line there is the two newlines before POS, with no third behind
+them: the separator the tail puts between a request and the todo list."
+  (save-excursion
+    (goto-char pos)
+    (beginning-of-line)
+    (and (> (point) (1+ (point-min)))
+         (equal "\n\n" (buffer-substring-no-properties (- (point) 2) (point)))
+         (not (eq (char-before (- (point) 2)) ?\n)))))
+
 (ert-deftest harness-ui-chat-request-todo-separation ()
-  "Questions and permissions have one blank line before either todo view."
-  (dolist (request '((:id "pq" :kind question :payload (:question "Which layout?"))
-                     (:id "pp" :kind permission :payload (:tool "bash" :title "Bash: echo" :kind exec :input (:command "echo")))))
-    (harness-ui-chat-test-with
-      (let* ((sid (harness-ui-chat-test-session))
-             (buf (harness-ui-chat-test-open sid)))
-        (harness-call 'session/set-todos sid '((:id "1" :text "Survey" :status "in-progress")))
-        (harness-call 'session/pending-add sid request)
-        (harness-test-wait (lambda () (with-current-buffer buf (and harness-chat--todos harness-chat--pending)))
-                           5 "request and todos")
-        (with-current-buffer buf
-          (dolist (choice '(folded open folded))
-            (setq harness-chat--todos-choice choice)
+  "Questions and permissions have one blank line before either todo view.
+The request alone, and the todo list alone, get no blank line: not under
+the request, not above the list, and not above the compose box."
+  (dolist (case (list (list (list :id "pq" :kind 'question
+                                 :payload (list :question "Which layout?"))
+                            "Which layout?")
+                      (list (list :id "pp" :kind 'permission
+                                  :payload (list :tool "bash" :title "Bash: echo"
+                                                 :kind 'exec :input (list :command "echo")))
+                            "Bash echo")))
+    (let ((request (nth 0 case))
+          (shows (nth 1 case)))
+      (harness-ui-chat-test-with
+        (let* ((sid (harness-ui-chat-test-session))
+               (buf (harness-ui-chat-test-open sid)))
+          (harness-call 'session/set-todos sid '((:id "1" :text "Survey" :status "in-progress")))
+          (harness-call 'session/pending-add sid request)
+          (harness-test-wait (lambda () (with-current-buffer buf (and harness-chat--todos harness-chat--pending)))
+                             5 "request and todos")
+          (with-current-buffer buf
+            (dolist (choice '(folded open folded))
+              (setq harness-chat--todos-choice choice)
+              (harness-chat--render-tail)
+              (should (harness-ui-chat-test-blank-line-before-p
+                       (harness-ui-chat-test-find buf "Todo list")))
+              ;; The box follows the list at once.
+              (should-not (harness-ui-chat-test-blank-line-before-p harness-compose-start)))
+            ;; The request alone keeps its content and gains no blank line.
+            (setq harness-chat--todos nil)
+            (harness-chat--render-tail)
+            (should-not (harness-ui-chat-test-find buf "Todo list"))
+            (should (harness-ui-chat-test-find buf shows))
+            (should-not (harness-ui-chat-test-blank-line-before-p harness-compose-start))
+            ;; The todo list alone: no separator above it either.
+            (harness-ui-pending-remove sid (plist-get request :id))
+            (setq harness-chat--todos '((:text "Survey" :status "in-progress")))
             (harness-chat--render-tail)
             (save-excursion
               (goto-char (harness-ui-chat-test-find buf "Todo list"))
               (beginning-of-line)
-              (should (equal "\n\n" (buffer-substring-no-properties (- (point) 2) (point))))
-              (should-not (eq (char-before (- (point) 2)) ?\n))))
-          ;; A request alone and todos alone gain no separator on redraw.
-          (setq harness-chat--todos nil)
+              (should (= (point) (marker-position harness-chat--transcript-end))))
+            (should-not (harness-ui-chat-test-blank-line-before-p harness-compose-start))))))))
+
+(ert-deftest harness-ui-chat-request-todo-separation-many-requests ()
+  "A question and a permission waiting together get one blank line, once.
+Both panels show above the todo list, oldest first, with no blank line
+between them and only the one before the list."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/set-todos sid '((:id "1" :text "Survey" :status "in-progress")))
+      (harness-call 'session/pending-add sid
+                    (list :id "mq" :kind 'question :payload (list :question "Which layout?")))
+      (harness-call 'session/pending-add sid
+                    (list :id "mp" :kind 'permission
+                          :payload (list :tool "bash" :title "Bash: echo" :kind 'exec
+                                         :input (list :command "echo"))))
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (and harness-chat--todos (= 2 (length harness-chat--pending)))))
+                         5 "the two requests and the todos")
+      (with-current-buffer buf
+        (dolist (choice '(folded open))
+          (setq harness-chat--todos-choice choice)
           (harness-chat--render-tail)
-          (should-not (harness-ui-chat-test-find buf "Todo list"))
-          (harness-ui-pending-remove sid (plist-get request :id))
-          (setq harness-chat--todos '((:text "Survey" :status "in-progress")))
+          (let ((question (harness-ui-chat-test-find buf " Question"))
+                (permission (harness-ui-chat-test-find buf " Permission"))
+                (todos (harness-ui-chat-test-find buf "Todo list")))
+            (should (< question permission todos))
+            ;; No blank line between the two panels.
+            (should-not (harness-ui-chat-test-blank-line-before-p permission))
+            ;; One blank line after the last of them, and no more.
+            (should (harness-ui-chat-test-blank-line-before-p todos))
+            (should-not (harness-ui-chat-test-blank-line-before-p harness-compose-start))))))))
+
+(ert-deftest harness-ui-chat-custom-request-panel-separation ()
+  "A request panel with no final newline still gets one blank line before the list.
+A panel `harness-ui-pending-panel-functions' draws may leave its last
+line unterminated; the tail ends it and then leaves the blank line."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (panel (lambda (r)
+                    (when (equal (plist-get r :kind) "question")
+                      (insert " COLD CACHE PANEL, no newline")
+                      t))))
+      (harness-call 'session/set-todos sid '((:id "1" :text "Survey" :status "in-progress")))
+      (harness-call 'session/pending-add sid
+                    (list :id "cq" :kind 'question :payload (list :question "Which layout?")))
+      (harness-test-wait (lambda () (with-current-buffer buf (and harness-chat--todos harness-chat--pending)))
+                         5 "the request and the todos")
+      (with-current-buffer buf
+        (let ((harness-ui-pending-panel-functions (list panel)))
           (harness-chat--render-tail)
-          (save-excursion
-            (goto-char (harness-ui-chat-test-find buf "Todo list"))
-            (beginning-of-line)
-            (should (= (point) (marker-position harness-chat--transcript-end)))))))))
+          (should-not (harness-ui-chat-test-find buf "Which layout?"))
+          (should (harness-ui-chat-test-find buf "COLD CACHE PANEL, no newline"))
+          (should (harness-ui-chat-test-blank-line-before-p
+                   (harness-ui-chat-test-find buf "Todo list")))
+          (should-not (harness-ui-chat-test-blank-line-before-p harness-compose-start)))))))
 
 (ert-deftest harness-ui-chat-top-functions-draw-first-in-the-tail ()
   "A buffer-local top function puts its lines first below the transcript.
