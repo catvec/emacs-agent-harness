@@ -204,6 +204,74 @@ arguments, and finally the completed response."
          (list :type "response.completed"
                :response (harness-responses-test--streamed-response)))))
 
+;;;; Catalogue capabilities through the agent and serialized request
+
+(ert-deftest harness-provider-responses-catalogue-controls-image-delivery ()
+  "Only advertised image input survives the agent's preparation to the wire.
+Exercise JSON catalogue parsing, provider normalization/lookup, attachments,
+and read_file-style tool results, rather than bypassing the vision gate."
+  (require 'harness-agent)
+  (let* ((png "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7l8AAAAASUVORK5CYII=")
+         (image (make-temp-file "harness-responses-delivery-" nil ".png")))
+    (unwind-protect
+        (progn
+          (with-temp-file image
+            (set-buffer-multibyte nil)
+            (insert (base64-decode-string png)))
+          ;; Even a familiar vision model name must not invent capability.
+          (dolist (metadata '((:input_modalities ("text" "image"))
+                              (:input_modalities ("text"))
+                              nil
+                              (:input_modalities :null)
+                              (:input_modalities [])
+                              (:input_modalities :false)
+                              (:input_modalities "image")
+                              (:input_modalities ("image" 42))))
+            (harness-responses-test-with-fake
+                `(("/models" . (:body ,(harness-json-encode
+                                       (list :models
+                                             (vector (append '(:slug "gpt-4o") metadata))))))
+                  ("/responses" . (:chunks ("data: [DONE]\n\n"))))
+              (harness-responses-test-with-provider
+                (harness-responses-refresh)
+                (harness-test-await (harness-provider-relist 'chatgpt))
+                (let* ((session '(:model "chatgpt:gpt-4o"))
+                       (vision (equal metadata '(:input_modalities ("text" "image"))))
+                       (model (harness-call 'provider/model "chatgpt:gpt-4o"))
+                       (messages
+                        `((:role user :content ((:type "image" :path ,image)))
+                          (:role assistant :content
+                                 ((:type "tool_use" :id "shot" :name "read_file"
+                                         :input (:path ,image))))
+                          (:role user :content
+                                 ((:type "tool_result" :tool_use_id "shot" :content "Screenshot"
+                                         :images ((:path ,image :mime "image/png")))))))
+                       (prepared (harness-agent--prepare-messages session messages)))
+                  (should (equal (plist-get model :input-modalities)
+                                 (if vision '("text" "image") '("text"))))
+                  (harness-responses-test--complete
+                   (list :model "chatgpt:gpt-4o" :messages prepared))
+                  ;; Round-trip the actual HTTP request JSON, not a helper's
+                  ;; intermediate plist, and compare the delivered bytes.
+                  (let* ((body (harness-responses-test--plain
+                                (harness-responses-test--last-body)))
+                         (items (plist-get body :input))
+                         (attachment (car (plist-get (car items) :content)))
+                         (result (plist-get (car (last items)) :output)))
+                    (should (equal "gpt-4o" (plist-get body :model)))
+                    (if vision
+                        (progn
+                          (should (equal "input_image" (plist-get attachment :type)))
+                          (should (equal (concat "data:image/png;base64," png)
+                                         (plist-get attachment :image_url)))
+                          (should (equal (concat "data:image/png;base64," png)
+                                         (plist-get (cadr result) :image_url))))
+                      (should (equal "input_text" (plist-get attachment :type)))
+                      (should (stringp result))
+                      (should (string-match-p "This model does not read images" result))
+                      (should-not (string-match-p "data:image" (harness-json-encode body))))))))))
+      (delete-file image))))
+
 ;;;; Registration
 
 (ert-deftest harness-provider-responses-registers-with-a-credential ()
@@ -322,9 +390,11 @@ call, which the harness's own tool loop cannot follow."
       (should (equal "additional_tools" (plist-get item :type)))
       (should (equal "developer" (plist-get item :role)))
       (should (equal '((:type "function" :name "echo" :description "Echo it."
+                        :strict :false
                         :parameters (:type "object" :properties (:value (:type "string"))
                                      :required ("value")))
                        (:type "function" :name "noop" :description ""
+                        :strict :false
                         :parameters (:type "object" :properties :empty)))
                      (append (plist-get item :tools) nil)))
       ;; Nothing is sent in the top-level `tools' beside the item.

@@ -1,0 +1,381 @@
+{
+  "responses": {
+    "model": "synthetic-model",
+    "input": [
+      {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+          {
+            "type": "function",
+            "name": "spawn_agent",
+            "description": "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "prompt": {
+                  "type": "string",
+                  "description": "The task for the sub-agent."
+                },
+                "fork": {
+                  "type": "boolean",
+                  "description": "Fork this session instead of starting fresh (default false)."
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Model id for the child (default: this session's model)."
+                },
+                "thinking": {
+                  "type": "string",
+                  "description": "Thinking level for the child (default: this session's). One of the levels the child's model offers."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Display name for the child session."
+                },
+                "cwd": {
+                  "type": "string",
+                  "description": "Working directory for the child (default: this session's), inside this session's allowed directories."
+                },
+                "worktree": {
+                  "type": "boolean",
+                  "description": "Create a git worktree and branch for the child (default false)."
+                },
+                "priority": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high"
+                  ],
+                  "description": "The child session's priority (default: what it inherits from this session's)."
+                }
+              },
+              "required": [
+                "prompt"
+              ]
+            }
+          },
+          {
+            "type": "function",
+            "name": "session_settings",
+            "description": "Read or change a session's model, thinking level, context window limit and budget: this session's by default, or another one by id, unique id prefix or name. action=read shows the model, thinking, the context window and what set its limit, and the budget, plus the permission mode and non-interactive state, which this tool does not change. action=set changes model, thinking, context_window_limit (a token count, or model for the model's own window) and budget (a dollar amount; budget_hard makes it stop the session's next turn once spent). A set goes through the permission chain and every change is left in the affected session's transcript as a hint naming who made it and the old and new value. It refuses permission_mode, non_interactive, allowed_dirs, capabilities, directory and host, naming the tool that changes them: request_escalation asks the user for more access (a Linux capability for your commands included), drop_access gives access up, session_move moves the session.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "set"
+                  ],
+                  "description": "read shows the settings; set changes them."
+                },
+                "session_id": {
+                  "type": "string",
+                  "description": "Session id, unique id prefix or unique name. Default: this session."
+                },
+                "model": {
+                  "type": "string",
+                  "description": "New model, as PROVIDER:MODEL, for set."
+                },
+                "thinking": {
+                  "type": "string",
+                  "description": "New thinking level, or default for the model's own, for set."
+                },
+                "context_window_limit": {
+                  "type": "string",
+                  "description": "New context window limit in tokens, as a number (\"200000\" or \"200k\"), or model/none to remove the limit, for set."
+                },
+                "budget": {
+                  "type": "string",
+                  "description": "New budget in US dollars, as a number (\"5\" or \"5.00\"), or none to remove it, for set."
+                },
+                "budget_hard": {
+                  "type": "boolean",
+                  "description": "true for a hard budget (the session's next turn stops once it is spent), false for soft (it warns), for set."
+                },
+                "permission_mode": {
+                  "type": "string",
+                  "description": "Refused: ask the user with request_escalation, or lower it with drop_access."
+                },
+                "non_interactive": {
+                  "type": "boolean",
+                  "description": "Refused: use set_non_interactive."
+                },
+                "allowed_dirs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Refused: use request_escalation (or request_directory_access)."
+                },
+                "directory": {
+                  "type": "string",
+                  "description": "Refused: use session_move."
+                },
+                "host": {
+                  "type": "string",
+                  "description": "Refused: use session_move."
+                }
+              },
+              "required": [
+                "action"
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "store": false,
+    "stream": true,
+    "include": [
+      "reasoning.encrypted_content"
+    ],
+    "reasoning": {
+      "summary": "auto"
+    }
+  },
+  "openai_tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "spawn_agent",
+        "description": "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "The task for the sub-agent."
+            },
+            "fork": {
+              "type": "boolean",
+              "description": "Fork this session instead of starting fresh (default false)."
+            },
+            "model": {
+              "type": "string",
+              "description": "Model id for the child (default: this session's model)."
+            },
+            "thinking": {
+              "type": "string",
+              "description": "Thinking level for the child (default: this session's). One of the levels the child's model offers."
+            },
+            "name": {
+              "type": "string",
+              "description": "Display name for the child session."
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Working directory for the child (default: this session's), inside this session's allowed directories."
+            },
+            "worktree": {
+              "type": "boolean",
+              "description": "Create a git worktree and branch for the child (default false)."
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ],
+              "description": "The child session's priority (default: what it inherits from this session's)."
+            }
+          },
+          "required": [
+            "prompt"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "session_settings",
+        "description": "Read or change a session's model, thinking level, context window limit and budget: this session's by default, or another one by id, unique id prefix or name. action=read shows the model, thinking, the context window and what set its limit, and the budget, plus the permission mode and non-interactive state, which this tool does not change. action=set changes model, thinking, context_window_limit (a token count, or model for the model's own window) and budget (a dollar amount; budget_hard makes it stop the session's next turn once spent). A set goes through the permission chain and every change is left in the affected session's transcript as a hint naming who made it and the old and new value. It refuses permission_mode, non_interactive, allowed_dirs, capabilities, directory and host, naming the tool that changes them: request_escalation asks the user for more access (a Linux capability for your commands included), drop_access gives access up, session_move moves the session.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "read",
+                "set"
+              ],
+              "description": "read shows the settings; set changes them."
+            },
+            "session_id": {
+              "type": "string",
+              "description": "Session id, unique id prefix or unique name. Default: this session."
+            },
+            "model": {
+              "type": "string",
+              "description": "New model, as PROVIDER:MODEL, for set."
+            },
+            "thinking": {
+              "type": "string",
+              "description": "New thinking level, or default for the model's own, for set."
+            },
+            "context_window_limit": {
+              "type": "string",
+              "description": "New context window limit in tokens, as a number (\"200000\" or \"200k\"), or model/none to remove the limit, for set."
+            },
+            "budget": {
+              "type": "string",
+              "description": "New budget in US dollars, as a number (\"5\" or \"5.00\"), or none to remove it, for set."
+            },
+            "budget_hard": {
+              "type": "boolean",
+              "description": "true for a hard budget (the session's next turn stops once it is spent), false for soft (it warns), for set."
+            },
+            "permission_mode": {
+              "type": "string",
+              "description": "Refused: ask the user with request_escalation, or lower it with drop_access."
+            },
+            "non_interactive": {
+              "type": "boolean",
+              "description": "Refused: use set_non_interactive."
+            },
+            "allowed_dirs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Refused: use request_escalation (or request_directory_access)."
+            },
+            "directory": {
+              "type": "string",
+              "description": "Refused: use session_move."
+            },
+            "host": {
+              "type": "string",
+              "description": "Refused: use session_move."
+            }
+          },
+          "required": [
+            "action"
+          ]
+        }
+      }
+    }
+  ],
+  "claude_mcp_tools": [
+    {
+      "name": "spawn_agent",
+      "description": "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "The task for the sub-agent."
+          },
+          "fork": {
+            "type": "boolean",
+            "description": "Fork this session instead of starting fresh (default false)."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model id for the child (default: this session's model)."
+          },
+          "thinking": {
+            "type": "string",
+            "description": "Thinking level for the child (default: this session's). One of the levels the child's model offers."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name for the child session."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Working directory for the child (default: this session's), inside this session's allowed directories."
+          },
+          "worktree": {
+            "type": "boolean",
+            "description": "Create a git worktree and branch for the child (default false)."
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "description": "The child session's priority (default: what it inherits from this session's)."
+          }
+        },
+        "required": [
+          "prompt"
+        ]
+      }
+    },
+    {
+      "name": "session_settings",
+      "description": "Read or change a session's model, thinking level, context window limit and budget: this session's by default, or another one by id, unique id prefix or name. action=read shows the model, thinking, the context window and what set its limit, and the budget, plus the permission mode and non-interactive state, which this tool does not change. action=set changes model, thinking, context_window_limit (a token count, or model for the model's own window) and budget (a dollar amount; budget_hard makes it stop the session's next turn once spent). A set goes through the permission chain and every change is left in the affected session's transcript as a hint naming who made it and the old and new value. It refuses permission_mode, non_interactive, allowed_dirs, capabilities, directory and host, naming the tool that changes them: request_escalation asks the user for more access (a Linux capability for your commands included), drop_access gives access up, session_move moves the session.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "read",
+              "set"
+            ],
+            "description": "read shows the settings; set changes them."
+          },
+          "session_id": {
+            "type": "string",
+            "description": "Session id, unique id prefix or unique name. Default: this session."
+          },
+          "model": {
+            "type": "string",
+            "description": "New model, as PROVIDER:MODEL, for set."
+          },
+          "thinking": {
+            "type": "string",
+            "description": "New thinking level, or default for the model's own, for set."
+          },
+          "context_window_limit": {
+            "type": "string",
+            "description": "New context window limit in tokens, as a number (\"200000\" or \"200k\"), or model/none to remove the limit, for set."
+          },
+          "budget": {
+            "type": "string",
+            "description": "New budget in US dollars, as a number (\"5\" or \"5.00\"), or none to remove it, for set."
+          },
+          "budget_hard": {
+            "type": "boolean",
+            "description": "true for a hard budget (the session's next turn stops once it is spent), false for soft (it warns), for set."
+          },
+          "permission_mode": {
+            "type": "string",
+            "description": "Refused: ask the user with request_escalation, or lower it with drop_access."
+          },
+          "non_interactive": {
+            "type": "boolean",
+            "description": "Refused: use set_non_interactive."
+          },
+          "allowed_dirs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Refused: use request_escalation (or request_directory_access)."
+          },
+          "directory": {
+            "type": "string",
+            "description": "Refused: use session_move."
+          },
+          "host": {
+            "type": "string",
+            "description": "Refused: use session_move."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  ]
+}

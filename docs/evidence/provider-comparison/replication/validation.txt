@@ -1,0 +1,4 @@
+Validated six replication records, 15 serialized requests, 6 image-bearing requests.
+Five trials completed; one image-bearing request billing-blocked (DeepSeek scratch); no retries.
+All five successful image-bearing responses independently recorded the requested model and one unique response ID; blocked request identity fields are null.
+Fixture hashes/schema required arrays/model targets match; no auth headers/private reasoning in committed requests.

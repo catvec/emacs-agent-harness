@@ -1,0 +1,182 @@
+{
+  "fixtures": {
+    "correct": {
+      "sha256": "b86316eb118f280f2be277fda6c0482a37e41c0a44af93d74f241eaf9f6bd64e",
+      "bytes": 37448,
+      "file": "correct.png"
+    },
+    "scratch": {
+      "sha256": "d30cecf65127d0faca447b482b3fbfe164b058501701900140a5ae4a98a898bd",
+      "bytes": 25911,
+      "file": "scratch.png"
+    },
+    "unrelated": {
+      "sha256": "8413a070be686e0c452586c709db72d1bdb39e09f01a1ef74f66d6403dfe00df",
+      "bytes": 32389,
+      "file": "unrelated.png"
+    }
+  },
+  "trials": {
+    "anthropic-correct-1000": {
+      "file": "anthropic-correct-1000.json",
+      "requests": 3,
+      "captures": 1,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "anthropic-scratch": {
+      "file": "anthropic-scratch.json",
+      "requests": 3,
+      "captures": 1,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "anthropic-unrelated": {
+      "file": "anthropic-unrelated.json",
+      "requests": 3,
+      "captures": 1,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "error",
+        "error": "HTTP 402: This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.",
+        "error-kind": "billing",
+        "retry-after": 120
+      }
+    },
+    "deepseek-correct-1000": {
+      "file": "deepseek-correct-1000.json",
+      "requests": 3,
+      "captures": 1,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "deepseek-scratch": {
+      "file": "deepseek-scratch.json",
+      "requests": 3,
+      "captures": 1,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "deepseek-unrelated": {
+      "file": "deepseek-unrelated.json",
+      "requests": 4,
+      "captures": 2,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "direct-deepseek-correct": {
+      "file": "direct-deepseek-correct.json",
+      "requests": 3,
+      "captures": 1,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "direct-deepseek-scratch": {
+      "file": "direct-deepseek-scratch.json",
+      "requests": 4,
+      "captures": 2,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "direct-deepseek-unrelated": {
+      "file": "direct-deepseek-unrelated.json",
+      "requests": 4,
+      "captures": 2,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "openai-correct": {
+      "file": "openai-correct.json",
+      "requests": 1,
+      "captures": 0,
+      "final-status": "Paused",
+      "stop": {
+        "type": "done",
+        "stop-reason": "error",
+        "error": "HTTP 402: This request requires more credits, or fewer max_tokens. You requested up to 3000 tokens, but can only afford 2466. To increase, visit https://openrouter.ai/settings/credits and add more credits",
+        "error-kind": "billing"
+      }
+    },
+    "openai-correct-1000": {
+      "file": "openai-correct-1000.json",
+      "requests": 1,
+      "captures": 0,
+      "final-status": "Paused",
+      "stop": {
+        "type": "done",
+        "stop-reason": "error",
+        "error": "HTTP 402: This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.",
+        "error-kind": "billing",
+        "retry-after": 120
+      }
+    },
+    "openai-mini-correct": {
+      "file": "openai-mini-correct.json",
+      "requests": 3,
+      "captures": 1,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "openai-mini-scratch": {
+      "file": "openai-mini-scratch.json",
+      "requests": 2,
+      "captures": 1,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "openai-mini-unrelated": {
+      "file": "openai-mini-unrelated.json",
+      "requests": 2,
+      "captures": 1,
+      "final-status": "Ready",
+      "stop": {
+        "type": "done",
+        "stop-reason": "end-turn"
+      }
+    },
+    "openai-scratch": {
+      "file": "openai-scratch.json",
+      "requests": 1,
+      "captures": 0,
+      "final-status": "Paused",
+      "stop": {
+        "type": "done",
+        "stop-reason": "error",
+        "error": "HTTP 402: This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.",
+        "error-kind": "billing",
+        "retry-after": 120
+      }
+    }
+  }
+}

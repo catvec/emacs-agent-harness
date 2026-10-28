@@ -1,0 +1,51 @@
+[
+  {
+    "raw": "{\"prompt\":\"synthetic\"}",
+    "parsed_lisp": "(:prompt \"synthetic\")",
+    "model_present": false,
+    "permission_mode_present": false,
+    "boundary_error": null
+  },
+  {
+    "raw": "{\"prompt\":\"synthetic\",\"model\":\"\",\"thinking\":\"\"}",
+    "parsed_lisp": "(:prompt \"synthetic\" :model \"\" :thinking \"\")",
+    "model_present": true,
+    "permission_mode_present": false,
+    "boundary_error": "Harness error: \"Model  does not offer the thinking level ; it offers none. Leave :thinking out to use this session's level.\""
+  },
+  {
+    "raw": "{\"prompt\":\"synthetic\",\"model\":null,\"thinking\":null}",
+    "parsed_lisp": "(:prompt \"synthetic\" :model nil :thinking nil)",
+    "model_present": true,
+    "permission_mode_present": false,
+    "boundary_error": null
+  },
+  {
+    "raw": "{\"action\":\"read\"}",
+    "parsed_lisp": "(:action \"read\")",
+    "model_present": false,
+    "permission_mode_present": false,
+    "boundary_error": null
+  },
+  {
+    "raw": "{\"action\":\"read\",\"permission_mode\":\"\",\"non_interactive\":false,\"allowed_dirs\":null}",
+    "parsed_lisp": "(:action \"read\" :permission_mode \"\" :non_interactive :false :allowed_dirs nil)",
+    "model_present": false,
+    "permission_mode_present": true,
+    "boundary_error": "Harness error: \"session_settings does not change permission mode: the permission mode is the user's: ask them for a more permissive one with request_escalation (attribute permission_mode), or lower this session's with drop_access\""
+  },
+  {
+    "raw": "{\"action\":\"read\",\"permission_mode\":null}",
+    "parsed_lisp": "(:action \"read\" :permission_mode nil)",
+    "model_present": false,
+    "permission_mode_present": true,
+    "boundary_error": "Harness error: \"session_settings does not change permission mode: the permission mode is the user's: ask them for a more permissive one with request_escalation (attribute permission_mode), or lower this session's with drop_access\""
+  },
+  {
+    "raw": "{\"action\":\"set\",\"permission_mode\":null}",
+    "parsed_lisp": "(:action \"set\" :permission_mode nil)",
+    "model_present": false,
+    "permission_mode_present": true,
+    "boundary_error": "Harness error: \"session_settings does not change permission mode: the permission mode is the user's: ask them for a more permissive one with request_escalation (attribute permission_mode), or lower this session's with drop_access\""
+  }
+]

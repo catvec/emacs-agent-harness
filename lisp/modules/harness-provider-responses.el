@@ -386,6 +386,13 @@ model the catalogue does not know, gets the ones
                            :thinking-levels (harness-responses--model-efforts slug))))
           (when (and (stringp label) (not (string-empty-p label)))
             (setq model (plist-put model :label label)))
+          ;; Capability comes from the catalogue, not the model's name or
+          ;; the provider-wide ability to encode images.  Missing or malformed
+          ;; metadata must retain normalization's conservative text default.
+          (let ((modalities (plist-get entry :input_modalities)))
+            (when (and (consp modalities) (cl-every #'stringp modalities))
+              (setq model (plist-put model :input-modalities
+                                     (copy-sequence modalities)))))
           model)))))
 
 (defun harness-responses--parse-models (json)
@@ -651,6 +658,11 @@ content, the call's name and arguments -- goes back as it came."
                     (list :type "function"
                           :name (plist-get spec :name)
                           :description (or (plist-get spec :description) "")
+                          ;; Responses may normalize an unspecified strictness
+                          ;; into strict mode, making optional keys required.
+                          ;; Our handlers distinguish omission from a value;
+                          ;; retain the registered schema's non-strict contract.
+                          :strict :false
                           :parameters (let ((schema (plist-get spec :schema)))
                                         (if (and (listp schema) (keywordp (car-safe schema)))
                                             schema

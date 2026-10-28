@@ -1,0 +1,45 @@
+[
+  {
+    "id": "deepseek:deepseek-flash",
+    "input-modalities": [
+      "text",
+      "image"
+    ],
+    "label": "DeepSeek-V4.1-Flash"
+  },
+  {
+    "id": "openrouter:anthropic/claude-sonnet-5.5",
+    "input-modalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "label": "Anthropic: Claude Sonnet 5.5"
+  },
+  {
+    "id": "openrouter:deepseek/deepseek-v4.1-flash",
+    "input-modalities": [
+      "text",
+      "image"
+    ],
+    "label": "DeepSeek: DeepSeek V4.1 Flash"
+  },
+  {
+    "id": "openrouter:openai/gpt-6-astra",
+    "input-modalities": [
+      "file",
+      "image",
+      "text"
+    ],
+    "label": "OpenAI: GPT-6 Astra"
+  },
+  {
+    "id": "openrouter:openai/gpt-4.1-mini",
+    "input-modalities": [
+      "image",
+      "text",
+      "file"
+    ],
+    "label": "OpenAI: GPT-4.1 Mini"
+  }
+]

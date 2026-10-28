@@ -1,0 +1,8 @@
+Evidence integrity check (2026-10-27):
+Validated 15 trial records, 40 serialized requests, 16 image-bearing requests; fixture hashes/schema required arrays/model targets match; no auth headers/private reasoning in committed requests.
+
+Runner offline check:
+Runner loads and parentheses are balanced.
+
+This validates the research artifacts, not a production UI or model quality.
+Project regression tests/full check are owned and recorded by the parent task.

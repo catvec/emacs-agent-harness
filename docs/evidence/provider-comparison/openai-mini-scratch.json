@@ -1,0 +1,366 @@
+{
+  "requested-model": "openrouter:openai/gpt-4.1-mini",
+  "endpoint": "https://openrouter.ai/api/v1",
+  "condition": "scratch",
+  "prompt": "Use the release panel tools to set the Demo orchard project's status from Paused to Ready. Verify that the panel shows Ready, that all 12 checks passed, and that Deploy and Cancel controls remain visible. Report what you changed and what the screenshot actually establishes. Do not deploy anything.",
+  "tools": [
+    {
+      "name": "set_status",
+      "description": "Set the release panel status.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "Paused",
+              "Ready"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "capture_panel",
+      "description": "Capture the application window as a screenshot.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "Optional capture note."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "final-status": "Ready",
+  "captures": 1,
+  "steps": [
+    {
+      "step": 1,
+      "events": [
+        {
+          "type": "tool-call",
+          "id": "call_QQECo9E2sk6jyZio0xkRTZLr",
+          "name": "set_status",
+          "input": {
+            "status": "Ready"
+          },
+          "respond": null
+        },
+        {
+          "type": "tool-call",
+          "id": "call_RvKOVq8vE3hhB3IK2jkNKGGu",
+          "name": "capture_panel",
+          "input": {
+            "note": "Verification after setting status to Ready"
+          },
+          "respond": null
+        },
+        {
+          "type": "done",
+          "stop-reason": "tool-use"
+        }
+      ],
+      "response-models": [
+        "openai/gpt-4.1-mini"
+      ],
+      "response-ids": [
+        "gen-1793140027-ySV2O3hGy7cv6tWjszJC"
+      ],
+      "wire-arguments": [
+        [
+          {
+            "index": 0,
+            "id": "call_QQECo9E2sk6jyZio0xkRTZLr",
+            "type": "function",
+            "function": {
+              "name": "set_status",
+              "arguments": ""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": ""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "{\"status\":\"Ready\"}"
+            }
+          }
+        ],
+        [
+          {
+            "index": 1,
+            "id": "call_RvKOVq8vE3hhB3IK2jkNKGGu",
+            "type": "function",
+            "function": {
+              "name": "capture_panel",
+              "arguments": ""
+            }
+          }
+        ],
+        [
+          {
+            "index": 1,
+            "function": {
+              "arguments": ""
+            }
+          }
+        ],
+        [
+          {
+            "index": 1,
+            "function": {
+              "arguments": "{\"note\":\"Verification after setting status to Ready\"}"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "step": 2,
+      "events": [
+        {
+          "type": "text",
+          "delta": "I changed the Demo orchard project's release panel status from Paused to Ready.\n\nHowever, the screenshot returned is not showing the release panel itself or the status controls. Instead, it shows a blank text buffer with the message:\n\";; This buffer is for text that is not saved.\n;; Nothing is deployed here.\"\n\nTherefore, the screenshot does not establish the details requested, such as the panel displaying the Ready status, checks passed, or that Deploy and Cancel controls remain visible. It appears to be unrelated to the release panel.\n\nWould you like me to try capturing the release panel view again?"
+        },
+        {
+          "type": "done",
+          "stop-reason": "end-turn"
+        }
+      ],
+      "response-models": [
+        "openai/gpt-4.1-mini"
+      ],
+      "response-ids": [
+        "gen-1793140028-Y8ZQR4dh783ayiZpkqSH",
+        "gen-1793140027-ySV2O3hGy7cv6tWjszJC"
+      ],
+      "wire-arguments": null
+    }
+  ],
+  "requests": [
+    {
+      "file": "request-01.json",
+      "original-sha256": "615b5e2032f9a9d4b8bf14199435d268b98e2feeb2f868c3c46a43a2757ead7c",
+      "images": [],
+      "body": {
+        "model": "openai/gpt-4.1-mini",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a software engineering assistant. Use the provided tools."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the release panel tools to set the Demo orchard project's status from Paused to Ready. Verify that the panel shows Ready, that all 12 checks passed, and that Deploy and Cancel controls remain visible. Report what you changed and what the screenshot actually establishes. Do not deploy anything."
+              }
+            ]
+          }
+        ],
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "set_status",
+              "description": "Set the release panel status.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "Paused",
+                      "Ready"
+                    ]
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "capture_panel",
+              "description": "Capture the application window as a screenshot.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "note": {
+                    "type": "string",
+                    "description": "Optional capture note."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "max_tokens": 1000,
+        "usage": {
+          "include": true
+        },
+        "reasoning": {
+          "effort": "low"
+        }
+      }
+    },
+    {
+      "file": "request-02.json",
+      "original-sha256": "ca3f1f5af84acb56343dfd93de852b431e9b873fc7009c184ac4471ff7b2e4ef",
+      "images": [
+        {
+          "sha256": "d30cecf65127d0faca447b482b3fbfe164b058501701900140a5ae4a98a898bd",
+          "bytes": 25911,
+          "fixture": "scratch"
+        }
+      ],
+      "body": {
+        "model": "openai/gpt-4.1-mini",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a software engineering assistant. Use the provided tools."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the release panel tools to set the Demo orchard project's status from Paused to Ready. Verify that the panel shows Ready, that all 12 checks passed, and that Deploy and Cancel controls remain visible. Report what you changed and what the screenshot actually establishes. Do not deploy anything."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_QQECo9E2sk6jyZio0xkRTZLr",
+                "type": "function",
+                "function": {
+                  "name": "set_status",
+                  "arguments": "{\"status\":\"Ready\"}"
+                }
+              },
+              {
+                "id": "call_RvKOVq8vE3hhB3IK2jkNKGGu",
+                "type": "function",
+                "function": {
+                  "name": "capture_panel",
+                  "arguments": "{\"note\":\"Verification after setting status to Ready\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_QQECo9E2sk6jyZio0xkRTZLr",
+            "content": "Status set to Ready."
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_RvKOVq8vE3hhB3IK2jkNKGGu",
+            "content": "Application screenshot."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Image returned by tool call call_RvKOVq8vE3hhB3IK2jkNKGGu]"
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "fixture:scratch.png#sha256=d30cecf65127d0faca447b482b3fbfe164b058501701900140a5ae4a98a898bd"
+                }
+              }
+            ]
+          }
+        ],
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "set_status",
+              "description": "Set the release panel status.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "Paused",
+                      "Ready"
+                    ]
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "capture_panel",
+              "description": "Capture the application window as a screenshot.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "note": {
+                    "type": "string",
+                    "description": "Optional capture note."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "max_tokens": 1000,
+        "usage": {
+          "include": true
+        },
+        "reasoning": {
+          "effort": "low"
+        }
+      }
+    }
+  ]
+}

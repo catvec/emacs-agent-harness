@@ -1,0 +1,1119 @@
+{
+  "requested-model": "deepseek:deepseek-flash",
+  "endpoint": "https://api.deepseek.com",
+  "condition": "scratch",
+  "prompt": "Use the release panel tools to set the Demo orchard project's status from Paused to Ready. Verify that the panel shows Ready, that all 12 checks passed, and that Deploy and Cancel controls remain visible. Report what you changed and what the screenshot actually establishes. Do not deploy anything.",
+  "tools": [
+    {
+      "name": "set_status",
+      "description": "Set the release panel status.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "Paused",
+              "Ready"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "capture_panel",
+      "description": "Capture the application window as a screenshot.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "Optional capture note."
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "final-status": "Ready",
+  "captures": 2,
+  "steps": [
+    {
+      "step": 1,
+      "events": [
+        {
+          "type": "tool-call",
+          "id": "call_00_aZyxRpAcTTKBKV8QnKjx2557",
+          "name": "capture_panel",
+          "input": {
+            "note": "Inspect the release panel before changing status."
+          },
+          "respond": null
+        },
+        {
+          "type": "done",
+          "stop-reason": "tool-use"
+        }
+      ],
+      "response-models": [
+        "deepseek-flash"
+      ],
+      "response-ids": [
+        "9f0ffd1f-75f3-40dd-a710-9bd901426467"
+      ],
+      "wire-arguments": [
+        [
+          {
+            "index": 0,
+            "id": "call_00_aZyxRpAcTTKBKV8QnKjx2557",
+            "type": "function",
+            "function": {
+              "name": "capture_panel",
+              "arguments": ""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "{"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "note"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": ": "
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "In"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "spect"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " the"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " release"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " panel"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " before"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " changing"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " status"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "."
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "}"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "step": 2,
+      "events": [
+        {
+          "type": "tool-call",
+          "id": "call_00_6kADFJEQE0lFms8ZsH0s2521",
+          "name": "set_status",
+          "input": {
+            "status": "Ready"
+          },
+          "respond": null
+        },
+        {
+          "type": "done",
+          "stop-reason": "tool-use"
+        }
+      ],
+      "response-models": [
+        "deepseek-flash"
+      ],
+      "response-ids": [
+        "1e3ab96a-3b29-4932-9b14-041245368b44",
+        "9f0ffd1f-75f3-40dd-a710-9bd901426467"
+      ],
+      "wire-arguments": [
+        [
+          {
+            "index": 0,
+            "id": "call_00_6kADFJEQE0lFms8ZsH0s2521",
+            "type": "function",
+            "function": {
+              "name": "set_status",
+              "arguments": ""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "{"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "status"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": ": "
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "Ready"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "}"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "step": 3,
+      "events": [
+        {
+          "type": "tool-call",
+          "id": "call_00_z4KXUizAsQVfJYQfTiTd7087",
+          "name": "capture_panel",
+          "input": {
+            "note": "Verify the Demo orchard release panel now shows Ready, 12 checks passed, and Deploy/Cancel controls."
+          },
+          "respond": null
+        },
+        {
+          "type": "done",
+          "stop-reason": "tool-use"
+        }
+      ],
+      "response-models": [
+        "deepseek-flash"
+      ],
+      "response-ids": [
+        "60767bd1-ca81-457b-9e85-08dccddc8919",
+        "1e3ab96a-3b29-4932-9b14-041245368b44",
+        "9f0ffd1f-75f3-40dd-a710-9bd901426467"
+      ],
+      "wire-arguments": [
+        [
+          {
+            "index": 0,
+            "id": "call_00_z4KXUizAsQVfJYQfTiTd7087",
+            "type": "function",
+            "function": {
+              "name": "capture_panel",
+              "arguments": ""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "{"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "note"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": ": "
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "Verify"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " the"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " Demo"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " orchard"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " release"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " panel"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " now"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " shows"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " Ready"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": ","
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " "
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "12"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " checks"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " passed"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": ","
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " and"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " De"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "ploy"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "/C"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "ancel"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": " controls"
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "."
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "\""
+            }
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "function": {
+              "arguments": "}"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "step": 4,
+      "events": [
+        {
+          "type": "text",
+          "delta": "Changed the **Demo orchard** release status from **Paused** to **Ready** using the release panel\u2019s status control. I did not activate **Deploy**.\n\nThe final screenshot confirms the panel shows:\n\n- **Project:** Demo orchard\n- **Status:** Ready\n- **Last check:** All 12 checks passed\n- **[ Deploy ]** and **[ Cancel ]** controls visible\n\nThe screenshot establishes the displayed release state and control availability; it does not show that any deployment occurred."
+        },
+        {
+          "type": "done",
+          "stop-reason": "end-turn"
+        }
+      ],
+      "response-models": [
+        "deepseek-flash"
+      ],
+      "response-ids": [
+        "92b89dab-ce58-4068-a711-32a3b98c4bbb",
+        "60767bd1-ca81-457b-9e85-08dccddc8919",
+        "1e3ab96a-3b29-4932-9b14-041245368b44",
+        "9f0ffd1f-75f3-40dd-a710-9bd901426467"
+      ],
+      "wire-arguments": null
+    }
+  ],
+  "requests": [
+    {
+      "file": "request-01.json",
+      "original-sha256": "24c611d02a744998980bc90feda2daac4040caa4d1a149ce0890e66aa2022cb9",
+      "images": [],
+      "body": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a software engineering assistant. Use the provided tools."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the release panel tools to set the Demo orchard project's status from Paused to Ready. Verify that the panel shows Ready, that all 12 checks passed, and that Deploy and Cancel controls remain visible. Report what you changed and what the screenshot actually establishes. Do not deploy anything."
+              }
+            ]
+          }
+        ],
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "set_status",
+              "description": "Set the release panel status.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "Paused",
+                      "Ready"
+                    ]
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "capture_panel",
+              "description": "Capture the application window as a screenshot.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "note": {
+                    "type": "string",
+                    "description": "Optional capture note."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "max_tokens": 1000,
+        "reasoning_effort": "low"
+      }
+    },
+    {
+      "file": "request-02.json",
+      "original-sha256": "7d40dbaaf7955b07758ad77a82c41e9ef20245e70482726331fb1dac9373862a",
+      "images": [
+        {
+          "sha256": "d30cecf65127d0faca447b482b3fbfe164b058501701900140a5ae4a98a898bd",
+          "bytes": 25911,
+          "fixture": "scratch"
+        }
+      ],
+      "body": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a software engineering assistant. Use the provided tools."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the release panel tools to set the Demo orchard project's status from Paused to Ready. Verify that the panel shows Ready, that all 12 checks passed, and that Deploy and Cancel controls remain visible. Report what you changed and what the screenshot actually establishes. Do not deploy anything."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_00_aZyxRpAcTTKBKV8QnKjx2557",
+                "type": "function",
+                "function": {
+                  "name": "capture_panel",
+                  "arguments": "{\"note\":\"Inspect the release panel before changing status.\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_aZyxRpAcTTKBKV8QnKjx2557",
+            "content": "Application screenshot."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Image returned by tool call call_00_aZyxRpAcTTKBKV8QnKjx2557]"
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "fixture:scratch.png#sha256=d30cecf65127d0faca447b482b3fbfe164b058501701900140a5ae4a98a898bd"
+                }
+              }
+            ]
+          }
+        ],
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "set_status",
+              "description": "Set the release panel status.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "Paused",
+                      "Ready"
+                    ]
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "capture_panel",
+              "description": "Capture the application window as a screenshot.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "note": {
+                    "type": "string",
+                    "description": "Optional capture note."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "max_tokens": 1000,
+        "reasoning_effort": "low"
+      }
+    },
+    {
+      "file": "request-03.json",
+      "original-sha256": "a1fb07b91f7c98c85c42ed8fd58d2ae1d3ced39e4cc377f93dd0395b9e0d6039",
+      "images": [
+        {
+          "sha256": "d30cecf65127d0faca447b482b3fbfe164b058501701900140a5ae4a98a898bd",
+          "bytes": 25911,
+          "fixture": "scratch"
+        }
+      ],
+      "body": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a software engineering assistant. Use the provided tools."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the release panel tools to set the Demo orchard project's status from Paused to Ready. Verify that the panel shows Ready, that all 12 checks passed, and that Deploy and Cancel controls remain visible. Report what you changed and what the screenshot actually establishes. Do not deploy anything."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_00_aZyxRpAcTTKBKV8QnKjx2557",
+                "type": "function",
+                "function": {
+                  "name": "capture_panel",
+                  "arguments": "{\"note\":\"Inspect the release panel before changing status.\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_aZyxRpAcTTKBKV8QnKjx2557",
+            "content": "Application screenshot."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Image returned by tool call call_00_aZyxRpAcTTKBKV8QnKjx2557]"
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "fixture:scratch.png#sha256=d30cecf65127d0faca447b482b3fbfe164b058501701900140a5ae4a98a898bd"
+                }
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_00_6kADFJEQE0lFms8ZsH0s2521",
+                "type": "function",
+                "function": {
+                  "name": "set_status",
+                  "arguments": "{\"status\":\"Ready\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_6kADFJEQE0lFms8ZsH0s2521",
+            "content": "Status set to Ready."
+          }
+        ],
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "set_status",
+              "description": "Set the release panel status.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "Paused",
+                      "Ready"
+                    ]
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "capture_panel",
+              "description": "Capture the application window as a screenshot.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "note": {
+                    "type": "string",
+                    "description": "Optional capture note."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "max_tokens": 1000,
+        "reasoning_effort": "low"
+      }
+    },
+    {
+      "file": "request-04.json",
+      "original-sha256": "db9a3ceb633bb8cc813b6e370bd4fe7bd5e499b2cf4b4b51670b7825c67d80b5",
+      "images": [
+        {
+          "sha256": "d30cecf65127d0faca447b482b3fbfe164b058501701900140a5ae4a98a898bd",
+          "bytes": 25911,
+          "fixture": "scratch"
+        },
+        {
+          "sha256": "b86316eb118f280f2be277fda6c0482a37e41c0a44af93d74f241eaf9f6bd64e",
+          "bytes": 37448,
+          "fixture": "correct"
+        }
+      ],
+      "body": {
+        "model": "deepseek-flash",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a software engineering assistant. Use the provided tools."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the release panel tools to set the Demo orchard project's status from Paused to Ready. Verify that the panel shows Ready, that all 12 checks passed, and that Deploy and Cancel controls remain visible. Report what you changed and what the screenshot actually establishes. Do not deploy anything."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_00_aZyxRpAcTTKBKV8QnKjx2557",
+                "type": "function",
+                "function": {
+                  "name": "capture_panel",
+                  "arguments": "{\"note\":\"Inspect the release panel before changing status.\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_aZyxRpAcTTKBKV8QnKjx2557",
+            "content": "Application screenshot."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Image returned by tool call call_00_aZyxRpAcTTKBKV8QnKjx2557]"
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "fixture:scratch.png#sha256=d30cecf65127d0faca447b482b3fbfe164b058501701900140a5ae4a98a898bd"
+                }
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_00_6kADFJEQE0lFms8ZsH0s2521",
+                "type": "function",
+                "function": {
+                  "name": "set_status",
+                  "arguments": "{\"status\":\"Ready\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_6kADFJEQE0lFms8ZsH0s2521",
+            "content": "Status set to Ready."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_00_z4KXUizAsQVfJYQfTiTd7087",
+                "type": "function",
+                "function": {
+                  "name": "capture_panel",
+                  "arguments": "{\"note\":\"Verify the Demo orchard release panel now shows Ready, 12 checks passed, and Deploy/Cancel controls.\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_00_z4KXUizAsQVfJYQfTiTd7087",
+            "content": "Application screenshot."
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Image returned by tool call call_00_z4KXUizAsQVfJYQfTiTd7087]"
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "fixture:correct.png#sha256=b86316eb118f280f2be277fda6c0482a37e41c0a44af93d74f241eaf9f6bd64e"
+                }
+              }
+            ]
+          }
+        ],
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "set_status",
+              "description": "Set the release panel status.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "Paused",
+                      "Ready"
+                    ]
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "capture_panel",
+              "description": "Capture the application window as a screenshot.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "note": {
+                    "type": "string",
+                    "description": "Optional capture note."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "max_tokens": 1000,
+        "reasoning_effort": "low"
+      }
+    }
+  ]
+}

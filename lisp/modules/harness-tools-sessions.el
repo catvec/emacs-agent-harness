@@ -1300,6 +1300,9 @@ INPUT is the tool call's input plist and CTX its context."
         (harness-tool-ok (harness-tools-sessions--settings-text s sid selfp))
       (harness-tools-sessions--settings-set input ctx s sid selfp))))
 
+;; Advertise only accepted keys.  Refused permission and location settings
+;; stay in the description and `--settings-check-keys', not in properties:
+;; they are never valid inputs, even on a read or with empty values.
 (harness-define-tool "session_settings"
   :label "Session settings"
   :description "Read or change a session's model, thinking level, context window limit and budget: this session's by default, or another one by id, unique id prefix or name. action=read shows the model, thinking, the context window and what set its limit, and the budget, plus the permission mode and non-interactive state, which this tool does not change. action=set changes model, thinking, context_window_limit (a token count, or model for the model's own window) and budget (a dollar amount; budget_hard makes it stop the session's next turn once spent). A set goes through the permission chain and every change is left in the affected session's transcript as a hint naming who made it and the old and new value. It refuses permission_mode, non_interactive, allowed_dirs, capabilities, directory and host, naming the tool that changes them: request_escalation asks the user for more access (a Linux capability for your commands included), drop_access gives access up, session_move moves the session."
@@ -1311,12 +1314,7 @@ INPUT is the tool call's input plist and CTX its context."
                          :thinking (:type "string" :description "New thinking level, or default for the model's own, for set.")
                          :context_window_limit (:type "string" :description "New context window limit in tokens, as a number (\"200000\" or \"200k\"), or model/none to remove the limit, for set.")
                          :budget (:type "string" :description "New budget in US dollars, as a number (\"5\" or \"5.00\"), or none to remove it, for set.")
-                         :budget_hard (:type "boolean" :description "true for a hard budget (the session's next turn stops once it is spent), false for soft (it warns), for set.")
-                         :permission_mode (:type "string" :description "Refused: ask the user with request_escalation, or lower it with drop_access.")
-                         :non_interactive (:type "boolean" :description "Refused: use set_non_interactive.")
-                         :allowed_dirs (:type "array" :items (:type "string") :description "Refused: use request_escalation (or request_directory_access).")
-                         :directory (:type "string" :description "Refused: use session_move.")
-                         :host (:type "string" :description "Refused: use session_move."))
+                         :budget_hard (:type "boolean" :description "true for a hard budget (the session's next turn stops once it is spent), false for soft (it warns), for set."))
             :required ("action"))
   :kind 'meta
   :subject (lambda (input)
