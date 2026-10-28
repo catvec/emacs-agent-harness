@@ -144,8 +144,13 @@ The first start of a checkout byte-compiles every module, so it takes
 longer than later ones."
   :type 'number :group 'harness)
 
-(defconst harness-tools-dev--probe-timeout 5
-  "Seconds an existing instance gets to answer a responsiveness probe.")
+(defcustom harness-tools-dev-probe-timeout 10
+  "Seconds an existing instance gets to answer a responsiveness probe.
+An instance that is loading code or collecting garbage may be slower than
+an idle one; raise this when a normally busy instance is reported stuck.
+The checkout's `scripts/dev.sh' has its own bound,
+HARNESS_DEV_PROBE_TIMEOUT, also ten seconds by default."
+  :type 'number :group 'harness)
 
 (defconst harness-tools-dev--registry-name "dev-instances.json"
   "File in `harness-state-directory' recording the instances opened.")
@@ -406,6 +411,29 @@ its file, else by its name."
               "")
             (if (and lifetime (not (string-empty-p lifetime))) (concat " " lifetime) ""))))
 
+(defun harness-tools-dev--probe-error (dir path exit running)
+  "Signal why the existing instance of DIR did not answer its probe.
+PATH is its socket file when one is known, EXIT and RUNNING are what the
+probe found.  A refused socket with an unreadable process table cannot be
+told from a stale one: the error then names removing it, not a restart
+that would refuse for the same reason."
+  (let ((detail (if (eq exit 'timeout)
+                    (format "probe timed out after %ss" harness-tools-dev-probe-timeout)
+                  (format "probe exit status %s" exit)))
+        (advice
+         (if (eq running :unavailable)
+             (concat " The process table is unavailable, so restart cannot verify that the old "
+                     "instance stopped. Wait and retry"
+                     (if (and path (not (eq exit 'timeout)))
+                         (format "; if you are sure no instance is running, remove %s and retry."
+                                 (abbreviate-file-name path))
+                       "."))
+           (concat " Wait and retry; if it stays stuck, cancel its operation in its frame "
+                   "(C-g), or explicitly call open_harness with restart=true "
+                   "(unsaved work in the instance will be lost)."))))
+    (error "The existing harness in %s did not respond (%s).%s"
+           (abbreviate-file-name dir) detail advice)))
+
 (defun harness-tools-dev--probe (dir socket)
   "Check that an existing instance of DIR under SOCKET responds.
 Return a promise.  A missing socket, or a refused socket with no daemon
@@ -434,7 +462,7 @@ since a worktree may have an older version of that script."
                                   "-s" (if path (concat "./" (file-name-nondirectory path)) socket)
                                   "--eval" "t")
                             :cwd (if path (file-name-directory path) dir)
-                            :timeout harness-tools-dev--probe-timeout :name "harness-dev-probe")
+                            :timeout harness-tools-dev-probe-timeout :name "harness-dev-probe")
        (lambda (r)
          (let* ((exit (plist-get r :exit))
                 ;; A wedged Emacs can fill its socket's listen queue:
@@ -448,14 +476,7 @@ since a worktree may have an older version of that script."
            ;; quick failure by name may just mean no instance exists.
            (when (or (eq exit 'timeout)
                      (and (not (eql exit 0)) (or live (and path (eq running :unavailable)))))
-             (error (concat "The existing harness in %s did not respond (%s); "
-                            "it may be busy or stuck. Cancel its operation in its frame (C-g), "
-                            "or explicitly call open_harness with restart=true "
-                            "(unsaved work in the instance will be lost)")
-                    (abbreviate-file-name dir)
-                    (if (eq exit 'timeout)
-                        (format "probe timed out after %ss" harness-tools-dev--probe-timeout)
-                      (format "probe exit status %s" exit))))))))))
+             (harness-tools-dev--probe-error dir path exit running))))))))
 
 (defun harness-tools-dev--start-error (dir result)
   "Signal an informative error for the failed start of DIR with RESULT."
@@ -883,7 +904,8 @@ than treating an unknown state as a stopped daemon."
                        (error :unavailable))
                    (funcall harness-tools-dev--processes-function))))
     (when (and require-table (not (listp running)))
-      (error "Cannot safely restart %s: process table unavailable" socket))
+      (error "Cannot safely restart %s: process table unavailable; wait and retry, or stop the daemon by hand"
+             socket))
     (and (listp running)
          (delq nil (mapcar (lambda (daemon)
                              (and (equal socket (plist-get daemon :socket)) (plist-get daemon :pid)))
@@ -891,27 +913,51 @@ than treating an unknown state as a stopped daemon."
 
 (defvar harness-tools-dev--own-socket 'unknown
   "The socket of the instance this harness itself runs in, nil for none.
-`unknown' until `harness-tools-dev--own-socket' finds out.")
+`unknown' until `harness-tools-dev--own-socket' finds out; a lookup
+that cannot see its parent leaves it `unknown' and is tried again.")
+
+(defun harness-tools-dev--own-socket-from-parent ()
+  "Return the socket named on the parent process's command line, or `unknown'.
+The harness process is a child of the Emacs that serves it (see
+harness-server.el), which scripts/dev.sh may have started as a daemon.
+`unknown' means the parent could not be read, so the answer is not
+definite and must not be cached."
+  (let* ((default-directory "/")
+         (self (ignore-errors (process-attributes (emacs-pid))))
+         (ppid (alist-get 'ppid self)))
+    (if (null ppid)
+        'unknown
+      (let* ((parent (ignore-errors (process-attributes ppid)))
+             (args (alist-get 'args parent)))
+        (if (stringp args)
+            (plist-get (harness-tools-dev--parse-command args) :socket)
+          'unknown)))))
 
 (defun harness-tools-dev--own-socket ()
   "Return the socket of the instance this harness itself runs in, or nil.
 That is this Emacs, when it is a daemon scripts/dev.sh started, or the
 Emacs this harness process serves (see harness-server.el).  An agent
 in an instance can open its own checkout, which is the same instance;
-it never stops itself."
+it never stops itself.  A parent lookup that cannot read the process
+table is inconclusive: the answer is not cached, and a later call tries
+again, so a restart cannot mistake an unread parent for no instance."
   (when (eq harness-tools-dev--own-socket 'unknown)
-    (setq harness-tools-dev--own-socket
-          ;; `daemonp' is what `--daemon=' gave: the socket's file.
-          (or (let* ((daemon (daemonp))
-                     (name (and (stringp daemon) (file-name-nondirectory daemon))))
-                (and name (string-prefix-p harness-tools-dev--socket-prefix name) name))
-              (let* ((default-directory "/")
-                     (ppid (alist-get 'ppid (ignore-errors (process-attributes (emacs-pid))))))
-                (and ppid
-                     (plist-get (harness-tools-dev--parse-command
-                                 (alist-get 'args (ignore-errors (process-attributes ppid))))
-                                :socket))))))
-  harness-tools-dev--own-socket)
+    (let ((daemon (daemonp)))
+      (cond
+       ((stringp daemon)
+        (let ((name (file-name-nondirectory daemon)))
+          (setq harness-tools-dev--own-socket
+                (and (string-prefix-p harness-tools-dev--socket-prefix name) name))))
+       (daemon
+        ;; A daemon under no harness socket of this module's making.
+        (setq harness-tools-dev--own-socket nil))
+       (t
+        (let ((found (harness-tools-dev--own-socket-from-parent)))
+          (unless (eq found 'unknown)
+            (setq harness-tools-dev--own-socket found)))))))
+  (if (eq harness-tools-dev--own-socket 'unknown)
+      nil
+    harness-tools-dev--own-socket))
 
 (defun harness-tools-dev--after (seconds)
   "Return a promise resolved SECONDS from now."

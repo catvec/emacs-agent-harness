@@ -157,7 +157,11 @@ before, so no other test sees it."
 (defun harness-test-reset-bus ()
   "Forget every method, subscriber, filter and module registration.
 The policies of read-only sessions go too: a module registers its own
-when it starts (harness-readonly.el)."
+when it starts (harness-readonly.el).  Debounced calls are cancelled:
+their methods are gone, so one that fired later would run against a
+reset bus."
+  (maphash (lambda (_key timer) (cancel-timer timer)) harness--debounce-timers)
+  (clrhash harness--debounce-timers)
   (clrhash harness--methods)
   (clrhash harness--subscribers)
   (clrhash harness--filters)

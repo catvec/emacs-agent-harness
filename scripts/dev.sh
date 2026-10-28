@@ -67,7 +67,7 @@ esac
 # Bound each command, and probe an existing daemon more quickly.  A probe
 # timeout means it may be busy, not that it is safe to start another one.
 DEV_TIMEOUT=${HARNESS_DEV_TIMEOUT:-60}
-DEV_PROBE_TIMEOUT=${HARNESS_DEV_PROBE_TIMEOUT:-5}
+DEV_PROBE_TIMEOUT=${HARNESS_DEV_PROBE_TIMEOUT:-10}
 # A socket's address holds about a hundred bytes (104 on macOS, 108 on
 # Linux), which the path of a socket in a session's temporary directory
 # can pass: emacsclient then connects from that directory, by a relative
@@ -87,8 +87,30 @@ ec() {
   (cd "$HERE" && timeout "$DEV_TIMEOUT" emacsclient -a false -s "$s" "$@")
 }
 alive() { DEV_TIMEOUT=$DEV_PROBE_TIMEOUT ec --eval t >/dev/null 2>&1; }
+# A daemon that no longer accepts connections can still be alive: its
+# socket may refuse them while its process keeps running (a full listen
+# queue, or a socket file replaced by a stale one).  Such a daemon names
+# its socket in the command line scripts/dev.sh gave it, so look for an
+# Emacs process that does, not for a shell command that merely mentions
+# it.  Never replace an instance just because its socket is not answering.
+daemon_alive() {
+  ps -A -o args= 2>/dev/null | awk -v socket="$NAME" '
+    function names_socket(line) {
+      if (index(line, "/" socket " ") > 0) return 1
+      if (substr(line, length(line) - length(socket)) == "/" socket) return 1
+      if (index(line, "--daemon=" socket " ") > 0) return 1
+      return substr(line, length(line) - length("--daemon=" socket) + 1) == "--daemon=" socket
+    }
+    {
+      command = tolower($1)
+      sub(/.*\//, "", command)
+      if (command !~ /^emacs/) next
+      if (index($0, "--daemon=") && names_socket($0)) { found = 1; exit }
+    }
+    END { exit(found ? 0 : 1) }'
+}
 not_responding() {
-  echo "daemon $SOCKET did not respond within ${DEV_PROBE_TIMEOUT}s; it may be busy or stuck. Cancel its operation in its frame (C-g). If open_harness opened it, explicitly call open_harness with restart=true; otherwise stop this daemon manually before retrying (unsaved work in the instance will be lost)." >&2
+  echo "daemon $SOCKET did not respond (${1:-probe failed}); it may be busy. Wait and retry; if it stays stuck, cancel its operation in its frame (C-g). If open_harness opened it, explicitly call open_harness with restart=true (unsaved work in the instance will be lost); otherwise stop this daemon manually before retrying." >&2
 }
 
 cmd=${1:-status}; shift || true
@@ -98,7 +120,12 @@ case "$cmd" in
       echo "daemon $SOCKET already running"
     else
       status=$?
-      if [ "$status" -eq 124 ]; then not_responding; exit 1; fi
+      if [ "$status" -eq 124 ]; then
+        not_responding "probe timed out after ${DEV_PROBE_TIMEOUT}s"; exit 1
+      fi
+      if daemon_alive; then
+        not_responding "connections refused while its process is alive"; exit 1
+      fi
       if [ -n "${HARNESS_SANDBOX:-}" ]; then
         echo "dev.sh: warning: in the harness sandbox ($HARNESS_SANDBOX) this Emacs ends with the command that started it; for one that stays, call the open_harness tool and drive it with the commands it lists" >&2
       fi
@@ -107,7 +134,9 @@ case "$cmd" in
       started=0
       for _ in $(seq 1 50); do
         if alive; then started=1; break; else status=$?; fi
-        if [ "$status" -eq 124 ]; then not_responding; exit 1; fi
+        if [ "$status" -eq 124 ]; then
+          not_responding "probe timed out after ${DEV_PROBE_TIMEOUT}s"; exit 1
+        fi
         sleep 0.2
       done
       [ "$started" = 1 ] || { echo "daemon failed to start"; cat "$DEVDIR/daemon.log"; exit 1; }
@@ -126,14 +155,23 @@ case "$cmd" in
       fi
     else
       status=$?
-      if [ "$status" -eq 124 ]; then not_responding; exit 1; fi
+      if [ "$status" -eq 124 ]; then
+        not_responding "probe timed out after ${DEV_PROBE_TIMEOUT}s"; exit 1
+      fi
+      if daemon_alive; then
+        not_responding "connections refused while its process is alive"; exit 1
+      fi
       echo "not running"
     fi ;;
   restart) "$SELF" stop && { sleep 0.5; "$SELF" start; } ;;
   status)
     if alive; then echo "running"; else
       status=$?
-      if [ "$status" -eq 124 ]; then not_responding; else echo "not running"; fi
+      if [ "$status" -eq 124 ]; then
+        not_responding "probe timed out after ${DEV_PROBE_TIMEOUT}s"
+      elif daemon_alive; then
+        not_responding "connections refused while its process is alive"
+      else echo "not running"; fi
       exit 1
     fi ;;
   eval) ec --eval "$*" ;;

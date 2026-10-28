@@ -29,24 +29,29 @@ who is away, allowed in yolo mode), not one that needs no approval.
 
 If an existing instance's responsiveness probe times out, `open_harness`
 and `dev.sh start` report that it may be busy rather than starting a second
-daemon.  `open_harness` also catches a refused connection when it can see
-the daemon is still running.  Cancel the operation in its frame with `C-g`
-and retry, or explicitly call `open_harness` with `restart: true` to stop an
-instance it opened and open a new one.  **Restart discards unsaved work in
-the instance**, so use it only when that is acceptable; it never restarts the
-harness that runs the tool itself, and requires a readable process table to
-verify that the old daemon stopped.  The equivalent ACP call is
-`harness-dev/open` with its third argument true.
+daemon.  Both also catch a refused connection when the daemon's process is
+still alive: `open_harness` asks the harness's process table, and `dev.sh`
+looks for an Emacs whose command line names the socket.  Wait and retry
+first, since a busy instance is not a stuck one.  If it stays stuck, cancel
+the operation in its frame with `C-g` and retry, or explicitly call
+`open_harness` with `restart: true` to stop an instance it opened and open a
+new one.  **Restart discards unsaved work in the instance**, so use it only
+when that is acceptable; it never restarts the harness that runs the tool
+itself, and requires a readable process table to verify that the old daemon
+stopped.  The equivalent ACP call is `harness-dev/open` with its third
+argument true.
 
-`dev.sh status`, `stop` and `restart` likewise report a probe timeout instead
-of claiming the daemon stopped.  A refused connection, however, is still
-reported as not running by the script, even if a wedged daemon's listen queue
-is full; verify its process before trying another start.  A daemon started
+`dev.sh status`, `stop` and `restart` likewise report a probe timeout or a
+refused connection from a live daemon instead of claiming it is not
+running.  When the process table cannot be read, `open_harness` says so
+rather than offering a restart that cannot verify the stop; if you are sure
+no instance is running, remove the stale socket and retry.  A daemon started
 directly with `dev.sh` uses a different socket from `open_harness`: if `C-g`
 cannot free it, identify and stop that daemon manually before retrying,
 accepting the loss of unsaved work.  `HARNESS_DEV_PROBE_TIMEOUT` changes the
-script's five-second responsiveness limit; `HARNESS_DEV_TIMEOUT` still bounds
-other emacsclient commands.
+script's ten-second responsiveness limit; the tool's is
+`harness-tools-dev-probe-timeout`, also ten seconds by default.
+`HARNESS_DEV_TIMEOUT` still bounds other emacsclient commands.
 
 The daemon's socket lives in the checkout, at
 `scripts/.dev/run/SOCKET`, not where Emacs puts sockets by default

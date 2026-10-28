@@ -3803,8 +3803,7 @@ stage's label, else `gate`; the access module's judgements and the
   providers they set up, so unattended sessions can say they need them,
   and `hand_in`, which only records a task's report and ends the turn.
   So are those a module outside the harness adds to
-  `harness-perms-extra-auto-allow-tools` (`harness-perms--auto-allow-p`),
-  as the harness repository's plugin adds `open_harness`.
+  `harness-perms-extra-auto-allow-tools` (`harness-perms--auto-allow-p`).
   So are the tools in `harness-perms--inspection-tools`, which only
   inspect the harness or the user's live Emacs: `emacs_buffers`,
   `emacs_buffer`, `emacs_windows`, `emacs_describe`,
@@ -9720,10 +9719,15 @@ method `harness-dev/open PATH &optional FOCUS RESTART` does the same for
 the UI (focus raises the frame); Open harness, which the plugin's UI
 half adds to the menu of a task board's review card whose worktree is
 such a checkout (`harness-ui-tasks-action-functions`), calls it.  An
-unresponsive instance is not treated as dead: a probe reports the
-problem and `restart` explicitly stops it before starting another,
-losing unsaved work in that instance.  The harness never restarts
-itself.  As it loads the plugin adds `harness-dev/` to
+unresponsive instance is not treated as dead: a probe that times out, or
+whose connection is refused while the daemon is still in the process
+table, reports that the instance may be busy.  Wait and retry; `restart`
+explicitly stops it before starting another, losing unsaved work in that
+instance.  The probe waits `harness-tools-dev-probe-timeout` seconds (ten
+by default), as `HARNESS_DEV_PROBE_TIMEOUT` bounds the script's.  A
+restart requires the process table to verify the old daemon stopped; when
+it cannot be read, the error names removing a stale socket instead.  The
+harness never restarts itself.  As it loads the plugin adds `harness-dev/` to
 `harness-acp-extra-method-prefixes`, and the tool to
 `harness-tool-slots-tools`, since a call starts a whole Emacs.  The tool
 runs outside the sandbox and the permission mode decides it.

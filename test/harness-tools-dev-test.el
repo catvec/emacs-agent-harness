@@ -19,7 +19,7 @@
 (defvar harness-tools-dev--check-timer)
 (defvar harness-tools-dev--own-socket)
 (defvar harness-tools-dev--processes-function)
-(defvar harness-tools-dev--probe-timeout)
+(defvar harness-tools-dev-probe-timeout)
 (defvar harness-tools-dev--exit-timeout)
 (defvar harness-tools-dev--kill-grace)
 (defvar harness-tools-dev--starting)
@@ -386,6 +386,7 @@ mode decides it as it decides bash."
         (let ((answer (harness-test-await (harness-tools-dev--open (list :path dir) (list :cwd dir)))))
           (should (plist-get answer :is-error))
           (should (string-search "did not respond" (plist-get answer :content)))
+          (should (string-search "Wait and retry" (plist-get answer :content)))
           (should (string-search "restart=true" (plist-get answer :content)))
           (should (string-search "unsaved work" (plist-get answer :content)))
           (should-not (file-exists-p (expand-file-name "invocation.log" dir)))
@@ -393,6 +394,26 @@ mode decides it as it decides bash."
           (should (= 1 (length probes)))
           (should (equal (concat "./" socket) (nth 4 (caar probes))))
           (should (equal (file-name-directory path) (plist-get (cadar probes) :cwd))))))))
+
+(ert-deftest harness-tools-dev-probe-timeout-is-configurable ()
+  "The responsiveness probe uses its custom bound and names it."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir))
+           (path (harness-tools-dev-socket-path socket))
+           (timeout nil))
+      (harness-tools-dev--make-socket-dir)
+      (with-temp-file path)
+      (cl-letf (((symbol-function 'harness-run-command)
+                 (lambda (_command &rest keys)
+                   (setq timeout (plist-get keys :timeout))
+                   (harness-resolved '(:exit timeout :stdout "" :stderr "")))))
+        (let* ((harness-tools-dev-probe-timeout 12.5)
+               (answer (harness-test-await (harness-tools-dev--open (list :path dir) (list :cwd dir)))))
+          (should (plist-get answer :is-error))
+          (should (= 12.5 timeout))
+          (should (string-search "timed out after 12.5s" (plist-get answer :content)))
+          (should (string-search "Wait and retry" (plist-get answer :content))))))))
 
 (ert-deftest harness-tools-dev-refused-socket-with-live-daemon-is-not-stale ()
   "A wedged daemon can refuse connections when its socket backlog fills."
@@ -414,6 +435,14 @@ mode decides it as it decides bash."
           (let ((answer (harness-test-await (harness-tools-dev--open (list :path dir) (list :cwd dir)))))
             (should (plist-get answer :is-error))
             (should (string-search "did not respond" (plist-get answer :content)))
+            (should (string-search "Wait and retry" (plist-get answer :content)))
+            (if (eq state :unavailable)
+                (progn
+                  (should (string-search "process table is unavailable" (plist-get answer :content)))
+                  (should (string-search "remove" (plist-get answer :content)))
+                  (should-not (string-search "restart=true" (plist-get answer :content))))
+              (should (string-search "restart=true" (plist-get answer :content)))
+              (should (string-search "unsaved work" (plist-get answer :content))))
             (should-not script-ran)))
         ;; Only when the process table confirms it is stale may start proceed.
         (setq running nil)
@@ -999,6 +1028,31 @@ A restart of the harness process alone must not stop the instances."
         (cl-letf (((symbol-function 'daemonp) (lambda () daemon)))
           (should (equal "harness-dev-0123456789ab" (harness-tools-dev--own-socket))))))))
 
+(ert-deftest harness-tools-dev-own-socket-retries-an-unreadable-parent ()
+  "A parent the process table cannot show leaves the answer unfixed.
+A later lookup that can read it finds the daemon socket, so a restart
+cannot take an unread parent for evidence that this harness is no
+instance at all."
+  (harness-tools-dev-test-with
+    (let ((harness-tools-dev--own-socket 'unknown)
+          (parent nil))
+      (cl-letf (((symbol-function 'daemonp) #'ignore)
+                ((symbol-function 'process-attributes)
+                 (lambda (pid)
+                   (if (eql pid (emacs-pid)) '((ppid . 4242)) parent))))
+        ;; The parent cannot be read: the answer is inconclusive.
+        (should-not (harness-tools-dev--own-socket))
+        (should (eq harness-tools-dev--own-socket 'unknown))
+        ;; Now it can: the lookup is definite and cached.
+        (setq parent '((args . "emacs -Q --daemon=harness-dev-0123456789ab")))
+        (should (equal "harness-dev-0123456789ab" (harness-tools-dev--own-socket)))
+        (should (equal "harness-dev-0123456789ab" harness-tools-dev--own-socket))
+        ;; A parent that names no instance is a definite nil.
+        (setq harness-tools-dev--own-socket 'unknown
+              parent '((args . "emacs -Q")))
+        (should-not (harness-tools-dev--own-socket))
+        (should-not harness-tools-dev--own-socket)))))
+
 (ert-deftest harness-tools-dev-reaches-an-instance-by-its-sockets-file ()
   "emacsclient is given the socket's file when there is one, else its name.
 An instance an older harness started has its socket in Emacs's default
@@ -1052,7 +1106,7 @@ directory, under its name."
            (socket (harness-tools-dev-socket dir))
            (path (harness-tools-dev-socket-path socket))
            (emacs (expand-file-name invocation-name invocation-directory))
-           (harness-tools-dev--probe-timeout 0.5)
+           (harness-tools-dev-probe-timeout 0.5)
            (harness-tools-dev--exit-timeout 0.5)
            (harness-tools-dev--kill-grace 0.1)
            (harness-tools-dev--processes-function
@@ -1284,6 +1338,95 @@ It starts it all the same: one command may start, drive and stop it."
               (should (string-search "unsaved work" (nth 2 r)))
               (should-not (string-search "not running" (nth 1 r)))
               (should-not (harness-tools-dev-test--calls bin)))))
+      (dolist (d (list dir bin)) (delete-directory d t)))))
+
+(ert-deftest harness-tools-dev-dev-sh-refuses-a-refused-live-daemon ()
+  "A live daemon whose socket refuses connections is not replaced.
+The daemon is real; its socket is moved and a plain file left where
+emacsclient looks, so the refusal is real too.  `start' must diagnose
+it rather than launch another Emacs, and `status' must not call it
+gone."
+  (skip-unless (listp (harness-tools-dev-processes)))
+  (skip-unless (executable-find "emacsclient"))
+  (let* ((dir (harness-tools-dev-test--real-checkout))
+         (bin (harness-tools-dev-test--fake-bin))
+         (sockets (harness-test-temp-dir))
+         (name "harness-dev-0123456789ab")
+         (path (expand-file-name name sockets))
+         (emacs (expand-file-name invocation-name invocation-directory))
+         (env (list (concat "HARNESS_DEV_SOCKET=" name)
+                    (concat "HARNESS_DEV_SOCKET_DIR=" sockets)
+                    "HARNESS_DEV_PROBE_TIMEOUT=1")))
+    (unwind-protect
+        (progn
+          (make-directory sockets t)
+          (with-temp-file (expand-file-name "scripts/harness-dev.el" dir)
+            (insert ";; A daemon for the refused-socket test.\n"))
+          (should (eql 0 (call-process emacs nil nil nil "-Q"
+                                      (concat "--daemon=" path)
+                                      "-l" (expand-file-name "scripts/harness-dev.el" dir))))
+          (harness-test-wait (lambda () (file-exists-p path)) 10 "the daemon socket")
+          (let ((daemon (car (harness-test-wait
+                              (lambda ()
+                                (let ((all (harness-tools-dev-processes)))
+                                  (and (listp all)
+                                       (seq-filter (lambda (d) (equal name (plist-get d :socket))) all))))
+                              10 "the daemon to show in the process table"))))
+            (should (integerp (plist-get daemon :pid))))
+          ;; The daemon keeps listening on the moved file; a plain file
+          ;; where emacsclient looks makes it refuse the connection.
+          (rename-file path (concat path ".moved"))
+          (with-temp-file path (insert "not a socket\n"))
+          ;; Real emacsclient; the fake emacs records any second start.
+          (delete-file (expand-file-name "emacsclient" bin))
+          (make-symbolic-link (executable-find "emacsclient")
+                              (expand-file-name "emacsclient" bin))
+          (let ((status (apply #'harness-tools-dev-test--dev-sh dir bin env '("status"))))
+            (should-not (eql 0 (car status)))
+            (should-not (string-search "not running" (nth 1 status)))
+            (should (string-search "did not respond" (nth 2 status)))
+            (should (string-search "connections refused" (nth 2 status))))
+          (let ((start (apply #'harness-tools-dev-test--dev-sh dir bin env '("start"))))
+            (should-not (eql 0 (car start)))
+            (should-not (string-search "up, frame ready" (nth 1 start)))
+            (should (string-search "did not respond" (nth 2 start)))
+            (should-not (cl-some (lambda (call) (string-prefix-p "emacs " call))
+                                 (harness-tools-dev-test--calls bin)))))
+      (let ((all (ignore-errors (harness-tools-dev-processes))))
+        (when (listp all)
+          (dolist (daemon all)
+            (when (equal name (plist-get daemon :socket))
+              (ignore-errors (signal-process (plist-get daemon :pid) 'kill))))))
+      (dolist (d (list dir bin sockets)) (ignore-errors (delete-directory d t))))))
+
+(ert-deftest harness-tools-dev-dev-sh-sees-a-daemon-named-by-its-socket ()
+  "A bare `--daemon=NAME`, as an older dev.sh starts it, is found alive.
+The socket is in Emacs's default directory then, and a refused
+connection must not let start launch a second daemon."
+  (let* ((dir (harness-tools-dev-test--real-checkout))
+         (bin (harness-tools-dev-test--fake-bin))
+         (name "harness-dev-0123456789ab")
+         (env (list (concat "HARNESS_DEV_SOCKET=" name)
+                    "HARNESS_DEV_PROBE_TIMEOUT=1")))
+    (unwind-protect
+        (progn
+          ;; emacsclient refuses, while ps names a daemon under the socket.
+          (with-temp-file (expand-file-name "emacsclient" bin)
+            (insert "#!/bin/sh\nexit 1\n"))
+          (with-temp-file (expand-file-name "ps" bin)
+            (insert "#!/bin/sh\necho 'emacs -Q --daemon=" name
+                    " -l /x/scripts/harness-dev.el'\n"))
+          (dolist (program '("emacsclient" "ps"))
+            (set-file-modes (expand-file-name program bin) #o755))
+          (let ((status (apply #'harness-tools-dev-test--dev-sh dir bin env '("status"))))
+            (should-not (eql 0 (car status)))
+            (should-not (string-search "not running" (nth 1 status)))
+            (should (string-search "connections refused" (nth 2 status))))
+          (let ((start (apply #'harness-tools-dev-test--dev-sh dir bin env '("start"))))
+            (should-not (eql 0 (car start)))
+            (should (string-search "did not respond" (nth 2 start)))
+            (should-not (cl-some (lambda (call) (string-prefix-p "emacs " call))
+                                 (harness-tools-dev-test--calls bin)))))
       (dolist (d (list dir bin)) (delete-directory d t)))))
 
 (ert-deftest harness-tools-dev-dev-sh-frame-failure-is-visible ()
