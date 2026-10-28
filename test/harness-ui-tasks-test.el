@@ -5514,7 +5514,7 @@ nothing of where the waiting cards' columns are, and has columns of its own."
             ;; its zone is as wide as its own buttons.
             (should (equal '(main-tree time title zone)
                            (sort (mapcar #'car active) #'string<)))
-            (should (= (- width 1 (string-width "[Steer] [Pause]")) (cdr (assq 'zone active))))))))))
+            (should (assq 'zone active))))))))
 
 
 (defun harness-ui-tasks-test--busy-session ()
@@ -5557,7 +5557,7 @@ That is `harness-ui-tasks-test--columns' of a buffer of its own."
   "A working task in the main tree with todos done and a time, titled NAME.
 Its title is `harness-ui-tasks-test--long-name' unless NAME is given.  It
 has every fact a working card has but the rare ones, and its buttons are
-\[Steer] and [Pause].  Its session is in the cache; return the task."
+\[Steer].  Its session is in the cache; return the task."
   (let ((id (or id "t-col-long")))
     (puthash (concat "s-" id)
              (list :id (concat "s-" id) :name (or name harness-ui-tasks-test--long-name) :status "running"
@@ -5804,10 +5804,10 @@ left out, so is the session's when the task has none."
         ;; one line (an archived task is not on the board: this one is not).
         (setq harness-ui-tasks--tasks (list (plist-put (copy-sequence busy) :archived nil) idle))
         (harness-ui-tasks--render t)
-        (should (equal (concat "Open the session · main tree · 1/3 todos done · started 12m ago"
+        (should (equal (concat "Open the session; right-click for actions (u pause, k stop) · main tree · 1/3 todos done · started 12m ago"
                                " · context 12.4k/200k · 3.4k out · 48 tok/s avg · cost $0.012")
                        (harness-ui-tasks-test--title-help board "Count the tokens")))
-        (should (equal "Open the session · started 1m ago" (harness-ui-tasks-test--title-help board "Wait for it")))
+        (should (equal "Open the session; right-click for actions (u pause, k stop) · started 1m ago" (harness-ui-tasks-test--title-help board "Wait for it")))
         ;; What a plan pays for reads as the plan, not as a cost.
         (puthash "s-col-busy" (plist-put (copy-sequence (gethash "s-col-busy" harness-ui--sessions))
                                          :usage (list :context 12300 :last-output 100 :output 3400 :cost 0.0
@@ -6745,11 +6745,27 @@ is not paused, with a message that says what the card is."
           (harness-ui-tasks--send `(reply . ,(car case)) "hello" "hello" nil)
           (should (equal (cdr case) (car harness-ui-tasks-test--said-messages))))))))
 
+(ert-deftest harness-ui-tasks-working-controls-stay-in-menu ()
+  "Working cards keep their stop and pause commands without persistent buttons."
+  (harness-ui-tasks-test-with
+    (let ((tasks (harness-ui-tasks-test--working-pair)))
+      (dolist (width '(40 140))
+        (let ((lines (harness-ui-tasks-test--draw-cards 'active tasks width)))
+          (should (harness-ui-tasks-test--cards-of lines 'active)))
+        (dolist (task tasks)
+          (let ((buttons (substring-no-properties (harness-ui-tasks--card-buttons task)))
+                (actions (harness-ui-tasks--actions task)))
+            (should (string-search "[Steer]" buttons))
+            (should-not (string-search "[Pause]" buttons))
+            (should-not (string-search "[Stop]" buttons))
+            (should (equal (cadr (assoc "Pause" actions)) 'harness-ui-tasks-pause))
+            (should (equal (cadr (assoc "Stop" actions)) 'harness-ui-tasks-cancel))))))))
+
 (ert-deftest harness-ui-tasks-live-pause-and-resume-a-waiting-task ()
   "u and U, and the card's buttons, pause and resume against the harness.
 A waiting task is held where it is: its card says paused, with Resume
-first; resumed, the queue starts it.  A task at work is paused with its
-[Pause] and carries on where it stopped when resumed."
+first; resumed, the queue starts it.  A task at work is paused with u
+and carries on where it stopped when resumed."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-max-running 1)
           (harness-agent--cancel-grace 0.05)
@@ -6769,12 +6785,10 @@ first; resumed, the queue starts it.  A task at work is paused with its
         (should (string-match-p "\\[Resume\\] \\[Start now\\]"
                                 (harness-ui-tasks-test--card-text board "Waits second")))
         (should-not (plist-get (harness-call 'task/get second) :started))
-        ;; The card's [Pause] on the task at work: it goes back to the queue, held.
+        ;; u on the task at work: it goes back to the queue, held.
         (with-current-buffer board
           (harness-ui-tasks-test--goto-card board "Works first")
-          (goto-char (line-beginning-position))
-          (search-forward "[Pause]")
-          (push-button (match-beginning 0)))
+          (execute-kbd-macro "u"))
         (harness-test-wait (lambda () (plist-get (harness-call 'task/get first) :paused)) 5 "the working task to be paused")
         (harness-ui-tasks-test--wait-text board "Pending  2")
         ;; No slot is taken by anything: both wait, paused.

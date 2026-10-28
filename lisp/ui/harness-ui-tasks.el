@@ -1420,14 +1420,18 @@ It is made when it is asked for, a `help-echo' function of the board
 while it works, are never older than the hover and the board need not be
 drawn again for them (`harness-ui-tasks--board-key').  One line, as
 hover text is (`harness-ui-one-line')."
-  (let ((figures (and (bufferp object) (buffer-live-p object)
-                      (harness-ignore-errors-logged "making the tooltip of a card"
-                        (with-current-buffer object
-                          (when-let* ((id (get-text-property pos 'harness-task-id object))
-                                      (task (harness-ui-tasks--find id)))
-                            (harness-ui-tasks--figures task)))))))
+  (let* ((task (and (bufferp object) (buffer-live-p object) (integer-or-marker-p pos)
+                    (with-current-buffer object
+                      (when-let* ((id (get-text-property pos 'harness-task-id object)))
+                        (harness-ui-tasks--find id)))))
+         (figures (and task (harness-ignore-errors-logged "making the tooltip of a card"
+                              (with-current-buffer object
+                                (harness-ui-tasks--figures task)))))
+         (hint (if (and task (eq (harness-ui-tasks--column task) 'active))
+                   "Open the session; right-click for actions (u pause, k stop)"
+                 "Open the session")))
     (harness-ui-one-line
-     (string-join (cons "Open the session" figures) (concat " " harness-ui-tasks--dot " ")))))
+     (string-join (cons hint figures) (concat " " harness-ui-tasks--dot " ")))))
 
 (defun harness-ui-tasks--shown-priority (task column)
   "TASK's priority as its card in COLUMN shows it: \"high\", \"low\" or nil.
@@ -1939,8 +1943,13 @@ offers for it, the session list too (`harness-ui-pending-view-actions'):
                       (list (funcall button '("Reply" harness-ui-tasks-reply))))
                  (and (harness-ui-tasks--pausable-p task)
                       (list (funcall button '("Pause" harness-ui-tasks-pause)))))
-       (mapcar button (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task t)
-                                         :key #'cadr))))
+       (mapcar button
+               (take 2 (cl-remove-if
+                        (lambda (action)
+                          (or (eq (cadr action) 'harness-ui-tasks-open)
+                              (and (eq (harness-ui-tasks--column task) 'active)
+                                   (memq (cadr action) '(harness-ui-tasks-pause harness-ui-tasks-cancel)))))
+                        (harness-ui-tasks--actions task t)))))
      " ")))
 
 (defun harness-ui-tasks--card-buttons (task)
