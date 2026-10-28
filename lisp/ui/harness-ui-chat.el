@@ -1734,11 +1734,16 @@ Pass the kinds `harness-chat--turn-kind' gives."
 A tool call the harness recorded (`harness-outside-node-p'), such as
 the merge queue's conflict resolver, is no part of an agent turn: it
 reads \"outside\", which opens none, and the agent's block after it
-opens one again."
+opens one again.  A slot-load notice folded into a tool group is part
+of the turn that group belongs to, so the block after it continues
+that turn; on its own, a hint opens none."
   (and block
-       (if (harness-outside-node-p (harness-chat-block-node block))
-           "outside"
-         (harness-chat-block-kind block))))
+       (cond
+        ((harness-outside-node-p (harness-chat-block-node block)) "outside")
+        ((and (harness-chat-block-group block)
+              (harness-chat--slot-hint-block-p block))
+         "thinking")
+        (t (harness-chat-block-kind block)))))
 
 (defun harness-chat--outside-header (block)
   "Return the sender line of BLOCK when the harness recorded its call, or nil.
@@ -3039,6 +3044,27 @@ The thinking folded in between them is left out."
            for b = (gethash nid harness-chat--blocks)
            when (and b (equal (harness-chat-block-kind b) "tool-call")) collect b))
 
+(defun harness-chat--group-slot-hints (group)
+  "Return the slot-change notices folded into GROUP, oldest first."
+  (cl-loop for nid in (harness-chat-group-members group)
+           for b = (gethash nid harness-chat--blocks)
+           when (harness-chat--slot-hint-block-p b) collect b))
+
+(defun harness-chat--group-slot-summary (group)
+  "Return the part of GROUP's summary that says its slot notices, or \"\".
+The group starts collapsed, so this is what tells of the notice, with
+the number of changes and the newest one a hover away."
+  (let ((hints (harness-chat--group-slot-hints group)))
+    (when hints
+      (let* ((items (cl-loop for b in hints
+                             append (plist-get (harness-node-fold (harness-chat-block-node b)) :items)))
+             (latest (plist-get (car (last items)) :text))
+             (count (length items)))
+        (propertize (concat " · slots changed" (if (> count 1) (format " ×%d" count) ""))
+                    'help-echo (if latest
+                                   (format "Latest slot change: %s" latest)
+                                 "The tool slots changed"))))))
+
 (defun harness-chat--group-outcomes (group)
   "Return the status text counting GROUP's failed and denied tool calls.
 Empty when none failed or was denied; a collapsed group would hide them."
@@ -3052,14 +3078,15 @@ Empty when none failed or was denied; a collapsed group would hide them."
 
 (defun harness-chat--render-group (group)
   "Return the body of the summary block of GROUP.
-It counts the calls by label, then the thinking folded between them.
-A run of one call names it as its header does, label and subject:
-\"1 tool call: Read file x.el\"."
+It counts the calls by label, then the thinking and slot notices folded
+between them.  A run of one call names it as its header does, label and
+subject: \"1 tool call: Read file x.el\"."
   (let* ((gid (harness-chat-group-id group))
          (calls (harness-chat--group-calls group))
          (names (mapcar (lambda (b) (harness-ui-tool-label (plist-get (harness-chat-block-node b) :tool)))
                         calls))
          (thoughts (cl-count-if #'harness-chat--thinking-block-p (harness-chat-group-members group)))
+         (slots (harness-chat--group-slot-summary group))
          (counts nil))
     (dolist (n names)
       (let ((cell (assoc n counts)))
@@ -3074,7 +3101,7 @@ A run of one call names it as its header does, label and subject:
                                         (lambda () (interactive) (harness-chat-toggle-group gid))
                                         "mouse-1, TAB: show or hide the individual tool calls")
              " "
-             (propertize (format "%s %d tool call%s: %s%s" (harness-ui-icon 'harness-icon-tool) (length names)
+             (propertize (format "%s %d tool call%s: %s%s%s" (harness-ui-icon 'harness-icon-tool) (length names)
                                  (if (= (length names) 1) "" "s")
                                  (if (= (length calls) 1)
                                      ;; What the lone call is about, as its
@@ -3088,7 +3115,8 @@ A run of one call names it as its header does, label and subject:
                                  (pcase thoughts
                                    (0 "")
                                    (1 " · thinking")
-                                   (n (format " · thinking ×%d" n))))
+                                   (n (format " · thinking ×%d" n)))
+                                 slots)
                          'face 'harness-summary-face)
              (harness-chat--group-outcomes group)
              "  "
@@ -3475,13 +3503,17 @@ it folds into their group with them."
   (when-let* ((b (gethash id harness-chat--blocks)))
     (equal (harness-chat-block-kind b) "thinking")))
 
+(defun harness-chat--slot-hint-block-p (block)
+  "Non-nil when BLOCK is the note of the tool slots changing."
+  (and (harness-chat-block-p block)
+       (equal (harness-chat-block-kind block) "hint")
+       (equal (plist-get (harness-node-fold (harness-chat-block-node block)) :key)
+              "tool-slots-load")))
+
 (defun harness-chat--group-auxiliary-p (id)
   "Non-nil when ID is thinking or a slot-load notice."
   (or (harness-chat--thinking-block-p id)
-      (when-let* ((block (gethash id harness-chat--blocks)))
-        (and (equal (harness-chat-block-kind block) "hint")
-             (equal (plist-get (harness-node-fold (harness-chat-block-node block)) :key)
-                    "tool-slots-load")))))
+      (harness-chat--slot-hint-block-p (gethash id harness-chat--blocks))))
 
 (defun harness-chat--run-calls (ids)
   "Return how many of the blocks IDS are coalescable tool calls."
@@ -3494,6 +3526,14 @@ it folds into their group with them."
                          (list 'harness-chat-group (harness-chat-group-id group) 'read-only t 'rear-nonsticky t)
                          text)
     text))
+
+(defun harness-chat--fold-member-head (block)
+  "Make BLOCK a member of a group, without a sender line of its own.
+The group's summary carries the turn's sender line instead, so a member
+that drew one is rendered again without it."
+  (when (harness-chat-block-head block)
+    (setf (harness-chat-block-head block) nil)
+    (harness-chat--rerender block)))
 
 (defun harness-chat--make-group (members)
   "Fold the blocks MEMBERS (oldest first) under a new summary block."
@@ -3519,8 +3559,12 @@ it folds into their group with them."
       (setf (harness-chat-group-overlay group) ov))
     (dolist (m members) (setf (harness-chat-block-group (gethash m harness-chat--blocks)) gid))
     (puthash gid group harness-chat--groups)
-    ;; The summary now carries the turn's sender line.
-    (when (harness-chat-block-head first) (harness-chat--rerender first))
+    ;; The summary now carries the turn's sender line, and only it.
+    (dolist (m members)
+      (let ((block (gethash m harness-chat--blocks)))
+        (if (eq block first)
+            (when (harness-chat-block-head block) (harness-chat--rerender block))
+          (harness-chat--fold-member-head block))))
     group))
 
 (defun harness-chat--update-group-summary (group)
@@ -3539,12 +3583,15 @@ arriving for one of them changes it."
     (harness-chat--update-group-summary group)))
 
 (defun harness-chat--extend-group (group ids)
-  "Add the blocks IDS (oldest first) to GROUP, which ends right before them."
+  "Add the blocks IDS (oldest first) to GROUP, which ends right before them.
+The group's summary stays the only sender line of the turn."
   (let ((last (gethash (car (last ids)) harness-chat--blocks))
         (ov (harness-chat-group-overlay group)))
     (setf (harness-chat-group-members group) (append (harness-chat-group-members group) ids))
     (dolist (id ids)
-      (setf (harness-chat-block-group (gethash id harness-chat--blocks)) (harness-chat-group-id group)))
+      (let ((block (gethash id harness-chat--blocks)))
+        (setf (harness-chat-block-group block) (harness-chat-group-id group))
+        (harness-chat--fold-member-head block)))
     (move-overlay ov (overlay-start ov) (1- (marker-position (harness-chat-block-end last))))
     (harness-chat--update-group-summary group)))
 
@@ -3607,21 +3654,34 @@ stays open (see `harness-chat--regroup-keeping-open')."
     (when (gethash gid harness-chat--groups)
       (harness-chat--regroup-keeping-open))))
 
-(defun harness-chat--regroup-keeping-open ()
-  "Group the transcript anew, keeping open the groups the user opened.
-A new group with a block of a group that was expanded is expanded too,
-and the others are folded, as `harness-chat--regroup' makes them."
-  (let ((open nil))
+(defun harness-chat--expanded-group-members ()
+  "Return the members of the groups the user opened, as one list."
+  (let (open)
     (maphash (lambda (_ g)
                (when (harness-chat-group-expanded g)
                  (setq open (append (harness-chat-group-members g) open))))
              harness-chat--groups)
+    open))
+
+(defun harness-chat--reopen-groups (open)
+  "Open every group holding a member of OPEN; all others stay folded.
+A new group with a block of a group that was expanded is expanded too,
+which is how a grouping made anew keeps the user's choices."
+  (when open
+    (maphash (lambda (gid g)
+               (when (and (not (harness-chat-group-expanded g))
+                          (cl-intersection (harness-chat-group-members g) open :test #'equal))
+                 (harness-chat-toggle-group gid)))
+             harness-chat--groups)))
+
+(defun harness-chat--regroup-keeping-open ()
+  "Group the transcript anew, keeping open the groups the user opened.
+A new group with a block of a group that was expanded is expanded too,
+and the others are folded, as `harness-chat--regroup' makes them."
+  (let ((open (harness-chat--expanded-group-members)))
     (harness-chat--regroup)
-    (when open
-      (maphash (lambda (gid g)
-                 (when (cl-intersection (harness-chat-group-members g) open :test #'equal)
-                   (harness-chat-toggle-group gid)))
-               harness-chat--groups))))
+    (harness-chat--refresh-heads)
+    (harness-chat--reopen-groups open)))
 
 (defun harness-chat--clear-groups ()
   "Remove every group: summary blocks and overlays."
@@ -3645,6 +3705,24 @@ thinking and slot-load notices, until another kind of block ends it."
             (push id run)
           (flush)))
       (flush))))
+
+(defun harness-chat--refresh-heads ()
+  "Set each block's sender line from the grouping now in force.
+A slot notice folded into a run continues its turn, which only the
+grouping tells: a page of history is laid out before it is grouped, so
+the reply after its notice would otherwise open a turn of its own."
+  (let ((previous nil))
+    (dolist (id (reverse harness-chat--order))
+      (let* ((block (gethash id harness-chat--blocks))
+             (kind (harness-chat--turn-kind block))
+             (head (harness-chat--head-p kind previous)))
+        (unless (eq (not head) (not (harness-chat-block-head block)))
+          (setf (harness-chat-block-head block) head)
+          (if-let* ((gid (harness-chat-block-group block))
+                    (group (gethash gid harness-chat--groups)))
+              (harness-chat--update-group-summary group)
+            (harness-chat--rerender block)))
+        (setq previous kind)))))
 
 (defun harness-chat-toggle-group (&optional gid)
   "Show or hide the tool calls of group GID (default the one at point)."
@@ -3742,8 +3820,10 @@ both places."
             (harness-chat-block-streamed block) t)
       (harness-chat--cancel-render id)
       (harness-chat--rerender block)
-      ;; The summary of a run of one call shows the call's title.
-      (when (equal kind "tool-call")
+      ;; The summary of a run of one call shows the call's title, and a
+      ;; slot notice's place in it counts its changes.
+      (when (or (equal kind "tool-call")
+                (harness-chat--slot-hint-block-p block))
         (harness-chat--refresh-group-of block)))
      (t
       (let ((windows (harness-chat--bottom-windows)))
@@ -4640,7 +4720,8 @@ page from its top, and land near the top again."
                     (- (length oldest) harness-chat--history-limit))))
     (when (and (>= above (* 2 harness-chat--history-page)) (> drop 0))
       (let ((victims (seq-take oldest drop))
-            (keep (gethash (nth drop oldest) harness-chat--blocks)))
+            (keep (gethash (nth drop oldest) harness-chat--blocks))
+            (open (harness-chat--expanded-group-members)))
         (harness-chat--clear-groups)
         (let ((inhibit-read-only t) (buffer-undo-list t))
           (delete-region harness-chat--transcript-start (harness-chat-block-start keep)))
@@ -4664,14 +4745,19 @@ page from its top, and land near the top again."
             (setf (harness-chat-block-head keep) head)
             (harness-chat--rerender keep)))
         (harness-chat--regroup)
+        (harness-chat--refresh-heads)
+        (harness-chat--reopen-groups open)
         (harness-chat--render-top)))))
 
 (defun harness-chat--prepend-nodes (nodes)
-  "Render NODES (oldest first) above the current first block."
+  "Render NODES (oldest first) above the current first block.
+The groups the user opened stay open, as they do when the transcript is
+grouped anew (`harness-chat--regroup-keeping-open')."
   (when nodes
     (let ((harness-chat--batch t)
           (results nil)
-          (ids nil))
+          (ids nil)
+          (open (harness-chat--expanded-group-members)))
       (harness-chat--clear-groups)
       (let* ((first (gethash (harness-chat--oldest-id) harness-chat--blocks))
              (anchor (harness-chat-block-start first))
@@ -4699,6 +4785,8 @@ page from its top, and land near the top again."
           (harness-chat--attach-result call r)))
       (harness-chat--adopt-orphans)
       (harness-chat--regroup)
+      (harness-chat--refresh-heads)
+      (harness-chat--reopen-groups open)
       ;; A page of older history may hold the only compaction there is.
       (harness-chat--sync-compaction-button))))
 

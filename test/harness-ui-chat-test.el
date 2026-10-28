@@ -7542,6 +7542,11 @@ with a call, and its overlay hides them and nothing else."
           (should (equal members (delete-dups (copy-sequence members))))
           (should (cl-every (lambda (b) (equal (harness-chat-block-group b) (harness-chat-group-id g))) blocks))
           (should (equal "tool-call" (harness-chat-block-kind (car blocks))))
+          ;; A run ends with a call, or with the thinking or slot notice
+          ;; that came after its last call; never with an unrelated block.
+          (let ((last (car (last blocks))))
+            (should (or (equal "tool-call" (harness-chat-block-kind last))
+                        (harness-chat--group-auxiliary-p (harness-chat-block-id last)))))
           (should (cl-every (lambda (a b) (< (harness-chat-block-start a) (harness-chat-block-start b)))
                             blocks (cdr blocks)))
           (should (= (overlay-start ov) (1- (harness-chat-block-start (car blocks)))))
@@ -7814,15 +7819,122 @@ and either change closed the groups the user had opened."
             (should-not (invisible-p (harness-chat-block-start (gethash "slot" harness-chat--blocks))))
             (call "c2")
             (should (equal '("c1" "t1" "slot" "c2") (harness-chat-group-members g)))
+            ;; One sender line for the turn: the call folded after the
+            ;; notice draws none of its own, and the summary tells of the
+            ;; slot notice it keeps folded.
+            (let ((case-fold-search nil))
+              (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
+            (should-not (harness-chat-block-head (gethash "c2" harness-chat--blocks)))
+            (should (harness-ui-chat-test-find buf "· slots changed ×2"))
+            ;; A reply after the folded notice continues the same turn.
+            (node '(:id "done" :kind "assistant" :content "Done."))
+            (should-not (harness-chat-block-head (gethash "done" harness-chat--blocks)))
+            (let ((case-fold-search nil))
+              (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
             (harness-chat--regroup-keeping-open)
             (setq g (gethash (harness-chat-block-group b) harness-chat--groups))
             (should (harness-chat-group-expanded g))
             (should (equal '("c1" "t1" "slot" "c2") (harness-chat-group-members g)))
+            (let ((case-fold-search nil))
+              (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
             (harness-chat-toggle-group (harness-chat-group-id g))
             (should (invisible-p (harness-chat-block-start (gethash "slot" harness-chat--blocks))))
             (node '(:id "other" :kind "hint" :content "Important"))
             (should-not (harness-chat-block-group (gethash "other" harness-chat--blocks)))
             (should-not (harness-chat-block-group (gethash "before" harness-chat--blocks)))))))))
+
+(ert-deftest harness-ui-chat-slot-notice-in-a-group-keeps-one-agent-turn ()
+  "A slot notice folded into a run opens no second agent turn.
+The group summary carries the turn's one sender line, also once the
+group is expanded: the call folded after the notice draws none."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-flet ((node (n) (harness-chat--on-node n))
+                  (call (id path)
+                    (harness-chat--on-node
+                     (list :id id :kind "tool-call" :tool "read_file" :call-id id
+                           :title (concat "Read " path) :input (list :path path)))))
+          (call "c1" "a.el")
+          (call "c2" "b.el")
+          (let ((g (gethash (harness-chat-block-group (gethash "c1" harness-chat--blocks))
+                            harness-chat--groups)))
+            (should g)
+            (should (equal '("c1" "c2") (harness-chat-group-members g)))
+            (node '(:id "slot" :kind "hint" :content "Slots changed"
+                    :meta (:fold (:key "tool-slots-load" :title "Slots"
+                                       :items ((:text "one") (:text "two"))))))
+            (should (member "slot" (harness-chat-group-members g)))
+            (should-not (harness-chat-block-head (gethash "slot" harness-chat--blocks)))
+            ;; A call after the notice joins the same run, without a header.
+            (call "c3" "c.el")
+            (should (equal '("c1" "c2" "slot" "c3") (harness-chat-group-members g)))
+            (should-not (harness-chat-block-head (gethash "c3" harness-chat--blocks)))
+            ;; The reply after the notice is still the agent's same turn.
+            (node '(:id "answer" :kind "assistant" :content "Done."))
+            (should-not (harness-chat-block-head (gethash "answer" harness-chat--blocks)))
+            (let ((case-fold-search nil))
+              (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
+            (harness-chat-toggle-group (harness-chat-group-id g))
+            (let ((case-fold-search nil))
+              (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
+            (should (harness-ui-chat-test-find buf "· slots changed ×2"))
+            (should-not (invisible-p (harness-chat-block-start (gethash "slot" harness-chat--blocks))))
+            (should-not (harness-chat-block-head (gethash "c3" harness-chat--blocks)))))))))
+
+(ert-deftest harness-ui-chat-a-real-slot-notice-folds-into-the-group ()
+  "The tool-slots-load module's notice folds under the run it arrives in.
+Its changes show on the collapsed summary, another change joining the
+same note updates that count, and the reply after it opens no turn."
+  (harness-ui-chat-test-with
+    (dolist (m '(priority tool-slots tool-slots-load)) (harness-test-load-module m))
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (answer nil))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "read_file" :call-id "c1"
+                          :input '(:path "a.el") :title "Read a.el"))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "read_file" :call-id "c2"
+                          :input '(:path "b.el") :title "Read b.el"))
+      (harness-tool-slots-load--announce
+       "Tool slots reduced from 18 to 5: system load 1.8x on this machine")
+      (harness-test-wait
+       (lambda () (with-current-buffer buf (car (harness-ui-chat-test-blocks buf "hint"))))
+       5 "the slot notice")
+      (with-current-buffer buf
+        (let ((hint (car (harness-ui-chat-test-blocks buf "hint"))))
+          (should (harness-chat-block-group hint))
+          (should (harness-ui-chat-test-find buf "· slots changed"))
+          (should-not (harness-chat-block-head hint))
+          ;; A second change joins the note, and the collapsed summary
+          ;; counts it without the user opening anything.
+          (harness-tool-slots-load--announce
+           "Tool slots restored to 18: system load back to normal")
+          (harness-test-wait
+           (lambda () (with-current-buffer buf (harness-ui-chat-test-find buf "· slots changed ×2")))
+           5 "the second change")
+          (should (= 1 (length (harness-ui-chat-test-blocks buf "hint"))))
+          (let ((pos (harness-ui-chat-test-find buf "· slots changed ×2")))
+            (should (string-match-p "Latest slot change:.*restored to 18"
+                                    (get-text-property (1- pos) 'help-echo))))
+          ;; The agent's reply after the notice is the same turn.
+          (setq answer (plist-get (harness-call 'session/append sid
+                                                '(:kind assistant :content "Building."))
+                                  :id))
+          (harness-test-wait (lambda () (with-current-buffer buf (gethash answer harness-chat--blocks)))
+                             5 "the reply")
+          (should-not (harness-chat-block-head (gethash answer harness-chat--blocks)))
+          (let ((case-fold-search nil))
+            (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
+          ;; Opened, the group shows the notice under the calls, folded.
+          (harness-chat-toggle-group (harness-chat-block-group hint))
+          (should-not (invisible-p (harness-chat-block-start hint)))
+          (should (harness-chat-block-collapsed hint))
+          (should (harness-ui-chat-test-find buf "Slots changed due to system load (2 changes)"))
+          (let ((case-fold-search nil))
+            (should (= 1 (how-many "^Agent$" (point-min) (point-max))))))))))
 
 (ert-deftest harness-ui-chat-groups-from-the-first-call ()
   "The first coalescable call opens a run; later calls join it.
@@ -8508,6 +8620,70 @@ split the run of reads around it, so part of the run stayed unfolded."
             (should (equal (mapcar #'harness-chat-block-id calls)
                            (harness-chat-group-members (car groups))))
             (should (harness-ui-chat-test-find buf "6 tool calls"))))))))
+
+(ert-deftest harness-ui-chat-history-page-keeps-expanded-groups ()
+  "A page of older history leaves the groups the user opened open.
+Paging used to group the transcript anew with every new group folded,
+so a group the user had opened closed when an older page arrived."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session)))
+      (dotimes (i 3)
+        (harness-call 'session/append sid
+                      (list :kind 'tool-call :tool "read_file" :call-id (format "c%d" i)
+                            :input (list :path (format "f%d" i))
+                            :title (format "Read f%d.el" i))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (let* ((calls (harness-ui-chat-test-blocks buf "tool-call"))
+                 (groups (harness-ui-chat-test-check-groups buf))
+                 (g (car groups)))
+            (should (= 1 (length groups)))
+            (harness-chat-toggle-group (harness-chat-group-id g))
+            (should (harness-chat-group-expanded g))
+            ;; The page arrives from the history above the transcript.
+            (harness-chat--prepend-nodes
+             (list (list :id "older" :kind "user" :content "Earlier")))
+            (setq groups (harness-ui-chat-test-check-groups buf))
+            (setq g (gethash (harness-chat-block-group (car calls))
+                             harness-chat--groups))
+            (should (= 1 (length groups)))
+            (should (harness-chat-group-expanded g))
+            (should-not (overlay-get (harness-chat-group-overlay g) 'invisible))
+            (should (string-match-p "\\[collapse\\]"
+                                    (buffer-substring-no-properties (harness-chat-group-start g)
+                                                                    (harness-chat-group-end g))))
+            (should (equal (mapcar #'harness-chat-block-id calls)
+                           (harness-chat-group-members g)))
+            (should (< (harness-ui-chat-test-find buf "Earlier")
+                       (harness-chat-group-start g)))))))))
+
+(ert-deftest harness-ui-chat-history-page-with-a-slot-notice-keeps-one-turn ()
+  "A history page ending in a slot notice and a reply draws one Agent line.
+The page is laid out before it is grouped, so the reply after the notice
+was marked as opening a turn until the grouping was known."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "read_file" :call-id "c3"
+                          :input '(:path "c.el") :title "Read c.el"))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (harness-chat--prepend-nodes
+           (list '(:id "old-user" :kind "user" :content "Earlier")
+                 (list :id "old-call" :kind "tool-call" :tool "read_file" :call-id "c1"
+                       :input '(:path "a.el") :title "Read a.el")
+                 (list :id "old-slot" :kind "hint" :content "Slots changed"
+                       :meta (list :fold (list :key "tool-slots-load" :title "Slots"
+                                               :items '((:text "one") (:text "two")))))
+                 '(:id "old-answer" :kind "assistant" :content "Done.")))
+          (should-not (harness-chat-block-head (gethash "old-answer" harness-chat--blocks)))
+          (should (equal "thinking"
+                         (harness-chat--turn-kind (gethash "old-slot" harness-chat--blocks))))
+          (let ((case-fold-search nil))
+            ;; The user's message opened one turn, which runs through the
+            ;; calls, the notice, the reply and the call after it.
+            (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
+          (should (harness-ui-chat-test-find buf "· slots changed ×2")))))))
 
 ;;;; Redraw and deletion
 
