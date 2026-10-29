@@ -631,6 +631,20 @@ made up."
          (equal (harness-responses--response-key kept) (cons (car ids) ids))
          kept)))
 
+(defun harness-responses--strip-content-part (part)
+  "Return message content PART with its empty array fields as [].
+An output text part carries `annotations' and `logprobs'; JSON parsing
+maps an empty array to nil, which would encode as null on replay, and
+this route requires arrays there.  A part of any other shape goes back
+as it is."
+  (if (not (listp part))
+      part
+    (let ((out part))
+      (dolist (key '(:annotations :logprobs))
+        (when (and (plist-member out key) (null (plist-get out key)))
+          (setq out (plist-put out key []))))
+      out)))
+
 (defun harness-responses--strip-item (item)
   "Return ITEM, an output item, as it is sent back in `input'.
 The lifecycle `status' is a response's own bookkeeping and is dropped;
@@ -646,6 +660,19 @@ content, the call's name and arguments -- goes back as it came."
                (plist-member out :summary)
                (null (plist-get out :summary)))
       (setq out (plist-put out :summary [])))
+    ;; The content parts of a replayed assistant message have the same
+    ;; trouble: `annotations' is an array the route validates, and a
+    ;; null there fails the whole request (its error names the input
+    ;; item and part, as in
+    ;; \"input[15].content[0].annotations\").
+    (when (and (equal (plist-get out :type) "message")
+               (plist-member out :content))
+      (let ((content (plist-get out :content)))
+        (when (or (listp content) (vectorp content))
+          (setq out (plist-put out :content
+                               (harness-json-array
+                                (mapcar #'harness-responses--strip-content-part
+                                        (append content nil))))))))
     out))
 
 ;;;; Input items
