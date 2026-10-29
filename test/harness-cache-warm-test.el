@@ -801,6 +801,54 @@ the same."
                                                              (harness-call 'session/nodes sid))))
                                 :content))))))
 
+(ert-deftest harness-cache-warm-keeps-a-cheap-cache-for-a-tool-for-a-day-at-most ()
+  "Refreshes that pay for days do not make a tool wait warm for days.
+DeepSeek's cache reads for a fiftieth of the input price, so 49 refreshes
+of a three-hour cache cost less than sending the conversation again --
+nearly a week of them.  A tool waits for a day at most, however cheap a
+refresh is."
+  (harness-cache-warm-test-with
+    (setq harness-cache-warm-test--prices '(0.003 . 0.15))
+    (let* ((now (float-time))
+           (sid (harness-cache-warm-test-session "api:m" 10800)))
+      (cl-letf (((symbol-function 'harness-cache-warm--tool-wait-p) (lambda (_) t)))
+        (let ((state (harness-call 'cache/warm sid)))
+          (should (= 49 (plist-get state :max-refreshes)))
+          (should (eq t (plist-get state :tool)))
+          (should (eq t (plist-get state :warming)))
+          ;; The end of the period is a day from the conversation's last
+          ;; own request, not the six days 49 three-hour refreshes span.
+          (should (<= (- (plist-get state :until) now) (+ (* 24 3600) 1)))
+          (should (> (- (plist-get state :until) now) (- (* 24 3600) 60))))))))
+
+(ert-deftest harness-cache-warm-leaves-a-tool-that-outlasts-a-day-to-lapse ()
+  "A turn that has waited on a tool for longer than a day gets no more refreshes.
+Its period is over, and a period the user asks for then is kept all the
+same: the day is the tool's limit, not the user's."
+  (harness-cache-warm-test-with
+    (setq harness-cache-warm-test--prices '(0.003 . 0.15))
+    ;; Three hours of cache, stamped 1.8 hours ago, with 8 refreshes
+    ;; (each adds 2.9 hours): the period began 25 hours ago.
+    (let* ((sid (harness-cache-warm-test-session "api:m" 10800 -6480)))
+      (puthash sid 8 harness-cache-warm--counts)
+      (cl-letf (((symbol-function 'harness-cache-warm--tool-wait-p) (lambda (_) t)))
+        (let ((state (harness-call 'cache/warm sid)))
+          (should (eq t (plist-get state :tool)))
+          (should (eq :false (plist-get state :warming)))
+          (should-not (plist-get state :until)))
+        ;; The period began 25 hours ago, so its day is over: the lapse is
+        ;; left alone while the turn waits on the tool.
+        (setq harness-cache-warm-test--requests nil)
+        (harness-cache-warm-test--event sid :running t)
+        (should-not harness-cache-warm-test--requests)
+        ;; The user asks for a period of their own: that is kept.
+        (should (plist-get (harness-call 'cache/keep-warm sid 1800) :manual-until))
+        (setq harness-cache-warm-test--requests nil)
+        (harness-cache-warm-test--event sid :running t)
+        (harness-cache-warm-test--wait-idle)
+        (should (= 1 (length harness-cache-warm-test--requests)))
+        (should (eq t (plist-get (harness-call 'cache/warm sid) :warming)))))))
+
 (ert-deftest harness-cache-warm-announces-when-a-turn-waits-on-a-tool ()
   "The chat hears when a turn starts to wait on a tool, and when it stops."
   (harness-cache-warm-test-with

@@ -36,7 +36,8 @@ sending the conversation again, when the harness says; a click asks for
 a period of your own (below).
 
 The harness never keeps a cache warm for longer than that costs less
-than sending the conversation uncached once.  When that leaves nothing
+than sending the conversation uncached once, nor a turn's wait on a
+tool for more than a day.  When that leaves nothing
 to keep warm although the user asked for a period, the flame stays, dim,
 and says "off" in place of a countdown until the period ends; hovering
 gives the harness's reason.

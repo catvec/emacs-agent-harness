@@ -5848,7 +5848,8 @@ nobody would be asked what goes first.
   say: the step after the tool will send the whole conversation, whoever
   is around), and the session has a cache, can be asked to, was not stopped
   and is not capped, no refresh is under way and no hard budget forbids
-  it (`usage/budget-block`); it claims the cache first.
+  it (`usage/budget-block`); it claims the cache first.  A tool's wait
+  keeps the cache warm for a day at most, however many refreshes pay.
 - What is sent: for a session that waits for the user, the request the
   agent's next step would send (`harness-agent-step-request`: model,
   system prompt, tools, thinking, conversation) with one short message at
@@ -5883,7 +5884,10 @@ nobody would be asked what goes first.
   count starts afresh with the next `session/usage` record that reports a
   request (the module's own do not).  At the cap the cache is left to lapse,
   the state's `:blocked` and a hint say so, once.  The end of the warm period
-  the state shows (`:until`) is the earlier of the user's and the cap's.
+  the state shows (`:until`) is the earlier of the user's and the cap's;
+  a turn's wait on a tool keeps it warm for a day from the conversation's
+  own request at most, however many refreshes pay, and no more refreshes
+  are made after that day.
 - `cache/warm SID` → `(:session-id :warming :until :manual-until :active-at
   :next :refreshes :max-refreshes :refresh-cost :resend-cost :tool :ttl
   :expires :supported :blocked)`, nil when there is no period; `:warming`

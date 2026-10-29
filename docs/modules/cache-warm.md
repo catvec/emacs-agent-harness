@@ -67,7 +67,10 @@ conversation at every request; one that holds the conversation in a
 process has that process busy with the turn, whose own requests read
 the cache.  The state says so (`:unsupported`), as it says why a
 provider that has no way to refresh one cannot, so that a session of
-Claude Code mid-turn is not told its provider is unable to.
+Claude Code mid-turn is not told its provider is unable to.  A tool
+waits for a day at most, whatever the refreshes might pay: a cache
+that reads cheaply enough would pay for a week of them, which is no
+reason to keep one warm for a week.
 
 Keeping a cache warm is worth it only for as long as the refreshes cost
 less than sending the conversation again, uncached, would have: a

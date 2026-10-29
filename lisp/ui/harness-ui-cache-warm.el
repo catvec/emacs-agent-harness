@@ -26,7 +26,8 @@
 ;; a period of your own (below).
 ;;
 ;; The harness never keeps a cache warm for longer than that costs less
-;; than sending the conversation uncached once.  When that leaves nothing
+;; than sending the conversation uncached once, nor a turn's wait on a
+;; tool for more than a day.  When that leaves nothing
 ;; to keep warm although the user asked for a period, the flame stays, dim,
 ;; and says "off" in place of a countdown until the period ends; hovering
 ;; gives the harness's reason.
@@ -136,7 +137,8 @@ warm, each a text, or nil.
 
 `:until' is where the warming period ends -- the earlier of the end of
 the period and of the refreshes that cost less than sending the
-conversation again -- `:manual-until' where the period set by hand
+conversation again, and a day at most while a turn waits on a tool --
+`:manual-until' where the period set by hand
 does, `:next' when the next refresh is due and `:refreshes' how many
 were made since the period began.  `:tool' says the cache is kept warm
 while a turn waits on a tool call, whether or not the user is about.

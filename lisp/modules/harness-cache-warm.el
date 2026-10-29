@@ -57,7 +57,10 @@
 ;; process has that process busy with the turn, whose own requests read
 ;; the cache.  The state says so (`:unsupported'), as it says why a
 ;; provider that has no way to refresh one cannot, so that a session of
-;; Claude Code mid-turn is not told its provider is unable to.
+;; Claude Code mid-turn is not told its provider is unable to.  A tool
+;; waits for a day at most, whatever the refreshes might pay: a cache
+;; that reads cheaply enough would pay for a week of them, which is no
+;; reason to keep one warm for a week.
 ;;
 ;; Keeping a cache warm is worth it only for as long as the refreshes cost
 ;; less than sending the conversation again, uncached, would have: a
@@ -114,7 +117,8 @@ that waits on a tool call, a long test run say, whoever is around.  How
 long after a sign of life depends on the lifetime of the cache (see
 `cache/periods'), six minutes for a five-minute cache; and never for
 longer than it costs less than sending the conversation again,
-uncached (12 refreshes of Claude's cache).  The chat shows a flame and
+uncached (12 refreshes of Claude's cache), nor than a day while a turn
+waits on a tool.  The chat shows a flame and
 the time left while it goes on, and a period can be asked for by hand."
   :type 'boolean :safe #'booleanp :group 'harness)
 
@@ -141,6 +145,13 @@ the time left while it goes on, and a period can be asked for by hand."
   "Most refreshes between two requests when no prices say how many pay.
 Claude's cache reads at a tenth of the price of sending the context
 again, uncached, and writes at 1.25 times the input price: 12 refreshes.")
+
+(defconst harness-cache-warm--max-tool-period (* 24 3600)
+  "Most seconds a turn's wait on a tool keeps a cache warm.
+A period the user asks for is a day at most (`cache/keep-warm'), and so
+is a tool's, however cheap the cache reads: fifty refreshes of a
+three-hour cache that reads at a fiftieth of the input price pay, but
+they are no reason to hold a cache for a week.")
 
 ;;;; State
 
@@ -273,6 +284,20 @@ costs uncached is not worth keeping."
             (if each (format " (~%s each)" (harness-format-cost each)) "")
             (if resend (format " (~%s)" (harness-format-cost resend)) ""))))
 
+(defun harness-cache-warm--period-start (sid session)
+  "Return when the period of session SID's warming began, a time, or nil.
+That is the request of the conversation's own after which its refreshes
+are counted (`harness-cache-warm--count'): the cache it stamped was
+stamped anew by each refresh since, which moved its lapse on by the
+lifetime less the lead, so the start is that lapse less the lifetime
+and what the refreshes added."
+  (let* ((cache (harness-cache--lapsing session))
+         (expires (plist-get cache :expires))
+         (ttl (and cache (harness-cache-ttl-of session)))
+         (lead (and ttl (harness-cache-lead ttl))))
+    (when (and (numberp expires) (numberp ttl) (numberp lead))
+      (- expires ttl (* (harness-cache-warm--count sid) (- ttl lead))))))
+
 (defun harness-cache-warm--state (sid &optional session now)
   "Return the state of session SID's warm period, or nil when it has none.
 SESSION is its plist, NOW the time, by default the current one.  The state
@@ -286,7 +311,8 @@ has a cache that has not lapsed.  `:unsupported' says why the provider
 cannot now, when it cannot (`harness-cache-warm--unsupported'); a hosted
 loop cannot while its turn runs, though its provider can.  `:until' is the
 end of the period -- of the user's, or the count of refreshes that pay,
-whichever is first --, `:manual-until' that of
+whichever is first, and a day after the conversation's own request at
+most while a turn waits on a tool --, `:manual-until' that of
 the one the user asked for, `:active-at' the last sign of life, `:next'
 when the next refresh is due, `:refreshes' how many were made since the
 session's last request, `:max-refreshes' how many pay, `:refresh-cost' and
@@ -310,10 +336,20 @@ lapses."
              (unsupported (harness-cache-warm--unsupported session))
              (supported (null unsupported))
              ;; The refreshes that pay end the period, where the user's
-             ;; does not come first.
+             ;; does not come first.  A turn waiting on a tool is kept
+             ;; warm for a day at most, however many refreshes pay.
              (cap-until (and expires (> left 0) (+ expires (* (1- left) (- ttl lead)))))
-             (until (cond (tool cap-until)
-                          ((and (plist-get presence :until) cap-until) (min (plist-get presence :until) cap-until))
+             (started (and cap-until (harness-cache-warm--period-start sid session)))
+             (tool-until (and tool cap-until
+                               (if started
+                                   (min cap-until (+ started harness-cache-warm--max-tool-period))
+                                 cap-until)))
+             (until (cond ((and tool-until (> tool-until now))
+                           (if (plist-get presence :until)
+                               (min cap-until (max tool-until (plist-get presence :until)))
+                             tool-until))
+                          ((and (plist-get presence :until) cap-until)
+                           (min (plist-get presence :until) cap-until))
                           (t (plist-get presence :until))))
              (warming (and harness-cache-warm supported (not blocked) (> left 0)
                            until (> until now)
@@ -396,8 +432,9 @@ call, and the cache has not lapsed.  `:unsupported' says why its provider
 cannot be asked to now, when it cannot: a turn is running in the process
 that holds a hosted loop's conversation, say.  `:until' is the end of the
 period, the user's or that of the refreshes that cost less than sending
-the conversation again, whichever comes first; `:manual-until' that of
-the one asked for by hand,
+the conversation again, whichever comes first, and a day after the
+conversation's own request at most while a turn waits on a tool;
+`:manual-until' that of the one asked for by hand,
 `:active-at' the time of the last sign of life, `:next' when the next
 refresh is due, `:refreshes' how many were made since the session's last
 request, `:max-refreshes' how many pay, `:refresh-cost' and `:resend-cost'
@@ -467,6 +504,11 @@ says so."
            (if running "a turn is running" "the user has been gone for the warm period"))
           ((gethash sid harness-cache-warm--blocked) "keeping it warm stopped")
           ((gethash sid harness-cache-warm--capped) "keeping it warm costs more than it saves")
+          ((and tool
+                (not (harness-cache-around-p sid session))
+                (let ((started (harness-cache-warm--period-start sid session)))
+                  (and started (> (float-time) (+ started harness-cache-warm--max-tool-period)))))
+           "the turn has waited on a tool for longer than a cache is kept warm")
           ((eql 0 (plist-get (harness-cache-warm--economics sid) :max))
            "reading the cache costs as much as sending the conversation again")
           ((and running (not tool)) "a turn is running")
