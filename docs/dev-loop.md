@@ -147,10 +147,17 @@ could not run because the account's plan usage limit is reached, its
 balance is empty, it is rate-limited, its credential was refused or the
 provider could not be reached is a SKIP with that reason, never a
 contract FAIL: an exhausted plan is not a broken provider.  The summary
-counts all three, and a failure is shown in the warning face.  Advice
-is conservative, **not an automatic settings change**: a missing/bad
-`:thinking-levels` or `:quota` claim should be removed from that
-model/provider until fixed; a tool-illiterate model should not be
+counts all three, and a failure is shown in the warning face.  A check
+that made model requests links to them: a click or RET on its line, or
+its `[Session]` button (one per call), opens the internal session that
+recorded the call, in the harness's own list of its model calls (the
+session list's `I` shows them).  The prompt, the model's answer, and
+the provider's own error are there -- a result never copies a
+provider's error text, which a plugin may have filled with a key, so a
+FAIL that says the error text is suppressed is read in its session.
+Advice is conservative, **not an automatic settings change**: a
+missing/bad `:thinking-levels` or `:quota` claim should be removed from
+that model/provider until fixed; a tool-illiterate model should not be
 selected for autonomous agent tasks.  The generic provider API has no
 per-model "turn off tools" switch, and a provider without sound text or
 tool transport needs fixing, not a capability flag.  Use a

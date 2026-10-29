@@ -17,9 +17,13 @@ harness menu) runs the live checks of the model in front of you, or
 of any model the catalogue lists with a prefix argument.  It opens
 the report page, which fills in as the checks settle: one line per
 check, PASS, FAIL or SKIP, with what went wrong and which advertised
-feature may have to be removed.  The checks themselves run in the
-harness process (harness-provider-check.el); this page only follows
-their events and draws them.
+feature may have to be removed.  Each check that made model requests
+links to the internal session that recorded them, where the prompt,
+the reply and the provider's own error are; the page itself never
+prints a provider's error text, which a plugin may have filled with a
+key.  The checks themselves run in the harness process
+(harness-provider-check.el); this page only follows their events and
+draws them.
 
 The two suites are kept apart on purpose.  Provider contract means
 the generic provider API is broken or lies about a capability; model
@@ -33,7 +37,10 @@ from the page is as explicit as the next command: it starts at once.
 
 Keys on the page: g runs the same scope again, p checks the provider
 contract only, m the model behavior only, M chooses another model, E
-adds an embedding model's check, c cancels a run in flight.
+adds an embedding model's check, c cancels a run in flight.  A click
+or RET on a check's line, or on its [Session] button, opens the
+internal session of the calls it made: what the page can only say
+failed -- a provider's error above all -- the session spells out.
 
 ## Provides
 

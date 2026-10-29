@@ -31,6 +31,11 @@
 ;; SKIP too: an exhausted plan is not a broken provider, and the report says
 ;; which of those it was without echoing the provider's error text.
 ;;
+;; Every model request a check makes is recorded as an internal session
+;; named after the check, and the result names its sessions, so the page
+;; can open the prompt, the reply and the provider's own error: the result
+;; never carries that error text, which a plugin may have filled with a key.
+;;
 ;; The job runs in the harness process, so it must not block the event loop:
 ;; every check returns a promise, and completions are driven by the
 ;; provider's own events.  The UI half follows the job's events over ACP
@@ -86,7 +91,8 @@ unsupported format rather than a bad request.")
   cancelled finished
   handle abort
   promise
-  started-at)
+  started-at
+  current-check sessions)
 
 (defconst harness-provider-check-suites '(provider model all)
   "Suites `harness-provider-check-start' runs.")
@@ -230,22 +236,64 @@ text, which a third-party plugin may have filled with a key."
   "Free what MODEL's provider keeps for SESSION-ID, ignoring a failure."
   (ignore-errors (harness-call 'provider/close model session-id)))
 
+(defun harness-provider-check--note-session (job session)
+  "Remember SESSION as one of JOB's current check's model calls.
+SESSION is the id of the internal session that recorded the call, or
+nil for a call nothing recorded.  The check's result names its sessions,
+so the page can open what the check asked and answered."
+  (when (and job (stringp session) (not (string-empty-p session)))
+    (when-let* ((entry (harness-provider-check-job-current-check job))
+                (id (plist-get entry :id))
+                (table (harness-provider-check-job-sessions job)))
+      (unless (member session (gethash id table))
+        (puthash id (append (gethash id table) (list session)) table)))))
+
+(defun harness-provider-check--entry-sessions (job entry)
+  "Return the internal sessions of JOB's check ENTRY, in call order."
+  (let ((table (and job (harness-provider-check-job-sessions job))))
+    (and table (gethash (plist-get entry :id) table))))
+
+(defun harness-provider-check--note-attempt-sessions (job attempt)
+  "Remember the calls of ATTEMPT, a tool turn, as ones of JOB's current check."
+  (dolist (session (plist-get attempt :sessions))
+    (harness-provider-check--note-session job session)))
+
+(defun harness-provider-check--note-check-sessions (job id)
+  "Remember the calls of JOB's check ID as ones of its current check.
+A check that reads another's evidence, such as usage accounting reading
+the text completion, then opens the call that produced it."
+  (let ((table (harness-provider-check-job-sessions job)))
+    (dolist (session (and table (gethash id table)))
+      (harness-provider-check--note-session job session))))
+
 (defun harness-provider-check--complete (job request &optional keep-open cancel-now)
   "Complete REQUEST for JOB; return a promise of (:events EVENTS :state STATE).
-Close the request's session afterwards unless KEEP-OPEN.  With CANCEL-NOW,
-cancel the handle as soon as it exists, so the cancellation path is
-exercised.  Every wait is bounded by `harness-provider-check-timeout'."
+The promise also says `:session', the internal session that recorded the
+call, when one did.  Close the request's session afterwards unless
+KEEP-OPEN.  With CANCEL-NOW, cancel the handle as soon as it exists, so
+the cancellation path is exercised.  Every wait is bounded by
+`harness-provider-check-timeout'."
   (let* ((model (plist-get request :model))
          (session-id (plist-get (plist-get request :session) :id))
+         (entry (harness-provider-check-job-current-check job))
          (events nil)
          (state nil)
          (done nil)
          (handle nil)
+         (session nil)
+         (settle-pending nil)
          (timer nil)
          (promise (harness-make-promise)))
     (cl-labels
         ((settle (error)
-           (unless done
+           (cond
+            (done nil)
+            ;; A provider may answer while `provider/complete' still runs,
+            ;; before it returns the handle that names the call's session.
+            ;; Settle then, once the handle is in hand.
+            ((and (null error) (null handle))
+             (setq settle-pending t))
+            (t
              (setq done t)
              (when timer (cancel-timer timer) (setq timer nil))
              (when (eq (harness-provider-check-job-handle job) handle)
@@ -256,7 +304,8 @@ exercised.  Every wait is bounded by `harness-provider-check-timeout'."
              (if error
                  (harness-reject promise error)
                (harness-resolve promise (list :events (nreverse events)
-                                              :state state)))))
+                                              :state state
+                                              :session session))))))
          (timed-out ()
            (unless done
              (let ((cancel (plist-get handle :cancel)))
@@ -272,7 +321,11 @@ exercised.  Every wait is bounded by `harness-provider-check-timeout'."
                 (harness-call
                  'provider/complete
                  (plist-put
-                  (copy-sequence request)
+                  (plist-put
+                   (copy-sequence request)
+                   :job (format "Provider check: %s"
+                                (or (and entry (plist-get entry :name))
+                                    (plist-get request :model))))
                   :on-event
                   (lambda (event)
                     (push event events)
@@ -281,6 +334,11 @@ exercised.  Every wait is bounded by `harness-provider-check-timeout'."
                     (when (eq (plist-get event :type) 'done)
                       (settle nil))))))
         (error (settle err)))
+      ;; Record it before the handle's own state is looked at: a provider that
+      ;; answers while `provider/complete' runs still made this call.
+      (when handle
+        (setq session (plist-get handle :session))
+        (harness-provider-check--note-session job session))
       (when (and handle (not done))
         (setf (harness-provider-check-job-handle job) handle
               (harness-provider-check-job-abort job)
@@ -294,7 +352,10 @@ exercised.  Every wait is bounded by `harness-provider-check-timeout'."
             (if (functionp cancel)
                 (ignore-errors (funcall cancel))
               (settle (list 'harness-provider-check-failure
-                            "Completion handle has no :cancel function")))))))
+                            "Completion handle has no :cancel function"))))))
+      (when settle-pending
+        (setq settle-pending nil)
+        (settle nil)))
     promise))
 
 (defun harness-provider-check--finally (promise fn)
@@ -370,6 +431,7 @@ exercised.  Every wait is bounded by `harness-provider-check-timeout'."
   (let ((base (harness-provider-check-job-base job)))
     (if (not base)
         '(skip . "Text completion did not return events.")
+      (harness-provider-check--note-check-sessions job "completion")
       (let* ((events (plist-get base :events))
              (usage (cl-remove-if-not
                      (lambda (event) (eq (plist-get event :type) 'usage))
@@ -438,9 +500,10 @@ exercised.  Every wait is bounded by `harness-provider-check-timeout'."
 (defun harness-provider-check--tool-turn (job)
   "Try an echo-tool round trip on the model of JOB.
 Return a promise of (:first EVENTS :second EVENTS :call TOOL-CALL :marker
-RECEIPT).  A hosted loop receives the result through :respond; a native
-loop gets assistant/tool messages in a second completion.  Not calling
-the tool is reported separately as model behavior, not a provider bug."
+RECEIPT :sessions SESSION-IDS).  A hosted loop receives the result
+through :respond; a native loop gets assistant/tool messages in a
+second completion.  Not calling the tool is reported separately as model
+behavior, not a provider bug."
   (let* ((model (harness-provider-check-job-model job))
          (id (format "provider-check-tool-%x" (random most-positive-fixnum)))
          (marker (format "receipt-%x" (random most-positive-fixnum)))
@@ -491,10 +554,13 @@ the tool is reported separately as model behavior, not a provider bug."
                            (lambda (reply)
                              (list :first first-events
                                    :second (plist-get reply :events)
-                                   :call call :marker marker)))
+                                   :call call :marker marker
+                                   :sessions (delq nil (list (plist-get first :session)
+                                                             (plist-get reply :session))))))
            (harness-resolved
             (list :first first-events :second nil
-                  :call call :marker marker))))))))
+                  :call call :marker marker
+                  :sessions (delq nil (list (plist-get first :session)))))))))))
 
 (defun harness-provider-check--check-tool-transport (job)
   "Check the tool-call event of JOB and its result continuation."
@@ -502,6 +568,7 @@ the tool is reported separately as model behavior, not a provider bug."
    (harness-provider-check--tool-turn job)
    (lambda (attempt)
      (setf (harness-provider-check-job-tool-attempt job) attempt)
+     (harness-provider-check--note-attempt-sessions job attempt)
      (let ((events (plist-get attempt :first))
            (call (plist-get attempt :call))
            (second (plist-get attempt :second)))
@@ -712,6 +779,7 @@ into the structured note argument rather than dropping it as a label."
         (setf (harness-provider-check-job-tool-attempt job) attempt)
         attempt)))
    (lambda (attempt)
+     (harness-provider-check--note-attempt-sessions job attempt)
      (let ((call (plist-get attempt :call))
            (events (plist-get attempt :first)))
        ;; An account or network failure is not the model's choice.
@@ -730,6 +798,8 @@ into the structured note argument rather than dropping it as a label."
 (defun harness-provider-check--check-tool-result (job)
   "Check that the model of JOB used the receipt only the tool returned."
   (let ((attempt (harness-provider-check-job-tool-attempt job)))
+    (when attempt
+      (harness-provider-check--note-attempt-sessions job attempt))
     (if (not (and attempt (plist-get attempt :call)))
         '(skip . "No tool call to return a result to.")
       (let* ((second (plist-get attempt :second))
@@ -857,66 +927,74 @@ into the structured note argument rather than dropping it as a label."
          (harness-reject result error))))
     result))
 
-(defun harness-provider-check--result (entry value)
-  "Return the result plist of check ENTRY from VALUE, its (STATUS . DETAIL)."
+(defun harness-provider-check--result (job entry value)
+  "Return the result plist of check ENTRY from VALUE, its (STATUS . DETAIL).
+JOB says which internal sessions the check made its calls in."
   (let* ((status (car-safe value))
-         (detail (cdr-safe value)))
+         (detail (cdr-safe value))
+         (sessions (harness-provider-check--entry-sessions job entry)))
     (unless (memq status '(pass fail skip))
       (setq status 'fail
             detail "Check returned no status"))
-    (list :id (plist-get entry :id)
-          :suite (plist-get entry :suite)
-          :name (plist-get entry :name)
-          :status status
-          :detail (or detail "")
-          :advice (and (eq status 'fail) (plist-get entry :advice)))))
+    (append
+     (list :id (plist-get entry :id)
+           :suite (plist-get entry :suite)
+           :name (plist-get entry :name)
+           :status status
+           :detail (or detail "")
+           :advice (and (eq status 'fail) (plist-get entry :advice)))
+     (and sessions (list :sessions sessions)))))
 
-(defun harness-provider-check--failure-result (entry error)
+(defun harness-provider-check--failure-result (job entry error)
   "Return the result of check ENTRY that signalled ERROR.
-A check that could not run because the account is out of quota or
-money, was rate-limited, refused the credential or could not reach the
-provider is a SKIP, with the safe explanation attached to the
-condition.  Any other failure is a FAIL.  Do not print a provider's
-error text in either case: a third-party plugin may have put its key in
-it."
-  (cond
-   ((and (consp error) (eq (car error) 'harness-provider-check-unavailable))
-    (list :id (plist-get entry :id)
-          :suite (plist-get entry :suite)
-          :name (plist-get entry :name)
-          :status 'skip
-          :detail (or (cadr error) "This check could not run against this account.")
-          :advice nil))
-   (t
-    (let ((detail
-           (cond
-            ((and (consp error) (eq (car error) 'harness-provider-check-failure))
-             (cadr error))
-            ((and (consp error) (eq (car error) 'error) (stringp (cadr error)))
-             (format "Provider raised error (details suppressed)"))
-            (t
-             (format "Provider raised %s (details suppressed)"
-                     (if (consp error) (car error) error))))))
-      (list :id (plist-get entry :id)
-            :suite (plist-get entry :suite)
-            :name (plist-get entry :name)
-            :status 'fail
-            :detail detail
-            :advice (plist-get entry :advice))))))
+JOB says which internal sessions the check made its calls in, where the
+provider's error text stays for the page to open.  A check that could
+not run because the account is out of quota or money, was rate-limited,
+refused the credential or could not reach the provider is a SKIP, with
+the safe explanation attached to the condition.  Any other failure is a
+FAIL.  Do not print a provider's error text in either case: a
+third-party plugin may have put its key in it."
+  (let ((sessions (harness-provider-check--entry-sessions job entry))
+        (unavailable (and (consp error)
+                          (eq (car error) 'harness-provider-check-unavailable))))
+    (append
+     (list :id (plist-get entry :id)
+           :suite (plist-get entry :suite)
+           :name (plist-get entry :name)
+           :status (if unavailable 'skip 'fail)
+           :detail (cond
+                    (unavailable
+                     (or (cadr error)
+                         "This check could not run against this account."))
+                    ((and (consp error)
+                          (eq (car error) 'harness-provider-check-failure))
+                     (cadr error))
+                    ((and (consp error) (eq (car error) 'error)
+                          (stringp (cadr error)))
+                     (format "Provider raised error (details suppressed)"))
+                    (t
+                     (format "Provider raised %s (details suppressed)"
+                             (if (consp error) (car error) error))))
+           :advice (and (not unavailable) (plist-get entry :advice)))
+     (and sessions (list :sessions sessions)))))
 
 (defun harness-provider-check--stage (job entry)
   "Run ENTRY as one check of JOB; return a promise of its result.
 A failure of this check, and a timeout, become a FAIL result rather
 than an error that would hide the checks after it."
   (let* ((name (plist-get entry :name))
-         (promise (condition-case error
-                      (harness-as-promise (funcall (plist-get entry :fn) job))
-                    (error (harness-rejected error)))))
+         (promise (progn
+                    ;; The calls this check makes are its own: the ones the
+                    ;; checks before it made are already in its session list.
+                    (setf (harness-provider-check-job-current-check job) entry)
+                    (condition-case error
+                        (harness-as-promise (funcall (plist-get entry :fn) job))
+                      (error (harness-rejected error))))))
     (harness-then
      (harness-provider-check--timeout
       promise (+ harness-provider-check-timeout 5) name)
-     (lambda (value) (harness-provider-check--result entry value))
-     (lambda (error) (harness-provider-check--failure-result entry error)))))
+     (lambda (value) (harness-provider-check--result job entry value))
+     (lambda (error) (harness-provider-check--failure-result job entry error)))))
 
 (defun harness-provider-check--advance (job)
   "Run the next check of JOB, emit its result, and carry on."
@@ -1010,6 +1088,7 @@ real API requests: only `harness-provider-check' and its UI call it."
                  :pending (copy-sequence plan)
                  :completed 0
                  :total (length plan)
+                 :sessions (make-hash-table :test #'equal)
                  :promise (harness-make-promise)
                  :started-at (float-time))))
       (puthash job-id job harness-provider-check--jobs)

@@ -9,9 +9,13 @@
 ;; of any model the catalogue lists with a prefix argument.  It opens
 ;; the report page, which fills in as the checks settle: one line per
 ;; check, PASS, FAIL or SKIP, with what went wrong and which advertised
-;; feature may have to be removed.  The checks themselves run in the
-;; harness process (harness-provider-check.el); this page only follows
-;; their events and draws them.
+;; feature may have to be removed.  Each check that made model requests
+;; links to the internal session that recorded them, where the prompt,
+;; the reply and the provider's own error are; the page itself never
+;; prints a provider's error text, which a plugin may have filled with a
+;; key.  The checks themselves run in the harness process
+;; (harness-provider-check.el); this page only follows their events and
+;; draws them.
 ;;
 ;; The two suites are kept apart on purpose.  Provider contract means
 ;; the generic provider API is broken or lies about a capability; model
@@ -25,7 +29,10 @@
 ;;
 ;; Keys on the page: g runs the same scope again, p checks the provider
 ;; contract only, m the model behavior only, M chooses another model, E
-;; adds an embedding model's check, c cancels a run in flight.
+;; adds an embedding model's check, c cancels a run in flight.  A click
+;; or RET on a check's line, or on its [Session] button, opens the
+;; internal session of the calls it made: what the page can only say
+;; failed -- a provider's error above all -- the session spells out.
 
 ;;; Code:
 
@@ -163,6 +170,51 @@ an explicit request and does not ask again."
         (button "[Other model…]" #'harness-ui-provider-check-other-model)
         (button "[Embeddings]" #'harness-ui-provider-check-embedding-model)))))
 
+(defun harness-ui-provider-check--result-sessions (result)
+  "Return the internal session ids RESULT names, in the order they were made."
+  (let ((sessions (and result (plist-get result :sessions))))
+    (cond
+     ((vectorp sessions) (append sessions nil))
+     ((listp sessions) sessions)
+     ((and (stringp sessions) (not (string-empty-p sessions))) (list sessions))
+     (t nil))))
+
+(defun harness-ui-provider-check--insert-session-buttons (sessions)
+  "Insert a button for each of SESSIONS, the calls a check made.
+The buttons open the internal session that recorded the call, where the
+prompt, the model's reply and any error are; a check with more than one
+call gets one button each, in call order."
+  (when sessions
+    (insert "  ")
+    (if (null (cdr sessions))
+        (let ((session (car sessions)))
+          (harness-ui-button
+           "[Session]"
+           (lambda () (interactive) (harness-ui-visit-session session))
+           :help "Open the session this check ran in: its prompt, the model's reply, and any error"))
+      (cl-loop for session in sessions
+               for index from 1
+               do (progn
+                    (unless (= index 1) (insert " "))
+                    (let ((id session)
+                          (n index))
+                      (harness-ui-button
+                       (format "[Session %d]" n)
+                       (lambda () (interactive) (harness-ui-visit-session id))
+                       :help (format "Open session %d of this check: its prompt, the model's reply, and any error" n))))))))
+
+(defun harness-ui-provider-check--insert-check-name (name sessions status)
+  "Insert check NAME, a link to the first of SESSIONS, drawn for STATUS."
+  (let ((start (point))
+        (face (pcase status
+                ('fail 'bold)
+                ('pass nil)
+                (_ 'harness-dim-face))))
+    (insert (if face (propertize name 'face face) name))
+    (when sessions
+      (harness-ui-add-session-keys (current-buffer) (car sessions) name start (point)
+                                   (harness-ui-session-action (car sessions))))))
+
 (defun harness-ui-provider-check--insert-check (entry)
   "Insert one check line for ENTRY, with its result when it has one."
   (let* ((id (harness-ui-provider-check--result-id entry))
@@ -170,23 +222,31 @@ an explicit request and does not ask again."
          (status (and result (harness-ui-provider-check--result-status result)))
          (name (or (plist-get entry :name) id))
          (detail (and result (plist-get result :detail)))
-         (advice (and result (plist-get result :advice))))
+         (advice (and result (plist-get result :advice)))
+         (sessions (and result (harness-ui-provider-check--result-sessions result)))
+         (line-start (point)))
     (pcase status
       ('pass
-       (insert "  " (propertize "PASS" 'face 'harness-success-face)
-               "  " name "\n"))
+       (insert "  " (propertize "PASS" 'face 'harness-success-face) "  "))
       ('fail
-       (insert "  " (propertize "FAIL" 'face 'harness-failure-face)
-               "  " (propertize name 'face 'bold) "\n"))
+       (insert "  " (propertize "FAIL" 'face 'harness-failure-face) "  "))
       ('skip
-       (insert "  " (propertize "SKIP" 'face 'harness-dim-face)
-               "  " (propertize name 'face 'harness-dim-face) "\n"))
+       (insert "  " (propertize "SKIP" 'face 'harness-dim-face) "  "))
       (_
        (insert "  " (propertize (if (memq harness-ui-provider-check--state '(finished cancelled))
                                      "NOT RUN"
                                    "WAIT")
                                  'face 'harness-dim-face)
-               "  " (propertize name 'face 'harness-dim-face) "\n")))
+               "  ")))
+    (harness-ui-provider-check--insert-check-name name sessions status)
+    (harness-ui-provider-check--insert-session-buttons sessions)
+    ;; The whole line opens the first call the check made; the buttons for
+    ;; the calls after it keep their own.
+    (when sessions
+      (harness-ui-add-session-keys (current-buffer) (car sessions) name
+                                   line-start (point)
+                                   (harness-ui-session-action (car sessions))))
+    (insert "\n")
     (when (and detail (not (string-empty-p detail)))
       (insert "        "
               (propertize detail 'face

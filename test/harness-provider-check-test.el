@@ -128,10 +128,24 @@
 (defmacro harness-provider-check-test-with (&rest body)
   "Run BODY with an offline, fake provider and a fresh bus."
   (declare (indent 0))
+  `(harness-provider-check-test--with nil ,@body))
+
+(defmacro harness-provider-check-test-with-session (&rest body)
+  "Run BODY as `harness-provider-check-test-with' does, with the session module.
+The checks then record their model calls as internal sessions, which
+the test can read back."
+  (declare (indent 0))
+  `(harness-provider-check-test--with '(store project config session) ,@body))
+
+(defmacro harness-provider-check-test--with (modules &rest body)
+  "Run BODY with an offline, fake provider, a fresh bus and MODULES loaded."
+  (declare (indent 1))
   `(progn
      (harness-test-reset-bus)
      (harness-test-load-module 'provider)
      (harness-test-load-module 'provider-check)
+     (dolist (module ,modules)
+       (harness-test-load-module module))
      (harness-define-provider 'checkfake
        :models #'harness-provider-check-test--models
        :complete #'harness-provider-check-test--complete)
@@ -548,6 +562,96 @@ Only account and network conditions turn a check into a SKIP."
       (should (harness-call 'provider/check-cancel id))
       (harness-await (harness-provider-check-job-promise job) 5)
       (should-not (harness-call 'provider/check-cancel id)))))
+
+(ert-deftest harness-provider-check-records-each-checks-calls-as-sessions ()
+  "A check's model requests are recorded as internal sessions it names.
+The page can then open what the check asked, what the model answered and
+how the call ended, which the result itself never spells out."
+  (harness-provider-check-test-with-session
+    (let* ((results (harness-provider-check-test-run "checkfake:model" 'all))
+           (completion (harness-provider-check-test-by-name
+                        results "Text completion and event lifecycle"))
+           (usage (harness-provider-check-test-by-name results "Usage accounting"))
+           (transport (harness-provider-check-test-by-name
+                       results "Tool-call transport and tool-result continuation"))
+           (tool-call (harness-provider-check-test-by-name
+                       results "Choose and form a harness tool call"))
+           (tool-result (harness-provider-check-test-by-name
+                         results "Use the returned tool result")))
+      (dolist (result (list completion usage transport tool-call tool-result))
+        (should result)
+        (should (plist-get result :sessions)))
+      ;; Usage reads the completion's own call: the same session.
+      (should (equal (plist-get usage :sessions) (plist-get completion :sessions)))
+      (should (= 1 (length (plist-get completion :sessions))))
+      ;; The tool turn calls the model twice, and both checks that reuse it
+      ;; name both calls.
+      (should (= 2 (length (plist-get transport :sessions))))
+      (should (equal (plist-get tool-call :sessions) (plist-get transport :sessions)))
+      (should (equal (plist-get tool-result :sessions) (plist-get transport :sessions)))
+      (let* ((session-id (car (plist-get completion :sessions)))
+             (session (harness-session--get session-id))
+             (nodes (harness-call 'session/nodes session-id)))
+        (should session)
+        (should (eq (harness-session-kind session) 'internal))
+        (should (equal (harness-session-name session)
+                       "Provider check: Text completion and event lifecycle"))
+        (should (cl-some (lambda (node)
+                           (and (eq (plist-get node :kind) 'user)
+                                (string-match-p "short greeting"
+                                                (plist-get node :content))))
+                         nodes))
+        (should (cl-some (lambda (node)
+                           (and (eq (plist-get node :kind) 'assistant)
+                                (equal (plist-get node :content) "hello")))
+                         nodes)))))
+  ;; A check whose requests nothing recorded names no session, rather than
+  ;; a link to nowhere.
+  (harness-provider-check-test-with-session
+    (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+           (catalogue (harness-provider-check-test-by-name
+                       results "Registry and model catalogue")))
+      (should (eq 'pass (plist-get catalogue :status)))
+      (should-not (plist-get catalogue :sessions)))))
+
+(ert-deftest harness-provider-check-model-suite-shares-the-tool-turn-sessions ()
+  "The tool checks of the model suite name the calls the turn made.
+A model-only run makes the turn in `tool-call`; `tool-result` reads it."
+  (harness-provider-check-test-with-session
+    (let* ((results (harness-provider-check-test-run "checkfake:model" 'model))
+           (tool-call (harness-provider-check-test-by-name
+                       results "Choose and form a harness tool call"))
+           (tool-result (harness-provider-check-test-by-name
+                         results "Use the returned tool result")))
+      (should (eq 'pass (plist-get tool-call :status)))
+      (should (= 2 (length (plist-get tool-call :sessions))))
+      (should (equal (plist-get tool-result :sessions)
+                     (plist-get tool-call :sessions))))))
+
+(ert-deftest harness-provider-check-session-holds-the-provider-error ()
+  "A provider's error text never reaches the result detail, but the session
+the check links to says how the call ended."
+  (harness-provider-check-test-with-session
+    (harness-define-provider 'checkfake
+      :models #'harness-provider-check-test--models
+      :complete (lambda (request)
+                  (let ((emit (plist-get request :on-event)))
+                    (funcall emit '(:type start))
+                    (funcall emit '(:type done :stop-reason error
+                                    :error "secret-password"))
+                    (list :cancel #'ignore))))
+    (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+           (completion (harness-provider-check-test-by-name
+                        results "Text completion and event lifecycle"))
+           (session-id (car (plist-get completion :sessions))))
+      (should (eq 'fail (plist-get completion :status)))
+      (should-not (string-match-p "secret-password" (plist-get completion :detail)))
+      (should session-id)
+      (should (cl-some (lambda (node)
+                         (and (eq (plist-get node :kind) 'hint)
+                              (string-match-p "secret-password"
+                                              (plist-get node :content))))
+                       (harness-call 'session/nodes session-id))))))
 
 (provide 'harness-provider-check-test)
 ;;; harness-provider-check-test.el ends here

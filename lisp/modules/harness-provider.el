@@ -1252,7 +1252,9 @@ what a call the harness makes on its own is for, such as \"Permission
 judge\", is recorded as an internal session (`session/internal-start'),
 made for the session `:job-parent' names, in the project `:job-project'
 names; it is finished when the request is done, refused or failed
-alike.  The provider never sees those keys."
+alike.  The provider never sees those keys, and the handle then carries
+the internal session's id as `:session', for a caller that shows what
+the call asked and answered."
   (pcase-let* ((job-id (harness-provider--job-start request))
                (request (if (or (plist-member request :job) (plist-member request :job-parent)
                                 (plist-member request :job-project))
@@ -1271,19 +1273,30 @@ alike.  The provider never sees those keys."
      (refusal
       (harness-log 'warn "provider/complete: %s" refusal)
       (funcall on-event (list :type 'done :stop-reason 'error :error refusal))
-      (list :cancel #'ignore))
+      (if job-id
+          (list :cancel #'ignore :session job-id)
+        (list :cancel #'ignore)))
      ((null provider)
       (funcall on-event (list :type 'done :stop-reason 'error
                               :error (format "No provider for model %s" (plist-get request :model))))
-      (list :cancel #'ignore))
+      (if job-id
+          (list :cancel #'ignore :session job-id)
+        (list :cancel #'ignore)))
      (t
       (condition-case err
-          (let ((handle (funcall (harness-provider-complete-fn provider) request)))
+          (let ((handle (or (funcall (harness-provider-complete-fn provider) request)
+                            (list :cancel #'ignore))))
             (harness-emit 'provider/request-started pid request)
-            (or handle (list :cancel #'ignore)))
+            ;; A recorded call says which internal session holds it, so a
+            ;; caller can show the prompt, the reply and any error.
+            (if job-id
+                (plist-put (copy-sequence handle) :session job-id)
+              handle))
         (error
          (funcall on-event (list :type 'done :stop-reason 'error :error (harness-error-message err)))
-         (list :cancel #'ignore)))))))
+         (if job-id
+             (list :cancel #'ignore :session job-id)
+           (list :cancel #'ignore))))))))
 
 (harness-defmethod provider/warm (request)
   "Have REQUEST's provider get ready for a request like it; non-nil if it did.

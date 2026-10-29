@@ -39,6 +39,11 @@ rate-limited, refused its credential or cannot reach the provider is a
 SKIP too: an exhausted plan is not a broken provider, and the report says
 which of those it was without echoing the provider's error text.
 
+Every model request a check makes is recorded as an internal session
+named after the check, and the result names its sessions, so the page
+can open the prompt, the reply and the provider's own error: the result
+never carries that error text, which a plugin may have filled with a key.
+
 The job runs in the harness process, so it must not block the event loop:
 every check returns a promise, and completions are driven by the
 provider's own events.  The UI half follows the job's events over ACP

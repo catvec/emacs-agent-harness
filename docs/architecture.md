@@ -2072,10 +2072,13 @@ whatever its stop reason, finishes the session with the reply
 (`session/internal-finish`).  A request the allow list refuses or that
 fails in setup finishes it too.  A failure of the recording is logged
 and goes no further; a request without `:job`, or a harness without the
-method, is not recorded.  Callers: the permission judge, the Elisp
-judge, the session judge, auto-naming (`naming/title` too, with no
-parent), recaps, todo syncs, the Insights summary, the pet and the task
-board's search.
+method, is not recorded.  The handle `provider/complete` returns then
+carries `:session`, the internal session's id, so a caller can show what
+the call asked and answered, its error included.  Callers: the
+permission judge, the Elisp judge, the session judge, auto-naming
+(`naming/title` too, with no parent), recaps, todo syncs, the Insights
+summary, the pet, the task board's search, and the provider checks
+(`Provider check: NAME`).
 
 Events delivered to `:on-event` (one plist each, in order):
 
@@ -2260,9 +2263,14 @@ Each check settles incrementally, and is announced as
 `provider-check/result JOB RESULT COMPLETED TOTAL`;
 `provider-check/started JOB MODEL SUITE TOTAL CHECKS` comes first and
 `provider-check/finished JOB MODEL RESULTS SUMMARY` last.  A result is
-`(:id :suite :name :status :detail :advice)`, its status `pass`, `fail`
-or `skip`; advice is for a failure, and a skip means unverified.  A
-provider that does not answer within `harness-provider-check-timeout`,
+`(:id :suite :name :status :detail :advice :sessions)`, its status
+`pass`, `fail` or `skip`; advice is for a failure, and a skip means
+unverified.  Each model request the check makes is recorded as an
+internal session named `Provider check: NAME`, and `:sessions` names
+them, in call order, for the page to open: the prompt, the reply and
+the provider's own error are there, never in the result's detail.  A
+check that makes no request names none.  A provider that does not
+answer within `harness-provider-check-timeout`,
 one whose request does not end, and one that signals are failures of
 their own check, and the checks after them still run.  The checks make
 real model requests, so only the UI command `harness-provider-check`

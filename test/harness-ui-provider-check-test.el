@@ -217,6 +217,77 @@ read."
             (should (string-match-p "Skipped checks are unverified" text))
             (should-not (string-match-p "WAIT" text))))))))
 
+(ert-deftest harness-ui-provider-check-check-lines-open-their-session ()
+  "A check that made model requests links to the session that recorded them.
+A check with no call offers no link, a failed one still does, and a check
+with several calls offers one button each, oldest first."
+  (harness-ui-provider-check-test-with
+    (harness-ui-provider-check-test-session "s1" "checkfake:model")
+    (with-temp-buffer
+      (setq-local harness-ui-session-id "s1")
+      (let ((harness-ui-provider-check-confirm nil))
+        (harness-ui-provider-check-test-recording (harness-provider-check)))
+      (with-current-buffer (harness-ui-provider-check-test-buffer)
+        (let ((job harness-ui-provider-check--job))
+          (harness-ui-provider-check-test-dispatch
+           "provider-check/result" job
+           '(:id "catalogue" :suite "provider" :name "Registry and model catalogue"
+             :status "pass" :detail "Listed.")
+           1 3)
+          (harness-ui-provider-check-test-dispatch
+           "provider-check/result" job
+           '(:id "completion" :suite "provider"
+             :name "Text completion and event lifecycle"
+             :status "fail" :detail "Turn ended with error (error text suppressed)."
+             :sessions ("session-1"))
+           2 3)
+          ;; ACP sends the list as a vector.
+          (harness-ui-provider-check-test-dispatch
+           "provider-check/result" job
+           (list :id "instructions" :suite "model" :name "Instruction following"
+                 :status "skip" :detail "Model did not call the resubmit tool."
+                 :sessions (vector "session-2" "session-3"))
+           3 3))
+        (let ((text (harness-ui-provider-check-test-text)))
+          (should (string-match-p "\\[Session\\]" text))
+          (should (string-match-p "\\[Session 1\\] \\[Session 2\\]" text)))
+        ;; The whole line is the link, its status included.
+        (goto-char (point-min))
+        (should (search-forward "FAIL" nil t))
+        (should (get-text-property (1- (point)) 'keymap))
+        ;; The check's name is a link too.
+        (goto-char (point-min))
+        (should (search-forward "Text completion and event lifecycle" nil t))
+        (should (get-text-property (1- (point)) 'keymap))
+        (should (string-match-p "open the session"
+                                (get-text-property (1- (point)) 'help-echo)))
+        (let ((opened nil)
+              (action (lookup-key (get-text-property (1- (point)) 'keymap)
+                                  (kbd "RET"))))
+          (cl-letf (((symbol-function 'harness-ui-visit-session)
+                     (lambda (id) (setq opened id))))
+            (funcall action))
+          (should (equal opened "session-1")))
+        (goto-char (point-min))
+        (should (search-forward "Registry and model catalogue" nil t))
+        (should-not (get-text-property (1- (point)) 'keymap))
+        ;; A click opens the session that recorded the call.
+        (let ((opened nil))
+          (cl-letf (((symbol-function 'harness-ui-visit-session)
+                     (lambda (id) (setq opened id))))
+            (goto-char (point-min))
+            (should (search-forward "[Session]" nil t))
+            (push-button (match-beginning 0))
+            (should (equal opened "session-1"))))
+        ;; And each of a check's several calls has its own button.
+        (let ((opened nil))
+          (cl-letf (((symbol-function 'harness-ui-visit-session)
+                     (lambda (id) (setq opened id))))
+            (goto-char (point-min))
+            (should (search-forward "[Session 2]" nil t))
+            (push-button (match-beginning 0))
+            (should (equal opened "session-3"))))))))
+
 (ert-deftest harness-ui-provider-check-closing-the-page-cancels-the-job ()
   "Nothing would show a killed page's results, so its job is told to stop."
   (harness-ui-provider-check-test-with
