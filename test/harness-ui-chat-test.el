@@ -7368,6 +7368,34 @@ opening it where images cannot show or the file is remote."
         (should (= 2 (hash-table-count harness-chat--groups)))
         (should (harness-ui-chat-test-find buf "5 tool calls: Read file ×3, Search files, Find files"))))))
 
+(ert-deftest harness-ui-chat-a-tool-groups-summary-does-not-end-in-nil ()
+  "A group with no slot notice ends its summary with what it counts.
+It used to read \"6 tool calls: Bash ×6 · thinking ×4nil\": the part
+about the slots changing was nil, and `format' prints nil as \"nil\"."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (dotimes (i 6)
+        (let ((n (1+ i)))
+          (harness-call 'session/append sid
+                        (list :kind 'tool-call :tool "bash" :call-id (format "b%d" n)
+                              :input (list :command (format "make step-%d" n))
+                              :title (format "Bash: make step-%d" n)))
+          (when (< n 5)
+            (harness-call 'session/append sid
+                          (list :kind 'thinking
+                                :content (format "Thought %d: the build is still fine." n))))))
+      (harness-test-wait (lambda () (harness-ui-chat-test-call-block buf "b6")) 5 "the calls")
+      (with-current-buffer buf
+        (let* ((pos (harness-ui-chat-test-find buf "6 tool calls: Bash ×6 · thinking ×4"))
+               (line (and pos (save-excursion
+                                (goto-char pos)
+                                (buffer-substring-no-properties
+                                 (line-beginning-position) (line-end-position))))))
+          (should line)
+          (should (string-suffix-p "  [expand]" line))
+          (should-not (string-match-p "nil" line)))))))
+
 (defun harness-ui-chat-test-append-call (sid tool call-id title input)
   "Append to SID the call CALL-ID of TOOL, titled TITLE, with INPUT, and its result."
   (harness-call 'session/append sid

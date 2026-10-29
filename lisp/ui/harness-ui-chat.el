@@ -3055,7 +3055,8 @@ The thinking folded in between them is left out."
 The group starts collapsed, so this is what tells of the notice, with
 the number of changes and the newest one a hover away."
   (let ((hints (harness-chat--group-slot-hints group)))
-    (when hints
+    (if (null hints)
+        ""
       (let* ((items (cl-loop for b in hints
                              append (plist-get (harness-node-fold (harness-chat-block-node b)) :items)))
              (latest (plist-get (car (last items)) :text))
