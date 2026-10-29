@@ -436,6 +436,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-report-panel-functions` | [ui-report](ui-report.md) | [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) |
 | `harness-ui-review-changes-functions` | [ui-review](ui-review.md) | [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-review-pending-functions` | [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) | [ui-patch-review](ui-patch-review.md) |
+| `harness-ui-review-pending-known-functions` | [ui-review](ui-review.md) | [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-sessions-changed-hook` | [ui](ui.md) | [ui-notify](ui-notify.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-sessions-footer-functions` | [ui-sessions](ui-sessions.md) |  |
 | `harness-ui-sessions-panel-functions` | [ui-carry](ui-carry.md), [ui-sessions](ui-sessions.md) | [ui-carry](ui-carry.md) |

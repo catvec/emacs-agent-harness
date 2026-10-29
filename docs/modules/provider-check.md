@@ -34,6 +34,10 @@ Checks are incremental in both senses.  Each one reports PASS, FAIL or
 SKIP as soon as it settles, with guidance about the feature that may need
 to be removed or fixed, and the remaining checks keep running.  Nothing
 stops at the first failure, and a SKIP means unverified, not supported.
+A check that cannot run because the account is out of quota or money, is
+rate-limited, refused its credential or cannot reach the provider is a
+SKIP too: an exhausted plan is not a broken provider, and the report says
+which of those it was without echoing the provider's error text.
 
 The job runs in the harness process, so it must not block the event loop:
 every check returns a promise, and completions are driven by the

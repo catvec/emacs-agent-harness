@@ -916,6 +916,53 @@ inference as successful, and so does this provider."
       (should (eq 'transport (plist-get done :error-kind)))
       (should (string-match-p "boom" (plist-get done :error))))))
 
+(ert-deftest harness-provider-responses-nested-error-event-keeps-its-code-and-kind ()
+  "The stream's `error' event nests the real code and message under `error'.
+Reading only the top level turned the account's quota refusal into an
+unexplained \"the request failed\", which the provider check reported as
+a contract failure and the fallback could not classify."
+  (harness-responses-test-with-fake
+      `(("/responses"
+         . (:chunks
+            (,(harness-responses-test--sse
+               '(:type "error"
+                 :sequence_number 3
+                 :error (:type "invalid_request_error"
+                         :param :null
+                         :code "subscription_sharing_usage_limit_exceeded"
+                         :message "The ChatGPT user has reached their Subscription Sharing usage limit.")))))))
+    (let* ((events (car (harness-responses-test--complete
+                         `(:model "chatgpt:gpt-6-astra"
+                           :messages ((:role user :content ((:type "text" :text "hi"))))))))
+           (done (harness-responses-test--done events)))
+      (should (eq 'error (plist-get done :stop-reason)))
+      (should (eq 'quota (plist-get done :error-kind)))
+      (should (string-match-p "subscription_sharing_usage_limit_exceeded"
+                              (plist-get done :error)))
+      (should (string-match-p "Subscription Sharing usage limit"
+                              (plist-get done :error))))))
+
+(ert-deftest harness-provider-responses-nested-error-wins-over-a-top-level-one ()
+  "A nested error object is the route's own; a top-level copy does not hide it."
+  (harness-responses-test-with-fake
+      `(("/responses"
+         . (:chunks
+            (,(harness-responses-test--sse
+               '(:type "error"
+                 :code "server_error"
+                 :message "outer"
+                 :error (:code "subscription_sharing_user_not_eligible"
+                         :message "inner")))))))
+    (let* ((events (car (harness-responses-test--complete
+                         `(:model "chatgpt:gpt-5"
+                           :messages ((:role user :content ((:type "text" :text "hi"))))))))
+           (done (harness-responses-test--done events)))
+      (should (eq 'auth (plist-get done :error-kind)))
+      (should (string-match-p "subscription_sharing_user_not_eligible"
+                              (plist-get done :error)))
+      (should (string-match-p "inner" (plist-get done :error)))
+      (should-not (string-match-p "outer" (plist-get done :error))))))
+
 (ert-deftest harness-provider-responses-cancel-ends-the-request-once ()
   "Cancelling a request in flight ends it as cancelled, and only once."
   (harness-responses-test-with-fake

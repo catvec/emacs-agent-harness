@@ -98,10 +98,13 @@ function call is known once its item is done, its input streams as
 `response.function_call_arguments.delta` (reported as `tool-input`
 activity, so a long input is visible), and `response.completed` ends
 the request: the usage comes from the response object, then the tool
-calls go out, then `done`.  `response.failed` is an error carrying
-the structured `error.code` -- `subscription_sharing_usage_limit_exceeded`
-and its family (see `harness-responses--error-kind`) -- and
-`response.incomplete` says why the answer stopped short.
+calls go out, then `done`.  `response.failed`, and the bare `error`
+event that precedes it, carry the structured `error.code` --
+`subscription_sharing_usage_limit_exceeded` and its family (see
+`harness-responses--error-kind`) -- nested under `error` in both, so
+that object is what is read and not the top-level fields, which this
+route leaves out.  `response.incomplete` says why the answer stopped
+short.
 
 Money.  The plan pays, so a call is recorded with `:billing
 subscription' and `:cost` 0.  This route lists no prices, so there is

@@ -2840,7 +2840,10 @@ and the provider is built to what it accepts:
   `response.output_item.done` for a `function_call` becomes a `tool-call`
   (its arguments parsed, kept `:raw` when they will not parse),
   `response.completed` ends the turn, `response.incomplete` and
-  `response.failed` fail it.  A failure's structured `error.code` is
+  `response.failed` fail it.  The `error` event before a failure nests
+  its code and message under `error`, as the failed response does, and
+  both are read there (a top-level copy is accepted too).  That
+  structured `error.code` is
   turned into a kind (`harness-responses-error-kind`), so
   `subscription_sharing_usage_limit_exceeded` (429) is a quota failure
   like any other, `subscription_sharing_user_not_eligible` (403) and

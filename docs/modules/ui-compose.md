@@ -121,6 +121,7 @@ prompt blocks with `harness-compose-attachment-block`.
 ### Options
 
 - `harness-compose-download-max-size` — Largest file, in bytes, that a link dropped on a compose box downloads.
+- `harness-compose-panel-target-delay` — Seconds the panel receiving a compose key is shown before it runs.
 - `harness-compose-reply-hints` — Non-nil: a card says how to move point out of its reply, and back in.
 - `harness-compose-thumbnail-lines` — Height of the thumbnail an attached image or video shows, in lines.
 - `harness-compose-yank-media` — Non-nil: yanking in a compose box attaches the media on the clipboard.

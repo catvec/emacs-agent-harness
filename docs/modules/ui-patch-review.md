@@ -484,5 +484,6 @@ it takes its part of the report and the banner out.
 - `harness-ui-report-panel-functions` → `harness-ui-patch-review--panel`
 - `harness-ui-review-changes-functions` → `harness-ui-patch-review--banner-panel`
 - `harness-ui-review-pending-functions` → `harness-ui-patch-review--pending-p`
+- `harness-ui-review-pending-known-functions` → `harness-ui-patch-review--pending-known-p`
 - `window-size-change-functions` → `harness-ui-patch-review--side-resized`
 

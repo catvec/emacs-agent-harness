@@ -142,7 +142,11 @@ timeout of its own (`harness-provider-check-timeout`).
 Every line is PASS, FAIL, or SKIP with feature-specific guidance.  A
 SKIP means *unverified*, not supported: for instance, an API account
 that does not report quota windows cannot verify plan quota, and no
-tool call means the tool transport was not exercised.  The summary
+tool call means the tool transport was not exercised.  A request that
+could not run because the account's plan usage limit is reached, its
+balance is empty, it is rate-limited, its credential was refused or the
+provider could not be reached is a SKIP with that reason, never a
+contract FAIL: an exhausted plan is not a broken provider.  The summary
 counts all three, and a failure is shown in the warning face.  Advice
 is conservative, **not an automatic settings change**: a missing/bad
 `:thinking-levels` or `:quota` claim should be removed from that

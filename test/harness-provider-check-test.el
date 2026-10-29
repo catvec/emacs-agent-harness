@@ -20,6 +20,8 @@
 (defvar harness-provider-check-test--no-tools nil)
 (defvar harness-provider-check-test--tool-use-without-call nil)
 (defvar harness-provider-check-test--drop-label nil)
+(defvar harness-provider-check-test--error-kind nil)
+(defvar harness-provider-check-test--error-text nil)
 (defvar harness-provider-check-test--events nil)
 
 (defun harness-provider-check-test--complete (request)
@@ -32,6 +34,12 @@
      (lambda ()
        (unless done
          (cond
+          (harness-provider-check-test--error-kind
+           (setq done t)
+           (funcall emit (list :type 'done :stop-reason 'error
+                               :error (or harness-provider-check-test--error-text
+                                          "the provider failed")
+                               :error-kind harness-provider-check-test--error-kind)))
           ((and (plist-get request :no-thinking)
                 harness-provider-check-test--no-thinking-error)
            (setq done t)
@@ -132,6 +140,8 @@
            (harness-provider-check-test--no-tools nil)
            (harness-provider-check-test--tool-use-without-call nil)
            (harness-provider-check-test--drop-label nil)
+           (harness-provider-check-test--error-kind nil)
+           (harness-provider-check-test--error-text nil)
            (harness-provider-check-test--events nil)
            (harness-provider-check-timeout 1))
        (harness-on 'provider-check/started
@@ -326,6 +336,23 @@
                                   :respond "not callable")
                    (:type done :stop-reason tool-use)))))
 
+(ert-deftest harness-provider-check-environment-errors-are-unavailable ()
+  "An account or network failure says the check could not run, not that the API broke.
+A `request' error is different: the provider rejected the body, which
+is its contract to keep."
+  (dolist (kind '(quota billing rate-limit auth transport :quota))
+    (should-error
+     (harness-provider-check--events
+      (list '(:type start)
+            (list :type 'done :stop-reason 'error :error-kind kind)))
+     :type 'harness-provider-check-unavailable))
+  (should (harness-provider-check--events
+           '((:type start)
+             (:type done :stop-reason error :error-kind request))))
+  (should (harness-provider-check--events
+           '((:type start)
+             (:type done :stop-reason error)))))
+
 (ert-deftest harness-provider-check-image-is-a-complete-valid-png ()
   "The baked-in test image is whole: a truncated PNG is an unsupported image.
 DeepSeek rejected the former constant, whose IDAT declared more bytes
@@ -398,6 +425,57 @@ than the file held, with an HTTP 400 unsupported-image error."
                       results "Text completion and event lifecycle")))
           (should (eq 'fail (plist-get basic :status)))
           (should-not (string-match-p "secret-password" (plist-get basic :detail))))))))
+
+(ert-deftest harness-provider-check-an-exhausted-account-is-a-skip-not-a-failure ()
+  "A plan's usage limit is not evidence that the provider or model is broken.
+Every request that could not run because the account is out of quota is
+a SKIP with a safe explanation, and no raw provider text reaches the
+report."
+  (harness-provider-check-test-with
+    (setq harness-provider-check-test--error-kind 'quota
+          harness-provider-check-test--error-text "secret-quota-credential")
+    (let* ((results (harness-provider-check-test-run "checkfake:model" 'all))
+           (status-of (lambda (name)
+                        (plist-get (harness-provider-check-test-by-name
+                                    results name)
+                                   :status))))
+      (should (eq 'pass (funcall status-of "Registry and model catalogue")))
+      (should (eq 'pass (funcall status-of "Cancellation and cleanup")))
+      (dolist (name '("Text completion and event lifecycle"
+                      "Usage accounting"
+                      "No-thinking request"
+                      "Declared thinking level"
+                      "Advertised image input"
+                      "Tool-call transport and tool-result continuation"
+                      "Instruction following"
+                      "Image recognition (optional)"
+                      "Choose and form a harness tool call"
+                      "Use the returned tool result"))
+        (should (eq 'skip (funcall status-of name))))
+      (should-not (cl-find 'fail results
+                           :key (lambda (result) (plist-get result :status))))
+      (should (string-match-p
+               "usage limit"
+               (plist-get (harness-provider-check-test-by-name
+                           results "Text completion and event lifecycle")
+                          :detail)))
+      (should-not (string-match-p
+                   "secret-quota-credential"
+                   (mapconcat (lambda (result) (or (plist-get result :detail) ""))
+                              results "\n"))))))
+
+(ert-deftest harness-provider-check-a-wrong-request-is-still-a-failure ()
+  "An error the provider calls `request' is its own contract to keep.
+Only account and network conditions turn a check into a SKIP."
+  (harness-provider-check-test-with
+    (setq harness-provider-check-test--error-kind 'request
+          harness-provider-check-test--error-text "unsupported body field")
+    (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
+      (let ((basic (harness-provider-check-test-by-name
+                    results "Text completion and event lifecycle")))
+        (should (eq 'fail (plist-get basic :status)))
+        (should-not (string-match-p "unsupported body field"
+                                    (plist-get basic :detail)))))))
 
 (ert-deftest harness-provider-check-hanging-provider-times-out-and-carries-on ()
   (harness-provider-check-test-with

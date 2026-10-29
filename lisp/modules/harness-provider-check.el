@@ -26,6 +26,10 @@
 ;; SKIP as soon as it settles, with guidance about the feature that may need
 ;; to be removed or fixed, and the remaining checks keep running.  Nothing
 ;; stops at the first failure, and a SKIP means unverified, not supported.
+;; A check that cannot run because the account is out of quota or money, is
+;; rate-limited, refused its credential or cannot reach the provider is a
+;; SKIP too: an exhausted plan is not a broken provider, and the report says
+;; which of those it was without echoing the provider's error text.
 ;;
 ;; The job runs in the harness process, so it must not block the event loop:
 ;; every check returns a promise, and completions are driven by the
@@ -54,6 +58,18 @@ it still run."
   :group 'harness-provider-check)
 
 (define-error 'harness-provider-check-failure "Provider check failed")
+
+(define-error 'harness-provider-check-unavailable "Provider check could not run")
+
+(defconst harness-provider-check--environment-kinds
+  '(quota billing rate-limit auth transport)
+  "Done-event error kinds that say a check could not run.
+A plan's usage limit, an empty balance, a short rate limit, a refused
+credential and an unreachable route are conditions of the account or
+the network.  None is evidence about the provider contract or the
+model, so a check that hits one is SKIPped rather than failed.  A
+`request' kind is different: it says the body was wrong, which is the
+provider's own contract to keep.")
 
 (defconst harness-provider-check--image
   "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAS0lEQVR42u3PQQkAAAgAsetfWiP4FgYrsKZeS0BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDgsqnc8OJg6Ln3AAAAAElFTkSuQmCC"
@@ -103,9 +119,36 @@ unsupported format rather than a bad request.")
                                          :data harness-provider-check--image)))))
     (plist-put request :messages (list message))))
 
+(defun harness-provider-check--kind (value)
+  "Return VALUE, an error kind, as a non-keyword symbol, or nil."
+  (and value (intern (string-remove-prefix ":" (format "%s" value)))))
+
+(defun harness-provider-check--unavailable-detail (kind)
+  "Return a safe explanation for a check that ended with error KIND.
+The text is built from the kind alone, never from the provider's error
+message, which a third-party plugin may have filled with a key.  It
+says that the account or network is the reason, so a reader does not
+mistake the SKIP for a verdict on the provider."
+  (pcase kind
+    ('quota (concat "The account's plan usage limit is reached, so this check "
+                    "could not run; try again after the limit resets."))
+    ('billing (concat "The account cannot be billed for this provider, so this "
+                      "check could not run; check the account's balance or plan."))
+    ('rate-limit (concat "The provider rate-limited this check, so it could not "
+                         "run; try again shortly."))
+    ('auth (concat "The provider refused the account's credential, so this check "
+                   "could not run; sign in again and rerun."))
+    ('transport (concat "The provider could not be reached, so this check could "
+                        "not run; try again later."))
+    (_ "This check could not run against this account.")))
+
 (defun harness-provider-check--events (events &optional allow-cancel)
   "Validate the transport shape of EVENTS, allowing cancellation if ALLOW-CANCEL.
-Do not assert the model's words or its choice to use tools here."
+Do not assert the model's words or its choice to use tools here.  A
+turn that ended because the account is out of quota or money, was
+rate-limited, refused the credential or could not reach the provider
+signals `harness-provider-check-unavailable', which the runner reports
+as SKIP: nothing about the provider was observed."
   (harness-provider-check--require (eq (plist-get (car events) :type) 'start)
                                    "No start event")
   (harness-provider-check--require (eq (plist-get (car (last events)) :type) 'done)
@@ -142,6 +185,14 @@ Do not assert the model's words or its choice to use tools here."
                   '(cancelled end-turn error tool-use max-tokens)
                 '(end-turn error tool-use max-tokens)))
         "Missing or unknown stop reason"))))
+  ;; A turn that ran out of account or network is not a provider verdict.
+  (let* ((done (car (last events)))
+         (kind (and (eq (plist-get done :stop-reason) 'error)
+                    (harness-provider-check--kind
+                     (plist-get done :error-kind)))))
+    (when (memq kind harness-provider-check--environment-kinds)
+      (signal 'harness-provider-check-unavailable
+              (list (harness-provider-check--unavailable-detail kind)))))
   t)
 
 (defun harness-provider-check--finish-events (events &optional allow-tool-use allow-cancel)
@@ -663,6 +714,8 @@ into the structured note argument rather than dropping it as a label."
    (lambda (attempt)
      (let ((call (plist-get attempt :call))
            (events (plist-get attempt :first)))
+       ;; An account or network failure is not the model's choice.
+       (harness-provider-check--events events t)
        (if (not call)
            (if (eq (plist-get (car (last events)) :stop-reason) 'tool-use)
                '(skip . "Turn ended for tool use without a tool-call event; model choice unobserved.")
@@ -679,9 +732,11 @@ into the structured note argument rather than dropping it as a label."
   (let ((attempt (harness-provider-check-job-tool-attempt job)))
     (if (not (and attempt (plist-get attempt :call)))
         '(skip . "No tool call to return a result to.")
-      (let* ((events (or (plist-get attempt :second)
-                         (plist-get attempt :first)))
+      (let* ((second (plist-get attempt :second))
+             (events (or second (plist-get attempt :first)))
              (marker (plist-get attempt :marker)))
+        ;; A continuation that ran out of quota never reached the model.
+        (when second (harness-provider-check--events second))
         (harness-provider-check--require
          (string-match-p (regexp-quote marker)
                          (harness-provider-check--text events))
@@ -817,24 +872,37 @@ into the structured note argument rather than dropping it as a label."
           :advice (and (eq status 'fail) (plist-get entry :advice)))))
 
 (defun harness-provider-check--failure-result (entry error)
-  "Return the failure result of check ENTRY that signalled ERROR.
-Do not print a provider's error text: a third-party plugin may have put
-its key in it."
-  (let ((detail
-         (cond
-          ((and (consp error) (eq (car error) 'harness-provider-check-failure))
-           (cadr error))
-          ((and (consp error) (eq (car error) 'error) (stringp (cadr error)))
-           (format "Provider raised error (details suppressed)"))
-          (t
-           (format "Provider raised %s (details suppressed)"
-                   (if (consp error) (car error) error))))))
+  "Return the result of check ENTRY that signalled ERROR.
+A check that could not run because the account is out of quota or
+money, was rate-limited, refused the credential or could not reach the
+provider is a SKIP, with the safe explanation attached to the
+condition.  Any other failure is a FAIL.  Do not print a provider's
+error text in either case: a third-party plugin may have put its key in
+it."
+  (cond
+   ((and (consp error) (eq (car error) 'harness-provider-check-unavailable))
     (list :id (plist-get entry :id)
           :suite (plist-get entry :suite)
           :name (plist-get entry :name)
-          :status 'fail
-          :detail detail
-          :advice (plist-get entry :advice))))
+          :status 'skip
+          :detail (or (cadr error) "This check could not run against this account.")
+          :advice nil))
+   (t
+    (let ((detail
+           (cond
+            ((and (consp error) (eq (car error) 'harness-provider-check-failure))
+             (cadr error))
+            ((and (consp error) (eq (car error) 'error) (stringp (cadr error)))
+             (format "Provider raised error (details suppressed)"))
+            (t
+             (format "Provider raised %s (details suppressed)"
+                     (if (consp error) (car error) error))))))
+      (list :id (plist-get entry :id)
+            :suite (plist-get entry :suite)
+            :name (plist-get entry :name)
+            :status 'fail
+            :detail detail
+            :advice (plist-get entry :advice))))))
 
 (defun harness-provider-check--stage (job entry)
   "Run ENTRY as one check of JOB; return a promise of its result.

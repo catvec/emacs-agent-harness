@@ -57,9 +57,15 @@ which works on it again and comes back for review.  The session's box
 needs nothing of its own: the harness takes any message the user
 sends the session of a task in review for the feedback that sends it
 back, wherever it was written (`harness-tasks--on-message`); another
-session's agent's message is no review and does not.  The report's box
-sends it back itself (`harness-ui-review--send` through
-`harness-ui-report-compose-functions`).  Its keys,
+session's agent's message is no review and does not.  An empty box is
+enough while the review holds drafts, the replies to its comments:
+`harness-chat-send` then sends the task back itself
+(`harness-ui-review--send`), leaving the harness to take the drafts it
+holds, which this Emacs may not have loaded; with none it is the empty
+send it looks like.  The report's box sends it back itself
+(`harness-ui-review--send` through `harness-ui-report-compose-functions`),
+and there the review is loaded, so it can say there is nothing to
+send before sending.  Its keys,
 C-c C-v to verify and C-c C-x to send back, are those of
 `harness-ui-review-minor-mode`, on only while the banner shows: the
 rest of the time the buffer's own keys stand, C-c C-v attaching the
@@ -73,6 +79,7 @@ moved it, and its keys with it.
 - `harness-chat-panel-functions`
 - `harness-ui-review-changes-functions` — Functions that draw the changes of a task under review in its banner.
 - `harness-ui-review-pending-functions` — Functions that say a review has something to send besides the box's words.
+- `harness-ui-review-pending-known-functions` — Functions that say whether a review's drafts are known to this Emacs.
 
 ### Commands
 

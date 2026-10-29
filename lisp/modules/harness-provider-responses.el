@@ -89,10 +89,13 @@
 ;; `response.function_call_arguments.delta' (reported as `tool-input'
 ;; activity, so a long input is visible), and `response.completed' ends
 ;; the request: the usage comes from the response object, then the tool
-;; calls go out, then `done'.  `response.failed' is an error carrying
-;; the structured `error.code' -- `subscription_sharing_usage_limit_exceeded'
-;; and its family (see `harness-responses--error-kind') -- and
-;; `response.incomplete' says why the answer stopped short.
+;; calls go out, then `done'.  `response.failed', and the bare `error'
+;; event that precedes it, carry the structured `error.code' --
+;; `subscription_sharing_usage_limit_exceeded' and its family (see
+;; `harness-responses--error-kind') -- nested under `error' in both, so
+;; that object is what is read and not the top-level fields, which this
+;; route leaves out.  `response.incomplete' says why the answer stopped
+;; short.
 ;;
 ;; Money.  The plan pays, so a call is recorded with `:billing
 ;; subscription' and `:cost' 0.  This route lists no prices, so there is
@@ -957,18 +960,39 @@ dropped with the rest of the item, which is kept whole for replaying."
     (setf (harness-responses--stream-items stream)
           (append (harness-responses--stream-items stream) (list item)))))
 
+(defun harness-responses--error-fields (json)
+  "Return (CODE . MESSAGE) of JSON, an error answer or stream event.
+The route nests the object under `error' in both a failed response and
+an `error' event, so its `code' and `message' are read there; a
+compatible server may put them at the top level instead.  Either field
+may be nil, and a bare string `error' is taken as the message."
+  (let* ((json (and (listp json) json))
+         (error (plist-get json :error))
+         (object (and (listp error) error))
+         (code (or (plist-get object :code)
+                   (plist-get json :code)))
+         (message (or (plist-get object :message)
+                      (and (stringp error) error)
+                      (plist-get json :message))))
+    (cons (and code (format "%s" code))
+          (and (stringp message) message))))
+
+(defun harness-responses--error-text (code message)
+  "Return the done event's error text from CODE and MESSAGE.
+No credential is ever part of either; MESSAGE is the route's own
+explanation and is kept on one line like `harness-first-line'."
+  (format "%s%s" (or code "the request failed")
+          (if (and (stringp message) (not (string-empty-p message)))
+              (format ": %s" (harness-first-line message 300))
+            "")))
+
 (defun harness-responses--event-failed (stream response)
   "End STREAM as failed, as the failed RESPONSE says.
 The structured `error.code' is kept whole, both as the message and as
 the kind of failure the harness decides on."
-  (let* ((error (plist-get response :error))
-         (code (and (listp error) (plist-get error :code)))
-         (code (and code (format "%s" code)))
-         (message (and (listp error) (plist-get error :message)))
-         (text (format "%s%s" (or code "the request failed")
-                       (if (and (stringp message) (not (string-empty-p message)))
-                           (format ": %s" message)
-                         ""))))
+  (let* ((fields (harness-responses--error-fields response))
+         (code (car fields))
+         (text (harness-responses--error-text code (cdr fields))))
     (harness-responses--finish stream 'error text
                                (harness-responses-error-kind code nil))))
 
@@ -1078,13 +1102,16 @@ read and dropped."
           ("response.failed" (harness-responses--event-failed stream (plist-get json :response)))
           ("response.incomplete" (harness-responses--event-incomplete stream (plist-get json :response)))
           ("error"
-           (let ((code (plist-get json :code))
-                 (message (plist-get json :message)))
+           ;; The route nests the code and message under `error', as its
+           ;; `response.failed' does; reading only the top level would
+           ;; turn a quota refusal into "the request failed", losing the
+           ;; kind the session and the fallback decide on.
+           (let* ((fields (harness-responses--error-fields json))
+                  (code (car fields)))
              (harness-responses--finish
               stream 'error
-              (format "%s%s" (or code "the request failed")
-                      (if (stringp message) (format ": %s" message) ""))
-              (harness-responses-error-kind (and code (format "%s" code)) nil))))
+              (harness-responses--error-text code (cdr fields))
+              (harness-responses-error-kind code nil))))
           (_ nil))))))
 
 (defun harness-responses--usage-event (usage)
