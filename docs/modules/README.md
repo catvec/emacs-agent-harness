@@ -120,6 +120,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [project](project.md) | by default |  | Project roots and non-blocking file lists (harness-files.el). |
 | [provider](provider.md) | by default |  | Provider contract, registry and model catalogue. |
 | [provider-bedrock](provider-bedrock.md) |  | [provider](provider.md) | AWS Bedrock provider: the Converse API, signed with SigV4 or an API key. |
+| [provider-check](provider-check.md) | by default | [provider](provider.md) | Live checks of a provider's contract and a model's harness skills, run from the harness. |
 | [provider-claude](provider-claude.md) | by default | [provider](provider.md) | Claude Code CLI as a hosted-loop completion provider. |
 | [provider-copilot](provider-copilot.md) |  | [provider](provider.md) | GitHub Copilot CLI as a hosted-loop completion provider. |
 | [provider-deepseek](provider-deepseek.md) |  | [provider](provider.md), [provider-openai](provider-openai.md) | DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing. |
@@ -200,6 +201,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-pet](ui-pet.md) |  | [ui](ui.md) | The companion pet: its buffer, and the creature and its words in chats, on the board and under the session list. |
 | [ui-popout](ui-popout.md) |  | [ui](ui.md), [ui-compose](ui-compose.md) | Popouts: one item of a session or task in a small window of its own. |
 | [ui-priority](ui-priority.md) | by default | [ui](ui.md), [ui-chat](ui-chat.md) | A session's priority: the chat header's segment, the keys that raise, lower and set it, and the bulk command. |
+| [ui-provider-check](ui-provider-check.md) | by default | [ui](ui.md) | The provider and model check page: live checks of any model, from the harness. |
 | [ui-qr](ui-qr.md) |  |  | QR codes: an encoder, drawn as an SVG image or with text characters. |
 | [ui-quick-search](ui-quick-search.md) |  | [ui](ui.md), [ui-popout](ui-popout.md), [ui-search](ui-search.md) | The quick search: find a session, a command or a task from anywhere, answered by a cheap model. |
 | [ui-report](ui-report.md) |  | [ui](ui.md), [ui-popout](ui-popout.md), [ui-tasks](ui-tasks.md) | A task's report: its final message and evidence, in a popout and in its session. |
@@ -273,6 +275,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `permission/requested` | [perms](perms.md) | [perms](perms.md) | [acp](acp.md), [insights](insights.md), [perms](perms.md) |  |
 | `pet/changed` | [pet](pet.md) | [pet](pet.md) | [ui-pet](ui-pet.md) | yes |
 | `pet/said` | [pet](pet.md) | [pet](pet.md) | [ui-pet](ui-pet.md) | yes |
+| `provider-check/finished` | [provider-check](provider-check.md) | [provider-check](provider-check.md) | [ui-provider-check](ui-provider-check.md) | yes |
+| `provider-check/result` | [provider-check](provider-check.md) | [provider-check](provider-check.md) | [ui-provider-check](ui-provider-check.md) | yes |
+| `provider-check/started` | [provider-check](provider-check.md) | [provider-check](provider-check.md) | [ui-provider-check](ui-provider-check.md) | yes |
 | `provider/models-updated` | [provider](provider.md) | [provider](provider.md) | [session](session.md) | yes |
 | `provider/pricing-warning` | [provider-deepseek](provider-deepseek.md) | [provider-deepseek](provider-deepseek.md) |  | yes |
 | `provider/quota-updated` | [provider](provider.md) | [provider](provider.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md) | [fallback](fallback.md), [usage](usage.md) | yes |
@@ -411,7 +416,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-config-sections-functions` | [ui-config](ui-config.md) | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
 | `harness-ui-connected-hook` | [ui](ui.md) | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |
-| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
+| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-provider-check](ui-provider-check.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-linking-context-functions` | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |
@@ -443,7 +448,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-update-functions` | [ui](ui.md), [ui-children](ui-children.md) | [ui-access](ui-access.md), [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-tree](ui-tree.md) |
 | `harness-update-hook` | [ui-version](ui-version.md), `harness.el` | [ui-version](ui-version.md) |
 | `harness-websearch-ready-functions` | [tools-web](tools-web.md) |  |
-| `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md) |
+| `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-provider-check](ui-provider-check.md) |
 | `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [session](session.md), [tasks](tasks.md), [ui](ui.md) |
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
 | `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), `compose-quote.el`, `change-review-ui.el` |

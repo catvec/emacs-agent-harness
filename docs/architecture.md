@@ -2248,6 +2248,27 @@ session id of a request made outside any session, such as a task
 board's search; the CLI kills its process).  The model used when nothing
 more specific is configured is `harness-model`.
 
+The live checks of the provider-check module use the same surface from
+inside the harness.  `provider/check-start MODEL &optional SUITE
+EMBEDDING-MODEL JOB` starts a background job: SUITE is `provider`,
+`model` or `all`, EMBEDDING-MODEL adds the optional embed check, and JOB
+is an id the caller chooses so events that arrive before the answer
+still name it.  It returns `(:job :model :suite :total :checks)`, the
+plan without the functions.  `provider/check-cancel JOB` ends the job,
+cancels the request in flight and keeps the results it already has.
+Each check settles incrementally, and is announced as
+`provider-check/result JOB RESULT COMPLETED TOTAL`;
+`provider-check/started JOB MODEL SUITE TOTAL CHECKS` comes first and
+`provider-check/finished JOB MODEL RESULTS SUMMARY` last.  A result is
+`(:id :suite :name :status :detail :advice)`, its status `pass`, `fail`
+or `skip`; advice is for a failure, and a skip means unverified.  A
+provider that does not answer within `harness-provider-check-timeout`,
+one whose request does not end, and one that signals are failures of
+their own check, and the checks after them still run.  The checks make
+real model requests, so only the UI command `harness-provider-check`
+starts a job; they are not part of the ordinary test suite.  The UI half,
+ui-provider-check, draws the report page and forwards these events.
+
 `harness-allowed-models` keeps the harness to some models: glob
 patterns of model ids (`"claude:*"`; one without a colon names a
 provider), nil for any; an administrator's policy may set it

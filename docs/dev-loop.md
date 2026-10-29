@@ -98,6 +98,70 @@ other suites use cannot tell you:
 HARNESS_REAL_CLAUDE=$(command -v claude) scripts/test.sh test/harness-provider-claude-real-cli-test.el
 ```
 
+## Check a provider and a model against a real account
+
+`C-c h !` (`M-x harness-provider-check`) runs the **live checks from
+inside the harness**, on the model of the session in front of you: a
+chat's model, or the model of the task at point on a board.  With `C-u`
+it asks the model catalogue for any model instead, so a provider a
+plugin author has just imported can be checked without leaving Emacs.
+The command asks before it spends anything, because the checks make
+several real model requests.  It never asks for or echoes an API key:
+the provider reads its key or signs in as it always does.  A plugin
+must already be loaded (and trusted) for its provider to appear in the
+catalogue; loading arbitrary Lisp is Emacs's business, not this
+command's.
+
+The report page fills in as each check settles, one line at a time,
+and keeps the earlier lines when a later check fails.  A run can be
+cancelled with `c`; `g` runs the same model and scope again, `p` runs
+the provider contract only, `m` the model behavior only, `M` chooses
+another model, and `E` asks for an embedding model and runs the
+provider contract with its optional embedding check.  The page is a
+harness view: `q` buries it, `?` opens the harness menu.
+
+The **provider contract** checks, in order: model listing/id/context
+window, text streaming and exactly one terminal event, nonnegative
+usage, `:no-thinking` (the OpenAI-family `none`/`minimal` rejection
+regression), the model's advertised thinking level, advertised image
+input, a tool-call/result round trip, quota's generic shape if
+reported, state/fork when advertised, optional embeddings (with an
+embedding model id), and cancellation/cleanup.  The **separate model
+behavior** checks test following a system instruction, identifying a
+red image when vision is advertised, choosing a harness tool with
+structured arguments, and using its result rather than inventing one.
+They deliberately use a fresh tool receipt that the model has not seen
+in the prompt.  A refusal to call the tool is **SKIP** (unobserved
+transport) in the provider suite and **FAIL** in the model suite; the
+two findings must not be conflated.  Other checks keep running after a
+failure, so one error does not mask a second one, and every wait has a
+timeout of its own (`harness-provider-check-timeout`).
+
+Every line is PASS, FAIL, or SKIP with feature-specific guidance.  A
+SKIP means *unverified*, not supported: for instance, an API account
+that does not report quota windows cannot verify plan quota, and no
+tool call means the tool transport was not exercised.  The summary
+counts all three, and a failure is shown in the warning face.  Advice
+is conservative, **not an automatic settings change**: a missing/bad
+`:thinking-levels` or `:quota` claim should be removed from that
+model/provider until fixed; a tool-illiterate model should not be
+selected for autonomous agent tasks.  The generic provider API has no
+per-model "turn off tools" switch, and a provider without sound text or
+tool transport needs fixing, not a capability flag.  Use a
+stronger/different model for tool-reliant work.  The checks do not
+assert particular prose for protocol checks, cannot prove that an API
+honored a reasoning effort if it silently ignores it, and cannot
+exercise an optional feature the account does not expose.
+
+These are **not** part of `scripts/test.sh`: that suite must stay
+offline and free.  The runner's own behavior -- incremental results,
+continuation after a failure, cancellation, timeouts, the separation of
+transport from model behavior, and the report page -- is tested with a
+fake provider there (`test/harness-provider-check-test.el`,
+`test/harness-ui-provider-check-test.el`).  The ordinary mocked provider
+suites still cover deterministic wire formats and error responses
+without a key.
+
 ## The fast test loop
 
 A test run is minutes, an edit is seconds, so run the checks your

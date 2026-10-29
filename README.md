@@ -663,6 +663,7 @@ transient infrastructure, independently of module-declarations v2
 | `C-c h K` | `harness-cache-keep-warm` | Keep the session's prompt cache warm for a period you give (`30m`, `1h30m`, `off`), though nothing says you are around yet; see [Keeping the cache warm](#keeping-the-cache-warm) |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
+| `C-c h !` | `harness-provider-check` | Run live checks of the current model's provider and of the model itself; with `C-u`, choose any model in the catalogue (see [Checking a provider and a model](#checking-a-provider-and-a-model)) |
 | `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session and task of every project to it |
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
 | `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session and task of every project |
@@ -5438,6 +5439,24 @@ own setting, so the priorities stay as they were unless you press `p`
 (or `+` and `-`), and the marks stay, so more settings can be given to
 the same sessions.
 
+### Checking a provider and a model
+
+`C-c h !` (`harness-provider-check`) runs live checks of the model in
+front of you: the generic provider API it goes through, and separately
+whether the model is good enough to use the harness.  `C-u C-c h !`
+chooses any model the catalogue lists, so a provider a plugin author
+has just imported can be checked without leaving Emacs.  The command
+asks before spending anything; the checks make several paid model
+requests and use the provider's normal account or key.  The report page
+fills in one check at a time: PASS, FAIL or SKIP, with guidance about
+the feature that may have to be fixed or turned off.  A failure does not
+stop the checks after it, and a SKIP means *unverified*, not supported.
+On the page, `g` runs the same checks again, `p` or `m` runs one suite,
+`M` checks another model, `E` adds an embedding model's optional check,
+and `c` cancels.  See [Checking a provider and a model against a real
+account](docs/dev-loop.md#check-a-provider-and-a-model-against-a-real-account)
+for what each suite covers and how to read a partial result.
+
 ### Session settings, from an agent
 
 `session_settings` reads and changes what a session runs with: its
@@ -5878,10 +5897,10 @@ with it.
 | Sessions | `config` `project` `store` `session` `agent` `compaction` `retry` `small` `priority` `usage` `naming` | `cowboy` `cache` `cache-warm` `cache-compact` `handoff` `fallback` `seed` `supervisor` `insights` `pet` `version` `decisions` `session-search` `cost-compare` `commit-msg` `todo-sync` |
 | Tasks and git | `worktree` | `tasks` `tasks-notify` `tasks-search` `recap` `merge` `patch-review` |
 | Safety | `perms` `sandbox` `access` `readonly` | `tool-slots` `tool-slots-load` `secrets` `redact` `judge` |
-| Providers | `provider` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
+| Providers | `provider` `provider-check` `provider-claude` | `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-question` `tools-plan` `tools-todo` `tools-session-info` `tools-agent` | `tools-ssh` `tools-web` `tools-sessions` `tools-notify` `tools-handin` `tools-review` `tools-dev` `tools-events` `tools-compact` `skills` |
 | Connections | `acp` `mcp` | `acp-remote` `notifications` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-cache-warm` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` `ui-carry` `ui-todo-sync` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-pending` `ui-sessions` `ui-notify` `ui-config` `ui-usage` `ui-priority` `ui-worktree` `ui-access` `ui-provider-check` | `ui-btw` `ui-tree` `ui-compact` `ui-cache` `ui-cache-warm` `ui-review` `ui-report` `ui-patch-review` `ui-popout` `ui-media` `ui-qr` `ui-acp-remote` `ui-handoff` `ui-carry` `ui-todo-sync` |
 
 [docs/modules](docs/modules/README.md) has a page for each module,
 generated from its source by `scripts/module-docs.sh`: what it is, what

@@ -135,7 +135,7 @@ after changing it run \\[harness-restart]."
   :type '(repeat directory) :group 'harness)
 
 (defconst harness-core-modules
-  '(access acp agent compaction config linking mcp naming perms priority project provider provider-claude
+  '(access acp agent compaction config linking mcp naming perms priority project provider provider-check provider-claude
     resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo
