@@ -19,6 +19,7 @@
 (defvar harness-provider-check-test--no-thinking-error nil)
 (defvar harness-provider-check-test--no-tools nil)
 (defvar harness-provider-check-test--tool-use-without-call nil)
+(defvar harness-provider-check-test--drop-label nil)
 (defvar harness-provider-check-test--events nil)
 
 (defun harness-provider-check-test--complete (request)
@@ -49,23 +50,38 @@
            (setq done t)
            (funcall emit '(:type done :stop-reason tool-use)))
           ((and (plist-get request :tools)
+                (not harness-provider-check-test--no-tools)
+                (cl-find "resubmit" (plist-get request :tools)
+                         :key (lambda (tool) (plist-get tool :name))
+                         :test #'equal))
+           (let* ((tool (cl-find "resubmit" (plist-get request :tools)
+                                 :key (lambda (tool) (plist-get tool :name))
+                                 :test #'equal))
+                  (label (and (string-match "marker-[0-9a-f]+"
+                                            (or (plist-get tool :description) ""))
+                              (match-string 0 (plist-get tool :description))))
+                  (note (if harness-provider-check-test--drop-label
+                            (string-remove-prefix "marker-" label)
+                          label)))
+             (funcall emit (list :type 'tool-call :id "call-resubmit"
+                                 :name "resubmit" :input (list :note note)))
+             (setq done t)
+             (funcall emit '(:type done :stop-reason tool-use))))
+          ((and (plist-get request :tools)
                 (not harness-provider-check-test--no-tools))
            (funcall emit '(:type tool-call :id "call-1"
                            :name "check_echo" :input (:value "ping")))
            (setq done t)
            (funcall emit '(:type done :stop-reason tool-use)))
           (t
-           (let* ((system (plist-get request :system))
-                  (prompt (plist-get (car (plist-get request :messages)) :content))
-                  (marker (and (string-match "marker-[0-9a-f]+" system)
-                               (match-string 0 system)))
+           (let* ((prompt (plist-get (car (plist-get request :messages)) :content))
                   (vision (cl-some
                            (lambda (block)
                              (and (equal (plist-get block :type) "text")
                                   (string-match-p "solid color"
                                                   (plist-get block :text))))
                            prompt)))
-             (funcall emit (list :type 'text :delta (or marker (and vision "red") "hello")))
+             (funcall emit (list :type 'text :delta (or (and vision "red") "hello")))
              (unless (plist-get request :ephemeral)
                (funcall emit '(:type provider-state :state (:id "fake-state"))))
              (funcall emit '(:type usage :input 42 :output 5))
@@ -114,6 +130,8 @@
      (let ((harness-provider-check-test--calls nil)
            (harness-provider-check-test--no-thinking-error nil)
            (harness-provider-check-test--no-tools nil)
+           (harness-provider-check-test--tool-use-without-call nil)
+           (harness-provider-check-test--drop-label nil)
            (harness-provider-check-test--events nil)
            (harness-provider-check-timeout 1))
        (harness-on 'provider-check/started
@@ -141,6 +159,31 @@
   "Return the recorded events of TYPE, oldest first."
   (mapcar #'cdr (nreverse (cl-remove-if-not (lambda (event) (eq (car event) type))
                                             harness-provider-check-test--events))))
+
+(defun harness-provider-check-test--u32 (data pos)
+  "Return the big-endian 32-bit number at POS in unibyte string DATA."
+  (logior (ash (aref data pos) 24)
+          (ash (aref data (+ pos 1)) 16)
+          (ash (aref data (+ pos 2)) 8)
+          (aref data (+ pos 3))))
+
+(defun harness-provider-check-test--png-chunks (data)
+  "Return the (TYPE . PAYLOAD) chunks of PNG DATA, checking their lengths."
+  (should (equal (substring data 0 8) "\211PNG\r\n\032\n"))
+  (let ((pos 8)
+        (limit (length data))
+        chunks)
+    (while (< pos limit)
+      (should (<= (+ pos 12) limit))
+      (let* ((size (harness-provider-check-test--u32 data pos))
+             (type (substring data (+ pos 4) (+ pos 8)))
+             (end (+ pos 12 size)))
+        (should (<= end limit))
+        (should (string-match-p "\\`[A-Za-z]\\{4\\}\\'" type))
+        (push (cons type (substring data (+ pos 8) (+ pos 8 size))) chunks)
+        (setq pos end)))
+    (should (= pos limit))
+    (nreverse chunks)))
 
 (ert-deftest harness-provider-check-both-suites-pass-offline ()
   (harness-provider-check-test-with
@@ -282,6 +325,69 @@
                  '((:type start) (:type tool-call :id "x" :name "echo" :input nil
                                   :respond "not callable")
                    (:type done :stop-reason tool-use)))))
+
+(ert-deftest harness-provider-check-image-is-a-complete-valid-png ()
+  "The baked-in test image is whole: a truncated PNG is an unsupported image.
+DeepSeek rejected the former constant, whose IDAT declared more bytes
+than the file held, with an HTTP 400 unsupported-image error."
+  (harness-provider-check-test-with
+    (let* ((data (base64-decode-string harness-provider-check--image))
+           (chunks (harness-provider-check-test--png-chunks data))
+           (ihdr (cdr (assoc "IHDR" chunks)))
+           (idat (apply #'concat
+                        (mapcar #'cdr (cl-remove-if-not
+                                       (lambda (chunk) (equal (car chunk) "IDAT"))
+                                       chunks)))))
+      (should (= 13 (length ihdr)))
+      (should (= 64 (harness-provider-check-test--u32 data 16)))
+      (should (= 64 (harness-provider-check-test--u32 data 20)))
+      (should (= 8 (aref ihdr 8)))       ; bit depth
+      (should (= 2 (aref ihdr 9)))       ; RGB, no alpha
+      (should (equal "IEND" (car (car (last chunks)))))
+      (should idat)
+      ;; The zlib stream inflates to one filter byte and three bytes per
+      ;; pixel on every row, so the image data itself is intact too.
+      (when (fboundp 'zlib-decompress-region)
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (insert idat)
+          (zlib-decompress-region (point-min) (point-max))
+          (should (= (* 64 (1+ (* 64 3))) (buffer-size))))))))
+
+(ert-deftest harness-provider-check-instruction-uses-a-resubmit-tool-with-a-label ()
+  "The instruction check models a real resubmit call with an exact label."
+  (harness-provider-check-test-with
+    (harness-provider-check-test-run "checkfake:model" 'model)
+    (let* ((request
+            (cl-find-if (lambda (request)
+                          (cl-find "resubmit" (plist-get request :tools)
+                                   :key (lambda (tool) (plist-get tool :name))
+                                   :test #'equal))
+                        harness-provider-check-test--calls))
+           (tool (and request
+                      (cl-find "resubmit" (plist-get request :tools)
+                               :key (lambda (tool) (plist-get tool :name))
+                               :test #'equal)))
+           (description (plist-get tool :description)))
+      (should request)
+      (should (string-match-p "marker-[0-9a-f]+" description))
+      (should (string-match-p "including the marker- prefix" description))
+      (should (string-match-p "prefix included"
+                              (plist-get
+                               (plist-get (plist-get (plist-get tool :schema)
+                                                     :properties)
+                                          :note)
+                               :description))))))
+
+(ert-deftest harness-provider-check-instruction-requires-the-resubmit-label ()
+  "A reply that keeps only the hex value is not following the tool instruction."
+  (harness-provider-check-test-with
+    (setq harness-provider-check-test--drop-label t)
+    (let ((results (harness-provider-check-test-run "checkfake:model" 'model)))
+      (let ((instructions (harness-provider-check-test-by-name
+                           results "Instruction following")))
+        (should (eq 'fail (plist-get instructions :status)))
+        (should (string-match-p "label" (plist-get instructions :detail)))))))
 
 (ert-deftest harness-provider-check-never-prints-provider-error-details ()
   (harness-provider-check-test-with

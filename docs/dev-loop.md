@@ -127,9 +127,11 @@ regression), the model's advertised thinking level, advertised image
 input, a tool-call/result round trip, quota's generic shape if
 reported, state/fork when advertised, optional embeddings (with an
 embedding model id), and cancellation/cleanup.  The **separate model
-behavior** checks test following a system instruction, identifying a
-red image when vision is advertised, choosing a harness tool with
-structured arguments, and using its result rather than inventing one.
+behavior** checks test following a resubmit tool's exact label in its
+structured argument (tool descriptions carry the formats hand-in and
+resubmit rely on), identifying a red image when vision is advertised,
+choosing a harness tool with structured arguments, and using its result
+rather than inventing one.
 They deliberately use a fresh tool receipt that the model has not seen
 in the prompt.  A refusal to call the tool is **SKIP** (unobserved
 transport) in the provider suite and **FAIL** in the model suite; the

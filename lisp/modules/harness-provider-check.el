@@ -56,8 +56,10 @@ it still run."
 (define-error 'harness-provider-check-failure "Provider check failed")
 
 (defconst harness-provider-check--image
-  "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAlElEQVR4nO3QMREAMBDDsPAn/YWhoR60+7zb7mfTAVoDdIDWAB2gNUAHaA3QAVoDdIDWAB2gNUAHaA3QAVoDdIDWAB2gNUAHaA3QAVoDdIDWAB2gNUAHaA3QAVoDdIDWAB2gNUAHaA3QAVoDdIDWAB2gNUAHaA3QAVoDdIDWAB2gNUAHaA9DiOHSbdjxEgAAAABJRU5ErkJggg=="
-  "64x64 red PNG used to check whether a vision model accepts images.")
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAS0lEQVR42u3PQQkAAAgAsetfWiP4FgYrsKZeS0BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDgsqnc8OJg6Ln3AAAAAElFTkSuQmCC"
+  "64x64 solid red PNG used to check whether a vision model accepts images.
+The bytes are a complete PNG: some APIs reject a truncated image as an
+unsupported format rather than a bad request.")
 
 (cl-defstruct (harness-provider-check-job (:copier nil))
   id model suite embedding-model
@@ -573,24 +575,60 @@ the tool is reported separately as model behavior, not a provider bug."
 
 ;;;; Model behavior
 
+(defun harness-provider-check--resubmit-label ()
+  "Return a fresh exact label for the resubmit-tool instruction check.
+The label keeps its \"marker-\" prefix: the tool description asks for
+the exact string, prefix included, so dropping the prefix is a real
+failure to follow the tool's instruction."
+  (format "marker-%06x%06x" (random #x1000000) (random #x1000000)))
+
+(defun harness-provider-check--resubmit-tool (label)
+  "Return a resubmit tool whose description demands LABEL exactly."
+  (list :name "resubmit"
+        :description (format (concat "Resubmit finished work after review. "
+                                     "Put the exact string %s in the note, "
+                                     "including the marker- prefix.")
+                             label)
+        :schema (list :type "object"
+                      :properties (list :note
+                                        (list :type "string"
+                                              :description
+                                              (format (concat "The exact string %s, "
+                                                              "prefix included.")
+                                                      label)))
+                      :required (list "note"))))
+
 (defun harness-provider-check--check-instructions (job)
-  "Check that the model of JOB follows a system instruction with a fresh marker."
-  (let* ((marker (format "marker-%x" (random most-positive-fixnum)))
+  "Check that the model of JOB follows a resubmit tool's label instruction.
+Tool descriptions carry the formats that resubmit, hand-in and other
+harness tools rely on.  This check puts a fresh label in the resubmit
+tool's description, and requires the model to carry it, prefix included,
+into the structured note argument rather than dropping it as a label."
+  (let* ((label (harness-provider-check--resubmit-label))
          (request (harness-provider-check--request
                    (harness-provider-check-job-model job)
                    "provider-check-instructions"
-                   "Say hello."
-                   (format "Include the exact token %s in your reply." marker))))
+                   "Resubmit the task now."
+                   "You are a coding agent resubmitting finished work.")))
+    (setf request (plist-put request :tools
+                             (list (harness-provider-check--resubmit-tool
+                                    label))))
     (harness-then
      (harness-provider-check--complete job request)
      (lambda (reply)
-       (let ((events (plist-get reply :events)))
-         (harness-provider-check--expect-text events)
+       (let* ((events (plist-get reply :events))
+              (call (cl-find 'tool-call events
+                             :key (lambda (event) (plist-get event :type))))
+              (note (and call (plist-get (plist-get call :input) :note))))
+         (harness-provider-check--finish-events events t)
          (harness-provider-check--require
-          (string-match-p (regexp-quote marker)
-                          (harness-provider-check--text events))
-          "Model did not follow the system instruction")
-         '(pass . "Followed a system instruction with a fresh exact marker."))))))
+          (and call (equal (plist-get call :name) "resubmit"))
+          "Model did not call the resubmit tool")
+         (harness-provider-check--require
+          (and (stringp note)
+               (string-match-p (regexp-quote label) note))
+          "Model dropped the label from the resubmit note")
+         '(pass . "Followed the resubmit tool's label in its argument."))))))
 
 (defun harness-provider-check--check-vision (job)
   "Check that the model of JOB names the color of a red image."
@@ -705,7 +743,9 @@ the tool is reported separately as model behavior, not a provider bug."
      (list
       (list :suite 'model :id "instructions"
             :name "Instruction following"
-            :advice "Do not use this model for instruction- or policy-sensitive harness tasks."
+            :advice (concat "A model that drops exact text from a tool description "
+                            "fills resubmit or hand-in arguments wrongly; do not use it "
+                            "for tools whose instructions carry exact formats.")
             :fn #'harness-provider-check--check-instructions)
       (list :suite 'model :id "vision"
             :name "Image recognition (optional)"
