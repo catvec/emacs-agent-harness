@@ -405,10 +405,10 @@ Nothing else does: the board has no button for them."
       (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
       (let ((text (harness-ui-patch-review-test--text popout))
             (merge-base (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix")))
-        (should (string-match-p (format "^Changes (6)   0 of 6 files viewed, 6 left   task/fix against main @ %s   \\+7 −8$"
+        (should (string-match-p (format "^▾ Changes (6)   0 of 6 files viewed, 6 left   task/fix against main @ %s   \\+7 −8$"
                                         (substring merge-base 0 7))
                                 text))
-        (should (< (string-match "^Evidence" text) (string-match "^Changes (6)" text)
+        (should (< (string-match "^▾ Evidence" text) (string-match "^▾ Changes (6)" text)
                    (string-match "Ready for review" text)))
         (should (string-match-p "^    M  a\\.el +\\+2 −2$" text))
         (should (string-match-p "^    D  b\\.el +\\+0 −5$" text))
@@ -1190,17 +1190,17 @@ point on the next one.  The box stays in sight under Ediff."
         ;; Point on the next file, the files seen, the threads counted.
         (should (eql 2 (cdr (harness-ui-patch-review--at-point))))
         (should (eql (point) (window-point (selected-window))))
-        (harness-ui-patch-review-test--wait-text popout "^Changes (6) .*   2 open, 0 closed")
+        (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6) .*   2 open, 0 closed")
         (let ((text (harness-ui-patch-review-test--text popout)))
           (should (string-match-p "^  ✓ M  a\\.el .*   1 open   1 draft" text))
           (should (string-match-p "^  ✓ D  b\\.el .*   1 open   1 draft" text))
           (should (string-match-p "^    R  c\\.el → d\\.el +\\+1 −1$" text))
           ;; Two of the six files were compared, four to go.
-          (should (string-match-p "^Changes (6)   2 of 6 files viewed, 4 left" text))
+          (should (string-match-p "^▾ Changes (6)   2 of 6 files viewed, 4 left" text))
           (should (string-match-p "^  2 drafts to send: they go with the feedback" text))
           ;; The threads are a section below the files, by file, each drawn as the
           ;; library draws a thread, the draft marked.
-          (should (string-match-p "^Threads  \\[open 2\\]" text))
+          (should (string-match-p "^▾ Threads  \\[open 2\\]" text))
           (should (string-match-p "^  ▾ a\\.el +1 thread$" text))
           ;; In this window there is no room for the button that deletes a
           ;; thread of drafts, which is the first thing a header gives up; the
@@ -1231,8 +1231,11 @@ longer drafts.  An empty box sends them alone."
                          10 "the feedback to reach the task")
       (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text))
             (tip (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
-        (should (string-prefix-p "Nearly there.\n\nMy review comments on your branch task/fix (at " feedback))
-        (should (string-search (substring tip 0 7) feedback))
+        ;; The words are a thread of their own, and the feedback names it.
+        (should (string-prefix-p "Nearly there.\n\n[thread t-" feedback))
+        (should (string-search (concat "My review comments on your branch task/fix (at "
+                                       (substring tip 0 7))
+                               feedback))
         (should (string-search "\n> diff --git a/a.el b/a.el\n> @@ -15,4 +15,4 @@\n" feedback))
         (should (string-search "> +(setq a18 'eighteen)\n\nWhy eighteen?\n[thread t-" feedback))
         (should (string-search "> diff --git a/new.el b/new.el\n\nNeeds a test\n[thread t-" feedback))
@@ -2209,11 +2212,11 @@ and RET on it act in the report."
                                          :author (change-review-user "Noah" "noah@example.org"))))
       (ignore whole)
       (change-review-close set (harness-ui-patch-review-test--thread-of review b3))
-      (harness-ui-patch-review-test--wait-text popout "^Changes (6) .*   2 open, 1 closed \\[Threads\\]")
+      (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6) .*   2 open, 1 closed \\[Threads\\]")
       (let ((text (harness-ui-patch-review-test--text popout)))
         ;; Below the files, under a heading with the filter buttons.
         (should (< (string-match "^  RET: compare" text)
-                   (string-match "^Threads  \\[open 2\\] +to review 0 +closed 1 +all 3" text)
+                   (string-match "^▾ Threads  \\[open 2\\] +to review 0 +closed 1 +all 3" text)
                    (string-match "^  ▾ a\\.el +1 thread$" text)))
         ;; The change as a whole first, then the files in the order of the diff.
         (should (< (string-match "^  ▾ The change as a whole +1 thread$" text)
@@ -2247,7 +2250,7 @@ and RET on it act in the report."
         (change-review-ui-set-filter 'all)
         (should (eq 'all change-review-ui--filter)))
       (harness-ui-patch-review-test--wait-text popout "Who used b3\\?")
-      (should (string-match-p "^Threads  +open 2 +to review 0 +closed 1 +\\[all 3\\]"
+      (should (string-match-p "^▾ Threads  +open 2 +to review 0 +closed 1 +\\[all 3\\]"
                               (harness-ui-patch-review-test--text popout)))
       (should (string-match-p "^  ▾ b\\.el +1 thread · 0 open$" (harness-ui-patch-review-test--text popout)))
       (with-current-buffer popout (change-review-ui-set-filter 'open))
@@ -2328,7 +2331,7 @@ to see, with the revision each was written against."
       (let* ((popout (harness-ui-patch-review-test--report board id))
              (review (gethash id harness-ui-patch-review--reviews))
              (set (harness-ui-patch-review--r-set review)))
-        (harness-ui-patch-review-test--wait-text popout "^Changes (6) .*   0 open, 2 closed")
+        (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6) .*   0 open, 2 closed")
         ;; Two threads: the words on the change, and the comment on a.el:2.
         (should (= 2 (length (change-review-set-threads set))))
         (should (cl-every (lambda (th) (not (change-review-thread-open-p th))) (change-review-set-threads set)))
@@ -3515,9 +3518,52 @@ changes once the branch is read."
   (let ((chat (harness-ui-display-session sid)))
     (set-window-buffer (selected-window) chat)
     (harness-test-wait (lambda () (harness-ui-review--task sid)) 5 "the session's task")
-    (harness-ui-patch-review-test--wait-text chat "^Changes (6)")
+    (harness-ui-patch-review-test--wait-text chat "^▾ Changes (6)")
     (harness-ui-patch-review-test--wait-text chat "^    M  a\\.el")
     chat))
+
+(ert-deftest harness-ui-patch-review-shows-the-threads-in-the-box ()
+  "C-c T puts the review's threads, filters and all, where the box was.
+The box's words are kept out of sight, with its attachments, and the
+view holds the threads only, not the report and the files above them;
+[Compose] or C-c T brings the box back, with the words it held."
+  (harness-ui-patch-review-test-with-task
+    (let* ((chat (harness-ui-patch-review-test--banner board id sid))
+           (review (gethash id harness-ui-patch-review--reviews)))
+      (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")
+      (harness-ui-patch-review--refresh review)
+      (harness-ui-patch-review-test--wait-text chat "Why two?")
+      (with-current-buffer chat
+        (goto-char harness-compose-end)
+        (insert "A draft of mine.")
+        (should (eq #'harness-chat-toggle-threads (key-binding (kbd "C-c T"))))
+        (call-interactively #'harness-chat-show-threads)
+        (should harness-chat--threads-view)
+        ;; The box is gone, but its words are kept for [Compose].
+        (should-not (harness-compose-live-p))
+        (should (equal "A draft of mine." (harness-compose-text)))
+        (let* ((tail (buffer-substring-no-properties
+                      (marker-position harness-chat--transcript-end) (point-max)))
+               (view (and (string-match "Threads  \\[Compose\\]" tail)
+                          (substring tail (match-beginning 0)))))
+          (should view)
+          ;; The same threads view, with its filter, where the box was.
+          (should (string-match-p "Why two?" view))
+          (should (string-match-p "\\[open 1\\]" view))
+          (should-not (string-match-p "❯ A draft of mine\\." view))
+          ;; Not the report and not the files.
+          (should-not (string-match-p "Handed in" view))
+          (should-not (string-match-p "Changes (" view)))
+        ;; [Compose] brings the box back, with the words it held.
+        (goto-char (point-min))
+        (search-forward "[Compose]")
+        (push-button (match-beginning 0))
+        (should-not harness-chat--threads-view)
+        (should (harness-compose-live-p))
+        (should (equal "A draft of mine." (harness-compose-text)))
+        (should-not (string-match-p "\\[Compose\\]"
+                                    (buffer-substring-no-properties
+                                     (marker-position harness-chat--transcript-end) (point-max))))))))
 
 (ert-deftest harness-ui-patch-review-shows-the-changes-in-the-banner ()
   "The review banner of the task's session shows the changes -- the tree and the
@@ -3531,9 +3577,9 @@ review, an approval or a thread."
            (text (harness-ui-patch-review-test--text chat)))
       (should (memq chat (harness-ui-patch-review--r-banners review)))
       (should (< (string-match "^Handed in" text)
-                 (string-match "^Changes (6)   0 of 6 files viewed, 6 left" text)
+                 (string-match "^▾ Changes (6)   0 of 6 files viewed, 6 left" text)
                  (string-match "^    M  a\\.el +\\+2 −2$" text)
-                 (string-match "^Threads  \\[open 0\\]" text)
+                 (string-match "^▾ Threads  \\[open 0\\]" text)
                  (string-match "No open threads\\." text)
                  (string-match "\\[Verify\\]" text)))
       (should (string-match-p "^  ▾ docs/  1 file  \\+1 −0$" text))
@@ -3569,7 +3615,7 @@ review, an approval or a thread."
       (harness-ui-patch-review-test--wait-text chat "^  ✔ M  a\\.el")
       (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")
       (harness-ui-patch-review-test--wait-text chat "^    ┃      Why two\\?$")
-      (should (string-match-p "^Threads  \\[open 1\\]" (harness-ui-patch-review-test--text chat)))
+      (should (string-match-p "^▾ Threads  \\[open 1\\]" (harness-ui-patch-review-test--text chat)))
       ;; The draft is a new comment on a.el, which takes its approval off: the
       ;; banner shows it viewed only, with its thread.
       (should (string-match-p "^  ✓ M  a\\.el .*   1 open   1 draft" (harness-ui-patch-review-test--text chat)))
@@ -3592,7 +3638,7 @@ review, an approval or a thread."
       ;; [Review Changes] still pops the report out, with the changes too.
       (let ((popout (progn (harness-ui-report-popout (with-current-buffer board (harness-ui-tasks--find id)))
                            (harness-ui-popout-buffer (list 'report id)))))
-        (harness-ui-patch-review-test--wait-text popout "^Changes (6)")
+        (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6)")
         (should (memq chat (harness-ui-patch-review--r-banners review)))
         (should (eq popout (harness-ui-patch-review--r-popout review)))))))
 
@@ -3902,14 +3948,14 @@ new one: the changes, the threads and the buttons are there."
       (harness-ui-patch-review--redraw-dropped)
       (should-not harness-ui-patch-review--dropped)
       (let ((popout (harness-ui-popout-buffer (list 'report id))))
-        (harness-ui-patch-review-test--wait-text popout "^Changes (6)")
+        (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6)")
         (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
         (let ((text (harness-ui-patch-review-test--text popout)))
           (should-not (string-search "Could not draw" text))
           (should-not (string-search "could not be drawn" text))
           (should (string-search "[Verify]" text))
           (should (string-search "[Send back]" text))))
-      (harness-ui-patch-review-test--wait-text chat "^Changes (6)")
+      (harness-ui-patch-review-test--wait-text chat "^▾ Changes (6)")
       (let ((tail (harness-ui-patch-review-test--text chat)))
         (should-not (string-search "could not be drawn" tail))
         (should (string-search "[Verify]  C-c C-v" tail))
@@ -3950,7 +3996,7 @@ that signalled on it would keep the others from hearing the task's events."
                    (gethash id harness-ui-patch-review--reviews))
                harness-ui-patch-review--reviews)
       (with-current-buffer chat (funcall harness-compose-redraw-function))
-      (harness-ui-patch-review-test--wait-text chat "^Changes (6)")
+      (harness-ui-patch-review-test--wait-text chat "^▾ Changes (6)")
       (should-not (string-search "could not be drawn" (harness-ui-patch-review-test--text chat)))
       (should-not (harness-ui-patch-review--stale-p (gethash id harness-ui-patch-review--reviews))))))
 
@@ -3969,7 +4015,7 @@ goes on, [Verify] and [Send back] with it.  [Try again] makes the review again."
                       (apply section args)))))
         (let* ((popout (harness-ui-patch-review-test--report board id))
                (text (harness-ui-patch-review-test--text popout)))
-          (should (string-match-p "^Changes   could not be drawn: Args out of range: \"#<harness-ui-patch-review-test--review>\", 33  \\[Try again\\]$"
+          (should (string-match-p "Changes   could not be drawn: Args out of range: \"#<harness-ui-patch-review-test--review>\", 33  \\[Try again\\]$"
                                   text))
           (should-not (string-search "xxxxxxxxxx" text))
           (should (string-search "[Verify]" text))
@@ -4534,7 +4580,7 @@ review, and any revisions typed."
            (short (lambda (sha) (substring sha 0 7))))
       ;; At first: the branch against main, no earlier review to offer.
       (let ((text (harness-ui-patch-review-test--section review)))
-        (should (string-match-p (format "^Changes (6)   0 of 6 files viewed, 6 left   task/fix against main @ %s   \\+7 −8$"
+        (should (string-match-p (format "^▾ Changes (6)   0 of 6 files viewed, 6 left   task/fix against main @ %s   \\+7 −8$"
                                         (funcall short start))
                                 text))
         (should (string-match-p "^  Diff   \\[● Task branch against main\\]  \\[Since last review\\]  \\[Other…\\]$" text)))
@@ -4547,7 +4593,7 @@ review, and any revisions typed."
       (harness-ui-patch-review-test--choose review 'since-review)
       (should (eq 'since-review (harness-ui-patch-review--kind review)))
       (let ((text (harness-ui-patch-review-test--section review)))
-        (should (string-match-p (format "^Changes (1)   0 of 1 file viewed, 1 left   task/fix since v1 @ %s   \\+4 −1$"
+        (should (string-match-p (format "^▾ Changes (1)   0 of 1 file viewed, 1 left   task/fix since v1 @ %s   \\+4 −1$"
                                         (funcall short first))
                                 text))
         (should (string-match-p "^  Diff   \\[Task branch against main\\]  \\[● Since last review (v1)\\]  \\[Other…\\]$" text))
@@ -4557,18 +4603,18 @@ review, and any revisions typed."
       (harness-ui-patch-review-test--choose review "main..task/fix")
       (should (eq 'custom (harness-ui-patch-review--kind review)))
       (let ((text (harness-ui-patch-review-test--section review)))
-        (should (string-match-p (format "^Changes (7) .*   task/fix against main @ %s   " (funcall short main)) text))
+        (should (string-match-p (format "^▾ Changes (7) .*   task/fix against main @ %s   " (funcall short main)) text))
         (should (string-match-p "^  Diff   \\[Task branch against main\\]  \\[Since last review (v1)\\]  \\[● Other: main\\.\\.task/fix\\]$" text))
         (should (string-match-p "^    M  keep\\.el " text)))
       ;; A diff whose ends are commits: the ends are told as typed, not repeated.
       (harness-ui-patch-review-test--choose review (format "%s..HEAD" (funcall short first)))
       (let ((text (harness-ui-patch-review-test--section review)))
-        (should (string-match-p (format "^Changes (1) .*   HEAD against %s   " (funcall short first)) text)))
+        (should (string-match-p (format "^▾ Changes (1) .*   HEAD against %s   " (funcall short first)) text)))
       ;; And back to the branch against its base.
       (harness-ui-patch-review-test--choose review 'base)
       (should (eq 'base (harness-ui-patch-review--kind review)))
       (should-not (harness-ui-patch-review--r-selector review))
-      (should (string-match-p "^Changes (6) .*   task/fix against main @ "
+      (should (string-match-p "^▾ Changes (6) .*   task/fix against main @ "
                               (harness-ui-patch-review-test--section review))))))
 
 (ert-deftest harness-ui-patch-review-refuses-a-diff-that-cannot-be-right ()
@@ -4600,7 +4646,7 @@ report says why; the choice is not the report's."
       (let ((text (harness-ui-patch-review-test--section review)))
         (should (string-match-p "^  Could not show the diff .nope\\.\\.task/fix.: There is no commit" text))
         (should (string-match-p "^  Diff   \\[● Task branch against main\\]" text))
-        (should (string-match-p "^Changes (6) " text)))
+        (should (string-match-p "^▾ Changes (6) " text)))
       ;; It stays until the next reading.
       (harness-test-await (harness-ui-patch-review--load review))
       (should-not (harness-ui-patch-review--r-selection-error review))
@@ -4648,7 +4694,7 @@ review: the report says so, naming the version."
       (should (eq 'since-review (harness-ui-patch-review--kind review)))
       (should-not (harness-ui-patch-review--r-files review))
       (let ((text (harness-ui-patch-review-test--section review)))
-        (should (string-match-p (format "^Changes (0) +task/fix since v1 @ %s$" (substring tip 0 7)) text))
+        (should (string-match-p (format "^▾ Changes (0) +task/fix since v1 @ %s$" (substring tip 0 7)) text))
         (should (string-match-p
                  (format "^  Nothing changed since v1 (%s): the branch is where it was at the last review\\.$"
                          (substring tip 0 7))
@@ -4776,7 +4822,7 @@ With no review before this one the choice since it is refused."
       ;; d chooses from the heading, from the line, and from a file's row.
       (with-current-buffer popout
         (goto-char (point-min))
-        (re-search-forward "^Changes (")
+        (re-search-forward "^▾ Changes (")
         (should (eq #'harness-ui-patch-review-select-diff (key-binding "d")))
         (should (eq #'harness-ui-patch-review-toggle-file-tree (key-binding "t")))
         (should (eq #'harness-ui-patch-review-threads (key-binding "T")))
@@ -4793,7 +4839,7 @@ With no review before this one the choice since it is refused."
       (harness-ui-patch-review-test--wait-text popout "\\[Since last review (v1)\\]")
       (harness-ui-patch-review-test--push popout "[Since last review (v1)]")
       (harness-ui-patch-review-test--wait-text
-       popout "^Changes (1)   0 of 1 file viewed, 1 left   task/fix since v1 @ ")
+       popout "^▾ Changes (1)   0 of 1 file viewed, 1 left   task/fix since v1 @ ")
       (harness-ui-patch-review-test--wait-text
        popout "^  Diff   \\[Task branch against main\\]  \\[● Since last review (v1)\\]  \\[Other…\\]$")
       (should (string-match-p "^    M  a\\.el +\\+4 −1$" (funcall text)))
@@ -4802,7 +4848,7 @@ With no review before this one the choice since it is refused."
       ;; with what was typed to start from.
       (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "main..task/fix")))
         (harness-ui-patch-review-test--push popout "[Other…]"))
-      (harness-ui-patch-review-test--wait-text popout "^Changes (7) ")
+      (harness-ui-patch-review-test--wait-text popout "^▾ Changes (7) ")
       (harness-ui-patch-review-test--wait-text popout "\\[● Other: main\\.\\.task/fix\\]$")
       (should (string-match-p "^    M  keep\\.el " (funcall text)))
       (let (default)
@@ -4811,7 +4857,7 @@ With no review before this one the choice since it is refused."
           (harness-ui-patch-review-test--push popout "[● Other: main..task/fix]"))
         (should (equal "main..task/fix" default)))
       (harness-ui-patch-review-test--wait-text popout "\\[● Other: task/fix~1\\]$")
-      (harness-ui-patch-review-test--wait-text popout "^Changes (1) ")
+      (harness-ui-patch-review-test--wait-text popout "^▾ Changes (1) ")
       ;; d in the minibuffer: the three, the one shown now the default.
       (let (asked)
         (cl-letf (((symbol-function 'completing-read)
@@ -4825,7 +4871,7 @@ With no review before this one the choice since it is refused."
                          ("Task branch against main" "Since last review (v1)" "Other: task/fix~1")
                          "Other: task/fix~1")
                        asked)))
-      (harness-ui-patch-review-test--wait-text popout "^Changes (6) ")
+      (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6) ")
       (harness-ui-patch-review-test--wait-text popout "^  Diff   \\[● Task branch against main\\]")
       ;; Choosing Other… from the minibuffer asks what to compare.
       (let (prompts)
@@ -4834,7 +4880,7 @@ With no review before this one the choice since it is refused."
                    (lambda (prompt &rest _) (push prompt prompts) "main...task/fix")))
           (with-current-buffer popout
             (goto-char (point-min))
-            (re-search-forward "^Changes (")
+            (re-search-forward "^▾ Changes (")
             (call-interactively (key-binding "d"))))
         (should (string-match-p "Diff of revisions (A\\.\\.B, A\\.\\.\\.B, A B, or A against the branch)"
                                 (car prompts))))
@@ -4866,21 +4912,21 @@ again with the report open, the report reads the diff chosen."
           (call-interactively #'harness-ui-patch-review-open))
         (should-not asked)
         (let ((popout (harness-ui-popout-buffer (list 'report id))))
-          (harness-ui-patch-review-test--wait-text popout "^Changes (6) ")
+          (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6) ")
           (harness-ui-patch-review-test--wait-text popout "\\[● Task branch against main\\]")
           ;; A diff asked for with the prefix is read, the report being open.
           (with-current-buffer chat
             (let ((current-prefix-arg '(4)))
               (call-interactively #'harness-ui-patch-review-open)))
           (should asked)
-          (harness-ui-patch-review-test--wait-text popout "^Changes (7) ")
+          (harness-ui-patch-review-test--wait-text popout "^▾ Changes (7) ")
           (harness-ui-patch-review-test--wait-text popout "\\[● Other: main\\.\\.task/fix\\]$")))
       ;; Closed, it opens at the diff chosen.
       (kill-buffer (harness-ui-popout-buffer (list 'report id)))
       (with-current-buffer chat
         (call-interactively #'harness-ui-patch-review-open))
       (let ((popout (harness-ui-popout-buffer (list 'report id))))
-        (harness-ui-patch-review-test--wait-text popout "^Changes (7) ")
+        (harness-ui-patch-review-test--wait-text popout "^▾ Changes (7) ")
         (should (equal "main..task/fix"
                        (harness-ui-patch-review--r-selector (gethash id harness-ui-patch-review--reviews)))))
       ;; Typed revisions that cannot be right are refused: nothing changes.
@@ -4912,7 +4958,7 @@ which the harness keeps, to say which commit that was."
       (harness-ui-patch-review-test--advance repo)
       (harness-test-await (harness-ui-patch-review--load review))
       (harness-test-await (harness-ui-patch-review-select-diff 'since-review review))
-      (harness-ui-patch-review-test--wait-text popout "^Changes (1) .*task/fix since v1 @ ")
+      (harness-ui-patch-review-test--wait-text popout "^▾ Changes (1) .*task/fix since v1 @ ")
       ;; The harness has both versions, which is all a reopened report has to go by.
       (harness-test-wait (lambda () (= 2 (length (plist-get (harness-call 'patch-review/get id) :versions))))
                          5 "the harness to keep the two versions")
@@ -4921,7 +4967,7 @@ which the harness keeps, to say which commit that was."
       (should-not (harness-ui-patch-review--last-review review (harness-ui-patch-review--r-branch-tip review)))
       (let ((again (harness-ui-patch-review-test--report board id)))
         (should-not (eq popout again))
-        (harness-ui-patch-review-test--wait-text again "^Changes (1) .*task/fix since v1 @ ")
+        (harness-ui-patch-review-test--wait-text again "^▾ Changes (1) .*task/fix since v1 @ ")
         (harness-ui-patch-review-test--wait-text
          again "^  Diff   \\[Task branch against main\\]  \\[● Since last review (v1)\\]  \\[Other…\\]$")
         (should (eq 'since-review (harness-ui-patch-review--r-selector review)))
@@ -4940,7 +4986,7 @@ the frame as it was."
       (harness-ui-patch-review-test--advance repo)
       (harness-test-await (harness-ui-patch-review--load review))
       (harness-test-await (harness-ui-patch-review-select-diff 'since-review review))
-      (harness-ui-patch-review-test--wait-text popout "^Changes (1) .*task/fix since v1 @ ")
+      (harness-ui-patch-review-test--wait-text popout "^▾ Changes (1) .*task/fix since v1 @ ")
       (with-current-buffer popout
         (goto-char (harness-ui-patch-review--row-start id 0))
         (call-interactively (key-binding (kbd "RET"))))
@@ -4976,7 +5022,7 @@ the frame as it was."
         (should-not (harness-ui-patch-review--r-ediff review))
         (should-not (buffer-live-p control))
         (should (equal layout (harness-ui-patch-review-test--layout)))
-        (harness-ui-patch-review-test--wait-text popout "^Changes (6) .*task/fix against main @ ")
+        (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6) .*task/fix against main @ ")
         (should (equal "the merge base" (harness-ui-patch-review--old-phrase review)))))))
 
 ;;;; The threads in Ediff: folded, and to the room the windows have
@@ -5458,7 +5504,7 @@ rows; the agent closing it again brings it back."
       (let ((thread (harness-ui-patch-review-test--agent-closes review id sid two "Because two reads better.")))
         (should (change-review-thread-unreviewed-p set thread))
         (harness-ui-patch-review-test--wait-text
-         popout "^Changes (6) .*   1 open, 2 closed \\[1 to review\\] \\[Threads\\]$")
+         popout "^▾ Changes (6) .*   1 open, 2 closed \\[1 to review\\] \\[Threads\\]$")
         (let ((text (harness-ui-patch-review-test--text popout)))
           ;; The file's row: its threads and how many of the closed ones wait.
           (should (string-match-p "^    M  a\\.el +\\+2 −2   1 open   1 closed (1 to review)   1 draft$" text))

@@ -160,6 +160,23 @@ reply is to and quotes it, and a rail goes down beside the words."
       ;; Not one of the attachment lines above the box.
       (should-not (string-search "reply" (buffer-substring-no-properties (point-min) harness-compose-start))))))
 
+(ert-deftest harness-ui-compose-thread-card-shows-the-whole-quote ()
+  "A thread's card shows every word it answers, wrapped, with no ellipsis.
+The quote is the reason for the reply: a card never cuts it short."
+  (harness-ui-compose-test-with
+    (let* ((text "The deployment waits for the build, and the build waits for the tests, which take a long while to finish.")
+           (ref (list :kind "chat" :node "n-1" :who "agent" :text text))
+           (att (harness-compose-add-thread (list ref)))
+           (card (overlay-get (car (harness-ui-compose-test--cards)) 'display))
+           (lines (split-string card "\n")))
+      (should att)
+      (should (string-search "The deployment waits for the build," card))
+      (should (string-search "a long while to finish." card))
+      (should-not (string-search "…" card))
+      ;; Wrapped to the card, not run past its width on one line.
+      (should (> (length lines) 2))
+      (should (cl-every (lambda (line) (<= (string-width line) 80)) lines)))))
+
 (ert-deftest harness-ui-compose-thread-rail-gives-way-to-a-bar-of-the-host ()
   "The rail is two columns, a bar and a space; where the host has a bar down
 its lines already it is two blanks, so the lines have the one bar, and the
@@ -766,6 +783,125 @@ what they are, as the empty box does, until words are typed in them."
     (should (equal '((17 . "Reply…") (28 . "Reply…")) (harness-ui-compose-test--area-hints)))
     (execute-kbd-macro "Second.")
     (should (equal '((17 . "Reply…")) (harness-ui-compose-test--area-hints)))))
+
+;;;; Editing what a reply answers
+
+(ert-deftest harness-ui-compose-edit-thread-splits-the-quote-into-replies ()
+  "C-c e edits what a reply answers; M-RET splits the quote into two replies.
+The first reply keeps the words written under its card, the second starts
+empty under its own card, and the quote of each is the part it was split
+from: the box holds two replies where one was, the text they go out as
+saying what each answers."
+  (harness-ui-compose-test-with
+    (harness-compose-set "My own words.")
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (execute-kbd-macro "First answer.")
+    (harness-compose-edit-thread)
+    ;; The editor holds the quote, point where the quote starts.
+    (should (derived-mode-p 'harness-compose-edit-thread-mode))
+    (should (equal "*Reply 1 quote*" (buffer-name)))
+    (should (string-search "The build is green.\nThe deploy is pending." (buffer-string)))
+    (should (equal "↩ agent's message"
+                   (save-excursion
+                     (goto-char (point-min))
+                     (buffer-substring-no-properties (point) (line-end-position)))))
+    (should (looking-at-p "The build is green"))
+    (should (string-match-p "Reply quote" header-line-format))
+    ;; Split after the first line of the quote.
+    (goto-char (point-min))
+    (search-forward "The build is green.")
+    (harness-compose-edit-thread-split)
+    (should (string-match-p "The build is green\.\n\n── another reply ──\n\nThe deploy is pending\."
+                            (buffer-string)))
+    ;; And apply: two replies, the first with the answer it had.
+    (harness-compose-edit-thread-apply)
+    (should (eq (current-buffer) (get-buffer "*compose test*")))
+    (should (equal "My own words.\n[reply 1]\nFirst answer.\n[reply 2]\n"
+                   (harness-compose-text)))
+    (should (equal '(1 2) (mapcar (lambda (a) (plist-get a :reply)) harness-compose-attachments)))
+    (should (equal '("The build is green." "The deploy is pending.")
+                   (mapcar (lambda (a) (plist-get (car (plist-get (plist-get a :thread) :refs)) :text))
+                           harness-compose-attachments)))
+    ;; Point is where the second reply's words go.
+    (should (= (point) harness-compose-end))
+    (execute-kbd-macro "Second answer.")
+    (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+      (should (equal "My own words." text))
+      (should (equal '("First answer." "Second answer.")
+                     (mapcar (lambda (a) (plist-get a :response)) atts)))
+      (should (equal '("The build is green." "The deploy is pending.")
+                     (mapcar (lambda (a) (plist-get (car (plist-get (plist-get a :thread) :refs)) :text))
+                             atts)))
+      (should (string-match-p "The build is green\."
+                              (harness-thread-text (plist-get (car atts) :thread))))
+      (should (string-match-p "The deploy is pending\."
+                              (harness-thread-text (plist-get (car (last atts)) :thread)))))))
+
+(ert-deftest harness-ui-compose-edit-thread-changes-the-quote-in-place ()
+  "Editing the quote without splitting changes what the one reply answers.
+The card shows the new quote, and a part no longer the whole of the
+message drops the offsets into it, which no longer name it."
+  (harness-ui-compose-test-with
+    (let* ((ref (append harness-ui-compose-test--ref '(:from 10 :to 58)))
+           (att (harness-compose-add-thread (list ref))))
+      (harness-compose-edit-thread att)
+      (goto-char (point-min))
+      (should (search-forward "The deploy is pending." nil t))
+      (replace-match "The deploy is done.")
+      (harness-compose-edit-thread-apply)
+      (should (= 1 (length harness-compose-attachments)))
+      (let* ((data (plist-get (car harness-compose-attachments) :thread))
+             (new (car (harness-thread-refs data))))
+        (should (equal "The build is green.\nThe deploy is done." (plist-get new :text)))
+        (should-not (plist-get new :from))
+        (should-not (plist-get new :to))
+        (should (equal "n-1" (plist-get new :node))))
+      ;; The one reply answers the quote as it now is.
+      (should (string-match-p "The deploy is done\."
+                              (harness-thread-quote (plist-get (car harness-compose-attachments) :thread)))))))
+
+(ert-deftest harness-ui-compose-edit-thread-elides-and-merges ()
+  "C-c [ elides the region with [...]; C-c ^ joins a split reply with the next.
+An empty quote is no reply, and applying it says so rather than leave a
+card with nothing to answer."
+  (harness-ui-compose-test-with
+    (harness-compose-add-thread (list harness-ui-compose-test--ref))
+    (harness-compose-edit-thread)
+    (goto-char (point-min))
+    (search-forward "The build is green.")
+    (let ((beg (match-beginning 0)))
+      (search-forward "The deploy is pending.")
+      (harness-compose-edit-thread-elide beg (point))
+      (should (string-search "[...]" (buffer-string))))
+    ;; Split, then join again.
+    (goto-char (point-min))
+    (search-forward "[...]")
+    (harness-compose-edit-thread-split)
+    (should (string-search "── another reply ──" (buffer-string)))
+    (goto-char (point-min))
+    (harness-compose-edit-thread-merge)
+    (should-not (string-search "── another reply ──" (buffer-string)))
+    ;; An empty quote is refused.
+    (let ((inhibit-read-only t))
+      (erase-buffer))
+    (should-error (harness-compose-edit-thread-apply) :type 'user-error)
+    (kill-buffer (current-buffer))
+    (set-buffer (get-buffer "*compose test*"))))
+
+(ert-deftest harness-ui-compose-edit-thread-cancel-leaves-the-reply ()
+  "C-c C-k leaves the reply as it was when the quote opened."
+  (harness-ui-compose-test-with
+    (let ((att (harness-compose-add-thread (list harness-ui-compose-test--ref))))
+      (execute-kbd-macro "Answer.")
+      (harness-compose-edit-thread att)
+      (goto-char (point-min))
+      (forward-line 2)
+      (harness-compose-edit-thread-split)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (harness-compose-edit-thread-cancel))
+      (should (eq (current-buffer) (get-buffer "*compose test*")))
+      (should (= 1 (length harness-compose-attachments)))
+      (should (equal "\n[reply 1]\nAnswer." (harness-compose-text))))))
 
 ;;;; Links dropped on the box
 

@@ -23,11 +23,18 @@ project, one section per column, most urgent first:
                         by priority, then oldest first
   Ready for review      finished, waiting for you: verify it (v), which
                         merges it, or send it back with feedback (R);
-                        by priority, then the last to finish first
+                        by priority, then the last to finish first.
+                        A task at work reaches it by handing in, or by
+                        hand (H, or [Put in review] in its menu); K, or
+                        [Keep working], takes it back out, into the
+                        working phase
   Merging               in the merge queue, in the order it takes them:
                         queued, merging, or resolving the conflicts
-  In progress           working, with its current todo and progress;
-                        by priority, then the last to start first
+  In progress           working, with its current todo and progress,
+                        in the working phase between hand-ins: put it
+                        in review by hand (H, or [Put in review] in its
+                        menu) if it does not hand in itself; by
+                        priority, then the last to start first
   Pending               waiting for a slot, so it starts on its own
                         while the project has one free; editable,
                         startable; in the order they start: by
@@ -114,7 +121,8 @@ turn has ended.
 
 A task is handled in its session, whatever its state.  In review it
 has the review banner (harness-ui-review.el: [Verify], [Send back],
-the report and the changes); in the backlog, the banner above.  In
+[Keep working], the report and the changes); in the backlog, the
+banner above.  In
 every other state its session has a panel above the compose box: the
 column the task is in, in the board's words, and a button for each
 action its card has there that the session can do -- start it now,
@@ -307,6 +315,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-deny` — Answer the permission request the task at point waits on with Deny.
 - `harness-ui-tasks-edit` — Edit the prompt of the pending task at point in the compose box.
 - `harness-ui-tasks-filter-project` — Show one project's tasks on the board of every project, or every project's.
+- `harness-ui-tasks-force-review` — Put the task at point in review by hand, as if it handed its work in.
 - `harness-ui-tasks-lower-priority` — Lower the priority of the task at point: high to medium, medium to low.
 - `harness-ui-tasks-merge` — Send the branch of the task at point through the merge queue again.
 - `harness-ui-tasks-mouse-open` — Open the task clicked in EVENT, or toggle the clicked section.
@@ -325,6 +334,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-requests` — Pop out what the task at point needs, to read and act on it.
 - `harness-ui-tasks-resume` — Resume the paused task at point: the queue starts it when its turn comes.
 - `harness-ui-tasks-retry` — Have the task at point, which stopped part way, work on it again.
+- `harness-ui-tasks-return-to-work` — Take the task at point, which waits for your review, back to work.
 - `harness-ui-tasks-search` — Find tasks, sessions and commands from the board, or act on tasks, in words.
 - `harness-ui-tasks-session-archive` — Archive this session's task, or restore it when it is archived.
 - `harness-ui-tasks-session-cancel` — Stop this session's task, or drop it when it is still pending.
@@ -371,6 +381,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `task/complete` ([tasks](tasks.md))
 - `task/delete` ([tasks](tasks.md))
 - `task/for-session` ([tasks](tasks.md))
+- `task/force-review` ([tasks](tasks.md))
 - `task/list` ([tasks](tasks.md))
 - `task/merge` ([tasks](tasks.md))
 - `task/park` ([tasks](tasks.md))
@@ -381,6 +392,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `task/reject` ([tasks](tasks.md))
 - `task/resume` ([tasks](tasks.md))
 - `task/retry` ([tasks](tasks.md))
+- `task/return-to-work` ([tasks](tasks.md))
 - `task/set-backlog-mode` ([tasks](tasks.md))
 - `task/settings` ([tasks](tasks.md))
 - `task/start` ([tasks](tasks.md))

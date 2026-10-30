@@ -51,6 +51,17 @@ draws as what it is: "Not handed in", with no evidence, the
 session's last message under it and [Open the session], where the
 work has to be checked.  The board's button for it reads [No report].
 
+A report folds.  Each piece of evidence has a fold button of its own,
+[Collapse all] and [Expand all] above them fold or open them together,
+and the Evidence heading folds them all at once.  What the reader
+folds is kept by the task and the section
+(`harness-ui-report--folds`), so it stands when the report is drawn
+again, at the next hand-in: from the second hand-in on, or once the
+task was reopened, every section starts folded
+(`harness-ui-report-auto-fold`), that a report already read does not
+bury the conversation under it.  The changes and threads of the review
+fold the same way, in the same store.
+
 Images are the evidence most worth seeing, so they show large: the
 popout's width and much of the frame's height, the popout growing
 taller than others for them (`harness-ui-report-max-height`).
@@ -93,6 +104,7 @@ record it was about whole, and a review holds the task's hand-in.
 
 ### Options
 
+- `harness-ui-report-auto-fold` — Non-nil: the second hand-in of a task opens with its sections folded.
 - `harness-ui-report-image-max-height` — Height an evidence image of a report takes at most.
 - `harness-ui-report-max-height` — Height a report popout grows to at most, as a fraction of its frame's.
 - `harness-ui-report-output-limit` — Characters of a referenced tool call's output shown before [show all].

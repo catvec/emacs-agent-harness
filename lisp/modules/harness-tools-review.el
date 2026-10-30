@@ -22,6 +22,12 @@
 ;; reply that says "fixed" says where.  With no thread it starts one, on
 ;; the change as a whole, or on a file and line of it.
 ;;
+;; A reply in a thread can also be written in the agent's message itself,
+;; as a <thread> block (harness-patch-review.el), the format the task's
+;; prompt names: no call is needed to answer.  The tools remain for what
+;; a block does not say -- listing the threads, starting one on a file
+;; and line, and closing one without words.
+;;
 ;; Both are offered to task sessions: a session that is no task's has no
 ;; review (the filter `agent/tools' removes them), unless it names a task.
 ;;
@@ -156,7 +162,7 @@ not from the session the comment was written in."
 
 (harness-define-tool "review_comment"
   :label "Review comment"
-  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. A reply of the user's that quotes your own words ends with such a marker too, [thread ID: answer with review_comment]: answer it here, in that thread, instead of in a message of your own; the chat shows your comment as your answer. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. Link what you mean in it, the tool call that proves a fix or the message you answer: [the test run](harness:call/bash#1). With thread and status but no body, only the status changes."
+  :description "Answer a thread of the review of your work, or start one. The thread id is given in the feedback after \"[thread ...]\", and review_threads lists them. A reply of the user's that quotes your own words ends with such a marker too, [thread ID: answer with review_comment]: answer it here, in that thread, instead of in a message of your own; the chat shows your comment as your answer. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. Link what you mean in it, the tool call that proves a fix or the message you answer: [the test run](harness:call/bash#1). With thread and status but no body, only the status changes. A reply can also be written in your message as a <thread id=\"...\"><quote>what it answers</quote>the reply</thread> block, as the prompt shows; review_threads lists the threads, and this tool starts one on a file and line."
   :schema '(:type "object"
             :properties (:thread (:type "string"
                                   :description "The id of the thread to answer, or the start of it when unique. Omit to start a new thread.")

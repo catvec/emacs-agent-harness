@@ -49,6 +49,21 @@ queue.
 The tool is offered to task sessions only: the filter `agent/tools`
 removes it where there is no task to hand the work in to.
 
+`hand_in` is what ends the working phase: until it is called, a turn
+that ends with a reply is the agent talking to the user, and the task
+stays at work (`harness-tasks-working-phase`).  The phase is for what
+is still owed, not a checkpoint before handing in: the tool's
+description and the task's prompt tell the agent to hand in at once
+when nothing is outstanding, and never to ask first whether the work
+is ready to hand in.  A module can keep a
+hand-in from being made at all while the work is not done, through
+`harness-tools-handin-block-functions`: each function is called with
+the task before the report is recorded, and the first that returns
+text refuses the hand-in with it.  The thread module adds the check
+that every open thread of the review is answered and closed
+(`harness-tools-handin-require-closed-threads`, on by default); with
+the module not loaded, or the option off, there is no such check.
+
 A project can hold a hand-in to checks of its own.  Before the report is
 recorded, the asynchronous filter `task/before-hand-in` runs from nil
 (see `harness-run-filter-async`) with the task and the plist of its
@@ -78,11 +93,19 @@ prompt cache, and its chat says when that lapsed.
 
 ### Tools
 
-- `hand_in` — Hand the finished work in and stop: the turn ends and the task waits for the user's review, with your summary and evidence in front of them. Call it once, when you are sure the task is complete, instead of replying normally. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. A project can refuse a hand-in until a check of its own has passed; the refusal then says what to run first. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. "bash"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says.
+- `hand_in` — Hand the finished work in and stop: the turn ends, the task leaves the working phase, and it waits for the user's review with your summary and evidence in front of them. Call it when the work is complete, not to answer a message or report progress: a plain reply is the working phase, and the task stays with you. Do not ask first whether the work is ready to hand in, and do not show what you are about to hand in for approval -- before the first hand-in or after your last open thread is closed, hand it in. When the review has threads, every open one must be answered and closed first, or hand_in is refused. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. A project can refuse a hand-in until a check of its own has passed; the refusal then says what to run first. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. "bash"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says.
 
 ### Filter chains it runs
 
 - `task/before-hand-in`
+
+### Hooks
+
+- `harness-tools-handin-block-functions` — Functions that can refuse a hand-in before its report is recorded.
+
+### Options
+
+- `harness-tools-handin-require-closed-threads` — When non-nil, an open review thread refuses a hand-in.
 
 ## Uses
 

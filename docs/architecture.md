@@ -12902,9 +12902,9 @@ token is shown as a CARD (`harness-compose--thread-card`, a display
 overlay of the token like an image's chip): a header per reference --
 what it is (`harness-thread-ref-label`: "agent's message", "your
 message", "hand-in report", "Bash call", a file and its lines) -- the
-lines of its quote under it (`harness-thread-card-lines`; at most
-`harness-thread-card-lines`, the tooltip has the rest), each after a
-rail, and `[×]` at the end of the first header.  The words under the
+whole of its quote under it (`harness-thread-card-lines`; wrapped to
+the card's width, never cut short), each after a rail, and `[×]` at the
+end of the first header.  The words under the
 card, up to the next card or the end of the box, are the response, and
 a line prefix draws the same rail beside them
 (`harness-compose--show-thread-rails`): they are typed in the same box,

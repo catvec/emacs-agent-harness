@@ -15,9 +15,13 @@ Reviewing a task where it is looked at: its report in full in its session; verif
 A task waiting for review shows a banner wherever its work is looked
 at: that the work is done and waits for the user, and the buttons that
 act on it -- [Verify], which accepts the work and merges its branch,
-and [Send back].  It is the board's Ready for review: the same mark
-and the same wording, so accepting work is one action wherever the
-user is.  One banner, one set of commands and keys, in two places:
+[Send back], which sends it back with the feedback in the box, and
+[Keep working], which takes it out of review into the working phase
+(`harness-tasks-working-phase`): the agent goes on with the task, the
+report kept for its next hand-in, and no feedback is recorded.  It is
+the board's Ready for review: the same mark and the same wording, so
+accepting work is one action wherever the user is.  One banner, one
+set of commands and keys, in two places:
 
   the session  above its compose box, a chat panel
                (`harness-chat-panel-functions`), with [Review Changes] too,
@@ -66,11 +70,16 @@ send it looks like.  The report's box sends it back itself
 (`harness-ui-review--send` through `harness-ui-report-compose-functions`),
 and there the review is loaded, so it can say there is nothing to
 send before sending.  Its keys,
-C-c C-v to verify and C-c C-x to send back, are those of
-`harness-ui-review-minor-mode`, on only while the banner shows: the
-rest of the time the buffer's own keys stand, C-c C-v attaching the
-clipboard.  The banner disappears when the task leaves review, whoever
-moved it, and its keys with it.
+C-c C-v to verify, C-c C-x to send back and C-c C-g to keep working,
+are those of `harness-ui-review-minor-mode`, on only while the banner
+shows: the rest of the time the buffer's own keys stand, C-c C-v
+attaching the clipboard.  The banner disappears when the task leaves
+review, whoever moved it -- verified, sent back, taken back to work by
+its [Keep working], or put back at work by `task/force-review` -- and
+its keys with it.  A task put in review by hand, without `hand_in`
+(`task/force-review`, the board's [Put in review]), shows the banner
+with the report it handed in last, or says that none came if it
+handed none in.
 
 ## Provides
 
@@ -83,6 +92,7 @@ moved it, and its keys with it.
 
 ### Commands
 
+- `harness-ui-review-keep-working` — Take the task this buffer shows out of review, back to the working phase.
 - `harness-ui-review-reject` — Send the work of the task this buffer shows back: say what should change.
 - `harness-ui-review-verify` — Accept the work of the task this buffer shows: verify it.
 
@@ -92,6 +102,7 @@ moved it, and its keys with it.
 
 - `task/for-session` ([tasks](tasks.md))
 - `task/reject` ([tasks](tasks.md))
+- `task/return-to-work` ([tasks](tasks.md))
 - `task/verify` ([tasks](tasks.md))
 
 ### Events it hears over ACP

@@ -36,6 +36,8 @@
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-tasks--reject-message)
+(defvar harness-tools-handin-require-closed-threads)
+(defvar harness-tools-handin-block-functions)
 (declare-function harness-tasks--set "harness-tasks")
 (declare-function harness-acp--drop-client "harness-acp")
 
@@ -166,6 +168,131 @@ directory, announced, and read back after a restart."
           (should (equal "closed" (plist-get thread :status)))
           (should (equal "a.el" (plist-get (plist-get (car (plist-get thread :comments)) :location) :file)))
           (should (equal "Noah" (plist-get (plist-get (car (plist-get thread :comments)) :author) :name))))))))
+
+(ert-deftest harness-patch-review-a-user-thread-block-in-a-message-is-a-reply ()
+  "A <thread> block the user writes in a message is a reply in that thread.
+It becomes a thread block, the prose around it stays, and the comment is
+a draft until the feedback sends the task back; a block naming no thread
+starts one."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (made (harness-patch-review-test--user-comment id "Why two?"))
+           (thread (car made))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (blocks (harness-patch-review--on-message
+                    (list (list :type "text"
+                                :text (format "Before.\n\n<thread id=\"%s\">\n<quote>Why two?</quote>\nBecause.\n</thread>\n\nAfter."
+                                             thread)))
+                    sid '(:from nil))))
+      (should (= 3 (length blocks)))
+      (should (equal "Before." (plist-get (car blocks) :text)))
+      (should (harness-thread-block-p (cadr blocks)))
+      (should (equal "After." (plist-get (caddr blocks) :text)))
+      (let* ((threads (harness-patch-review-test--threads id))
+             (comment (car (last (plist-get (car threads) :comments)))))
+        (should (= 2 (length (plist-get (car threads) :comments))))
+        (should (equal "> Why two?\n\nBecause." (plist-get comment :body)))
+        (should (equal "user" (plist-get (plist-get comment :author) :kind)))
+        ;; A draft until the feedback that sends the task back.
+        (should-not (plist-get comment :sent))
+        (should (equal thread (plist-get (plist-get (cadr blocks) :thread) :id))))
+      ;; A block that names no thread starts one, as review_comment would.
+      (let ((new-blocks (harness-patch-review--on-message
+                         (list (list :type "text"
+                                     :text "<thread>\n<quote>The deploy is pending.</quote>\nWatch it.\n</thread>"))
+                         sid '(:from nil))))
+        (should (harness-thread-block-p (car new-blocks)))
+        (let* ((threads (harness-patch-review-test--threads id))
+               (new (car (last threads)))
+               (comment (car (plist-get new :comments))))
+          (should (= 2 (length threads)))
+          (should (equal "open" (plist-get new :status)))
+          (should (equal "> The deploy is pending.\n\nWatch it." (plist-get comment :body)))
+          (should (equal (plist-get new :id) (plist-get (plist-get (car new-blocks) :thread) :id))))))))
+
+(ert-deftest harness-patch-review-a-thread-block-in-a-message-is-a-comment ()
+  "An agent's <thread> block in its message is its comment in that thread.
+The message stays as the agent wrote it -- the chat draws its blocks --
+and a block that says status=\"closed\" closes the thread."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (made (harness-patch-review-test--user-comment id "Why two?"))
+           (thread (car made))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (text (format "Answering.\n\n<thread id=\"%s\">\n<quote>Why two?</quote>\nBecause the loop needs it.\n</thread>\n"
+                         thread)))
+      ;; The filter is what the agent runs on its final message.
+      (should (equal text (harness-run-filter 'agent/assistant-message text sid "n-answer")))
+      (let* ((threads (harness-patch-review-test--threads id))
+             (comments (plist-get (car threads) :comments))
+             (answer (car (last comments))))
+        (should (= 2 (length comments)))
+        (should (equal "> Why two?\n\nBecause the loop needs it." (plist-get answer :body)))
+        (should (equal "agent" (plist-get (plist-get answer :author) :kind)))
+        (should (equal sid (plist-get (plist-get answer :author) :session))))
+      ;; Closing it in the block closes the thread, with the words kept.
+      (harness-patch-review--on-assistant-message
+       (format "<thread id=\"%s\" status=\"closed\">\n<quote>Why two?</quote>\nDone.\n</thread>" thread)
+       sid "n-answer-2")
+      (let* ((threads (harness-patch-review-test--threads id))
+             (comments (plist-get (car threads) :comments)))
+        (should (equal "closed" (plist-get (car threads) :status)))
+        (should (equal "> Why two?\n\nDone." (plist-get (car (last comments)) :body)))))))
+
+(ert-deftest harness-patch-review-refuses-hand-in-while-a-thread-is-open ()
+  "A sent thread that is still open refuses hand_in, naming the thread.
+Closing it lets the work in.  A draft is no thread yet, the custom turns
+the check off, and a harness that did not load the module adds no check."
+  (harness-patch-review-test-with
+    (cl-flet ((hand-in (sid)
+                (harness-test-await
+                 (harness-call-async 'tools/execute sid
+                                     (list :id "h-gate" :name "hand_in"
+                                           :input (list :problem "The tests pass"
+                                                        :summary "Done."
+                                                        :evidence '("a note"))))))
+              (open-thread (id text)
+                (car (harness-patch-review-test--user-comment id text :sent (float-time)))))
+      (let* ((id (harness-patch-review-test--task))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             (thread (open-thread id "Why eighteen?")))
+        (let ((result (hand-in sid)))
+          (should (plist-get result :is-error))
+          (should-not (plist-get result :end-turn))
+          (should (string-match-p thread (plist-get result :content)))
+          (should (string-match-p "still open" (plist-get result :content))))
+        ;; Nothing was recorded: the report of the hand-in that made the
+        ;; review stands, and the task still waits for it.
+        (should (eq 'review (plist-get (harness-call 'task/get id) :state)))
+        (should (equal "Done: fixed." (plist-get (plist-get (harness-call 'task/get id) :report) :summary)))
+        ;; Closed, the same hand-in goes through.
+        (harness-call 'patch-review/apply id (list :op "set-status" :thread thread :status "closed"
+                                                   :id "s-gate" :time 5
+                                                   :author '(:kind "user" :name "Noah")))
+        (let ((result (hand-in sid)))
+          (should-not (plist-get result :is-error))
+          (should (plist-get result :end-turn))
+          (should (equal "Done." (plist-get (plist-get (harness-call 'task/get id) :report) :summary)))))
+      ;; A draft is no thread the agent has to answer yet.
+      (let* ((id (harness-patch-review-test--task))
+             (sid (plist-get (harness-call 'task/get id) :session)))
+        (harness-patch-review-test--user-comment id "Not sent yet")
+        (let ((result (hand-in sid)))
+          (should-not (plist-get result :is-error))))
+      ;; Turned off, the open thread gates nothing.
+      (let* ((id (harness-patch-review-test--task))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             (harness-tools-handin-require-closed-threads nil))
+        (open-thread id "Still open, but allowed")
+        (let ((result (hand-in sid)))
+          (should-not (plist-get result :is-error))))
+      ;; Without the module's check, a harness has no gate at all.
+      (let* ((id (harness-patch-review-test--task))
+             (sid (plist-get (harness-call 'task/get id) :session)))
+        (open-thread id "Open, and no module to care")
+        (remove-hook 'harness-tools-handin-block-functions #'harness-patch-review--hand-in-blocker)
+        (let ((result (hand-in sid)))
+          (should-not (plist-get result :is-error)))))))
 
 (ert-deftest harness-patch-review-performs-an-operation-once ()
   "The same operation sent twice changes nothing and announces nothing the second time."
@@ -336,9 +463,11 @@ line saying what the quote is; they are sent once the task is."
         (should (= 1 (length (harness-call 'patch-review/drafts id))))
         (harness-call 'task/reject id "Nearly there.")
         (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
-          (should (string-prefix-p (concat "Nearly there.\n\nMy review comments on your branch task/fix (at "
-                                           (substring tip 0 7) ") against main (merge base ")
-                                   feedback))
+          ;; The words are a thread of their own, whose id the feedback names.
+          (should (string-prefix-p "Nearly there.\n\n[thread t-" feedback))
+          (should (string-search (concat "My review comments on your branch task/fix (at "
+                                         (substring tip 0 7) ") against main (merge base ")
+                                 feedback))
           (should (string-search "[thread" feedback))
           (should (string-search (concat "> diff --git a/a.el b/a.el\n> @@ -15,4 +15,4 @@\n"
                                          ">  (setq a15 15)\n>  (setq a16 16)\n>  (setq a17 17)\n"
@@ -421,16 +550,18 @@ feedback that sends it back, and the drafts go with it."
       (harness-patch-review-test--user-comment id "Why eighteen?" :location harness-patch-review-test--a18)
       (harness-call 'agent/prompt sid "  Also this.  ")
       (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
-        (should (string-prefix-p "Also this.\n\nMy review comments on your branch task/fix" feedback))
+        (should (string-prefix-p "Also this.\n\n[thread t-" feedback))
+        (should (string-search "My review comments on your branch task/fix" feedback))
         (should (string-search "Why eighteen?\n[thread " feedback)))
       (should-not (harness-call 'patch-review/drafts id)))))
 
 (ert-deftest harness-patch-review-sends-nothing-more-than-the-words-without-drafts ()
-  "With no draft the feedback is the words, as it was."
+  "With no draft the feedback is the words and the marker of their thread."
   (harness-patch-review-test-with
     (let ((id (harness-patch-review-test--task)))
       (harness-call 'task/reject id "Just this.")
-      (should (equal "Just this." (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
+      (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
+        (should (string-match-p "\\`Just this\\.\n\n\\[thread t-[^]]+\\]\\'" feedback)))
       ;; Kept as a thread, so the review remembers what the round said.
       (let ((threads (plist-get (harness-call 'patch-review/get id) :threads)))
         (should (equal '("Just this.") (mapcar (lambda (th) (plist-get (car (plist-get th :comments)) :body)) threads)))))))
@@ -1304,6 +1435,38 @@ The import of the words typed by hand does not make them again either."
         (let ((before (length (harness-patch-review-test--threads id))))
           (should (equal '(:added 0 :edited 0 :threads nil) (harness-call 'patch-review/import-manual id)))
           (should (= before (length (harness-patch-review-test--threads id)))))))))
+
+(ert-deftest harness-patch-review-the-words-of-the-feedback-name-their-thread ()
+  "The feedback that sends a task back names the thread its words are in.
+The agent reads the id after [thread ...] in its message, answers it in
+a message of its own, and the thread closes; a message that is never
+sent makes no thread."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (words "Say which unit the threshold is in.")
+           (additions (harness-patch-review--additions (harness-call 'task/get id) words)))
+      (should additions)
+      (should (string-match "\\`\\[thread \\(t-[A-Za-z0-9]+\\)\\]\\'" (car additions)))
+      (let ((thread (match-string 1 (car additions))))
+        ;; The agent's message names the thread, after the words it is in.
+        (let ((feedback (harness-tasks--add-to-feedback words additions)))
+          (should (string-prefix-p words feedback))
+          (should (string-match-p (regexp-quote (format "[thread %s]" thread)) feedback)))
+        ;; Nothing is made until the message is sent.
+        (should-not (harness-call 'patch-review/open-threads id))
+        (funcall (cdr additions))
+        (should (equal (list thread)
+                       (mapcar (lambda (th) (plist-get th :id))
+                               (harness-call 'patch-review/open-threads id))))
+        ;; The agent answers and closes it in its message.
+        (harness-patch-review--on-assistant-message
+         (format "<thread id=\"%s\" status=\"closed\">\n<quote>%s</quote>\nSeconds.\n</thread>" thread words)
+         sid "n-answer")
+        (should-not (harness-call 'patch-review/open-threads id))
+        (let ((threads (harness-patch-review-test--threads id)))
+          (should (= 1 (length threads)))
+          (should (equal "closed" (plist-get (car threads) :status))))))))
 
 (defvar harness-patch-review-test--requests nil
   "The requests the scripted agent of a test was sent, newest first.")

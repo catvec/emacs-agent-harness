@@ -15,6 +15,18 @@
 (defvar harness-test-root
   (expand-file-name ".." (file-name-directory (or load-file-name buffer-file-name))))
 
+;; The suite's tasks finish when their turn ends, as they did before the
+;; working phase: most tests are about everything but the conversation,
+;; and a task that stays at work would never reach `done'.  A test of the
+;; working phase binds `harness-tasks-working-phase' to t itself.  The
+;; value is set before the module is loaded, so its defcustom keeps it.
+(setq harness-tasks-working-phase nil)
+
+;; The review's sections start open in the tests, as the first hand-in
+;; draws them: a test of the folding binds `harness-ui-report-auto-fold'
+;; to t itself.  Set before the module loads, as above.
+(setq harness-ui-report-auto-fold nil)
+
 (add-to-list 'load-path harness-test-root)
 (dolist (d '("lisp" "lisp/modules" "lisp/ui" "test"))
   (add-to-list 'load-path (expand-file-name d harness-test-root)))

@@ -319,7 +319,7 @@ function that fails says so in a line and the banner stays, [Verify] with it."
                    (lambda (_task) ""))))
         (with-current-buffer chat (funcall harness-compose-redraw-function))
         (let ((text (harness-ui-review-test--text chat)))
-          (should (< (string-match "^Evidence" text)
+          (should (< (string-match "^▾ Evidence" text)
                      (string-match "^Changes of the task$" text)
                      (string-match "^  a file$" text)
                      (string-match "\\[Verify\\]" text))))
@@ -597,7 +597,7 @@ line, and its text opens that session, like the chat's call block."
         (should (string-match-p "^  \\[Open in the session\\]$" text))
         ;; A blank line between pieces of evidence, a caption with its own.
         (should (string-match-p "^a note\n\n" text))
-        (should (string-match-p "^(fix)\n  the fix\n\n  \\[tool call\\]" text)))
+        (should (string-match-p "^(fix)\n  the fix\n\n  [▾▸] 3\\. bash: make test\n  \\[tool call\\]" text)))
       ;; None after the last: what follows the report keeps its own spacing.
       (should (string-suffix-p "  [Open in the session]\n" full))
       ;; The session line opens the sub-agent, and so does the call's text.
@@ -616,9 +616,11 @@ line, and its text opens that session, like the chat's call block."
               (setq opened nil)
               (call-interactively (lookup-key keys [mouse-1]))
               (should (equal "kid12345" opened)))
-            ;; The call's text opens it too.
+            ;; The call's text opens it too: the second "bash: make test",
+            ;; the item's label being the first.
             (setq opened nil)
             (goto-char (point-min))
+            (search-forward "bash: make test")
             (search-forward "bash: make test")
             (call-interactively (lookup-key (get-text-property (match-beginning 0) 'keymap)
                                             (kbd "RET")))
@@ -636,6 +638,8 @@ line, and its text opens that session, like the chat's call block."
         (with-temp-buffer
           (harness-ui-report--insert task2)
           (goto-char (point-min))
+          ;; The item's label first, then the call's own text.
+          (should (search-forward "bash: make test" nil t))
           (should (search-forward "bash: make test" nil t))
           (should-not (get-text-property (match-beginning 0) 'keymap))
           (should-not (string-search "session:" (buffer-string)))))
@@ -798,6 +802,31 @@ The board's record is the one the wire gives, as the UI sees it."
   (let ((popout (harness-ui-popout-buffer (list 'report id))))
     (harness-ui-review-test--wait-text popout "Handed in")
     popout))
+
+(ert-deftest harness-ui-review-keeps-working-when-asked ()
+  "The banner offers [Keep working]: the task leaves review at once.
+Its report stands for the next hand-in, and the banner and its keys go;
+C-c C-g in the report popout does the same."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid)))
+      (harness-ui-review-test--wait-report chat)
+      (with-current-buffer chat
+        (goto-char harness-chat--transcript-end)
+        (should (search-forward "[Keep working]" nil t))
+        (should (eq 'harness-ui-review-keep-working (key-binding (kbd "C-c C-g"))))
+        (push-button (match-beginning 0)))
+      (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
+                         10 "the task to leave review")
+      (let ((task (harness-call 'task/get id)))
+        (should (equal "working" (plist-get task :phase)))
+        (should (plist-get task :report))
+        (should (eq 'conversing (plist-get task :outcome))))
+      (with-current-buffer chat
+        (harness-test-wait (lambda ()
+                             (not (string-search "Ready for review"
+                                                 (harness-ui-review-test--tail chat))))
+                           5 "the banner to go")
+        (should-not harness-ui-review-minor-mode)))))
 
 (ert-deftest harness-ui-review-report-popout-verifies ()
   "A report of a task in review ends with its session's banner and a box:

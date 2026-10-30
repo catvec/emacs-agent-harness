@@ -46,15 +46,32 @@
 ;; keeps it; a merged task that goes back to work locks it again.
 ;;
 ;; Review: finished work is not done until the user has looked at it
-;; (`harness-tasks-require-verification').  A task whose turn ends
-;; cleanly waits in review instead, its branch not merged yet in a git
+;; (`harness-tasks-require-verification').  A task works before it hands
+;; its work in (`harness-tasks-working-phase'): a turn that ends with a
+;; reply, not with `hand_in', is the agent talking to the user -- a
+;; question, an answer to feedback, a note of what it is about to do --
+;; and leaves the task active, in the working phase, waiting for the
+;; next message; no report is made for it.  The phase is for what is
+;; still owed -- work, a question only the user can answer, an open
+;; thread -- not for an approval before handing in: the prompt tells the
+;; agent to hand in at once when nothing is outstanding, and that a
+;; message from the user sends the task back to work, so handing in
+;; never ends the conversation.  `hand_in' ends the working
+;; phase and puts the task in review, its branch not merged yet in a git
 ;; project.  `task/verify' accepts it: its branch goes through the merge
 ;; queue and the task is done once merged (outside git, at once).
 ;; `task/reject' sends it back with feedback: the feedback goes to the
 ;; same session, in its own worktree (or the main tree, see below), as a
-;; new prompt, and the task comes back to review when that turn ends.
-;; Every round of feedback is kept with the task (`:feedback'), and so
-;; is the verification (`:verified', `:verified-at').  Any other message
+;; new prompt, and the task works on it; a turn that ends by handing the
+;; work in puts it back in review.  Every round of feedback is kept with
+;; the task (`:feedback'), and so is the verification (`:verified',
+;; `:verified-at').  The phase moves by hand too: `task/return-to-work`
+;; takes a task out of review into the working phase, its report kept
+;; for the next hand-in, and `task/force-review` puts a task at work in
+;; review without waiting for `hand_in`, recording that none came when
+;; the round handed nothing in.  The board's [Keep working] and [Put in
+;; review] are the same two, and so is the review banner's [Keep
+;; working].  Any other message
 ;; the user sends the session while its task waits for review sends it
 ;; back the same way, with the message as the feedback, wherever it was
 ;; written: the session's own chat, `task/prompt', another client, the
@@ -1224,13 +1241,67 @@ turn ends and verifying it completes the task without merging."
            (harness-json-true-p (plist-get (plist-get task :report) :no-merge)))
        t))
 
+;;;; The working phase
+;;
+;; A task works before it is handed in.  A turn that ends with a reply,
+;; not with hand_in, is the agent talking to the user: a question, an
+;; answer to feedback, a report of what it is about to do.  It is no
+;; round of work to review, so the task stays at work, waiting for the
+;; user's next message (`:outcome' `conversing'), and no report is made
+;; for it.  `hand_in' is what ends the working phase and puts the work
+;; in review; feedback sent back from review starts the working phase
+;; again (`:phase').  A turn that only deals with another session's
+;; message while the task waits for review keeps the review phase, so
+;; its end returns the task to review with the report that stands.
+
+(defcustom harness-tasks-working-phase t
+  "Non-nil when a task works before it hands its work in.
+A turn that ends without `hand_in' is then a reply to the user, not a
+round of work to review: the task stays active, in the working phase,
+until the next message or until `hand_in' puts it in review.  Nil makes
+every clean turn a round of work again, as it was before the working
+phase: a turn without a report gets one saying so and the task waits
+for review, or completes when it needs no review."
+  :type 'boolean :group 'harness)
+
+(defconst harness-tasks-phase-working "working"
+  "The phase of a task whose work is not handed in yet.")
+
+(defconst harness-tasks-phase-review "review"
+  "The phase of a task whose work was handed in and waits for the user.")
+
+(defconst harness-tasks-phase-done "done"
+  "The phase of a task that is finished.")
+
+(defun harness-tasks--phase (task)
+  "Return the phase of TASK: working, review or done.
+A record from before the phases uses its state and report: work waits
+for review once it was handed in, and otherwise is in the working
+phase."
+  (let ((phase (plist-get task :phase)))
+    (cond ((and (stringp phase) (not (string-empty-p phase))) phase)
+          ((memq (plist-get task :state) '(pending backlog refining active))
+           (if (and (eq (plist-get task :state) 'active)
+                    (harness-tasks--handed-in-p task))
+               harness-tasks-phase-review
+             harness-tasks-phase-working))
+          ((eq (plist-get task :state) 'done) harness-tasks-phase-done)
+          (t harness-tasks-phase-review))))
+
+(defun harness-tasks--working-phase-p (task)
+  "Non-nil when TASK's work is not handed in: it is in the working phase.
+Nil when `harness-tasks-working-phase' is off: every clean turn is then
+a round of work to review, as it was before the phase."
+  (and harness-tasks-working-phase
+       (equal (harness-tasks--phase task) harness-tasks-phase-working)))
+
 (defun harness-tasks--to-review (id &rest plist)
   "Put task ID in review with PLIST merged in; emit `task/review'.
 The feedback it was sent back with, if any, is answered: it is no
 longer work sent back from review (`harness-tasks--sent-back-p').
 Return the task's view."
   (let ((view (apply #'harness-tasks--set id :state 'review :merge-status nil :conflicts nil
-                     :sent-back nil plist)))
+                     :phase harness-tasks-phase-review :sent-back nil plist)))
     (harness-emit 'task/review view)
     view))
 
@@ -1243,7 +1314,8 @@ branch), `finished' (its turn ended with nothing to merge or review),
 follow-up, not feedback sent back from review
 \(`harness-tasks--sent-back-p').  Return the task's view."
   (let* ((was (plist-get (harness-tasks--get id) :state))
-         (view (apply #'harness-tasks--set id :state 'done :sent-back nil plist)))
+         (view (apply #'harness-tasks--set id :state 'done :sent-back nil
+                                           :phase harness-tasks-phase-done plist)))
     (unless (eq was 'done)
       (harness-emit 'task/done view how))
     view))
@@ -1498,7 +1570,10 @@ repository stores."
   "Return the kanban column of TASK, a symbol.
 That is pending, backlog, needs-input, review, merging, active, done or
 cancelled.  A done task the user cancelled (`harness-tasks--cancelled-p')
-is cancelled, not done: the done column holds finished work only.
+is cancelled, not done: the done column holds finished work only.  A
+turn that ended talking to the user (`:outcome' `conversing') is at
+work, in the working phase, and shows there: only a question or a
+permission the user must answer makes a task need their input.
 A backlog task (`harness-tasks--backlog-p'), and the write-up an agent
 does for it, show in the backlog: only the user starts one, so it is no
 queued pending task (`harness-tasks--queued-p').  A task whose branch
@@ -1535,6 +1610,10 @@ user."
                ((plist-get task :merge-status) 'merging)
                ((harness-tasks--waking-p task) 'active)
                ((eq (plist-get session :status) 'running) 'active)
+               ;; A turn that ended talking to the user is at work, not
+               ;; waiting on them: the working phase goes on until something
+               ;; is asked or handed in.
+               ((eq (plist-get task :outcome) 'conversing) 'active)
                ((plist-get task :outcome) 'needs-input)
                (t 'active))))))
 
@@ -1576,6 +1655,7 @@ or over a hard budget, with the reason and when it ends."
   ;; `append' copies TASK, so `plist-put' changes only the view.
   (let ((view (plist-put (append task (list :column (harness-tasks--column task)))
                          :priority (harness-priority-of-task task))))
+    (setq view (plist-put view :phase (harness-tasks--phase task)))
     (when (harness-tasks--task-suspended-p task)
       (setq view (append view (list :queue-suspended t))))
     (when (harness-tasks--auto-queue-p (harness-tasks--slot-project task))
@@ -1772,8 +1852,12 @@ task the merge queue reported merged."
 
 ;;;; The task prompts
 
+(defconst harness-tasks-working-phase-prompt
+  "You are in the working phase until you hand the work in. To talk to the user -- answer a question, ask for a decision, say what you found, or work through feedback -- write a normal reply and end the turn with it: nothing is handed in, and the task stays with you waiting for the user. A turn that ends without hand_in is not a report and is not put in review. Call hand_in only when the work is complete; not for a status update, and not to answer a message. The working phase is not a checkpoint before handing in, and the user is not waiting to approve the work: do not ask whether it is ready, and do not show what you are about to hand in first -- not before the first hand-in either. When nothing is outstanding -- no work left, no question only the user can answer, no open thread -- hand in at once. Handing in never ends the conversation: a message from the user sends the task back to work, so what they have to say reads the same before or after. A turn that ends with nothing to ask leaves the task idle and wastes the user's time: if you end one without hand_in, its reply must ask what only the user can answer or say what you still need from them -- never end a turn merely to say you will carry on. Every open thread of the review is a question still owed an answer: answer it and close it before handing in, or hand_in is refused. A reply in a thread may be written in your message, as the user writes theirs:\n\n<thread id=\"THREAD_ID\">\n<quote>the part of the conversation you answer</quote>\nyour answer\n</thread>\n\nIt is recorded as your comment in that thread and drawn as a thread card in the chat; add status=\"closed\" to the opening tag to close the thread, or use review_comment, which can also close one without words. review_threads lists the threads and their ids. A comment a thread already holds is not repeated: answer the newest one."
+  "What a task's session is told about the working phase and replying in threads.")
+
 (defconst harness-tasks-hand-in-prompt
-  "Finish with the hand_in tool rather than a plain reply: it hands your summary and your evidence to the user and ends the turn, so the task waits for their review.  The problem statement is required: a short summary of what must be fixed and how to see it, which the review shows at the top, so the user remembers what the task was about from its name.  The reproduction note is optional: how to see the problem, or the steps to check the fix.  The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id, by the tool's name (its newest call) or by the `#N` a previous hand_in error listed, so a run whose log you kept can be quoted without running it again.  A file, a code block or a note is evidence for what cannot be shown.  If you cannot finish the task, hand it in with cannot_continue true and say in the summary what blocks it: the task goes to the user's input instead of review, and nothing merges.  If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: the user's verification then completes it without merging.  Then stop; do not start more work."
+  "Finish with the hand_in tool when the work is complete, without asking first whether it is ready to hand in: it hands your summary and your evidence to the user and ends the turn, so the task moves from the working phase to review and waits for them. The problem statement is required: a short summary of what must be fixed and how to see it, which the review shows at the top, so the user remembers what the task was about from its name. The reproduction note is optional: how to see the problem, or the steps to check the fix. The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id, by the tool's name (its newest call) or by the `#N` a previous hand_in error listed, so a run whose log you kept can be quoted without running it again. A file, a code block or a note is evidence for what cannot be shown. If you cannot finish the task, hand it in with cannot_continue true and say in the summary what blocks it: the task goes to the user's input instead of review, and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: the user's verification then completes it without merging. Then stop; do not start more work."
   "What a task's session is told about handing its finished work in.")
 
 (defun harness-tasks--system-prompt (prompt session)
@@ -1812,7 +1896,10 @@ work takes effect there."
                                   (or (plist-get task :base) "the main branch"))
                           "your branch through the merge queue, and it will come back to you if the merge needs anything. ")
                 "")
-              harness-tasks-hand-in-prompt)))))
+              (if harness-tasks-working-phase
+                  (concat "\n\n" harness-tasks-working-phase-prompt)
+                "")
+              "\n\n" harness-tasks-hand-in-prompt)))))
 
 
 
@@ -3825,6 +3912,7 @@ prompts the session, `harness-tasks--on-message' lets the message
 through.  Return the task's view."
   (let ((task (harness-tasks--get id)))
     (harness-tasks--set id :state 'active :outcome nil :error nil :finished nil :archived nil
+                        :phase harness-tasks-phase-working :cannot-continue nil :no-merge nil
                         :verified nil :verified-at nil :merge-attempts 0
                         :recap nil :recap-at nil :recap-turns nil :recap-tools nil
                         :sent-back (float-time)
@@ -3862,7 +3950,8 @@ turn ends.  No round of feedback is kept, and no new round begins (the
 turn finds the task active, so it sets no `:reopened'): the report
 handed in stands unless the session hands in a new one.  Return the
 task's view."
-  (harness-tasks--set id :state 'active :outcome nil :error nil :finished nil :archived nil))
+  (harness-tasks--set id :state 'active :outcome nil :error nil :finished nil :archived nil
+                      :phase harness-tasks-phase-review))
 
 (defun harness-tasks--on-message (blocks session-id info)
   "Send SESSION-ID's task back from review when the user wrote message BLOCKS.
@@ -4119,7 +4208,7 @@ Return the task's view."
   (let ((now (float-time)))
     (apply #'harness-tasks--set id
            :state 'pending :returned now :queued-at now :backlog nil
-           :parked nil
+           :parked nil :phase harness-tasks-phase-working
            :return-reason 'returned :preempted-by nil
            :outcome nil :error nil :waiting nil :finished nil
            :merge-status nil :merge-attempts 0
@@ -4786,6 +4875,14 @@ paused task's session resumes it, as `task/start' does."
                :merged nil :archived nil :returned nil :return-reason nil :preempted-by nil :paused nil
                (append
                 (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil))
+                ;; A new round is in the working phase, also when the user
+                ;; answers a task that stopped part way (`:outcome'): the
+                ;; reply is the next turn of the work, not a review aside.
+                (when (or (memq (plist-get task :state) '(review done))
+                          (plist-get task :outcome)
+                          (not (plist-get task :phase)))
+                  (list :phase harness-tasks-phase-working
+                        :cannot-continue nil :no-merge nil))
                 (when (memq (plist-get task :state) '(review done)) (list :reopened (float-time)))))))))
 
 (defun harness-tasks--outstanding (task)
@@ -4905,6 +5002,14 @@ starts again when the hold ends (`harness-tasks--refresh-holds')."
        ((and (memq (plist-get task :state) '(done review)) (harness-tasks--merged-p task)) nil)
        ((setq waiting (harness-tasks--outstanding task))
         (harness-tasks--set id :state 'active :waiting waiting))
+       ;; The working phase: a turn that did not hand its work in was the
+       ;; agent talking to the user, not a round of work to review.  The
+       ;; task stays at work, waiting for the next message, and no report
+       ;; is made for it; only hand_in ends the working phase.
+       ((harness-tasks--working-phase-p task)
+        (harness-tasks--set id :state 'active :outcome 'conversing :error nil
+                            :finished nil :waiting nil :merge-status nil
+                            :cannot-continue nil :no-merge nil))
        ((harness-tasks--cannot-continue-p task)
         ;; The session said it cannot finish: the task waits for the user
         ;; instead of review, and nothing joins the merge queue.
@@ -6406,8 +6511,59 @@ ends cleanly, which the review step picks up as usual
   (harness-tasks--get id)               ; signals for an unknown task
   ;; `harness-tasks--set' writes it soon and says `task/changed'.
   (harness-tasks--set id :report report :report-at (float-time) :archived nil
+                      :phase harness-tasks-phase-review
                       :cannot-continue (if (harness-json-true-p (plist-get report :cannot-continue)) t :false)
                       :no-merge (if (harness-json-true-p (plist-get report :no-merge)) t :false)))
+
+(harness-defmethod task/force-review (id)
+  "Put task ID in review by hand, without waiting for its agent to hand in.
+The task is at work: its last turn ended, in the working phase
+\(`harness-tasks--working-phase-p') or stopped part way, and its session
+is neither running nor waiting on the user.  The report it handed in
+last stands when it speaks for this round; otherwise the harness records
+that none was handed in, with the session's last message as its summary
+\(`harness-tasks--missing-report'), or says the work was put in review
+by hand when the session wrote nothing.  The review banner is there at
+once, as if `hand_in' had been called, and `task/review' says so.  A
+task already in review is left as it is.  Return the task's view."
+  (let* ((task (harness-tasks--get id))
+         (state (plist-get task :state)))
+    (cond
+     ((eq state 'review) (harness-call 'task/get id))
+     ((memq state '(pending backlog refining merging done))
+      (error "Task %s is not at work" id))
+     ((harness-tasks--turn-p task)
+      (error "Task %s is working; put it in review when its turn ends" id))
+     ((harness-session-waiting-on-user-p (harness-tasks--session task))
+      (error "Task %s waits for your answer; answer it, or stop the task first" id))
+     (t
+      (let* ((report (cond ((and (plist-get task :report)
+                                 (or (harness-tasks--handed-in-p task)
+                                     (harness-tasks--missing-recorded-p task)))
+                            (plist-get task :report))
+                           ((plist-get (harness-tasks--missing-report task) :report))
+                           (t (list :summary "Put in review by hand: the agent did not hand its work in."
+                                    :at (float-time) :missing t)))))
+        (prog1 (harness-tasks--to-review id :report report :report-at (float-time)
+                                         :outcome nil :error nil :finished (float-time)
+                                         :cannot-continue :false :no-merge :false)
+          (harness-run-soon #'harness-tasks--schedule)))))))
+
+(harness-defmethod task/return-to-work (id)
+  "Take task ID, which waits in review, back to the working phase by hand.
+The task is active again, as after a turn that only talked to the user:
+its review banner goes, the report it handed in stands for the next
+hand-in to replace, and no round of feedback is kept.  The next message
+the user sends its session is an ordinary message, not feedback that
+sends the work back.  Return the task's view."
+  (let ((task (harness-tasks--get id)))
+    (unless (eq (plist-get task :state) 'review)
+      (error "Task %s is not waiting for review" id))
+    (prog1 (harness-tasks--set id :state 'active :phase harness-tasks-phase-working
+                               :outcome 'conversing :error nil :finished nil
+                               :merge-status nil :conflicts nil :sent-back nil
+                               :cannot-continue nil :no-merge nil)
+      (harness-run-soon #'harness-tasks--schedule))))
 
 (harness-defmethod task/archive (id &optional restore)
   "Archive done task ID, hiding it and deactivating its session; RESTORE undoes it.

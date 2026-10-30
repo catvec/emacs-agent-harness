@@ -18,7 +18,11 @@
 ;;     what it is and the part of it quoted, with the words of the reply
 ;;     typed under it, in the same box (see the Threads section).  Your
 ;;     own message has a line above the first card, and C-c < moves
-;;     point out of a reply to it, and back into the reply;
+;;     point out of a reply to it, and back into the reply.  C-c e, or
+;;     the card's menu, edits what the reply answers: trimmed, elided
+;;     with [...], or split into replies of their own, each with its own
+;;     card and words, as a mail answers a quote a part at a time (see
+;;     Changing what a reply answers);
 ;;   - typing anywhere in the buffer goes into the box: a printable
 ;;     character (or a yank) with point outside it moves point to the
 ;;     end of the box and types there -- once the box holds a card, to
@@ -242,7 +246,11 @@ the box with its project alone (`harness-compose-project-function').")
   (define-key map (kbd "C-j") #'harness-compose-newline)
   (define-key map (kbd "C-c C-a") #'harness-compose-add-attachment)
   ;; `>' is Markdown's quote, and C-c with a punctuation key is a major
-  ;; mode's to bind, the box's hosts all being major modes.
+  ;; mode's to bind, the box's hosts all being major modes.  A host with
+  ;; threads replies in one, remapping `compose-quote-reply' (the chat
+  ;; does); a prefix argument quotes inline, as compose-quote does.  The
+  ;; key is compose-quote's in the box; bound here too, for a host that
+  ;; runs the box without the library.
   (define-key map (kbd "C-c >") #'compose-quote-reply)
   ;; `<' is `>''s other half: out of the reply `C-c >' started, to your own
   ;; message, and back into it.
@@ -251,6 +259,9 @@ the box with its project alone (`harness-compose-project-function').")
   ;; after C-c in every host: the harness menu writes a view's plain keys
   ;; behind a dot as well (". F").
   (define-key map (kbd "C-c .") #'harness-compose-panel-key)
+  ;; What a reply in a thread answers: trimmed, elided, or split into
+  ;; replies (see the Threads section).
+  (define-key map (kbd "C-c e") #'harness-compose-edit-thread)
   ;; The top and the bottom of the box, not of the buffer: what the buffer
   ;; holds above the box is read, not edited.  The keys are bound, and the
   ;; commands remapped for C-<home> and the rest: a minor mode's remap of
@@ -540,6 +551,27 @@ attachments show as chips (`harness-compose--show-tokens')."
     (setq harness-compose--placeholder (make-overlay (1- (point)) (point)))
     (harness-compose-update-placeholder)
     (harness-compose--show-tokens)))
+
+(defun harness-compose-hide ()
+  "Take the box off the buffer, keeping the words and the attachments.
+A host that draws something else where the box goes calls this instead
+of `harness-compose-insert'; `harness-compose-insert' brings the box
+back with the text it held (`harness-compose--text'), so a draft is no
+less a draft for being out of sight."
+  (dolist (ov (append (list harness-compose-overlay harness-compose--placeholder harness-compose--indent)
+                      harness-compose--token-overlays harness-compose--thread-rails
+                      harness-compose--area-hints))
+    (when ov (delete-overlay ov)))
+  (setq harness-compose-overlay nil
+        harness-compose--placeholder nil
+        harness-compose--indent nil
+        harness-compose--token-overlays nil
+        harness-compose--thread-rails nil
+        harness-compose--area-hints nil)
+  (when harness-compose-start (set-marker harness-compose-start nil))
+  (when harness-compose-end (set-marker harness-compose-end nil))
+  (setq harness-compose-start nil
+        harness-compose-end nil))
 
 (defun harness-compose-update-placeholder ()
   "Show the placeholder while the box is empty.
@@ -1186,7 +1218,9 @@ The box may have been out of sight: its windows follow it again
               compose-quote-source-function #'harness-ui-markdown-source)
   (add-hook 'compose-quote-insert-hook #'harness-compose--quoted nil t)
   ;; Its post-command tracking turns the inline mode on in a quote of the
-  ;; box, and off elsewhere.
+  ;; box, and off elsewhere.  Its map binds C-c > to `compose-quote-reply',
+  ;; which a host with threads of its own remaps (`harness-chat-thread-reply'
+  ;; in a chat).
   (compose-quote-mode 1))
 
 ;; Quoting was the box's own once: the library's names took over.
@@ -2349,11 +2383,6 @@ line prefix, which takes no face from the text."
   "The part of a message a thread's card quotes."
   :group 'harness-compose)
 
-(defcustom harness-thread-card-lines 5
-  "Most lines of a quote a thread's card shows; the tooltip has the rest."
-  :type 'natnum
-  :group 'harness-compose)
-
 (defvar harness-compose-thread-open-function #'ignore
   "Function showing what a thread's card is a reply to.
 It is called with the data of the thread (`harness-thread-block') and the
@@ -2390,21 +2419,50 @@ a diff or a buffer the file and its lines."
              ("tool" (if (stringp label) (format "%s call" label) "tool call"))
              (who (if (and (stringp label) (not (string-empty-p label))) label who))))))))
 
-(defun harness-thread-ref-excerpt (ref room)
-  "Return the lines of REF's quote a card shows, at most ROOM columns wide.
-The first `harness-thread-card-lines' non-blank lines, a long one cut
-short and the cut ones ending in an ellipsis."
-  (let* ((text (or (plist-get ref :text) ""))
-         (lines (cl-remove-if #'string-blank-p
-                              (mapcar #'string-trim-right (split-string text "\n"))))
-         (shown (seq-take lines harness-thread-card-lines)))
-    (append (mapcar (lambda (line) (truncate-string-to-width line room nil nil "…")) shown)
-            (and (> (length lines) (length shown)) (list "…")))))
+(defun harness-thread-wrap-line (line room)
+  "Return LINE as lines of at most ROOM columns, words whole where they fit.
+A word wider than ROOM is broken, so no line overflows the card."
+  (let ((words (split-string line "[ \t]+" t))
+        (current "")
+        lines)
+    (dolist (word words)
+      (while (> (string-width word) room)
+        (let ((head (truncate-string-to-width word room nil nil nil)))
+          (unless (string-empty-p current)
+            (push current lines)
+            (setq current ""))
+          (push head lines)
+          (setq word (substring word (length head)))))
+      (unless (string-empty-p word)
+        (cond ((string-empty-p current) (setq current word))
+              ((<= (+ (string-width current) 1 (string-width word)) room)
+               (setq current (concat current " " word)))
+              (t (push current lines)
+                 (setq current word)))))
+    (push current lines)
+    (nreverse lines)))
+
+(defun harness-thread-wrap (text room)
+  "Return TEXT as lines of at most ROOM columns, every word of it kept.
+The blank lines that part its paragraphs stay as blank lines."
+  (let (lines)
+    (dolist (line (split-string (string-trim-right (or text "") "[ \t\n]+") "\n"))
+      (if (string-blank-p line)
+          (push "" lines)
+        (dolist (wrapped (harness-thread-wrap-line line room))
+          (push wrapped lines))))
+    (nreverse lines)))
+
+(defun harness-thread-ref-lines (ref room)
+  "Return every line of REF's quote, wrapped to ROOM columns.
+A card shows the whole quote: a line longer than ROOM wraps, and no
+part of it is left out or cut short."
+  (harness-thread-wrap (or (plist-get ref :text) "") room))
 
 (defun harness-thread-card-lines (data &optional room close rail)
   "Return the lines of the card for the thread DATA, as propertized strings.
 Each reference is a header -- what it is (`harness-thread-ref-label') --
-and the lines of its quote under it, ROOM columns wide at most (by
+and the whole of its quote under it, wrapped to ROOM columns (by
 default 72), every line after the rail and with the reference it is of
 as `harness-thread-ref', for a click to show.  CLOSE, a string, is put at
 the end of the first header, such as a button that removes the thread.
@@ -2422,7 +2480,7 @@ The card is no text of the buffer; the caller puts it where it goes."
                                         'face 'harness-thread-header-face))))
         (push (if (and first close) (concat header "  " close) header) lines)
         (setq first nil)
-        (dolist (line (harness-thread-ref-excerpt ref room))
+        (dolist (line (harness-thread-ref-lines ref room))
           (push (concat rail (propertize line 'face 'harness-thread-quote-face)) lines))
         ;; Each line of a reference says which it is: a click on it shows that one.
         (let ((here (cl-loop for l in lines
@@ -2658,10 +2716,315 @@ The host does it (`harness-compose-thread-open-function')."
 (defun harness-compose--thread-actions (att)
   "Return what the card of ATT offers: (NAME . FUNCTION) each."
   (list (cons "Show what this replies to" (lambda () (harness-compose-open-thread att)))
+        (cons "Edit what this replies to…" (lambda () (harness-compose-edit-thread att)))
         (cons "Remove the thread, keep my words" (lambda () (harness-compose-remove-attachment att)))
         (cons "Copy the quote" (lambda ()
                                  (kill-new (harness-thread-quote (plist-get att :thread)))
                                  (message "Copied the quote")))))
+
+;;;; Changing what a reply answers
+
+;; A reply's quote is data, not text in the box: the card shows the part
+;; of the conversation quoted, a few lines of it, and the words under the
+;; card are the answer.  `harness-compose-edit-thread' (C-c e, or the
+;; card's menu) opens the quote in a buffer of its own, where it can be
+;; changed: trimmed, elided with "[...]", or split into replies.  M-RET
+;; splits the quote where point is, as a mail answers its quote a part at
+;; a time: each part becomes a reply of its own in the box, with its own
+;; card and the words written under it, the first keeping the answer the
+;; reply had.  C-c C-c puts them back in the box and C-c C-k leaves the
+;; reply as it was; C-c [ elides the region with the library's elision,
+;; C-c ^ joins a reply with the next, and C-c C-r starts again from the
+;; quote as it was.
+;;
+;; The header of each reference and the line that parts two replies are
+;; read-only: they say what the part is, and are no words of the quote.
+;; Everything else is the quote, and the agent reads it as the reply's
+;; text (`harness-thread-text').
+
+(defvar-local harness-compose-edit-thread--attachment nil
+  "The attachment of the reply this buffer edits.")
+
+(defvar-local harness-compose-edit-thread--box nil
+  "The compose buffer of the reply this buffer edits.")
+
+(defvar-local harness-compose-edit-thread--data nil
+  "The thread data of the reply as it was when this buffer opened.")
+
+(defvar harness-compose-edit-thread-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map text-mode-map)
+    (define-key map (kbd "C-c C-c") #'harness-compose-edit-thread-apply)
+    (define-key map (kbd "C-c C-k") #'harness-compose-edit-thread-cancel)
+    (define-key map (kbd "C-c C-r") #'harness-compose-edit-thread-reset)
+    (define-key map (kbd "M-RET") #'harness-compose-edit-thread-split)
+    (define-key map (kbd "C-c [") #'harness-compose-edit-thread-elide)
+    (define-key map (kbd "C-c ^") #'harness-compose-edit-thread-merge)
+    map)
+  "Keys of the buffer that edits what a reply in a thread answers.")
+
+(define-derived-mode harness-compose-edit-thread-mode text-mode "Thread-Quote"
+  "Edit what a reply in a thread answers.
+The quote is a section per reference, each headed by what it is, the
+text under it editable.  M-RET splits the quote at point into another
+reply, which the box gets with its own card and answer; C-c [ elides
+the region with `compose-quote-elision'; C-c ^ joins this reply with
+the next.  C-c C-c applies, C-c C-k cancels and C-c C-r starts again
+from the quote as it was."
+  (setq-local buffer-read-only nil)
+  (visual-line-mode 1)
+  (setq-local header-line-format
+              (substitute-command-keys
+               "  Reply quote · \\[harness-compose-edit-thread-split] split · \\[harness-compose-edit-thread-elide] elide · \\[harness-compose-edit-thread-apply] apply · \\[harness-compose-edit-thread-cancel] cancel")))
+
+(defun harness-compose-edit-thread--insert-head (text &optional ref note)
+  "Insert TEXT as a read-only line of the quote editor.
+REF, the reference the line heads, goes on it as `harness-thread-edit-ref'
+and marks it as a header; NOTE marks a line of instructions, which heads
+no reference."
+  (let ((start (point)))
+    (insert text "\n")
+    (add-text-properties start (1- (point))
+                         (append (list 'read-only t 'rear-nonsticky t
+                                       'face (if note 'harness-hint-face 'harness-thread-header-face))
+                                 (if note (list 'harness-thread-edit-note t)
+                                   (list 'harness-thread-edit-header t 'harness-thread-edit-ref ref))))))
+
+(defun harness-compose-edit-thread--insert-quote (data)
+  "Insert the quote of the thread DATA into the buffer, as it stands."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (dolist (ref (harness-thread-refs data))
+      (harness-compose-edit-thread--insert-head
+       (format "↩ %s" (harness-thread-ref-label ref)) ref)
+      (let ((start (point)))
+        (insert (or (plist-get ref :text) ""))
+        (unless (bolp) (insert "\n"))
+        (add-text-properties start (point) (list 'harness-thread-edit-ref ref))))
+    ;; Point starts where the quote does, under its header.
+    (goto-char (point-min))
+    (forward-line 1)))
+
+(defun harness-compose-edit-thread--line-property (property &optional pos)
+  "Return PROPERTY at the start of the line of POS, or of point's."
+  (get-text-property (save-excursion (goto-char (or pos (point))) (line-beginning-position))
+                     property))
+
+(defun harness-compose-edit-thread--parts ()
+  "Return the parts of the quote the buffer holds, in order.
+Each is (:ref REF :text TEXT): the reference the part is of, and the
+words under its header or the split above it, trimmed.  A part with no
+words is no reply and is left out."
+  (let (parts (ref nil) (lines nil))
+    (cl-flet ((flush ()
+                (when (or ref lines)
+                  (push (list :ref ref :text (string-trim (string-join (nreverse lines) "\n")))
+                        parts)
+                  (setq lines nil))))
+      (save-excursion
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let ((bol (line-beginning-position)) (eol (line-end-position)))
+            (cond
+             ((get-text-property bol 'harness-thread-edit-note) nil)
+             ((get-text-property bol 'harness-thread-edit-header)
+              (flush)
+              (setq ref (get-text-property bol 'harness-thread-edit-ref)))
+             ((get-text-property bol 'harness-thread-edit-split)
+              (flush))
+             (t (push (buffer-substring-no-properties bol eol) lines))))
+          (forward-line 1)))
+      (flush))
+    (cl-remove-if (lambda (part) (string-blank-p (plist-get part :text))) (nreverse parts))))
+
+(defun harness-compose-edit-thread--start (att)
+  "Open a buffer that edits what ATT, a reply in a thread, answers."
+  (let* ((data (plist-get att :thread))
+         (number (plist-get att :reply))
+         (box (current-buffer))
+         (name (format "*Reply %s quote*" number))
+         (buffer (get-buffer-create name)))
+    (with-current-buffer buffer
+      (harness-compose-edit-thread-mode)
+      (setq-local harness-compose-edit-thread--attachment att
+                  harness-compose-edit-thread--box box
+                  harness-compose-edit-thread--data data)
+      (harness-compose-edit-thread--insert-quote data)
+      (set-buffer-modified-p nil))
+    (pop-to-buffer buffer '((display-buffer-below-selected) (window-height . 0.45)))
+    buffer))
+
+(defun harness-compose-edit-thread-reset ()
+  "Start again from the quote as it was when this buffer opened."
+  (interactive)
+  (when (y-or-n-p "Start again from the quote as it was? ")
+    (harness-compose-edit-thread--insert-quote harness-compose-edit-thread--data)))
+
+(defun harness-compose-edit-thread-split ()
+  "Split the quote at point into another reply.
+Each side of the split becomes a reply of its own in the box, with its
+own card and the words written under it; the answer the reply had stays
+with the part above, and the part below starts empty."
+  (interactive)
+  (when (or (harness-compose-edit-thread--line-property 'harness-thread-edit-header)
+            (harness-compose-edit-thread--line-property 'harness-thread-edit-note)
+            (harness-compose-edit-thread--line-property 'harness-thread-edit-split))
+    (user-error "Point must be in the quote, not on a header or a split"))
+  (let ((inhibit-read-only t))
+    (insert "\n\n")
+    (let ((start (point)))
+      (insert "── another reply ──\n")
+      (add-text-properties start (1- (point))
+                           (list 'read-only t 'rear-nonsticky t 'face 'harness-dim-face
+                                 'harness-thread-edit-split t)))
+    (message "Reply split: the part below becomes a reply of its own")))
+
+(defun harness-compose-edit-thread-merge ()
+  "Join the reply at point with the one after it.
+The split below point goes, and the quoted parts become one reply."
+  (interactive)
+  (let (start)
+    (save-excursion
+      (forward-line 1)
+      (while (and (not (eobp)) (not start))
+        (when (get-text-property (line-beginning-position) 'harness-thread-edit-split)
+          (setq start (line-beginning-position)))
+        (unless start (forward-line 1))))
+    (unless start (user-error "There is no reply below to join"))
+    (let ((inhibit-read-only t))
+      (delete-region start (min (point-max) (1+ (save-excursion (goto-char start) (line-end-position)))))
+      (message "The replies are one again"))))
+
+(defun harness-compose-edit-thread-elide (beg end)
+  "Replace the region with `compose-quote-elision', as a mail omits a part."
+  (interactive "r")
+  (when (and (called-interactively-p 'any) (not (use-region-p)))
+    (user-error "Mark the part of the quote to elide"))
+  (let ((inhibit-read-only t))
+    (goto-char beg)
+    (delete-region beg end)
+    (insert compose-quote-elision)))
+
+(defun harness-compose--edit-thread-ref (part original)
+  "Return the reference of PART, a part of a quote, made from ORIGINAL.
+The text is PART's.  A part that is not the whole of ORIGINAL loses the
+offsets into the message, which no longer name it, and a part of a diff
+below another moves its lines down as far as the parts above it went."
+  (let ((text (plist-get part :text))
+        (ref (copy-sequence (plist-get part :ref))))
+    (setf (plist-get ref :text) text)
+    (unless (equal (plist-get original :text) text)
+      (setq ref (cl-loop for (k v) on ref by #'cddr
+                         unless (memq k '(:from :to)) append (list k v))))
+    ref))
+
+(defun harness-compose--edit-thread-replace (att parts)
+  "Replace the reply ATT in the box with the replies PARTS make.
+PARTS are (:ref REF :text TEXT), in order.  The first keeps ATT's number
+and the words under its card, and, when the reply is a thread of the
+review already, the identity that answers it; the rest are new replies,
+numbered after the box's last, with the words written under each left
+for the user."
+  (let* ((data (plist-get att :thread))
+         (number (plist-get att :reply))
+         (split (harness-compose--split-threads (harness-compose-text) harness-compose-attachments))
+         (own (car split))
+         (threads (cdr split))
+         (current (cl-find number threads :key (lambda (a) (plist-get a :reply))))
+         (response (or (plist-get current :response) ""))
+         (next (harness-compose--next-reply))
+         (others (cl-remove-if #'harness-compose--thread-attachment-p harness-compose-attachments))
+         (n 0) new)
+    (dolist (part parts)
+      (let* ((first (= n 0))
+             (thread (copy-sequence data))
+             (refs (list (harness-compose--edit-thread-ref part (car (harness-thread-refs data))))))
+        (setf (plist-get thread :refs) refs)
+        (unless first
+          ;; A new reply is a thread of its own; the review knows only
+          ;; the one it had.
+          (setq thread (cl-loop for (k v) on thread by #'cddr
+                                unless (memq k '(:id :comment :reply)) append (list k v))))
+        (push (list :thread thread :reply (if first number (+ next n -1))
+                    :response (if first response ""))
+              new)
+        (cl-incf n)))
+    (setq new (nreverse new))
+    (harness-compose-restore
+     own
+     (append (cl-loop for thread in threads
+                      if (equal (plist-get thread :reply) number) append new
+                      else collect thread)
+             others))
+    ;; Point goes where the answer to the last part is written: the new
+    ;; reply a split makes, or the one reply there was.
+    (let ((area (plist-get (car (last new)) :reply)))
+      (setq harness-compose--area area harness-compose--reply area)
+      (when (harness-compose-live-p)
+        (harness-compose--jump
+         (harness-compose--area-point (harness-compose--cards) area))))
+    (funcall harness-compose-redraw-function)
+    new))
+
+(defun harness-compose-edit-thread-apply ()
+  "Put the quote the buffer holds back in the box, as the replies it makes.
+The reply becomes one reply per part of the quote: split it, and each
+part gets its own card and the words written under it."
+  (interactive)
+  (let ((parts (harness-compose-edit-thread--parts))
+        (box harness-compose-edit-thread--box)
+        (att harness-compose-edit-thread--attachment))
+    (unless parts (user-error "The quote is empty: write what the reply answers"))
+    (unless (buffer-live-p box) (user-error "The compose box this reply is in is gone"))
+    (with-current-buffer box
+      (harness-compose--edit-thread-replace att parts))
+    (kill-buffer (current-buffer))
+    (when (buffer-live-p box)
+      (set-buffer box)
+      ;; The box's window kept the point it had before the quote opened:
+      ;; put point back where the answer is written.
+      (when-let* ((window (get-buffer-window box)))
+        (select-window window)
+        (when (and (integerp harness-compose--reply) (harness-compose-live-p))
+          (harness-compose--jump
+           (harness-compose--area-point (harness-compose--cards) harness-compose--reply)))))))
+
+(defun harness-compose-edit-thread-cancel ()
+  "Leave the reply as it was; the quote the buffer holds goes."
+  (interactive)
+  (let ((box harness-compose-edit-thread--box))
+    (when (and (buffer-modified-p)
+               (not (y-or-n-p "Leave the quote as it was, and lose the changes? ")))
+      (user-error "Cancelled"))
+    (kill-buffer (current-buffer))
+    (when (buffer-live-p box)
+      (set-buffer box)
+      ;; The box's window kept the point it had before the quote opened:
+      ;; put point back where the answer is written.
+      (when-let* ((window (get-buffer-window box)))
+        (select-window window)
+        (when (and (integerp harness-compose--reply) (harness-compose-live-p))
+          (harness-compose--jump
+           (harness-compose--area-point (harness-compose--cards) harness-compose--reply)))))))
+
+(defun harness-compose-edit-thread (&optional att)
+  "Edit what a reply in a thread answers: trim it, elide it, or split it.
+With point in a reply's words, or on its card, that reply is edited;
+ATT, an attachment, edits that reply.  The quote opens in a buffer of
+its own; M-RET there splits it where point is, into another reply with
+its own card and answer.  C-c C-c puts the parts back in the box."
+  (interactive)
+  (let ((att (or att (harness-compose--thread-here)
+                 (user-error "Point is not in a reply in a thread"))))
+    (harness-compose-edit-thread--start att)))
+
+(defun harness-compose--thread-here ()
+  "Return the reply in a thread whose card is at point or above it, if any."
+  (let (found)
+    (dolist (card (harness-compose--cards) found)
+      (if (or (and (>= (point) (cadr card)) (< (point) (cddr card)))
+              (>= (point) (cddr card)))
+          (setq found (car card))))))
 
 ;;;; Your message, and the replies
 

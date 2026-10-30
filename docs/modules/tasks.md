@@ -57,15 +57,32 @@ prune' run where it cannot be seen (in another session's sandbox)
 keeps it; a merged task that goes back to work locks it again.
 
 Review: finished work is not done until the user has looked at it
-(`harness-tasks-require-verification`).  A task whose turn ends
-cleanly waits in review instead, its branch not merged yet in a git
+(`harness-tasks-require-verification`).  A task works before it hands
+its work in (`harness-tasks-working-phase`): a turn that ends with a
+reply, not with `hand_in`, is the agent talking to the user -- a
+question, an answer to feedback, a note of what it is about to do --
+and leaves the task active, in the working phase, waiting for the
+next message; no report is made for it.  The phase is for what is
+still owed -- work, a question only the user can answer, an open
+thread -- not for an approval before handing in: the prompt tells the
+agent to hand in at once when nothing is outstanding, and that a
+message from the user sends the task back to work, so handing in
+never ends the conversation.  `hand_in` ends the working
+phase and puts the task in review, its branch not merged yet in a git
 project.  `task/verify` accepts it: its branch goes through the merge
 queue and the task is done once merged (outside git, at once).
 `task/reject` sends it back with feedback: the feedback goes to the
 same session, in its own worktree (or the main tree, see below), as a
-new prompt, and the task comes back to review when that turn ends.
-Every round of feedback is kept with the task (`:feedback`), and so
-is the verification (`:verified`, `:verified-at`).  Any other message
+new prompt, and the task works on it; a turn that ends by handing the
+work in puts it back in review.  Every round of feedback is kept with
+the task (`:feedback`), and so is the verification (`:verified`,
+`:verified-at`).  The phase moves by hand too: `task/return-to-work`
+takes a task out of review into the working phase, its report kept
+for the next hand-in, and `task/force-review` puts a task at work in
+review without waiting for `hand_in`, recording that none came when
+the round handed nothing in.  The board's [Keep working] and [Put in
+review] are the same two, and so is the review banner's [Keep
+working].  Any other message
 the user sends the session while its task waits for review sends it
 back the same way, with the message as the feedback, wherever it was
 written: the session's own chat, `task/prompt`, another client, the
@@ -347,6 +364,7 @@ here logs, emits or returns one.
 - `task/complete` (id) — Mark task ID done by hand, merged or not.
 - `task/delete` (id &optional delete-session) — Forget task ID; with DELETE-SESSION also cancel and delete its session.
 - `task/for-session` (session-id) — Return the task of SESSION-ID, or nil.
+- `task/force-review` (id) — Put task ID in review by hand, without waiting for its agent to hand in.
 - `task/get` (id) — Return task ID.
 - `task/hand-in` (id report) — Record REPORT as the work ID hands in, waiting for the user's review.
 - `task/hand-in-plan` (session-id title plan) — Hand in PLAN, titled TITLE, for the task SESSION-ID plans; return the task.
@@ -368,6 +386,7 @@ here logs, emits or returns one.
 - `task/resume-queue` (&optional cwd) — Start starting the pending tasks of CWD's project again, at once.
 - `task/retry` (id) — Have task ID, which stopped part way, work on it again; return the task.
 - `task/return-to-pending` (id) — Stop the turn of active task ID and put it back in the pending queue.
+- `task/return-to-work` (id) — Take task ID, which waits in review, back to the working phase by hand.
 - `task/session-ids` (&optional filter) — Return the ids of the sessions of the current tasks FILTER selects.
 - `task/set-all` (settings &optional filter) — Apply SETTINGS to every current task FILTER selects; return the ids changed.
 - `task/set-backlog-mode` (mode &optional cwd) — Put the backlog of CWD's project in MODE, `manual` or `auto` (or its name).
@@ -429,6 +448,7 @@ here logs, emits or returns one.
 - `harness-tasks-slot-wait-days` — Days back the slot page's queue wait figures look.
 - `harness-tasks-store-in-repository` — When non-nil, a git project keeps its tasks inside its repository.
 - `harness-tasks-thinking` — Thinking level of task sessions, or nil for the configured default.
+- `harness-tasks-working-phase` — Non-nil when a task works before it hands its work in.
 - `harness-tasks-worktrees` — When non-nil, tasks in a git project work in a worktree and merge back.
 
 ## Uses

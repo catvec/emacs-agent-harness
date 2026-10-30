@@ -12,11 +12,18 @@
 ;;                         by priority, then oldest first
 ;;   Ready for review      finished, waiting for you: verify it (v), which
 ;;                         merges it, or send it back with feedback (R);
-;;                         by priority, then the last to finish first
+;;                         by priority, then the last to finish first.
+;;                         A task at work reaches it by handing in, or by
+;;                         hand (H, or [Put in review] in its menu); K, or
+;;                         [Keep working], takes it back out, into the
+;;                         working phase
 ;;   Merging               in the merge queue, in the order it takes them:
 ;;                         queued, merging, or resolving the conflicts
-;;   In progress           working, with its current todo and progress;
-;;                         by priority, then the last to start first
+;;   In progress           working, with its current todo and progress,
+;;                         in the working phase between hand-ins: put it
+;;                         in review by hand (H, or [Put in review] in its
+;;                         menu) if it does not hand in itself; by
+;;                         priority, then the last to start first
 ;;   Pending               waiting for a slot, so it starts on its own
 ;;                         while the project has one free; editable,
 ;;                         startable; in the order they start: by
@@ -103,7 +110,8 @@
 ;;
 ;; A task is handled in its session, whatever its state.  In review it
 ;; has the review banner (harness-ui-review.el: [Verify], [Send back],
-;; the report and the changes); in the backlog, the banner above.  In
+;; [Keep working], the report and the changes); in the backlog, the
+;; banner above.  In
 ;; every other state its session has a panel above the compose box: the
 ;; column the task is in, in the board's words, and a button for each
 ;; action its card has there that the session can do -- start it now,
@@ -1625,12 +1633,17 @@ come alone, as for the card's buttons."
                       ("Open" harness-ui-tasks-open))
                   ;; No Reply: a message to a task in review sends it back.
                   '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
+                    ("Keep working" harness-ui-tasks-return-to-work)
                     ("Open" harness-ui-tasks-open) ("Archive" harness-ui-tasks-archive))))
        ((or 'done 'cancelled)
         (if (harness-ui-tasks--archived-p task)
             '(("Unarchive" harness-ui-tasks-archive) ("Open" harness-ui-tasks-open))
           '(("Archive" harness-ui-tasks-archive) ("Reply" harness-ui-tasks-reply)
             ("Open" harness-ui-tasks-open)))))
+     ;; A task at work can be put in review by hand, whichever column of
+     ;; work it shows in: in the menu only, never among the card's buttons.
+     (when (and (not own) (memq column '(active needs-input)))
+       '(("Put in review" harness-ui-tasks-force-review)))
      ;; In the menu only, never among the card's buttons (OWN).
      (unless own (harness-ui-tasks--extra-actions task))
      (unless own (harness-ui-tasks--assume-actions task))
@@ -4678,6 +4691,7 @@ so they type, into the compose box (`harness-compose-acts-p')."
                    harness-ui-tasks-reply harness-ui-tasks-requests harness-ui-tasks-refine
                    harness-ui-tasks-allow harness-ui-tasks-deny harness-ui-tasks-cancel
                    harness-ui-tasks-complete harness-ui-tasks-verify harness-ui-tasks-reject
+                   harness-ui-tasks-return-to-work harness-ui-tasks-force-review
                    harness-ui-tasks-merge harness-ui-tasks-archive harness-ui-tasks-delete
                    harness-ui-tasks-raise-priority harness-ui-tasks-lower-priority
                    harness-ui-tasks-attach harness-ui-tasks-assume-worktree))
@@ -4730,6 +4744,8 @@ compose box, as every letter the board does not bind does
   (define-key map (kbd "d") #'harness-ui-tasks-complete)
   (define-key map (kbd "v") #'harness-ui-tasks-verify)
   (define-key map (kbd "R") #'harness-ui-tasks-reject)
+  (define-key map (kbd "K") #'harness-ui-tasks-return-to-work)
+  (define-key map (kbd "H") #'harness-ui-tasks-force-review)
   (define-key map (kbd "M") #'harness-ui-tasks-merge)
   (define-key map (kbd "x") #'harness-ui-tasks-archive)
   (define-key map (kbd "X") #'harness-ui-tasks-archive-done)
@@ -4832,6 +4848,8 @@ act on from there.
         (". U" "Resume a paused task" harness-ui-tasks-resume)
         (". v" "Verify (accept)" harness-ui-tasks-verify)
         (". R" "Send back with feedback" harness-ui-tasks-reject)
+        (". K" "Keep working (leave review)" harness-ui-tasks-return-to-work)
+        (". H" "Put in review by hand" harness-ui-tasks-force-review)
         (". d" "Mark completed" harness-ui-tasks-complete)
         (". M" "Merge again" harness-ui-tasks-merge)
         (". x" "Archive or restore" harness-ui-tasks-archive)
@@ -5707,6 +5725,33 @@ task is completed once merged; otherwise it is completed at once."
     (message (if (and (plist-get task :worktree) (not (harness-json-true-p (plist-get task :merged))))
                  "Verified: merging it"
                "Verified"))))
+
+(defun harness-ui-tasks-return-to-work ()
+  "Take the task at point, which waits for your review, back to work.
+Its review banner goes and the agent goes on with the task: the report
+it handed in stands until it hands in another, and the next message you
+send its session is an ordinary one, not feedback.  The work comes back
+for your review when a turn hands it in again, or by hand
+\(`harness-ui-tasks-force-review')."
+  (interactive)
+  (let ((task (harness-ui-tasks--review-task)))
+    (harness-ui-tasks--request-then "_harness/task/return-to-work" (list :id (plist-get task :id))
+                                    "Taking the task back to work")
+    (message "Back to work: the agent goes on with the task")))
+
+(defun harness-ui-tasks-force-review ()
+  "Put the task at point in review by hand, as if it handed its work in.
+For a task at work whose agent has not handed in yet: the review banner
+is there at once, with [Verify] and [Send back].  The report handed in
+last stands when it speaks for this round; otherwise the review shows
+that none was handed in, with the session's last message as its
+summary.  A task whose turn runs, or whose session waits on your
+answer, cannot be put in review until that is over."
+  (interactive)
+  (let ((task (harness-ui-tasks--task)))
+    (harness-ui-tasks--request-then "_harness/task/force-review" (list :id (plist-get task :id))
+                                    "Putting the task in review")
+    (message "In review")))
 
 (defun harness-ui-tasks-reject (&optional feedback)
   "Send the task at point back from review with feedback.

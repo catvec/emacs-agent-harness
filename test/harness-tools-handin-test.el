@@ -201,6 +201,67 @@ reports that were recorded."
         (should (string-prefix-p "hand_in needs summary" (plist-get result :content))))
       (should (= 0 asked)))))
 
+;;;; What the harness itself asks of a hand-in
+
+(ert-deftest harness-tools-handin-a-block-function-refuses-with-its-text ()
+  "A function on `harness-tools-handin-block-functions' stops the hand-in.
+Its text is the error the agent reads, it is given the task, and no
+report is recorded."
+  (harness-tools-handin-test-with
+    (let ((seen (list nil))
+          (old harness-tools-handin-block-functions))
+      (unwind-protect
+          (progn
+            ;; The list is the global one: the tool may run from a timer,
+            ;; where a let binding of it would not be seen.
+            (setq harness-tools-handin-block-functions
+                  (list (lambda (task) (setcar seen task) "Close the open thread first.")))
+            (let ((result (harness-tools-handin-test--hand-in)))
+              (should (plist-get result :is-error))
+              (should-not (plist-get result :end-turn))
+              (should (string-match-p "Close the open thread first" (plist-get result :content)))
+              (should (equal "t1" (plist-get (car seen) :id)))
+              (should-not harness-tools-handin-test--handed-in)))
+        (setq harness-tools-handin-block-functions old)))))
+
+(ert-deftest harness-tools-handin-a-block-function-that-signals-refuses-nothing ()
+  "A check that cannot be made is no reason to keep the work from the user.
+The functions after it are asked all the same."
+  (harness-tools-handin-test-with
+    (let ((old harness-tools-handin-block-functions))
+      (unwind-protect
+          (progn
+            (setq harness-tools-handin-block-functions
+                  (list (lambda (_task) (error "The check itself broke"))))
+            (let ((result (harness-tools-handin-test--hand-in)))
+              (should-not (plist-get result :is-error))
+              (should (plist-get result :end-turn))
+              (should harness-tools-handin-test--handed-in))
+            (setq harness-tools-handin-test--handed-in nil
+                  harness-tools-handin-block-functions
+                  (list (lambda (_task) (error "The check itself broke"))
+                        (lambda (_task) "Still to do.")))
+            (let ((result (harness-tools-handin-test--hand-in)))
+              (should (plist-get result :is-error))
+              (should (string-match-p "Still to do" (plist-get result :content)))
+              (should-not harness-tools-handin-test--handed-in)))
+        (setq harness-tools-handin-block-functions old)))))
+
+(ert-deftest harness-tools-handin-a-block-function-is-not-asked-for-a-task-that-cannot-continue ()
+  "A task that says it cannot continue is not held to the harness's checks."
+  (harness-tools-handin-test-with
+    (let ((asked (list 0))
+          (old harness-tools-handin-block-functions))
+      (unwind-protect
+          (progn
+            (setq harness-tools-handin-block-functions
+                  (list (lambda (_task) (cl-incf (car asked)) "Not yet.")))
+            (let ((result (harness-tools-handin-test--hand-in :cannot_continue t)))
+              (should-not (plist-get result :is-error))
+              (should (plist-get result :end-turn)))
+            (should (= 0 (car asked))))
+        (setq harness-tools-handin-block-functions old)))))
+
 ;;;; The screenshots a report holds
 
 (ert-deftest harness-tools-handin-the-screenshots-it-records-are-the-pictures-a-phone-is-given ()

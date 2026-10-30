@@ -2405,6 +2405,38 @@ the same would carry the bar on."
   (mapcar (lambda (n) (plist-get n :content))
           (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes sid))))
 
+(ert-deftest harness-ui-tasks-keep-working-and-put-in-review ()
+  "The board moves a task out of review, and back into it, by hand.
+[Keep working] takes it to the working phase, its report kept; Put in
+review, in its menu, puts it back without waiting for a hand-in."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-require-verification t))
+      (with-current-buffer board (harness-ui-tasks-refresh))
+      (harness-ui-tasks-test--settings-say board t)
+      (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
+      (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Fix the flaky test")
+      (let ((id (plist-get (car (harness-call 'task/list default-directory)) :id)))
+        (harness-ui-tasks-test--goto-card board "Fix the flaky test")
+        (with-current-buffer board
+          (should (member '("Keep working" harness-ui-tasks-return-to-work)
+                          (harness-ui-tasks--actions (harness-ui-tasks--task))))
+          (call-interactively #'harness-ui-tasks-return-to-work))
+        (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
+                           10 "the task to leave review")
+        (let ((task (harness-call 'task/get id)))
+          (should (equal "working" (plist-get task :phase)))
+          (should (plist-get task :report)))
+        ;; At work, not waiting on the user: no question was asked, the
+        ;; turn ended talking to them.
+        (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Fix the flaky test")
+        (harness-ui-tasks-test--goto-card board "Fix the flaky test")
+        (with-current-buffer board
+          (should (member '("Put in review" harness-ui-tasks-force-review)
+                          (harness-ui-tasks--actions (harness-ui-tasks--task))))
+          (call-interactively #'harness-ui-tasks-force-review))
+        (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Fix the flaky test")
+        (should (eq 'review (plist-get (harness-call 'task/get id) :state)))))))
+
 (ert-deftest harness-ui-tasks-review-verify-and-send-back ()
   "Finished work waits in Ready for review: R sends it back with feedback, v accepts it."
   (harness-ui-tasks-test-with

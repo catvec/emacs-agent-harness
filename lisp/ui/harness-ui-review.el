@@ -5,9 +5,13 @@
 ;; A task waiting for review shows a banner wherever its work is looked
 ;; at: that the work is done and waits for the user, and the buttons that
 ;; act on it -- [Verify], which accepts the work and merges its branch,
-;; and [Send back].  It is the board's Ready for review: the same mark
-;; and the same wording, so accepting work is one action wherever the
-;; user is.  One banner, one set of commands and keys, in two places:
+;; [Send back], which sends it back with the feedback in the box, and
+;; [Keep working], which takes it out of review into the working phase
+;; (`harness-tasks-working-phase'): the agent goes on with the task, the
+;; report kept for its next hand-in, and no feedback is recorded.  It is
+;; the board's Ready for review: the same mark and the same wording, so
+;; accepting work is one action wherever the user is.  One banner, one
+;; set of commands and keys, in two places:
 ;;
 ;;   the session  above its compose box, a chat panel
 ;;                (`harness-chat-panel-functions'), with [Review Changes] too,
@@ -56,11 +60,16 @@
 ;; (`harness-ui-review--send' through `harness-ui-report-compose-functions'),
 ;; and there the review is loaded, so it can say there is nothing to
 ;; send before sending.  Its keys,
-;; C-c C-v to verify and C-c C-x to send back, are those of
-;; `harness-ui-review-minor-mode', on only while the banner shows: the
-;; rest of the time the buffer's own keys stand, C-c C-v attaching the
-;; clipboard.  The banner disappears when the task leaves review, whoever
-;; moved it, and its keys with it.
+;; C-c C-v to verify, C-c C-x to send back and C-c C-g to keep working,
+;; are those of `harness-ui-review-minor-mode', on only while the banner
+;; shows: the rest of the time the buffer's own keys stand, C-c C-v
+;; attaching the clipboard.  The banner disappears when the task leaves
+;; review, whoever moved it -- verified, sent back, taken back to work by
+;; its [Keep working], or put back at work by `task/force-review' -- and
+;; its keys with it.  A task put in review by hand, without `hand_in'
+;; (`task/force-review', the board's [Put in review]), shows the banner
+;; with the report it handed in last, or says that none came if it
+;; handed none in.
 
 ;;; Code:
 
@@ -178,10 +187,13 @@ such, so the lookup happens once per session."
     (gethash sid harness-ui-review--tasks)))
 
 (defun harness-ui-review--reviewing-p (task)
-  "Non-nil when TASK waits for the user's review, not archived."
-  (and task
-       (equal (plist-get task :state) "review")
-       (not (harness-json-true-p (plist-get task :archived)))))
+  "Non-nil when TASK waits for the user's review, not archived.
+TASK may come from the wire, its state a string, or from a method of
+this Emacs, its state a symbol."
+  (let ((state (plist-get task :state)))
+    (and task
+         (equal "review" (if (symbolp state) (symbol-name state) state))
+         (not (harness-json-true-p (plist-get task :archived))))))
 
 ;;;; The task under review
 
@@ -205,6 +217,20 @@ its report popout, while it waits for review."
     (harness-ui-call "_harness/task/verify" (list :id (plist-get task :id)) #'ignore
                      (lambda (e) (message "Could not verify: %s" (harness-error-message e))))
     (message "Verified")))
+
+(defun harness-ui-review-keep-working ()
+  "Take the task this buffer shows out of review, back to the working phase.
+Its banner goes and the agent goes on with the work: the report it
+handed in stands until it hands in another, and the next message in its
+box is an ordinary message, not feedback.  The work is put back in
+review when a turn hands it in again, or by hand (`task/force-review').
+In a task's session or in its report popout, while it waits for review."
+  (interactive)
+  (let ((task (harness-ui-review--current-task)))
+    (harness-ui-call "_harness/task/return-to-work" (list :id (plist-get task :id)) #'ignore
+                     (lambda (e) (message "Could not take it out of review: %s"
+                                          (harness-error-message e))))
+    (message "Back to work: the agent goes on with the task")))
 
 (defun harness-ui-review-reject ()
   "Send the work of the task this buffer shows back: say what should change.
@@ -373,6 +399,10 @@ then, the report being the window it is drawn in."
      (harness-ui-review--button "[Send back]" #'harness-ui-review-reject
                                 "Type the feedback in the box below, then C-c C-c")
      (harness-ui-review--key #'harness-ui-review-reject)
+     "   "
+     (harness-ui-review--button "[Keep working]" #'harness-ui-review-keep-working
+                                "Take the task out of review; the agent goes on with the work")
+     (harness-ui-review--key #'harness-ui-review-keep-working)
      ;; A round that handed none in has nothing for [Review Changes] to
      ;; pop out that the session does not show already.  [Review Changes]
      ;; as on the board's card (`harness-ui-tasks--card-buttons'), not
@@ -395,15 +425,18 @@ then, the report being the window it is drawn in."
   (define-key map (kbd "C-c C-v") #'harness-ui-review-verify)
   ;; No Shift to hold: x sits next to c and two keys from v, so a slip
   ;; does not verify (which merges) instead.
-  (define-key map (kbd "C-c C-x") #'harness-ui-review-reject))
+  (define-key map (kbd "C-c C-x") #'harness-ui-review-reject)
+  ;; g, to go on: the task leaves review and its agent keeps working.
+  (define-key map (kbd "C-c C-g") #'harness-ui-review-keep-working))
 
 (define-minor-mode harness-ui-review-minor-mode
   "Keys to review the task this buffer shows, on while its banner shows.
 In a task's session and in its report popout, while the task waits for
 your review: \\<harness-ui-review-minor-mode-map>\\[harness-ui-review-verify] verifies it and \\[harness-ui-review-reject] sends it back, with what the
-compose box holds as the feedback.  Elsewhere, and once the task has
-left review, the keys are the buffer's own (C-c C-v attaches the
-clipboard to the box).
+compose box holds as the feedback; \\[harness-ui-review-keep-working]
+leaves it in the working phase, the agent going on with the task.
+Elsewhere, and once the task has left review, the keys are the buffer's
+own (C-c C-v attaches the clipboard to the box).
 
 \\{harness-ui-review-minor-mode-map}"
   :lighter nil :keymap harness-ui-review-minor-mode-map :group 'harness-ui-review)
@@ -414,7 +447,8 @@ clipboard to the box).
      '("Review"
        ["Task in review"
         ("C-c C-v" "Verify (accept)" harness-ui-review-verify)
-        ("C-c C-x" "Send back with feedback" harness-ui-review-reject)]))
+        ("C-c C-x" "Send back with feedback" harness-ui-review-reject)
+        ("C-c C-g" "Keep working (leave review)" harness-ui-review-keep-working)]))
 
 ;; The banner's keys once sat in the chat's own map, so they acted in
 ;; every session: C-c C-v hid the box's attach-the-clipboard, and C-c C-R,

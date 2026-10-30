@@ -28,7 +28,11 @@ major mode, then `harness-compose-insert` wherever it draws the box
     what it is and the part of it quoted, with the words of the reply
     typed under it, in the same box (see the Threads section).  Your
     own message has a line above the first card, and C-c < moves
-    point out of a reply to it, and back into the reply;
+    point out of a reply to it, and back into the reply.  C-c e, or
+    the card's menu, edits what the reply answers: trimmed, elided
+    with [...], or split into replies of their own, each with its own
+    card and words, as a mail answers a quote a part at a time (see
+    Changing what a reply answers);
   - typing anywhere in the buffer goes into the box: a printable
     character (or a yank) with point outside it moves point to the
     end of the box and types there -- once the box holds a card, to
@@ -108,6 +112,13 @@ prompt blocks with `harness-compose-attachment-block`.
 - `harness-compose-attach-task` — Attach TASK, a task of the box's project, to the next message.
 - `harness-compose-beginning-of-buffer` — Move to the top of the compose box; from there, to the top of the buffer.
 - `harness-compose-download` — Download URL in the background, then attach the file.
+- `harness-compose-edit-thread` — Edit what a reply in a thread answers: trim it, elide it, or split it.
+- `harness-compose-edit-thread-apply` — Put the quote the buffer holds back in the box, as the replies it makes.
+- `harness-compose-edit-thread-cancel` — Leave the reply as it was; the quote the buffer holds goes.
+- `harness-compose-edit-thread-elide` — Replace the region with `compose-quote-elision`, as a mail omits a part.
+- `harness-compose-edit-thread-merge` — Join the reply at point with the one after it.
+- `harness-compose-edit-thread-reset` — Start again from the quote as it was when this buffer opened.
+- `harness-compose-edit-thread-split` — Split the quote at point into another reply.
 - `harness-compose-end-of-buffer` — Move to the bottom of the compose box; from there, to the bottom of the buffer.
 - `harness-compose-enter-reply` — Move point into a reply: to the end of the words under its card.
 - `harness-compose-leave-reply` — Move point out of the reply, to your own message above the first card.
@@ -125,7 +136,6 @@ prompt blocks with `harness-compose-attachment-block`.
 - `harness-compose-reply-hints` — Non-nil: a card says how to move point out of its reply, and back in.
 - `harness-compose-thumbnail-lines` — Height of the thumbnail an attached image or video shows, in lines.
 - `harness-compose-yank-media` — Non-nil: yanking in a compose box attaches the media on the clipboard.
-- `harness-thread-card-lines` — Most lines of a quote a thread's card shows; the tooltip has the rest.
 
 ## Uses
 

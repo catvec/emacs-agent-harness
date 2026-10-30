@@ -24,6 +24,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'harness-links)
+(require 'harness-util)
 
 (defgroup harness-ui-markdown nil
   "Markdown rendering for the harness."
@@ -57,6 +58,15 @@
   "Table header cells." :group 'harness-ui-markdown)
 (defface harness-md-strike '((t :strike-through t))
   "Struck text." :group 'harness-ui-markdown)
+
+(defvar harness-ui-markdown-thread-function nil
+  "Function drawing a reply in a thread written as a <thread> block, or nil.
+It is called with the block as `harness-thread-parse-blocks' returns it,
+a plist of its id, status, quote and body, and returns the string to
+show in place of the block.  The chat sets it, so that the same little
+block in a message of the user's and of the agent's reads as the thread
+reply it is; a view that does not set it shows the words of the reply,
+with the tags left out.")
 
 (defcustom harness-ui-markdown-language-modes
   '(("elisp" . emacs-lisp-mode) ("emacs-lisp" . emacs-lisp-mode) ("lisp" . lisp-mode)
@@ -601,6 +611,28 @@ rendered from."
               (while (and lines (string-match-p "|" (car lines)))
                 (push (pop lines) rows))
               (emit (mark (harness-ui-markdown--table (nreverse rows)) first (here)))))
+           ;; A reply in a thread, as a <thread> block
+           ((string-match "\\`[ ]\\{0,3\\}<thread\\(?:[ \t][^>]*\\)?>[ \t]*\\'" line)
+            (flush-para)
+            (let ((block-lines (list line))
+                  (closed nil))
+              (while (and lines (not closed))
+                (let ((next (pop lines)))
+                  (push next block-lines)
+                  (when (string-match-p "</thread>" next) (setq closed t))))
+              (let* ((raw (string-join (nreverse block-lines) "\n"))
+                     (parsed (car (harness-thread-parse-blocks raw)))
+                     (rendered
+                      (cond
+                       ((and parsed harness-ui-markdown-thread-function)
+                        (funcall harness-ui-markdown-thread-function parsed))
+                       (parsed
+                        (concat (propertize (format "↳ thread %s\n" (or (plist-get parsed :id) "new"))
+                                            'face 'harness-md-quote-bar)
+                                (harness-ui-markdown-render (plist-get parsed :body))))
+                       (t raw))))
+                (emit (mark (if (string-suffix-p "\n" rendered) rendered (concat rendered "\n"))
+                            first (here))))))
            ;; Block quote
            ((string-match "\\`[ ]\\{0,3\\}>[ ]?\\(.*\\)\\'" line)
             (flush-para)

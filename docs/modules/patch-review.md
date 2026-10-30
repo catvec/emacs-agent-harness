@@ -92,6 +92,28 @@ what ends with a marker.  Only a task's session has a review, and only
 an agent that has `review_comment` can answer in it: any other
 session's replies stay plain, answered inline.
 
+THE <thread> FORM IN MESSAGES.  A reply in a thread can be written in
+the message itself, by the user and the agent alike
+(`harness-thread-parse-blocks`): <thread id="..."><quote>what it
+answers</quote>the reply</thread>, status="closed" to close it.  The
+chat draws it as the card a reply in a thread is, and the transcript
+keeps it as it was written.  The user's is a comment of the review --
+a draft while the task waits in review, sent with the feedback that
+sends it back -- and the agent's, read from its final message
+(`agent/assistant-message`), is its answer in the thread.  This is the
+way an agent answers without the tool, and the format its prompt
+names; a block that names no thread the review has stays as the user
+wrote it, for the agent to read.
+
+THE OPEN THREADS.  A thread with a sent comment that is still open is
+a question the work has not answered.  While this module is loaded,
+and `harness-tools-handin-require-closed-threads` is on, `hand_in`
+refuses until every such thread is closed
+(`harness-patch-review--hand-in-blocker`, on
+`harness-tools-handin-block-functions`): the working phase goes on
+until the agent has answered what the user asked.  Without the module
+there is no such check, and the hook is empty.
+
 THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
 the session while the agent was at work -- steering, quoting what the
 agent said and answering it -- was never feedback, so no round holds
@@ -119,6 +141,7 @@ to say.
 - `patch-review/drafts` (task-id) — Return the draft comments of task TASK-ID's review, those not sent yet, as data.
 - `patch-review/get` (task-id) — Return the review of task TASK-ID as plain data: its versions and threads.
 - `patch-review/import-manual` (task-id) — Make the user's words by hand in task TASK-ID's session threads of its review.
+- `patch-review/open-threads` (task-id) — Return the open threads of task TASK-ID's review, as a list of plists.
 - `patch-review/set-viewed` (task-id kind files on) — Mark FILES viewed in task TASK-ID's review, or approved, or take the mark off.
 - `patch-review/threads-text` (task-id &optional status) — Return the threads of task TASK-ID's review as text for its agent.
 - `patch-review/viewed` (task-id) — Return the files viewed, and approved, in task TASK-ID's review.
@@ -156,6 +179,7 @@ to say.
 
 ### Filter chains it joins
 
+- `agent/assistant-message` at 20 → `harness-patch-review--on-assistant-message`
 - `agent/message` at 40 → `harness-patch-review--on-message`
 - `task/feedback-attachments` at 40 → `harness-patch-review--on-feedback-attachments`
 
@@ -163,4 +187,5 @@ to say.
 
 - `change-review-changed-functions` → `harness-patch-review--changed`
 - `harness-tasks-feedback-additions-functions` → `harness-patch-review--additions`
+- `harness-tools-handin-block-functions` → `harness-patch-review--hand-in-blocker`
 

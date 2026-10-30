@@ -3992,6 +3992,64 @@ first card stays the message's own; sending the box splits it at the cards."
                            (mapcar (lambda (a) (plist-get (car (harness-thread-refs (plist-get a :thread))) :text))
                                    atts)))))))))
 
+(ert-deftest harness-ui-chat-c-c->-on-a-plan-without-a-region-replies-to-the-plan ()
+  "C-c > on a plan starts a thread to the plan, whole.
+The same key does it in the box and out of it, wherever the chat binds it."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (content "1. Wait for the migration.\n2. Roll out.")
+           (node nil))
+      (harness-call 'session/append sid (list :kind 'plan :title "Deploy" :content content))
+      (let* ((buf (harness-ui-chat-test-open sid))
+             (node (harness-ui-chat-test-node-of buf "plan"))
+             (refs (harness-ui-chat-test-refs
+                    (caar (harness-ui-chat-test-reply buf (harness-ui-chat-test-find buf "Wait for"))))))
+        (should (= 1 (length refs)))
+        (should (equal "plan" (plist-get (car refs) :who)))
+        (should (equal node (plist-get (car refs) :node)))
+        (should (string-search "Wait for the migration." (plist-get (car refs) :text)))
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (search-forward "Wait for the migration")
+          (should (eq 'harness-chat-thread-reply (key-binding (kbd "C-c >"))))
+          (goto-char harness-compose-end)
+          (should (eq 'harness-chat-thread-reply (key-binding (kbd "C-c >")))))))))
+
+(ert-deftest harness-ui-chat-c-c->-with-nothing-to-reply-to-says-so ()
+  "A session with no message yet has nothing for C-c > to reply to, and says so."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (goto-char harness-compose-end)
+        (let ((err (should-error (call-interactively #'harness-chat-thread-reply) :type 'user-error)))
+          (should (string-match-p "message to reply to" (error-message-string err))))))))
+
+(ert-deftest harness-ui-chat-draws-a-thread-block-in-a-message ()
+  "A <thread> block in a message is drawn as a thread card, not as tags.
+Its line names the thread and its status; under it the quote it answers
+is drawn whole, and then the words."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid
+                    '(:kind assistant
+                      :content "Here is the answer.\n\n<thread id=\"t-1234\" status=\"closed\">\n<quote>The build is green.</quote>\nBecause the tests ran.\n</thread>\n"))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (should (search-forward "Here is the answer." nil t))
+          (should (search-forward "↳ " nil t))
+          (should (search-forward "t-1234" nil t))
+          (should (search-forward "closed" nil t))
+          ;; The previous reply, whole, in the card's quote face.
+          (should (search-forward "The build is green." nil t))
+          (should (memq 'harness-thread-quote-face
+                        (ensure-list (get-text-property (match-beginning 0) 'face))))
+          (should (search-forward "Because the tests ran." nil t))
+          (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+            (should-not (string-search "<thread" text))
+            (should-not (string-search "<quote>" text))))))))
+
 (defun harness-ui-chat-test-bars (pos)
   "Return the bars drawn down the left of the line at POS, as a string.
 Those of the line's prefix, which the transcript draws beside the text

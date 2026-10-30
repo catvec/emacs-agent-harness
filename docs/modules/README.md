@@ -348,6 +348,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 
 | Chain | Run by | Joined by (priorities) |
 |---|---|---|
+| `agent/assistant-message` | [agent](agent.md) | [patch-review](patch-review.md) (20) |
 | `agent/before-turn` | [agent](agent.md), [seed](seed.md) | [cache-compact](cache-compact.md) (11), [cache-warm](cache-warm.md) (1), [compaction](compaction.md) (11, 12, 20), [cowboy](cowboy.md) (15), [fallback](fallback.md) (10), [handoff](handoff.md) (10), [merge](merge.md) (30), [seed](seed.md) (5), [tasks](tasks.md) (2), [usage](usage.md) (30) |
 | `agent/builtin-tools` | [tools](tools.md) | [provider-claude](provider-claude.md) (50), [tools-web](tools-web.md) (50) |
 | `agent/hold` | [agent](agent.md) | [compaction](compaction.md) (50) |
@@ -411,6 +412,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-start-hook` | `harness.el`, `harness-revision.el` | `harness-revision.el` |
 | `harness-tasks-feedback-additions-functions` | [patch-review](patch-review.md), [tasks](tasks.md) | [patch-review](patch-review.md) |
 | `harness-thread-ref-functions` | [ui-chat](ui-chat.md) |  |
+| `harness-tools-handin-block-functions` | [tools-handin](tools-handin.md) | [patch-review](patch-review.md) |
 | `harness-ui-cache-warm-functions` | [ui-cache-warm](ui-cache-warm.md) |  |
 | `harness-ui-config-load-hooks` |  | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
 | `harness-ui-config-sections-functions` | [ui-config](ui-config.md) | [ui-chatgpt-plan](ui-chatgpt-plan.md) |

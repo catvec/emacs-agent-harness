@@ -115,3 +115,56 @@ response make the block, as the compose box's attachment does."
 
 (provide 'harness-thread-test)
 ;;; harness-thread-test.el ends here
+
+;;;; The <thread> form in messages
+
+(defun harness-thread-test--tagged (text)
+  "Return the parsed blocks of TEXT without the offsets and the raw text."
+  (mapcar (lambda (block)
+            (list :id (plist-get block :id) :status (plist-get block :status)
+                  :quote (plist-get block :quote) :body (plist-get block :body)))
+          (harness-thread-parse-blocks text)))
+
+(ert-deftest harness-thread-parses-the-tag-forms-agents-write ()
+  "The <thread> form is read as an agent writes it: tags on lines of their own
+or one line, names in any case, the id quoted either way or bare, the quote
+optional and wrapped in <quote>, the answer wrapped in <reply> or another tag,
+the id a child tag, and the status a tag attribute.  A block never closed, or
+one in a fenced code block, is no reply."
+  (should (equal '((:id "t-1" :status nil :quote "The build is green." :body "Why?"))
+                 (harness-thread-test--tagged
+                  "<thread id=\"t-1\">\n<quote>The build is green.</quote>\nWhy?\n</thread>")))
+  (should (equal '((:id "t-2" :status nil :quote "Q" :body "A"))
+                 (harness-thread-test--tagged
+                  "<thread id=\"t-2\"><quote>Q</quote>A</thread>")))
+  (should (equal '((:id "t-3" :status "closed" :quote "Q" :body "A"))
+                 (harness-thread-test--tagged
+                  "<Thread id='t-3' status=\"closed\"><QUOTE>Q</QUOTE><reply>A</reply></Thread>")))
+  (should (equal '((:id "t-4" :status nil :quote nil :body "A line."))
+                 (harness-thread-test--tagged "<thread id=t-4>A line.</thread>")))
+  (should (equal '((:id "t-5" :status nil :quote "Q" :body "A"))
+                 (harness-thread-test--tagged
+                  "<thread><id>t-5</id><quote>Q</quote>A</thread>")))
+  ;; Whitespace inside the tag: the quote's tags still leave the words alone.
+  (should (equal '((:id "t-6" :status nil :quote "Q" :body "A"))
+                 (harness-thread-test--tagged
+                  "<thread id=\"t-6\">\n<quote >Q</quote >\n<reply>A</reply>\n</thread>")))
+  ;; No quote: the answer is the whole block.
+  (should (equal '((:id "t-7" :status nil :quote nil :body "Just this."))
+                 (harness-thread-test--tagged "<thread id=\"t-7\">Just this.</thread>")))
+  ;; Never closed, and a code example, are no replies.
+  (should-not (harness-thread-parse-blocks "<thread id=\"t-8\">\nA question?"))
+  (should-not (harness-thread-parse-blocks
+               "As in:\n\n```\n<thread id=\"t-9\"><quote>Q</quote>A</thread>\n```\n"))
+  ;; Two blocks, in order, with the text between them left alone.
+  (should (equal '((:id "t-10" :status nil :quote nil :body "One.")
+                   (:id "t-11" :status nil :quote nil :body "Two."))
+                 (harness-thread-test--tagged
+                  "<thread id=\"t-10\">One.</thread>\nAnd in between.\n<thread id=\"t-11\">Two.</thread>"))))
+
+(ert-deftest harness-thread-renders-a-tag-block-as-a-mail-quotes-it ()
+  "The text kept of a parsed block is its quote as a block quote, then the answer."
+  (let ((block (car (harness-thread-parse-blocks
+                     "<thread id=\"t-1\">\n<quote>The build is green.\nThe deploy is pending.</quote>\nWhy?\n</thread>"))))
+    (should (equal "> The build is green.\n> The deploy is pending.\n\nWhy?"
+                   (harness-thread-render-text block)))))

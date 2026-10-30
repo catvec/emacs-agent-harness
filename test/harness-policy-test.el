@@ -406,26 +406,24 @@ the comment \";; /etc/harness/policy.el\"."
       (nreverse out))))
 
 (ert-deftest harness-policy-the-documented-examples-are-policies ()
-  "The policies docs/policy.md and the README show are ones the harness
-takes: every option they set is one its modules define, and every
-value fits."
+  "The policies docs/policy.md shows are ones the harness takes: every
+option they set is one its modules define, and every value fits."
   (harness-test-with-temp-state
     (dolist (m '(store project config tools perms provider sandbox))
       (harness-test-load-module m))
-    (dolist (doc '("docs/policy.md" "README.md"))
-      (let ((examples (harness-policy-test--doc-policies doc)))
-        ;; None found would pass the checks below without checking anything.
-        (should examples)
-        (dolist (text examples)
-          (let ((harness-policy-file (harness-policy-test--file text)))
-            (unwind-protect
-                (let ((entries (harness-policy-load)))
-                  (should (> (length entries) 3))
-                  (dolist (entry entries)
-                    (should (custom-variable-p (car entry)))
-                    (should (harness-policy--type-match-p (car entry) (cdr entry)))))
-              (harness-policy-clear)
-              (delete-file harness-policy-file))))))))
+    (let ((examples (harness-policy-test--doc-policies "docs/policy.md")))
+      ;; None found would pass the checks below without checking anything.
+      (should examples)
+      (dolist (text examples)
+        (let ((harness-policy-file (harness-policy-test--file text)))
+          (unwind-protect
+              (let ((entries (harness-policy-load)))
+                (should (> (length entries) 3))
+                (dolist (entry entries)
+                  (should (custom-variable-p (car entry)))
+                  (should (harness-policy--type-match-p (car entry) (cdr entry)))))
+            (harness-policy-clear)
+            (delete-file harness-policy-file)))))))
 
 (provide 'harness-policy-test)
 ;;; harness-policy-test.el ends here

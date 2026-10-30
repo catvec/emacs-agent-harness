@@ -1137,15 +1137,39 @@ task's card (`harness-tasks--missing-report')."
    (list (list :file "acme/timing.py" :caption "The timing middleware and its threshold"))
    "Requests slower than 500 ms are invisible in the logs, so slowness is found only by report."))
 
-(defun harness-media--task-slow-again (_request)
-  "Task: log slow requests, after review: the round hands its work in again."
-  (list (harness-media--tool "edit_file" :path "acme/timing.py"
-                             :old_string "SLOW_SECONDS = 0.5" :new_string "SLOW_SECONDS = 0.5  # seconds")
-        (harness-media--git-commit "Say the threshold is in seconds")
-        (harness-media--say "The threshold says it is in seconds now: handing it in again.")
-        (harness-media--tool "hand_in" :problem "The threshold constant does not say it is in seconds."
-                             :summary "`SLOW_SECONDS`, the threshold of `acme.timing`, says it is in seconds."
-                             :evidence (list (list :file "acme/timing.py" :caption "The threshold, in seconds")))))
+(defun harness-media--request-text (request)
+  "Return the text of REQUEST's messages, as one string."
+  (let (texts)
+    (dolist (message (plist-get request :messages))
+      (dolist (block (plist-get message :content))
+        (when (stringp (plist-get block :text))
+          (push (plist-get block :text) texts))))
+    (string-join (nreverse texts) "\n")))
+
+(defun harness-media--thread-id (text)
+  "Return the first review thread id TEXT names, as the feedback does, or nil."
+  (when (and (stringp text)
+             (string-match "\\[thread \\([A-Za-z0-9][A-Za-z0-9_.-]*\\)\\]" text))
+    (match-string 1 text)))
+
+(defun harness-media--task-slow-again (request)
+  "Task: log slow requests, after review: the round answers its thread and hands in.
+The message answers the thread the feedback came in, as a message does
+\(`harness-thread-parse-blocks'), and closes it, so the hand-in is not
+refused for an open thread."
+  (let ((thread (harness-media--thread-id (harness-media--request-text request))))
+    (list (harness-media--tool "edit_file" :path "acme/timing.py"
+                               :old_string "SLOW_SECONDS = 0.5" :new_string "SLOW_SECONDS = 0.5  # seconds")
+          (harness-media--git-commit "Say the threshold is in seconds")
+          (harness-media--say
+           (concat "The threshold says it is in seconds now: handing it in again."
+                   (if thread
+                       (format "\n\n<thread id=\"%s\" status=\"closed\">\n<quote>Say which unit the threshold is in.</quote>\n`SLOW_SECONDS` is in seconds: the constant now says so, and a commit records it.\n</thread>"
+                               thread)
+                     "")))
+          (harness-media--tool "hand_in" :problem "The threshold constant does not say it is in seconds."
+                               :summary "`SLOW_SECONDS`, the threshold of `acme.timing`, says it is in seconds."
+                               :evidence (list (list :file "acme/timing.py" :caption "The threshold, in seconds"))))))
 
 (defun harness-media--task-settings (_request)
   "Task in progress: typed settings."
@@ -2004,6 +2028,46 @@ and the review banner."
   (harness-media--fullscreen-layout :slow)
   (harness-media--capture "chat"))
 
+(defun harness-media--user-thread (task-id body)
+  "Add a sent thread of the user's, BODY, to the review of TASK-ID.
+Return its id.  It is what a comment made in the review is, as the
+threads view draws it, without waiting for a session or a model."
+  (let ((thread (format "t-%s" (harness-short-id)))
+        (comment (format "c-%s" (harness-short-id))))
+    (harness-call 'patch-review/apply task-id
+                  (list :op "add-comment" :thread thread
+                        :comment (list :id comment :thread thread :body body
+                                       :time (float-time) :sent (float-time)
+                                       :author '(:kind "user" :name "Noah Huppert"
+                                                 :email "noah@acme.example"))))
+    thread))
+
+(defun harness-media-shot-chat-threads ()
+  "The threads of a task at work, in place of its compose box.
+The task handed its work in, then was taken back to work with
+[Keep working]; C-c T shows the review's threads -- the filter, the
+keys, the cards -- where the box was, and [Compose] brings the box back
+with the words it held.  The open thread is one the user made in the
+review, as a review's threads are made."
+  (let ((id (plist-get (plist-get harness-media--world :tasks) :slow)))
+    (harness-call 'task/return-to-work id)
+    (harness-media--wait-task id (lambda (task) (equal (harness-media--column task) "active"))
+                              "to be back at work")
+    (unless (harness-call 'patch-review/open-threads id)
+      (harness-media--user-thread id "Does the warning include the request id?"))
+    (let ((buffer (harness-media--fullscreen-layout :slow)))
+      (with-current-buffer buffer
+        (goto-char (point-max))
+        (call-interactively #'harness-chat-show-threads))
+      (harness-media--settle 1)
+      (harness-media--to-bottom buffer)
+      (with-current-buffer buffer
+        (when-let* ((window (get-buffer-window buffer)))
+          (when (markerp harness-chat--threads-view-start)
+            (set-window-start window harness-chat--threads-view-start t)
+            (set-window-point window harness-chat--threads-view-start))))
+      (harness-media--capture "chat-threads"))))
+
 (defun harness-media-shot-chat-permission ()
   "A chat waiting for permission to run a command."
   (harness-media--chat-shot (plist-get harness-media--world :permission) "acme/webhooks.py")
@@ -2785,6 +2849,48 @@ after, so no other picture shows them."
       (harness-call 'task/delete task))
     (harness-call 'session/delete id)))
 
+;;;; Splitting what a reply answers
+
+(defun harness-media-shot-thread-edit ()
+  "The quote of a reply edited in a buffer of its own, split into two replies.
+The user selected a part of the agent's words and C-c > made a reply
+that answers it; the words typed under its card are the reply.  C-c e
+opens the quote in a buffer below, and M-RET after its first clause
+splits it: the line says another reply starts there, and C-c C-c would
+put both in the box, each a card of its own with its own answer.
+The session and its task are made here and deleted after, as
+`harness-media-shot-thread-reply' does."
+  (let ((id (harness-media--new-session :name "Retry failed webhooks"
+                                        :model "claude:claude-opus-5-5"
+                                        :permission-mode 'accept-edits)))
+    (harness-media--prompt id harness-media--thread-question)
+    (let* ((task (plist-get (harness-call 'task/adopt id) :id))
+           (buffer (harness-media--chat-shot id "acme/webhooks.py"))
+           (chat (get-buffer-window buffer)))
+      (select-window chat)
+      (with-current-buffer buffer
+        (harness-media--select-text
+         "retry it from a background thread, waiting 1, 2, 4 and 8 minutes between attempts")
+        (harness-media--keys "C-c >")
+        (harness-media--type "Keep them long enough that one outage is not one retry storm.")
+        (harness-media--keys "C-c e"))
+      (let ((edit (get-buffer "*Reply 1 quote*")))
+        (unless edit (error "C-c e opened no buffer for the quote"))
+        (unless (get-buffer-window edit) (error "The quote is not shown"))
+        (select-window (get-buffer-window edit))
+        (with-current-buffer edit
+          (goto-char (point-min))
+          (unless (search-forward "retry it from a background thread," nil t)
+            (error "The quote is not in the editor"))
+          (harness-media--keys "M-RET")
+          (goto-char (point-min))
+          (unless (search-forward "── another reply ──" nil t)
+            (error "M-RET split no reply")))
+        (harness-media--settle 1)
+        (harness-media--capture "thread-edit"))
+      (harness-call 'task/delete task))
+    (harness-call 'session/delete id)))
+
 ;;; The thread a reply made, in the task's review
 
 (defun harness-media--thread-reply-review-prepare ()
@@ -2822,13 +2928,14 @@ thread's id."
 The user quoted a part of what the agent said and asked about it; the
 review has that as a thread, the quote above the question, and the agent's
 answer in it.  The report at its threads, the filter on all of them."
+  (harness-media--unfold (plist-get (plist-get harness-media--world :tasks) :slow) "threads")
   (harness-media--thread-reply-review-prepare)
   (let ((popout (harness-media--review-layout)))
     (with-selected-window (get-buffer-window popout)
       (change-review-ui-set-filter 'all)
       (harness-media--settle 0.5)
       (goto-char (point-min))
-      (re-search-forward "^Threads ")
+      (re-search-forward "^[▾▸] Threads ")
       (beginning-of-line))
     (harness-media--fit-popout-shot 56)
     (with-selected-window (get-buffer-window popout)
@@ -3865,6 +3972,15 @@ beside acme/timing.py.  Done once."
       (harness-media--git-in worktree "add" "-A")
       (harness-media--git-in worktree "commit" "-q" "-m" "Time the requests the application serves"))))
 
+(defun harness-media--unfold (id &rest keys)
+  "Open the report sections KEYS of task ID for the picture.
+A second hand-in starts folded, as a reader who saw the first one wants
+it; a picture of what a section holds opens it, as a press would, so
+that the reader's own state is not what the picture depends on."
+  (let ((task (harness-media--task id)))
+    (dolist (key keys)
+      (harness-ui-report--set-fold task key nil))))
+
 (defun harness-media--review-layout ()
   "Show the board the whole frame high, the slow-request task's report over it.
 Return the report's popout buffer, once it shows its changes."
@@ -3970,16 +4086,17 @@ The threads are the library's, kept by the harness: the user's comments,
 the agent's answers, a draft, and the round of feedback from before
 there were threads, closed.  They are a section under the files, in the
 same buffer."
+  (harness-media--unfold (plist-get (plist-get harness-media--world :tasks) :slow) "changes")
   (let ((popout (harness-media--review-layout)))
     (with-selected-window (get-buffer-window popout)
       (goto-char (point-min))
-      (re-search-forward "^Changes (")
+      (re-search-forward "^[▾▸] Changes (")
       (beginning-of-line)
       (recenter 0))
     (harness-media--fit-popout-shot 42)
     (with-selected-window (get-buffer-window popout)
       (goto-char (point-min))
-      (re-search-forward "^Changes (")
+      (re-search-forward "^[▾▸] Changes (")
       (beginning-of-line)
       (recenter 0))
     (harness-media--capture "review")))
@@ -3989,6 +4106,7 @@ same buffer."
 The filter shows them all, the closed one too; where one comment was made
 shows under it, with the lines of the diff it was made on; the agent's
 answer links to the conversation it came from."
+  (harness-media--unfold (plist-get (plist-get harness-media--world :tasks) :slow) "threads")
   (let ((popout (harness-media--review-layout)))
     (with-selected-window (get-buffer-window popout)
       (change-review-ui-set-filter 'all)
@@ -3997,12 +4115,12 @@ answer links to the conversation it came from."
       (search-forward "Is half a second")
       (call-interactively #'change-review-ui-show-origin)
       (goto-char (point-min))
-      (re-search-forward "^Threads ")
+      (re-search-forward "^[▾▸] Threads ")
       (beginning-of-line))
     (harness-media--fit-popout-shot 56)
     (with-selected-window (get-buffer-window popout)
       (goto-char (point-min))
-      (re-search-forward "^Threads ")
+      (re-search-forward "^[▾▸] Threads ")
       (beginning-of-line)
       (recenter 0))
     (harness-media--capture "review-threads")))
@@ -4013,6 +4131,8 @@ The work is looked over where it was handed in, with no click on
 [Review Changes]: the tree has the marks of the files already looked at
 and approved, the threads the user's comments and the agent's answers,
 and [Verify] and [Send back] are under them."
+  (harness-media--unfold (plist-get (plist-get harness-media--world :tasks) :slow)
+                         "changes" "threads")
   (harness-media--review-prepare)
   (harness-media--reset-layout)
   (set-frame-size nil harness-media-columns harness-media-lines)
@@ -4036,14 +4156,14 @@ and [Verify] and [Send back] are under them."
       ;; The banner from its changes to the box, in a window as high as that.
       (with-current-buffer buffer
         (goto-char harness-chat--transcript-end)
-        (re-search-forward "^Changes (")
+        (re-search-forward "^[▾▸] Changes (")
         (beginning-of-line)
         (let ((lines (count-screen-lines (point) (point-max) nil window)))
           (set-frame-size nil harness-media-columns (min harness-media-lines (+ 4 lines)))))
       (harness-media--settle 1)
       (with-selected-window window
         (goto-char harness-chat--transcript-end)
-        (re-search-forward "^Changes (")
+        (re-search-forward "^[▾▸] Changes (")
         (beginning-of-line)
         (set-window-start window (point))
         (goto-char (point-max))))
@@ -4124,12 +4244,13 @@ The Diff line marks the choice.  The files are those the diff changes, each
 with its threads; the threads of the files it leaves out are among the
 other threads, each with its file.  Taken after the other review pictures:
 it puts the report back at the branch against main when it is done."
+  (harness-media--unfold (plist-get (plist-get harness-media--world :tasks) :slow) "changes")
   (let* ((popout (harness-media--review-layout))
          (review harness-media--review)
          (heading (lambda ()
                     (with-selected-window (get-buffer-window popout)
                       (goto-char (point-min))
-                      (re-search-forward "^Changes (")
+                      (re-search-forward "^[▾▸] Changes (")
                       (beginning-of-line)
                       (recenter 0)))))
     (harness-ui-patch-review-select-diff 'since-review review)
@@ -4375,6 +4496,8 @@ The review opens under the chat in the report of the task, once its branch
 is read and its threads are drawn, with point on the thread the link
 names."
   (harness-media--links-sessions)
+  (harness-media--unfold (plist-get (plist-get harness-media--world :tasks) :slow)
+                         "changes" "threads")
   (harness-media--review-prepare)
   (cl-destructuring-bind (report _worker thread) harness-media--links
     (let ((buffer (harness-media--chat-shot report "acme/app.py"))
@@ -4397,7 +4520,7 @@ names."
         ;; wherever it is below.
         (with-selected-window (get-buffer-window popout)
           (goto-char (point-min))
-          (re-search-forward "^Changes (")
+          (re-search-forward "^[▾▸] Changes (")
           (beginning-of-line)
           (recenter 0)
           (goto-char (text-property-any (point-min) (point-max) 'change-review-thread thread)))
@@ -4458,6 +4581,7 @@ names."
     ("quote-reply" . harness-media-shot-quote-reply)
     ("quote-thread" . harness-media-shot-quote-thread)
     ("thread-reply" . harness-media-shot-thread-reply)
+    ("thread-edit" . harness-media-shot-thread-edit)
     ("access" . harness-media-shot-access)
     ("access-tools" . harness-media-shot-access-tools)
     ("access-judgements" . harness-media-shot-access-judgements)
@@ -4479,7 +4603,10 @@ names."
     ("links-followed" . harness-media-shot-links-followed)
     ;; Last of all: a thread on the slow-request task's review that no
     ;; other picture shows, made by a reply in its session.
-    ("thread-reply-review" . harness-media-shot-thread-reply-review))
+    ("thread-reply-review" . harness-media-shot-thread-reply-review)
+    ;; After every picture of the slow-request task: it takes the task
+    ;; back to work, and shows the threads where its compose box was.
+    ("chat-threads" . harness-media-shot-chat-threads))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point

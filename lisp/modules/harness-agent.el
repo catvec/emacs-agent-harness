@@ -1757,6 +1757,14 @@ it, or the method fails: what the model said must reach the transcript."
              (plist-get (harness-call 'link/canonicalize text sid node-id) :text)))
       text))
 
+(defun harness-agent--assistant-message (sid node-id text)
+  "Return TEXT, the final words of assistant node NODE-ID of SID, filtered.
+The `agent/assistant-message' filters see the words before they are
+written: a module that keeps something they say elsewhere -- the review
+threads an agent answers in a message -- records it there, and returns
+the text the transcript keeps."
+  (harness-run-filter 'agent/assistant-message (or text "") sid node-id))
+
 (defun harness-agent--finalize (turn kind)
   "Write the live node of KIND (assistant or thinking) of TURN for good.
 Whitespace held back for a node that never got visible text is dropped.
@@ -1770,7 +1778,10 @@ The turn lets go of the node whether or not it could be written."
     (unwind-protect
         (when node-id
           (harness-call 'session/update-node sid node-id
-                        :content (if thinking (or buf "") (harness-agent--written-links sid node-id (or buf "")))
+                        :content (if thinking (or buf "")
+                                   (harness-agent--assistant-message
+                                    sid node-id
+                                    (harness-agent--written-links sid node-id (or buf ""))))
                         :meta (list :model (or (gethash sid harness-agent--step-models)
                                                (plist-get (harness-call 'session/get sid) :model))
                                     :usage (and (not thinking) (harness-agent-turn-last-usage turn)))))

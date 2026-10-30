@@ -906,6 +906,135 @@ is that text as a text block, none when the text is blank, marked
 ;; [thread ID] lines of the feedback that sends a task back are another
 ;; thing, and no marker.
 
+;; A reply may also be written as a little XML-ish block, the same in a
+;; message of the user's and of the agent's:
+;;
+;;   <thread id="t-3f2a1b09" status="closed">
+;;   <quote>the part of the conversation answered</quote>
+;;   the answer
+;;   </thread>
+;;
+;; The id names the thread of a task's review to answer, its absence a
+;; new thread; status optionally closes or opens it after the comment.
+;; The quote is what the answer is about, kept above it as a mail keeps
+;; it.  The parsers below read the blocks; the review module that keeps
+;; the threads makes them comments, and the chat draws them as it draws
+;; a reply in a thread (`harness-ui-markdown-thread-function').
+
+(defconst harness-thread-tag-open-regexp
+  "<thread\\(?:[ \t]+\\([^>]*\\)\\)?>"
+  "Regexp matching the opening tag of a reply in a thread.
+Group 1 holds the tag's attributes; the match is case-insensitive when
+the caller lets `case-fold-search' be so.")
+(defconst harness-thread-tag-close-regexp
+  "</thread[ \t]*>"
+  "Regexp matching the closing tag of a reply in a thread.")
+
+(defun harness-thread--tag-attribute (attributes name)
+  "Return the value of NAME in ATTRIBUTES, a tag's, as a string, or nil.
+The value may be in double or single quotes, or bare."
+  (when (and (stringp attributes)
+             (let ((case-fold-search t))
+               (string-match (concat "\\b" (regexp-quote name)
+                                     "\\s-*=\\s-*\\(?:\"\\([^\"]*\\)\"\\|'\\([^']*\\)'\\|\\([^ \t\n/>]+\\)\\)")
+                             attributes)))
+    (or (match-string 1 attributes)
+        (match-string 2 attributes)
+        (match-string 3 attributes))))
+
+(defun harness-thread--tag-content (text tag)
+  "Return where the content of TAG in TEXT is, or nil.
+A plist: `:start' and `:end' are the offsets of the content, `:open-start'
+and `:open-end' those of the opening tag, `:close-start' and `:close-end'
+those of the closing one.  The tag name is matched without case, and
+whitespace may end its name."
+  (let ((case-fold-search t))
+    (when-let* ((open (string-match (concat "<" (regexp-quote tag) "\\s-*>") text))
+                (open-start (match-beginning 0))
+                (start (match-end 0))
+                (close (string-match (concat "</" (regexp-quote tag) "\\s-*>") text start)))
+      (list :start start :end close :open-start open-start :open-end start
+            :close-start close :close-end (match-end 0)))))
+
+(defun harness-thread--inner-text (text tag)
+  "Return the trimmed content of TAG in TEXT, or nil."
+  (when-let* ((span (harness-thread--tag-content text tag)))
+    (string-trim (substring text (plist-get span :start) (plist-get span :end)))))
+
+(defun harness-thread--strip-wrapper (text)
+  "Return TEXT without a tag that wraps all of it, such as <reply>…</reply>."
+  (let ((text (string-trim text)))
+    (if (and (let ((case-fold-search t))
+               (string-match "\\`<\\([A-Za-z][A-Za-z0-9_-]*\\)\\(?:[ \t][^>]*\\)?>\\(.*\\)</\\1[ \t]*>\\'" text))
+             (> (length (match-string 2 text)) 0))
+        (string-trim (match-string 2 text))
+      text)))
+
+(defun harness-thread--in-fenced-code-p (text pos)
+  "Non-nil when POS in TEXT is inside a fenced code block.
+A block an agent writes as an example in a fence is no reply."
+  (let ((n 0)
+        (lines (split-string (substring text 0 pos) "\n")))
+    (dolist (line lines)
+      (when (string-match-p "\\`[ \t]*\\(```\\|~~~\\)" line) (cl-incf n)))
+    (= 1 (% n 2))))
+
+(defun harness-thread-parse-blocks (text)
+  "Return the <thread> reply blocks of TEXT, oldest first, as plists.
+Each is (:start START :end END :id ID :status STATUS :quote QUOTE
+:body BODY :raw RAW): the offsets of the whole block, the thread's id (or
+nil for a new thread), its status when the tag names one, what the
+<quote> holds, and the words of the reply with the quote left out.  The
+tags may be on lines of their own or run into the text, their names in
+any case, the id in double or single quotes or bare, and the answer may
+be wrapped in <reply> or another tag.  A block in a fenced code block is
+no reply, and one never closed is no block."
+  (when (stringp text)
+    (let ((case-fold-search t)
+          (pos 0) blocks)
+      (while (and (< pos (length text))
+                  (string-match harness-thread-tag-open-regexp text pos))
+        (let* ((start (match-beginning 0))
+               (block-start (match-end 0))
+               (attributes (match-string 1 text))
+               (close (and (string-match harness-thread-tag-close-regexp text block-start)
+                           (match-beginning 0)))
+               (close-end (and close (match-end 0))))
+          (if (or (null close) (harness-thread--in-fenced-code-p text start))
+              ;; Past the tag, and past the block when there was one.
+              (setq pos (or close-end block-start))
+            (let* ((inner (substring text block-start close))
+                   (quote-span (harness-thread--tag-content inner "quote"))
+                   (quote (and quote-span
+                               (string-trim (substring inner (plist-get quote-span :start)
+                                                       (plist-get quote-span :end)))))
+                   (body (string-trim
+                          (if quote-span
+                              ;; The quote's content is kept apart: its tags
+                              ;; go with it, and not into the answer.
+                              (concat (substring inner 0 (plist-get quote-span :open-start))
+                                      (substring inner (plist-get quote-span :close-end)))
+                            inner)))
+                   (body (harness-thread--strip-wrapper body))
+                   (attribute-id (harness-thread--tag-attribute attributes "id"))
+                   (inner-id (harness-thread--inner-text inner "id"))
+                   (id (or attribute-id inner-id))
+                   (status (harness-thread--tag-attribute attributes "status")))
+              ;; The <id> tag named the thread: it is no part of the words.
+              (when (and inner-id (not attribute-id))
+                (setq body (string-trim
+                            (replace-regexp-in-string
+                             "<id[ \t]*>[^<]*</id[ \t]*>" "" body t t))))
+              (when (or quote (not (string-blank-p body)))
+                (push (list :start start :end close-end
+                            :id id
+                            :status status
+                            :quote quote :body body
+                            :raw (substring text start close-end))
+                      blocks))
+              (setq pos close-end)))))
+      (nreverse blocks))))
+
 (defconst harness-thread-marker-regexp
   "^[ \t]*\\[thread \\([A-Za-z0-9][A-Za-z0-9_.-]*\\): answer with review_comment\\][ \t]*$"
   "Regexp matching the marker line of a reply that is a comment in a thread.
@@ -1003,6 +1132,15 @@ reply apart, quotes and answers, finds the quote whole."
                                                (and (stringp text) (not (string-blank-p text)) text)))
                                "\n\n"))))
              (harness-thread-refs data) "\n\n"))
+
+(defun harness-thread-render-text (block)
+  "Return BLOCK, a parsed <thread> reply, as the text the review keeps.
+The quote as a block quote, then the words, as a mail keeps a reply."
+  (string-join
+   (delq nil (list (and (plist-get block :quote)
+                        (harness-thread-quote-lines (plist-get block :quote)))
+                   (plist-get block :body)))
+   "\n\n"))
 
 (defun harness-thread-text (data)
   "Return the text of a reply in the thread DATA: quotes, response, marker.

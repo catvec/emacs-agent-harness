@@ -459,6 +459,7 @@
 (declare-function harness-ui-tasks--task "harness-ui-tasks" (&optional noerror))
 (defvar harness-ui-linking-handlers)
 (defvar harness-ui-linking-context-functions)
+(defvar harness-chat-threads-function)
 
 (defgroup harness-ui-patch-review nil
   "A task's changes in its session and report: Ediff file by file, comments quoted in the feedback."
@@ -2589,28 +2590,41 @@ comment's under its bar, which goes on down the lines."
         (setq pos (1+ end))))
     string))
 
-(defun harness-ui-patch-review--threads-section (review &optional compact)
+(defun harness-ui-patch-review--threads-section (review &optional compact always-open)
   "Return the threads of REVIEW as the changes show them, below the files.
 A heading with the library's filter buttons, a line of what the keys do
 \(not when COMPACT, as in the tree beside Ediff), then the threads of
 the status the buffer's filter lets through, by file, drawn as the
 library's threads view draws them.  The buffer is a view of the review's
 set (`harness-ui-patch-review--view'), so the library's commands find the
-thread or comment at point and its buttons draw the section again."
+thread or comment at point and its buttons draw the section again.
+ALWAYS-OPEN draws them whole, with no fold button: the threads view the
+chat puts in place of its box is the threads, not a line that hides them."
   (let* ((set (harness-ui-patch-review--r-set review))
          (filter (or change-review-ui--filter 'open))
-         (text (concat
-                (propertize (change-review-ui-threads-heading set filter)
-                            'harness-ui-patch-review-threads t 'wrap-prefix "  ")
-                (if compact ""
-                  (propertize (concat "  " "RET: compare/jump  r: reply  x: close/reopen  f: filter  (hover for more)\n")
-                              'help-echo harness-ui-patch-review--thread-hint-detail
-                              'face 'harness-hint-face 'wrap-prefix "  "))
-                (harness-ui-patch-review--wrap-headers
-                 (change-review-ui-threads-string
-                  set :filter filter :details change-review-ui--details
-                  :width (harness-ui-patch-review--text-width (if compact 2 8))
-                  :indent "  ")))))
+         (counts (change-review-thread-counts set))
+         (folded (and (not compact) (not always-open)
+                      (harness-ui-patch-review--folded-p review "threads")))
+         (text (if folded
+                   (concat (harness-ui-patch-review--fold-button
+                            review "threads"
+                            (format "Threads (%d open, %d closed)"
+                                    (plist-get counts :open) (plist-get counts :closed)))
+                           "\n")
+                 (concat
+                  (unless (or compact always-open)
+                    (harness-ui-patch-review--fold-button review "threads" ""))
+                  (propertize (change-review-ui-threads-heading set filter)
+                              'harness-ui-patch-review-threads t 'wrap-prefix "  ")
+                  (if compact ""
+                    (propertize (concat "  " "RET: compare/jump  r: reply  x: close/reopen  f: filter  (hover for more)\n")
+                                'help-echo harness-ui-patch-review--thread-hint-detail
+                                'face 'harness-hint-face 'wrap-prefix "  "))
+                  (harness-ui-patch-review--wrap-headers
+                   (change-review-ui-threads-string
+                    set :filter filter :details change-review-ui--details
+                    :width (harness-ui-patch-review--text-width (if compact 2 8))
+                    :indent "  "))))))
     (harness-ui-with-keymap
      (propertize text 'harness-ui-patch-review-task (harness-ui-patch-review--r-id review))
      harness-ui-patch-review--thread-map)))
@@ -3243,14 +3257,21 @@ since the last review, \"HEAD against main~3 @ 5be0a77\" for another."
   "Return the first line of REVIEW's changes: what is compared, how much changed.
 It also says how many threads the review has, open and closed.
 COMPACT, for the tree beside Ediff, says how many files and how far
-through them the reviewer is, and no more."
+through them the reviewer is, and no more.  The label folds the files
+away, and what is folded still says how far through them the reader is."
   (let* ((files (harness-ui-patch-review--r-files review))
          (tip (harness-ui-patch-review--r-tip review))
          (counts (change-review-thread-counts (harness-ui-patch-review--r-set review)))
          (open (plist-get counts :open))
          (closed (plist-get counts :closed))
          (unreviewed (plist-get counts :unreviewed))
-         (label (propertize (if tip (format "Changes (%d)" (length files)) "Changes") 'face 'harness-label-face)))
+         (label (if compact
+                    (propertize (if tip (format "Changes (%d)" (length files)) "Changes")
+                                'face 'harness-label-face)
+                  (harness-ui-patch-review--fold-button
+                   review "changes"
+                   (propertize (if tip (format "Changes (%d)" (length files)) "Changes")
+                               'face 'harness-label-face)))))
     (harness-ui-with-keymap
      (propertize
      (if compact
@@ -3484,18 +3505,49 @@ line ends in a newline."
    review))
 
 
+(defun harness-ui-patch-review--fold-task (review)
+  "Return REVIEW's task, as the reader's folds key it: the task record."
+  (or (harness-ui-patch-review--r-task review)
+      (list :id (harness-ui-patch-review--r-id review))))
+
+(defun harness-ui-patch-review--folded-p (review key)
+  "Non-nil when REVIEW's section KEY is folded.
+The reader's folds are `harness-ui-report--folds', so the state is kept
+from one hand-in to the next; a section never set starts folded from
+the second hand-in of the task on, as the report's evidence does."
+  (let ((task (harness-ui-patch-review--fold-task review)))
+    (harness-ui-report--folded-p task key (harness-ui-report--default-folded-p task))))
+
+(defun harness-ui-patch-review--fold-button (review key label)
+  "Return LABEL as the fold button of REVIEW's section KEY.
+Pressing it folds the section when it is open, opens it when folded,
+and draws the surface again."
+  (let ((folded (harness-ui-patch-review--folded-p review key))
+        (task (harness-ui-patch-review--fold-task review)))
+    (harness-ui-report--button
+     (format "%s %s" (if folded "▸" "▾") label)
+     (lambda ()
+       (harness-ui-report--set-fold task key (not folded))
+       (harness-ui-report--refresh task))
+     (if folded "Show it" "Hide it"))))
+
 (defun harness-ui-patch-review--section (review counts &optional compact)
   "Return REVIEW's changes as its report shows them.
 The heading, the settings, what to know, the files -- the tree or a flat
 list -- and under them the threads.  COUNTS are its threads per file.
 COMPACT draws it for the narrow tree beside Ediff: rows that fit, the
-file Ediff compares marked, and no line of keys."
+file Ediff compares marked, and no line of keys.  The heading folds the
+files away -- the tree is long, and the report should not be all of it
+once the work is known -- and the threads have a fold of their own; the
+reader's choice is kept from one hand-in to the next."
   (let* ((files (harness-ui-patch-review--r-files review))
+         (folded (and (not compact) (harness-ui-patch-review--folded-p review "changes")))
          (indices (let ((table (make-hash-table :test 'eq)))
                     (cl-loop for file in files for index from 0
                              do (puthash file index table))
                     table))
-         (tree (and (harness-ui-patch-review--r-tree review)
+         (tree (and (not folded)
+                    (harness-ui-patch-review--r-tree review)
                     (harness-ui-patch-review--tree files)))
          (avail (and compact (harness-ui-patch-review--avail)))
          (current (and compact (plist-get (harness-ui-patch-review--r-ediff review) :index)))
@@ -3505,29 +3557,34 @@ file Ediff compares marked, and no line of keys."
                                                files))))))
     (concat
      (harness-ui-patch-review--heading review compact) "\n"
-     ;; Not before there is a branch to choose a diff of.
-     (if (and (not compact)
-              (or (harness-ui-patch-review--r-tip review) (harness-ui-patch-review--r-loading review)))
-         (harness-ui-patch-review--selector-line review)
-       "")
-     (harness-ui-patch-review--toggles review compact)
-     (mapconcat (lambda (note) (propertize (concat "  " note "\n") 'wrap-prefix "  "))
-                (harness-ui-patch-review--notes review) "")
-     (if (null files) ""
-       (concat "\n"
-               (if tree
-                   (harness-ui-patch-review--tree-lines review tree 0 width counts indices
-                                                        :compact compact :avail avail :current current)
-                 (cl-loop for file in files for index from 0
-                          concat (concat (harness-ui-patch-review--row
-                                          review file index width counts
-                                          :compact compact :avail avail :current (eql current index))
-                                         "\n")))
-               (if compact ""
-                 (concat (propertize (concat "  " "RET: compare  a: approve  n/p: files  T: threads  (hover for more)")
-                                     'help-echo harness-ui-patch-review--hint-detail
-                                     'face 'harness-hint-face 'wrap-prefix "  ")
-                         "\n"))))
+     ;; Folded, the heading alone says what it holds -- the count and how
+     ;; far through the files the reader is -- so no line repeats it.
+     (if folded
+         ""
+       (concat
+        ;; Not before there is a branch to choose a diff of.
+        (if (and (not compact)
+                 (or (harness-ui-patch-review--r-tip review) (harness-ui-patch-review--r-loading review)))
+            (harness-ui-patch-review--selector-line review)
+          "")
+        (harness-ui-patch-review--toggles review compact)
+        (mapconcat (lambda (note) (propertize (concat "  " note "\n") 'wrap-prefix "  "))
+                   (harness-ui-patch-review--notes review) "")
+        (if (null files) ""
+          (concat "\n"
+                  (if tree
+                      (harness-ui-patch-review--tree-lines review tree 0 width counts indices
+                                                           :compact compact :avail avail :current current)
+                    (cl-loop for file in files for index from 0
+                             concat (concat (harness-ui-patch-review--row
+                                             review file index width counts
+                                             :compact compact :avail avail :current (eql current index))
+                                            "\n")))
+                  (if compact ""
+                    (concat (propertize (concat "  " "RET: compare  a: approve  n/p: files  T: threads  (hover for more)")
+                                        'help-echo harness-ui-patch-review--hint-detail
+                                        'face 'harness-hint-face 'wrap-prefix "  ")
+                            "\n"))))))
      (if (or (harness-ui-patch-review--r-tip review)
              (change-review-set-threads (harness-ui-patch-review--r-set review)))
          (concat "\n" (harness-ui-patch-review--threads-section review compact))
@@ -3807,6 +3864,32 @@ window."
                 (set-window-point window found))
               (with-selected-window window
                 (recenter line)))))))))
+
+(defun harness-ui-patch-review--chat-threads-view ()
+  "Insert this session's review threads, for the chat's C-c T.
+On `harness-chat-threads-function': the threads of the task of the
+chat's session, with their filter and their keys, in place of the
+chat's compose box, whose words and attachments are kept.  A task in
+the working phase has the threads of the review it handed in last, when
+it has one: the view is for a conversation as much as for a review.
+Returns nil when the session is no task's, so the chat says it has no
+threads; a task without a review says why it has none."
+  (when-let* ((task (and (fboundp 'harness-ui-review--task)
+                         (harness-ui-review--task harness-ui-session-id))))
+    (let ((review (or (harness-ui-patch-review--known (plist-get task :id))
+                      (and (or (harness-ui-patch-review--offered-p task)
+                               (and (plist-get task :report)
+                                    (not (harness-string-blank-p (plist-get task :branch)))
+                                    (harness-ui-patch-review--repository task)))
+                           (harness-ui-patch-review--review-for task)))))
+      (if (null review)
+          (insert (propertize (concat "  " (harness-ui-patch-review--why-not task) "\n")
+                              'face 'harness-dim-face 'wrap-prefix "  "))
+        (harness-ui-patch-review--ensure-loaded review)
+        (harness-ui-patch-review--view
+         review (lambda () (harness-ui-patch-review--redraw-chat (current-buffer))))
+        (insert (harness-ui-patch-review--threads-section review nil t))))
+    t))
 
 ;;;;; Moving between the files
 
@@ -5697,6 +5780,8 @@ the review again."
     (add-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel))
   (with-eval-after-load 'harness-ui-chat
     (add-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat))
+  ;; C-c T in a chat draws the threads of this module, not a blank view.
+  (setq harness-chat-threads-function #'harness-ui-patch-review--chat-threads-view)
   ;; A link to a thread of a review opens here, once ui-linking is there.
   (with-eval-after-load 'harness-ui-linking
     (harness-ui-patch-review--register-links))
@@ -5714,6 +5799,8 @@ the review again."
   (remove-hook 'harness-ui-review-pending-known-functions #'harness-ui-patch-review--pending-known-p)
   (remove-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel)
   (remove-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat)
+  (when (eq harness-chat-threads-function #'harness-ui-patch-review--chat-threads-view)
+    (setq harness-chat-threads-function nil))
   (when (boundp 'harness-ui-linking-handlers)
     (harness-ui-patch-review--unregister-links))
   (dolist (buffer (buffer-list))

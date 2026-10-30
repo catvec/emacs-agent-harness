@@ -39,6 +39,7 @@
 (defvar harness-tasks--dirty)
 (defvar harness-tasks-max-running)
 (defvar harness-tasks-require-verification)
+(defvar harness-tasks-working-phase)
 (defvar harness-tasks-permission-mode)
 (defvar harness-tasks-non-interactive)
 (defvar harness-tasks-context-limit)
@@ -105,6 +106,8 @@ turn `harness-tasks-require-verification' on themselves."
            (harness-naming-auto nil)
            (harness-tasks-max-running 3)
            (harness-tasks-require-verification nil)
+           ;; The tests that exercise the working phase ask for it.
+           (harness-tasks-working-phase nil)
            (harness-tasks-permission-mode 'auto)
            (harness-tasks-non-interactive t)
            (harness-tasks-model "demo:scripted")
@@ -638,8 +641,12 @@ task's sub-agent runs, another task starts at once."
       ;; Two sessions at work, and one slot taken: the task's own.
       (should (eq 'subagent (plist-get helper :kind)))
       (should (eq 'running (plist-get (harness-call 'session/get (plist-get helper :id)) :status)))
-      (should (eq 'running (plist-get (harness-tasks-test-session a) :status)))
+      ;; The task's turn ended when it started the sub-agent; the task stays
+      ;; active, waiting on it, and keeps its slot meanwhile.
+      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task a) :waiting))
+                         5 "the task to wait on its sub-agent")
       (should (eq 'active (harness-tasks-test-state a)))
+      (should (harness-tasks--holds-slot-p (harness-tasks--get a)))
       (should (= 1 (harness-tasks--free-slots project)))
       (let ((b (harness-tasks-test-submit "something else")))
         (should (eq 'active (harness-tasks-test-state b)))
@@ -5232,6 +5239,157 @@ The merge decides what happens to the task, whatever is outstanding."
         :evidence (or harness-tasks-test--handin-evidence
                       (list (list :code "(parse \"a\\\"b\")" :language "elisp"
                                   :caption "The new case")))))
+
+(ert-deftest harness-tasks-working-phase-keeps-a-reply-at-work ()
+  "A task turn that ends with a reply, not `hand_in', stays at work.
+The task is active in the working phase, with the outcome `conversing';
+no report is made for it and it does not go to review.  Its next turn
+is the same, and `hand_in' is what puts it in review."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-working-phase t)
+          (harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "One thing first: which parser?\n")
+             (:type done :stop-reason end-turn))))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session))
+             (reviews nil))
+        (harness-on 'task/review (lambda (task) (push (plist-get task :id) reviews)))
+        (harness-test-wait (lambda () (eq 'conversing (plist-get (harness-tasks-test-task id) :outcome)))
+                           10 "the task to be left at work")
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'active (plist-get task :state)))
+          (should (equal "working" (plist-get task :phase)))
+          ;; At work, not waiting on the user: the board shows it in
+          ;; In progress, not Requires your input.
+          (should (eq 'active (harness-tasks--column task)))
+          (should-not (plist-get task :report))
+          (should-not (plist-get task :finished))
+          (should-not reviews))
+        ;; The user answers: the task stays at work, and the reply is the turn.
+        (harness-await (harness-call 'agent/prompt sid "The JSON one."))
+        (harness-test-wait (lambda () (eq 'conversing (plist-get (harness-tasks-test-task id) :outcome)))
+                           10 "the second reply to be left at work")
+        (should (eq 'active (plist-get (harness-tasks-test-task id) :state)))
+        (should-not reviews)
+        (should-not (plist-get (harness-tasks-test-task id) :report))
+        ;; Handing in ends the working phase, the turn, and puts it in review.
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Done.\n")
+                (:type tool-call :id "h1" :name "hand_in"
+                 :input (:problem "Nested quotes in the parser"
+                         :summary "# Done" :evidence ("looks good")))
+                (:type done :stop-reason end-turn)))
+        (harness-await (harness-call 'agent/prompt sid "Go ahead."))
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal (list id) reviews))
+        (should (equal "review" (plist-get (harness-tasks-test-task id) :phase)))
+        (should (plist-get (plist-get (harness-tasks-test-task id) :report) :summary))))))
+
+(ert-deftest harness-tasks-working-phase-can-be-turned-off ()
+  "Without `harness-tasks-working-phase' a clean turn is a round of work again:
+it gets the report saying none was handed in and waits for review."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t))
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (let ((task (harness-tasks-test-task id)))
+          (should (equal "review" (plist-get task :phase)))
+          (should (plist-get (plist-get task :report) :missing)))))))
+
+(ert-deftest harness-tasks-force-review-puts-a-task-at-work-in-review ()
+  "A task at work is put in review by hand, without `hand_in'.
+Its round handed no report in, so the review records that none came,
+with the session's last reply as the summary; `task/review` says so, and
+forcing a task already in review changes nothing."
+  (harness-tasks-test-with
+    (let ((harness-tasks-working-phase t)
+          (harness-tasks-require-verification t))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (reviews nil))
+        (harness-on 'task/review (lambda (task) (push (plist-get task :id) reviews)))
+        (harness-test-wait (lambda () (eq 'conversing (plist-get (harness-tasks-test-task id) :outcome)))
+                           10 "the task to be left at work")
+        (let ((view (harness-call 'task/force-review id)))
+          (should (eq 'review (plist-get view :state)))
+          (should (equal "review" (plist-get view :phase)))
+          (should (plist-get (plist-get view :report) :missing))
+          (should (string-match-p "Working on it"
+                                  (or (plist-get (plist-get view :report) :summary) ""))))
+        (should (equal (list id) reviews))
+        ;; Again: it waits for review already, and no second review is said.
+        (should (eq 'review (plist-get (harness-call 'task/force-review id) :state)))
+        (should (equal (list id) reviews))))))
+(ert-deftest harness-tasks-return-to-work-leaves-review-with-the-report ()
+  "A task in review is taken back to the working phase by hand.
+Its report stands, no feedback is kept, and the next message it gets is
+an ordinary one; its reply leaves it at work.  Forced back into review
+by hand, the report it handed in is still the one reviewed."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-working-phase t)
+          (harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "All done.\n")
+             (:type tool-call :id "h1" :name "hand_in"
+              :input (:problem "Fix the parser" :summary "# Done" :evidence ("looks good")))
+             (:type done :stop-reason end-turn))))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-tasks-test-wait-state id 'review)
+        (let ((handed (plist-get (harness-tasks-test-task id) :report)))
+          (should (plist-get handed :summary))
+          ;; Out of review by hand: at work again, the report kept.
+          (let ((view (harness-call 'task/return-to-work id)))
+            (should (eq 'active (plist-get view :state)))
+            (should (equal "working" (plist-get view :phase)))
+            (should (eq 'conversing (plist-get view :outcome)))
+            (should (equal handed (plist-get view :report))))
+          (should-not (plist-get (harness-tasks-test-task id) :feedback))
+          ;; The next message is an ordinary one; the reply keeps it at work.
+          (setq harness-provider-demo-script-override
+                '((:type text :delta "One more thing.\n") (:type done :stop-reason end-turn)))
+          (harness-await (harness-call 'agent/prompt sid "Also the lexer."))
+          (harness-test-wait (lambda () (eq 'conversing (plist-get (harness-tasks-test-task id) :outcome)))
+                             10 "the task to be left at work again")
+          (should-not (plist-get (harness-tasks-test-task id) :feedback))
+          (should (equal handed (plist-get (harness-tasks-test-task id) :report)))
+          ;; Forced into review by hand: the hand-in it made still stands.
+          (let ((view (harness-call 'task/force-review id)))
+            (should (eq 'review (plist-get view :state)))
+            (should (equal "review" (plist-get view :phase)))
+            (should (equal handed (plist-get view :report))))
+          (should (equal 'review (harness-tasks-test-state id))))))))
+(ert-deftest harness-tasks-system-prompt-names-the-working-phase ()
+  "The task's session is told it may reply without handing in, and not when off."
+  (harness-tasks-test-with
+    (let* ((id (harness-tasks-test-submit "fix the parser"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-tasks-test-wait-state id 'done)
+      (let ((session (harness-call 'session/get sid)))
+        ;; The prompt went out with the session's first request; ask for the
+        ;; filter's answer as the harness would.
+        (let ((prompt (harness-run-filter 'agent/system-prompt "Base." session)))
+          (should-not (string-match-p "<thread id=" prompt))
+          (should-not (string-match-p "not a checkpoint" prompt))
+          (should-not (string-match-p "answer it and close it" prompt))))))
+  (harness-tasks-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait (lambda () (eq 'conversing (plist-get (harness-tasks-test-task id) :outcome)))
+                           10 "the task to be left at work")
+        (let* ((session (harness-call 'session/get sid))
+               (prompt (harness-run-filter 'agent/system-prompt "Base." session)))
+          (should (string-match-p "You are in the working phase" prompt))
+          (should (string-match-p "<thread id=\\\"THREAD_ID\\\">" prompt))
+          ;; Not a checkpoint before handing in: the agent hands in at once
+          ;; when nothing is owed, and never asks leave to.
+          (should (string-match-p "not a checkpoint before handing in" prompt))
+          (should (string-match-p "do not ask whether it is ready" prompt))
+          (should (string-match-p "never end a turn merely to say you will carry on" prompt))
+          (should (string-match-p "hand in at once" prompt)))))))
 
 (ert-deftest harness-tasks-hand-in-waits-for-review ()
   "A task session handing its work in ends the turn and waits for the user.

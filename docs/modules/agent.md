@@ -111,6 +111,7 @@ The loop is entirely event driven: nothing here waits.
 
 ### Filter chains it runs
 
+- `agent/assistant-message`
 - `agent/before-turn`
 - `agent/hold`
 - `agent/message`

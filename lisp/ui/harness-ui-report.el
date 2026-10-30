@@ -41,6 +41,17 @@
 ;; session's last message under it and [Open the session], where the
 ;; work has to be checked.  The board's button for it reads [No report].
 ;;
+;; A report folds.  Each piece of evidence has a fold button of its own,
+;; [Collapse all] and [Expand all] above them fold or open them together,
+;; and the Evidence heading folds them all at once.  What the reader
+;; folds is kept by the task and the section
+;; (`harness-ui-report--folds'), so it stands when the report is drawn
+;; again, at the next hand-in: from the second hand-in on, or once the
+;; task was reopened, every section starts folded
+;; (`harness-ui-report-auto-fold'), that a report already read does not
+;; bury the conversation under it.  The changes and threads of the review
+;; fold the same way, in the same store.
+;;
 ;; Images are the evidence most worth seeing, so they show large: the
 ;; popout's width and much of the frame's height, the popout growing
 ;; taller than others for them (`harness-ui-report-max-height').
@@ -132,6 +143,93 @@ takes the feedback that sends a task back this way.")
 (defvar-local harness-ui-report--box nil
   "What `harness-ui-report-compose-functions' gave this popout at its last draw.
 That is (SUBMIT . PLACEHOLDER), or nil for no box.")
+
+(defcustom harness-ui-report-auto-fold t
+  "Non-nil: the second hand-in of a task opens with its sections folded.
+The evidence, the files and the threads of a review are long, and a task
+looked at again and again should not show them all every time: from the
+review after the first one on, they start folded, and what the reader
+opens or folds stays so for the next.  Nil opens every review whole."
+  :type 'boolean :group 'harness-ui)
+
+(defvar harness-ui-report--folds (make-hash-table :test 'equal)
+  "What the reader folded in a report, by task and section.
+Keys are (TASK-ID . SECTION), values t folded and nil open.  A section
+not here uses its default: the evidence starts folded from the second
+hand-in of a task on, so a review does not open as a wall of evidence
+every time.")
+
+(defconst harness-ui-report--unset (make-symbol "unset")
+  "The value of a fold that was never set.")
+
+(defun harness-ui-report--fold-key (task key)
+  "Return the key of TASK's fold KEY in `harness-ui-report--folds'."
+  (cons (plist-get task :id) key))
+
+(defun harness-ui-report--folded-p (task key default)
+  "Non-nil when TASK's KEY is folded; DEFAULT when it was never set."
+  (let ((value (gethash (harness-ui-report--fold-key task key) harness-ui-report--folds
+                        harness-ui-report--unset)))
+    (if (eq value harness-ui-report--unset) default value)))
+
+(defun harness-ui-report--set-fold (task key folded)
+  "Fold TASK's KEY when FOLDED, else open it; return the value."
+  (puthash (harness-ui-report--fold-key task key) (and folded t)
+           harness-ui-report--folds))
+
+(defun harness-ui-report--default-folded-p (task)
+  "Non-nil from the second hand-in of TASK on.
+The first report opens whole; the ones after a round of feedback, or
+after a task was reopened, start folded, and what the reader did with
+one stays so for the next."
+  (and harness-ui-report-auto-fold
+       (or (plist-get task :feedback) (plist-get task :reopened)) t))
+
+(defun harness-ui-report--refresh (task)
+  "Draw TASK's report again where it shows: its popout or its chat."
+  (let ((id (plist-get task :id)))
+    (when (and (fboundp 'harness-ui-report-task) (harness-ui-report-task)
+               (fboundp 'harness-ui-popout-refresh))
+      (harness-ui-popout-refresh (list 'report id)))
+    (when (and (fboundp 'harness-ui-review--redraw) (plist-get task :session))
+      (harness-ui-review--redraw (plist-get task :session)))))
+
+(defun harness-ui-report--button (label function help)
+  "Return LABEL as a button running FUNCTION, with HELP."
+  (propertize (buttonize label (lambda (_) (funcall function)) nil help)
+              'mouse-face 'highlight))
+
+(defun harness-ui-report--fold-button (task key folded label)
+  "Return LABEL as the fold button of TASK's KEY, folded when FOLDED."
+  (harness-ui-report--button
+   (format "%s %s" (if folded "▸" "▾") label)
+   (lambda ()
+     (harness-ui-report--set-fold task key (not folded))
+     (harness-ui-report--refresh task))
+   (if folded "Show it" "Hide it")))
+
+(defun harness-ui-report--set-evidence-fold (task folded)
+  "Fold every piece of evidence of TASK's report when FOLDED, else open them.
+The section and each item are set, so the next report of the task opens
+as the reader left this one."
+  (harness-ui-report--set-fold task "evidence" folded)
+  (let ((n (length (append (plist-get (harness-ui-report--report task) :evidence) nil))))
+    (dotimes (i n)
+      (harness-ui-report--set-fold task (list 'evidence (1+ i)) folded)))
+  (harness-ui-report--refresh task))
+
+(defun harness-ui-report--evidence-controls (task)
+  "Return the [Collapse all] and [Expand all] buttons of TASK's evidence."
+  (if (null (plist-get (harness-ui-report--report task) :evidence))
+      ""
+    (concat "  "
+            (harness-ui-report--button
+             "[Collapse all]" (lambda () (harness-ui-report--set-evidence-fold task t))
+             "Hide every piece of evidence")
+            " "
+            (harness-ui-report--button
+             "[Expand all]" (lambda () (harness-ui-report--set-evidence-fold task nil))
+             "Show every piece of evidence"))))
 
 (defvar-local harness-ui-report--expanded (make-hash-table :test 'equal)
   "Referenced tool calls whose full output this popout shows.")
@@ -464,22 +562,44 @@ quotes it from the box too."
   (let ((summary (plist-get (harness-ui-report--report harness-ui-report--task) :summary)))
     (and (stringp summary) (not (harness-string-blank-p summary)) summary)))
 
-(defun harness-ui-report--insert-item (item task)
-  "Insert one piece of evidence, ITEM, of TASK's report, with its caption."
-  (let ((kind (format "%s" (plist-get item :kind)))
-        (caption (plist-get item :caption)))
+(defun harness-ui-report--item-label (item)
+  "Return the short name of a piece of evidence ITEM, for its fold line."
+  (let ((kind (format "%s" (plist-get item :kind))))
     (pcase kind
-      ("image" (harness-ui-report--insert-image (plist-get item :path)))
-      ("video" (harness-ui-report--insert-media (plist-get item :path)))
-      ("file" (harness-ui-report--insert-media (plist-get item :path)))
-      ("code" (harness-ui-report--insert-markdown
-               (format "```%s\n%s\n```\n" (or (plist-get item :language) "text") (plist-get item :code))))
-      ("note" (harness-ui-report--insert-markdown (or (plist-get item :text) "")))
-      ("tool-call" (harness-ui-report--insert-call item task))
-      (_ (insert (propertize (format "[%s]\n" kind) 'face 'harness-dim-face))))
-    (when (and (stringp caption) (not (harness-string-blank-p caption)))
-      (insert (propertize (concat "  " caption "\n") 'face 'harness-dim-face
-                          'wrap-prefix "  ")))))
+      ((or "image" "video" "file")
+       (format "%s %s" kind (file-name-nondirectory (or (plist-get item :path) ""))))
+      ("code" (format "code%s" (let ((language (plist-get item :language)))
+                                 (if (and (stringp language) (not (string-blank-p language)))
+                                     (format " (%s)" language) ""))))
+      ("note" (harness-first-line (or (plist-get item :text) "note") 90))
+      ("tool-call" (or (plist-get item :title) (plist-get item :tool) "tool call"))
+      (_ kind))))
+
+(defun harness-ui-report--insert-item (item task number)
+  "Insert evidence ITEM number NUMBER of TASK's report, with its fold line.
+The number's line names what it is and folds it away; the caption under
+it, when there is one, says what it shows."
+  (let* ((key (list 'evidence number))
+         (folded (harness-ui-report--folded-p task key nil))
+         (caption (plist-get item :caption))
+         (kind (format "%s" (plist-get item :kind))))
+    (insert "  "
+            (harness-ui-report--fold-button
+             task key folded (format "%d. %s" number (harness-ui-report--item-label item)))
+            "\n")
+    (unless folded
+      (pcase kind
+        ("image" (harness-ui-report--insert-image (plist-get item :path)))
+        ("video" (harness-ui-report--insert-media (plist-get item :path)))
+        ("file" (harness-ui-report--insert-media (plist-get item :path)))
+        ("code" (harness-ui-report--insert-markdown
+                 (format "```%s\n%s\n```\n" (or (plist-get item :language) "text") (plist-get item :code))))
+        ("note" (harness-ui-report--insert-markdown (or (plist-get item :text) "")))
+        ("tool-call" (harness-ui-report--insert-call item task))
+        (_ (insert (propertize (format "[%s]\n" kind) 'face 'harness-dim-face))))
+      (when (and (stringp caption) (not (harness-string-blank-p caption)))
+        (insert (propertize (concat "  " caption "\n") 'face 'harness-dim-face
+                            'wrap-prefix "  "))))))
 
 (defun harness-ui-report--input-item (item)
   "Return the report evidence item for ITEM, a hand_in call's evidence item.
@@ -617,17 +737,24 @@ with the work -- [Verify] and [Send back]."
           (let ((summary (plist-get report :summary)))
             (when (and (stringp summary) (not (string-empty-p summary)))
               (harness-ui-report--insert-message summary)))
-          (insert "\n" (propertize (format "Evidence (%d)\n" (length evidence)) 'face 'harness-label-face) "\n")
-          (if evidence
-              ;; A blank line between pieces of evidence, so each reads as one
-              ;; with its caption; none after the last.
-              (cl-loop for item in evidence for first = t then nil for number from 1
-                       do (unless first (insert "\n"))
-                       (condition-case item-err
-                           (harness-ui-report--insert-item item task)
-                         (error (harness-ui-report--insert-failed
-                                 (format "Evidence %d" number) item-err))))
-            (insert (propertize "  none\n" 'face 'harness-dim-face)))))
+          (insert "\n")
+          (let* ((default (harness-ui-report--default-folded-p task))
+                 (folded (harness-ui-report--folded-p task "evidence" default)))
+            (insert (harness-ui-report--fold-button
+                     task "evidence" folded (format "Evidence (%d)" (length evidence)))
+                    (harness-ui-report--evidence-controls task)
+                    "\n")
+            (if (null evidence)
+                (insert (propertize "  none\n" 'face 'harness-dim-face))
+              (unless folded
+                ;; A blank line between pieces of evidence, so each reads as
+                ;; one with its caption; none after the last.
+                (cl-loop for item in evidence for first = t then nil for number from 1
+                         do (unless first (insert "\n"))
+                         (condition-case item-err
+                             (harness-ui-report--insert-item item task number)
+                           (error (harness-ui-report--insert-failed
+                                   (format "Evidence %d" number) item-err)))))))))
       (error (harness-ui-report--insert-failed "The report" err)))
     ;; A report drawn among a view's own text -- the review banner shows the
     ;; report in the session -- already has its panel there, so the panels

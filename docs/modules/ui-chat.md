@@ -35,6 +35,10 @@ One buffer per session, "*harness: NAME*", laid out top to bottom:
                 them at a time, in one place, and switches between them
   todos         the session's todo items, one per line, or folded to
                 the title line, which is how the panel starts
+  threads       the review's threads, while C-c T shows them: the view
+                the report draws, drawn by the module that keeps the
+                review (`harness-chat-threads-function`), in place of
+                the compose box, whose words and attachments it keeps
   attachments   chips for files attached to the next message
   notice        the session was deleted, or is inactive (sending resumes it)
   compose       an editable region; C-c C-c sends, RET adds a newline
@@ -68,6 +72,11 @@ asked for is kept in the block (`harness-chat-block-more`), and stays
 when the block is drawn again.  Only what is drawn is cut: what is sent
 and kept, and what a reply to the message quotes, is all of it, but a
 search does not find the words that are cut until they are drawn.
+A message of either side may hold a reply in a thread as a <thread>
+block (`harness-thread-parse-blocks`): it draws as the same card, a
+line naming the thread, what it answers and its status, the words
+under it (`harness-chat--render-thread-tag`), so the user and the
+agent reply in the one form.
 The text of a message is marked with the node and the part of it it
 is (`harness-chat-part`), and where its source was (`harness-md-source`),
 so that C-c > knows what a region is from (`harness-chat--region-refs`).
@@ -131,11 +140,14 @@ this file never touches a session struct.
 - `harness-chat-send` — Send the compose box, or answer the active question with it.
 - `harness-chat-send-queue` — Send every queued message now.
 - `harness-chat-send-queued` — Send the queued message QID now; the others stay queued.
+- `harness-chat-show-compose` — Put the compose box back, with the words it held, hiding the threads.
+- `harness-chat-show-threads` — Show the threads of the task's review in place of the compose box.
 - `harness-chat-tab` — Complete in the compose box; elsewhere expand or collapse the block at point.
 - `harness-chat-thread-reply` — Start a reply in a thread to the region, or the message at point.
 - `harness-chat-toggle-block` — Collapse or expand the block ID (default the one at point).
 - `harness-chat-toggle-group` — Show or hide the tool calls of group GID (default the one at point).
 - `harness-chat-toggle-recap` — Show or hide the recaps before the newest, under the activity line.
+- `harness-chat-toggle-threads` — Show the review's threads in place of the box, or the box again.
 - `harness-chat-toggle-todos` — Show or hide the session's todo list above the compose box.
 - `harness-open-latest-session` — Open the newest session of the current project in POSITION.
 - `harness-open-session` — Open session ID in POSITION.
