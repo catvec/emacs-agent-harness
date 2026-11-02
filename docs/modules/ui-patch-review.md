@@ -17,6 +17,12 @@ module puts the patch in the review: in the review banner of the task's
 session, where its work is handed in, and in its report (the popout
 [Review Changes] opens on the board and in the session), and reviews it
 file by file in Ediff, with the comments made on it kept as threads.
+A task in the working phase shows its threads too -- the review of the
+work it handed in last, which is a conversation with the user rather
+than a review to send feedback on (the chat's C-c T).  What the user
+writes there is a draft as anywhere, and the threads say how many are
+waiting; [Send replies] sends them together (`patch-review/send-replies`),
+as one message to the agent, which answers them in their threads.
 
 THE LIBRARY AND THIS ADAPTER.  What a review is -- a change set with
 versions, threads of comments, each comment recording its thread, its
@@ -429,6 +435,7 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-redraw-tree` — Draw the tree beside Ediff again.
 - `harness-ui-patch-review-reply` — Reply to the thread at the current difference, or at point, in Ediff.
 - `harness-ui-patch-review-select-diff` — Choose the diff the report of the changes shows.
+- `harness-ui-patch-review-send-replies` — Send the replies written in the threads to the agent, as one message.
 - `harness-ui-patch-review-thread-reply` — Start a reply in a thread to the lines selected in this version of a file.
 - `harness-ui-patch-review-thread-return` — Do what RET does on a thread of the changes, or on the file it is under.
 - `harness-ui-patch-review-threads` — Go to the threads of the review at point: a section below its files.
@@ -460,6 +467,7 @@ it takes its part of the report and the banner out.
 - `patch-review/assume-viewed` ([patch-review](patch-review.md))
 - `patch-review/get` ([patch-review](patch-review.md))
 - `patch-review/import-manual` ([patch-review](patch-review.md))
+- `patch-review/send-replies` ([patch-review](patch-review.md))
 - `patch-review/set-viewed` ([patch-review](patch-review.md))
 - `patch-review/viewed` ([patch-review](patch-review.md))
 - `task/for-session` ([tasks](tasks.md))

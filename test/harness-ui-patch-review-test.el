@@ -54,6 +54,7 @@
 (defvar harness-patch-review--sets)
 (defvar harness-ui-linking-handlers)
 (defvar harness-ui-linking-context-functions)
+(defvar harness-tasks-working-phase)
 (declare-function harness-ui-linking-follow "harness-ui-linking" (url))
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-tasks--set "harness-tasks")
@@ -3521,6 +3522,109 @@ changes once the branch is read."
     (harness-ui-patch-review-test--wait-text chat "^▾ Changes (6)")
     (harness-ui-patch-review-test--wait-text chat "^    M  a\\.el")
     chat))
+
+(ert-deftest harness-ui-patch-review-replies-while-working-are-sent-together ()
+  "A reply written while the task is at work is a draft, as in a review; the
+threads offer [Send replies], and sending them gives the agent one message,
+each reply in its thread, and draws them sent."
+  (let ((harness-tasks-working-phase t))
+    (harness-ui-patch-review-test-with-task
+      (let* ((popout (harness-ui-patch-review-test--changes board id))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (set (harness-ui-patch-review--r-set review))
+             (first (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                               :sent 10.0))
+             (second (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 3) "And three?"
+                                                                :sent 10.0))
+             (thread (harness-ui-patch-review-test--thread-of review first))
+             (other (harness-ui-patch-review-test--thread-of review second))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             captured)
+        (ignore popout)
+        (harness-call 'task/return-to-work id)
+        (harness-test-wait
+         (lambda () (equal "working" (plist-get (harness-ui-patch-review--r-task review) :phase)))
+         5 "the review to hear the task is at work")
+        (with-current-buffer popout
+          (should (equal "C-c C-c saves a draft; [Send replies] sends them"
+                         (harness-ui-patch-review--read-hint))))
+        (cl-letf (((symbol-function 'harness-method/agent/prompt)
+                   (lambda (session blocks &optional _opts)
+                     (setq captured (list session blocks))
+                     (harness-resolved nil))))
+          (with-current-buffer popout
+            (let ((change-review-ui-read-function
+                   (lambda (_prompt initial callback &optional _point)
+                     (funcall callback (concat initial "Because.")))))
+              (change-review-ui-reply-to-thread set thread)
+              (change-review-ui-reply-to-thread set other)))
+          ;; Both are drafts: nothing went to the agent.
+          (should-not captured)
+          (harness-test-wait (lambda () (= 2 (length (harness-call 'patch-review/drafts id))))
+                             5 "the harness to hear the two replies")
+          ;; The threads say how many wait, and offer to send them.
+          (with-current-buffer popout
+            (should (string-search "[Send replies]"
+                                   (string-join (harness-ui-patch-review--notes review) ""))))
+          (with-current-buffer popout
+            (harness-ui-patch-review-send-replies))
+          (harness-test-wait (lambda () captured) 5 "the replies to reach the agent"))
+        ;; One message, a block for each reply, in its own thread.
+        (should (equal sid (car captured)))
+        (let ((blocks (cl-remove-if-not #'harness-thread-block-p (cadr captured))))
+          (should (= 2 (length blocks)))
+          (should (equal (list (change-review-thread-id thread) (change-review-thread-id other))
+                         (mapcar (lambda (block) (plist-get (plist-get block :thread) :id)) blocks)))
+          (should (equal '("Because." "Because.") (mapcar #'harness-thread-response blocks))))
+        ;; The harness keeps them sent, and the UI hears that they are no drafts.
+        (harness-test-wait
+         (lambda ()
+           (cl-every (lambda (thread)
+                       (not (change-review-comment-draft-p
+                             (change-review-thread-last-comment
+                              (change-review-find-thread set (change-review-thread-id thread))))))
+                     (list thread other)))
+         5 "the UI to hear the replies were sent")
+        (let* ((data (cl-find (change-review-thread-id thread)
+                              (harness-ui-patch-review-test--harness-threads id)
+                              :key (lambda (th) (plist-get th :id)) :test #'equal))
+               (reply (car (last (plist-get data :comments)))))
+          (should (equal "Because." (plist-get reply :body)))
+          (should (numberp (plist-get reply :sent)))
+          (should (plist-get (plist-get reply :meta) :working)))
+        ;; It was the conversation; the task is still at work.
+        (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+        (should-not (plist-get (harness-call 'task/get id) :feedback))))))
+
+(ert-deftest harness-ui-patch-review-the-threads-of-a-working-task-offer-to-send ()
+  "The threads view of a task at work says how many replies wait, and
+offers [Send replies] where the user wrote them."
+  (let ((harness-tasks-working-phase t))
+    (harness-ui-patch-review-test-with-task
+      (let* ((chat (harness-ui-patch-review-test--banner board id sid))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (set (harness-ui-patch-review--r-set review))
+             (root (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                             :sent 10.0))
+             (thread (harness-ui-patch-review-test--thread-of review root)))
+        (harness-call 'task/return-to-work id)
+        (harness-test-wait
+         (lambda () (equal "working" (plist-get (harness-ui-patch-review--r-task review) :phase)))
+         5 "the review to hear the task is at work")
+        (with-current-buffer chat
+          (let ((change-review-ui-read-function
+                 (lambda (_prompt initial callback &optional _point)
+                   (funcall callback (concat initial "Because.")))))
+            (change-review-ui-reply-to-thread set thread)))
+        (with-current-buffer chat
+          (call-interactively #'harness-chat-show-threads))
+        (harness-ui-patch-review-test--wait-text chat "\\[Send replies\\]")
+        (with-current-buffer chat
+          (let ((view (buffer-substring-no-properties
+                       (marker-position harness-chat--transcript-end) (point-max))))
+            (should (string-match-p "1 reply waiting" view))
+            (should (string-match-p "C-c C-c saves one" view))
+            (should (string-match-p "\\[Send replies\\]" view))))))))
 
 (ert-deftest harness-ui-patch-review-shows-the-threads-in-the-box ()
   "C-c T puts the review's threads, filters and all, where the box was.

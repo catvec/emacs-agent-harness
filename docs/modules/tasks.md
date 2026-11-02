@@ -64,13 +64,17 @@ question, an answer to feedback, a note of what it is about to do --
 and leaves the task active, in the working phase, waiting for the
 next message; no report is made for it.  The phase is for what is
 still owed -- work, a question only the user can answer, an open
-thread -- not for an approval before handing in: the prompt tells the
-agent to hand in at once when nothing is outstanding, and that a
-message from the user sends the task back to work, so handing in
-never ends the conversation.  `hand_in` ends the working
-phase and puts the task in review, its branch not merged yet in a git
-project.  `task/verify` accepts it: its branch goes through the merge
-queue and the task is done once merged (outside git, at once).
+thread -- not for an approval before handing in, and its purpose is
+to work with the user until they are satisfied, not to reach hand_in:
+the prompt tells the agent to hand in at once when nothing is
+outstanding, that a message from the user sends the task back to
+work, so handing in never ends the conversation, and that the
+review's open threads are the user's questions, to answer and work
+through with them -- never to close in a batch so that hand_in goes
+through.  `hand_in` ends the working phase and puts the task in
+review, its branch not merged yet in a git project.  `task/verify`
+accepts it: its branch goes through the merge queue and the task is
+done once merged (outside git, at once).
 `task/reject` sends it back with feedback: the feedback goes to the
 same session, in its own worktree (or the main tree, see below), as a
 new prompt, and the task works on it; a turn that ends by handing the

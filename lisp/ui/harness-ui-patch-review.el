@@ -7,6 +7,12 @@
 ;; session, where its work is handed in, and in its report (the popout
 ;; [Review Changes] opens on the board and in the session), and reviews it
 ;; file by file in Ediff, with the comments made on it kept as threads.
+;; A task in the working phase shows its threads too -- the review of the
+;; work it handed in last, which is a conversation with the user rather
+;; than a review to send feedback on (the chat's C-c T).  What the user
+;; writes there is a draft as anywhere, and the threads say how many are
+;; waiting; [Send replies] sends them together (`patch-review/send-replies'),
+;; as one message to the agent, which answers them in their threads.
 ;;
 ;; THE LIBRARY AND THIS ADAPTER.  What a review is -- a change set with
 ;; versions, threads of comments, each comment recording its thread, its
@@ -707,6 +713,35 @@ window has another.")
        (equal (plist-get task :state) "review")
        (not (harness-json-true-p (plist-get task :archived)))))
 
+(defun harness-ui-patch-review--working-p (task)
+  "Non-nil when TASK is at work, in the working phase.
+Its review is then the conversation with the user: a comment made there
+goes to the agent at once, not into the drafts that wait for feedback."
+  (and task
+       (equal "active" (format "%s" (plist-get task :state)))
+       (if (fboundp 'harness-tasks--working-phase-p)
+           (harness-tasks--working-phase-p task)
+         (equal "working" (format "%s" (plist-get task :phase))))))
+
+(defun harness-ui-patch-review--read-hint ()
+  "Return what C-c C-c does to a comment read in this buffer.
+While the task is in the working phase it sends the comment to its agent
+at once; while the task waits for review it saves a draft to go with the
+feedback."
+  (let* ((set (or (and (bound-and-true-p change-review-ui--set)
+                       (harness-ui-patch-review--set-p change-review-ui--set)
+                       change-review-ui--set)
+                  (let ((review (bound-and-true-p harness-ui-patch-review--review)))
+                    (and (harness-ui-patch-review--review-p review)
+                         (harness-ui-patch-review--r-set review)))))
+         (review (and set (harness-ui-patch-review--set-review set)))
+         (working (and review
+                       (harness-ui-patch-review--working-p
+                        (harness-ui-patch-review--r-task review)))))
+    (if working
+        "C-c C-c saves a draft; [Send replies] sends them"
+      "C-c C-c saves it as a draft, C-c C-k cancels")))
+
 (defun harness-ui-patch-review--current ()
   "Return the review of this Ediff control panel.
 An Ediff that began before the harness was updated holds a review of
@@ -722,9 +757,9 @@ reads wrong; it is no review any more, and `ediff-quit' ends it."
   "Return a promise rejected with the error FORMAT-STRING and ARGS make."
   (harness-rejected (list 'error (apply #'format-message format-string args))))
 
-(defun harness-ui-patch-review--plural (count word)
-  "Return COUNT WORD, WORD in the plural unless COUNT is 1."
-  (format "%d %s%s" count word (if (= count 1) "" "s")))
+(defun harness-ui-patch-review--plural (count word &optional plural)
+  "Return COUNT WORD, PLURAL (or WORD with an s) unless COUNT is 1."
+  (format "%d %s" count (if (= count 1) word (or plural (concat word "s")))))
 
 ;;;; The change set of a review
 
@@ -2552,10 +2587,11 @@ again.  The library's commands act on the thread or the comment at point.")
   (define-key map (kbd "p") #'change-review-ui-previous-comment)
   (define-key map (kbd "N") #'change-review-ui-next-thread)
   (define-key map (kbd "P") #'change-review-ui-previous-thread)
+  (define-key map (kbd "S") #'harness-ui-patch-review-send-replies)
   (define-key map (kbd "f") #'change-review-ui-cycle-filter))
 
 (defconst harness-ui-patch-review--thread-hint-detail
-  "RET compares the file at the thread's line or shows where a comment was made, r replies, e edits a draft, k deletes one and K a thread of drafts, x closes a thread or opens it again, o follows an agent's comment, c comments on the change as a whole, f changes which threads show."
+  "RET compares the file at the thread's line or shows where a comment was made, r replies, S sends the replies of a task at work to the agent, e edits a draft, k deletes one and K a thread of drafts, x closes a thread or opens it again, o follows an agent's comment, c comments on the change as a whole, f changes which threads show."
   "The full key list the threads show on hover.")
 
 (defun harness-ui-patch-review--text-width (&optional margin)
@@ -2617,9 +2653,12 @@ chat puts in place of its box is the threads, not a line that hides them."
                   (propertize (change-review-ui-threads-heading set filter)
                               'harness-ui-patch-review-threads t 'wrap-prefix "  ")
                   (if compact ""
-                    (propertize (concat "  " "RET: compare/jump  r: reply  x: close/reopen  f: filter  (hover for more)\n")
+                    (propertize (concat "  " "RET: compare/jump  r: reply  S: send replies  x: close/reopen  f: filter  (hover for more)\n")
                                 'help-echo harness-ui-patch-review--thread-hint-detail
                                 'face 'harness-hint-face 'wrap-prefix "  "))
+                  (when always-open
+                    (when-let* ((note (harness-ui-patch-review--replies-note review)))
+                      (propertize (concat "  " note "\n") 'wrap-prefix "  ")))
                   (harness-ui-patch-review--wrap-headers
                    (change-review-ui-threads-string
                     set :filter filter :details change-review-ui--details
@@ -2647,6 +2686,31 @@ On the name of a file above its threads: compare that file."
           (harness-ui-patch-review-ediff review index)
         (user-error "%s is not a file this version changes" path))))
    (t (user-error "No thread here"))))
+
+(defun harness-ui-patch-review-send-replies (&optional review)
+  "Send the replies written in the threads to the agent, as one message.
+In a task at work the replies are drafts until the user sends them: this
+sends them together, each in its thread, and the agent answers them all
+in one turn.  REVIEW is the review to send, the one at point by default.
+A task waiting for review has no such sending: its drafts go with the
+feedback that sends it back."
+  (interactive)
+  (let* ((review (or review (harness-ui-patch-review--review-here)
+                     (harness-ui-patch-review--current)))
+         (id (harness-ui-patch-review--r-id review))
+         (drafts (length (and (harness-ui-patch-review--r-set review)
+                              (change-review-drafts (harness-ui-patch-review--r-set review))))))
+    (unless (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review))
+      (user-error "The task waits for review: its replies go with the feedback that sends it back"))
+    (when (zerop drafts)
+      (user-error "No reply to send"))
+    (harness-ui-call
+     "_harness/patch-review/send-replies" (list :task-id id)
+     (lambda (result)
+       (message "Sent %s to the agent"
+                (harness-ui-patch-review--plural (or (plist-get result :sent) drafts) "reply" "replies")))
+     (lambda (err)
+       (message "Could not send the replies: %s" (harness-error-message err))))))
 
 ;;;;; The files
 
@@ -3358,6 +3422,24 @@ its key.  COMPACT uses shorter words."
    'harness-ui-patch-review-task (harness-ui-patch-review--r-id review))
    harness-ui-patch-review--common-map))
 
+(defun harness-ui-patch-review--replies-note (review)
+  "Return the line about the replies waiting in REVIEW, or nil.
+A task at work has no feedback to carry its drafts: they are replies the
+user sends together, and the line says how many wait and offers to send
+them (`harness-ui-patch-review-send-replies')."
+  (when (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review))
+    (let ((drafts (length (and (harness-ui-patch-review--r-set review)
+                               (change-review-drafts (harness-ui-patch-review--r-set review))))))
+      (when (> drafts 0)
+        (concat
+         (propertize (format "%s waiting: C-c C-c saves one; send them to the agent together when you are done.  "
+                             (harness-ui-patch-review--plural drafts "reply" "replies"))
+                     'face 'change-review-ui-draft-face)
+         (propertize (buttonize "[Send replies]"
+                                (lambda (_) (harness-ui-patch-review-send-replies review))
+                                nil "Send them to the agent as one message")
+                     'mouse-face 'highlight))))))
+
 (defun harness-ui-patch-review--notes (review)
   "Return the lines that tell what to know about REVIEW, above its files."
   (let ((tip (harness-ui-patch-review--r-tip review)))
@@ -3377,12 +3459,16 @@ its key.  COMPACT uses shorter words."
            ;; before is shown, and this says why.
            (and (harness-ui-patch-review--r-selection-error review)
                 (propertize (harness-ui-patch-review--r-selection-error review) 'face 'error))
+           (when-let* ((note (harness-ui-patch-review--replies-note review)))
+             note)
            (let ((drafts (length (and (harness-ui-patch-review--r-set review)
                                       (change-review-drafts (harness-ui-patch-review--r-set review))))))
              (and (> drafts 0)
-                  (propertize (format "%s to send: they go with the feedback that sends the task back, an empty box included."
-                                      (harness-ui-patch-review--plural drafts "draft"))
-                              'face 'change-review-ui-draft-face)))
+                  (not (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review)))
+                  (propertize
+                   (format "%s to send: they go with the feedback that sends the task back, an empty box included."
+                           (harness-ui-patch-review--plural drafts "draft"))
+                   'face 'change-review-ui-draft-face)))
            (and (harness-ui-patch-review--r-dirty review)
                 (propertize "Its worktree has changes not committed: they are not on the branch, so not here."
                             'face 'warning))
@@ -3600,7 +3686,8 @@ the buffer again; a change of the set draws it too
 \(`change-review-changed-functions').  Which threads show starts as
 `harness-ui-patch-review-closed-threads' says."
   (setq-local change-review-ui--set (harness-ui-patch-review--r-set review)
-              change-review-ui--redraw-function redraw)
+              change-review-ui--redraw-function redraw
+              change-review-ui-read-hint-function #'harness-ui-patch-review--read-hint)
   (unless change-review-ui--filter
     (setq-local change-review-ui--filter (if harness-ui-patch-review-closed-threads 'all 'open))))
 
@@ -4822,7 +4909,8 @@ they are, as `harness-ui-patch-review--place-from-texts' gives it)."
                   default-directory (harness-ui-patch-review--link-directory review)
                   ;; The threads draw again when the set changes.
                   change-review-ui--redraw-function
-                  (lambda () (harness-ui-patch-review--decorate review file buffer side nil)))
+                  (lambda () (harness-ui-patch-review--decorate review file buffer side nil))
+                  change-review-ui-read-hint-function #'harness-ui-patch-review--read-hint)
       ;; The threads are drawn to the room the window has: when it gets
       ;; another -- Ediff lays the frame out, a split is toggled, the box
       ;; grows -- they are drawn again.
@@ -5057,7 +5145,8 @@ GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
 It gets the review's keys and help, and gives the report back as it ends."
   (setq harness-ui-patch-review--review review
         harness-ui-patch-review--index index)
-  (setq-local ediff-brief-help-message-function #'harness-ui-patch-review--ediff-help)
+  (setq-local ediff-brief-help-message-function #'harness-ui-patch-review--ediff-help
+              change-review-ui-read-hint-function #'harness-ui-patch-review--read-hint)
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map ediff-mode-map)
     (define-key map "c" #'harness-ui-patch-review-comment)

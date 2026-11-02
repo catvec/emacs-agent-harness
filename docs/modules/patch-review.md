@@ -41,15 +41,26 @@ agent's comment records the agent, the session and the tool call that
 made it (`review_comment`), the link back to that point of the
 conversation.
 
-THE DRAFTS.  What the user writes in the review is a draft until the
-task is sent back.  Whatever sends it back -- the report's box, a
-message typed in its session, another client -- gets the drafts with
-it: `harness-tasks-feedback-additions-functions` asks this module for
-the text, which quotes the diff above each comment as a reply on a
-mailing list does and names each comment's thread, and the drafts are
-marked sent once the task is.  The agent answers a thread with
-`review_comment`, closing it when its point is done; the user closes
-it in turn, once they agree.
+THE DRAFTS.  What the user writes in a thread is a draft until it is
+sent, and a blank one is no comment at all.  A task waiting for review
+sends its drafts when it is sent back: whatever sends it back -- the
+report's box, a message typed in its session, another client -- gets
+them, `harness-tasks-feedback-additions-functions` asking this module
+for the text, which quotes the diff above each comment as a reply on a
+mailing list does and names each comment's thread.  The agent answers a
+thread with `review_comment`, closing it when its point is done; the
+user closes it in turn, once they agree.
+
+THE WORKING PHASE.  A task at work is in the working phase: its review
+is a conversation with the user, and there is no feedback that could
+carry a draft until the work is handed in.  What the user writes in
+its threads waits there as drafts, all of them, until they send the
+replies together (`patch-review/send-replies`,
+`harness-patch-review--send-working-replies`): one message to the
+agent, a thread block each, which the agent answers in their threads
+as one turn.  Closing a thread is the user's question answered, not a
+way past the hand-in check: hand_in refuses while one is open
+(`harness-patch-review--hand-in-blocker`).
 
 THE CLOSES.  The agent closes a thread; the user is the one who says
 the point is done.  A thread the agent closed is TO REVIEW until the
@@ -98,21 +109,25 @@ the message itself, by the user and the agent alike
 answers</quote>the reply</thread>, status="closed" to close it.  The
 chat draws it as the card a reply in a thread is, and the transcript
 keeps it as it was written.  The user's is a comment of the review --
-a draft while the task waits in review, sent with the feedback that
-sends it back -- and the agent's, read from its final message
-(`agent/assistant-message`), is its answer in the thread.  This is the
-way an agent answers without the tool, and the format its prompt
-names; a block that names no thread the review has stays as the user
-wrote it, for the agent to read.
+a draft, sent with the feedback that sends the task back, or with the
+other replies of a task at work -- and the agent's, read from its
+final message (`agent/assistant-message`), is its answer in the
+thread.  This is the way an agent answers without the tool, and the
+format its prompt names; a block that names no thread the review has
+stays as the user wrote it, for the agent to read.
 
 THE OPEN THREADS.  A thread with a sent comment that is still open is
-a question the work has not answered.  While this module is loaded,
-and `harness-tools-handin-require-closed-threads` is on, `hand_in`
-refuses until every such thread is closed
+a question the work has not answered, and the working phase is for
+working through it with the user until they are satisfied -- not for
+getting to hand_in.  While this module is loaded, and
+`harness-tools-handin-require-closed-threads` is on, `hand_in` refuses
+until every such thread is closed
 (`harness-patch-review--hand-in-blocker`, on
 `harness-tools-handin-block-functions`): the working phase goes on
-until the agent has answered what the user asked.  Without the module
-there is no such check, and the hook is empty.
+until the agent has answered what the user asked, and closing a
+thread is a statement that its point is done, never a way around the
+check.  Without the module there is no such check, and the hook is
+empty.
 
 THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
 the session while the agent was at work -- steering, quoting what the
@@ -142,6 +157,7 @@ to say.
 - `patch-review/get` (task-id) — Return the review of task TASK-ID as plain data: its versions and threads.
 - `patch-review/import-manual` (task-id) — Make the user's words by hand in task TASK-ID's session threads of its review.
 - `patch-review/open-threads` (task-id) — Return the open threads of task TASK-ID's review, as a list of plists.
+- `patch-review/send-replies` (task-id) — Send the replies the user wrote in the threads of task TASK-ID's review.
 - `patch-review/set-viewed` (task-id kind files on) — Mark FILES viewed in task TASK-ID's review, or approved, or take the mark off.
 - `patch-review/threads-text` (task-id &optional status) — Return the threads of task TASK-ID's review as text for its agent.
 - `patch-review/viewed` (task-id) — Return the files viewed, and approved, in task TASK-ID's review.
@@ -159,6 +175,7 @@ to say.
 
 ### Methods it calls
 
+- `agent/prompt` ([agent](agent.md)), when it is loaded
 - `session/get` ([session](session.md)), when it is loaded
 - `session/node` ([session](session.md))
 - `session/nodes` ([session](session.md)), when it is loaded

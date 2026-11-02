@@ -5384,12 +5384,17 @@ by hand, the report it handed in is still the one reviewed."
                (prompt (harness-run-filter 'agent/system-prompt "Base." session)))
           (should (string-match-p "You are in the working phase" prompt))
           (should (string-match-p "<thread id=\\\"THREAD_ID\\\">" prompt))
-          ;; Not a checkpoint before handing in: the agent hands in at once
-          ;; when nothing is owed, and never asks leave to.
+          ;; Not a checkpoint before handing in: the agent hands in as soon
+          ;; as nothing is owed, and never asks leave to.
           (should (string-match-p "not a checkpoint before handing in" prompt))
-          (should (string-match-p "do not ask whether it is ready" prompt))
-          (should (string-match-p "never end a turn merely to say you will carry on" prompt))
-          (should (string-match-p "hand in at once" prompt)))))))
+          (should (string-match-p "ask whether it is ready" prompt))
+          (should (string-match-p "Never end a turn only to say you will carry on" prompt))
+          (should (string-match-p "hand in as soon as nothing is outstanding" prompt))
+          ;; The phase is not a way to hand_in: it is the user's threads,
+          ;; worked through with them until they are satisfied.
+          (should (string-match-p "not a check to get past" prompt))
+          (should (string-match-p "until they are satisfied" prompt))
+          (should (string-match-p "never in a batch" prompt)))))))
 
 (ert-deftest harness-tasks-hand-in-waits-for-review ()
   "A task session handing its work in ends the turn and waits for the user.

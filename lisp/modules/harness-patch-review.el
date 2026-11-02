@@ -31,15 +31,26 @@
 ;; made it (`review_comment'), the link back to that point of the
 ;; conversation.
 ;;
-;; THE DRAFTS.  What the user writes in the review is a draft until the
-;; task is sent back.  Whatever sends it back -- the report's box, a
-;; message typed in its session, another client -- gets the drafts with
-;; it: `harness-tasks-feedback-additions-functions' asks this module for
-;; the text, which quotes the diff above each comment as a reply on a
-;; mailing list does and names each comment's thread, and the drafts are
-;; marked sent once the task is.  The agent answers a thread with
-;; `review_comment', closing it when its point is done; the user closes
-;; it in turn, once they agree.
+;; THE DRAFTS.  What the user writes in a thread is a draft until it is
+;; sent, and a blank one is no comment at all.  A task waiting for review
+;; sends its drafts when it is sent back: whatever sends it back -- the
+;; report's box, a message typed in its session, another client -- gets
+;; them, `harness-tasks-feedback-additions-functions' asking this module
+;; for the text, which quotes the diff above each comment as a reply on a
+;; mailing list does and names each comment's thread.  The agent answers a
+;; thread with `review_comment', closing it when its point is done; the
+;; user closes it in turn, once they agree.
+;;
+;; THE WORKING PHASE.  A task at work is in the working phase: its review
+;; is a conversation with the user, and there is no feedback that could
+;; carry a draft until the work is handed in.  What the user writes in
+;; its threads waits there as drafts, all of them, until they send the
+;; replies together (`patch-review/send-replies',
+;; `harness-patch-review--send-working-replies'): one message to the
+;; agent, a thread block each, which the agent answers in their threads
+;; as one turn.  Closing a thread is the user's question answered, not a
+;; way past the hand-in check: hand_in refuses while one is open
+;; (`harness-patch-review--hand-in-blocker').
 ;;
 ;; THE CLOSES.  The agent closes a thread; the user is the one who says
 ;; the point is done.  A thread the agent closed is TO REVIEW until the
@@ -88,21 +99,25 @@
 ;; answers</quote>the reply</thread>, status="closed" to close it.  The
 ;; chat draws it as the card a reply in a thread is, and the transcript
 ;; keeps it as it was written.  The user's is a comment of the review --
-;; a draft while the task waits in review, sent with the feedback that
-;; sends it back -- and the agent's, read from its final message
-;; (`agent/assistant-message'), is its answer in the thread.  This is the
-;; way an agent answers without the tool, and the format its prompt
-;; names; a block that names no thread the review has stays as the user
-;; wrote it, for the agent to read.
+;; a draft, sent with the feedback that sends the task back, or with the
+;; other replies of a task at work -- and the agent's, read from its
+;; final message (`agent/assistant-message'), is its answer in the
+;; thread.  This is the way an agent answers without the tool, and the
+;; format its prompt names; a block that names no thread the review has
+;; stays as the user wrote it, for the agent to read.
 ;;
 ;; THE OPEN THREADS.  A thread with a sent comment that is still open is
-;; a question the work has not answered.  While this module is loaded,
-;; and `harness-tools-handin-require-closed-threads' is on, `hand_in'
-;; refuses until every such thread is closed
+;; a question the work has not answered, and the working phase is for
+;; working through it with the user until they are satisfied -- not for
+;; getting to hand_in.  While this module is loaded, and
+;; `harness-tools-handin-require-closed-threads' is on, `hand_in' refuses
+;; until every such thread is closed
 ;; (`harness-patch-review--hand-in-blocker', on
 ;; `harness-tools-handin-block-functions'): the working phase goes on
-;; until the agent has answered what the user asked.  Without the module
-;; there is no such check, and the hook is empty.
+;; until the agent has answered what the user asked, and closing a
+;; thread is a statement that its point is done, never a way around the
+;; check.  Without the module there is no such check, and the hook is
+;; empty.
 ;;
 ;; THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
 ;; the session while the agent was at work -- steering, quoting what the
@@ -1028,6 +1043,14 @@ what changed to every UI, so that each performs it on its own copy."
     (let ((set (harness-patch-review--set-for task-id t)))
       (list :changed (and (change-review-dispatch set op) t)))))
 
+(harness-defmethod patch-review/send-replies (task-id)
+  "Send the replies the user wrote in the threads of task TASK-ID's review.
+It is for a task at work, which has no feedback to carry them: they go to
+its agent as one message, a thread block each, and are marked sent.
+Return (:sent N).  A task waiting for review signals `harness-error': its
+drafts go with the feedback that sends it back."
+  (list :sent (harness-patch-review--send-working-replies task-id)))
+
 (harness-defmethod patch-review/open-threads (task-id)
   "Return the open threads of task TASK-ID's review, as a list of plists.
 Each is (:id ID :where WHERE), WHERE being the file and line the thread
@@ -1237,7 +1260,7 @@ Return a promise of (:seen N :unviewed M :revision COMMIT :tip COMMIT)."
 (defun harness-patch-review--attribution (task set)
   "Return the line before the first quote of the drafts of TASK's review in SET."
   (let ((version (change-review-latest-version set)))
-    (format "My review comments on your branch %s%s%s. Each is quoted from the diff, with my comment under the lines it is about; [thread ...] names the thread it belongs to. Answer a thread with the review_comment tool, giving its id, and close it (status \"closed\") once what it raises is done: a thread left open is not done. I look at every thread you close, so say in your answer what you changed and where."
+    (format "My review comments on your branch %s%s%s. Each is quoted from the diff, with my comment under the lines it is about; [thread ...] names the thread it belongs to. These threads are what I want worked on with you, not a check to get to hand_in. Answer a thread with the review_comment tool, giving its id, and close it (status \"closed\") only once what it raises is done: a thread left open is not done, and neither is one closed unanswered or in a batch. I look at every thread you close, so say in your answer what you changed and where."
             (or (plist-get task :branch) "")
             (if version (format " (at %s)" (change-review-short-revision (change-review-version-tip version))) "")
             (if (and version (change-review-version-base version))
@@ -1327,6 +1350,70 @@ thread its words are in."
                                            :time time :sent time
                                            :meta (list :round round :words t))))))))))
 
+;;;; The working phase: the replies go together
+
+(defun harness-patch-review--working-task-p (task)
+  "Non-nil when TASK is at work, in the working phase.
+Its review is then a conversation with the user: what the user writes in
+its threads is sent to the agent together, when they send it
+\(`patch-review/send-replies'), not with a round of feedback."
+  (and task
+       (eq (plist-get task :state) 'active)
+       (fboundp 'harness-tasks--working-phase-p)
+       (harness-tasks--working-phase-p task)))
+
+(defun harness-patch-review--working-replies (set)
+  "Return the replies of the user in SET that are not sent yet, as comments.
+They are the drafts that are the user's, not blank, in the order they
+were written."
+  (cl-remove-if-not
+   (lambda (comment)
+     (and (not (harness-string-blank-p (change-review-comment-body comment)))
+          (let ((author (change-review-comment-author comment)))
+            (eq (change-review-author-kind author) 'user))))
+   (change-review-drafts set)))
+
+(defun harness-patch-review--send-working-replies (task-id)
+  "Send the replies written in the threads of TASK-ID's review to its agent.
+They go as one message, each a thread block, so the agent answers them in
+their threads as one turn; each is marked sent.  Return how many there
+were.  Only a task in the working phase sends them so: a task waiting for
+review sends its drafts with the feedback that sends it back."
+  (let ((task (harness-patch-review--task task-id))
+        (set (harness-patch-review--set-for task-id t)))
+    (unless (harness-patch-review--working-task-p task)
+      (signal 'harness-error
+              (list "The task waits for review: its replies go with the feedback that sends it back")))
+    (let ((replies (harness-patch-review--working-replies set))
+          (session (plist-get task :session)))
+      (unless replies
+        (signal 'harness-error (list "No reply to send")))
+      (unless (and (stringp session) (not (string-blank-p session)))
+        (signal 'harness-error (list "The task has no session to send its replies to")))
+      (unless (harness-method-exists-p 'agent/prompt)
+        (signal 'harness-error (list "The harness cannot prompt a session")))
+      (let* ((time (float-time))
+             (blocks
+              (cons (list :type "text"
+                          :text "I wrote replies in the threads of the review of your work. Answer each in its thread with review_comment.")
+                    (mapcar (lambda (comment)
+                              (let* ((thread (car (change-review-find-comment set (change-review-comment-id comment))))
+                                     (body (change-review-comment-body comment)))
+                                (harness-thread-block
+                                 (list :id (change-review-thread-id thread) :response body)
+                                 body)))
+                            replies)))
+             (promise (harness-call-async 'agent/prompt session blocks)))
+        (when (eq (harness-promise-state promise) 'rejected)
+          (signal 'harness-error (list "The replies did not reach the agent")))
+        (harness-catch
+         promise
+         (lambda (e)
+           (harness-log 'warn "patch-review: the replies of %s did not reach the agent: %s"
+                        task-id (harness-error-message e))))
+        (change-review-mark-sent set replies :time time :meta (list :working t))
+        (length replies)))))
+
 ;;;; What the agent reads
 
 (defun harness-patch-review--where (thread)
@@ -1387,7 +1474,7 @@ module is loaded, so a harness without threads gates nothing; with
 either.  Return the text for the agent, naming the threads to answer."
   (when (bound-and-true-p harness-tools-handin-require-closed-threads)
     (when-let* ((open (harness-call 'patch-review/open-threads (plist-get task :id))))
-      (format "hand_in: %d thread%s of this task's review %s still open: %s. Answer each one and close it once what it raises is done: use review_comment with status \"closed\", or a <thread id=\"…\" status=\"closed\"> block in a message. review_threads lists them; then call hand_in again."
+      (format "hand_in: %d thread%s of this task's review %s still open: %s. They are the user's questions: answer each in its thread with review_comment and close it only when what it raises is done -- never in a batch just to hand in. Then call hand_in."
               (length open) (if (= 1 (length open)) "" "s")
               (if (= 1 (length open)) "is" "are")
               (string-join

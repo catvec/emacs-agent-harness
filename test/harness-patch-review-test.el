@@ -260,7 +260,12 @@ the check off, and a harness that did not load the module adds no check."
           (should (plist-get result :is-error))
           (should-not (plist-get result :end-turn))
           (should (string-match-p thread (plist-get result :content)))
-          (should (string-match-p "still open" (plist-get result :content))))
+          (should (string-match-p "still open" (plist-get result :content)))
+          ;; The refusal says what the threads are: the user's questions,
+          ;; not a check to get past, and never closed in a batch.
+          (should (string-match-p "the user's questions" (plist-get result :content)))
+          (should (string-match-p "never in a batch" (plist-get result :content)))
+          (should (string-match-p "Then call hand_in" (plist-get result :content))))
         ;; Nothing was recorded: the report of the hand-in that made the
         ;; review stands, and the task still waits for it.
         (should (eq 'review (plist-get (harness-call 'task/get id) :state)))
@@ -540,6 +545,78 @@ not filled into the lines around it, a long line of it is cut with the same
       (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
         (should (string-prefix-p "My review comments on your branch task/fix" feedback))
         (should (string-search "A word on the whole\n[thread " feedback))))))
+
+(ert-deftest harness-patch-review-the-replies-of-a-working-task-go-together ()
+  "In the working phase the user's replies wait as drafts and go together
+when they send them: one message to the agent, each in its thread, marked
+sent.  A blank draft is no reply and stays behind."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--task))
+             (eighteen (harness-patch-review-test--user-comment
+                        id "Why eighteen?" :location harness-patch-review-test--a18 :sent 10.0))
+             (cache (harness-patch-review-test--user-comment id "Why the cache?" :sent 10.0))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             sent)
+        (harness-call 'task/return-to-work id)
+        (should (equal "working" (plist-get (harness-call 'task/get id) :phase)))
+        (harness-patch-review-test--user-comment
+         id "Because the loop counts from one." :thread (car eighteen))
+        (harness-patch-review-test--user-comment
+         id "Because the key is minute." :thread (car cache))
+        (harness-patch-review-test--user-comment id "  " :thread (car eighteen))
+        ;; They are drafts: nothing went to the agent yet.
+        (should (= 3 (length (harness-call 'patch-review/drafts id))))
+        (should-not sent)
+        (cl-letf (((symbol-function 'harness-method/agent/prompt)
+                   (lambda (session blocks &optional _opts)
+                     (setq sent (list session blocks))
+                     (harness-resolved nil))))
+          (should (equal (list :sent 2)
+                         (harness-call 'patch-review/send-replies id))))
+        ;; One message, a block for each thread, in the order written.
+        (should (equal sid (car sent)))
+        (let* ((blocks (cadr sent))
+               (replies (cl-remove-if-not #'harness-thread-block-p blocks)))
+          (should (= 2 (length replies)))
+          (should (equal (list (car eighteen) (car cache))
+                         (mapcar (lambda (block) (plist-get (plist-get block :thread) :id)) replies)))
+          (should (equal (list "Because the loop counts from one." "Because the key is minute.")
+                         (mapcar #'harness-thread-response replies)))
+          (should (string-search "review_comment" (plist-get (car blocks) :text))))
+        ;; The replies are sent, with the mark of the working phase.
+        (let* ((thread (car (harness-patch-review-test--threads id)))
+               (reply (cl-find "Because the loop counts from one."
+                               (plist-get thread :comments)
+                               :key (lambda (comment) (plist-get comment :body)) :test #'equal)))
+          (should reply)
+          (should (numberp (plist-get reply :sent)))
+          (should (plist-get (plist-get reply :meta) :working)))
+        ;; The blank draft is no reply, and waits.
+        (let ((drafts (harness-call 'patch-review/drafts id)))
+          (should (= 1 (length drafts)))
+          (should (harness-string-blank-p (plist-get (car drafts) :body))))
+        ;; It was the conversation, not a round of feedback.
+        (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+        (should-not (plist-get (harness-call 'task/get id) :feedback))))))
+
+(ert-deftest harness-patch-review-a-task-in-review-sends-no-replies ()
+  "A task waiting for review has no send-replies: its drafts go with the
+feedback that sends it back, and sending them as replies is an error."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)))
+      (harness-patch-review-test--user-comment id "Not yet.")
+      (should (harness-call 'patch-review/drafts id))
+      (should-error (harness-call 'patch-review/send-replies id) :type 'harness-error)
+      (should (harness-call 'patch-review/drafts id)))))
+
+(ert-deftest harness-patch-review-sending-no-replies-is-an-error ()
+  "A task at work with nothing written has no reply to send."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t)
+          (id (harness-patch-review-test--task)))
+      (harness-call 'task/return-to-work id)
+      (should-error (harness-call 'patch-review/send-replies id) :type 'harness-error))))
 
 (ert-deftest harness-patch-review-sends-the-drafts-with-a-message-to-the-session ()
   "A message the user writes in the session of a task in review is the

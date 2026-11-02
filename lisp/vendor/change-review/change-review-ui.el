@@ -247,6 +247,18 @@ the text, `end' when that is after it, as it is for a reply that starts
 with a quote, else nil."
   :type 'function)
 
+(defun change-review-ui--draft-read-hint ()
+  "Return what C-c C-c does to a comment read by default: saves it as a draft."
+  "C-c C-c saves it as a draft, C-c C-k cancels")
+
+(defcustom change-review-ui-read-hint-function #'change-review-ui--draft-read-hint
+  "Function returning what the buffer that reads a comment says C-c C-c does.
+It is called with no arguments, in the buffer the comment is read for,
+and its string follows the prompt.  The default says that the comment is
+saved as a draft; a set whose comments are sent as they are written says
+that instead."
+  :type 'function)
+
 (defcustom change-review-ui-directory (locate-user-emacs-file "change-review/")
   "The directory that keeps the reviews of emailed patches.
 `change-review-open-patches' keeps the threads of a set of patches in a
@@ -2316,7 +2328,7 @@ or nil, says whether point starts after INITIAL or before it."
   (require 'string-edit)
   (let ((string-edit-mode-hook (cons (lambda () (change-review-ui--prepare-reading point))
                                      string-edit-mode-hook)))
-    (string-edit (concat prompt "  C-c C-c saves it as a draft, C-c C-k cancels")
+    (string-edit (concat prompt "  " (funcall change-review-ui-read-hint-function))
                  (or initial "") callback :abort-callback #'ignore)))
 
 (defun change-review-ui-read (prompt initial callback &optional point)
