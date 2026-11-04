@@ -26,6 +26,7 @@ Threads  [open 2]  to review 0  reviewed 1  closed 1   all 3
   ┃      Because the retry loop needs one more.
   ┃ 3/3  Noah Huppert (you) · draft · ↳ re 2/3  [Edit] [Delete]
   ┃      Then say so in a comment.
+  ┃ [Reply] [Close] [Diff]
 ```
 
 change-review is developed inside the
@@ -88,7 +89,10 @@ the one above (`↳ re 1/3`), for a draft an `[Edit]` button that edits
 it and a `[Delete]` button that takes it back, a `▸ where` button that
 shows where it was made, and for an agent's comment `↗ conversation`,
 then its text. The header of a thread that is nothing but drafts has a
-`[Delete thread]` button too.
+`[Delete thread]` button too. A thread drawn whole ends with the same
+buttons again, under its last comment: a long thread is answered, closed
+or shown in the diff from its end, without going back to its header
+(`change-review-ui-thread-buttons-at-bottom`).
 
 **Where a comment was made** is where it was made, not where its thread
 is now. The answer to a comment changes the code it is about, so the
@@ -334,6 +338,7 @@ them.
 The options of the views are `change-review-ui-time-format`,
 `change-review-ui-relative-times`, `change-review-ui-width`,
 `change-review-ui-default-filter`, `change-review-ui-collapse-closed-in-diff`,
+`change-review-ui-thread-buttons-at-bottom`,
 `change-review-ui-max-thread-lines`, `change-review-ui-tail-replies`,
 `change-review-ui-max-comment-lines`,
 `change-review-ui-read-function` (a comment is read in a `string-edit`

@@ -4918,8 +4918,9 @@ whole, or whose line is gone, at the top of the branch's version.
 PLACED says where each thread is, an alist of its id to its place
 \(`harness-ui-patch-review--place-from-texts'), for those the report has
 not placed yet.  No line is wider than the window shows, and a thread is
-no taller than it has room for (`change-review-ui-current-size'), its long
-comments cut shorter to fit, with the [Show more] that draws them: the
+no taller than it has room for (`change-review-ui-current-size'), but for
+the line of buttons that ends it, its long comments cut shorter to fit,
+with the [Show more] that draws them: the
 window's size at this drawing is kept, for a window that changes it
 \(`harness-ui-patch-review--side-resized').  A closed thread is a line,
 which TAB or a click opens to its conversation, as the library's fold

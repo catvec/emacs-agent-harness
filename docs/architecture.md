@@ -15008,7 +15008,12 @@ comment it answers when that is not the one above (`↳ re 1/3`), for a
 draft an `[Edit]` button and a `[Delete]` one, a `▸
 where` button that shows where the comment was made, and for an agent's
 comment `↗ conversation`, then the text.  The header of a thread that is
-nothing but drafts has one more button, `[Delete thread]`.  The text is drawn by the kind
+nothing but drafts has one more button, `[Delete thread]`.  A thread drawn
+whole ends with the same buttons again, under its last comment
+(`change-review-ui-thread-buttons-at-bottom`), so that a long thread is
+answered or closed from its end without going back to its header; it is
+one line more than `change-review-ui-max-thread-lines` allows, so that it
+does not cut a comment shorter.  The text is drawn by the kind
 of set: as it was typed, its lines wrapped under the bar, for a plain one,
 and as a markup does where the kind of set says its comments are one --
 `change-review-ui-body-lines` gives the lines of a comment, as wide as

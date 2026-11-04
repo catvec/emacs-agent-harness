@@ -208,13 +208,26 @@ user to review it is drawn whole all the same, so that what was
 answered is in sight."
   :type 'boolean)
 
+(defcustom change-review-ui-thread-buttons-at-bottom t
+  "Whether a thread drawn whole ends with its buttons again.
+The header of a thread has what can be done with it; a thread of many
+comments is long enough that to reply one would have to scroll back to
+it, so its last line has the same buttons for the view that draws it,
+[Reply], [Close] or [Reopen], [Mark reviewed] when one waits, [Diff]
+and [Delete thread] -- the last two where the view has them.  A thread
+folded to one line has them in that line.  nil draws the header's
+buttons only."
+  :type 'boolean)
+
 (defcustom change-review-ui-max-thread-lines 'window
   "The most lines a thread takes under a line of a diff.
 A number; `window' for what the window shows, its height less a few
 lines, so the line the thread is under stays in sight; nil for no limit.
 A thread that is longer is cut after the lines it has room for, with how
 many more there are in a line of its own: \\`TAB' on the thread, or a
-click on that line, shows all of it.  The threads view has no limit."
+click on that line, shows all of it.  The line of buttons that ends a
+thread (`change-review-ui-thread-buttons-at-bottom') is one more, so
+that it does not cut a comment shorter.  The threads view has no limit."
   :type '(choice (const :tag "What the window shows" window)
                  (const :tag "No limit" nil)
                  natnum))
@@ -1091,6 +1104,39 @@ the marker and the space."
      (lambda () (change-review-ui-set-fold set thread (if collapsed 'expanded 'collapsed)))
      'change-review-ui-fold-face)))
 
+(defun change-review-ui--thread-buttons (set thread view options)
+  "Return the buttons of THREAD in SET, drawn for VIEW, or nil.
+VIEW is `threads' or `diff': the diff view leaves out [Diff], since the
+thread is there already.  OPTIONS are those of
+`change-review-ui--header-steps': `:buttons' nil leaves them all out and
+`:delete' nil the button that deletes a thread of drafts."
+  (when (change-review-ui--opt options :buttons t)
+    (let ((open (change-review-thread-open-p thread)))
+      (concat
+       (change-review-ui--button "[Reply]" "Reply to this thread"
+                                 (lambda () (change-review-ui-reply-to-thread set thread)))
+       " "
+       (change-review-ui--button (if open "[Close]" "[Reopen]")
+                                 (if open "Close this thread: it is done"
+                                   "Open this thread again")
+                                 (lambda () (change-review-ui-toggle-thread set thread)))
+       (if (change-review-thread-unreviewed-p set thread)
+           (concat " " (change-review-ui--button
+                        "[Mark reviewed]"
+                        "You looked at how this thread was closed: it no longer waits for you"
+                        (lambda () (change-review-ui-mark-thread-reviewed set thread))))
+         "")
+       (if (eq view 'diff)
+           ""
+         (concat " " (change-review-ui--button
+                      "[Diff]" "Show this thread in the diff view"
+                      (lambda () (change-review-visit set thread)))))
+       ;; A thread of drafts is the author's alone: it can be taken back.
+       (if (and (change-review-ui--opt options :delete t)
+                (change-review-thread-draft-p thread))
+           (concat " " (change-review-ui--delete-thread-button set thread))
+         "")))))
+
 (defun change-review-ui--build-thread-header (set thread view placement prefix fold options)
   "Return the first line of THREAD in SET, drawn for VIEW, after PREFIX.
 VIEW is `threads' or `diff'; PLACEMENT says where the thread is now.
@@ -1116,31 +1162,7 @@ that deletes a thread of drafts and the buttons."
                                  (format "%d %s" count (if (= count 1) "comment" "comments")))
                             (change-review-ui--status-text set thread (plist-get options :status))
                             (change-review-ui--review-text set thread))))
-         (buttons (and (change-review-ui--opt options :buttons t)
-                       (concat
-                        (change-review-ui--button "[Reply]" "Reply to this thread"
-                                                  (lambda () (change-review-ui-reply-to-thread set thread)))
-                        " "
-                        (change-review-ui--button (if open "[Close]" "[Reopen]")
-                                                  (if open "Close this thread: it is done"
-                                                    "Open this thread again")
-                                                  (lambda () (change-review-ui-toggle-thread set thread)))
-                        (if (change-review-thread-unreviewed-p set thread)
-                            (concat " " (change-review-ui--button
-                                         "[Mark reviewed]"
-                                         "You looked at how this thread was closed: it no longer waits for you"
-                                         (lambda () (change-review-ui-mark-thread-reviewed set thread))))
-                          "")
-                        (if (eq view 'diff)
-                            ""
-                          (concat " " (change-review-ui--button
-                                       "[Diff]" "Show this thread in the diff view"
-                                       (lambda () (change-review-visit set thread)))))
-                        ;; A thread of drafts is the author's alone: it can be taken back.
-                        (if (and (change-review-ui--opt options :delete t)
-                                 (change-review-thread-draft-p thread))
-                            (concat " " (change-review-ui--delete-thread-button set thread))
-                          "")))))
+         (buttons (change-review-ui--thread-buttons set thread view options)))
     (propertize (concat (if fold
                             (change-review-ui--fold-gutter prefix (change-review-ui--fold-marker set thread fold))
                           prefix)
@@ -1168,6 +1190,35 @@ returned as it is, not cut."
      (change-review-ui--build-thread-header set thread view placement prefix fold options))
    (if (eq fold 'collapsed) change-review-ui--collapsed-header-steps change-review-ui--header-steps)
    keep))
+
+(defconst change-review-ui--footer-steps
+  '((:delete nil))
+  "What the line of a thread's buttons at its bottom gives up.
+As `change-review-ui--header-steps', but only the button that deletes a
+thread of drafts goes: a line of buttons has the room of a line of its
+own, and when it has not, it is cut.")
+
+(defun change-review-ui--thread-footer (set thread view indent width)
+  "Return the line that ends THREAD of SET with its buttons, or nil.
+VIEW is `threads' or `diff', as `change-review-ui-thread-string' takes
+it.  INDENT starts the line and WIDTH is the room it has; a line wider
+than that says the least it can, `change-review-ui--footer-steps', and
+is cut.  The line begins with the bar the comments have, in the meta
+face.  It is nil when `change-review-ui-thread-buttons-at-bottom' is
+nil, or when the thread has no comment to reply to."
+  (when (and change-review-ui-thread-buttons-at-bottom
+             (change-review-thread-last-comment thread))
+    (let ((prefix (concat indent
+                          (propertize "┃" 'face 'change-review-ui-meta-face)
+                          " ")))
+      (let ((line (change-review-ui--fit
+                   width
+                   (lambda (options)
+                     (concat prefix
+                             (change-review-ui--thread-buttons set thread view options)
+                             "\n"))
+                   change-review-ui--footer-steps)))
+        (propertize line 'wrap-prefix (concat indent "  "))))))
 
 (defun change-review-ui--summary (body)
   "Return the words of BODY, a comment's text, that stand for it in one line.
@@ -1336,6 +1387,11 @@ before), who wrote it, when, against which revision, whether it is a
 draft, and the text (`change-review-ui-body-lines': as it was typed,
 unless the kind of set says its comments are a markup).  A comment
 whose author is an agent has a button to the conversation it came from.
+A thread drawn whole ends with a line of its own that has the header's
+buttons again (`change-review-ui-thread-buttons-at-bottom'), so that it
+is answered from its end without going back to its start: [Reply],
+[Close] or [Reopen], [Mark reviewed], [Diff] and [Delete thread], as
+the view has them.
 
 No line is wider than WIDTH, by default the room the buffer's window
 has: a line that would be says less -- how long ago for a date, the
@@ -1359,7 +1415,8 @@ what still does not fit is cut off, a line saying how many lines the
 thread has more, a button that draws all of it.  A thread whose DETAILS
 show, or that the user asked to show more of
 \(`change-review-ui-show-earlier', `change-review-ui-show-comment'), is
-not cut.
+not cut.  The line of buttons at its bottom is one more, so that it does
+not cut a comment shorter to make room for itself.
 
 A thread with many comments draws the first and the last few, and one
 line, \"▸ 6 earlier replies\", for the ones between; a comment longer than
@@ -1371,6 +1428,8 @@ the next `change-review-ui-next-fold' shows."
          (collapsed (or collapsed (eq fold 'collapsed)))
          (fold (and fold (if collapsed 'collapsed fold)))
          (comments (change-review-thread-comments thread))
+         (footer (and (not collapsed)
+                      (change-review-ui--thread-footer set thread view indent width)))
          (limit (and max-lines (eq fold 'expanded)
                      (not (or (eq details t)
                               (cl-some (lambda (comment) (member (change-review-comment-id comment) details))
@@ -1392,15 +1451,16 @@ the next `change-review-ui-next-fold' shows."
               ;; A drawing that cannot be folded -- the threads view's -- says nothing of it.
               (when fold
                 (change-review-ui--note-trimmed set thread (or cut left-out)))
-              (if cut
-                  ;; The button draws all of it: that is what the count is of.
-                  (append (seq-take all (1- limit))
-                          (list (change-review-ui--more-row
-                                 set thread indent
-                                 (- (1+ (length (car (change-review-ui--comment-rows
-                                                      set thread indent width details 'full))))
-                                    (1- limit)))))
-                all)))))
+              (let ((drawn (if cut
+                               ;; The button draws all of it: that is what the count is of.
+                               (append (seq-take all (1- limit))
+                                       (list (change-review-ui--more-row
+                                              set thread indent
+                                              (- (1+ (length (car (change-review-ui--comment-rows
+                                                                   set thread indent width details 'full))))
+                                                 (1- limit)))))
+                             all)))
+                (if footer (append drawn (list footer)) drawn))))))
     (propertize (apply #'concat lines)
                 'change-review-thread (change-review-thread-id thread))))
 

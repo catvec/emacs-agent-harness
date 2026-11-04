@@ -304,7 +304,10 @@ whether it is a draft, and where it is in the thread."
       (should (equal "┃ 3/3  Noah (you) · 2026-10-14 17:45 · second · draft · ↳ re 1/3  [Edit] [Delete]  ▸ where"
                      (nth 6 lines)))
       (should (equal "┃      Then say so in a comment." (nth 7 lines)))
-      (should (= 8 (length lines))))))
+      ;; The thread ends with the header's buttons, so it is answered from
+      ;; its bottom.
+      (should (equal "┃ [Reply] [Close] [Diff]" (nth 8 lines)))
+      (should (= 9 (length lines))))))
 
 (ert-deftest change-review-ui-marks-what-the-text-is-about ()
   "The text carries the ids of its thread and its comments, and where each starts."
@@ -336,7 +339,9 @@ This one the agent closed, so it waits for the user's review as well."
            (lines (change-review-ui-test--lines (change-review-ui-thread-string set thread :width 120))))
       (should (string-match-p "\\`✓ [^ ]+ · line 2 · 1 comment · closed by Claude, 2026-10-14 17:16 · to review +\\[Reply\\] \\[Reopen\\] \\[Mark reviewed\\] \\[Diff\\]\\'"
                               (car lines)))
-      (should (= 3 (length lines)))
+      (should (= 4 (length lines)))
+      ;; The buttons again at the thread's end, in the same words.
+      (should (equal "┃ [Reply] [Reopen] [Mark reviewed] [Diff]" (nth 3 lines)))
       (let ((one (change-review-ui-test--lines
                   (change-review-ui-thread-string set thread :width 90 :collapsed t :view 'diff))))
         (should (= 1 (length one)))
@@ -388,8 +393,9 @@ This one the agent closed, so it waits for the user's review as well."
            (thread (change-review-find-thread set (change-review-comment-thread comment)))
            (lines (change-review-ui-test--lines (change-review-ui-thread-string set thread :width 50))))
       (should (> (length lines) 4))
-      ;; The text wraps; the header lines are as long as they are.
-      (dolist (line (cddr lines))
+      ;; The text wraps; the header lines are as long as they are, and the
+      ;; buttons at the bottom are no comment's text.
+      (dolist (line (butlast (cddr lines)))
         (should (<= (string-width line) 50))
         (should (string-prefix-p "┃      wordy" line))))))
 
@@ -428,6 +434,51 @@ This one the agent closed, so it waits for the user's review as well."
                                 (car (change-review-ui-test--set-followed set))))))))
 
 ;; The comment that can still be changed has a button of its own.
+
+(ert-deftest change-review-ui-ends-a-thread-with-its-buttons ()
+  "A thread drawn whole ends with the header's buttons under its last comment.
+The ones at the bottom do what the header's do, a thread of one line has
+the header's alone, the option nil draws none at the bottom, and a line of
+them is no wider than the thread's room."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (thread (car (change-review-ui-test--populate set)))
+           (change-review-ui-read-function (lambda (_prompt _initial callback)
+                                             (funcall callback "From the bottom")))
+           (string (change-review-ui-thread-string set thread :width 90)))
+      ;; One set of them in the header and one at the bottom, which is last.
+      (should (= 2 (length (change-review-ui-test--buttons string "[Reply]"))))
+      (should (= 2 (length (change-review-ui-test--buttons string "[Close]"))))
+      (should (equal "┃ [Reply] [Close] [Diff]"
+                     (car (last (change-review-ui-test--lines string)))))
+      ;; The line is the thread's, so the commands at point find it.
+      (should (equal (change-review-thread-id thread)
+                     (get-text-property (string-search "┃ [Reply]" string)
+                                        'change-review-thread string)))
+      ;; The bottom one replies, to the last comment.
+      (change-review-ui-test--press-nth string "[Reply]" 1)
+      (let ((last (change-review-thread-last-comment thread)))
+        (should (equal "From the bottom" (change-review-comment-body last)))
+        (should (change-review-comment-draft-p last))
+        (should (equal (change-review-comment-id
+                        (nth 2 (change-review-thread-comments thread)))
+                       (change-review-comment-reply-to last))))
+      ;; The bottom one closes it, as the header's does.
+      (change-review-ui-test--press-nth (change-review-ui-thread-string set thread :width 90)
+                                        "[Close]" 1)
+      (should-not (change-review-thread-open-p thread))
+      ;; A thread of one line says it in that line, and only there.
+      (let ((one (change-review-ui-thread-string set thread :width 90 :collapsed t)))
+        (should (= 1 (length (change-review-ui-test--lines one))))
+        (should (= 1 (length (change-review-ui-test--buttons one "[Reopen]")))))
+      (let ((change-review-ui-thread-buttons-at-bottom nil))
+        (should (= 1 (length (change-review-ui-test--buttons
+                              (change-review-ui-thread-string set thread :width 90)
+                              "[Reopen]")))))
+      ;; A line of buttons fits the room it is drawn to.
+      (let ((footer (car (last (change-review-ui-test--lines
+                                (change-review-ui-thread-string set thread :width 50))))))
+        (should (<= (string-width footer) 50))))))
 
 (ert-deftest change-review-ui-draws-an-edit-button-on-a-draft-only ()
   "A draft has [Edit] in its header, a comment that was sent has none."
@@ -956,10 +1007,12 @@ given is what the bar leaves."
       ;; The indent, the bar, and the six columns the comment's place in
       ;; the thread takes: nine columns of the eighty.
       (should (equal '(71) (change-review-ui-test--markup-set-widths set)))
-      ;; The thread's header, the comment's, then its four lines.
-      (should (= 6 (length lines)))
+      ;; The thread's header, the comment's, then its four lines, and the
+      ;; buttons at the bottom.
+      (should (= 7 (length lines)))
       (should (equal '("  ┃      plain" "  ┃      bold" "  ┃      extends" "  ┃      last")
-                     (nthcdr 2 lines)))
+                     (butlast (nthcdr 2 lines))))
+      (should (equal "  ┃ [Reply] [Close] [Diff] [Delete thread]" (car (last lines))))
       (let ((pos (string-search "bold" string)))
         (should (eq 'bold (get-text-property pos 'face string)))
         (should (eq 'bold (get-text-property (+ pos 3) 'face string)))
@@ -1238,7 +1291,7 @@ left out of the conversation -- then one line; several threads follow the first.
         (should (equal (format "Thread %s: one line" (change-review-ui-thread-short-id set closed))
                        (car message-log)))
         ;; Something was: all of it comes before one line.
-        (should (= 8 (length (change-review-ui-test--lines
+        (should (= 9 (length (change-review-ui-test--lines
                               (change-review-ui-thread-string set open :width 80)))))
         (change-review-ui-thread-string set open :width 80 :fold 'expanded :max-lines 5)
         (should (eq 'full (change-review-ui-cycle-folds set (list open))))
@@ -1306,18 +1359,22 @@ long, and not cut itself: that is `change-review-ui-max-comment-lines'.)"
            (draw (lambda (fold &rest keys)
                    (apply #'change-review-ui-thread-string set thread :view 'diff :width 80
                           :fold fold :max-lines 8 keys))))
-      ;; Eight lines: the header, the comment's, five of its text, and the one that says more.
+      ;; Eight lines of the thread, as the room has it: the header, the
+      ;; comment's, five of its text and the one that says more; then the
+      ;; buttons at the bottom.
       (let ((lines (change-review-ui-test--lines (funcall draw 'expanded))))
-        (should (= 8 (length lines)))
+        (should (= 9 (length lines)))
         (should (equal "┃      Line 5 of a long comment." (nth 6 lines)))
-        (should (equal "┃      … 15 more lines" (nth 7 lines))))
+        (should (equal "┃      … 15 more lines" (nth 7 lines)))
+        (should (equal "┃ [Reply] [Close] [Delete thread]" (nth 8 lines))))
       (should (change-review-ui--trimmed-p set thread))
       (change-review-ui-test--press (funcall draw 'expanded) "… 15 more lines")
       (should (eq 'full (change-review-ui-thread-fold set thread)))
       ;; All of it, and nothing says more.
       (let ((lines (change-review-ui-test--lines (funcall draw 'full))))
-        (should (= 22 (length lines)))
-        (should-not (cl-some (lambda (line) (string-search "more line" line)) lines)))
+        (should (= 23 (length lines)))
+        (should-not (cl-some (lambda (line) (string-search "more line" line))
+                             (butlast lines))))
       (should-not (change-review-ui--trimmed-p set thread))
       ;; The threads view's drawing, which cannot be folded, leaves that note alone.
       (funcall draw 'expanded)
@@ -1326,16 +1383,16 @@ long, and not cut itself: that is `change-review-ui-max-comment-lines'.)"
       (should (change-review-ui--trimmed-p set thread))
       ;; Not cut where there is room, or where no limit is given, or when
       ;; the comment's details show: it was asked for.
-      (should (= 22 (length (change-review-ui-test--lines
+      (should (= 23 (length (change-review-ui-test--lines
                              (change-review-ui-thread-string set thread :view 'diff :width 80
                                                              :fold 'expanded :max-lines 30)))))
-      (should (= 22 (length (change-review-ui-test--lines
+      (should (= 23 (length (change-review-ui-test--lines
                              (change-review-ui-thread-string set thread :view 'diff :width 80 :fold 'expanded)))))
       (should (> (length (change-review-ui-test--lines
                           (funcall draw 'expanded :details (list (change-review-comment-id comment)))))
-                 22))
+                 23))
       ;; The threads view, with no fold, has no limit either.
-      (should (= 22 (length (change-review-ui-test--lines
+      (should (= 23 (length (change-review-ui-test--lines
                              (change-review-ui-thread-string set thread :width 80 :max-lines 8))))))))
 
 ;;;; Long threads and long comments
@@ -1423,8 +1480,8 @@ and the last three; the comments keep their numbers, so the gap shows."
       (should (equal "┃       ▸ 6 earlier replies" (nth 3 lines)))
       (should (equal "┃       Comment 8, line 1." (nth 5 lines)))
       (should (equal "┃       Comment 10, line 1." (nth 9 lines)))
-      ;; Nothing else: the header, 2 + 1 + 3 * 2 lines.
-      (should (= 10 (length lines)))
+      ;; Nothing else: the header, 2 + 1 + 3 * 2 lines, and the buttons.
+      (should (= 11 (length lines)))
       (should-not (cl-some (lambda (n) (string-search (format "Comment %d," n) string)) '(2 3 4 5 6 7)))
       ;; The line is a button.
       (should (change-review-ui-test--button string "▸ 6 earlier replies"))
@@ -1465,8 +1522,8 @@ them away again.  What was chosen stays with the set, and is the thread's."
       (let* ((string (funcall draw))
              (lines (change-review-ui-test--lines string)))
         ;; All ten, and the line that folds them, after the first: the header,
-        ;; the line, and two for each comment.
-        (should (= (+ 1 1 (* 2 10)) (length lines)))
+        ;; the line, two for each comment, and the buttons at the bottom.
+        (should (= (+ 1 1 (* 2 10) 1) (length lines)))
         (should (equal "┃       ▾ 6 earlier replies" (nth 3 lines)))
         (should (equal '("┃  1/10" "┃  2/10" "┃  3/10" "┃  7/10" "┃  8/10" "┃ 10/10")
                        (mapcar (lambda (n) (substring (nth n lines) 0 7))
@@ -1474,7 +1531,7 @@ them away again.  What was chosen stays with the set, and is the thread's."
         (should (string-search "Comment 4, line 1." string))
         (change-review-ui-test--press string "▾ 6 earlier replies"))
       (should-not (change-review-ui-earlier-shown-p set thread))
-      (should (= 10 (length (change-review-ui-test--lines (funcall draw)))))
+      (should (= 11 (length (change-review-ui-test--lines (funcall draw)))))
       ;; Another set, with a thread of the same id perhaps, has its own.
       (change-review-ui-show-earlier set thread t)
       (should (change-review-ui-earlier-shown-p set thread))
@@ -1548,25 +1605,29 @@ and its [Show more] draws them, with a [Show less] that cuts it again."
            (thread (change-review-ui-test--conversation set 1 20))
            (root (change-review-thread-root thread))
            (draw (lambda () (change-review-ui-thread-string set thread :width 80))))
-      ;; The header, the comment's, five lines of the text, and the line that says more.
+      ;; The header, the comment's, five lines of the text, the line that
+      ;; says more, and the buttons at the bottom.
       (let ((lines (change-review-ui-test--lines (funcall draw))))
-        (should (= 8 (length lines)))
+        (should (= 9 (length lines)))
         (should (equal "┃      Comment 1, line 5." (nth 6 lines)))
-        (should (equal "┃      … 15 more lines  [Show more]" (nth 7 lines))))
+        (should (equal "┃      … 15 more lines  [Show more]" (nth 7 lines)))
+        (should (equal "┃ [Reply] [Close] [Diff]" (nth 8 lines))))
       (should-not (change-review-ui-comment-shown-p set root))
       (change-review-ui-test--press (funcall draw) "[Show more]")
       (should (change-review-ui-comment-shown-p set root))
-      ;; All of it, the header and the comment's, then [Show less].
+      ;; All of it, the header and the comment's, then [Show less], and the
+      ;; buttons at the bottom.
       (let ((lines (change-review-ui-test--lines (funcall draw))))
-        (should (= 23 (length lines)))
+        (should (= 24 (length lines)))
         (should (equal "┃      Comment 1, line 20." (nth 21 lines)))
-        (should (equal "┃      [Show less]" (nth 22 lines))))
+        (should (equal "┃      [Show less]" (nth 22 lines)))
+        (should (equal "┃ [Reply] [Close] [Diff]" (nth 23 lines))))
       (change-review-ui-test--press (funcall draw) "[Show less]")
       (should-not (change-review-ui-comment-shown-p set root))
-      (should (= 8 (length (change-review-ui-test--lines (funcall draw)))))
+      (should (= 9 (length (change-review-ui-test--lines (funcall draw)))))
       ;; The option nil never cuts.
       (let ((change-review-ui-max-comment-lines nil))
-        (should (= 22 (length (change-review-ui-test--lines (funcall draw))))))
+        (should (= 23 (length (change-review-ui-test--lines (funcall draw))))))
       ;; A thread that was not cut says nothing of the buttons.
       (should-not (string-search "Show less" (let ((change-review-ui-max-comment-lines nil))
                                                (funcall draw)))))))
@@ -1580,10 +1641,10 @@ until it is two lines over."
            (six (change-review-ui-test--conversation set 1 6))
            (seven (change-review-ui-test--conversation set 1 7)))
       (let ((string (change-review-ui-thread-string set six :width 80)))
-        (should (= 8 (length (change-review-ui-test--lines string))))
+        (should (= 9 (length (change-review-ui-test--lines string))))
         (should-not (string-search "Show" string)))
       (let ((string (change-review-ui-thread-string set seven :width 80)))
-        (should (= 8 (length (change-review-ui-test--lines string))))
+        (should (= 9 (length (change-review-ui-test--lines string))))
         (should (string-search "… 2 more lines  [Show more]" string))))))
 
 (ert-deftest change-review-ui-cuts-each-long-comment-of-a-thread-by-itself ()
@@ -1617,7 +1678,8 @@ them: the cut does not count the lines of the text."
                    (lines (change-review-ui-test--lines string)))
         (should (equal '("┃      plain" "┃      bold" "┃      extends"
                          "┃      … 3 more lines  [Show more]")
-                       (nthcdr 2 lines)))
+                       (butlast (nthcdr 2 lines))))
+        (should (equal "┃ [Reply] [Close] [Diff] [Delete thread]" (car (last lines))))
         (should (eq 'bold (get-text-property (string-search "bold" string) 'face string)))
         (should-not (string-search "fourth" string))))))
 
@@ -1653,13 +1715,15 @@ the thread is cut to the window any more."
            (draw (lambda (&rest keys)
                    (apply #'change-review-ui-thread-string set thread :view 'diff :width 80
                           :fold 'expanded :max-lines 6 keys))))
-      ;; Six lines of room: the header, the comment's, three of its lines and
-      ;; the one that says more, whose button draws all of the comment.
+      ;; Six lines of room: the header, the comment's, three of its lines
+      ;; and the one that says more, whose button draws all of the comment;
+      ;; then the buttons at the bottom.
       (let ((lines (change-review-ui-test--lines (funcall draw))))
-        (should (= 6 (length lines)))
-        (should (string-match-p "… 17 more lines  \\[Show more\\]\\'" (car (last lines)))))
+        (should (= 7 (length lines)))
+        (should (string-match-p "… 17 more lines  \\[Show more\\]" (nth 5 lines)))
+        (should (equal "┃ [Reply] [Close]" (car (last lines)))))
       (change-review-ui-show-comment set (change-review-thread-root thread) t)
-      (should (= 23 (length (change-review-ui-test--lines (funcall draw)))))
+      (should (= 24 (length (change-review-ui-test--lines (funcall draw)))))
       ;; The replies that were folded away too.
       (change-review-ui-show-comment set (change-review-thread-root thread) nil)
       (let ((many (change-review-ui-test--conversation set 10)))
@@ -1668,7 +1732,7 @@ the thread is cut to the window any more."
                                                             :fold 'expanded :max-lines 6)))
                    10))
         (change-review-ui-show-earlier set many t)
-        (should (= 22 (length (change-review-ui-test--lines
+        (should (= 23 (length (change-review-ui-test--lines
                                (change-review-ui-thread-string set many :view 'diff :width 80
                                                                :fold 'expanded :max-lines 6)))))))))
 
@@ -1692,28 +1756,30 @@ what clicking it draws: all of the thread."
                                  lines))))
       ;; Room for all: each comment is cut as the option says.
       (let ((lines (funcall draw)))
-        (should (= 35 (length lines)))
+        (should (= 36 (length lines)))
         (should (= 2 (funcall shows lines)))
         (should (string-search "Comment 1, line 15." (string-join lines "\n")))
         (should-not (string-search "Comment 1, line 16." (string-join lines "\n"))))
-      ;; Room for 20: seven lines of each, and the line after them.
+      ;; Room for 20: seven lines of each, the line after them, and the buttons.
       (let ((lines (funcall draw 20)))
-        (should (= 19 (length lines)))
+        (should (= 20 (length lines)))
         (should (= 2 (funcall shows lines)))
         (should (string-search "Comment 2, line 7." (string-join lines "\n")))
         (should-not (string-search "Comment 2, line 8." (string-join lines "\n")))
-        (should (string-match-p "… 33 more lines  \\[Show more\\]\\'" (car (last lines)))))
+        (should (string-search "… 33 more lines  [Show more]" (string-join lines "\n"))))
       ;; Room for 12: three lines of each.
       (let ((lines (funcall draw 12)))
-        (should (= 11 (length lines)))
+        (should (= 12 (length lines)))
         (should (= 2 (funcall shows lines)))
         (should (string-search "Comment 2, line 3." (string-join lines "\n")))
         (should-not (string-search "Comment 2, line 4." (string-join lines "\n"))))
       ;; Less than that: the thread is cut off, saying how many lines the
       ;; button draws, all of those the thread has less the ones drawn.
       (let ((lines (funcall draw 8)))
-        (should (= 8 (length lines)))
-        (should (string-match-p "┃      … 76 more lines\\'" (car (last lines)))))
+        (should (= 9 (length lines)))
+        (should (string-match-p "┃      … 76 more lines\\'"
+                                (nth 7 lines)))
+        (should (equal "┃ [Reply] [Close]" (nth 8 lines))))
       ;; The button on a comment draws all of it, and then the room is no limit.
       (change-review-ui-show-comment set (change-review-thread-root thread) t)
       (let ((lines (funcall draw 12)))
@@ -1726,8 +1792,9 @@ what clicking it draws: all of the thread."
            (lines (change-review-ui-test--lines
                    (change-review-ui-thread-string set thread :view 'diff :width 80
                                                    :fold 'expanded :max-lines 8))))
-      (should (= 8 (length lines)))
-      (should (string-match-p "┃      … 16 more lines\\'" (car (last lines)))))))
+      (should (= 9 (length lines)))
+      (should (string-match-p "┃      … 16 more lines\\'" (nth 7 lines)))
+      (should (equal "┃ [Reply] [Close]" (nth 8 lines))))))
 
 (ert-deftest change-review-ui-folding-a-thread-to-one-line-takes-back-what-was-shown ()
   "The earlier replies and the long comments the user asked to see stay shown
@@ -2617,7 +2684,9 @@ This includes whitespace and line ends, before or after their anchor."
 (ert-deftest change-review-ui-keeps-the-face-of-the-last-newline-under-a-line ()
   "The buffer's own newline ends the last line of a thread under a line, so a
 face that reaches the edge of the window from the newline of that line is
-a stretch there instead.  Plain text extends its default base there too."
+a stretch there instead.  Plain text extends its default base there too.
+A thread now ends with its buttons, and the newline of the comment before
+them keeps the face the markup gave it."
   (change-review-ui-test--drawing
     (pcase-let ((`(,set . ,thread) (change-review-ui-test--markup-thread "first\n~extends"))
                 (plain (change-review-ui-test--set)))
@@ -2630,10 +2699,17 @@ a stretch there instead.  Plain text extends its default base there too."
                                   'after-string))
                (last (1- (length text))))
           (should-not (string-suffix-p "\n" text))
-          (should (string-suffix-p "extends " (substring-no-properties text)))
-          (should (equal '(highlight (:inherit default :extend t))
+          ;; The thread ends with its buttons, whose line is the one the
+          ;; stretch of the window's edge is on now.
+          (should (string-suffix-p "┃ [Reply] [Close] [Delete thread] "
+                                   (substring-no-properties text)))
+          (should (equal '(:inherit default :extend t)
                          (get-text-property last 'face text)))
-          (should (equal '(space :align-to right) (get-text-property last 'display text))))
+          (should (equal '(space :align-to right) (get-text-property last 'display text)))
+          ;; The newline the markup gave the comment's last line is no
+          ;; longer the thread's last, and its face stays.
+          (let ((pos (+ (string-search "extends" text) (length "extends"))))
+            (should (eq 'highlight (car (get-text-property pos 'face text))))))
         (let* ((thread (car (change-review-ui-test--populate plain)))
                (text (overlay-get (change-review-ui-add-thread-overlay
                                    plain thread (line-end-position) :view 'diff :width 70)
@@ -4050,9 +4126,11 @@ would be, not the thread at a line that does not say where the rest is."
                                                                               (or (overlay-get o 'after-string) "")))
                                                  (overlays-in (point-min) (point-max)))
                                      'after-string)))))
-          ;; The header, the comment's, four of its lines and the one that says more.
-          (should (string-match-p "Line 4 of a long comment\\.\n    ┃      … 8 more lines  \\[Show more\\] \\'"
+          ;; The header, the comment's, four of its lines, the one that says
+          ;; more, and the buttons at the bottom.
+          (should (string-match-p "Line 4 of a long comment\\.\n    ┃      … 8 more lines  \\[Show more\\]\n"
                                   (funcall drawn)))
+          (should (string-match-p "┃ \\[Reply\\] \\[Close\\] \\[Delete thread\\] \\'" (funcall drawn)))
           (should-not (string-match-p "Line 5 of" (funcall drawn)))
           (change-review-ui-test--goto "^ (setq a6 6)")
           (end-of-line)
@@ -4061,7 +4139,7 @@ would be, not the thread at a line that does not say where the rest is."
           (let ((inhibit-message t))
             (call-interactively #'change-review-ui-cycle-fold))
           (change-review-ui-flush)
-          (should (string-match-p "Line 12 of a long comment\\. \\'" (funcall drawn)))
+          (should (string-match-p "Line 12 of a long comment\\.\n" (funcall drawn)))
           (should-not (string-match-p "more lines" (funcall drawn))))))))
 
 ;;;; Emailed patches

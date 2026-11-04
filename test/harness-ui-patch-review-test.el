@@ -4287,7 +4287,9 @@ its bar, so the tree beside Ediff reads in order."
         (should (eq (get-text-property (string-match "┃" prefix) 'face prefix)
                     (get-text-property (string-match "┃" text comment-start) 'face text))))
       ;; A line of the body wraps as the library's own drawing wraps it.
-      (should-not (get-text-property (string-match "Why two" text) 'wrap-prefix text)))))
+      (should-not (get-text-property (string-match "Why two" text) 'wrap-prefix text))
+      ;; The thread ends with its buttons, under the comment, in the section.
+      (should (string-search "┃ [Reply] [Close] [Diff] [Delete thread]" text)))))
 ;;;; Where a comment was made
 
 (defun harness-ui-patch-review-test--advance-again (repo)
@@ -5602,9 +5604,11 @@ they are drawn again when a window changes its size."
         (with-current-buffer new
           (let ((change-review-ui-max-thread-lines 4))
             (funcall change-review-ui--redraw-function)
-            (should (string-match-p "┃      … [0-9]+ more lines \\'"
-                                    (cdr (assq 2 (harness-ui-patch-review-test--drawn new)))))
-            (should (<= (length (split-string (cdr (assq 2 (harness-ui-patch-review-test--drawn new))) "\n")) 5))))
+            (let ((drawn (cdr (assq 2 (harness-ui-patch-review-test--drawn new)))))
+              ;; The room cuts the thread, and the buttons end it.
+              (should (string-search "more lines" drawn))
+              (should (string-match-p "┃ \\[Reply\\] \\[Close\\]" drawn))
+              (should (<= (length (split-string drawn "\n")) 6)))))
         (ignore thread)
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
@@ -5650,17 +5654,17 @@ the thread, even one as tall as the window."
         ;; The long reply: cut to the room, the button in sight, nothing taller than the room.
         (should (string-search "Answer line 1." (funcall text 2)))
         (should-not (string-search "Answer line 40." (funcall text 2)))
-        (should (string-match-p "… [0-9]+ more lines  \\[Show more\\] \\'" (funcall text 2)))
-        (should (<= (length (split-string (funcall text 2) "\n")) 13))
+        (should (string-search "more lines  [Show more]" (funcall text 2)))
+        (should (<= (length (split-string (funcall text 2) "\n")) 14))
         ;; The button draws all of the reply, and [Show less] cuts it again.
         (harness-ui-patch-review-test--press-nth (funcall thread 2) "[Show more]" 0)
         (change-review-ui-flush)
         (should (string-search "Answer line 40." (funcall text 2)))
-        (should (string-match-p "\\[Show less\\] \\'" (funcall text 2)))
+        (should (string-search "[Show less]" (funcall text 2)))
         (harness-ui-patch-review-test--press-nth (funcall thread 2) "[Show less]" 0)
         (change-review-ui-flush)
         (should-not (string-search "Answer line 40." (funcall text 2)))
-        (should (string-match-p "\\[Show more\\] \\'" (funcall text 2)))
+        (should (string-search "[Show more]" (funcall text 2)))
         ;; The earlier replies: a click draws them, and the line folds them again.
         (harness-ui-patch-review-test--press-nth (funcall thread 18) "▸ 6 earlier replies" 0)
         (change-review-ui-flush)
