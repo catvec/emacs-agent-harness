@@ -417,6 +417,208 @@ directories too; a BTW nothing."
       (should (equal (list ro) (plist-get (harness-access-test-profile fork) :read-dirs)))
       (should-not (harness-access-test-profile btw)))))
 
+;;;; Worktrees of sub-agents
+
+(defun harness-access-test--worktree-parent ()
+  "Return (PARENT WORKTREE ELSEWHERE): a session, a directory beside it that
+holds a sub-agent's worktree, and one that is nobody's."
+  (let* ((base (file-name-as-directory (file-truename (harness-test-temp-dir))))
+         (worktree (file-name-as-directory (expand-file-name "repo/.worktrees/harness-kid" base)))
+         (elsewhere (file-name-as-directory (expand-file-name "elsewhere" base)))
+         (work (file-name-as-directory (expand-file-name "work" base))))
+    (dolist (dir (list worktree elsewhere work))
+      (make-directory dir t))
+    (with-temp-file (expand-file-name "notes.md" worktree) (insert "the sub-agent's notes\n"))
+    (with-temp-file (expand-file-name "notes.md" elsewhere) (insert "nobody's\n"))
+    (list (plist-get (harness-call 'session/create :cwd work :model "demo:scripted"
+                                   :permission-mode 'yolo)
+                     :id)
+          worktree elsewhere)))
+
+(defun harness-access-test--no-prompt (sid tool kind path)
+  "Check that a call of TOOL of KIND on PATH in SID is allowed with no prompt."
+  (should (eq 'allow (plist-get (harness-access-test-decide sid tool kind (list path)) :behavior)))
+  (should-not (harness-call 'permission/pending sid)))
+
+(ert-deftest harness-access-parent-reads-the-worktree-of-its-sub-agent ()
+  "A session reads the worktree of its sub-agent without a prompt; a path
+outside that worktree still asks, and so does writing in it."
+  (harness-access-test-with
+    (pcase-let ((`(,sid ,worktree ,elsewhere) (harness-access-test--worktree-parent)))
+      (let ((file (concat worktree "notes.md"))
+            (other (concat elsewhere "notes.md")))
+        ;; Nothing is granted before the sub-agent has a worktree.
+        (should (eq 'deny (harness-access-test-asks sid file 'read "outside the allowed directories")))
+        (should (equal worktree (harness-call 'access/grant-child-worktree sid "kid" worktree)))
+        ;; Its worktree is a directory the session may read, the sub-agent named.
+        (let ((e (harness-access-test-dir-entry sid worktree)))
+          (should (eq 'child (plist-get e :source)))
+          (should (plist-get e :read-only))
+          (should (equal "kid" (plist-get e :child))))
+        (should-not (member worktree (harness-perms-roots (harness-call 'session/get sid))))
+        (should (member worktree (harness-perms-read-only-dirs (harness-call 'session/get sid))))
+        ;; Reading in it asks nobody, whatever the tool that reads.
+        (dolist (tool '("read_file" "grep" "glob" "list_dir" "file_info"))
+          (harness-access-test--no-prompt sid tool 'read file))
+        ;; A path outside it asks, though it lies beside it.
+        (should (eq 'deny (harness-access-test-asks sid other 'read "outside the allowed directories")))
+        ;; Writing in it asks too: it is a directory the session may only read.
+        (should (eq 'deny (harness-access-test-asks sid file)))
+        (should (eq 'deny (harness-access-test-asks sid (concat worktree "new.md"))))))))
+
+(ert-deftest harness-access-worktree-grant-is-kept-with-the-session ()
+  "The worktrees a session may read are kept in its record, once each, and
+reach the access view as read-only directories of a sub-agent."
+  (harness-access-test-with
+    (pcase-let ((`(,sid ,worktree ,_) (harness-access-test--worktree-parent)))
+      (harness-call 'access/grant-child-worktree sid "kid" worktree)
+      ;; Once: the same sub-agent's worktree is not listed twice.
+      (harness-call 'access/grant-child-worktree sid "kid" worktree)
+      (should (equal (list (list :child "kid" :dir worktree))
+                     (harness-access-child-worktrees (harness-call 'session/get sid))))
+      (should (equal (list (list :child "kid" :dir worktree))
+                     (plist-get (plist-get (harness-call 'session/get sid) :ext) :child-worktrees)))
+      ;; The profile of the session is none of it.
+      (should-not (harness-access-test-profile sid))
+      ;; The access view lists it with the others, read-only.
+      (let ((e (cl-find worktree (plist-get (harness-call 'access/describe sid) :dirs)
+                        :key (lambda (e) (plist-get e :dir)) :test #'equal)))
+        (should (eq 'child (plist-get e :source)))
+        (should (plist-get e :read-only)))
+      ;; A session of another host has no worktree of this machine to read.
+      (let ((remote (harness-access-test-session :host "box.example.invalid")))
+        (should-not (harness-call 'access/grant-child-worktree remote "kid" worktree))
+        (should-not (harness-access-child-worktrees (harness-call 'session/get remote)))))))
+
+(ert-deftest harness-access-worktree-grant-ends-with-the-worktree ()
+  "The grant ends when the branch of the sub-agent merges, when its
+worktree is removed and when the sub-agent is deleted; a merge that did
+not land leaves it."
+  (harness-access-test-with
+    (pcase-let ((`(,sid ,worktree ,_) (harness-access-test--worktree-parent)))
+      (let ((grant (lambda (child)
+                     (harness-call 'session/set-ext sid :child-worktrees nil)
+                     (harness-call 'access/grant-child-worktree sid child worktree)
+                     (should (harness-access-test-dir-entry sid worktree))))
+            (kid (plist-get (harness-call 'session/create :cwd worktree :model "demo:scripted"
+                                          :kind 'subagent :parent-id sid)
+                            :id)))
+        ;; A merge that failed, or was cancelled, leaves the worktree to read.
+        (funcall grant kid)
+        (harness-emit 'merge/finished kid sid 'failed)
+        (harness-emit 'merge/finished kid sid 'cancelled)
+        (should (harness-access-test-dir-entry sid worktree))
+        ;; The merge of another sub-agent changes nothing here either.
+        (harness-emit 'merge/finished "other" sid 'merged)
+        (should (harness-access-test-dir-entry sid worktree))
+        ;; The sub-agent's branch merged: its worktree is the parent's now.
+        (harness-emit 'merge/finished kid sid 'merged)
+        (should-not (harness-access-test-dir-entry sid worktree))
+        (should-not (plist-get (plist-get (harness-call 'session/get sid) :ext) :child-worktrees))
+        ;; Its worktree removed.
+        (funcall grant kid)
+        (harness-emit 'worktree/removed (file-name-directory (directory-file-name worktree)) (directory-file-name worktree))
+        (should-not (harness-access-test-dir-entry sid worktree))
+        ;; The sub-agent deleted, its record as it was.
+        (funcall grant kid)
+        (harness-emit 'session/deleted kid (list :id kid :parent-id sid))
+        (should-not (harness-access-test-dir-entry sid worktree))
+        ;; A grant of one sub-agent leaves another's.
+        (harness-call 'access/grant-child-worktree sid "kid" worktree)
+        (harness-call 'access/grant-child-worktree sid "kid-2" (concat (file-name-directory (directory-file-name worktree)) "harness-kid-2/"))
+        (harness-emit 'session/deleted "kid" (list :id "kid" :parent-id sid))
+        (should-not (harness-access-test-dir-entry sid worktree))
+        (should (equal '("kid-2") (mapcar (lambda (c) (plist-get c :child))
+                                          (harness-access-child-worktrees (harness-call 'session/get sid)))))))))
+
+(ert-deftest harness-access-the-user-or-the-agent-gives-up-a-sub-agents-worktree ()
+  "A worktree of a sub-agent is given up like any directory, by the agent
+with drop_access and by the user from the access view; it comes with a
+note in the session's transcript, and the user may make it writable."
+  (harness-access-test-with
+    (pcase-let ((`(,sid ,worktree ,_) (harness-access-test--worktree-parent)))
+      (let ((file (concat worktree "notes.md")))
+        ;; The agent gives it up.
+        (harness-call 'access/grant-child-worktree sid "kid" worktree)
+        (let ((r (harness-access-test-result sid "drop_access" (list :attribute "directory" :value worktree))))
+          (should-not (plist-get r :is-error))
+          (should (string-match-p "no longer readable" (plist-get r :content))))
+        (should-not (harness-access-test-dir-entry sid worktree))
+        (should (eq 'deny (harness-access-test-asks sid file 'read "outside the allowed directories")))
+        ;; The user takes it away.
+        (harness-call 'access/grant-child-worktree sid "kid" worktree)
+        (should (string-match-p "no longer readable" (harness-call 'access/drop-dir sid worktree)))
+        (should-not (harness-access-test-dir-entry sid worktree))
+        (should (cl-some (lambda (h) (string-match-p "may no longer be read (set by the user)" h))
+                         (harness-access-test-hints sid)))
+        ;; The user makes it writable: a grant beats the read-only entry.
+        (harness-call 'access/grant-child-worktree sid "kid" worktree)
+        (harness-call 'permission/allow-dir sid worktree)
+        (should (eq 'session (plist-get (harness-access-test-dir-entry sid worktree) :source)))
+        (should (eq 'allow (plist-get (harness-access-test-decide sid "write_file" 'write (list file)) :behavior)))))))
+
+(defun harness-access-test--git (dir &rest args)
+  "Run git ARGS in DIR; signal on failure."
+  (with-temp-buffer
+    (let ((default-directory (file-name-as-directory dir)))
+      (unless (zerop (apply #'call-process "git" nil t nil args))
+        (error "git %s failed: %s" args (buffer-string))))))
+
+(ert-deftest harness-access-spawn-agent-in-a-worktree-lets-its-parent-read-it ()
+  "A session that starts a sub-agent in a worktree reads that worktree at
+once, though its own directory is another one: spawn_agent makes the
+grant.  The repository around the worktree stays outside, and the grant
+ends with the merge of the sub-agent's branch."
+  (harness-access-test-with
+    (harness-test-load-module 'worktree)
+    (let* ((base (file-name-as-directory (file-truename (harness-test-temp-dir))))
+           (root (file-name-as-directory (expand-file-name "repo" base)))
+           (work (file-name-as-directory (expand-file-name "work" base))))
+      (unwind-protect
+          (progn
+            (make-directory root t)
+            (make-directory work t)
+            (harness-access-test--git root "init" "-q" "-b" "main")
+            (harness-access-test--git root "config" "user.name" "Harness Test")
+            (harness-access-test--git root "config" "user.email" "test@example.invalid")
+            (harness-access-test--git root "config" "commit.gpgsign" "false")
+            (with-temp-file (expand-file-name "README" root) (insert "hello\n"))
+            (harness-access-test--git root "add" "README")
+            (harness-access-test--git root "commit" "-q" "-m" "initial")
+            ;; The session works beside the repository, as a task's session
+            ;; works in a worktree of its own: the worktree its sub-agent
+            ;; gets is not inside its directory.
+            (let* ((sid (plist-get (harness-call 'session/create :cwd work :project root
+                                                 :model "demo:scripted" :permission-mode 'yolo)
+                                   :id))
+                   (readme (expand-file-name "README" root))
+                   (result (progn
+                             (should (eq 'deny (harness-access-test-asks sid readme 'read
+                                                                         "outside the allowed directories")))
+                             (harness-access-test-result sid "spawn_agent"
+                                                         '(:prompt "hi" :name "kid" :worktree t))))
+                   (cid (plist-get (plist-get result :meta) :child-id))
+                   (worktree (plist-get (harness-call 'session/get cid) :worktree)))
+              (should-not (plist-get result :is-error))
+              (should (file-directory-p worktree))
+              (should-not (harness-perms--outside (list worktree)
+                                                  (harness-perms-readable-roots (harness-call 'session/get sid))))
+              (harness-access-test--no-prompt sid "read_file" 'read (expand-file-name "README" worktree))
+              (harness-access-test--no-prompt sid "list_dir" 'read worktree)
+              ;; The repository the worktree belongs to is still outside.
+              (should (eq 'deny (harness-access-test-asks sid readme 'read "outside the allowed directories")))
+              ;; Its sub-agent is no more its sibling's: that one has no worktree.
+              (let ((plain (harness-access-test-result sid "spawn_agent" '(:prompt "hi" :name "plain"))))
+                (should-not (plist-get plain :is-error))
+                (should (equal (list cid) (mapcar (lambda (c) (plist-get c :child))
+                                                  (harness-access-child-worktrees (harness-call 'session/get sid))))))
+              (harness-test-wait (lambda () (not (harness-call 'agent/running cid))) 15 "the sub-agent to end")
+              ;; Its branch merged.
+              (harness-emit 'merge/finished cid sid 'merged)
+              (should (eq 'deny (harness-access-test-asks sid (expand-file-name "README" worktree) 'read
+                                                          "outside the allowed directories")))))
+        (ignore-errors (delete-directory base t))))))
+
 ;;;; Judgements
 
 (ert-deftest harness-access-judgements-of-a-turn ()

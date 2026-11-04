@@ -225,6 +225,34 @@ change."
         ;; The ones left are drawn still.
         (should (string-match-p "rw +/ssh:box.example.invalid:~/ " (harness-ui-access-test-row home)))))))
 
+(ert-deftest harness-ui-access-directories-list-the-worktree-of-a-sub-agent ()
+  "The worktree of a sub-agent is a row of its own: read only, named by what it
+is, with [Remove] and [Make writable].  [Make writable] grants it beside the
+read grant, [Remove] takes it away, and the grant ending takes the row."
+  (harness-ui-access-test-with
+    (let* ((base (file-name-as-directory (file-truename (harness-test-temp-dir))))
+           (worktree (file-name-as-directory (expand-file-name "repo/.worktrees/harness-kid" base))))
+      (make-directory worktree t)
+      (harness-ui-access-test-open sid 'directories)
+      (harness-call 'access/grant-child-worktree sid "kid" worktree)
+      (harness-ui-access-test-wait-text (concat (regexp-quote (abbreviate-file-name worktree)) " +sub-agent worktree"))
+      (should (string-match-p "\\`  ro +.* +sub-agent worktree +\\[Remove\\] \\[Make writable\\]"
+                              (harness-ui-access-test-row worktree)))
+      ;; Made writable: a grant of the session, which beats the read-only entry.
+      (harness-ui-access-test-click "[Make writable]" (harness-ui-access--find-anchor (cons 'dir worktree)))
+      (harness-ui-access-test-wait-text "rw +.* +granted to this session")
+      (should (eq 'session (plist-get (cl-find worktree (harness-call 'permission/dirs sid)
+                                               :key (lambda (e) (plist-get e :dir)) :test #'equal)
+                                      :source)))
+      ;; The grant revoked, the sub-agent's read-only entry shows again.
+      (harness-call 'permission/revoke-dir sid worktree)
+      (harness-ui-access-test-wait-text "ro +.* +sub-agent worktree")
+      ;; Removed from the view, the row is gone.
+      (harness-ui-access-test-click "[Remove]" (harness-ui-access--find-anchor (cons 'dir worktree)))
+      (harness-ui-access-test-wait-text "sub-agent worktree" t)
+      (should-not (cl-find worktree (harness-call 'permission/dirs sid)
+                           :key (lambda (e) (plist-get e :dir)) :test #'equal)))))
+
 (defun harness-ui-access-test-click (label &optional from)
   "Click the button LABEL, the first after FROM (the buffer's start), as a user does.
 A click runs the button's action with no arguments (`harness-ui-action-push'),

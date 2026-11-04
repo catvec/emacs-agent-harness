@@ -724,6 +724,7 @@ give one and take them away.  Nothing is drawn when D has no
     ("read" (if (harness-ui-access--true-p (plist-get entry :given-up))
                 "read only (given up)"
               "read only"))
+    ("child" "sub-agent worktree")
     ("dropped" "given up")
     (s (or s ""))))
 
@@ -758,6 +759,10 @@ give one and take them away.  Nothing is drawn when D has no
                                                    (format "Give %s back to the session, for writing too" shown))
                       (harness-ui-access--button "[Make writable]" (lambda () (harness-ui-access-make-writable dir))
                                                  (format "Grant %s to the session for writing" shown)))))
+      ("child" (list (harness-ui-access--button "[Remove]" (lambda () (harness-ui-access-drop-dir dir))
+                                                (format "Stop the session reading %s" shown))
+                     (harness-ui-access--button "[Make writable]" (lambda () (harness-ui-access-make-writable dir t))
+                                                (format "Grant %s to the session for writing" shown))))
       ("dropped" (list (harness-ui-access--button "[Restore]" (lambda () (harness-ui-access-restore-dir dir))
                                                   (format "Give %s back to the session" shown))))
       (_ (ignore sid) nil))))
@@ -1537,13 +1542,20 @@ EVERYWHERE says DIR is one every session may reach: it is taken out of
   (harness-ui-call "_harness/access/remove-read-dir" (list :session-id (harness-ui-access--session) :dir dir)
                    (harness-ui-access--after (format "Read access removed: %s" (harness-abbreviate-file-name dir)))))
 
-(defun harness-ui-access-make-writable (dir)
-  "Grant DIR, which this buffer's session may only read, for writing too."
-  (let ((sid (harness-ui-access--session)))
+(defun harness-ui-access-make-writable (dir &optional child)
+  "Grant DIR, which this buffer's session may only read, for writing too.
+A directory it was told to read is no read-only directory then.  With
+CHILD, DIR is the worktree of a sub-agent, which the session reads by
+the grant of that sub-agent: the write grant is beside it, and the
+read-only entry stays for the day the write grant is revoked."
+  (let ((sid (harness-ui-access--session))
+        (done (harness-ui-access--after (format "Writable: %s" (harness-abbreviate-file-name dir)))))
     (harness-ui-call "_harness/permission/allow-dir" (list :session-id sid :dir dir)
-                     (lambda (_)
-                       (harness-ui-call "_harness/access/remove-read-dir" (list :session-id sid :dir dir)
-                                        (harness-ui-access--after (format "Writable: %s" (harness-abbreviate-file-name dir))))))))
+                     (lambda (result)
+                       (if child
+                           (funcall done result)
+                         (harness-ui-call "_harness/access/remove-read-dir" (list :session-id sid :dir dir)
+                                          done))))))
 
 (defun harness-ui-access-restore-dir (dir)
   "Give this buffer's session back DIR, which it gave up."
@@ -1599,6 +1611,7 @@ given up for this session alone, after you confirm."
     (pcase (harness-ui-access--str (plist-get e :source))
       ((or "session" "turn") (harness-ui-access-revoke dir))
       ("read" (harness-ui-access-remove-read-dir dir))
+      ("child" (harness-ui-access-drop-dir dir))
       ("dropped" (user-error "Given up already: %s (R restores)" shown))
       ("outputs" (user-error "Tool output directory: fixed"))
       (_ (when (y-or-n-p (format "Give up %s for this session? " shown))

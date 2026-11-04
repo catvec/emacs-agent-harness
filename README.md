@@ -138,6 +138,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Standard file read / write / search tools
   - Emacs control 
   - Sub-agents
+    - A sub-agent blocked on you is announced, shown blocked in the session list, and listed first in the sub-agents panel above the parent's compose box, with what it asks and the buttons that answer it
   - Todo
   - Ask question
   - Threaded replies 
@@ -146,10 +147,11 @@ A non-comprehensive list of all the different functionality offered by modules s
 - Git worktrees 
 - Permissions
   - Operating system level jails (Cross platform)
-  - Directory allow listing
+  - Directory allow listing, including the worktrees of the sub-agents a session started, which it may read
   - Secret file blocking
   - Auto mode
   - Live access introspection: `session_info` reports the session's permission mode, writable and read-only directories with their sources, network, tools turned off, Linux capabilities and standing allow/deny rules
+  - The access view names a sub-agent worktree among a session's directories, with buttons to give it up or make it writable
 - Usage, cost, quota tracking
 - Completion providers
   - Claude Code SDK & API

@@ -17,6 +17,10 @@
 ;; the child's transcript says it
 ;; (`harness-tools-agent-context-limit-hint').  Without a priority of
 ;; its own the child works at its parent's (`harness-priority-session').
+;; A child in a worktree of its own is a worktree its parent may read
+;; without asking, from the moment it exists until the child's branch
+;; merges (`harness-tools-agent--grant-worktree'; the access module keeps
+;; the grant, read-only: see there).
 ;;
 ;; The module also adds a Planning section to the system prompt that
 ;; explains forks, sub-agents, worktrees and the merge queue, so plans
@@ -49,7 +53,7 @@ Split work with the mechanisms this harness provides:
 - Session forks share the cached context of the current session, so they are much cheaper than a fresh sub-agent that has to gather all the context again. Prefer a fork (spawn_agent with fork=true) when the sub-task needs what you already know.
 - spawn_agent starts a fresh sub-agent (fork=false) when the sub-task is self-contained and does not need the current context; it gets its own session, and the call never blocks: it returns as soon as the child starts, and the child's answer arrives later in a message of its own. Start independent sub-tasks that way, together, and carry on while they run instead of waiting for one after another.
 - Several spawn_agent calls made in the same step run at once, each child starting its own turn without blocking the others.
-- Each sub-agent can work in its own git worktree (worktree=true), so independent steps run in parallel worktrees without touching each other's files.
+- Each sub-agent can work in its own git worktree (worktree=true), so independent steps run in parallel worktrees without touching each other's files. You may read that worktree (read_file, grep, glob, list_dir) without asking until its branch merges; to change a file there, ask the sub-agent (session_send) or request the directory.
 - A merge queue brings a worktree's branch back into the parent session's working directory, one child at a time; conflicts are handed to the child to resolve. Plan independent steps as parallel worktrees that merge back, and dependent steps sequentially in this session.
 Keep the plan short and concrete; update the todo list (todo_write) as steps complete."
   "Text appended to the system prompt by the tools-agent module.")
@@ -537,16 +541,32 @@ level out."
                               (if levels (string-join levels ", ") "none"))))))
     level))
 
+(defun harness-tools-agent--grant-worktree (parent-id child-id worktree)
+  "Let session PARENT-ID read WORKTREE, where its sub-agent CHILD-ID works.
+The parent made the worktree and delegated it, so it reads it without
+asking, from now until the sub-agent's branch merges, the worktree is
+removed or the sub-agent is deleted: the access module keeps the grant
+\(`access/grant-child-worktree'), read-only for the parent's calls.
+Nothing happens without that module, and a grant that cannot be made
+is logged, never fails the sub-agent.  Return non-nil when it was made."
+  (when (harness-method-exists-p 'access/grant-child-worktree)
+    (condition-case err
+        (and (harness-call 'access/grant-child-worktree parent-id child-id worktree) t)
+      (error (harness-log 'warn "tools-agent: letting %s read the worktree %s of %s failed: %s"
+                          parent-id worktree child-id (harness-error-message err))
+             nil))))
+
 (defun harness-tools-agent--create-child (parent input child-id cwd worktree call-id priority)
   "Return a promise of the child session plist for PARENT from INPUT.
 CHILD-ID is the id to use, CWD its working directory and WORKTREE
-its worktree path (or nil).  CALL-ID is the spawn_agent call's: a fork
-copies it among the parent's calls still running, and answers it with
-a result saying the fork is the sub-agent it started.  PRIORITY, a
-level or nil, is the child session's own priority (see
-`harness-tools-agent--child-priority'): it orders the queues the
-child's work waits in, as the parent's does its own (see the priority
-plugin).  The child's context is capped as
+its worktree path (or nil): once the child exists, PARENT may read that
+worktree (`harness-tools-agent--grant-worktree').  CALL-ID is the
+spawn_agent call's: a fork copies it among the parent's calls still
+running, and answers it with a result saying the fork is the sub-agent
+it started.  PRIORITY, a level or nil, is the child session's own
+priority (see `harness-tools-agent--child-priority'): it orders the
+queues the child's work waits in, as the parent's does its own (see the
+priority plugin).  The child's context is capped as
 `harness-tools-agent-context-limit' says, and a hint in its transcript
 says so (`harness-tools-agent-context-limit-hint'), added once it
 exists.  INPUT's `:thinking', when given, is checked against the
@@ -582,12 +602,12 @@ without one starts at its parent's level, and a fork inherits it."
                     ;; Off too, not left to the setting.
                     :non-interactive (if (harness-json-true-p (plist-get parent :non-interactive)) t :false)
                     limit-option)))))
-    (if (and (null hint) (null priority))
+    (if (and (null hint) (null priority) (null worktree))
         created
       (harness-then created
                     (lambda (child)
-                      ;; A hint or a priority that cannot be set must not
-                      ;; fail the sub-agent.
+                      ;; A hint, a priority or a grant that cannot be made
+                      ;; must not fail the sub-agent.
                       (when hint
                         (condition-case err
                             (harness-call 'session/hint (plist-get child :id) hint)
@@ -598,6 +618,8 @@ without one starts at its parent's level, and a fork inherits it."
                             (harness-call 'priority/set (plist-get child :id) (symbol-name priority))
                           (error (harness-log 'warn "tools-agent: giving %s priority %s failed: %S"
                                               (plist-get child :id) priority err))))
+                      (when worktree
+                        (harness-tools-agent--grant-worktree (plist-get parent :id) (plist-get child :id) worktree))
                       child)))))
 
 (defun harness-tools-agent--call-node (session-id call-id)

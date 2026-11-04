@@ -30,9 +30,13 @@
 ;;
 ;; - A sub-agent waiting on a permission prompt or a question nobody
 ;;   answers.  Its parent waits for its report, and the whole tree with
-;;   it.  After `harness-resilience-prompt-timeout' seconds the prompt
-;;   is answered by default -- a permission denied, a question told to
-;;   decide alone -- and the parent and the user are told.
+;;   it.  The parent and the user are told as the prompt appears: a hint
+;;   in the parent's transcript, which starts no turn, and a notification
+;;   that opens the sub-agent (`harness-resilience--announce'), so the
+;;   whole tree does not stand still unseen.  After
+;;   `harness-resilience-prompt-timeout' seconds the prompt is answered
+;;   by default -- a permission denied, a question told to decide alone
+;;   -- and the parent and the user are told again.
 ;;
 ;; - A running turn that makes no progress: a model stream that never
 ;;   ends, a call that never returns.  A watchdog notices a turn that
@@ -75,12 +79,14 @@ why, and the user is notified.")
 
 (defcustom harness-resilience-prompt-timeout 600
   "Seconds a sub-agent's permission prompt or question waits for an answer.
-After that it is answered by default -- a permission is denied, a
-question is told to decide for itself -- and the sub-agent's parent and
-the user are told, rather than leaving the parent, and everything above
-it, waiting for a report that cannot come.  Nil waits for the user
-however long it takes.  The user's own sessions, tasks included, always
-wait for the user."
+The parent and the user are told when it appears: a hint in the parent's
+transcript, a notification that opens the sub-agent, and the parent's
+chat lists the sub-agent as blocked.  After this long it is answered by
+default -- a permission is denied, a question is told to decide for
+itself -- and they are told again, rather than leaving the parent, and
+everything above it, waiting for a report that cannot come.  Nil waits
+for the user however long it takes, the notice at the start still sent.
+The user's own sessions, tasks included, always wait for the user."
   :type '(choice (const :tag "Wait for the user" nil) (number :tag "Seconds"))
   :group 'harness)
 
@@ -109,6 +115,11 @@ Dropped as soon as it makes progress again, or its turn ends.")
 (defvar harness-resilience--defaulted (make-hash-table :test 'equal)
   "Pending request id -> t, once it was answered by default.
 A request whose default answer failed is not tried again each tick.")
+
+(defvar harness-resilience--announced (make-hash-table :test 'equal)
+  "Sub-agent session id -> the requests its parent and the user were told of.
+The ids of its requests, dropped with the request that waits no more
+and with the session.")
 
 (defvar harness-resilience--timer nil
   "The repeating timer of the watchdog and the prompt timeout.")
@@ -371,12 +382,68 @@ times in a row the harness carried the session on."
   (or (plist-get (harness-resilience--ext session :report-to) :parent)
       (plist-get session :parent-id)))
 
+(defun harness-resilience--announce (session item)
+  "Tell the parent and the user that SESSION, a sub-agent, waits on ITEM.
+The parent's transcript gets a hint naming the sub-agent and what it
+asks: the parent's chat shows the sub-agent as blocked beside it, and a
+hint starts no turn, as a message would, for a request only the user can
+answer.  The user gets a notification that opens the sub-agent.  Both
+come as the request appears, not when it has waited too long
+\(`harness-resilience--prompt-timed-out')."
+  (let* ((id (plist-get session :id))
+         (name (harness-resilience--name session))
+         (asks (harness-resilience--asks item))
+         (parent (harness-resilience--session (harness-resilience--parent session))))
+    (harness-log 'info "resilience: %s waits for the user on %s: %s" id (car asks) (cdr asks))
+    (when parent
+      (harness-call 'session/hint (plist-get parent :id)
+                    (format "Sub-agent %s blocked on %s: %s (session %s)" name (car asks) (cdr asks) id)))
+    (harness-resilience--notify session (format "Blocked: %s" name)
+                                (concat (capitalize (car asks)) ": " (cdr asks)
+                                        (and parent (format " \N{U+00B7} sub-agent of %s"
+                                                            (harness-resilience--name parent))))
+                                'normal "prompt-waiting")))
+
+(defun harness-resilience--on-pending-changed (session-id &optional items)
+  "Announce the requests of the sub-agent SESSION-ID that ITEMS list and are new.
+A `session/pending-changed' subscriber: ITEMS are the requests it waits
+on now.  Each is announced once (`harness-resilience--announce'),
+whoever answers it; a session that is no sub-agent, a seed or a request
+already announced says nothing."
+  (let ((known (gethash session-id harness-resilience--announced))
+        (now (delq nil (mapcar (lambda (item) (plist-get item :id)) items))))
+    (if (null now)
+        (remhash session-id harness-resilience--announced)
+      (puthash session-id now harness-resilience--announced))
+    (when-let* ((fresh (cl-remove-if (lambda (item) (member (plist-get item :id) known)) items))
+                (session (harness-resilience--session session-id)))
+      (when (and (eq (plist-get session :kind) 'subagent)
+                 (not (plist-get (plist-get session :ext) :seed)))
+        (dolist (item fresh)
+          (harness-ignore-errors-logged (format "resilience: announcing %s of %s" (plist-get item :id) session-id)
+            (harness-resilience--announce session item)))))))
+
+(defun harness-resilience--forget-announced (session-id &rest _)
+  "Forget what was announced of the requests of SESSION-ID, which is gone."
+  (remhash session-id harness-resilience--announced))
+
 (defun harness-resilience--what (item)
   "Return what the pending request ITEM asks for, in words."
   (let ((payload (plist-get item :payload)))
     (if (equal (format "%s" (plist-get item :kind)) "question")
         (format "an answer to the question \"%s\"" (harness-first-line (or (plist-get payload :question) "") 150))
       (format "permission to run %s" (or (plist-get payload :title) (plist-get payload :tool) "a tool call")))))
+
+(defun harness-resilience--asks (item)
+  "Return what the pending request ITEM asks, as (KIND . SUBJECT).
+KIND is \"permission\" or \"question\"; SUBJECT the title of the call, or
+the first line of the question, on one line."
+  (let ((payload (plist-get item :payload)))
+    (if (equal (format "%s" (plist-get item :kind)) "question")
+        (cons "question" (harness-first-line (or (plist-get payload :question) "") 150))
+      (cons "permission"
+            (harness-first-line (format "%s" (or (plist-get payload :title) (plist-get payload :tool) "a tool call"))
+                                150)))))
 
 (defun harness-resilience--answer (session item waited)
   "Answer ITEM, a request SESSION waited on for WAITED (words), by default.
@@ -547,6 +614,9 @@ At a start, not a reload, carry on what a stopped harness cut short."
   (dolist (event '(agent/step-started agent/stream agent/tool-call agent/tool-result
                    agent/activity-changed agent/steered tools/progress session/pending-changed))
     (harness-on event #'harness-resilience--note))
+  ;; A sub-agent's request is told of as it appears, not once it is stale.
+  (harness-on 'session/pending-changed #'harness-resilience--on-pending-changed)
+  (harness-on 'session/deleted #'harness-resilience--forget-announced)
   (unless (memq harness-resilience--timer timer-list)
     (setq harness-resilience--timer (run-at-time harness-resilience--tick-seconds harness-resilience--tick-seconds
                                                  #'harness-resilience--tick)))
@@ -562,6 +632,9 @@ At a start, not a reload, carry on what a stopped harness cut short."
   (dolist (event '(agent/step-started agent/stream agent/tool-call agent/tool-result
                    agent/activity-changed agent/steered tools/progress session/pending-changed))
     (harness-off (cons event #'harness-resilience--note)))
+  (harness-off (cons 'session/pending-changed #'harness-resilience--on-pending-changed))
+  (harness-off (cons 'session/deleted #'harness-resilience--forget-announced))
+  (clrhash harness-resilience--announced)
   (clrhash harness-resilience--progress)
   (clrhash harness-resilience--stalled))
 
@@ -573,7 +646,7 @@ At a start, not a reload, carry on what a stopped harness cut short."
                        "(SESSION-ID ITEM) after a sub-agent's request ITEM, unanswered too long, was answered by default.")
 
 (harness-define-module 'resilience
-  :doc "Carry on sessions a stopped harness cut short, answer sub-agents' unanswered prompts by default, and report stalled turns."
+  :doc "Carry on sessions a stopped harness cut short, tell the parent and the user when a sub-agent waits for them, answer its unanswered prompts by default, and report stalled turns."
   :requires '(session agent tools)
   :init #'harness-resilience--init
   :shutdown #'harness-resilience--shutdown)

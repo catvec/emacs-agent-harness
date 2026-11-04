@@ -374,6 +374,83 @@ the user; the parent then gets the sub-agent's report as usual."
         (should note)
         (should (equal "Answered for you: researcher" (plist-get note :title)))))))
 
+(defun harness-resilience-test--hints (sid)
+  "Return the texts of the hints in the transcript of SID, oldest first."
+  (mapcar (lambda (n) (plist-get n :content)) (harness-resilience-test--nodes sid 'hint)))
+
+(defun harness-resilience-test--notes (kind)
+  "Return the notifications of KIND sent so far, oldest first."
+  (reverse (cl-remove-if-not (lambda (n) (equal kind (plist-get n :kind))) harness-resilience-test--notifications)))
+
+(ert-deftest harness-resilience-sub-agent-prompt-is-announced-when-it-appears ()
+  "The parent and the user hear of a sub-agent's prompt as it appears.
+The parent's transcript gets a hint naming the sub-agent and what it
+asks, no turn of the parent starts for it, and the user's notification
+opens the sub-agent.  A request is announced once, whoever answers it,
+and the prompt is still there, unanswered, with no timeout set."
+  (harness-resilience-test-with
+    (let* ((harness-resilience-prompt-timeout nil)
+           (harness-provider-demo-script-override
+            (harness-resilience-test--script
+             '(("\\`research" . ((:type tool-call :id "r1" :name "risky" :input (:command "rm -rf build"))
+                              (:type tool-call :id "r2" :name "risky" :input (:command "rm -rf dist"))
+                              (:type text :delta "Done.") (:type done :stop-reason end-turn))))))
+           (parent (harness-resilience-test-session :name "Lead"))
+           (child (harness-resilience-test--spawn parent "research the licence" "researcher")))
+      (harness-test-wait (lambda () (harness-call 'session/pending child)) 10 "the permission prompt")
+      ;; At once: the hint in the parent, the notification for the user.
+      (let ((hint (car (last (harness-resilience-test--hints parent)))))
+        (should (string-match-p (format "\\`Sub-agent researcher blocked on permission: .*Risky.* (session %s)\\'" child)
+                                hint)))
+      (let ((notes (harness-resilience-test--notes "prompt-waiting")))
+        (should (= 1 (length notes)))
+        (should (equal "Blocked: researcher" (plist-get (car notes) :title)))
+        (should (string-match-p "\\`Permission: .*Risky.* \u00b7 sub-agent of Lead\\'" (plist-get (car notes) :body)))
+        (should (equal child (plist-get (car notes) :session))))
+      ;; Starting no turn: the parent heard nothing in a message.
+      (should-not (harness-resilience-test--from parent "resilience"))
+      ;; The user's answer to the first brings the second: that is announced
+      ;; too, and the first is not announced again.
+      (harness-call 'permission/answer child (plist-get (car (harness-call 'session/pending child)) :id) "allow-once")
+      (harness-test-wait (lambda () (= 2 (length (harness-resilience-test--notes "prompt-waiting")))) 10 "the second notice")
+      (should (= 2 (cl-count-if (lambda (h) (string-match-p "\\`Sub-agent researcher blocked on permission" h))
+                                (harness-resilience-test--hints parent))))
+      (harness-call 'permission/answer child (plist-get (car (harness-call 'session/pending child)) :id) "allow-once")
+      (harness-resilience-test--wait-idle child)
+      (accept-process-output nil 0.3)
+      (should (= 2 (length (harness-resilience-test--notes "prompt-waiting")))))))
+
+(ert-deftest harness-resilience-sub-agent-question-is-announced-too ()
+  "A question of a sub-agent is told of the same way, naming the question."
+  (harness-resilience-test-with
+    (let* ((harness-resilience-prompt-timeout nil)
+           (harness-provider-demo-script-override
+            (harness-resilience-test--script
+             '(("\\`research" . ((:type tool-call :id "q1" :name "ask_user"
+                                     :input (:question "Which licence applies?" :options ("ODbL" "CC-BY")))
+                              (:type text :delta "Assumed ODbL.") (:type done :stop-reason end-turn))))))
+           (parent (harness-resilience-test-session :name "Lead"))
+           (child (harness-resilience-test--spawn parent "research the licence" "researcher")))
+      (harness-test-wait (lambda () (harness-call 'session/pending child)) 10 "the question")
+      (should (equal (format "Sub-agent researcher blocked on question: Which licence applies? (session %s)" child)
+                     (car (last (harness-resilience-test--hints parent)))))
+      (should (equal "Question: Which licence applies? \u00b7 sub-agent of Lead"
+                     (plist-get (car (harness-resilience-test--notes "prompt-waiting")) :body)))
+      (harness-call 'question/cancel child (plist-get (car (harness-call 'session/pending child)) :id)))))
+
+(ert-deftest harness-resilience-users-own-prompts-are-not-announced ()
+  "A session that is no sub-agent waits for the user, who sees it: nobody is told."
+  (harness-resilience-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type tool-call :id "r1" :name "risky" :input (:command "rm -rf build"))
+             (:type done :stop-reason end-turn)))
+          (sid (harness-resilience-test-session)))
+      (harness-call 'agent/prompt sid "clean up")
+      (harness-test-wait (lambda () (harness-call 'session/pending sid)) 10 "the permission prompt")
+      (accept-process-output nil 0.3)
+      (should-not (harness-resilience-test--notes "prompt-waiting"))
+      (should-not (harness-resilience-test--hints sid)))))
+
 (ert-deftest harness-resilience-sub-agent-question-wait-times-out ()
   "A sub-agent's question nobody answers is answered: decide for yourself."
   (harness-resilience-test-with

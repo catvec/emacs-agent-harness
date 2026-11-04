@@ -70,7 +70,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  :ui
  ;;btw                ; BTW side conversations over the current session or view.
  ;;carry              ; The panel that asks how to carry a conversation over: a cold prompt…
- ;;children           ; Running sub-agents of a session, pinned above its compose box: name,…
+ ;;children           ; Sub-agents of a session at work or blocked on you, pinned above its…
  ;;compact            ; Compact a session's conversation by hand, choosing the kind at a known…
  ;;dirs               ; Obsolete: the directories of a session are a section of its access…
  ;;media              ; Audio playback and recording, video thumbnails, clipboard images.
@@ -131,7 +131,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [readonly](readonly.md) | by default | [session](session.md), [tools](tools.md) | Read-only sessions: the sessions a module's policy names (a supervisor, a task's write-up or plan) get only reading tools and read-only, offline bash, enforced by the harness. |
 | [recap](recap.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [tasks](tasks.md) | Write the recaps task cards and running chats show, with a short model call. |
 | [redact](redact.md) |  | [secrets](secrets.md), [session](session.md), [store](store.md) | Takes a secret out of the transcripts and every other copy the harness keeps. |
-| [resilience](resilience.md) | by default | [session](session.md), [agent](agent.md), [tools](tools.md) | Carry on sessions a stopped harness cut short, answer sub-agents' unanswered prompts by default, and report stalled turns. |
+| [resilience](resilience.md) | by default | [session](session.md), [agent](agent.md), [tools](tools.md) | Carry on sessions a stopped harness cut short, tell the parent and the user when a sub-agent waits for them, answer its unanswered prompts by default, and report stalled turns. |
 | [retry](retry.md) | by default | [session](session.md), [agent](agent.md) | Try a step again after a transient network or rate-limit failure. |
 | [sandbox](sandbox.md) | by default | [config](config.md) | Kernel sandbox (bwrap / systemd-run / MXC on macOS) for spawned tool processes. |
 | [secrets](secrets.md) |  | [store](store.md) | Secret references, masking of tool output and the guard against writing placeholders. |
@@ -182,7 +182,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-carry](ui-carry.md) |  | [ui](ui.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) | The panel that asks how to carry a conversation over: a cold prompt cache, a model switch. |
 | [ui-chat](ui-chat.md) | by default | [ui](ui.md) | The chat buffer: transcript, pending panel, queue, attachments and compose box. |
 | [ui-chatgpt-plan](ui-chatgpt-plan.md) |  |  | Sign in with ChatGPT from the settings page, with the accounts and what they may do. |
-| [ui-children](ui-children.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Running sub-agents of a session, pinned above its compose box: name, progress and elapsed time. |
+| [ui-children](ui-children.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Sub-agents of a session at work or blocked on you, pinned above its compose box: name, progress and elapsed time, and for a blocked one what it asks, with the buttons that answer it. |
 | [ui-commit-msg](ui-commit-msg.md) |  | [ui](ui.md) | M-x harness-commit-msg-uninstall: take the harness's commit-msg hook out of a repository. |
 | [ui-compact](ui-compact.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Compact a session's conversation by hand, choosing the kind at a known cost. |
 | [ui-compose](ui-compose.md) | by default | [ui](ui.md) | The compose box shared by chat buffers and the task board. |
@@ -263,7 +263,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness/started` | `harness.el` | `harness.el` | [worktree](worktree.md) |  |
 | `harness/stopping` | `harness.el` | `harness.el` |  |  |
 | `merge/conflict` | [merge](merge.md) | [merge](merge.md) | [tasks](tasks.md), [ui-merge](ui-merge.md), [ui-worktree](ui-worktree.md) | yes |
-| `merge/finished` | [merge](merge.md) | [merge](merge.md) | [tasks](tasks.md), [ui-merge](ui-merge.md), [ui-worktree](ui-worktree.md), [worktree](worktree.md) | yes |
+| `merge/finished` | [merge](merge.md) | [merge](merge.md) | [access](access.md), [tasks](tasks.md), [ui-merge](ui-merge.md), [ui-worktree](ui-worktree.md), [worktree](worktree.md) | yes |
 | `merge/queued` | [merge](merge.md) | [merge](merge.md) | [ui-merge](ui-merge.md), [ui-worktree](ui-worktree.md) | yes |
 | `merge/resolver` | [merge](merge.md) | [merge](merge.md) |  |  |
 | `merge/started` | [merge](merge.md) | [merge](merge.md) | [tasks](tasks.md), [ui-merge](ui-merge.md), [ui-worktree](ui-worktree.md) | yes |
@@ -297,7 +297,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/changed` | [session](session.md) | [session](session.md) | [acp](acp.md), [cache](cache.md), [cache-warm](cache-warm.md), [tools](tools.md), [tools-sessions](tools-sessions.md) |  |
 | `session/created` | [session](session.md) | [session](session.md) | [access](access.md), [plugins](plugins.md), [supervisor](supervisor.md), [ui-tree](ui-tree.md) | yes |
 | `session/deactivated` | [session](session.md) | [session](session.md) | [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md) |  |
-| `session/deleted` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache](cache.md), [cache-compact](cache-compact.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [mcp](mcp.md), [perms](perms.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [redact](redact.md), [seed](seed.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-tree](ui-tree.md), [usage](usage.md) | yes |
+| `session/deleted` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache](cache.md), [cache-compact](cache-compact.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [mcp](mcp.md), [perms](perms.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [redact](redact.md), [resilience](resilience.md), [seed](seed.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-tree](ui-tree.md), [usage](usage.md) | yes |
 | `session/ext-changed` | [session](session.md) | [session](session.md) | [supervisor](supervisor.md), [tasks](tasks.md), [ui-priority](ui-priority.md), [ui-tasks](ui-tasks.md) | yes |
 | `session/forked` | [session](session.md) | [session](session.md) | [fallback](fallback.md), [session-search](session-search.md), [ui-tree](ui-tree.md) | yes |
 | `session/head-moved` | [session](session.md) | [session](session.md) | [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-tree](ui-tree.md) | yes |
@@ -343,7 +343,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `version/checked` | [version](version.md) | [version](version.md) | [ui-version](ui-version.md) | yes |
 | `worktree/created` | [worktree](worktree.md) | [worktree](worktree.md) | [ui-worktree](ui-worktree.md) | yes |
 | `worktree/locked` | [worktree](worktree.md) | [worktree](worktree.md) | [ui-worktree](ui-worktree.md) | yes |
-| `worktree/removed` | [worktree](worktree.md) | [worktree](worktree.md) | [ui-worktree](ui-worktree.md), [worktree](worktree.md) | yes |
+| `worktree/removed` | [worktree](worktree.md) | [worktree](worktree.md) | [access](access.md), [ui-worktree](ui-worktree.md), [worktree](worktree.md) | yes |
 | `worktree/unlocked` | [worktree](worktree.md) | [worktree](worktree.md) | [ui-worktree](ui-worktree.md) | yes |
 
 ## Filter chains

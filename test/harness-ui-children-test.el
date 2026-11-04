@@ -56,8 +56,9 @@ KIND and STATUS are strings as they come over ACP; PARENT-ID is the
   (and (stringp text) (substring-no-properties text)))
 
 (defun harness-ui-children-test--at (text needle)
-  "Return the position of NEEDLE in TEXT, or nil."
-  (string-match-p (regexp-quote needle) text))
+  "Return the position of NEEDLE in TEXT, or nil.  The case counts."
+  (let ((case-fold-search nil))
+    (string-match-p (regexp-quote needle) text)))
 
 (defun harness-ui-children-test--mouse1 (text pos)
   "Return the mouse-1 command on TEXT at POS, or nil."
@@ -144,6 +145,138 @@ until its first activity arrives."
           (should (commandp command))))
       ;; Every face the panel wears names a real face.
       (should-not (harness-ui-children-test--undefined-faces panel)))))
+
+(defun harness-ui-children-test--blocked (id name kind &optional parent-id)
+  "Cache sub-agent ID, NAME, blocked on a request of KIND, as the wire has it.
+KIND is \"permission\", a directory it asks for, or \"question\"."
+  (harness-ui-cache-session
+   (list :id id :kind "subagent" :status "blocked" :name name :parent-id (or parent-id "p")
+         :pending (list (if (equal kind "question")
+                            (list :id (concat id "-q") :kind "question"
+                                  :payload (list :question "Which colour should the badge be?"
+                                                 :options '("red" "green")))
+                          (list :id (concat id "-p") :kind "permission"
+                                :payload (list :title "Access /home/me/other-repo/" :tool "request_directory_access"
+                                               :dir "/home/me/other-repo/"
+                                               :options '("allow-once" "allow-session" "deny-once"))))))))
+
+(ert-deftest harness-ui-children-panel-shows-a-blocked-child-and-what-it-asks ()
+  "A child that waits for the user stays in its parent's panel, first.
+It is no longer running, and the parent waits for its report, so the
+panel names it as blocked, with the link that opens it, the buttons that
+answer what it waits on and what it asks; the running ones follow."
+  (harness-ui-children-test-with
+    (harness-ui-children-test--cache "r1" "subagent" "running" "worker-one" parent)
+    (harness-ui-children-test--blocked "b1" "needs-access" "permission")
+    (let* ((harness-ui-session-id parent)
+           (panel (harness-ui-children--panel))
+           (lines (split-string (harness-ui-children-test--text panel) "\n" t)))
+      ;; The header counts both, and the blocked child's line comes first.
+      (should (string-match-p "Sub-agents  1 running \u00b7 1 blocked" (car lines)))
+      (should (string-match-p "needs-access  Blocked  \\[Allow\\] \\[Deny\\]  Access /home/me/other-repo/"
+                              (nth 1 lines)))
+      (should (string-match-p "worker-one" (nth 2 lines)))
+      (should (= 3 (length lines)))
+      ;; The name is the session link, "Blocked" says it in the blocked
+      ;; face and hovers what it waits on, the buttons answer.
+      (let ((pos (harness-ui-children-test--at panel "needs-access")))
+        (should (commandp (harness-ui-children-test--mouse1 panel pos)))
+        (should (eq 'harness-status-blocked-face
+                    (get-text-property (harness-ui-children-test--at panel "Blocked") 'face panel)))
+        (should (equal "needs your permission"
+                       (get-text-property (harness-ui-children-test--at panel "Blocked") 'help-echo panel))))
+      (dolist (label '("[Allow]" "[Deny]"))
+        (let ((pos (harness-ui-children-test--at panel label)))
+          (should (functionp (get-text-property pos 'harness-ui-action panel)))
+          (should (commandp (harness-ui-children-test--mouse1 panel pos)))))
+      (should-not (harness-ui-children-test--undefined-faces panel))
+      ;; The header's blocked count wears the blocked face too.
+      (should (memq 'harness-status-blocked-face
+                    (ensure-list (get-text-property (harness-ui-children-test--at panel "1 blocked")
+                                                    'face panel)))))))
+
+(ert-deftest harness-ui-children-panel-offers-a-question-to-answer ()
+  "A child that asks a question has [Answer…], which pops the question out, and the question."
+  (harness-ui-children-test-with
+    (harness-ui-children-test--blocked "b1" "asks" "question")
+    (let* ((harness-ui-session-id parent)
+           (panel (harness-ui-children--panel))
+           (lines (split-string (harness-ui-children-test--text panel) "\n" t)))
+      (should (string-match-p "\\`.* Sub-agents  1 blocked\\'" (car lines)))
+      (should (string-match-p "asks  Blocked  \\[Answer…\\]  Which colour should the badge be\\?" (nth 1 lines)))
+      (should-not (string-match-p "running" (harness-ui-children-test--text panel))))))
+
+(ert-deftest harness-ui-children-panel-answers-from-the-parent ()
+  "The buttons of a blocked child's line answer its request, as the session list's do."
+  (harness-ui-children-test-with
+    (harness-ui-children-test--blocked "b1" "needs-access" "permission")
+    (let* ((harness-ui-session-id parent)
+           (panel (harness-ui-children--panel))
+           (answers nil))
+      (cl-letf (((symbol-function 'harness-ui-pending-answer-first-permission)
+                 (lambda (session-id option &rest _) (push (list session-id option) answers))))
+        (funcall (get-text-property (harness-ui-children-test--at panel "[Allow]") 'harness-ui-action panel))
+        (funcall (get-text-property (harness-ui-children-test--at panel "[Deny]") 'harness-ui-action panel)))
+      (should (equal '(("b1" "deny-once") ("b1" "allow-once")) answers)))))
+
+(ert-deftest harness-ui-children-line-of-a-blocked-child-fits-the-window ()
+  "A blocked child's line is one screen line too: what it asks is cut to the
+room the name, the state and the buttons leave, and left out where there is none."
+  (harness-ui-children-test-with
+    (harness-ui-children-test--blocked "b1" "needs-access" "permission")
+    (harness-ui-children-test-with-chat (chat _redraws)
+      (let ((lines (harness-ui-children-test--lines chat)))
+        (should (< (string-width (nth 1 lines)) 80))
+        (should (string-match-p "Access /home/me/other-repo/" (nth 1 lines))))
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((wide (selected-window))
+               ;; Fifty columns, a divider among them; the other window
+               ;; has what the frame has left of its 80.
+               (narrow (split-window wide 50 t)))
+          (set-window-buffer wide chat)
+          (let ((lines (harness-ui-children-test--lines chat))
+                (width (window-body-width wide)))
+            (dolist (line lines)
+              (should (< (string-width line) width)))
+            ;; The buttons stay, what is asked is cut.
+            (should (string-match-p "needs-access  Blocked  \\[Allow\\] \\[Deny\\]" (nth 1 lines)))
+            (should-not (string-match-p "other-repo/\\'" (nth 1 lines))))
+          ;; Shown in both windows, the narrower decides, and its width leaves
+          ;; the buttons no room: the name and the state alone, the name
+          ;; still the link that opens the session.
+          (set-window-buffer narrow chat)
+          (should (< (window-body-width narrow) (window-body-width wide)))
+          (let ((line (cadr (harness-ui-children-test--lines chat))))
+            (should (< (string-width line) (window-body-width narrow)))
+            (should (string-match-p "needs-access  Blocked\\'" line))))))))
+
+(ert-deftest harness-ui-children-panel-follows-a-child-that-blocks-and-answers ()
+  "A child that blocks asks its parent's chat to draw again, and so does one
+that goes on: the panel changes with it."
+  (harness-ui-children-test-with
+    (harness-ui-children-test--cache "r1" "subagent" "running" "worker-one" parent)
+    (harness-ui-children-test-with-chat (chat redraws)
+      (harness-ui-children--panel)
+      ;; The child blocks: its record says so.
+      (harness-ui-children-test--blocked "r1" "worker-one" "permission")
+      (harness-ui-children--on-update
+       "r1" (list :sessionUpdate "_harness/session" :session (list :id "r1" :status "blocked")))
+      (should (timerp (buffer-local-value 'harness-ui-children--timer chat)))
+      (harness-ui-children--flush chat)
+      (should (= 1 redraws))
+      (let ((drawn (buffer-local-value 'harness-ui-children--drawn chat)))
+        (should (string-match-p "Sub-agents  1 blocked" drawn))
+        (should (string-match-p "worker-one  Blocked  \\[Allow\\] \\[Deny\\]" drawn)))
+      ;; It was answered, and works again.
+      (harness-ui-children-test--cache "r1" "subagent" "running" "worker-one" parent)
+      (harness-ui-children--on-update
+       "r1" (list :sessionUpdate "_harness/session" :session (list :id "r1" :status "running")))
+      (harness-ui-children--flush chat)
+      (should (= 2 redraws))
+      (let ((drawn (buffer-local-value 'harness-ui-children--drawn chat)))
+        (should (string-match-p "Sub-agents  1 running\\'" (car (split-string drawn "\n"))))
+        (should-not (string-match-p "Blocked" drawn))))))
 
 (ert-deftest harness-ui-children-panel-shows-activity-progress ()
   "A child's progress is its activity, the activity line's own text."

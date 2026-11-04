@@ -104,6 +104,25 @@ escalation does, and so does a shell command that names one and looks
 like it writes it.  The shell command's check is a reading of its
 text, not a boundary.
 
+* Worktrees of sub-agents
+
+A session that starts a sub-agent in a worktree of its own
+(`spawn_agent` with `worktree`) made that worktree, so it may read it
+without asking, from the moment it exists: the tools that only read
+take its paths, and bash sees it read-only.  It is a directory the
+session may only read, kept in its `ext` (`:child-worktrees`) so that
+it outlives a restart, and listed in the access view as the worktree
+of a sub-agent.  Writing there is not granted: the merge flow needs no
+write of the parent's (the merge queue runs git itself, outside the
+jail, and the conflicts of a merge are resolved by the sub-agent's own
+session in its worktree), so a call that writes there asks the user as
+any call outside the jail does, and the user can make the directory
+writable from the access view.  The grant ends when the sub-agent's
+branch merges, its worktree is removed or the sub-agent is deleted;
+the user or the agent can give it up before, as any directory.
+`access/grant-child-worktree` is what the module that starts the
+sub-agent calls.
+
 * Judgements
 
 Every decision of the permission chain (`permission/decided`) is a
@@ -124,7 +143,8 @@ the directories, the tools, the rules.  `access/judgements` lists the
 judgements.  `access/set-network`, `access/set-read-only`,
 `access/set-tool`, `access/set-capability`, `access/add-read-dir`,
 `access/remove-read-dir`, `access/drop-dir` and `access/restore-dir`
-change the profile for the user.  `access/changed` (SESSION-ID) says
+change the profile for the user; `access/grant-child-worktree` is the
+one the tools-agent module calls.  `access/changed` (SESSION-ID) says
 a session's access changed, `access/judged` (SESSION-ID RECORD) that
 a call was judged.
 
@@ -135,6 +155,7 @@ a call was judged.
 - `access/add-read-dir` (session-id dir) — Let SESSION-ID read DIR but not write it; for the user.  Return what was done.
 - `access/describe` (session-id) — Return everything about SESSION-ID's access, for the access view.
 - `access/drop-dir` (session-id dir &optional keep-read) — Take DIR away from SESSION-ID, keeping it readable with KEEP-READ; for the user.
+- `access/grant-child-worktree` (parent-id child-id dir) — Let PARENT-ID read DIR, the worktree of its sub-agent CHILD-ID.
 - `access/judgements` (session-id &rest filter) — Return the judgements of SESSION-ID's calls, newest first.
 - `access/remove-read-dir` (session-id dir) — Stop SESSION-ID reading the read-only directory DIR; for the user.
 - `access/restore-dir` (session-id dir) — Give SESSION-ID back the directory DIR it gave up; for the user.
@@ -162,6 +183,7 @@ a call was judged.
 - `sandbox/capability-name` ([sandbox](sandbox.md)), when it is loaded
 - `sandbox/status` ([sandbox](sandbox.md)), when it is loaded
 - `session/get` ([session](session.md))
+- `session/list` ([session](session.md))
 - `session/nodes` ([session](session.md))
 - `session/set-ext` ([session](session.md))
 - `session/update` ([session](session.md))
@@ -170,10 +192,13 @@ a call was judged.
 
 ### Events it handles
 
+- `merge/finished` → `harness-access--on-merge-finished`
 - `permission/decided` → `harness-access--record`
 - `session/created` → `harness-access--inherit`
+- `session/deleted` → `harness-access--on-session-deleted`
 - `session/deleted` → `harness-access--forget`
 - `session/updated` → `harness-access--on-session-updated`
+- `worktree/removed` → `harness-access--on-worktree-removed`
 
 ### Events it emits
 

@@ -579,7 +579,10 @@ Its last turn's count stays once the turn ends, and
          (format "waiting on you: %s"
                  (harness-truncate-end (harness-first-line (or (plist-get payload :question) "a question")) 60)))
         ("permission"
-         (format "waiting on you: permission for %s" (or (plist-get payload :tool) "a tool")))
+         (format "waiting on you: permission for %s"
+                 (harness-truncate-end
+                  (harness-first-line (or (plist-get payload :title) (plist-get payload :tool) "a tool"))
+                  60)))
         (_ "waiting on you")))))
 
 (defun harness-tools--last-node-phrase (session-id)
@@ -607,9 +610,11 @@ what its turn is doing; one that waits on the user says so; any other
 says the last thing in its transcript."
   (let ((activity (or activity (harness-tools-session-activity (plist-get session :id)))))
     (cond
+     ;; A call being checked waits for the user once a request is pending
+     ;; on it: that is what the note says, not that the call is checked.
+     ((and (harness-session-waiting-on-user-p session) (harness-tools--pending-phrase session)))
      (activity (harness-tools--activity-phrase activity))
-     ((eq (plist-get session :status) 'blocked)
-      (or (harness-tools--pending-phrase session) "waiting on you"))
+     ((eq (plist-get session :status) 'blocked) "waiting on you")
      (t (or (harness-tools--last-node-phrase (plist-get session :id))
             (if (eq (plist-get session :status) 'running) "working" "idle"))))))
 

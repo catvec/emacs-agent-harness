@@ -1,4 +1,4 @@
-;;; harness-ui-children.el --- Running sub-agents, pinned above the compose box  -*- lexical-binding: t; -*-
+;;; harness-ui-children.el --- Sub-agents at work or blocked, pinned above the compose box  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -11,6 +11,14 @@
 ;; parent session sees its workers without scrolling back to the
 ;; `spawn_agent' call that started them -- which a background sub-agent
 ;; outlives anyway.
+;;
+;; A child that waits for the user -- a permission prompt, a directory it
+;; asked for, a question -- is no longer running, and the parent, which
+;; waits for its report, would show nothing of it.  It stays in the
+;; panel, first, in the blocked face: its name (the link that opens it),
+;; "Blocked", the buttons that answer what it waits on -- the ones the
+;; session list draws under its row -- and what it asks, so the user
+;; sees the whole tree stand still and answers from the parent's chat.
 ;;
 ;; Nothing here polls a child.  The harness broadcasts every session's
 ;; activity (`agent/activity-changed' → `_harness/activity' to every
@@ -35,6 +43,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-ui-pending)
 
 (defvar harness-chat-panel-functions)
 (defvar harness-chat-mode-hook)
@@ -50,7 +59,7 @@
 (declare-function harness-chat--normalise-todos "harness-ui-chat" (todos))
 
 (defgroup harness-ui-children nil
-  "Running sub-agents of a session, pinned above its compose box."
+  "Sub-agents of a session at work or blocked on you, pinned above its compose box."
   :group 'harness-ui)
 
 (harness-ui-define-icon harness-ui-children-icon "agent" "◇" "sub-agent"
@@ -88,22 +97,45 @@ panel changed since.")
 `_harness/session' spells `:kind' and `:status' as symbols or strings."
   (when value (if (symbolp value) (symbol-name value) (format "%s" value))))
 
-(defun harness-ui-children--running ()
-  "Return this session's running sub-agents, newest first, or nil.
-A running child is a cached session of kind `subagent' whose
-`:parent-id' is this buffer's session and whose status is `running'; a
-seed conversation does not count, and says so itself (in its `:ext',
-`harness-ui-seed-session-p').  This buffer's session is always a
-string in a chat, so a nil id (no session) matches nothing."
+(defun harness-ui-children--of-session ()
+  "Return this session's sub-agents, as cached sessions, newest first.
+A sub-agent is a cached session of kind `subagent' whose `:parent-id' is
+this buffer's session; a seed conversation does not count, and says so
+itself (in its `:ext', `harness-ui-seed-session-p').  This buffer's
+session is always a string in a chat, so a nil id (no session) matches
+nothing."
   (when (and (stringp harness-ui-session-id) (not (string-empty-p harness-ui-session-id)))
     (let ((sid harness-ui-session-id))
       (cl-remove-if-not
        (lambda (s)
          (and (equal (plist-get s :parent-id) sid)
               (equal (harness-ui-children--str (plist-get s :kind)) "subagent")
-              (equal (harness-ui-children--str (plist-get s :status)) "running")
               (harness-ui-navigable-session-p s)))
        (harness-ui-sessions)))))
+
+(defun harness-ui-children--waiting-p (child)
+  "Non-nil when CHILD, a cached session, waits for the user to answer.
+That is a request pending on it, or the status `blocked'
+\(`harness-session-waiting-on-user-p')."
+  (harness-session-waiting-on-user-p child))
+
+(defun harness-ui-children--running ()
+  "Return this session's running sub-agents, newest first, or nil.
+A running child is one of this session's sub-agents
+\(`harness-ui-children--of-session') whose status is `running' and that
+waits for nobody."
+  (cl-remove-if-not
+   (lambda (s)
+     (and (equal (harness-ui-children--str (plist-get s :status)) "running")
+          (not (harness-ui-children--waiting-p s))))
+   (harness-ui-children--of-session)))
+
+(defun harness-ui-children--waiting ()
+  "Return this session's sub-agents that wait for the user, newest first, or nil.
+They wait on a permission prompt or a question of their own; each is
+blocked, and answered where the user chooses
+\(`harness-ui-pending-view-actions')."
+  (cl-remove-if-not #'harness-ui-children--waiting-p (harness-ui-children--of-session)))
 
 (defun harness-ui-children--todo (child)
   "Return CHILD's current todo item's text, or nil.
@@ -169,18 +201,73 @@ comes and goes: the progress is cut to the room the chat's window leaves
                                        'face 'harness-dim-face)))
             "\n")))
 
+(defun harness-ui-children--waiting-line (child)
+  "Return the panel's line for CHILD, a sub-agent that waits for you.
+The name is the session link, as a running child's.  \"Blocked\" follows
+in the blocked face, its tooltip saying what the child waits on, then
+the buttons that answer it -- the ones the session list draws under the
+child's row (`harness-ui-pending-view-actions') -- and what it asks, cut
+to the room left (`harness-ui-pending-subject').  It is one screen line
+as a running child's is, so the buttons and what is asked are left out
+where the window has no room for them, the name still opening the
+session, and a child whose request this Emacs has not heard of yet shows
+neither."
+  (let* ((id (plist-get child :id))
+         (name (or (plist-get child :name) id))
+         (request (harness-ui-pending-first id))
+         (buttons (mapconcat (lambda (action)
+                               (harness-ui-action-button (nth 0 action) (nth 1 action)
+                                                         :help (nth 2 action)))
+                             (harness-ui-pending-view-actions id) " "))
+         (head (concat "   "
+                       (propertize (harness-ui-icon 'harness-icon-blocked)
+                                   'face 'harness-status-blocked-face)
+                       " "
+                       (harness-ui-session-link id (harness-truncate-end name 24)
+                                                (format "Open the session %s" name))
+                       "  "
+                       (propertize "Blocked" 'face 'harness-status-blocked-face
+                                   'help-echo (or (harness-ui-pending-summary child) "Request pending"))))
+         (room (- (harness-ui-children--room) (string-width head) 2))
+         (buttons (and (not (string-empty-p buttons)) (<= (+ 2 (string-width buttons)) room) buttons))
+         (room (min 60 (if buttons (- room 2 (string-width buttons)) room))))
+    (concat head
+            (and buttons (concat "  " buttons))
+            (when (and request (>= room 8))
+              (concat "  " (harness-ui-pending-subject request room)))
+            "\n")))
+
+(defun harness-ui-children--counts (running waiting)
+  "Return the panel's counts for RUNNING and WAITING children, as text.
+\"2 running\", \"1 blocked\" or both, joined by a dot; the blocked count
+wears the blocked face."
+  (string-join
+   (delq nil (list (and running (format "%d running" (length running)))
+                   (and waiting (propertize (format "%d blocked" (length waiting))
+                                            'face 'harness-status-blocked-face))))
+   " \N{U+00B7} "))
+
 (defun harness-ui-children--render ()
-  "Return the panel of this session's running sub-agents, or nil.
-A session with no running sub-agent shows nothing.  This only builds
-the text; `harness-ui-children--panel' is what the chat draws."
-  (when-let* ((children (harness-ui-children--running)))
-    (concat
-     (propertize (concat (harness-ui-icon 'harness-ui-children-icon)
-                         (format " Sub-agents  %d running" (length children)))
-                 'face 'harness-label-face)
-     "\n"
-     (string-join (mapcar #'harness-ui-children--line children) "")
-     "\n")))
+  "Return the panel of this session's sub-agents at work, or nil.
+The children that wait for you come first (`harness-ui-children--waiting-line'),
+then the running ones (`harness-ui-children--line').  A session with no
+running and no waiting sub-agent shows nothing.  This only builds the
+text; `harness-ui-children--panel' is what the chat draws."
+  (let ((waiting (harness-ui-children--waiting))
+        (running (harness-ui-children--running)))
+    (when (or waiting running)
+      (concat
+       (propertize (concat (harness-ui-icon 'harness-ui-children-icon) " Sub-agents  ")
+                   'face 'harness-label-face)
+       (let ((counts (harness-ui-children--counts running waiting)))
+         ;; The label's face under the counts, the blocked one over its own.
+         (add-face-text-property 0 (length counts) 'harness-label-face t counts)
+         counts)
+       "\n"
+       (string-join (append (mapcar #'harness-ui-children--waiting-line waiting)
+                            (mapcar #'harness-ui-children--line running))
+                    "")
+       "\n"))))
 
 (defun harness-ui-children--plain (text)
   "Return TEXT, a panel from `harness-ui-children--render', without properties.
@@ -298,7 +385,7 @@ of the panel."
 (harness-ui-children--init)
 
 (harness-define-module 'ui-children
-  :doc "Running sub-agents of a session, pinned above its compose box: name, progress and elapsed time."
+  :doc "Sub-agents of a session at work or blocked on you, pinned above its compose box: name, progress and elapsed time, and for a blocked one what it asks, with the buttons that answer it."
   :requires '(ui ui-chat)
   :init #'harness-ui-children--init)
 

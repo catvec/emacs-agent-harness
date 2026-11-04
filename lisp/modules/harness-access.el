@@ -94,6 +94,25 @@
 ;; like it writes it.  The shell command's check is a reading of its
 ;; text, not a boundary.
 ;;
+;; * Worktrees of sub-agents
+;;
+;; A session that starts a sub-agent in a worktree of its own
+;; (`spawn_agent' with `worktree') made that worktree, so it may read it
+;; without asking, from the moment it exists: the tools that only read
+;; take its paths, and bash sees it read-only.  It is a directory the
+;; session may only read, kept in its `ext' (`:child-worktrees') so that
+;; it outlives a restart, and listed in the access view as the worktree
+;; of a sub-agent.  Writing there is not granted: the merge flow needs no
+;; write of the parent's (the merge queue runs git itself, outside the
+;; jail, and the conflicts of a merge are resolved by the sub-agent's own
+;; session in its worktree), so a call that writes there asks the user as
+;; any call outside the jail does, and the user can make the directory
+;; writable from the access view.  The grant ends when the sub-agent's
+;; branch merges, its worktree is removed or the sub-agent is deleted;
+;; the user or the agent can give it up before, as any directory.
+;; `access/grant-child-worktree' is what the module that starts the
+;; sub-agent calls.
+;;
 ;; * Judgements
 ;;
 ;; Every decision of the permission chain (`permission/decided') is a
@@ -114,7 +133,8 @@
 ;; judgements.  `access/set-network', `access/set-read-only',
 ;; `access/set-tool', `access/set-capability', `access/add-read-dir',
 ;; `access/remove-read-dir', `access/drop-dir' and `access/restore-dir'
-;; change the profile for the user.  `access/changed' (SESSION-ID) says
+;; change the profile for the user; `access/grant-child-worktree' is the
+;; one the tools-agent module calls.  `access/changed' (SESSION-ID) says
 ;; a session's access changed, `access/judged' (SESSION-ID RECORD) that
 ;; a call was judged.
 
@@ -298,10 +318,13 @@ file standing for the directory holding it."
 A `permission/dir-entries' filter: the directories it gave up of
 `harness-access-droppable-sources' go, and those it may only read come
 last, with `:read-only' t and source `read', so a directory both
-granted and read-only stays writable."
+granted and read-only stays writable.  The worktrees of its sub-agents
+\(`harness-access-child-worktrees') are among them, with source `child'
+and the sub-agent's id as `:child'."
   (let ((dropped (harness-access-dropped session))
-        (read-dirs (harness-access-read-dirs session)))
-    (if (not (or dropped read-dirs))
+        (read-dirs (harness-access-read-dirs session))
+        (children (harness-access-child-worktrees session)))
+    (if (not (or dropped read-dirs children))
         entries
       (append (if dropped
                   (cl-remove-if (lambda (e)
@@ -311,7 +334,10 @@ granted and read-only stays writable."
                                 entries)
                 entries)
               (mapcar (lambda (d) (list :dir (file-name-as-directory d) :source 'read :read-only t))
-                      read-dirs)))))
+                      read-dirs)
+              (mapcar (lambda (c) (list :dir (file-name-as-directory (plist-get c :dir)) :source 'child
+                                        :read-only t :child (plist-get c :child)))
+                      children)))))
 
 (defun harness-access--entry-of (session dir)
   "Return the entry of SESSION's directories that is DIR, or nil.
@@ -328,6 +354,7 @@ Its read-only directories count, its dropped ones do not."
   "Return how a message names directory SOURCE."
   (pcase source
     ('read "a directory it may only read")
+    ('child "the worktree of a sub-agent, which it may only read")
     (_ (harness-perms--source-label source))))
 
 (defun harness-access-drop-dir (session-id path &optional keep-read who)
@@ -365,6 +392,11 @@ directories, or the tool output directory."
                                                      (cl-remove-if (lambda (d) (harness-access--same-dir-p d dir))
                                                                    (plist-get p :read-dirs))))
                               (harness-access--hint who (format "%s may no longer be read" shown)))
+      (format "%s is no longer readable by this session." shown))
+     ((eq source 'child)
+      (harness-access-revoke-child-worktrees session-id
+                                             (lambda (c) (harness-access--same-dir-p (plist-get c :dir) dir))
+                                             (harness-access--hint who (format "%s may no longer be read" shown)))
       (format "%s is no longer readable by this session." shown))
      ((memq source '(session turn))
       (harness-call 'permission/revoke-dir session-id (plist-get entry :dir))
@@ -440,6 +472,101 @@ Return non-nil when DIR was one."
                                                                   (harness-access--abbrev found))))
       (harness-emit 'permission/dir-revoked session-id found)
       t)))
+
+;;;; Worktrees of sub-agents
+
+;; A session that starts a sub-agent in a worktree of its own
+;; (`spawn_agent' with `worktree') made that worktree: it may read it, as
+;; a directory it may only read (see `harness-access--dir-entries'), from
+;; the moment the worktree exists, without being asked.  The list is kept
+;; in its `ext' as `:child-worktrees', each entry (:child ID :dir DIR), so
+;; it survives a restart, and is told to the module by the one that starts
+;; the sub-agent (`access/grant-child-worktree').
+
+(defun harness-access-child-worktrees (session)
+  "Return the worktrees of SESSION's sub-agents it may read, as plists.
+Each is (:child ID :dir DIR): the sub-agent's id and its worktree.  A
+session of another host has none: a worktree is a directory of this
+machine."
+  (let ((entries (plist-get (plist-get session :ext) :child-worktrees)))
+    (and (consp entries)
+         (not (plist-get session :host))
+         (cl-remove-if-not (lambda (c)
+                             (and (consp c) (stringp (plist-get c :dir))
+                                  (not (string-empty-p (plist-get c :dir)))))
+                           entries))))
+
+(defun harness-access--store-child-worktrees (session-id entries &optional hint)
+  "Keep ENTRIES as the worktrees of SESSION-ID's sub-agents it may read.
+HINT, a string, goes into its transcript.  Announced as `access/changed'."
+  (harness-call 'session/set-ext session-id :child-worktrees entries hint)
+  (harness-emit 'access/changed session-id))
+
+(defun harness-access-grant-child-worktree (parent-id child-id dir)
+  "Let PARENT-ID read DIR, the worktree of its sub-agent CHILD-ID; return DIR.
+DIR is read-only for the session: the calls that only read may reach it,
+and bash sees it read-only.  Writing there stays a request for a
+directory.  A worktree it may read already is left as it is.  Nil for a
+session of another host, which has no worktree of this machine to read."
+  (let ((session (harness-access--session parent-id))
+        (dir (file-name-as-directory (expand-file-name dir))))
+    (unless (plist-get session :host)
+      (let ((held (harness-access-child-worktrees session)))
+        (unless (cl-some (lambda (c) (and (equal (plist-get c :child) child-id)
+                                          (harness-access--same-dir-p (plist-get c :dir) dir)))
+                         held)
+          (harness-access--store-child-worktrees
+           parent-id
+           (append (cl-remove child-id held :key (lambda (c) (plist-get c :child)) :test #'equal)
+                   (list (list :child child-id :dir dir))))
+          (harness-emit 'permission/dir-allowed parent-id dir))
+        dir))))
+
+(defun harness-access-revoke-child-worktrees (parent-id test &optional hint)
+  "Take from PARENT-ID the worktrees of its sub-agents that TEST names.
+TEST is a function of an entry (:child ID :dir DIR).  HINT, a string,
+goes into its transcript.  Return the entries taken away, nil when it
+held none of them or is gone."
+  (when-let* ((session (ignore-errors (harness-access--session parent-id))))
+    (let* ((held (plist-get (plist-get session :ext) :child-worktrees))
+           (gone (and (consp held) (cl-remove-if-not (lambda (c) (and (consp c) (funcall test c))) held))))
+      (when gone
+        (harness-access--store-child-worktrees parent-id (cl-remove-if (lambda (c) (memq c gone)) held) hint)
+        (dolist (c gone)
+          (when (stringp (plist-get c :dir))
+            (harness-emit 'permission/dir-revoked parent-id (plist-get c :dir)))))
+      gone)))
+
+(defun harness-access--forget-child-worktree (child-id parent-id)
+  "Take the worktree of CHILD-ID from PARENT-ID, which may read it."
+  (when (stringp parent-id)
+    (harness-access-revoke-child-worktrees parent-id (lambda (c) (equal (plist-get c :child) child-id)))))
+
+(defun harness-access--on-merge-finished (child-id _target status)
+  "Take the worktree of CHILD-ID from its parent once its branch MERGED.
+A `merge/finished' subscriber: its work is on the parent's branch, and
+the worktree is to be pruned, so there is nothing left to read there
+that the parent does not have.  A merge that failed, was aborted or
+cancelled leaves the worktree readable."
+  (when (eq (harness-perms--sym status) 'merged)
+    (harness-access--forget-child-worktree
+     child-id (plist-get (ignore-errors (harness-call 'session/get child-id)) :parent-id))))
+
+(defun harness-access--on-worktree-removed (_root path)
+  "Take the worktree at PATH, now removed, from every session that may read it.
+A `worktree/removed' subscriber."
+  (dolist (session (ignore-errors (harness-call 'session/list)))
+    (when (cl-some (lambda (c) (and (consp c) (stringp (plist-get c :dir))
+                                    (harness-access--same-dir-p (plist-get c :dir) path)))
+                   (plist-get (plist-get session :ext) :child-worktrees))
+      (harness-access-revoke-child-worktrees
+       (plist-get session :id)
+       (lambda (c) (and (stringp (plist-get c :dir)) (harness-access--same-dir-p (plist-get c :dir) path)))))))
+
+(defun harness-access--on-session-deleted (session-id plist)
+  "Take the worktree of the sub-agent SESSION-ID from its parent, once deleted.
+A `session/deleted' subscriber: PLIST is the record the session had."
+  (harness-access--forget-child-worktree session-id (plist-get plist :parent-id)))
 
 ;;;; Network, writing and tools
 
@@ -1540,6 +1667,15 @@ See `harness-access-drop-dir'.  Return what was done, as text."
   (or (harness-access-restore-dir session-id dir)
       (signal 'harness-error (list (format "%s was not given up" (harness-access--abbrev dir))))))
 
+(harness-defmethod access/grant-child-worktree (parent-id child-id dir)
+  "Let PARENT-ID read DIR, the worktree of its sub-agent CHILD-ID.
+For the module that starts the sub-agent (`spawn_agent'): the grant is
+read-only, and ends when the sub-agent's branch merges, its worktree is
+removed or the sub-agent is deleted.  See
+`harness-access-grant-child-worktree'.  Return DIR, nil for a session
+of another host."
+  (harness-access-grant-child-worktree parent-id child-id dir))
+
 ;;;; Module
 
 (defun harness-access--on-session-updated (session-id changes)
@@ -1567,7 +1703,10 @@ non-interactive switch, its directories."
   (harness-on 'permission/decided #'harness-access--record)
   (harness-on 'session/created #'harness-access--inherit)
   (harness-on 'session/deleted #'harness-access--forget)
-  (harness-on 'session/updated #'harness-access--on-session-updated))
+  (harness-on 'session/deleted #'harness-access--on-session-deleted)
+  (harness-on 'session/updated #'harness-access--on-session-updated)
+  (harness-on 'merge/finished #'harness-access--on-merge-finished)
+  (harness-on 'worktree/removed #'harness-access--on-worktree-removed))
 
 (defun harness-access--shutdown ()
   "Take the module off the bus."
@@ -1581,7 +1720,10 @@ non-interactive switch, its directories."
   (harness-off (cons 'permission/decided #'harness-access--record))
   (harness-off (cons 'session/created #'harness-access--inherit))
   (harness-off (cons 'session/deleted #'harness-access--forget))
-  (harness-off (cons 'session/updated #'harness-access--on-session-updated)))
+  (harness-off (cons 'session/deleted #'harness-access--on-session-deleted))
+  (harness-off (cons 'session/updated #'harness-access--on-session-updated))
+  (harness-off (cons 'merge/finished #'harness-access--on-merge-finished))
+  (harness-off (cons 'worktree/removed #'harness-access--on-worktree-removed)))
 
 (put 'harness-access--gate 'harness-permission-stage 'access)
 (put 'harness-access--escalation 'harness-permission-stage 'access)

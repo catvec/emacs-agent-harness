@@ -2,12 +2,13 @@
 
 # ui-children
 
-Running sub-agents of a session, pinned above its compose box: name, progress and elapsed time.
+Sub-agents of a session at work or blocked on you, pinned above its compose box: name, progress and elapsed time, and for a blocked one what it asks, with the buttons that answer it.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-children.el](../../lisp/ui/harness-ui-children.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [ui](ui.md), [ui-chat](ui-chat.md)
+- **Brings along:** [ui-pending](ui-pending.md) (its file requires it)
 
 ## About
 
@@ -20,6 +21,14 @@ while the child works and goes when it stops, so the user watching the
 parent session sees its workers without scrolling back to the
 `spawn_agent` call that started them -- which a background sub-agent
 outlives anyway.
+
+A child that waits for the user -- a permission prompt, a directory it
+asked for, a question -- is no longer running, and the parent, which
+waits for its report, would show nothing of it.  It stays in the
+panel, first, in the blocked face: its name (the link that opens it),
+"Blocked", the buttons that answer what it waits on -- the ones the
+session list draws under its row -- and what it asks, so the user
+sees the whole tree stand still and answers from the parent's chat.
 
 Nothing here polls a child.  The harness broadcasts every session's
 activity (`agent/activity-changed` → `_harness/activity` to every

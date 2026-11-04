@@ -27,6 +27,10 @@ sub-agents use too.  The cap is never silent: a hint at the start of
 the child's transcript says it
 (`harness-tools-agent-context-limit-hint`).  Without a priority of
 its own the child works at its parent's (`harness-priority-session`).
+A child in a worktree of its own is a worktree its parent may read
+without asking, from the moment it exists until the child's branch
+merges (`harness-tools-agent--grant-worktree`; the access module keeps
+the grant, read-only: see there).
 
 The module also adds a Planning section to the system prompt that
 explains forks, sub-agents, worktrees and the merge queue, so plans
@@ -54,6 +58,7 @@ Nothing here waits: every long operation returns a promise.
 
 ### Methods it calls
 
+- `access/grant-child-worktree` ([access](access.md)), when it is loaded
 - `agent/cancel` ([agent](agent.md))
 - `agent/outstanding` ([agent](agent.md))
 - `agent/prompt` ([agent](agent.md))

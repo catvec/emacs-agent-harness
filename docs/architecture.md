@@ -3516,11 +3516,14 @@ stage's label, else `gate`; the access module's judgements and the
   `permission/dir-entries` (value: the entries; argument: the session)
   and then made unique: the access module takes out the ones a session
   gave up and adds those it may only read, `(:dir D :source read
-  :read-only t)`.  `harness-perms-roots` are the entries that may be
-  written; `harness-perms-read-only-dirs` the `:read-only` ones, which a
-  call of kind `read` may reach (`harness-perms--read-only-reachable-p`)
-  and any other call is jailed out of as outside the roots, the jail
-  asking the user as it does there; `harness-perms-readable-roots` both.
+  :read-only t)`, and the worktrees of the sub-agents it started in
+  one, `(:dir D :source child :child ID :read-only t)`, which it may
+  read until the branch merges and not write.  `harness-perms-roots`
+  are the entries that may be written; `harness-perms-read-only-dirs`
+  the `:read-only` ones, which a call of kind `read` may reach
+  (`harness-perms--read-only-reachable-p`) and any other call is jailed
+  out of as outside the roots, the jail asking the user as it does
+  there; `harness-perms-readable-roots` both.
   The sandbox shows a `:read-only` entry to bash read-only.
 - Inspecting the harness itself is one of the things that make it
   powerful, so no mode, judge or jail stands in its way.  The harness
@@ -4058,6 +4061,21 @@ half `ui-access`, the access view).
   change goes through `session/set-ext` with a hint in the transcript
   ("Access: … (given up by the agent | set by the user)") and emits
   `access/changed SESSION-ID`.
+- The worktrees of the sub-agents a session started in one are the
+  session's ext `:child-worktrees`, each `(:child ID :dir DIR)`:
+  directories it may only read, added to `permission/dir-entries` with
+  source `child` (see perms), listed in the access view as "sub-agent
+  worktree".  The module that starts the child tells this one with
+  `access/grant-child-worktree PARENT-ID CHILD-ID DIR`, from
+  `spawn_agent` with `worktree`.  The entry lasts until the child's
+  branch merges (`merge/finished` with `merged`), its worktree is
+  removed (`worktree/removed`) or the child is deleted
+  (`session/deleted`); a failed, aborted or cancelled merge leaves it,
+  as does a restart, since it is on the record.  Writing there is no
+  part of the grant: the merge queue runs git outside the jail, so the
+  parent needs no write, and a write from the parent asks as any path
+  outside the roots, with `[Make writable]` in the access view when the
+  user wants to allow it.
 - It is held by the harness, not a prompt: the `permission/dir-entries`
   filter (50) takes the dropped directories out and adds the read-only
   ones (see perms); the `agent/tools` filter (85) takes off the tools
@@ -5390,6 +5408,13 @@ and tools.
   one that is not is reported "stopped: the harness restarted during its
   turn, which was not resumed" (or cancelled), so no parent waits
   forever.
+- Prompts as they appear: `session/pending-changed` gives each new
+  request of a sub-agent to `harness-resilience--on-pending-changed`,
+  which announces it once (`harness-resilience--announce`): the
+  parent's transcript gets a hint naming the child and what it asks,
+  which starts no turn, and the user a notification that opens the
+  child (kind `prompt-waiting`).  A session that is no sub-agent and a
+  seed say nothing, and `session/deleted` forgets what was announced.
 - Prompts: every `harness-resilience--tick-seconds` (30) a repeating
   timer looks at the blocked sub-agents.  A pending request older than
   `harness-resilience-prompt-timeout` (600 s; nil never) is answered by

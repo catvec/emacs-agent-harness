@@ -1150,6 +1150,53 @@ The worktree step of the call keeps the branch, which the report names."
                 (should (string-match-p "on branch harness/" report)))))
         (ignore-errors (delete-directory base t))))))
 
+(ert-deftest harness-tools-agent-spawn-worktree-lets-the-parent-read-it ()
+  "A child in a worktree is a worktree its parent may read: spawn_agent tells
+the access module, once the child exists.  A child without a worktree
+grants nothing, and a grant that fails fails nothing."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'worktree)
+    (let* ((base (harness-test-temp-dir))
+           (root (file-name-as-directory (expand-file-name "repo" base)))
+           (grants nil)
+           (fails nil))
+      (unwind-protect
+          (progn
+            (make-directory root t)
+            (harness-tools-agent-test--git root "init" "-q" "-b" "main")
+            (harness-tools-agent-test--git root "config" "user.name" "Harness Test")
+            (harness-tools-agent-test--git root "config" "user.email" "test@example.invalid")
+            (harness-tools-agent-test--git root "config" "commit.gpgsign" "false")
+            (with-temp-file (expand-file-name "README" root) (insert "hello\n"))
+            (harness-tools-agent-test--git root "add" "README")
+            (harness-tools-agent-test--git root "commit" "-q" "-m" "initial")
+            (harness-register-method 'access/grant-child-worktree
+                                     (lambda (parent child dir)
+                                       (when fails (error "no way"))
+                                       (push (list parent child dir) grants)
+                                       dir))
+            (let* ((sid (plist-get (harness-call 'session/create :cwd root :model "demo:scripted") :id))
+                   (cid (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "kid" :worktree t)))
+                   (worktree (plist-get (harness-call 'session/get cid) :worktree)))
+              ;; Told which session may read which worktree, of which sub-agent.
+              (should (equal (list (list sid cid worktree)) grants))
+              ;; No worktree, nothing to read.
+              (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "plain"))
+              (should (= 1 (length grants)))
+              ;; A fork in a worktree is a sub-agent in one.
+              (let ((fork (harness-tools-agent-test-spawn sid '(:prompt "carry on" :name "fork" :fork t :worktree t))))
+                (should (equal (list sid fork (plist-get (harness-call 'session/get fork) :worktree))
+                               (car grants))))
+              ;; A grant that cannot be made fails no sub-agent.
+              (setq fails t)
+              (let ((cid (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "again" :worktree t))))
+                (should (plist-get (harness-call 'session/get cid) :worktree))
+                (should (= 2 (length grants))))
+              ;; Without the access module there is nobody to tell.
+              (harness-unregister-method 'access/grant-child-worktree)
+              (should (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "alone" :worktree t)))))
+        (ignore-errors (delete-directory base t))))))
+
 ;;;; A sub-agent that registers a wait
 
 (defvar harness-tools-agent-test--target nil

@@ -307,6 +307,31 @@ that is neither folded nor named fails, so adding one is a decision."
       (should (equal "last ran Bash: make test"
                      (harness-tools-session-doing (harness-call 'session/get sid)))))))
 
+(ert-deftest harness-tools-session-doing-says-a-checked-call-waits-for-the-user ()
+  "A call whose permission is being checked is one the user is asked about once
+a request is pending: the note says the session waits on them, not that it checks."
+  (harness-tools-test-with-sessions
+    (let ((sid (harness-tools-test-session))
+          (activity (list :phase 'tool :tool "request_directory_access" :title "Request access"
+                          :checking t)))
+      ;; Checked, nobody asked yet.
+      (should (equal "checking permission for Request access"
+                     (harness-tools-session-doing (harness-call 'session/get sid) activity)))
+      ;; A directory it asked for, which waits for the user.
+      (harness-call 'session/pending-add sid
+                    (list :kind 'permission
+                          :payload (list :tool "request_directory_access" :title "Access /srv/data/")))
+      (should (equal "waiting on you: permission for Access /srv/data/"
+                     (harness-tools-session-doing (harness-call 'session/get sid) activity)))
+      (should (equal "waiting on you: permission for Access /srv/data/"
+                     (harness-tools-session-doing (harness-call 'session/get sid))))
+      ;; A question, whatever the turn is doing.
+      (harness-call 'session/pending-resolve sid (plist-get (car (harness-call 'session/pending sid)) :id) nil)
+      (harness-call 'session/pending-add sid
+                    (list :kind 'question :payload (list :question "Which licence applies?\nSecond line")))
+      (should (equal "waiting on you: Which licence applies?"
+                     (harness-tools-session-doing (harness-call 'session/get sid) '(:phase thinking)))))))
+
 (ert-deftest harness-tools-watch-session-reports-changes ()
   "A watcher hears the note at once, and again only when it changed."
   (harness-tools-test-with-sessions

@@ -731,11 +731,13 @@ pattern rather than a directory (see `harness-perms--within-p').
 
 The sync filter `permission/dir-entries' (value: the entries; argument:
 SESSION) may then add entries and take some away: the access module
-adds the directories a session may only read, with `:read-only' t,
-and takes away those it gave up.  An entry with `:read-only' is no
-root (`harness-perms-roots'): the calls that only read may reach it,
-and bash sees it read-only.  The first entry of a directory wins, so a
-directory both granted and read-only is writable."
+adds the directories a session may only read, with `:read-only' t --
+source `read' for those the user or the agent named, `child' for the
+worktrees of its sub-agents -- and takes away those it gave up.  An
+entry with `:read-only' is no root (`harness-perms-roots'): the calls
+that only read may reach it, and bash sees it read-only.  The first
+entry of a directory wins, so a directory both granted and read-only is
+writable."
   (cl-remove-duplicates
    (harness-run-filter 'permission/dir-entries (harness-perms--base-dirs session) session)
    :test #'equal :key (lambda (e) (plist-get e :dir)) :from-end t))
@@ -2856,6 +2858,7 @@ came) must not reach the next turn."
     ('session "granted to this session")
     ('turn "granted to this session until this turn ends")
     ('outputs "the tool output directory")
+    ('child "the worktree of a sub-agent, which this session may only read")
     (_ (format "%s" source))))
 
 (defun harness-perms--dir-request-result (input ctx)

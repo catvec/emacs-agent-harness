@@ -2,7 +2,7 @@
 
 # resilience
 
-Carry on sessions a stopped harness cut short, answer sub-agents' unanswered prompts by default, and report stalled turns.
+Carry on sessions a stopped harness cut short, tell the parent and the user when a sub-agent waits for them, answer its unanswered prompts by default, and report stalled turns.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-resilience.el](../../lisp/modules/harness-resilience.el)
@@ -37,9 +37,13 @@ until somebody noticed and typed "continue":
 
 - A sub-agent waiting on a permission prompt or a question nobody
   answers.  Its parent waits for its report, and the whole tree with
-  it.  After `harness-resilience-prompt-timeout` seconds the prompt
-  is answered by default -- a permission denied, a question told to
-  decide alone -- and the parent and the user are told.
+  it.  The parent and the user are told as the prompt appears: a hint
+  in the parent's transcript, which starts no turn, and a notification
+  that opens the sub-agent (`harness-resilience--announce`), so the
+  whole tree does not stand still unseen.  After
+  `harness-resilience-prompt-timeout` seconds the prompt is answered
+  by default -- a permission denied, a question told to decide alone
+  -- and the parent and the user are told again.
 
 - A running turn that makes no progress: a model stream that never
   ends, a call that never returns.  A watchdog notices a turn that
@@ -94,6 +98,8 @@ until somebody noticed and typed "continue":
 - `agent/tool-result` → `harness-resilience--note`
 - `agent/turn-ended` → `harness-resilience--on-turn-ended`
 - `agent/turn-started` → `harness-resilience--on-turn-started`
+- `session/deleted` → `harness-resilience--forget-announced`
+- `session/pending-changed` → `harness-resilience--on-pending-changed`
 - `session/pending-changed` → `harness-resilience--note`
 - `tools/progress` → `harness-resilience--note`
 
