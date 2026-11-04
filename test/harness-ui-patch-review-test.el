@@ -1690,7 +1690,13 @@ as typed."
           (should (string-search "Why two, not three?" (substring-no-properties drawn)))
           (should (string-search "See the docs." (substring-no-properties drawn)))
           (should-not (string-search "**" drawn))
-          (should (funcall bold-at drawn (string-search "two," drawn))))
+          (should (funcall bold-at drawn (string-search "two," drawn)))
+          ;; The comment's own faces sit over default, not the code's
+          ;; syntax or Ediff face at the overlay's anchor.
+          (should (equal '(:inherit default :extend t)
+                         (get-text-property (string-search "Why " drawn) 'face drawn)))
+          (should (equal '(bold (:inherit default :extend t))
+                         (get-text-property (string-search "two," drawn) 'face drawn))))
         ;; The threads view: rendered.
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-threads))
         (let ((view (cl-find-if (lambda (b) (eq 'change-review-threads-mode (buffer-local-value 'major-mode b)))
@@ -5332,7 +5338,8 @@ first comes back."
              (new (nth 2 (harness-ui-patch-review--ediff-buffers review)))
              (text (lambda (line) (cdr (assq line (harness-ui-patch-review-test--drawn new))))))
         ;; The closed thread is a line; the open one is in its conversation.
-        (should (string-match-p "\n▸ ✓ [^ ]+ · 2 comments · closed.*“Why two\\?”\\'" (funcall text 2)))
+        ;; The final space stretches the comment's own background to the edge.
+        (should (string-match-p "\n▸ ✓ [^ ]+ · 2 comments · closed.*“Why two\\?” \\'" (funcall text 2)))
         (should (= 2 (length (split-string (funcall text 2) "\n"))))
         (should (string-match-p "\n▾ ● [^ ]+ · 1 comment · open " (funcall text 18)))
         (should (string-search "1/1  Noah" (funcall text 18)))
@@ -5471,7 +5478,7 @@ they are drawn again when a window changes its size."
         (with-current-buffer new
           (let ((change-review-ui-max-thread-lines 4))
             (funcall change-review-ui--redraw-function)
-            (should (string-match-p "┃      … [0-9]+ more lines\\'"
+            (should (string-match-p "┃      … [0-9]+ more lines \\'"
                                     (cdr (assq 2 (harness-ui-patch-review-test--drawn new)))))
             (should (<= (length (split-string (cdr (assq 2 (harness-ui-patch-review-test--drawn new))) "\n")) 5))))
         (ignore thread)
@@ -5519,17 +5526,17 @@ the thread, even one as tall as the window."
         ;; The long reply: cut to the room, the button in sight, nothing taller than the room.
         (should (string-search "Answer line 1." (funcall text 2)))
         (should-not (string-search "Answer line 40." (funcall text 2)))
-        (should (string-match-p "… [0-9]+ more lines  \\[Show more\\]\\'" (funcall text 2)))
+        (should (string-match-p "… [0-9]+ more lines  \\[Show more\\] \\'" (funcall text 2)))
         (should (<= (length (split-string (funcall text 2) "\n")) 13))
         ;; The button draws all of the reply, and [Show less] cuts it again.
         (harness-ui-patch-review-test--press-nth (funcall thread 2) "[Show more]" 0)
         (change-review-ui-flush)
         (should (string-search "Answer line 40." (funcall text 2)))
-        (should (string-match-p "\\[Show less\\]\\'" (funcall text 2)))
+        (should (string-match-p "\\[Show less\\] \\'" (funcall text 2)))
         (harness-ui-patch-review-test--press-nth (funcall thread 2) "[Show less]" 0)
         (change-review-ui-flush)
         (should-not (string-search "Answer line 40." (funcall text 2)))
-        (should (string-match-p "\\[Show more\\]\\'" (funcall text 2)))
+        (should (string-match-p "\\[Show more\\] \\'" (funcall text 2)))
         ;; The earlier replies: a click draws them, and the line folds them again.
         (harness-ui-patch-review-test--press-nth (funcall thread 18) "▸ 6 earlier replies" 0)
         (change-review-ui-flush)

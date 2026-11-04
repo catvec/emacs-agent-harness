@@ -1965,6 +1965,12 @@ string, and the overlay is how the thread it draws is found."
          (text (if selection
                    (change-review-ui--mark-selection text selection)
                  (copy-sequence text))))
+    ;; An overlay string inherits the face of its anchor in the buffer,
+    ;; including syntax and diff highlighting.  Ground every comment row
+    ;; in default, below its own faces.  Extend it so the source's face
+    ;; cannot fill the space past the end of a comment's line either.
+    ;; The leading newline below still ends the source line in its face.
+    (add-face-text-property 0 (length text) '(:inherit default :extend t) t text)
     (put-text-property 0 (length text) 'change-review-view overlay text)
     (if (overlay-get overlay 'change-review-before)
         (overlay-put overlay 'before-string text)
@@ -1975,7 +1981,8 @@ string, and the overlay is how the thread it draws is found."
       (let* ((face (and (> (length text) 0) (get-text-property (1- (length text)) 'face text)))
              (string (concat "\n" (substring text 0 -1)
                              (if face
-                                 (propertize " " 'face face 'display '(space :align-to right))
+                                 (propertize " " 'face face 'display '(space :align-to right)
+                                             'change-review-view overlay)
                                ""))))
         ;; Point at the end of the line, where the thread hangs, is shown
         ;; after the string, on the last of its rows: one that is not in

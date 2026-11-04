@@ -2569,10 +2569,50 @@ drafts, and each button of the drawing names its own."
                                           "[Delete thread]")
             (should-not (memq mine-thread (change-review-set-threads set)))))))))
 
+(ert-deftest change-review-ui-grounds-overlay-text-in-default-without-losing-its-faces ()
+  "Threads use their own faces over default, not the source line's face.
+This includes whitespace and line ends, before or after their anchor."
+  (change-review-ui-test--drawing
+    (pcase-let* ((`(,set . ,thread) (change-review-ui-test--markup-thread "plain\n!bold\n~extends"))
+                 (ground '(:inherit default :extend t)))
+      (dolist (before '(nil t))
+        (with-temp-buffer
+          (insert (propertize "source\nnext\n" 'face '(:inherit font-lock-string-face :weight bold)))
+          (let* ((source (buffer-string))
+                 (overlay (change-review-ui-add-thread-overlay
+                           set thread (if before (point-min) (1- (point-max)))
+                           :before before :view 'diff :width 70 :indent "  "))
+                 (raw (overlay-get overlay 'change-review-text))
+                 (saved (copy-sequence raw))
+                 (property (if before 'before-string 'after-string))
+                 (text (overlay-get overlay property)))
+            ;; Existing faces are stronger than the base, even where they
+            ;; leave attributes unspecified.  Bare text has the base alone.
+            (should (equal ground (get-text-property (string-search "plain" text) 'face text)))
+            (should (equal (list 'bold ground)
+                           (get-text-property (string-search "bold" text) 'face text)))
+            (should (equal (list 'change-review-ui-user-face ground)
+                           (get-text-property (string-search "Noah" text) 'face text)))
+            ;; All rows, including their indent and newline, are grounded.
+            (cl-loop for pos from (if before 0 1) below (length text)
+                     for face = (get-text-property pos 'face text)
+                     do (should (or (equal ground face)
+                                     (equal ground (car (last face))))))
+            (unless before
+              ;; This newline ends the source line, not a comment row.
+              (should-not (get-text-property 0 'face text)))
+            ;; Drawing again does not accumulate bases or change the stored
+            ;; text, its mouse keys, or the source buffer's properties.
+            (change-review-ui--show-text overlay)
+            (should (equal-including-properties text (overlay-get overlay property)))
+            (should (equal-including-properties saved raw))
+            (should-not (get-text-property (string-search "plain" raw) 'face raw))
+            (should (equal-including-properties source (buffer-string)))))))))
+
 (ert-deftest change-review-ui-keeps-the-face-of-the-last-newline-under-a-line ()
   "The buffer's own newline ends the last line of a thread under a line, so a
 face that reaches the edge of the window from the newline of that line is
-a stretch there instead; text whose last newline has no face ends as it did."
+a stretch there instead.  Plain text extends its default base there too."
   (change-review-ui-test--drawing
     (pcase-let ((`(,set . ,thread) (change-review-ui-test--markup-thread "first\n~extends"))
                 (plain (change-review-ui-test--set)))
@@ -2586,14 +2626,18 @@ a stretch there instead; text whose last newline has no face ends as it did."
                (last (1- (length text))))
           (should-not (string-suffix-p "\n" text))
           (should (string-suffix-p "extends " (substring-no-properties text)))
-          (should (eq 'highlight (get-text-property last 'face text)))
+          (should (equal '(highlight (:inherit default :extend t))
+                         (get-text-property last 'face text)))
           (should (equal '(space :align-to right) (get-text-property last 'display text))))
         (let* ((thread (car (change-review-ui-test--populate plain)))
                (text (overlay-get (change-review-ui-add-thread-overlay
                                    plain thread (line-end-position) :view 'diff :width 70)
                                   'after-string)))
           (should-not (string-suffix-p "\n" text))
-          (should-not (get-text-property (1- (length text)) 'display text)))))))
+          (should (equal '(:inherit default :extend t)
+                         (get-text-property (1- (length text)) 'face text)))
+          (should (equal '(space :align-to right)
+                         (get-text-property (1- (length text)) 'display text))))))))
 
 (ert-deftest change-review-ui-lines-mode-acts-on-the-thread-under-the-line ()
   "In a buffer that shows threads under its lines, r, x and RET act on the thread there."
@@ -3880,7 +3924,8 @@ thread on the line TAB is what it is without the library's keys."
                                      'after-string)
                         "")))))
       (should (eq #'change-review-ui-cycle-fold (key-binding (kbd "TAB"))))
-      (should (string-match-p "\n  ▸ ✓ [^ ]+ · closed .*“Fine\\.”\\'" (funcall drawn "^\\+(setq b2 'two)")))
+      ;; The final space stretches the thread's own background to the edge.
+      (should (string-match-p "\n  ▸ ✓ [^ ]+ · closed .*“Fine\\.” \\'" (funcall drawn "^\\+(setq b2 'two)")))
       (should (string-match-p "\n  ▾ ● [^ ]+ · 1 comment · open " (funcall drawn "^ (setq a4 4)")))
       (let ((inhibit-message t))
         (change-review-ui-test--goto "^\\+(setq b2 'two)")
@@ -3955,7 +4000,7 @@ would be, not the thread at a line that does not say where the rest is."
                                                  (overlays-in (point-min) (point-max)))
                                      'after-string)))))
           ;; The header, the comment's, four of its lines and the one that says more.
-          (should (string-match-p "Line 4 of a long comment\\.\n    ┃      … 8 more lines  \\[Show more\\]\\'"
+          (should (string-match-p "Line 4 of a long comment\\.\n    ┃      … 8 more lines  \\[Show more\\] \\'"
                                   (funcall drawn)))
           (should-not (string-match-p "Line 5 of" (funcall drawn)))
           (change-review-ui-test--goto "^ (setq a6 6)")
@@ -3965,7 +4010,7 @@ would be, not the thread at a line that does not say where the rest is."
           (let ((inhibit-message t))
             (call-interactively #'change-review-ui-cycle-fold))
           (change-review-ui-flush)
-          (should (string-match-p "Line 12 of a long comment\\.\\'" (funcall drawn)))
+          (should (string-match-p "Line 12 of a long comment\\. \\'" (funcall drawn)))
           (should-not (string-match-p "more lines" (funcall drawn))))))))
 
 ;;;; Emailed patches
@@ -4713,6 +4758,9 @@ wraps to, and nothing else is."
                                  (change-review-ui-test--where overlay "only ever" 9))
     (should (equal "only ever" (change-review-ui-test--selected overlay)))
     (should (equal "only ever" (change-review-ui-test--marked overlay)))
+    (let ((text (overlay-get overlay 'after-string)))
+      (should (equal '(change-review-ui-selection-face (:inherit default :extend t))
+                     (get-text-property (string-search "only ever" text) 'face text))))
     ;; The same backwards.
     (change-review-ui-test--drag overlay (change-review-ui-test--where overlay "only ever" 9)
                                  (change-review-ui-test--where overlay "only ever"))
@@ -4727,9 +4775,10 @@ wraps to, and nothing else is."
                                  (change-review-ui-test--where overlay "Because the loop" 7))
     (should (equal "Second paragraph of the question." (change-review-ui-test--selected overlay)))
     (should (equal "Second paragraph of the question." (change-review-ui-test--marked overlay)))
-    ;; The text of the string is what it was.
+    ;; The text is what it was, apart from the initial newline and the
+    ;; final space that stretches the background to the window's edge.
     (should (equal (substring-no-properties (overlay-get overlay 'change-review-text) 0 -1)
-                   (substring-no-properties (overlay-get overlay 'after-string) 1)))))
+                   (substring-no-properties (overlay-get overlay 'after-string) 1 -1)))))
 
 (ert-deftest change-review-ui-a-drag-past-the-text-goes-to-where-it-ends ()
   "To the right of a row of text the selection reaches its end; above the text
