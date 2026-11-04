@@ -13,6 +13,9 @@
 ;; writes there is a draft as anywhere, and the threads say how many are
 ;; waiting; [Send replies] sends them together (`patch-review/send-replies'),
 ;; as one message to the agent, which answers them in their threads.
+;; [Diff] rereads the worktree's current HEAD on each click while the task
+;; works; historical source links stay at the commit they name.  These
+;; live views are local, not new hand-ins or baselines for the last review.
 ;;
 ;; THE LIBRARY AND THIS ADAPTER.  What a review is -- a change set with
 ;; versions, threads of comments, each comment recording its thread, its
@@ -936,31 +939,61 @@ SIDE is `new' or `old', nil for `new'.  That is the form
 `harness-ui-patch-review-ediff' takes a line to have in sight in."
   (and line (cons (intern (concat ":" (symbol-name (or side 'new)))) line)))
 
+(defun harness-ui-patch-review--visit-current (review target)
+  "Show TARGET in the files and thread placements REVIEW has read."
+  (let ((set (harness-ui-patch-review--r-set review)))
+    (pcase-let* ((`(,thread . ,location) (harness-ui-patch-review--target-place set target))
+                 (index (and location
+                             (cl-position-if (lambda (file) (harness-ui-patch-review--location-file-p location file))
+                                             (harness-ui-patch-review--r-files review))))
+                 (placement (and thread (change-review-placement set thread))))
+      (cond
+       ((null location)
+        (user-error (if thread
+                        "The change as a whole is not a file this version changes"
+                      "No thread to show")))
+       ((null index)
+        (user-error "%s is not a file this version changes" (change-review-location-label location)))
+       (t
+        (harness-ui-patch-review-ediff
+         review index
+         (harness-ui-patch-review--goto
+          (or (plist-get placement :side) (change-review-location-side location))
+          (or (plist-get placement :line) (change-review-location-line location)))))))))
+
+(defun harness-ui-patch-review--visit-working (review target)
+  "Read the work in progress again, then show TARGET in REVIEW.
+A thread's [Diff] must include commits made since the last hand-in or
+click.  End an existing Ediff before replacing its files, so leaving it
+marks the old blob viewed, not the new one.  Never open cached files
+when this reading failed or a newer reading is still under way."
+  (let ((buffer (current-buffer)))
+    (harness-ui-patch-review--end-ediff review)
+    (harness-then
+     (harness-ui-patch-review--load review)
+     (lambda (_)
+       (cond
+        ((harness-ui-patch-review--r-loading review) nil)
+        ((harness-ui-patch-review--r-error review)
+         (message "Could not show the current code: %s" (harness-ui-patch-review--r-error review))
+         nil)
+        (t
+         (condition-case err
+             (with-current-buffer (if (buffer-live-p buffer) buffer (current-buffer))
+               (harness-ui-patch-review--visit-current review target))
+           (user-error (message "%s" (error-message-string err)) nil))))))))
+
 (cl-defmethod change-review-visit ((set harness-ui-patch-review--set) target &optional version)
   (let* ((review (harness-ui-patch-review--set-review set))
          (revision (harness-ui-patch-review--version-revision set version)))
-    (if (and revision (not (change-review-same-revision-p
-                            revision (harness-ui-patch-review--r-tip review))))
-        ;; An earlier commit: the code as it was, when the comment was written.
-        (harness-ui-patch-review--visit-at review target revision)
-      (pcase-let* ((`(,thread . ,location) (harness-ui-patch-review--target-place set target))
-                   (index (and location
-                               (cl-position-if (lambda (file) (harness-ui-patch-review--location-file-p location file))
-                                               (harness-ui-patch-review--r-files review))))
-                   (placement (and thread (change-review-placement set thread))))
-        (cond
-         ((null location)
-          (user-error (if thread
-                          "The change as a whole is not a file this version changes"
-                        "No thread to show")))
-         ((null index)
-          (user-error "%s is not a file this version changes" (change-review-location-label location)))
-         (t
-          (harness-ui-patch-review-ediff
-           review index
-           (harness-ui-patch-review--goto
-            (or (plist-get placement :side) (change-review-location-side location))
-            (or (plist-get placement :line) (change-review-location-line location))))))))))
+    (cond
+     ((and (null version) (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review)))
+      (harness-ui-patch-review--visit-working review target))
+     ((and revision (not (change-review-same-revision-p
+                          revision (harness-ui-patch-review--r-tip review))))
+      ;; An earlier commit: the code as it was, when the comment was written.
+      (harness-ui-patch-review--visit-at review target revision))
+     (t (harness-ui-patch-review--visit-current review target)))))
 
 ;; The text of a comment is Markdown (`harness-ui-patch-review-markdown'),
 ;; drawn as the chat draws a message: in the threads view, under the
@@ -1055,9 +1088,12 @@ repository the branch is read in."
 (defun harness-ui-patch-review--attach-files (review)
   "Give the version REVIEW's branch ends at the files of the branch's change.
 That is the version the harness recorded when the task came to review;
-if it has none yet, the version is made here.  Its files are those of the
-whole change, against the merge base with the branch it was made from,
-whichever diff the report shows (`harness-ui-patch-review--r-selector')."
+if it has none yet, the version is made here.  In the working phase it
+stays local, marked :working-view: looking at work in progress is not a
+hand-in or a new baseline for the diff since the last review.
+Its files are those of the whole change, against the merge base with the
+branch it was made from, whichever diff the report shows
+\(`harness-ui-patch-review--r-selector')."
   (when-let* ((tip (harness-ui-patch-review--r-branch-tip review))
               ;; Not when the whole change could not be read, beside a
               ;; diff the reviewer chose that could.
@@ -1066,13 +1102,20 @@ whichever diff the report shows (`harness-ui-patch-review--r-selector')."
     (let ((files (harness-ui-patch-review--r-branch-files review)))
       (if-let* ((version (change-review-find-version set tip)))
           (setf (change-review-version-files version) files)
-        (let ((task (harness-ui-patch-review--r-task review)))
-          (change-review-add-version
-           set (change-review-make-version
-                :id tip :tip tip :base (harness-ui-patch-review--r-branch-base review)
-                :time (or (plist-get task :report-at) (float-time))
-                :title (harness-ui-patch-review--title review)
-                :files files)))))))
+        (let* ((task (harness-ui-patch-review--r-task review))
+               (working (harness-ui-patch-review--working-p task))
+               (version (change-review-make-version
+                         :id tip :tip tip :base (harness-ui-patch-review--r-branch-base review)
+                         :time (or (plist-get task :report-at) (float-time))
+                         :title (harness-ui-patch-review--title review)
+                         :meta (and working (list :working-view t))
+                         :files files)))
+          (if working
+              ;; Do not dispatch this to the harness as a version handed in.
+              (progn
+                (change-review-apply set (list :op 'add-version :version (change-review-version-to-data version)))
+                (setf (change-review-version-files (change-review-find-version set tip)) files))
+            (change-review-add-version set version)))))))
 
 (defun harness-ui-patch-review--viewed-keys (entries)
   "Return the seen keys of ENTRIES, files as the harness keeps them viewed."
@@ -1423,9 +1466,12 @@ or BASE.  The promise's :kind is `custom'."
                       :old-name old-name :new-name new-name)))))))
     (user-error (harness-ui-patch-review--fail "%s" (cadr err)))))
 
-(defun harness-ui-patch-review--read-branch (dir branch base &optional worktree selector last-review)
+(defun harness-ui-patch-review--read-branch (dir branch base &optional worktree selector last-review live)
   "Return a promise of what BRANCH changes, by default against its merge base.
 The merge base is that of BRANCH with BASE.  DIR is the repository.
+With LIVE and a local WORKTREE, its HEAD supplies the tip instead of
+BRANCH: work in progress need not have been handed in yet, and HEAD in
+DIR may be the project's main branch, not the task's.
 SELECTOR says what is compared instead:
 `since-review', the branch against where it was when its work was last
 handed in -- LAST-REVIEW, a function of the branch's tip, gives that
@@ -1441,8 +1487,11 @@ changes not committed.  Whichever the diff, :branch-base, :branch-tip and
 :branch-files are those of the branch's whole change against its merge
 base with BASE, which :merge-base, :tip and :files are for a nil SELECTOR."
   (harness-then
-   (harness-ui-patch-review--rev dir (concat branch "^{commit}")
-                                 (format-message "There is no branch `%s' in %s" branch (abbreviate-file-name dir)))
+   (if (and live worktree)
+       (harness-ui-patch-review--rev worktree "HEAD^{commit}"
+                                     (format-message "There is no HEAD in %s" (abbreviate-file-name worktree)))
+     (harness-ui-patch-review--rev dir (concat branch "^{commit}")
+                                   (format-message "There is no branch `%s' in %s" branch (abbreviate-file-name dir))))
    (lambda (tip)
      (let* ((whole (harness-then
                     (harness-ui-patch-review--merge-base dir base tip)
@@ -1519,8 +1568,10 @@ since is what they have not.  A task sent back whose branch has no new
 commit was handed in again at TIP: that is the last review too, and
 nothing changed since.  COMMIT is that of the version, NAME its name
 \(\"v1\"); nil when the set knows no version to compare with."
-  (let* ((versions (and (harness-ui-patch-review--r-set review)
-                        (change-review-set-versions (harness-ui-patch-review--r-set review))))
+  (let* ((versions (cl-remove-if
+                    (lambda (version) (plist-get (change-review-version-meta version) :working-view))
+                    (and (harness-ui-patch-review--r-set review)
+                         (change-review-set-versions (harness-ui-patch-review--r-set review)))))
          (here (cl-position tip versions :key #'harness-ui-patch-review--version-tip :test #'equal))
          (earlier (cl-find tip (if here (cl-subseq versions 0 here) versions)
                            :key #'harness-ui-patch-review--version-tip :test-not #'equal :from-end t))
@@ -1643,6 +1694,7 @@ beside Ediff (`harness-ui-patch-review--opening-box')."
 
 (defun harness-ui-patch-review--load (review &optional keep-selection-error)
   "Read REVIEW's branch again, then draw its report.
+In the working phase, read the tip from its worktree's HEAD when local.
 What is read is the diff the reviewer chose
 \(`harness-ui-patch-review--r-selector').  One that cannot be read is
 not shown: the diff shown before comes back -- the branch against its
@@ -1664,7 +1716,8 @@ next reading, unless KEEP-SELECTION-ERROR.  Return a promise of REVIEW."
      (if dir
          (harness-ui-patch-review--read-branch
           dir branch (plist-get task :base) worktree selector
-          (lambda (tip) (harness-ui-patch-review--last-review review tip)))
+          (lambda (tip) (harness-ui-patch-review--last-review review tip))
+          (harness-ui-patch-review--working-p task))
        (harness-ui-patch-review--fail "%s" (harness-ui-patch-review--why-not task)))
      (lambda (result)
        ;; A later reading wins over this one.

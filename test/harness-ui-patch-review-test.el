@@ -4461,6 +4461,168 @@ written against it, or a location of it, is shown there."
                                         (line-number-at-pos)))))
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
+(ert-deftest harness-ui-patch-review-working-diff-reloads-the-worktree-head ()
+  "[Diff] reads the live worktree, even when the cached review and branch lag.
+Repeated clicks replace Ediff without marking the newest code viewed; an
+explicit historical revision still shows the code as it was."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((harness-tasks-working-phase t)
+           (review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (v1 (harness-ui-patch-review--r-tip review))
+           (root (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (thread (harness-ui-patch-review-test--thread-of review root))
+           (worktree (harness-test-temp-dir)))
+      (unwind-protect
+          (progn
+            ;; HEAD in the project is main; the task's worktree is detached,
+            ;; so even resolving the branch ref would miss its newest commit.
+            (harness-ui-patch-review-test--git repo "worktree" "add" "-q" "--detach" worktree "task/fix")
+            (setf (harness-ui-patch-review--r-task review)
+                  (harness-ui-patch-review-test--task repo :state "active" :phase "working" :worktree worktree))
+            (harness-ui-patch-review-test--write
+             worktree "a.el" (concat "(setq top1 1)\n(setq top2 2)\n(setq top3 3)\n"
+                                    (harness-ui-patch-review-test--numbered
+                                     "a" 20 '((2 . "(setq a2 'three)") (18 . "(setq a18 'eighteen)")))))
+            ;; A new file changes the target's index as well as its line.
+            (harness-ui-patch-review-test--write worktree "0.el" "(setq zero 0)\n")
+            (harness-ui-patch-review-test--git worktree "add" "-A")
+            (harness-ui-patch-review-test--git worktree "commit" "-q" "-m" "Fix the thread without handing in")
+            (harness-ui-patch-review-test--press-nth
+             (change-review-ui-thread-string set thread :view 'threads) "[Diff]" 0)
+            (harness-test-wait (lambda () (not (harness-ui-patch-review--r-loading review)))
+                               5 "the live diff to load")
+            (should (equal (harness-ui-patch-review-test--git worktree "rev-parse" "HEAD")
+                           (harness-ui-patch-review--r-tip review)))
+            (should (equal v1 (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
+            (let* ((control (harness-ui-patch-review-test--control review 1))
+                   (new (plist-get (harness-ui-patch-review--r-ediff review) :b))
+                   (file (harness-ui-patch-review-test--file review "a.el")))
+              (should (string-search "(setq a2 'three)" (harness-ui-patch-review-test--text new)))
+              (should (= 5 (with-current-buffer new
+                             (save-excursion (goto-char (window-point (get-buffer-window new)))
+                                             (line-number-at-pos)))))
+              ;; The next click must read again, even with an Ediff open.
+              (harness-ui-patch-review-test--write
+               worktree "a.el" (replace-regexp-in-string
+                                "'three" "'four" (harness-ui-patch-review-test--text new)))
+              (harness-ui-patch-review-test--git worktree "commit" "-q" "-am" "Fix it again")
+              (harness-test-await (change-review-visit set thread))
+              (should-not (buffer-live-p control))
+              (should-not (buffer-live-p new))
+              (should (harness-ui-patch-review--seen-p review file))
+              (should-not (harness-ui-patch-review--seen-p
+                           review (harness-ui-patch-review-test--file review "a.el")))
+              (should (string-search
+                       "(setq a2 'four)"
+                       (harness-ui-patch-review-test--text
+                        (plist-get (harness-ui-patch-review--r-ediff review) :b)))))
+            (with-current-buffer (harness-ui-patch-review-test--control review 1)
+              (call-interactively #'harness-ui-patch-review-ediff-quit))
+            ;; An explicit revision remains historical while the task works.
+            (harness-test-await (change-review-visit set root v1))
+            (let* ((snapshot (harness-ui-patch-review-test--snapshot review v1))
+                   (control (harness-ui-patch-review-test--control snapshot 0)))
+              (should (string-search
+                       "(setq a2 'two)"
+                       (harness-ui-patch-review-test--text
+                        (plist-get (harness-ui-patch-review--r-ediff snapshot) :b))))
+              (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))
+        (harness-ui-patch-review-test--git repo "worktree" "remove" "--force" worktree)
+        (ignore-errors (delete-directory worktree t))))))
+
+(ert-deftest harness-ui-patch-review-working-diff-does-not-record-a-hand-in ()
+  "Looking at live commits keeps them local, not new last-review baselines."
+  (let ((harness-tasks-working-phase t))
+    (harness-ui-patch-review-test-with-task
+      (let* ((popout (harness-ui-patch-review-test--changes board id))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (set (harness-ui-patch-review--r-set review))
+             (v1 (harness-ui-patch-review--r-tip review))
+             (root (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?" :sent 10.0)))
+        (ignore popout)
+        (harness-test-wait (lambda () (= 1 (length (plist-get (harness-call 'patch-review/get id) :versions))))
+                           5 "the original review version")
+        (harness-call 'task/return-to-work id)
+        (harness-test-wait
+         (lambda () (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review)))
+         5 "the task to return to work")
+        (harness-ui-patch-review-test--advance repo)
+        (harness-test-await (change-review-visit set root))
+        (harness-ui-patch-review-test--control review 0)
+        (harness-ui-patch-review-test--write
+         repo "a.el" (harness-ui-patch-review-test--numbered
+                      "a" 20 '((2 . "(setq a2 'four)") (18 . "(setq a18 'eighteen)"))))
+        (harness-ui-patch-review-test--git repo "commit" "-q" "-am" "Another fix before hand-in")
+        (harness-test-await (change-review-visit set root))
+        (let ((latest (change-review-latest-version set)))
+          (should (equal (harness-ui-patch-review--r-tip review) (change-review-version-tip latest)))
+          (should (plist-get (change-review-version-meta latest) :working-view))
+          (should (equal (cons v1 "v1")
+                         (harness-ui-patch-review--last-review review (change-review-version-tip latest)))))
+        ;; The harness stores only the handed-in version, not the UI's live views.
+        (should (equal (list v1)
+                       (mapcar (lambda (version) (plist-get version :id))
+                               (plist-get (harness-call 'patch-review/get id) :versions))))
+        (harness-test-await (harness-ui-patch-review-select-diff 'since-review review))
+        (should (equal v1 (harness-ui-patch-review--r-merge-base review)))))))
+
+(ert-deftest harness-ui-patch-review-working-diff-reloads-the-branch-without-a-worktree ()
+  "A task without a local worktree still rereads its branch, not project HEAD."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((harness-tasks-working-phase t)
+           (review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (root (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")))
+      (setf (harness-ui-patch-review--r-task review)
+            (harness-ui-patch-review-test--task repo :state "active" :phase "working"))
+      (harness-ui-patch-review-test--advance repo)
+      (harness-ui-patch-review-test--git repo "checkout" "-q" "main")
+      (harness-test-await (change-review-visit set root))
+      (should (equal (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")
+                     (harness-ui-patch-review--r-tip review)))
+      (should (string-search
+               "(setq a2 'three)"
+               (harness-ui-patch-review-test--text
+                (plist-get (harness-ui-patch-review--r-ediff review) :b)))))))
+
+(ert-deftest harness-ui-patch-review-working-diff-does-not-open-a-stale-read ()
+  "A failed or superseded reload must not open the old cached files."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((harness-tasks-working-phase t)
+           (review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (root (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           opened)
+      (setf (harness-ui-patch-review--r-task review)
+            (harness-ui-patch-review-test--task repo :state "active" :phase "working"))
+      (cl-letf (((symbol-function 'harness-ui-patch-review-ediff)
+                 (lambda (&rest _) (setq opened t) (harness-resolved review)))
+                ((symbol-function 'harness-ui-patch-review--read-branch)
+                 (lambda (&rest _) (harness-rejected '(error "worktree unavailable")))))
+        (harness-test-await (change-review-visit set root))
+        (should-not opened)
+        (should (equal "worktree unavailable" (harness-ui-patch-review--r-error review))))
+      (cl-letf (((symbol-function 'harness-ui-patch-review-ediff)
+                 (lambda (&rest _) (setq opened t) (harness-resolved review)))
+                ((symbol-function 'harness-ui-patch-review--load)
+                 (lambda (_review)
+                   (setf (harness-ui-patch-review--r-error review) nil
+                         (harness-ui-patch-review--r-loading review) '(newer-read))
+                   (harness-resolved review))))
+        (harness-test-await (change-review-visit set root))
+        (should-not opened))
+      ;; The latest commit can remove a file from the diff altogether.
+      (harness-ui-patch-review-test--git repo "checkout" "-q" "task/fix")
+      (harness-ui-patch-review-test--git repo "checkout" "main" "--" "a.el")
+      (harness-ui-patch-review-test--git repo "commit" "-q" "-am" "The file needs no change")
+      (let (said)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+          (harness-test-await (change-review-visit set root)))
+        (should (cl-some (lambda (text) (string-search "is not a file this version changes" text)) said))
+        (should-not (harness-ui-patch-review--r-ediff review))))))
+
 ;;;; Choosing the diff
 
 (ert-deftest harness-ui-patch-review-parses-the-diffs-typed ()
