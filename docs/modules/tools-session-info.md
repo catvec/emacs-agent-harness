@@ -2,7 +2,7 @@
 
 # tools-session-info
 
-The Session info tool (session_info): the current session, described to the model.
+The Session info tool (session_info): the current session and its live access, described to the model.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-tools-session-info.el](../../lisp/modules/harness-tools-session-info.el)
@@ -15,16 +15,45 @@ The Session info tool (session_info): the current session, described to the mode
 name, model, directories, permission mode, status, usage, the plan
 quota last reported to it, and its parent and children.
 
+It describes the session's live access too, the state that
+`request_escalation`, `request_directory_access` and `drop_access`
+change, so a model can see what it may reach before it asks for
+more:
+
+- its effective permission mode and non-interactive state, marked
+  when the policy sets either;
+- whether it has the network, and whether it may write;
+- the directories it may write, each with its source: the working
+  directory, the worktree, the session's own temporary directory,
+  `harness-allowed-directories` (allowed for every session), a
+  grant to this session or until its turn ends, and the tool output
+  directory;
+- the directories it may only read: its read-only grants;
+- the tools turned off for it;
+- the Linux capabilities its bash and elisp commands are given;
+- the standing allow and deny permission rules that apply to it,
+  its own and those of every session, in the order they are
+  weighed.
+
+The access is `access/describe` when the access module is loaded,
+so it is the session's own live state and not a fresh session's
+defaults.  Without that module it is made from `permission/rules`,
+`permission/dirs` and the session's access profile, and without the
+permission module from the session record itself.
+
 ## Provides
 
 ### Tools
 
-- `session_info` — Describe the current session: id, name, model, working directory, temporary directory, permission mode, non-interactive mode, status, usage and related sessions.
+- `session_info` — Describe the current session and its live access. The session part gives its id, name, kind, model, working directory, worktree, temporary directory, effective permission mode, non-interactive mode (each marked when a policy sets it), status, usage, plan quota, parent and children. The access part has these fields: Network, whether the session may reach the network; Writing, whether it may write, and why not when it is read-only; Writable directories, each with its source -- the working directory, the worktree, this session's own temporary directory, allowed for every session (harness-allowed-directories), granted to this session, granted to this session until this turn ends, or the tool output directory; Read-only directories, directories it may read but not write; Tools turned off, the tools the user or drop_access turned off for it; Linux capabilities (bash and elisp), the Linux capabilities its bash and elisp commands are given, with a note when the sandbox does not enforce them; and Standing rules, the allow and deny permission rules that apply to it, for this session and for every session, in the order they are weighed, with every-session rules first when a policy sets them. It reads the session's live state, not a fresh session's defaults, so what request_escalation, request_directory_access and drop_access change is visible here.
 
 ## Uses
 
 ### Methods it calls
 
+- `access/describe` ([access](access.md)), when it is loaded
+- `permission/dirs` ([perms](perms.md)), when it is loaded
+- `permission/rules` ([perms](perms.md)), when it is loaded
 - `session/get` ([session](session.md))
 - `session/list` ([session](session.md))
 - `session/runtime` ([session](session.md))

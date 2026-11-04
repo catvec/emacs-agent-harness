@@ -149,6 +149,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Directory allow listing
   - Secret file blocking
   - Auto mode
+  - Live access introspection: `session_info` reports the session's permission mode, writable and read-only directories with their sources, network, tools turned off, Linux capabilities and standing allow/deny rules
 - Usage, cost, quota tracking
 - Completion providers
   - Claude Code SDK & API

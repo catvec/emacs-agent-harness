@@ -4174,6 +4174,12 @@ half `ui-access`, the access view).
   entries are `(:name :why :profile :elsewhere)`, `:elsewhere` for a
   tool of other kinds of session (a task's `hand_in`), which nobody
   turned off.
+- `session_info` (tools-session-info) is the agent's read of that
+  state: the effective mode and non-interactive state, network,
+  writing, writable and read-only directories with their sources,
+  tools turned off, Linux capabilities and the standing rules.  It is
+  a read, needs no approval (`harness-perms--inspection-tools`) and
+  changes nothing.
 - `access/judgements SESSION-ID &rest FILTER` (`:behavior` allow, deny,
   ask or asked -- the ones the user answered --, `:by`, `:tool`,
   `:query` over the tool, reason, handle and title, `:limit`, default
@@ -9633,7 +9639,7 @@ TRAMP prefixes come from the session host):
 | `request_escalation` | Request escalation | attribute (directory, read_directory, writes, network, tool, permission_mode, non_interactive, capability), value (the directory, tool, mode or Linux capability: `CAP_SYS_PTRACE`, `CAP_NET_RAW`...), reason | meta (access module; decided only by the user's answer, in every mode, yolo included; refused at once in a non-interactive session; a capability is refused at once, with a hint, where the jail cannot enforce it, for a name the user does not let agents ask for, or in a read-only session; see access) |
 | `drop_access` | Drop access | attribute (directory, writes, network, tool, permission_mode, non_interactive, capability), value (the directory, tool, less permissive mode, or Linux capability: a name or `all`), keep_read (a directory: give up writing only), reason | meta (access module; always allowed, never asks, in every mode and session, read-only ones included) |
 | `rerun_approved` | Rerun approved call | handle | meta (perms module; runs the denied call the user approved by hand with `permission/approve-denied`, exactly as it was denied and with no permission check (`tools/execute-approved`); a handle the user has not approved, one this session does not know, and one already rerun are refused) |
-| `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`; describes the session and its live access: effective permission mode and non-interactive state, network, writing, writable and read-only directories with their sources, tools turned off, Linux capabilities, and the standing rules that apply) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
 | `spawn_agent` | Sub-agent | prompt, fork, model, thinking, name, cwd, worktree, priority (of the child's session: low/medium/high; default: what it inherits) | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
