@@ -87,7 +87,8 @@
 ;;
 ;; THE THREADS VIEW (`change-review-open-threads').  All the threads of a
 ;; change set, grouped by file, with a filter on their status: open,
-;; closed, all, or to review.  Point is on a comment, and the keys act
+;; to review, reviewed this turn, closed, all.  Point is on a comment,
+;; and the keys act
 ;; on it: RET shows where it was made (the file and line, the revision,
 ;; and the lines of the diff it was made on), r replies to it (a closed
 ;; thread is open again then), x closes its thread or opens it again
@@ -110,7 +111,12 @@
 ;; the thread, as before; the opening is a change of status of its own,
 ;; made by the user after it.  Nothing marks a thread by itself, so a
 ;; close missed for two rounds still waits.  m on a thread already
-;; reviewed makes it wait again.
+;; reviewed makes it wait again.  Marking a close reviewed takes it out
+;; of the threads that wait and into the closed ones; the filter of that
+;; name, `reviewed', keeps what was marked in the turn of the review at
+;; hand -- since the newest version was proposed, see
+;; `change-review-review-turn-start' -- so a thread just let go of is one
+;; key away still.
 ;;
 ;; WHERE A COMMENT WAS MADE.  The lines under a comment are the diff of
 ;; the revision it was written against, as it was then: the answer to a
@@ -186,10 +192,12 @@ Long lines of a comment are wrapped to it, under the comment's bar."
 
 (defcustom change-review-ui-default-filter 'open
   "Which threads the threads view shows at first.
-`open', `closed', `all', or `unreviewed': the closed threads that wait
-for the user to review them."
+`open', `closed', `all', `unreviewed' -- the closed threads that wait
+for the user to review them -- or `reviewed': the threads the user
+marked reviewed this turn."
   :type '(choice (const open) (const closed) (const all)
-                 (const :tag "to review" unreviewed)))
+                 (const :tag "to review" unreviewed)
+                 (const :tag "reviewed this turn" reviewed)))
 
 (defcustom change-review-ui-collapse-closed-in-diff t
   "Whether a closed thread is drawn as one line, until it is opened.
@@ -3054,16 +3062,20 @@ comment at point, or on a thread's header one of the thread's drafts.
   (setq change-review-ui--redraw-function #'change-review-ui--draw-threads))
 
 (defconst change-review-ui--filters
-  '((open . "open") (unreviewed . "to review") (closed . "closed") (all . "all"))
+  '((open . "open") (unreviewed . "to review") (reviewed . "reviewed")
+    (closed . "closed") (all . "all"))
   "The filters of the views, in the order f goes through them, and their names.
 `unreviewed' shows the closed threads that wait for the user's review: it
-comes after `open', the other threads that want the user's attention.")
+comes after `open', the other threads that want the user's attention.
+`reviewed' shows the threads the user marked reviewed this turn, so that
+what they just let go of is one key away still.")
 
 (defun change-review-ui--filter-phrase (filter)
   "Return what the threads of FILTER are called: \"open threads\", say."
-  (if (eq filter 'unreviewed)
-      "threads to review"
-    (format "%s threads" filter)))
+  (pcase filter
+    ('unreviewed "threads to review")
+    ('reviewed "threads reviewed this turn")
+    (_ (format "%s threads" filter))))
 
 (defun change-review-ui--filter-button (set label filter current)
   "Return a button that shows the threads of FILTER, labelled LABEL, of SET.
@@ -3073,12 +3085,17 @@ The one for CURRENT, the filter in force, is marked instead."
                    ('open (plist-get counts :open))
                    ('closed (plist-get counts :closed))
                    ('unreviewed (plist-get counts :unreviewed))
+                   ('reviewed (plist-get counts :reviewed))
                    (_ (+ (plist-get counts :open) (plist-get counts :closed)))))
          (text (format "%s %d" label number)))
     (if (eq filter current)
         (propertize (format "[%s]" text) 'face 'change-review-ui-filter-face)
       (change-review-ui--button
-       (format " %s " text) (format "Show the %s threads" label)
+       (format " %s " text)
+       (pcase filter
+         ('unreviewed "Show the threads to review")
+         ('reviewed "Show the threads you marked reviewed this turn")
+         (_ (format "Show the %s threads" label)))
        (lambda ()
          (setq change-review-ui--filter filter)
          (change-review-ui-redraw))))))
@@ -3091,8 +3108,9 @@ The one for CURRENT, the filter in force, is marked instead."
 
 (defun change-review-ui-threads-heading (set &optional filter)
   "Return the line that heads the threads of SET, ending in a newline.
-It is \"Threads\" and a button for each status filter -- open, closed and
-all, with how many threads each lets through -- the one for FILTER, by
+It is \"Threads\" and a button for each status filter -- open, to review,
+reviewed this turn, closed and all, with how many threads each lets
+through -- the one for FILTER, by
 default `change-review-ui--filter', marked as in force; and how many
 drafts are not sent.  A button sets `change-review-ui--filter' in the
 buffer it is pressed in and draws that view again
@@ -3145,7 +3163,9 @@ threads and comments, so the commands of this library, such as
 `change-review-ui-reply' and `change-review-ui-toggle-status', find
 the thread or the comment at point in the buffer that shows it.
 
-FILTER is `open', `closed' or `all'.  DETAILS is the list of the ids of
+FILTER is `open', `closed', `all', `unreviewed' (the closed threads
+that wait for the user's review) or `reviewed' (the threads the user
+marked reviewed this turn).  DETAILS is the list of the ids of
 the comments that also show where they were made.  WIDTH is the width to
 wrap to, by default that of the window showing the current buffer, and
 INDENT starts every line.  EMPTY is the line to say when the filter
@@ -3159,6 +3179,7 @@ threads, their filter buttons, is `change-review-ui-threads-heading'."
                                         ('open "No open threads.")
                                         ('closed "No closed threads.")
                                         ('unreviewed "Nothing to review.")
+                                        ('reviewed "Nothing reviewed this turn.")
                                         (_ "No threads yet.")))
                             "\n")
                     'face 'change-review-ui-meta-face)
@@ -3213,6 +3234,7 @@ were."
                       ('open "No open threads.  f shows the closed ones.")
                       ('closed "No closed threads.  f shows the open ones.")
                       ('unreviewed "Nothing to review: no thread closed by someone else waits for you.  f shows the others.")
+                      ('reviewed "Nothing reviewed this turn: no thread was marked reviewed since the newest version.  f shows the others.")
                       (_ "No threads yet.  c comments on the change; in the diff view, c comments on a line."))))
     (goto-char (point-min))
     (change-review-ui--goto-anchor anchor)
@@ -3256,8 +3278,10 @@ with one title each have a buffer of their own."
 ;;;###autoload
 (defun change-review-open-threads (set &optional filter)
   "Show the threads of change set SET, grouped by file.
-FILTER is `open', `closed' or `all'; by default what the view showed
-last, else `change-review-ui-default-filter'.  Return the buffer."
+FILTER is `open', `closed', `all', `unreviewed' -- the closed threads
+that wait for the user's review -- or `reviewed', the threads the user
+marked reviewed this turn; by default what the view showed last, else
+`change-review-ui-default-filter'.  Return the buffer."
   (interactive (list (change-review-ui--read-set)))
   (setq change-review-ui-sets (cons set (delq set change-review-ui-sets)))
   (let ((buffer (change-review-ui--view-buffer "threads" set 'change-review-threads-mode)))
@@ -3280,15 +3304,17 @@ last, else `change-review-ui-default-filter'.  Return the buffer."
     (car (rassoc name change-review-ui--filters))))
 
 (defun change-review-ui-set-filter (filter)
-  "Show the threads of FILTER: `open', `closed', `all', or `unreviewed'.
-The last is the closed threads someone else closed and the user has not
-reviewed yet: what an agent answered and closed since they looked."
+  "Show the threads of FILTER.
+`open', `closed', `all', `unreviewed' -- the closed threads someone else
+closed and the user has not reviewed yet, what an agent answered and
+closed since they looked -- or `reviewed', the threads the user marked
+reviewed this turn."
   (interactive (list (change-review-ui--read-filter)))
   (setq change-review-ui--filter filter)
   (change-review-ui-redraw))
 
 (defun change-review-ui-cycle-filter ()
-  "Change which threads show: open, those to review, closed, and all."
+  "Change which threads show: open, those to review, reviewed, closed, all."
   (interactive)
   (let ((order (mapcar #'car change-review-ui--filters)))
     (change-review-ui-set-filter (or (cadr (memq change-review-ui--filter order)) (car order)))))

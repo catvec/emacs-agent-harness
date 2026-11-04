@@ -16,7 +16,7 @@ is still waiting.
 
 ```
 Review of Retry the upload                v2 of 2
-Threads  [open 2]  closed 1   all 3
+Threads  [open 2]  to review 0  reviewed 1  closed 1   all 3
 
 ▾ src/foo.el                                          2 threads
   ● 3f9a1c · line 18 · 3 comments · open          [Reply] [Close] [Diff]
@@ -128,8 +128,10 @@ comparison say, does not wrap.
 **The threads view**, `change-review-open-threads`, lists all the
 threads of a set, grouped by file, with a filter on their status
 (`change-review-ui-default-filter`): open, to review (the closed threads
-that wait for the user, see [Closes to review](#closes-to-review)), closed
-or all. Point is on a comment, and the keys act on it:
+that wait for the user, see [Closes to review](#closes-to-review)),
+reviewed (the threads the user marked reviewed this turn, see
+[Reviewed this turn](#reviewed-this-turn)), closed or all. Point is on a
+comment, and the keys act on it:
 
 | Key | Does |
 | --- | --- |
@@ -144,7 +146,7 @@ or all. Point is on a comment, and the keys act on it:
 | `e` `k` | Edit / delete a draft: the comment at point, or on a thread's header one of the thread's drafts (asking which when there are several). Asks before it deletes. |
 | `K` | Delete the thread at point when it is nothing but drafts, after asking. |
 | `c` | Comment on the change as a whole. |
-| `f` `F` | Cycle / set the filter: open, to review, closed, all. |
+| `f` `F` | Cycle / set the filter: open, to review, reviewed, closed, all. |
 | `C-c C-c` `I` | Send the drafts / read the comments out of a reply. |
 | `g` | Draw again. |
 
@@ -392,14 +394,17 @@ hand the operation to
 `change-review-changed-functions` with the set and the operation, which
 is how the views stay current.
 
-Queries: `change-review-threads` (by status: `open`, `closed`, or
-`unreviewed`), `change-review-threads-by-file`,
+Queries: `change-review-threads` (by status: `open`, `closed`,
+`unreviewed`, or `reviewed`, the closes marked reviewed this turn),
+`change-review-threads-by-file`,
 `change-review-thread-counts`, `change-review-drafts`,
 `change-review-thread-draft-p` (nothing in the thread was sent),
 `change-review-find-thread` (by id or the start of one),
 `change-review-find-comment`, `change-review-latest-version`,
 `change-review-thread-closing` (the change of status that closed a
-thread) and `change-review-thread-unreviewed-p`.
+thread), `change-review-thread-unreviewed-p`,
+`change-review-thread-reviewed-this-turn-p` and
+`change-review-review-turn-start` (when the turn of the review began).
 
 ## Closes to review
 
@@ -424,6 +429,23 @@ the `:reviewed` time in the thread's history entry that closed it -- so:
   one made a minute ago;
 - a close by the user themselves, or one with no record of who made it,
   never waits.
+
+## Reviewed this turn
+
+A close marked reviewed goes to the closed threads, with the others from
+every round before it.  The filter **reviewed** keeps what was marked
+reviewed in the turn of the review at hand, so that a thread the user has
+just let go of is still one key away to refer to, or to add to.
+
+A turn is the review of one version: it begins when the newest version of
+the set is proposed -- for a task, when the work is handed in -- and the
+filter lists the closes marked reviewed at or after that
+(`change-review-thread-reviewed-this-turn-p`,
+`change-review-review-turn-start`).  A mark from an earlier turn is a
+reviewed close as much as a new one, and the `closed` filter says so in
+its header, but this filter does not list it.  Unmarking the close, or
+opening its thread again, takes it out as it does there.  A set with no
+version has no turn to measure: every reviewed close counts as this turn's.
 
 ## Diffs
 

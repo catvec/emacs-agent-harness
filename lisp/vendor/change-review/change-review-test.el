@@ -493,6 +493,50 @@ review again, and a mark meant for the earlier close never reaches the later."
         (should (change-review-apply set (list :op 'mark-reviewed :thread id :status-id late :time 86)))
         (should-not (change-review-thread-unreviewed-p set thread))))))
 
+(ert-deftest change-review-what-was-reviewed-this-turn ()
+  "A close marked reviewed counts as reviewed this turn only when it was
+marked at or after the newest version was proposed.  A mark from an earlier
+turn is still a reviewed close, but not this turn's; unmarking takes it out,
+and so does opening the thread.  A set with no version has no turn to
+measure, and every reviewed close counts as this turn's."
+  (let* ((set (change-review-test--set))
+         (thread (change-review-test--closed-by-bot set 50)))
+    ;; The newest version was proposed at 200.
+    (should (= 200 (change-review-review-turn-start set)))
+    (should (change-review-mark-reviewed set thread :time 150))
+    (should-not (change-review-thread-unreviewed-p set thread))
+    (should-not (change-review-thread-reviewed-this-turn-p set thread))
+    (should-not (change-review-threads set 'reviewed))
+    (should (= 0 (plist-get (change-review-thread-counts set) :reviewed)))
+    ;; Marked again in this turn: it is this turn's.
+    (change-review-unmark-reviewed set thread)
+    (should (change-review-mark-reviewed set thread :time 200))
+    (should (change-review-thread-reviewed-this-turn-p set thread))
+    (should (equal (list thread) (change-review-threads set 'reviewed)))
+    (should (= 1 (plist-get (change-review-thread-counts set) :reviewed)))
+    (should (= 1 (length (change-review-threads-by-file set 'reviewed))))
+    ;; Unmarking, and opening it again, take it out.
+    (change-review-unmark-reviewed set thread)
+    (should-not (change-review-thread-reviewed-this-turn-p set thread))
+    (change-review-mark-reviewed set thread :time 210)
+    (change-review-reopen set thread :time 220)
+    (should-not (change-review-thread-reviewed-this-turn-p set thread))
+    ;; What the user closed is never a close of someone else's to review.
+    (let* ((mine (change-review-comment set "Mine" :time 2))
+           (mine-thread (change-review-find-thread set (change-review-comment-thread mine))))
+      (change-review-close set mine-thread :time 230)
+      (should (change-review-mark-reviewed set mine-thread :time 240))
+      (should-not (change-review-thread-reviewed-this-turn-p set mine-thread)))
+    ;; No version: no boundary, so what was reviewed counts.
+    (let* ((bare (change-review-make-set))
+           (comment (change-review-comment bare "Bare" :time 1))
+           (bare-thread (change-review-find-thread bare (change-review-comment-thread comment))))
+      (change-review-close bare bare-thread :author (change-review-test--bot) :time 50)
+      (should-not (change-review-review-turn-start bare))
+      (change-review-mark-reviewed bare bare-thread :time 60)
+      (should (change-review-thread-reviewed-this-turn-p bare bare-thread))
+      (should (= 1 (plist-get (change-review-thread-counts bare) :reviewed))))))
+
 (ert-deftest change-review-review-operations-come-over-a-wire ()
   "The review operations are plain data: names as strings, the history's mark
 as a number; they signal for a thread that is not there and leave an entry
@@ -713,7 +757,7 @@ threads in the order of their lines."
                              (cdr (assoc "a.el" groups))))))
     (should (equal '(nil "a.el" "c.el") (mapcar #'car (change-review-threads-by-file set 'open))))
     (should (equal '("b.el") (mapcar #'car (change-review-threads-by-file set 'closed))))
-    (should (equal '(:open 4 :closed 1 :unreviewed 0 :drafts 5 :comments 5)
+    (should (equal '(:open 4 :closed 1 :unreviewed 0 :reviewed 0 :drafts 5 :comments 5)
                    (change-review-thread-counts set)))))
 
 (ert-deftest change-review-threads-on-one-line-come-in-the-order-they-were-started ()

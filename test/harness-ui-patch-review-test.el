@@ -2223,7 +2223,7 @@ and RET on it act in the report."
       (let ((text (harness-ui-patch-review-test--text popout)))
         ;; Below the files, under a heading with the filter buttons.
         (should (< (string-match "^  RET: compare" text)
-                   (string-match "^▾ Threads  \\[open 2\\] +to review 0 +closed 1 +all 3" text)
+                   (string-match "^▾ Threads  \\[open 2\\] +to review 0 +reviewed 0 +closed 1 +all 3" text)
                    (string-match "^  ▾ a\\.el +1 thread$" text)))
         ;; The change as a whole first, then the files in the order of the diff.
         (should (< (string-match "^  ▾ The change as a whole +1 thread$" text)
@@ -2257,7 +2257,7 @@ and RET on it act in the report."
         (change-review-ui-set-filter 'all)
         (should (eq 'all change-review-ui--filter)))
       (harness-ui-patch-review-test--wait-text popout "Who used b3\\?")
-      (should (string-match-p "^▾ Threads  +open 2 +to review 0 +closed 1 +\\[all 3\\]"
+      (should (string-match-p "^▾ Threads  +open 2 +to review 0 +reviewed 0 +closed 1 +\\[all 3\\]"
                               (harness-ui-patch-review-test--text popout)))
       (should (string-match-p "^  ▾ b\\.el +1 thread · 0 open$" (harness-ui-patch-review-test--text popout)))
       (with-current-buffer popout (change-review-ui-set-filter 'open))
@@ -5818,6 +5818,15 @@ rows; the agent closing it again brings it back."
                                      :history)))
              (numberp (plist-get (car (last history)) :reviewed))))
          5 "the harness to keep that the thread was reviewed")
+        ;; The threads marked reviewed this turn are one filter away, the
+        ;; close just marked with the agent's answer.
+        (with-current-buffer popout (change-review-ui-set-filter 'reviewed))
+        (harness-ui-patch-review-test--wait-text popout "Because two reads better\\.")
+        (let ((text (harness-ui-patch-review-test--text popout)))
+          (should (string-match-p "^▾ Threads  +open 1 +to review 0 +\\[reviewed 1\\]" text))
+          (should (string-match-p "^  ▾ a\\.el +1 thread$" text)))
+        (with-current-buffer popout (change-review-ui-set-filter 'unreviewed))
+        (harness-ui-patch-review-test--wait-text popout "Because two reads better\\." t)
         ;; Opened and closed again by the agent, it waits once more.
         (change-review-reopen set thread)
         (harness-test-wait (lambda () (equal "open" (plist-get (cl-find (change-review-thread-id thread)

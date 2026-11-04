@@ -15054,7 +15054,8 @@ the review banner and of the tree beside Ediff
 (`change-review-ui-threads-string`, the body of the threads view as a
 string, and `change-review-ui-threads-heading`, the line with the
 filter's buttons), the threads view (`change-review-open-threads`, which
-lists every thread by file, filtered by status with f and F) and the
+lists every thread by file, filtered by status -- open, to review,
+reviewed this turn, closed, all -- with f and F) and the
 threads under the lines of Ediff's two versions and of the library's own
 diff view (`change-review-open-diff`) all call them, and the keys on a
 thread are
@@ -15149,6 +15150,21 @@ threads view has it as a filter, `unreviewed`, shown
 as "to review" and counted in its heading; the diff view draws such a
 thread whole where other closed threads are a line; the review of a task
 (below) counts them, lists them and draws them whole in Ediff.
+
+WHAT WAS JUST REVIEWED.  Marking a close reviewed moves it out of the
+threads that wait and into the closed ones, where every earlier round's
+closes are; to find one again the threads view has a filter of its own,
+`reviewed`, shown as "reviewed" and counted in its heading: the closes the
+user marked reviewed in the turn of the review at hand
+(`change-review-thread-reviewed-this-turn-p`).  A turn is the review of
+one version (`change-review-review-turn-start`): it begins when the newest
+version of the set is proposed -- for a task, when the work is handed in --
+and a mark from a turn before it is a reviewed close still, and the
+`closed` filter says so in its header, but is not listed.  Unmarking the
+close, or opening its thread again, takes it out, as it does there; a set
+with no version has no turn to measure, and every reviewed close counts as
+this turn's.  The filter is the library's, so the report, the banner, the
+threads view and the diff view all have it, the same and in one place.
 
 QUOTE REPLY.  C-c > (`change-review-ui-quote-reply`) answers a comment as
 a mail does: a reply, a draft in the thread, that starts with part of the

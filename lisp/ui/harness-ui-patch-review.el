@@ -3117,7 +3117,8 @@ tree is shown beside it (`harness-ui-patch-review-ediff-tree') and point
 goes there.  Without a tree, the library's threads view lists them in a
 buffer of its own (`change-review-open-threads').  FILTER, `open',
 `unreviewed' (the threads the agent closed that you have not reviewed),
-`closed' or `all', is the status to show them by, by default the
+`reviewed' (the threads you marked reviewed this turn), `closed' or
+`all', is the status to show them by, by default the
 buffer's.  \\<change-review-threads-mode-map>\\[change-review-ui-quote-reply] there replies with what you selected of a comment
 quoted."
   (interactive)

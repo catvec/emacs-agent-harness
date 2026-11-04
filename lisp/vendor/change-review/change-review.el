@@ -68,7 +68,12 @@
 ;; so a thread closed again after it was opened is to review again, and
 ;; nothing marks one by the passing of time: a close missed for two
 ;; rounds is still waiting.  `change-review-thread-unreviewed-p' says
-;; which threads wait.  Adding a comment to a thread (`change-review-reply')
+;; which threads wait.  A close the user marked reviewed is in the
+;; closed threads with the others of earlier rounds; the turn of the
+;; review -- the review of the newest version -- is what
+;; `change-review-review-turn-start' says, and
+;; `change-review-thread-reviewed-this-turn-p' picks out the closes
+;; marked since it.  Adding a comment to a thread (`change-review-reply')
 ;; never changes its status: an agent that answers in a thread it has
 ;; closed, or a reply that came by mail, leaves it as it is.
 ;;
@@ -564,6 +569,29 @@ waits: there is nothing of someone else's to look at."
     (and (not (plist-get entry :reviewed))
          (not (change-review-own-author-p set author)))))
 
+(defun change-review-review-turn-start (set)
+  "Return when the current turn of SET's review began, or nil.
+A turn is the review of one version: it begins when the newest version
+of SET is proposed -- for a task, when it is handed in -- and what the
+user marks reviewed at or after that is marked this turn.  A set with no
+version, or whose newest version records no time, has no start, and
+every close the user reviewed counts as this turn's."
+  (when-let* ((version (change-review-latest-version set)))
+    (change-review-version-time version)))
+
+(defun change-review-thread-reviewed-this-turn-p (set thread)
+  "Return non-nil when the user marked THREAD of SET reviewed this turn.
+That is a close by someone other than the user (`change-review-own-author-p'),
+marked reviewed (`change-review-mark-reviewed') at or after the newest
+version of SET was proposed (`change-review-review-turn-start').  A close
+marked before that turn, or an open thread, is not."
+  (when-let* ((entry (change-review-thread-closing thread))
+              (time (plist-get entry :reviewed))
+              (author (plist-get entry :author))
+              ((not (change-review-own-author-p set author))))
+    (let ((start (change-review-review-turn-start set)))
+      (or (null start) (>= time start)))))
+
 (defun change-review-thread-drafts (thread)
   "Return the comments of THREAD that are drafts, in order."
   (cl-remove-if-not #'change-review-comment-draft-p (change-review-thread-comments thread)))
@@ -620,14 +648,19 @@ INDEX counts from 1; nil when THREAD does not hold COMMENT."
 
 (defun change-review-threads (set &optional status)
   "Return the threads of SET, in the order they were started.
-STATUS limits them to the `open' or the `closed' ones, or to the
+STATUS limits them to the `open' or the `closed' ones, to the
 `unreviewed' ones, closed by someone else and waiting for the user to
-look at them (`change-review-thread-unreviewed-p'); nil or `all'
-returns every one."
+look at them (`change-review-thread-unreviewed-p'), or to the
+`reviewed' ones the user marked reviewed this turn
+\(`change-review-thread-reviewed-this-turn-p'); nil or `all' returns
+every one."
   (cond ((memq status '(nil all))
          (copy-sequence (change-review-set-threads set)))
         ((eq status 'unreviewed)
          (cl-remove-if-not (lambda (thread) (change-review-thread-unreviewed-p set thread))
+                           (change-review-set-threads set)))
+        ((eq status 'reviewed)
+         (cl-remove-if-not (lambda (thread) (change-review-thread-reviewed-this-turn-p set thread))
                            (change-review-set-threads set)))
         (t
          (cl-remove-if-not (lambda (thread) (eq (change-review-thread-status thread) status))
@@ -636,15 +669,18 @@ returns every one."
 (defun change-review-thread-counts (set)
   "Return the counts of SET's threads as a plist.
 :open and :closed count the threads of each status, :unreviewed those of
-the closed ones that wait for the user to review them, :drafts the
-draft comments, :comments all the comments."
-  (let ((open 0) (closed 0) (unreviewed 0) (drafts 0) (comments 0))
+the closed ones that wait for the user to review them, :reviewed those
+the user marked reviewed this turn, :drafts the draft comments,
+:comments all the comments."
+  (let ((open 0) (closed 0) (unreviewed 0) (reviewed 0) (drafts 0) (comments 0))
     (dolist (thread (change-review-set-threads set))
       (if (change-review-thread-open-p thread) (cl-incf open) (cl-incf closed))
       (when (change-review-thread-unreviewed-p set thread) (cl-incf unreviewed))
+      (when (change-review-thread-reviewed-this-turn-p set thread) (cl-incf reviewed))
       (cl-incf comments (length (change-review-thread-comments thread)))
       (cl-incf drafts (length (change-review-thread-drafts thread))))
-    (list :open open :closed closed :unreviewed unreviewed :drafts drafts :comments comments)))
+    (list :open open :closed closed :unreviewed unreviewed :reviewed reviewed
+          :drafts drafts :comments comments)))
 
 (defun change-review-drafts (set)
   "Return the draft comments of SET, in the order they were written."

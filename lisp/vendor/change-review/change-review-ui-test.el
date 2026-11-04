@@ -1987,7 +1987,7 @@ the files in the order of the newest version."
   (change-review-ui-test--threads-view
     (let ((text (change-review-ui-test--text)))
       (should (string-prefix-p "Review of Fix the flaky test   second of 2\n" text))
-      (should (string-match-p "^Threads  +open 3 +to review 1 +closed 1 +\\[all 4\\]" text))
+      (should (string-match-p "^Threads  +open 3 +to review 1 +reviewed 0 +closed 1 +\\[all 4\\]" text))
       (should (string-match-p "2 drafts not sent" text))
       (let ((whole (string-match "^▾ The change as a whole" text))
             (a (string-match "^▾ a\\.el" text))
@@ -1999,8 +1999,8 @@ the files in the order of the newest version."
       (should (string-match-p "What about a4\\?" text)))))
 
 (ert-deftest change-review-ui-threads-view-filters-by-status ()
-  "f changes which threads show: open, closed, all, those to review; the
-buttons say how many."
+  "f changes which threads show: open, those to review, those reviewed this
+turn, closed, all; the buttons say how many."
   (change-review-ui-test--threads-view
     (change-review-ui-set-filter 'open)
     (let ((text (change-review-ui-test--text)))
@@ -2010,6 +2010,8 @@ buttons say how many."
       (should-not (string-match-p "Fine\\." text)))
     (change-review-ui-cycle-filter)
     (should (eq 'unreviewed change-review-ui--filter))
+    (change-review-ui-cycle-filter)
+    (should (eq 'reviewed change-review-ui--filter))
     (change-review-ui-cycle-filter)
     (let ((text (change-review-ui-test--text)))
       (should (string-match-p "\\[closed 1\\]" text))
@@ -2116,9 +2118,9 @@ they are pressed in and draw it again."
            (_ (change-review-ui-test--populate set))
            (heading (change-review-ui-threads-heading set 'open)))
       (should (string-suffix-p "\n" heading))
-      (should (string-match-p "\\`Threads  \\[open 3\\] +to review 1 +closed 1 +all 4 +2 drafts not sent\n\\'"
+      (should (string-match-p "\\`Threads  \\[open 3\\] +to review 1 +reviewed 0 +closed 1 +all 4 +2 drafts not sent\n\\'"
                               (substring-no-properties heading)))
-      (should (string-match-p "\\`Threads  +open 3 +to review 1 +closed 1 +\\[all 4\\]"
+      (should (string-match-p "\\`Threads  +open 3 +to review 1 +reviewed 0 +closed 1 +\\[all 4\\]"
                               (substring-no-properties (change-review-ui-threads-heading set 'all))))
       (let (redrawn)
         (with-temp-buffer
@@ -2127,7 +2129,10 @@ they are pressed in and draw it again."
           (insert heading)
           (push-button (1+ (change-review-ui-test--button heading " closed 1 ")))
           (should (eq 'closed change-review-ui--filter))
-          (should (eq 'closed redrawn)))))))
+          (should (eq 'closed redrawn))
+          (push-button (1+ (change-review-ui-test--button heading " reviewed 0 ")))
+          (should (eq 'reviewed change-review-ui--filter))
+          (should (eq 'reviewed redrawn)))))))
 
 (ert-deftest change-review-ui-threads-view-moves-between-comments-and-threads ()
   "n and p move between comments, N and P between threads."
@@ -2726,6 +2731,44 @@ m marks one reviewed and takes it out, and a second m brings it back."
     (should (string-match-p "closed[^\n]* · to review" (change-review-ui-test--text)))
     (should (eq #'change-review-ui-toggle-reviewed (key-binding "m")))
     (should (eq #'change-review-ui-mark-all-reviewed (key-binding "M")))))
+
+(ert-deftest change-review-ui-threads-view-lists-what-was-reviewed-this-turn ()
+  "The `reviewed' filter lists the threads the user marked reviewed this turn,
+which the `closed' filter only says in their header; m marks one and adds it,
+and m again takes it out.  A close marked before the newest version was
+proposed belongs to an earlier turn, and is not listed."
+  (change-review-ui-test--threads-view
+    (should (string-match-p "reviewed 0" (change-review-ui-test--text)))
+    (change-review-ui-set-filter 'reviewed)
+    (let ((text (change-review-ui-test--text)))
+      (should (string-match-p "\\[reviewed 0\\]" text))
+      (should (string-match-p "Nothing reviewed this turn" text)))
+    ;; Mark the close of b.el reviewed, in this turn: it is listed.
+    (should (change-review-mark-reviewed set (nth 1 threads) :time change-review-ui-test--now))
+    (change-review-ui-flush)
+    (let ((text (change-review-ui-test--text)))
+      (should (string-match-p "\\[reviewed 1\\]" text))
+      (should (string-match-p "^▾ b\\.el +1 thread$" text))
+      (should (string-match-p "Fine\\." text))
+      (should (string-match-p "closed[^\n]* · reviewed" text)))
+    ;; m on it, in this view, makes it wait again and takes it out.
+    (goto-char (point-min))
+    (search-forward "Fine.")
+    (call-interactively #'change-review-ui-toggle-reviewed)
+    (should (change-review-thread-unreviewed-p set (nth 1 threads)))
+    (change-review-ui-flush)
+    (should (string-match-p "Nothing reviewed this turn" (change-review-ui-test--text)))
+    ;; A mark from before the newest version is a reviewed close, not this turn's.
+    (change-review-mark-reviewed set (nth 1 threads) :time (- change-review-ui-test--now 1000))
+    (change-review-ui-flush)
+    (should (string-match-p "Nothing reviewed this turn" (change-review-ui-test--text)))
+    (change-review-ui-set-filter 'closed)
+    (should (string-match-p "closed[^\n]* · reviewed" (change-review-ui-test--text)))
+    ;; Opening the thread again takes it out of the closes there are.
+    (change-review-ui-set-filter 'reviewed)
+    (change-review-reopen set (nth 1 threads) :time change-review-ui-test--now)
+    (change-review-ui-flush)
+    (should (string-match-p "Nothing reviewed this turn" (change-review-ui-test--text)))))
 
 (ert-deftest change-review-ui-point-goes-on-to-the-next-thread-when-one-leaves-the-view ()
   "A thread marked reviewed leaves the filter of those that wait: point goes to
@@ -3630,6 +3673,14 @@ header line says which are shown."
                             (apply #'concat (cl-remove-if-not #'stringp header-line-format))))
     (change-review-ui-set-filter 'open)
     (should (string-match-p "showing open threads"
+                            (apply #'concat (cl-remove-if-not #'stringp header-line-format))))
+    ;; And what was marked reviewed this turn, the close that no longer waits.
+    (change-review-mark-reviewed set (nth 1 threads) :time change-review-ui-test--now)
+    (change-review-ui-set-filter 'reviewed)
+    (should (= 1 (length (cl-remove-if-not (lambda (o) (and (overlay-get o 'change-review-thread)
+                                                            (overlay-get o 'after-string)))
+                                           (overlays-in (point-min) (point-max))))))
+    (should (string-match-p "showing threads reviewed this turn"
                             (apply #'concat (cl-remove-if-not #'stringp header-line-format))))))
 
 (ert-deftest change-review-ui-diff-view-places-threads-of-another-version ()
