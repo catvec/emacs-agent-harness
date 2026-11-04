@@ -81,6 +81,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;review             ; Reviewing a task where it is looked at: its report in full in its…
  ;;search             ; Search the sessions' transcripts: words, literal… (with session-search)
  ;;slots              ; The task slots page: the tasks that hold slots… (with tool-slots-load)
+ ;;sticky-compose     ; The compose box, docked in the mode line of a chat window scrolled…
  ;;tree               ; Conversation tree: the fork family of a session as a git-like graph.
  )
 ```
@@ -210,6 +211,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-secrets](ui-secrets.md) |  | [ui](ui.md) | Redact a secret from everything the harness stored, and name the secrets to mask. |
 | [ui-sessions](ui-sessions.md) | by default | [ui](ui.md) | Session list buffer. |
 | [ui-slots](ui-slots.md) |  | [ui](ui.md), [ui-tasks](ui-tasks.md) | The task slots page: the tasks that hold slots as the session list lists sessions, who is using the machine's tool slots, the queue and its waits by priority. |
+| [ui-sticky-compose](ui-sticky-compose.md) |  | [ui](ui.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) | The compose box, docked in the mode line of a chat window scrolled away from it, while you compose. |
 | [ui-supervisor](ui-supervisor.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Supervisor mode: the chat header's segment and the V key that toggles it. |
 | [ui-tasks](ui-tasks.md) |  | [ui](ui.md) | Task mode: a kanban of one-session tasks with a compose box. |
 | [ui-tasks-search](ui-tasks-search.md) |  | [ui-tasks](ui-tasks.md), [ui-quick-search](ui-quick-search.md) | The task board's search: find tasks, sessions and commands or act on tasks in words, answered by a cheap model. |
@@ -398,7 +400,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-chat-header-end-functions` | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md) | [ui-cache-warm](ui-cache-warm.md), [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
-| `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
+| `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-sticky-compose](ui-sticky-compose.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
 | `harness-chat-panel-functions` | [ui-cache](ui-cache.md), [ui-carry](ui-carry.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-carry](ui-carry.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
 | `harness-chat-send-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md) | [ui-btw](ui-btw.md) |
 | `harness-chat-tool-body-functions` | [ui-chat](ui-chat.md) | [ui-report](ui-report.md) |
@@ -454,9 +456,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-provider-check](ui-provider-check.md) |
 | `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [session](session.md), [tasks](tasks.md), [ui](ui.md) |
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
-| `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), `compose-quote.el`, `change-review-ui.el` |
+| `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-sticky-compose](ui-sticky-compose.md), `compose-quote.el`, `change-review-ui.el` |
 | `pre-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) |
-| `pre-redisplay-functions` |  | [ui-compose](ui-compose.md), [ui-popout](ui-popout.md), `change-review-ui.el` |
+| `pre-redisplay-functions` |  | [ui-compose](ui-compose.md), [ui-popout](ui-popout.md), [ui-sticky-compose](ui-sticky-compose.md), `change-review-ui.el` |
 | `project-find-functions` |  | `worktree-assume.el` |
 | `string-edit-mode-hook` | `change-review-ui.el` |  |
 | `tabulated-list-revert-hook` |  | [ui-sessions](ui-sessions.md), [ui-worktree](ui-worktree.md) |

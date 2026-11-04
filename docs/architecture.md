@@ -12422,6 +12422,19 @@ first, then the thinking level, the context and the model.  The mode
 line has the status: its icon and word, the spinner while a turn runs
 (its tooltip says what the turn does), and the turn's duration while
 the turn runs, not while the session is blocked waiting on the user.
+A window scrolled away from the compose box while the user composes
+draws a compact copy of the box after that status, with the `ui-sticky-compose`
+module (`:ui sticky-compose`, off unless enabled): the prompt, the
+start and the end of the draft, how many lines and attachments it has,
+and a [Compose box] button that jumps to the box, as `C-c C-e` does.
+The chat draws none of it: the module puts its own `mode-line-format`
+window parameter on a window whose box is out of view and takes it off
+when the box comes back (`harness-ui-sticky-compose--redisplay`, from
+the buffer's `pre-redisplay-functions` and post-command hook), so a
+render of the tail leaves the mode line alone; the line itself never
+measures the window, for `pos-visible-in-window-p` would format it
+inside itself.  The mode counts as composing while the box has focus or
+holds a draft, or only while it holds one (`harness-sticky-compose-when`).
 The todo list is left to its panel above the compose
 box -- which starts folded to its title line, the progress and the item
 in hand (`harness-chat-todos-collapsed'), until the reader opens it,

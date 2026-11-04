@@ -164,6 +164,9 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Priorities
 - Insights
 - Btw sessions
+- Sticky compose box (`ui-sticky-compose`)
+  - A chat window scrolled away from its compose box draws a compact copy of it in its mode line while you compose
+  - The start and end of the draft, its lines and attachments, and a button that jumps back to the box
 - Configuration via customize
   - Global overridden by per-project (via `.dir-locals.el`)
   - Corporate policy profiles
