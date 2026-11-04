@@ -23,6 +23,9 @@ than a review to send feedback on (the chat's C-c T).  What the user
 writes there is a draft as anywhere, and the threads say how many are
 waiting; [Send replies] sends them together (`patch-review/send-replies`),
 as one message to the agent, which answers them in their threads.
+[Diff] rereads the worktree's current HEAD on each click while the task
+works; historical source links stay at the commit they name.  These
+live views are local, not new hand-ins or baselines for the last review.
 
 THE LIBRARY AND THIS ADAPTER.  What a review is -- a change set with
 versions, threads of comments, each comment recording its thread, its
@@ -91,9 +94,20 @@ files, and below it the threads:
               again, RET on its header compares the file in Ediff at
               its line, on a comment shows where it was made, o
               follows an agent's comment to its conversation, c
-              comments on the change as a whole, f changes the
-              filter.  T goes to the section; where there is none, in
-              Ediff, it shows the tree beside it and goes there.
+              starts a new thread in the box, f changes the filter.
+              T goes to the section; where there is none, in Ediff,
+              it shows the tree beside it and goes there.
+  new thread  c, or the heading's [New thread] button, starts a
+              thread that quotes nothing -- one on the change as a
+              whole -- as a card in the compose box, where the
+              feedback is written: the words under the card are its
+              first comment, and C-c C-c sends it, as the box sends
+              anything.  While the task waits for review that is the
+              feedback that sends it back, with the thread among the
+              review's own; while it works, the words go to the agent
+              at once, as a reply in the thread it starts.  In the
+              threads view of a chat the box comes back for it, and
+              the card stays in it until it is sent.
 
 Reviewing a branch is going through its files, and two settings make
 that go the way a reviewer wants, each a button of the changes with its
@@ -427,6 +441,7 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-import-manual` — Make the replies you wrote by hand for this task threads of its review.
 - `harness-ui-patch-review-mouse-ediff` — Compare the file clicked on in EVENT in Ediff.
 - `harness-ui-patch-review-mouse-toggle-directory` — Fold or unfold the directory clicked on in EVENT.
+- `harness-ui-patch-review-new-thread` — Compose a new thread of the review, with nothing quoted.
 - `harness-ui-patch-review-next-difference` — Move to the next difference in this Ediff, ARG times.
 - `harness-ui-patch-review-next-file` — Move to the next file of the changes, or the Nth next.
 - `harness-ui-patch-review-open` — Show the changes of the task this buffer shows, in a popout.

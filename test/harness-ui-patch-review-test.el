@@ -3675,6 +3675,130 @@ view holds the threads only, not the report and the files above them;
                                     (buffer-substring-no-properties
                                      (marker-position harness-chat--transcript-end) (point-max))))))))
 
+(ert-deftest harness-ui-patch-review-starts-a-new-thread-from-the-threads-view ()
+  "The threads view offers [New thread]: it brings the compose box back with a
+card that quotes nothing, and C-c C-c sends the task back with the words as
+the feedback, a thread on the change as a whole in the review."
+  (harness-ui-patch-review-test-with-task
+    (let* ((chat (harness-ui-patch-review-test--banner board id sid))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (root (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2)
+                                                           "Why two?" :sent 10.0)))
+      (ignore root)
+      (harness-ui-patch-review--refresh review)
+      (harness-ui-patch-review-test--wait-text chat "Why two?")
+      (with-current-buffer chat
+        (call-interactively #'harness-chat-show-threads)
+        (should harness-chat--threads-view)
+        ;; The key on a thread starts one too, as the button does.
+        (goto-char (point-min))
+        (search-forward "Why two?")
+        (should (eq #'harness-ui-patch-review-new-thread (key-binding (kbd "c"))))
+        (goto-char (point-min))
+        (search-forward "[New thread]")
+        (push-button (match-beginning 0))
+        ;; The threads view gave way to the box, with a card that quotes nothing.
+        (should-not harness-chat--threads-view)
+        (should (harness-compose-live-p))
+        (should (string-search "[reply 1]" (harness-compose-text)))
+        (should (= (point) harness-compose-end))
+        (let ((card (cl-find-if (lambda (ov)
+                                  (plist-get (overlay-get ov 'harness-compose-attachment) :thread))
+                                harness-compose--token-overlays)))
+          (should card)
+          (should (string-search "↩ a new thread" (overlay-get card 'display))))
+        ;; The words under the card, sent with C-c C-c, send the task back.
+        (insert "Is the sky blue?")
+        (call-interactively #'harness-chat-send))
+      (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :feedback))
+                         10 "the feedback to reach the task")
+      (should (string-search "Is the sky blue?"
+                             (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
+      ;; A thread on the change as a whole, made by this reply in it.
+      (harness-ui-patch-review-test--wait-harness-threads id 2)
+      (let* ((threads (harness-ui-patch-review-test--harness-threads id))
+             (new (cl-find-if (lambda (thread)
+                                (null (plist-get (car (plist-get thread :comments)) :location)))
+                              threads))
+             (comment (car (plist-get new :comments))))
+        (should new)
+        (should (equal "Is the sky blue?" (plist-get comment :body)))
+        (should (equal "user" (plist-get (plist-get comment :author) :kind)))
+        (should (numberp (plist-get comment :sent)))
+        (should-not (plist-get comment :location))))))
+
+(ert-deftest harness-ui-patch-review-new-thread-from-the-report-goes-in-its-box ()
+  "The [New thread] button of the report's threads starts the card in the
+feedback box there, and C-c C-c sends the task back with it."
+  (harness-ui-patch-review-test-with-task
+    (let ((popout (harness-ui-patch-review-test--changes board id)))
+      (with-current-buffer popout
+        (goto-char (point-min))
+        (search-forward "[New thread]")
+        (push-button (match-beginning 0))
+        ;; The report's own box, the one that sends the feedback.
+        (should (harness-compose-live-p))
+        (should (string-search "[reply 1]" (harness-compose-text)))
+        (insert "Is the sky blue?")
+        (call-interactively (key-binding (kbd "C-c C-c"))))
+      (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :feedback))
+                         10 "the feedback to reach the task")
+      (should (string-search "Is the sky blue?"
+                             (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
+      ;; The thread is on the change as a whole, as the chat's would be.
+      (harness-ui-patch-review-test--wait-harness-threads id 1)
+      (let* ((comment (car (plist-get (car (harness-ui-patch-review-test--harness-threads id))
+                                      :comments))))
+        (should (equal "Is the sky blue?" (plist-get comment :body)))
+        (should-not (plist-get comment :location))))))
+
+(ert-deftest harness-ui-patch-review-a-new-thread-at-work-goes-to-the-agent ()
+  "At work the threads view's [New thread] starts one in the box, and C-c C-c
+sends it as the message the agent answers in the thread it starts."
+  (let ((harness-tasks-working-phase t))
+    (harness-ui-patch-review-test-with-task
+      (let* ((chat (harness-ui-patch-review-test--banner board id sid))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (root (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2)
+                                                             "Why two?" :sent 10.0)))
+        (ignore root)
+        (harness-call 'task/return-to-work id)
+        (harness-test-wait
+         (lambda () (equal "working" (plist-get (harness-ui-patch-review--r-task review) :phase)))
+         5 "the review to hear the task is at work")
+        (with-current-buffer chat
+          (call-interactively #'harness-chat-show-threads))
+        (harness-ui-patch-review-test--wait-text chat "\\[New thread\\]")
+        ;; The demo agent answers the thread the marker names.
+        (setq harness-provider-demo-script-override nil)
+        (with-current-buffer chat
+          (goto-char (point-min))
+          (search-forward "[New thread]")
+          (push-button (match-beginning 0))
+          (should-not harness-chat--threads-view)
+          (insert "What about the warning?")
+          (call-interactively #'harness-chat-send))
+        (harness-test-wait
+         (lambda ()
+           (let* ((threads (harness-ui-patch-review-test--harness-threads id))
+                  (new (cl-find-if (lambda (thread)
+                                     (null (plist-get (car (plist-get thread :comments)) :location)))
+                                   threads)))
+             (and new (= 2 (length (plist-get new :comments))))))
+         15 "the agent's answer in the new thread")
+        (let* ((threads (harness-ui-patch-review-test--harness-threads id))
+               (new (cl-find-if (lambda (thread)
+                                  (null (plist-get (car (plist-get thread :comments)) :location)))
+                                threads))
+               (comments (plist-get new :comments))
+               (answer (cadr comments)))
+          (should (equal "What about the warning?" (plist-get (car comments) :body)))
+          (should (equal "agent" (plist-get (plist-get answer :author) :kind)))
+          (should (string-search "demo provider answering in the thread" (plist-get answer :body))))
+        ;; It was the conversation: the task is still at work, no feedback.
+        (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+        (should-not (plist-get (harness-call 'task/get id) :feedback))))))
+
 (ert-deftest harness-ui-patch-review-shows-the-changes-in-the-banner ()
   "The review banner of the task's session shows the changes -- the tree and the
 threads -- between the report and [Verify], with no click on [Review Changes]:

@@ -160,6 +160,54 @@ reply is to and quotes it, and a rail goes down beside the words."
       ;; Not one of the attachment lines above the box.
       (should-not (string-search "reply" (buffer-substring-no-properties (point-min) harness-compose-start))))))
 
+(ert-deftest harness-ui-compose-new-thread-is-a-card-that-quotes-nothing ()
+  "A thread with no reference is a new one: its card says so, in place of a
+quote, and the words under it are the thread's first comment.  Sending it
+gives a reply in a thread with no references at all."
+  (harness-ui-compose-test-with
+    (let ((att (harness-compose-add-thread nil)))
+      (should (equal 1 (plist-get att :reply)))
+      (should (string-search "[reply 1]" (harness-compose-text)))
+      ;; Point is where the words under the card start.
+      (should (= (point) harness-compose-end))
+      (let* ((card (overlay-get (car (harness-ui-compose-test--cards)) 'display)))
+        (should (string-search "↩ a new thread" card))
+        (should (string-search "[×]" card))
+        (should (string-search "nothing is quoted" (overlay-get (car (harness-ui-compose-test--cards)) 'help-echo)))
+        ;; No quote line under the header: the card is one line.
+        (should (= 1 (length (split-string card "\n")))))
+      ;; The empty area under it says what it is, not Reply…
+      (should (cl-some (lambda (ov) (equal "Thread…" (substring-no-properties (overlay-get ov 'before-string))))
+                       harness-compose--area-hints))
+      (insert "Why is the sky blue?")
+      (harness-compose--keep-tokens)
+      (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+        (should (equal "" text))
+        (should (= 1 (length atts)))
+        (should (equal "Why is the sky blue?" (plist-get (car atts) :response)))
+        (should-not (harness-thread-refs (plist-get (car atts) :thread)))
+        ;; What goes on to the rest of the harness has no quote either: its
+        ;; block is the words, with the thread they are in.
+        (let ((block (harness-thread-block (plist-get (car atts) :thread)
+                                           (plist-get (car atts) :response))))
+          (should (equal "Why is the sky blue?" (plist-get block :text)))
+          (should-not (harness-thread-refs (plist-get block :thread))))))))
+
+(ert-deftest harness-ui-compose-new-thread-has-no-quote-to-show-or-edit ()
+  "A new thread answers nothing: there is no quote to show, edit or copy,
+only taking the thread back; its card says so."
+  (harness-ui-compose-test-with
+    (let ((att (harness-compose-add-thread nil)))
+      (should-error (harness-compose-edit-thread att) :type 'user-error)
+      (should (equal '("Remove the thread, keep my words")
+                     (mapcar #'car (harness-compose--thread-actions att))))
+      (should (equal "a new thread" (harness-compose--chip-what att)))
+      (insert "A question.")
+      (harness-compose--keep-tokens)
+      (should (string-match-p
+               "\\`This thread is new"
+               (car (harness-ui-compose-test-messages (harness-compose-open-thread att))))))))
+
 (ert-deftest harness-ui-compose-thread-card-shows-the-whole-quote ()
   "A thread's card shows every word it answers, wrapped, with no ellipsis.
 The quote is the reason for the reply: a card never cuts it short."

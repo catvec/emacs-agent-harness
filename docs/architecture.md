@@ -1082,7 +1082,11 @@ the text for one that does not (see agent).
 A THREAD is the user's reply to a region of something on the screen: part
 of a message in the chat, several messages, lines of a diff.  The UI
 that starts it says what the region is from and records that as data,
-the thread's DATA, so nothing is guessed from the words afterwards.  The
+the thread's DATA, so nothing is guessed from the words afterwards.  A
+thread may have no reference at all: it is a NEW THREAD, one on the
+change as a whole, started from a task review's threads view or its
+[New thread] button (`harness-ui-patch-review-new-thread`), the words
+written under its card its first comment.  The
 reply is a text block that carries it as `:thread`
 (`harness-thread-block`, in `harness-util`):
 
@@ -12910,7 +12914,10 @@ they answer in turn.
 Threads in the box: a reply in a thread (see Threads) is an attachment
 of the box, `(:thread DATA :reply N)`, with the token `[reply N]` in the
 text that images have (`harness-compose-add-thread`, which adds the
-attachment and puts its token on a line of its own, point under it).  The
+attachment and puts its token on a line of its own, point under it).  A
+reply started with no reference is a new thread: its DATA has no
+`:refs`, and its card is the one line "↩ a new thread", with no quote to
+show, edit or copy.  The
 token is shown as a CARD (`harness-compose--thread-card`, a display
 overlay of the token like an image's chip): a header per reference --
 what it is (`harness-thread-ref-label`: "agent's message", "your
@@ -15517,7 +15524,8 @@ a button with its state in the settings line and in Ediff's help:
 
 THE THREADS, a section below the files and not a view of their own: the
 heading is the library's (`change-review-ui-threads-heading`: the three
-filter buttons with their counts, the drafts not sent), then the threads
+filter buttons with their counts, the drafts not sent), with a
+[New thread] button at its end, then the threads
 of the status the buffer's filter lets through
 (`change-review-ui-threads-string`: by file, the change as a whole
 first, each as the threads view draws it, with [Reply] [Close] [Diff]
@@ -15525,11 +15533,17 @@ and `▸ where`), each file under its own heading.  The filter starts as
 `harness-ui-patch-review-closed-threads` says, open or all, and is kept
 by the buffer, so the report, the banner and the tree beside Ediff each
 have their own.  The keys are the library's, bound on the text: r, x, o,
-e, k, c, f, n and p between comments, N and P between threads, d and RET
+e, k, f, n and p between comments, N and P between threads, d and RET
 on the header of a thread compare the file in Ediff at the thread's
 line (`change-review-visit`, with the line the harness placed it at), RET
 on a comment shows where it was made, RET on the name of a file compares
-that file.  T (`harness-ui-patch-review-threads`) goes to the heading in
+that file.  The harness's c is not the library's comment: it starts a
+new thread in the compose box (`harness-ui-patch-review-new-thread`),
+one that quotes nothing, as the heading's [New thread] button does; the
+words under its card are the first comment, and C-c C-c sends it -- with
+the feedback while the task waits for review, to the agent at once while
+it works.  In the chat's threads view the box comes back for it.  T
+(`harness-ui-patch-review-threads`) goes to the heading in
 the buffer it is pressed in; in Ediff, from the control panel or
 either version, it shows the tree beside Ediff and goes there, and
 without one (the option off) opens the library's view in a buffer of its

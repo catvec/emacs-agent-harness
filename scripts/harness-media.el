@@ -2068,6 +2068,26 @@ review, as a review's threads are made."
             (set-window-point window harness-chat--threads-view-start))))
       (harness-media--capture "chat-threads"))))
 
+(defun harness-media-shot-new-thread ()
+  "A new thread written from the threads view of a task at work.
+[New thread] is pressed there: the compose box comes back with a card
+that quotes nothing -- one on the change as a whole -- and the question
+is typed under it, point in the box."
+  (let ((buffer (harness-media--fullscreen-layout :slow)))
+    (with-current-buffer buffer
+      (goto-char (point-max))
+      (call-interactively #'harness-chat-show-threads))
+    (harness-media--settle 0.5)
+    (with-current-buffer buffer
+      (goto-char (point-min))
+      (search-forward "[New thread]")
+      (push-button (match-beginning 0))
+      (insert "Should the warning name the slowest part of the request, too?")
+      (harness-compose-update-placeholder))
+    (harness-media--settle 1)
+    (harness-media--to-bottom buffer)
+    (harness-media--capture "new-thread")))
+
 (defun harness-media-shot-chat-permission ()
   "A chat waiting for permission to run a command."
   (harness-media--chat-shot (plist-get harness-media--world :permission) "acme/webhooks.py")
@@ -4606,7 +4626,9 @@ names."
     ("thread-reply-review" . harness-media-shot-thread-reply-review)
     ;; After every picture of the slow-request task: it takes the task
     ;; back to work, and shows the threads where its compose box was.
-    ("chat-threads" . harness-media-shot-chat-threads))
+    ("chat-threads" . harness-media-shot-chat-threads)
+    ;; And then the box again, with a new thread's card in it.
+    ("new-thread" . harness-media-shot-new-thread))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point

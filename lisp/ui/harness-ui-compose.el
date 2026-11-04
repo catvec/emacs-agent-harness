@@ -16,7 +16,9 @@
 ;;     (a chat's C-c > starts a thread instead, its C-u C-c > quotes);
 ;;   - replies in threads: a card in the box for each region replied to,
 ;;     what it is and the part of it quoted, with the words of the reply
-;;     typed under it, in the same box (see the Threads section).  Your
+;;     typed under it, in the same box (see the Threads section).  A
+;;     reply with no region is a new thread: its card says so and has no
+;;     quote, and the words under it start the thread on its own.  Your
 ;;     own message has a line above the first card, and C-c < moves
 ;;     point out of a reply to it, and back into the reply.  C-c e, or
 ;;     the card's menu, edits what the reply answers: trimmed, elided
@@ -2085,7 +2087,10 @@ middle to `harness-compose--token-max' characters."
 
 (defun harness-compose--chip-what (att)
   "Return what attachment ATT is, in a word or two: image 1, file, task t-1a2b."
-  (cond ((plist-get att :thread) (format "reply %s" (plist-get att :reply)))
+  (cond ((plist-get att :thread)
+         (if (harness-thread-refs (plist-get att :thread))
+             (format "reply %s" (plist-get att :reply))
+           "a new thread"))
         ((plist-get att :label))
         ((plist-get att :task) (concat "task " (plist-get att :task)))
         (t "file")))
@@ -2464,37 +2469,47 @@ part of it is left out or cut short."
 Each reference is a header -- what it is (`harness-thread-ref-label') --
 and the whole of its quote under it, wrapped to ROOM columns (by
 default 72), every line after the rail and with the reference it is of
-as `harness-thread-ref', for a click to show.  CLOSE, a string, is put at
-the end of the first header, such as a button that removes the thread.
-RAIL, a string, is what starts every line, as `harness-thread-rail' makes
-it, which is also the default: the host that has a bar down its lines of
-its own gives the blanks that stand for it, not a second bar.
+as `harness-thread-ref', for a click to show.  A thread with no
+reference answers nothing: it is a new one, and its one line says so.
+CLOSE, a string, is put at the end of the first header, such as a
+button that removes the thread.  RAIL, a string, is what starts every
+line, as `harness-thread-rail' makes it, which is also the default: the
+host that has a bar down its lines of its own gives the blanks that
+stand for it, not a second bar.
 The card is no text of the buffer; the caller puts it where it goes."
   (let* ((rail (or rail (harness-thread-rail)))
          (room (max 16 (- (or room 72) (string-width rail))))
          (refs (harness-thread-refs data))
          (first t) lines)
-    (dolist (ref refs)
-      (let ((header (concat rail
-                            (propertize (concat "↩ " (harness-thread-ref-label ref))
-                                        'face 'harness-thread-header-face))))
-        (push (if (and first close) (concat header "  " close) header) lines)
-        (setq first nil)
-        (dolist (line (harness-thread-ref-lines ref room))
-          (push (concat rail (propertize line 'face 'harness-thread-quote-face)) lines))
-        ;; Each line of a reference says which it is: a click on it shows that one.
-        (let ((here (cl-loop for l in lines
-                             while (not (get-text-property 0 'harness-thread-ref l))
-                             collect l)))
-          (dolist (l here)
-            (put-text-property 0 (length l) 'harness-thread-ref ref l)))))
+    (if (null refs)
+        (push (concat rail (propertize "↩ a new thread" 'face 'harness-thread-header-face)
+                      (if close (concat "  " close) ""))
+              lines)
+      (dolist (ref refs)
+        (let ((header (concat rail
+                              (propertize (concat "↩ " (harness-thread-ref-label ref))
+                                          'face 'harness-thread-header-face))))
+          (push (if (and first close) (concat header "  " close) header) lines)
+          (setq first nil)
+          (dolist (line (harness-thread-ref-lines ref room))
+            (push (concat rail (propertize line 'face 'harness-thread-quote-face)) lines))
+          ;; Each line of a reference says which it is: a click on it shows that one.
+          (let ((here (cl-loop for l in lines
+                               while (not (get-text-property 0 'harness-thread-ref l))
+                               collect l)))
+            (dolist (l here)
+              (put-text-property 0 (length l) 'harness-thread-ref ref l))))))
     (nreverse lines)))
 
 (defun harness-compose--thread-help (data)
-  "Return the tooltip of a thread's card: the whole quote of each reference."
-  (mapconcat (lambda (ref)
-               (concat (harness-thread-ref-label ref) ":\n" (or (plist-get ref :text) "")))
-             (harness-thread-refs data) "\n\n"))
+  "Return the tooltip of a thread's card DATA: the whole quote of each reference.
+A thread that answers nothing, a new one, says so instead."
+  (let ((refs (harness-thread-refs data)))
+    (if (null refs)
+        "A new thread: nothing is quoted; the words under it start one"
+      (mapconcat (lambda (ref)
+                   (concat (harness-thread-ref-label ref) ":\n" (or (plist-get ref :text) "")))
+                 refs "\n\n"))))
 
 (defun harness-compose--next-reply ()
   "Return the number of the next reply in a thread: the one after the highest.
@@ -2540,12 +2555,13 @@ its text.  Point ends where the response starts."
 (defun harness-compose-add-thread (refs)
   "Start a reply in a thread to REFS, references to regions, in the box.
 The reply is a card -- what the regions are, and the part of each quoted
--- and the words written under it are the response.  Point goes there,
+-- and the words written under it are the response.  REFS may be nil:
+the reply answers nothing, a new thread, and its card says so; what the
+user writes under it is the thread's first comment.  Point goes there,
 and it is the reply that typing from outside the box goes to until
 point is in another area (\\<harness-compose-map>\\[harness-compose-toggle-reply] moves it out to your own message).
 REFS are plists of the shape `harness-thread-block' describes.  Return
 the attachment."
-  (unless refs (user-error "Nothing to reply to"))
   (let ((att (list :thread (list :refs refs) :reply (harness-compose--next-reply))))
     (setq harness-compose-attachments (append harness-compose-attachments (list att)))
     (harness-compose--forget-detached (harness-compose--thread-token att))
@@ -2710,17 +2726,23 @@ response has its line too."
 
 (defun harness-compose-open-thread (att &optional ref)
   "Show what ATT, a reply in a thread, is a reply to; REF, one reference of it.
-The host does it (`harness-compose-thread-open-function')."
-  (funcall harness-compose-thread-open-function (plist-get att :thread) ref))
+The host does it (`harness-compose-thread-open-function').  A new thread
+answers nothing, so there is nothing to show, and this says so."
+  (if (null (harness-thread-refs (plist-get att :thread)))
+      (message "This thread is new: it answers nothing")
+    (funcall harness-compose-thread-open-function (plist-get att :thread) ref)))
 
 (defun harness-compose--thread-actions (att)
-  "Return what the card of ATT offers: (NAME . FUNCTION) each."
-  (list (cons "Show what this replies to" (lambda () (harness-compose-open-thread att)))
-        (cons "Edit what this replies to…" (lambda () (harness-compose-edit-thread att)))
-        (cons "Remove the thread, keep my words" (lambda () (harness-compose-remove-attachment att)))
-        (cons "Copy the quote" (lambda ()
-                                 (kill-new (harness-thread-quote (plist-get att :thread)))
-                                 (message "Copied the quote")))))
+  "Return what the card of ATT offers: (NAME . FUNCTION) each.
+A new thread has no quote to show, edit or copy: only taking it back."
+  (if (null (harness-thread-refs (plist-get att :thread)))
+      (list (cons "Remove the thread, keep my words" (lambda () (harness-compose-remove-attachment att))))
+    (list (cons "Show what this replies to" (lambda () (harness-compose-open-thread att)))
+          (cons "Edit what this replies to…" (lambda () (harness-compose-edit-thread att)))
+          (cons "Remove the thread, keep my words" (lambda () (harness-compose-remove-attachment att)))
+          (cons "Copy the quote" (lambda ()
+                                   (kill-new (harness-thread-quote (plist-get att :thread)))
+                                   (message "Copied the quote"))))))
 
 ;;;; Changing what a reply answers
 
@@ -3012,10 +3034,13 @@ part gets its own card and the words written under it."
 With point in a reply's words, or on its card, that reply is edited;
 ATT, an attachment, edits that reply.  The quote opens in a buffer of
 its own; M-RET there splits it where point is, into another reply with
-its own card and answer.  C-c C-c puts the parts back in the box."
+its own card and answer.  C-c C-c puts the parts back in the box.  A new
+thread has no quote to edit."
   (interactive)
   (let ((att (or att (harness-compose--thread-here)
                  (user-error "Point is not in a reply in a thread"))))
+    (when (null (harness-thread-refs (plist-get att :thread)))
+      (user-error "This thread is new: it has no quote to edit"))
     (harness-compose-edit-thread--start att)))
 
 (defun harness-compose--thread-here ()
@@ -3285,7 +3310,11 @@ left for them, \"Reply…\".  nil without a card."
                when (and (<= from to)
                          (or (= from end) (eq (char-after from) ?\n))
                          (funcall blank from to))
-               do (push (cons from (funcall said "Reply…")) found))
+               do (push (cons from (funcall said
+                                            (if (harness-thread-refs
+                                                 (plist-get (car card) :thread))
+                                                "Reply…" "Thread…")))
+                        found))
       (nreverse found))))
 
 (defun harness-compose--show-area-hints ()

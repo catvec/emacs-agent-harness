@@ -26,7 +26,9 @@ major mode, then `harness-compose-insert` wherever it draws the box
     (a chat's C-c > starts a thread instead, its C-u C-c > quotes);
   - replies in threads: a card in the box for each region replied to,
     what it is and the part of it quoted, with the words of the reply
-    typed under it, in the same box (see the Threads section).  Your
+    typed under it, in the same box (see the Threads section).  A
+    reply with no region is a new thread: its card says so and has no
+    quote, and the words under it start the thread on its own.  Your
     own message has a line above the first card, and C-c < moves
     point out of a reply to it, and back into the reply.  C-c e, or
     the card's menu, edits what the reply answers: trimmed, elided
