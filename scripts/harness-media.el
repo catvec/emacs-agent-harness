@@ -4145,6 +4145,38 @@ answer links to the conversation it came from."
       (recenter 0))
     (harness-media--capture "review-threads")))
 
+(defun harness-media-shot-review-collapsed ()
+  "That review folded: the files' tree one directory line, each file's threads and each thread a line.
+A review starts this way for each task and round: the directories are
+folded, the comments of each file are a line and each thread is a line,
+unless the user commented in it.  Here [Collapse all] folds the review
+whose comments the pictures before it show; [Expand all], under it and in
+the threads' heading, opens it again, and the review is left open for the
+pictures after."
+  (harness-media--unfold (plist-get (plist-get harness-media--world :tasks) :slow)
+                         "changes" "threads")
+  (let ((popout (harness-media--review-layout)))
+    (with-selected-window (get-buffer-window popout)
+      (harness-ui-patch-review-collapse-all)
+      (harness-ui-patch-review-collapse-all-threads)
+      (harness-media--settle 1)
+      (goto-char (point-min))
+      (re-search-forward "^[▾▸] Changes (")
+      (beginning-of-line)
+      (recenter 0))
+    (harness-media--fit-popout-shot 42)
+    (with-selected-window (get-buffer-window popout)
+      (goto-char (point-min))
+      (re-search-forward "^[▾▸] Changes (")
+      (beginning-of-line)
+      (recenter 0))
+    (harness-media--capture "review-collapsed")
+    ;; The pictures after show the tree and the threads again.
+    (with-selected-window (get-buffer-window popout)
+      (harness-ui-patch-review-expand-all)
+      (harness-ui-patch-review-expand-all-threads)
+      (harness-media--settle 0.5))))
+
 (defun harness-media-shot-review-banner ()
   "The session of the task in review, its banner showing the changes: the files as a tree, the threads below.
 The work is looked over where it was handed in, with no click on
@@ -4609,6 +4641,7 @@ names."
     ;; threads of its review, which no other picture shows.
     ("review" . harness-media-shot-review)
     ("review-threads" . harness-media-shot-review-threads)
+    ("review-collapsed" . harness-media-shot-review-collapsed)
     ("review-banner" . harness-media-shot-review-banner)
     ("review-ediff" . harness-media-shot-review-ediff)
     ("review-to-review" . harness-media-shot-review-to-review)

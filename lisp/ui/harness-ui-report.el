@@ -49,8 +49,10 @@
 ;; again, at the next hand-in: from the second hand-in on, or once the
 ;; task was reopened, every section starts folded
 ;; (`harness-ui-report-auto-fold'), that a report already read does not
-;; bury the conversation under it.  The changes and threads of the review
-;; fold the same way, in the same store.
+;; bury the conversation under it.  The changes and threads sections of
+;; the review fold the same way, in the same store; what they hold -- the
+;; files' directories, each file's threads and each thread -- folds in
+;; the review itself, for its round.
 ;;
 ;; Images are the evidence most worth seeing, so they show large: the
 ;; popout's width and much of the frame's height, the popout growing

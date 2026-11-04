@@ -15064,9 +15064,26 @@ and has `C-n` and `C-p` go from line to line.  How a thread is folded is the set
 `change-review-ui-thread-fold` reads it from a weak table, keyed by the
 set and the thread's id with the status it had when it was folded, so a
 view drawn again, another view and the Ediff of the next file keep it, and
-a thread whose status changed is what its status makes it at first.  The
-drawing notes which threads it cut (`change-review-ui--trimmed`): `TAB`
-goes one line, conversation, all of it when it did, one line again.
+a thread whose status changed is what its status makes it at first.  A
+view that draws the threads among its own text says how they start:
+`change-review-ui-threads-string` takes `:file-fold`, a function of a
+file that says whether its threads are a heading alone -- the heading's
+triangle folds and opens them, the state kept in a weak table keyed by
+the set and the file (`change-review-ui-file-fold`), as a thread's is --
+and `:thread-fold`, a function of a thread that says how it is drawn.
+The report and the banner use them for the round: the threads of a file
+start folded to its heading, each thread one line, unless the user wrote
+in the thread; a file they commented on or hold a draft on starts open,
+and so does the change as a whole when they commented there.  TAB on a
+file's heading or on a thread folds it, and E and C, and the [Expand
+all] and [Collapse all] buttons of the threads' heading, fold or open
+every file and every thread
+(`harness-ui-patch-review-expand-all-threads',
+`harness-ui-patch-review-collapse-all-threads').  What the user writes
+opens its file, its thread and its directory as it is written
+(`harness-ui-patch-review--on-comment').  The drawing notes which threads
+it cut (`change-review-ui--trimmed`): `TAB` goes one line, conversation,
+all of it when it did, one line again.
 `change-review-ui-thread-line` is the same thread as one row of a list.  The threads of the report, of
 the review banner and of the tree beside Ediff
 (`change-review-ui-threads-string`, the body of the threads view as a
@@ -15451,7 +15468,15 @@ directory folds with TAB, RET or a click (`▾` open, `▸` folded; the
 fold is the review's, so every surface follows it), and a row that is
 asked to be shown while it is hidden -- n or p, q from Ediff landing on
 it -- unfolds what hides it; a on a directory approves the files under
-it, or stops approving them when they all are.  A file's mark says
+it, or stops approving them when they all are.  The report and the
+banner start every directory folded, for the round the review shows: a
+directory holding a file the user commented on or has a draft on starts
+open, and the tree beside Ediff starts them all open, being there to go
+from file to file.  E and C, and the [Expand all] and [Collapse all]
+buttons under the settings line, fold or open every directory, and what
+the reader folds or opens is kept with the review for the rest of the
+round (`harness-ui-patch-review--directory-folded-p',
+`harness-ui-patch-review--ensure-fold-round').  A file's mark says
 whether it was compared in Ediff, by its path and its
 blob on the branch, and whether it was approved -- by the same key, so a
 file the branch changed again is neither and is reviewed anew.  The marks

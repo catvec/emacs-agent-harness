@@ -233,7 +233,16 @@ above find them), and the line that heads them, the status filter as
 three buttons, `change-review-ui-threads-heading`. The buffer keeps
 `change-review-ui--set`, `change-review-ui--filter` and
 `change-review-ui--redraw-function`, which the buttons set and call, and
-binds the keys of the table above where the text is.
+binds the keys of the table above where the text is. A view that starts
+its threads folded passes `:file-fold`, a function of a file (a path, or
+nil for the change as a whole) that says to draw the file's heading
+alone, with a triangle that folds and opens its threads
+(`change-review-ui-file-fold`, `change-review-ui-set-file-fold`), and
+`:thread-fold`, a function of a thread that says how it is drawn, as
+`change-review-ui-thread-fold` does. `change-review-ui-set-folds` and
+`change-review-ui-set-file-folds` fold or open many at once, which a
+view's [Expand all] and [Collapse all] buttons run;
+`change-review-ui-forget-folds` starts every one at its default again.
 
 **Your own views.** A side-by-side comparison, or any buffer that shows
 the lines of a file, draws the threads under its lines with

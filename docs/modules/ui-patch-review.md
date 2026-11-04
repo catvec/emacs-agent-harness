@@ -83,16 +83,30 @@ files, and below it the threads:
               files were taken as viewed and not looked at.
   directories the files group under the directories that hold them,
               with how many files each holds and the lines they add
-              and delete, as a file tree shows them.  TAB, RET or a
-              click folds a directory, and a approves its files.
+              and delete, as a file tree shows them.  They start
+              folded in the report and the banner -- not in the narrow
+              tree beside Ediff -- for each round of the review, so a
+              review of many directories is a line each; a directory
+              holding a file the user commented on, or has a draft on,
+              starts open.  TAB, RET or a click folds a directory, a
+              approves its files, and E and C, or [Expand all] and
+              [Collapse all] under the settings, open and fold them
+              all.  What the reader chose holds for the round.
   threads     a section below the files, in the same buffer -- not a
               view of its own: the library's drawing of each thread
               (who wrote each comment, when, which revision it was
               against, its place in the thread, open or closed), by
               file, under a heading whose buttons filter them by
-              status.  r replies in a thread, x closes it or opens it
-              again, RET on its header compares the file in Ediff at
-              its line, on a comment shows where it was made, o
+              status.  The threads of a file start folded to the
+              file's heading, and each thread starts folded to one
+              line, unless the user wrote in it; a file the user
+              commented on, or has a draft on, starts open, and so
+              does the change as a whole when they commented there.
+              TAB folds the file or the thread at point, and E and C,
+              or [Expand all] and [Collapse all] in the heading, do
+              every one.  r replies in a thread, x closes it or opens
+              it again, RET on its header compares the file in Ediff
+              at its line, on a comment shows where it was made, o
               follows an agent's comment to its conversation, c
               starts a new thread in the box, f changes the filter.
               T goes to the section; where there is none, in Ediff,
@@ -108,6 +122,11 @@ files, and below it the threads:
               at once, as a reply in the thread it starts.  In the
               threads view of a chat the box comes back for it, and
               the card stays in it until it is sent.
+
+The folds are the review's, for the task and the round: a report or a
+banner drawn again, and the tree beside Ediff, keep what the reader
+opened or folded, and the round after starts from the defaults, where
+the comments and drafts of the user have opened what they wrote in.
 
 Reviewing a branch is going through its files, and two settings make
 that go the way a reviewer wants, each a button of the changes with its
@@ -427,6 +446,8 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-approve-all` — Approve every file of the review at point.
 - `harness-ui-patch-review-approve-ediff` — Approve the file compared in this Ediff, or stop approving it.
 - `harness-ui-patch-review-assume-viewed` — Take every file as viewed but those the branch's newest commit changed.
+- `harness-ui-patch-review-collapse-all` — Fold every directory of the review at point.
+- `harness-ui-patch-review-collapse-all-threads` — Fold every file's threads and every thread of the review at point.
 - `harness-ui-patch-review-comment` — Comment on the current difference with TEXT.
 - `harness-ui-patch-review-comment-line` — Comment on the line at point in the version Ediff shows.
 - `harness-ui-patch-review-cycle-fold` — Fold the threads of the current difference: one line, conversation, all.
@@ -438,6 +459,8 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-ediff-quit` — Back to the task's report, the windows as they were, without asking.
 - `harness-ui-patch-review-edit-comment` — Edit a draft of yours under point in Ediff; else go to the feedback box.
 - `harness-ui-patch-review-edit-feedback` — Go to the report's feedback box, to write the words that go with the comments.
+- `harness-ui-patch-review-expand-all` — Open every folded directory of the review at point.
+- `harness-ui-patch-review-expand-all-threads` — Open every file's threads and every thread of the review at point.
 - `harness-ui-patch-review-import-manual` — Make the replies you wrote by hand for this task threads of its review.
 - `harness-ui-patch-review-mouse-ediff` — Compare the file clicked on in EVENT in Ediff.
 - `harness-ui-patch-review-mouse-toggle-directory` — Fold or unfold the directory clicked on in EVENT.
@@ -458,6 +481,7 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-toggle-directory` — Fold the directory of the row at point, or unfold it.
 - `harness-ui-patch-review-toggle-ediff-tree` — Show the tree of the changed files beside Ediff, or hide it.
 - `harness-ui-patch-review-toggle-file-tree` — Show the changed files flat, in the diff's order, or as a tree.
+- `harness-ui-patch-review-toggle-fold` — Fold or open what point is on: a file's threads, or a thread.
 - `harness-ui-patch-review-toggle-reviewed` — Mark the thread at the current difference reviewed, or make it wait again.
 - `harness-ui-patch-review-toggle-skip-approved` — Switch whether going on from file to file steps over the files already approved.
 - `harness-ui-patch-review-toggle-thread` — Close the thread at the current difference, or at point, or open it again.

@@ -73,16 +73,30 @@
 ;;               files were taken as viewed and not looked at.
 ;;   directories the files group under the directories that hold them,
 ;;               with how many files each holds and the lines they add
-;;               and delete, as a file tree shows them.  TAB, RET or a
-;;               click folds a directory, and a approves its files.
+;;               and delete, as a file tree shows them.  They start
+;;               folded in the report and the banner -- not in the narrow
+;;               tree beside Ediff -- for each round of the review, so a
+;;               review of many directories is a line each; a directory
+;;               holding a file the user commented on, or has a draft on,
+;;               starts open.  TAB, RET or a click folds a directory, a
+;;               approves its files, and E and C, or [Expand all] and
+;;               [Collapse all] under the settings, open and fold them
+;;               all.  What the reader chose holds for the round.
 ;;   threads     a section below the files, in the same buffer -- not a
 ;;               view of its own: the library's drawing of each thread
 ;;               (who wrote each comment, when, which revision it was
 ;;               against, its place in the thread, open or closed), by
 ;;               file, under a heading whose buttons filter them by
-;;               status.  r replies in a thread, x closes it or opens it
-;;               again, RET on its header compares the file in Ediff at
-;;               its line, on a comment shows where it was made, o
+;;               status.  The threads of a file start folded to the
+;;               file's heading, and each thread starts folded to one
+;;               line, unless the user wrote in it; a file the user
+;;               commented on, or has a draft on, starts open, and so
+;;               does the change as a whole when they commented there.
+;;               TAB folds the file or the thread at point, and E and C,
+;;               or [Expand all] and [Collapse all] in the heading, do
+;;               every one.  r replies in a thread, x closes it or opens
+;;               it again, RET on its header compares the file in Ediff
+;;               at its line, on a comment shows where it was made, o
 ;;               follows an agent's comment to its conversation, c
 ;;               starts a new thread in the box, f changes the filter.
 ;;               T goes to the section; where there is none, in Ediff,
@@ -98,6 +112,11 @@
 ;;               at once, as a reply in the thread it starts.  In the
 ;;               threads view of a chat the box comes back for it, and
 ;;               the card stays in it until it is sent.
+;;
+;; The folds are the review's, for the task and the round: a report or a
+;; banner drawn again, and the tree beside Ediff, keep what the reader
+;; opened or folded, and the round after starts from the defaults, where
+;; the comments and drafts of the user have opened what they wrote in.
 ;;
 ;; Reviewing a branch is going through its files, and two settings make
 ;; that go the way a reviewer wants, each a button of the changes with its
@@ -643,8 +662,11 @@ the line it is on there and whether the line moved, changed or stayed
 \(`change-review-diff-place'); PLACING is the reading of the files that
 places them, while it runs.  SINCE says for each commented file, by its
 path, whether it `changed' or stayed the `same' since the reviewer's
-last comment on it.  TREE, non-nil while the files show as a tree; FOLDED holds the
-directories (their paths) folded in it.
+last comment on it.  TREE, non-nil while the files show as a tree;
+FOLDED holds what the reader chose of the directories (their paths),
+`folded' or `open', absent for the default a directory starts at;
+FOLD-ROUND is the review round that choice is for: a new round starts
+the tree and the threads collapsed again (`--ensure-fold-round').
 SHOW, non-nil when the review is shown for a task no longer waiting for
 one, opened from its session's history.  DIRTY is non-nil when the
 task's worktree has changes not committed.  LOADING is non-nil while the
@@ -678,6 +700,7 @@ about its code, which the branch has gone past."
   (since (make-hash-table :test 'equal))
   (tree harness-ui-patch-review-file-tree)
   (folded (make-hash-table :test 'equal))
+  fold-round
   show dirty loading error started
   popout banners tree-buffer origin ediff gone
   (snapshots (make-hash-table :test 'equal))
@@ -1913,6 +1936,26 @@ not one the reviewer is through with."
                (harness-ui-patch-review--file-threads review file))
       (harness-ui-patch-review--box-reply-p review file)))
 
+(defun harness-ui-patch-review--user-commented-file-p (review file)
+  "Non-nil when the user wrote a comment on FILE of REVIEW, or has a draft on it.
+A thread they wrote in counts, closed or open, as a draft does: the
+file is one they had something to say about, and it starts open where
+the others start folded (`harness-ui-patch-review--file-folded-p').
+FILE is a path, or nil for the threads about the change as a whole.  A
+reply card waiting in the report's box counts too
+\(`harness-ui-patch-review--box-reply-p')."
+  (let ((threads (change-review-set-threads (harness-ui-patch-review--r-set review))))
+    (or (if file
+            (cl-some (lambda (thread)
+                       (and (equal file (change-review-thread-file thread))
+                            (harness-ui-patch-review--user-wrote-p thread)))
+                     threads)
+          (cl-some (lambda (thread)
+                     (and (null (change-review-thread-file thread))
+                          (harness-ui-patch-review--user-wrote-p thread)))
+                   threads))
+        (and file (harness-ui-patch-review--box-reply-p review file)))))
+
 (defun harness-ui-patch-review--auto-approve (review file reached &optional unapproved)
   "Approve FILE of REVIEW, which the reviewer is leaving in Ediff, if it is due.
 That is with `harness-ui-patch-review-auto-approve' on, when REACHED says
@@ -1985,6 +2028,14 @@ reply; a comment on the change as a whole is on no file."
                   ((change-review-comment-draft-p comment))
                   (author (change-review-comment-author comment))
                   ((eq (change-review-author-kind author) 'user)))
+        ;; The threads are collapsed by default, and a file or thread the
+        ;; user commented on stays open: what they just wrote is in sight,
+        ;; and so is the file it is on.
+        (let ((file (change-review-thread-file thread)))
+          (change-review-ui-set-file-fold set file nil t)
+          (change-review-ui-set-fold set thread 'expanded t)
+          (when file
+            (harness-ui-patch-review--reveal-path review file)))
         ;; The files the report shows, and the branch's whole change: the
         ;; diff shown may be a part of it, and the approval is by the file's
         ;; path and blob either way.
@@ -2586,7 +2637,9 @@ snapshot's is the review's own."
   (define-key map (kbd "t") #'harness-ui-patch-review-toggle-file-tree)
   (define-key map (kbd "T") #'harness-ui-patch-review-threads)
   (define-key map (kbd "d") #'harness-ui-patch-review-select-diff)
-  (define-key map (kbd "c") #'harness-ui-patch-review-new-thread))
+  (define-key map (kbd "c") #'harness-ui-patch-review-new-thread)
+  (define-key map (kbd "E") #'harness-ui-patch-review-expand-all)
+  (define-key map (kbd "C") #'harness-ui-patch-review-collapse-all))
 
 (let ((map harness-ui-patch-review--row-map))
   (set-keymap-parent map harness-ui-patch-review--common-map)
@@ -2655,10 +2708,14 @@ again.  The library's commands act on the thread or the comment at point.")
   (define-key map (kbd "N") #'change-review-ui-next-thread)
   (define-key map (kbd "P") #'change-review-ui-previous-thread)
   (define-key map (kbd "S") #'harness-ui-patch-review-send-replies)
-  (define-key map (kbd "f") #'change-review-ui-cycle-filter))
+  (define-key map (kbd "f") #'change-review-ui-cycle-filter)
+  (define-key map (kbd "TAB") #'harness-ui-patch-review-toggle-fold)
+  (define-key map (kbd "<tab>") #'harness-ui-patch-review-toggle-fold)
+  (define-key map (kbd "E") #'harness-ui-patch-review-expand-all-threads)
+  (define-key map (kbd "C") #'harness-ui-patch-review-collapse-all-threads))
 
 (defconst harness-ui-patch-review--thread-hint-detail
-  "RET compares the file at the thread's line or shows where a comment was made, r replies, c starts a new thread in the box, S sends the replies of a task at work to the agent, e edits a draft, k deletes one and K a thread of drafts, x closes a thread or opens it again, o follows an agent's comment, f changes which threads show."
+  "RET compares the file at the thread's line or shows where a comment was made, r replies, c starts a new thread in the box, S sends the replies of a task at work to the agent, e edits a draft, k deletes one and K a thread of drafts, x closes a thread or opens it again, o follows an agent's comment, f changes which threads show, TAB folds or opens the file's threads or the thread at point, E opens every one and C folds every one."
   "The full key list the threads show on hover.")
 
 (defun harness-ui-patch-review--text-width (&optional margin)
@@ -2693,15 +2750,18 @@ comment's under its bar, which goes on down the lines."
         (setq pos (1+ end))))
     string))
 
-(defun harness-ui-patch-review--threads-heading (set filter &optional compact)
+(defun harness-ui-patch-review--threads-heading (set filter &optional compact fold-buttons)
   "Return the heading of the threads of SET, its FILTER's buttons.
 COMPACT leaves [New thread] out, as the tree beside Ediff has no box to
-write in."
+write in.  FOLD-BUTTONS, when given, are drawn after it: the [Expand all]
+and [Collapse all] buttons of the review."
   (let ((heading (change-review-ui-threads-heading set filter)))
     (propertize (if compact
                     heading
                   (concat (if (string-suffix-p "\n" heading) (substring heading 0 -1) heading)
-                          "   " (harness-ui-patch-review--new-thread-button) "\n"))
+                          "   " (harness-ui-patch-review--new-thread-button)
+                          (if fold-buttons (concat "   " fold-buttons) "")
+                          "\n"))
                 'harness-ui-patch-review-threads t 'wrap-prefix "  ")))
 
 (defun harness-ui-patch-review--new-thread-button ()
@@ -2770,12 +2830,18 @@ the review's set (`harness-ui-patch-review--view'), so the library's
 commands find the thread or comment at point and its buttons draw the
 section again.  ALWAYS-OPEN draws them whole, with no fold button: the
 threads view the chat puts in place of its box is the threads, not a
-line that hides them."
+line that hides them.
+The report and the banner start the threads of each file and each thread
+folded for the round, but where the user commented (`--file-folded-p',
+`--thread-fold'); COMPACT, the tree beside Ediff, and ALWAYS-OPEN draw
+them as they were."
+  (harness-ui-patch-review--ensure-fold-round review)
   (let* ((set (harness-ui-patch-review--r-set review))
          (filter (or change-review-ui--filter 'open))
          (counts (change-review-thread-counts set))
          (folded (and (not compact) (not always-open)
                       (harness-ui-patch-review--folded-p review "threads")))
+         (fold-comments (not (or compact always-open)))
          (text (if folded
                    (concat (harness-ui-patch-review--fold-button
                             review "threads"
@@ -2785,9 +2851,14 @@ line that hides them."
                  (concat
                   (unless (or compact always-open)
                     (harness-ui-patch-review--fold-button review "threads" ""))
-                  (harness-ui-patch-review--threads-heading set filter compact)
+                  (harness-ui-patch-review--threads-heading
+                   set filter compact
+                   (unless compact
+                     (harness-ui-patch-review--fold-all-buttons
+                      (lambda () (harness-ui-patch-review--set-comments-folded review nil))
+                      (lambda () (harness-ui-patch-review--set-comments-folded review t)))))
                   (if compact ""
-                    (propertize (concat "  " "RET: compare/jump  r: reply  c: new thread  S: send replies  x: close/reopen  f: filter  (hover for more)\n")
+                    (propertize (concat "  " "RET: compare/jump  r: reply  c: new thread  S: send replies  x: close/reopen  f: filter  TAB: fold  E/C: expand/collapse all  (hover for more)\n")
                                 'help-echo harness-ui-patch-review--thread-hint-detail
                                 'face 'harness-hint-face 'wrap-prefix "  "))
                   (when always-open
@@ -2798,6 +2869,12 @@ line that hides them."
                     set :filter filter :details change-review-ui--details
                     :width (harness-ui-patch-review--text-width (if compact 2 8))
                     :indent "  "
+                    :file-fold (and fold-comments
+                                    (lambda (file)
+                                      (harness-ui-patch-review--file-folded-p review file)))
+                    :thread-fold (and fold-comments
+                                      (lambda (thread)
+                                        (harness-ui-patch-review--thread-fold review thread)))
                     :empty (pcase filter
                              ('open "No open threads.  c starts a new one; f shows the closed ones.")
                              ('closed "No closed threads.  c starts a new one; f shows the open ones.")
@@ -3112,6 +3189,63 @@ The next file to review, so the next one that is not approved while
     (cl-remove-if-not (lambda (file) (string-prefix-p prefix (change-review-file-path file)))
                       (harness-ui-patch-review--r-files review))))
 
+(defun harness-ui-patch-review--directory-paths (review)
+  "Return the paths of every directory in REVIEW's file tree."
+  (let (paths)
+    (dolist (file (harness-ui-patch-review--r-files review))
+      (let ((path nil))
+        (dolist (part (butlast (split-string (change-review-file-path file) "/" t)))
+          (setq path (if path (concat path "/" part) part))
+          (cl-pushnew path paths :test #'equal))))
+    (nreverse paths)))
+
+(defun harness-ui-patch-review--directory-has-user-comment-p (review path)
+  "Non-nil when a file under PATH in REVIEW has a comment or draft of the user's.
+That is a thread they wrote in, or a reply card in the report's box;
+such a directory starts open, that its file be in sight
+\(`harness-ui-patch-review--directory-folded-p')."
+  (cl-some (lambda (file)
+             (or (cl-some #'harness-ui-patch-review--user-wrote-p
+                          (harness-ui-patch-review--file-threads review file))
+                 (harness-ui-patch-review--box-reply-p review file)))
+           (harness-ui-patch-review--dir-files review path)))
+
+(defun harness-ui-patch-review--directory-folded-p (review path &optional compact)
+  "Non-nil when the directory at PATH of REVIEW is folded.
+What the reader chose holds.  A directory they never folded starts
+folded unless a file under it has a comment or draft of the user's
+\(`harness-ui-patch-review--directory-has-user-comment-p'), so that a
+large tree starts as its directories and the files the user commented
+on are in sight.  COMPACT, the tree beside Ediff, starts every directory
+open: that tree is there to go from file to file."
+  (let ((state (gethash path (harness-ui-patch-review--r-folded review) 'unset)))
+    (cond ((eq state 'folded) t)
+          ((eq state 'open) nil)
+          (compact nil)
+          (t (not (harness-ui-patch-review--directory-has-user-comment-p review path))))))
+
+(defun harness-ui-patch-review--set-directories-folded (review folded)
+  "Fold every directory of REVIEW's files when FOLDED, else open them all.
+The view is drawn again."
+  (let ((folded (and folded 'folded)))
+    (dolist (path (harness-ui-patch-review--directory-paths review))
+      (puthash path (or folded 'open) (harness-ui-patch-review--r-folded review))))
+  (harness-ui-patch-review--refresh review))
+
+(defun harness-ui-patch-review-expand-all ()
+  "Open every folded directory of the review at point."
+  (interactive)
+  (harness-ui-patch-review--set-directories-folded
+   (or (harness-ui-patch-review--review-here) (user-error "No review here")) nil)
+  (message "Opened every directory"))
+
+(defun harness-ui-patch-review-collapse-all ()
+  "Fold every directory of the review at point."
+  (interactive)
+  (harness-ui-patch-review--set-directories-folded
+   (or (harness-ui-patch-review--review-here) (user-error "No review here")) t)
+  (message "Folded every directory"))
+
 (cl-defun harness-ui-patch-review--directory-row (review node path depth &key compact)
   "Return the row of directory NODE, at PATH, at DEPTH in the file tree.
 It says how many files the directory holds and the lines they add and
@@ -3119,7 +3253,7 @@ delete, and whether it is folded (`harness-ui-patch-review-toggle-directory');
 COMPACT leaves the count of files out."
   (pcase-let* ((`(,count ,added ,deleted) (harness-ui-patch-review--tree-stats node))
                (indent (harness-ui-patch-review--tree-indent depth))
-               (folded (gethash path (harness-ui-patch-review--r-folded review)))
+               (folded (harness-ui-patch-review--directory-folded-p review path compact))
                (row (concat indent
                             (propertize (if folded "▸ " "▾ ") 'face 'harness-dim-face)
                             (propertize (concat (plist-get node :name) "/") 'face 'bold)
@@ -3164,7 +3298,7 @@ A folded directory shows its own row alone."
                  (child-path (if path (concat path "/" (plist-get child :name)) (plist-get child :name))))
             (concat (harness-ui-patch-review--directory-row review child child-path depth
                                                             :compact compact)
-                    (if (gethash child-path (harness-ui-patch-review--r-folded review))
+                    (if (harness-ui-patch-review--directory-folded-p review child-path compact)
                         ""
                       (harness-ui-patch-review--tree-lines
                        review child (1+ depth) width counts indices
@@ -3258,20 +3392,25 @@ In a report showing the changes, from a row or anywhere else in it."
                   (get-text-property bol 'harness-ui-patch-review-task))))
     (and path review (cons review path))))
 
-(defun harness-ui-patch-review--reveal-file (review index)
-  "Unfold the directories of REVIEW that hide the file at INDEX.
+(defun harness-ui-patch-review--reveal-path (review path)
+  "Open the directories of REVIEW that hide PATH.
 Return non-nil when one was folded."
-  (let* ((path (change-review-file-path (nth index (harness-ui-patch-review--r-files review))))
-         (parts (butlast (split-string path "/" t)))
+  (let* ((parts (butlast (split-string path "/" t)))
          (folded (harness-ui-patch-review--r-folded review))
          (dir nil)
          changed)
     (dolist (part parts)
       (setq dir (if dir (concat dir "/" part) part))
-      (when (gethash dir folded)
-        (remhash dir folded)
+      (when (harness-ui-patch-review--directory-folded-p review dir)
+        (puthash dir 'open folded)
         (setq changed t)))
     changed))
+
+(defun harness-ui-patch-review--reveal-file (review index)
+  "Unfold the directories of REVIEW that hide the file at INDEX.
+Return non-nil when one was folded."
+  (harness-ui-patch-review--reveal-path
+   review (change-review-file-path (nth index (harness-ui-patch-review--r-files review)))))
 
 (defun harness-ui-patch-review-toggle-directory ()
   "Fold the directory of the row at point, or unfold it.
@@ -3280,8 +3419,11 @@ banner and the tree beside Ediff alike."
   (interactive)
   (pcase-let ((`(,review . ,path) (or (harness-ui-patch-review--dir-at-point)
                                       (user-error "No directory on this line"))))
-    (let ((folded (harness-ui-patch-review--r-folded review)))
-      (if (gethash path folded) (remhash path folded) (puthash path t folded)))
+    (let* ((compact (eq (current-buffer) (harness-ui-patch-review--r-tree-buffer review)))
+           (folded (harness-ui-patch-review--r-folded review)))
+      (puthash path (if (harness-ui-patch-review--directory-folded-p review path compact)
+                        'open 'folded)
+               folded))
     (harness-ui-patch-review--refresh review)))
 
 (defun harness-ui-patch-review-mouse-toggle-directory (event)
@@ -3558,6 +3700,13 @@ its key.  COMPACT uses shorter words."
             "Tree" nil (harness-ui-patch-review--r-tree review)
             "t" #'harness-ui-patch-review-toggle-file-tree
             "The files grouped by directory, or in a flat list")
+           (if (and (not compact) (harness-ui-patch-review--r-tree review)
+                    (harness-ui-patch-review--directory-paths review))
+               (concat "   "
+                       (harness-ui-patch-review--fold-all-buttons
+                        (lambda () (harness-ui-patch-review--set-directories-folded review nil))
+                        (lambda () (harness-ui-patch-review--set-directories-folded review t))))
+             "")
            "\n")
    'harness-ui-patch-review-task (harness-ui-patch-review--r-id review))
    harness-ui-patch-review--common-map))
@@ -3627,7 +3776,7 @@ them (`harness-ui-patch-review-send-replies')."
       (_ (format "The branch changes nothing against %s." (harness-ui-patch-review--r-base review))))))
 
 (defconst harness-ui-patch-review--hint-detail
-  "RET or a click compares a file in Ediff (a directory: folds it), n and p move between files, a approves one (✔ approved, ✓ only viewed: only the approved are skipped), A all of them, V takes the files the newest commit left alone as viewed; s and u switch skipping the approved files and approving those you go through without a comment, t the tree, d chooses the diff shown, T goes to the threads, c starts a new thread in the box, e on a thread edits one of its drafts, k deletes one and K the thread when it is only drafts, m marks a thread the agent closed as reviewed (M all of them).  In Ediff c comments, r replies, e edits a draft or goes to the box, k deletes a draft and K a thread of drafts, N and P go to the next and previous file, q comes back."
+  "RET or a click compares a file in Ediff (a directory: folds it), n and p move between files, a approves one (✔ approved, ✓ only viewed: only the approved are skipped), A all of them, V takes the files the newest commit left alone as viewed; s and u switch skipping the approved files and approving those you go through without a comment, t the tree, E opens every directory and C folds every one, d chooses the diff shown, T goes to the threads, c starts a new thread in the box, e on a thread edits one of its drafts, k deletes one and K the thread when it is only drafts, m marks a thread the agent closed as reviewed (M all of them).  In Ediff c comments, r replies, e edits a draft or goes to the box, k deletes a draft and K a thread of drafts, N and P go to the next and previous file, q comes back."
   "The full key list the changes show on hover.")
 
 (defun harness-ui-patch-review--tree-width (&optional frame)
@@ -3757,6 +3906,174 @@ and draws the surface again."
        (harness-ui-report--refresh task))
      (if folded "Show it" "Hide it"))))
 
+;;;;; What starts folded, per round
+
+(defun harness-ui-patch-review--round (review)
+  "Return the round of REVIEW whose folds it keeps.
+That is the round the newest version of its set was handed in at
+\(`harness-patch-review--version-op'), the task's count of rounds of
+feedback when no version says, and 0 before any: every round starts the
+tree and the threads collapsed again, and what the reader folds or
+opens stays so while that round lasts."
+  (let* ((set (harness-ui-patch-review--r-set review))
+         (version (and set (change-review-latest-version set)))
+         (round (and version (plist-get (change-review-version-meta version) :round))))
+    (or (and (integerp round) round)
+        (length (plist-get (harness-ui-patch-review--r-task review) :feedback))
+        0)))
+
+(defun harness-ui-patch-review--ensure-fold-round (review)
+  "Forget REVIEW's folds when it shows a round other than the one they are for.
+A review that comes back after another round of feedback starts its
+tree and threads collapsed again; the reader's choices of the round
+before are not carried over.  The state of this round is kept in the
+review, so redrawing, closing and opening its report, or moving between
+its files keeps it."
+  (let ((round (harness-ui-patch-review--round review)))
+    (unless (equal round (harness-ui-patch-review--r-fold-round review))
+      (setf (harness-ui-patch-review--r-fold-round review) round)
+      (clrhash (harness-ui-patch-review--r-folded review))
+      (when-let* ((set (harness-ui-patch-review--r-set review)))
+        (change-review-ui-forget-folds set)))))
+
+(defun harness-ui-patch-review--file-start-folded-p (review file)
+  "Non-nil when the threads of FILE of REVIEW start folded.
+FILE is a path, or nil for the threads about the change as a whole.
+A file the user commented on, or has a draft on, starts open
+\(`harness-ui-patch-review--user-commented-file-p'); every other starts
+folded, so that a review of many files is a line each."
+  (not (harness-ui-patch-review--user-commented-file-p review file)))
+
+(defun harness-ui-patch-review--file-folded-p (review file)
+  "Non-nil when the threads of FILE of REVIEW are drawn folded.
+FILE is a path, or nil for the change as a whole.  What the reader chose
+holds; a file they never folded starts as
+`harness-ui-patch-review--file-start-folded-p' says."
+  (change-review-ui-file-fold
+   (harness-ui-patch-review--r-set review) file
+   (harness-ui-patch-review--file-start-folded-p review file)))
+
+(defun harness-ui-patch-review--thread-start-fold (thread)
+  "Return how THREAD starts folded: open when the user wrote in it.
+A thread they wrote in stays open (`harness-ui-patch-review--user-wrote-p');
+every other starts collapsed, one line, so that a review of many threads
+is a line each."
+  (if (harness-ui-patch-review--user-wrote-p thread) 'expanded 'collapsed))
+
+(defun harness-ui-patch-review--thread-fold (review thread)
+  "Return how THREAD of REVIEW is folded.
+What the reader chose holds; a thread they never folded starts as
+`harness-ui-patch-review--thread-start-fold' says."
+  (change-review-ui-thread-fold
+   (harness-ui-patch-review--r-set review) thread
+   (harness-ui-patch-review--thread-start-fold thread)))
+
+(defun harness-ui-patch-review--file-at-point ()
+  "Return (REVIEW . FILE) for the threads file heading at point, or nil.
+FILE is nil for the heading of the change as a whole."
+  (when (get-text-property (point) 'change-review-file)
+    (let ((review (harness-ui-patch-review--review-here))
+          (file (get-text-property (point) 'change-review-file)))
+      (when review
+        (cons review (unless (eq file :change) file))))))
+
+(defun harness-ui-patch-review--toggle-file-fold (&optional review file)
+  "Fold or open the threads of FILE, one of REVIEW's files.
+FILE nil is the threads about the change as a whole.  Interactively, it
+is the file whose heading point is on."
+  (interactive)
+  (let* ((at (when (called-interactively-p 'interactive)
+               (or (harness-ui-patch-review--file-at-point)
+                   (user-error "No file's threads here"))))
+         (review (or review (car at)))
+         (file (if at (cdr at) file)))
+    (unless review (user-error "No file's threads here"))
+    (let ((folded (not (harness-ui-patch-review--file-folded-p review file))))
+      (change-review-ui-set-file-fold (harness-ui-patch-review--r-set review) file folded)
+      (harness-ui-patch-review--refresh review)
+      (message "%s the threads of %s" (if folded "Folded" "Opened")
+               (or file "the change as a whole")))))
+
+(defun harness-ui-patch-review--toggle-thread-fold (&optional review thread)
+  "Fold or open THREAD of REVIEW, through one line, its conversation and back.
+Interactively, it is the thread at point."
+  (interactive)
+  (let* ((at (unless (and review thread)
+               (change-review-ui--thread-at-point)))
+         (set (and at (change-review-ui--current-set)))
+         (review (or review (harness-ui-patch-review--review-here)))
+         (thread (or thread at)))
+    (unless (and review thread) (user-error "No thread here"))
+    (let* ((set (or set (harness-ui-patch-review--r-set review)))
+           (next (pcase (harness-ui-patch-review--thread-fold review thread)
+                   ('collapsed 'expanded)
+                   ('expanded (if (change-review-ui--trimmed-p set thread) 'full 'collapsed))
+                   (_ 'collapsed))))
+      (change-review-ui-set-fold set thread next)
+      (harness-ui-patch-review--refresh review)
+      (message "%s: %s" (change-review-ui-thread-short-id set thread)
+               (pcase next
+                 ('collapsed "one line")
+                 ('expanded "the conversation")
+                 (_ "all of it"))))))
+
+(defun harness-ui-patch-review-toggle-fold ()
+  "Fold or open what point is on: a file's threads, or a thread.
+The file heading at point shows or hides the threads under it; a thread
+goes through one line, its conversation and all of it, as TAB does in
+Ediff (`change-review-ui-next-fold')."
+  (interactive)
+  (let ((file (get-text-property (point) 'change-review-file))
+        (id (get-text-property (point) 'change-review-thread)))
+    (cond
+     (id
+      (let* ((review (or (harness-ui-patch-review--review-here)
+                         (user-error "No review here")))
+             (set (harness-ui-patch-review--r-set review))
+             (thread (change-review-find-thread set id)))
+        (unless thread (user-error "No thread here"))
+        (harness-ui-patch-review--toggle-thread-fold review thread)))
+     (file (harness-ui-patch-review--toggle-file-fold))
+     (t
+      (let ((thread (ignore-errors (change-review-ui--thread-at-point))))
+        (if thread
+            (harness-ui-patch-review--toggle-thread-fold nil thread)
+          (user-error "No thread or file's threads here")))))))
+
+(defun harness-ui-patch-review--fold-all-buttons (expand collapse)
+  "Return the [Expand all] and [Collapse all] buttons running EXPAND and COLLAPSE."
+  (concat (propertize (buttonize "[Expand all]" (lambda (_) (funcall expand)) nil
+                                 "Open every folded one")
+                      'mouse-face 'highlight)
+          " "
+          (propertize (buttonize "[Collapse all]" (lambda (_) (funcall collapse)) nil
+                                 "Fold every open one")
+                      'mouse-face 'highlight)))
+
+(defun harness-ui-patch-review--set-comments-folded (review folded)
+  "Fold every file's threads of REVIEW, and every thread, when FOLDED.
+Open them all when not.  The change as a whole is a file's threads too."
+  (let ((set (harness-ui-patch-review--r-set review)))
+    (change-review-ui-set-folds set (change-review-set-threads set)
+                                (if folded 'collapsed 'expanded))
+    (change-review-ui-set-file-folds set
+                                     (mapcar #'car (change-review-threads-by-file set))
+                                     folded)
+    (harness-ui-patch-review--refresh review)
+    (message "%s the threads of this review" (if folded "Folded" "Opened"))))
+
+(defun harness-ui-patch-review-expand-all-threads ()
+  "Open every file's threads and every thread of the review at point."
+  (interactive)
+  (harness-ui-patch-review--set-comments-folded
+   (or (harness-ui-patch-review--review-here) (user-error "No review here")) nil))
+
+(defun harness-ui-patch-review-collapse-all-threads ()
+  "Fold every file's threads and every thread of the review at point."
+  (interactive)
+  (harness-ui-patch-review--set-comments-folded
+   (or (harness-ui-patch-review--review-here) (user-error "No review here")) t))
+
 (defun harness-ui-patch-review--section (review counts &optional compact)
   "Return REVIEW's changes as its report shows them.
 The heading, the settings, what to know, the files -- the tree or a flat
@@ -3764,8 +4081,12 @@ list -- and under them the threads.  COUNTS are its threads per file.
 COMPACT draws it for the narrow tree beside Ediff: rows that fit, the
 file Ediff compares marked, and no line of keys.  The heading folds the
 files away -- the tree is long, and the report should not be all of it
-once the work is known -- and the threads have a fold of their own; the
-reader's choice is kept from one hand-in to the next."
+once the work is known -- and the threads have a fold of their own.
+Directories, the threads of each file and each thread start folded for
+the round, but where the user commented (`--ensure-fold-round',
+`--file-start-folded-p', `--thread-start-fold'); the reader's choice is
+kept while that round lasts."
+  (harness-ui-patch-review--ensure-fold-round review)
   (let* ((files (harness-ui-patch-review--r-files review))
          (folded (and (not compact) (harness-ui-patch-review--folded-p review "changes")))
          (indices (let ((table (make-hash-table :test 'eq)))
@@ -3807,7 +4128,7 @@ reader's choice is kept from one hand-in to the next."
                                              :compact compact :avail avail :current (eql current index))
                                             "\n")))
                   (if compact ""
-                    (concat (propertize (concat "  " "RET: compare  a: approve  n/p: files  T: threads  (hover for more)")
+                    (concat (propertize (concat "  " "RET: compare  a: approve  n/p: files  T: threads  E/C: expand/collapse dirs  (hover for more)")
                                         'help-echo harness-ui-patch-review--hint-detail
                                         'face 'harness-hint-face 'wrap-prefix "  ")
                             "\n"))))))

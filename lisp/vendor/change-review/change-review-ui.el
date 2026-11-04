@@ -2760,8 +2760,56 @@ FOLD is `collapsed', `expanded' or `full'.  STATUS is the thread's when
 it was folded: a thread whose status changed since is drawn as a thread
 of that status is, again.")
 
+(defvar change-review-ui--file-folds (make-hash-table :test 'eq :weakness 'key)
+  "How the files of a change set are folded: set -> a table of FILE -> (FOLDED).
+FILE is a path, or `:change' for the threads about the change as a whole.
+FOLDED is non-nil when the file's threads are drawn as its heading alone.
+A file not in the table is drawn as `change-review-ui-file-fold' says it
+starts, which the caller decides.")
+
 (defvar change-review-ui--trimmed (make-hash-table :test 'eq :weakness 'key)
   "Change set -> a table of the ids of the threads the last drawing cut short.")
+
+(defun change-review-ui--file-key (file)
+  "Return FILE, a path or nil for the change as a whole, as the fold table keys it."
+  (or file :change))
+
+(defun change-review-ui-file-fold (set file &optional default)
+  "Return non-nil when the threads of FILE of SET are drawn folded.
+FILE is a path, or nil for the threads about the change as a whole.
+DEFAULT is the answer when the user never folded the file, nil when it
+is not given: a file starts open.  What the user chose
+\(`change-review-ui-set-file-fold') holds."
+  (let* ((table (gethash set change-review-ui--file-folds))
+         (value (if table (gethash (change-review-ui--file-key file) table 'unset) 'unset)))
+    (if (eq value 'unset) default value)))
+
+(defun change-review-ui-set-file-fold (set file folded &optional no-refresh)
+  "Draw the threads of FILE of SET folded when FOLDED, else open.
+FILE is a path, or nil for the threads about the change as a whole.
+Unless NO-REFRESH, the views of SET are drawn again."
+  (let ((table (or (gethash set change-review-ui--file-folds)
+                   (puthash set (make-hash-table :test 'equal) change-review-ui--file-folds))))
+    (puthash (change-review-ui--file-key file) (and folded t) table))
+  (unless no-refresh (change-review-ui-refresh set)))
+
+(defun change-review-ui-set-file-folds (set files folded)
+  "Draw the threads of FILES of SET folded when FOLDED, else open.
+FILES are paths, or nil for the threads about the change as a whole.
+The views of SET are drawn again once."
+  (let ((table (or (gethash set change-review-ui--file-folds)
+                   (puthash set (make-hash-table :test 'equal) change-review-ui--file-folds))))
+    (dolist (file files)
+      (puthash (change-review-ui--file-key file) (and folded t) table)))
+  (change-review-ui-refresh set))
+
+(defun change-review-ui-forget-folds (set)
+  "Forget how the threads and files of SET were folded.
+The next drawing starts them as their caller's defaults say, which is
+what a new round of a review wants."
+  (remhash set change-review-ui--folds)
+  (remhash set change-review-ui--file-folds)
+  (remhash set change-review-ui--trimmed))
 
 (defun change-review-ui--note-trimmed (set thread trimmed)
   "Note that the last drawing of THREAD of SET was TRIMMED, cut short, or was not."
@@ -2787,24 +2835,23 @@ user's review in SET; any other is `expanded'."
       'collapsed
     'expanded))
 
-(defun change-review-ui-thread-fold (set thread)
+(defun change-review-ui-thread-fold (set thread &optional default)
   "Return how THREAD of SET is folded: `collapsed', `expanded' or `full'.
 A collapsed thread is drawn as one line, an expanded one in full but
 for what does not fit the window (`change-review-ui-max-thread-lines'),
 a full one in full.  What the user chose
-\(`change-review-ui-set-fold') holds while the thread keeps its status."
+\(`change-review-ui-set-fold') holds while the thread keeps its status.
+DEFAULT is the fold when they never did, and when it is not given, the
+one `change-review-ui-default-fold' says."
   (let* ((table (gethash set change-review-ui--folds))
          (entry (and table (gethash (change-review-thread-id thread) table))))
     (if (and entry (eq (car entry) (change-review-thread-status thread)))
         (cdr entry)
-      (change-review-ui-default-fold thread set))))
+      (or default (change-review-ui-default-fold thread set)))))
 
-(defun change-review-ui-set-fold (set thread fold)
-  "Fold THREAD of SET to FOLD, `collapsed', `expanded' or `full'.
-One line takes back what was shown of it: the earlier replies and the
-long comments drawn in full (`change-review-ui-show-earlier',
-`change-review-ui-show-comment'), so that its conversation, drawn
-again, is as short as it was.  The views of SET are drawn again."
+(defun change-review-ui--store-fold (set thread fold)
+  "Keep FOLD as the way THREAD of SET is drawn, and take back what one line hides.
+No view is drawn again."
   (unless (memq fold '(collapsed expanded full))
     (signal 'change-review-error (list (format "Not a way to fold a thread: %S" fold))))
   (let ((table (or (gethash set change-review-ui--folds)
@@ -2813,7 +2860,23 @@ again, is as short as it was.  The views of SET are drawn again."
   (when (eq fold 'collapsed)
     (change-review-ui--set-flag change-review-ui--earlier set (change-review-thread-id thread) nil)
     (dolist (comment (change-review-thread-comments thread))
-      (change-review-ui--set-flag change-review-ui--shown set (change-review-comment-id comment) nil)))
+      (change-review-ui--set-flag change-review-ui--shown set (change-review-comment-id comment) nil))))
+
+(defun change-review-ui-set-fold (set thread fold &optional no-refresh)
+  "Fold THREAD of SET to FOLD, `collapsed', `expanded' or `full'.
+One line takes back what was shown of it: the earlier replies and the
+long comments drawn in full (`change-review-ui-show-earlier',
+`change-review-ui-show-comment'), so that its conversation, drawn
+again, is as short as it was.  Unless NO-REFRESH, the views of SET are
+drawn again."
+  (change-review-ui--store-fold set thread fold)
+  (unless no-refresh (change-review-ui-refresh set)))
+
+(defun change-review-ui-set-folds (set threads fold)
+  "Fold every thread of THREADS of SET to FOLD, and draw the views again once.
+FOLD is `collapsed', `expanded' or `full', as `change-review-ui-set-fold'
+takes it."
+  (dolist (thread threads) (change-review-ui--store-fold set thread fold))
   (change-review-ui-refresh set))
 
 (defun change-review-ui-next-fold (set thread)
@@ -3212,7 +3275,43 @@ buffer it is pressed in and draws that view again
                  'face 'change-review-ui-meta-face)
      "\n\n")))
 
-(cl-defun change-review-ui-threads-string (set &key (filter 'open) details width (indent "") empty)
+(cl-defun change-review-ui--file-heading (set file threads filter indent &optional folded foldable)
+  "Return the heading line of the threads of FILE of SET, ending in a newline.
+FILE is a path, or nil for the threads about the change as a whole.
+THREADS are its threads that FILTER lets through; INDENT starts the
+line.  FOLDED says they are drawn folded, one line; FOLDABLE gives the
+heading the triangle and the names that fold and open them, when it is
+non-nil."
+  (let* ((open (cl-count-if #'change-review-thread-open-p threads))
+         (name (if file file "The change as a whole"))
+         (triangle (cond ((not foldable) "▾ ")
+                         (folded "▸ ")
+                         (t "▾ ")))
+         (fold (if foldable
+                   (change-review-ui--link
+                    triangle
+                    (if folded "Show the threads of this file" "Fold the threads of this file")
+                    (lambda () (change-review-ui-set-file-fold set file (not folded)))
+                    'change-review-ui-fold-face)
+                 (propertize triangle 'face 'change-review-ui-file-face)))
+         (label (if foldable
+                    (change-review-ui--link
+                     name
+                     (if folded "Show the threads of this file" "Fold the threads of this file")
+                     (lambda () (change-review-ui-set-file-fold set file (not folded)))
+                     'change-review-ui-file-face)
+                  (propertize name 'face 'change-review-ui-file-face))))
+    (propertize
+     (concat indent fold label
+             (propertize (format "   %d %s%s" (length threads)
+                                 (if (= 1 (length threads)) "thread" "threads")
+                                 (if (eq filter 'all) (format " · %d open" open) ""))
+                         'face 'change-review-ui-meta-face)
+             "\n")
+     'change-review-file (or file :change))))
+
+(cl-defun change-review-ui-threads-string (set &key (filter 'open) details width (indent "") empty
+                                               file-fold thread-fold)
   "Return the threads of SET that FILTER lets through, grouped by file, as text.
 This is the body of the threads view, for a buffer that shows it among
 its own text.  The change as a whole comes first, then the files in the
@@ -3230,7 +3329,14 @@ the comments that also show where they were made.  WIDTH is the width to
 wrap to, by default that of the window showing the current buffer, and
 INDENT starts every line.  EMPTY is the line to say when the filter
 lets no thread through, by default one that says so.  The head of the
-threads, their filter buttons, is `change-review-ui-threads-heading'."
+threads, their filter buttons, is `change-review-ui-threads-heading'.
+
+FILE-FOLD, when given, is a function of a file (a path, or nil for the
+change as a whole) that says the file's threads are drawn folded: its
+heading alone, with a triangle that folds and opens it.  THREAD-FOLD,
+when given, is a function of a thread that says how it is folded, as
+`change-review-ui-thread-string' takes FOLD; without it the threads are
+drawn whole, as the threads view draws them."
   (let ((groups (change-review-threads-by-file set filter))
         (width (or width (change-review-ui-current-width))))
     (if (null groups)
@@ -3246,26 +3352,20 @@ threads, their filter buttons, is `change-review-ui-threads-heading'."
       (mapconcat
        (lambda (group)
          (let* ((file (car group)) (threads (cdr group))
-                (open (cl-count-if #'change-review-thread-open-p threads)))
+                (folded (and file-fold (funcall file-fold file))))
            (concat
-            (propertize
-             (concat indent
-                     (propertize (if file (concat "▾ " file) "▾ The change as a whole")
-                                 'face 'change-review-ui-file-face)
-                     (propertize (format "   %d %s%s" (length threads)
-                                         (if (= 1 (length threads)) "thread" "threads")
-                                         (if (eq filter 'all) (format " · %d open" open) ""))
-                                 'face 'change-review-ui-meta-face)
-                     "\n")
-             'change-review-file (or file :change))
-            (mapconcat
-             (lambda (thread)
-               (concat (change-review-ui-thread-string
-                        set thread :view 'threads
-                        :placement (change-review-placement set thread)
-                        :details details :width width :indent (concat indent "  "))
-                       "\n"))
-             threads ""))))
+            (change-review-ui--file-heading set file threads filter indent
+                                            folded (and file-fold t))
+            (unless folded
+              (mapconcat
+               (lambda (thread)
+                 (concat (change-review-ui-thread-string
+                          set thread :view 'threads
+                          :placement (change-review-placement set thread)
+                          :details details :width width :indent (concat indent "  ")
+                          :fold (and thread-fold (funcall thread-fold thread)))
+                         "\n"))
+               threads "")))))
        groups ""))))
 
 (defun change-review-ui--screen-row ()

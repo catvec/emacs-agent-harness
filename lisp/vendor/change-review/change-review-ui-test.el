@@ -2176,6 +2176,50 @@ passes the filter."
       (should (equal "Nothing.\n"
                      (substring-no-properties (change-review-ui-threads-string set :empty "Nothing.")))))))
 
+(ert-deftest change-review-ui-threads-string-folds-files-and-threads ()
+  "The threads string can draw a file's threads as its heading alone, and
+each thread as one line; what it leaves folded is the caller's default
+until the reader folds a file themselves, and forgetting the folds starts
+them at the caller's defaults again."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (threads (change-review-ui-test--populate set))
+           (fold (lambda (file) (equal file "a.el")))
+           (folded (change-review-ui-threads-string
+                    set :filter 'open :width 80
+                    :file-fold fold :thread-fold (lambda (_thread) 'collapsed)))
+           (open (change-review-ui-threads-string
+                  set :filter 'open :width 80
+                  :file-fold (lambda (_file) nil)
+                  :thread-fold (lambda (_thread) 'expanded))))
+      ;; The change as a whole is open, its thread one line.
+      (should (string-match-p "^▾ The change as a whole +1 thread$"
+                              (substring-no-properties folded)))
+      (should (string-match-p "^▸ ● [^ ]+ · the change · 1 comment · open "
+                              (substring-no-properties folded)))
+      (should (string-search "Overall: good" folded))
+      ;; a.el is its heading alone.
+      (should (string-match-p "^▸ a\\.el +2 threads$" (substring-no-properties folded)))
+      (should-not (string-search "What about a4?" (substring-no-properties folded)))
+      ;; Every file and thread open: both threads of a.el and their text.
+      (should (string-match-p "^▾ a\\.el +2 threads$" (substring-no-properties open)))
+      (should (string-search "Why 'two?" open))
+      (should (string-search "What about a4?" open))
+      ;; A file's fold is the reader's, with the caller's default until set.
+      (should-not (change-review-ui-file-fold set "a.el"))
+      (should (eq 'open (change-review-ui-file-fold set "a.el" 'open)))
+      (change-review-ui-set-file-fold set "a.el" t t)
+      (should (change-review-ui-file-fold set "a.el" 'open))
+      (change-review-ui-set-file-fold set "a.el" nil t)
+      (should-not (change-review-ui-file-fold set "a.el" t))
+      ;; Forgetting them, as a new round does, gives the caller its defaults.
+      (change-review-ui-forget-folds set)
+      (should (eq 'open (change-review-ui-file-fold set "a.el" 'open)))
+      (should-not (change-review-ui-file-fold set "a.el"))
+      (should (eq 'expanded (change-review-ui-thread-fold set (car threads))))
+      (should (eq 'collapsed (change-review-ui-thread-fold set (car threads) 'collapsed)))
+      (ignore threads))))
+
 (ert-deftest change-review-ui-threads-heading-has-the-filter-buttons ()
   "The head of the threads has a button for each filter, the one in force
 marked, how many drafts wait, and its buttons set the filter of the buffer
