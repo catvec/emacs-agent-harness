@@ -165,6 +165,10 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Review agent file changes in ediff 
   - Maximum task concurrency
   - Priorities
+  - `PREFIX a` opens the task board of the buffer's project: the project
+    of its directory, or in a session buffer the session's own project,
+    whatever directory that session works in and whatever other
+    project's board is open
 - Insights
 - Btw sessions
 - Sticky compose box (`ui-sticky-compose`)

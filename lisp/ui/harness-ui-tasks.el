@@ -4877,9 +4877,41 @@ act on from there.
         ("C-c ." "A board key, from the box" harness-compose-panel-key)
         ("C-y" "Paste; an image attaches" harness-compose-yank)]))
 
+(defun harness-ui-tasks--plain-name (root)
+  "Return the name of the directory of project ROOT."
+  (let ((name (file-name-nondirectory (directory-file-name root))))
+    (if (string-empty-p name) (abbreviate-file-name root) name)))
+
 (defun harness-ui-tasks--buffer-name (dir)
-  "Return the name of the board buffer for the project directory DIR."
-  (format "*harness tasks: %s*" (file-name-nondirectory (directory-file-name dir))))
+  "Return the name of the board buffer for the project directory DIR.
+Two projects can share a directory name, and their boards are buffers of
+their own: a name another live board has keeps the directory above it,
+and more of the path above that while two boards still share a name, as
+the cards of the board of every project do
+\(`harness-ui-tasks--project-names')."
+  (let* ((root (file-name-as-directory (expand-file-name dir)))
+         (name (harness-ui-tasks--plain-name root))
+         (others (delq nil
+                       (mapcar (lambda (board)
+                                 (and (not (buffer-local-value 'harness-ui-tasks--all board))
+                                      (let ((there (buffer-local-value 'harness-ui-tasks--dir board)))
+                                        (and (stringp there)
+                                             (not (equal root (file-name-as-directory
+                                                               (expand-file-name there))))
+                                             there))))
+                               (harness-ui-tasks--buffers)))))
+    (when (cl-some (lambda (there) (equal name (harness-ui-tasks--plain-name there))) others)
+      (let ((parts 2)
+            (tail nil))
+        (while (and (<= parts 8) (null tail))
+          (let ((candidate (harness-ui-tasks--directory-tail root parts)))
+            (unless (cl-some (lambda (there)
+                               (equal candidate (harness-ui-tasks--directory-tail there parts)))
+                             others)
+              (setq tail candidate)))
+          (setq parts (1+ parts)))
+        (setq name (or tail (abbreviate-file-name (directory-file-name root))))))
+    (format "*harness tasks: %s*" name)))
 
 (defconst harness-ui-tasks--all-buffer-name "*harness tasks: all projects*"
   "The name of the buffer of the board of every project (`harness-tasks-all').")
@@ -4904,18 +4936,44 @@ updated session of the board's tasks, archived ones aside."
               (when (or (null best) (> updated newest))
                 (setq best sid newest updated))))))))
 
-(defun harness-ui-tasks--board-of-session (session-id)
-  "Return the open board listing the task SESSION-ID works on, or nil.
-The task's project's own board is preferred to the board of every
-project, which lists every task."
-  (and session-id
-       (let ((boards (cl-remove-if-not
-                      (lambda (board)
-                        (cl-find session-id (buffer-local-value 'harness-ui-tasks--tasks board)
-                                 :key (lambda (task) (plist-get task :session)) :test #'equal))
-                      (harness-ui-tasks--buffers))))
-         (or (cl-find-if-not (lambda (board) (buffer-local-value 'harness-ui-tasks--all board)) boards)
-             (car boards)))))
+(defun harness-ui-tasks--project-board (root)
+  "Return the live board of the project at ROOT, or nil.
+That is a project's board, not the board of every project
+\(`harness-tasks-all'), whose `harness-ui-tasks--dir' is the directory it
+was opened from and not a project it shows."
+  (cl-find-if (lambda (board)
+                (and (not (buffer-local-value 'harness-ui-tasks--all board))
+                     (let ((there (buffer-local-value 'harness-ui-tasks--dir board)))
+                       (and (stringp there)
+                            (equal (file-name-as-directory (expand-file-name there))
+                                   root)))))
+              (harness-ui-tasks--buffers)))
+
+(defun harness-ui-tasks--board-buffer (root)
+  "Return the board buffer of the project at ROOT, made when there is none.
+A buffer that has the name but is no board is left as it is: the board
+takes a name of its own."
+  (or (harness-ui-tasks--project-board root)
+      (let ((name (harness-ui-tasks--buffer-name root)))
+        (get-buffer-create (if (get-buffer name)
+                               (generate-new-buffer-name name)
+                             name)))))
+
+(defun harness-ui-tasks--buffer-root ()
+  "Return the project root of the buffer this is called from.
+In a buffer that shows a session it is the session's project, which the
+session says even when the worktree it works in is gone from this
+machine (`harness-ui-session-project'); in any other buffer it is the
+project of the buffer's `default-directory'."
+  (or (when-let* ((session (and harness-ui-session-id
+                                (harness-ui-session harness-ui-session-id))))
+        (or (harness-ui-session-project session)
+            (when-let* ((root (or (plist-get session :project)
+                                  (plist-get session :cwd)))
+                        ((stringp root))
+                        ((not (string-empty-p root))))
+              (file-name-as-directory (expand-file-name root)))))
+      (harness-ui-tasks--board-root)))
 
 (declare-function project-root "project")
 
@@ -4925,9 +4983,13 @@ project, which lists every task."
 Task mode runs one session per task: submit tasks from the compose box
 at the bottom and follow them from pending to completed.
 
-Without DIRECTORY, in the buffer of a task's session it is the open
-board that lists the task, whatever directory the session works in:
-from a session opened on a board, the board's key leads back to it.
+Without DIRECTORY the project is the current buffer's: in a buffer that
+shows a session it is the session's project, whatever directory the
+session works in, so the board's key in a session opened from a board
+leads back to it; in any other buffer it is the project of its
+`default-directory'.  Opening the board for another project shows that
+project's board -- the one `projectile-switch-project' switched to, say
+-- even while another project's board is open.
 
 The board takes a position like a session does (`harness-ui-positions')
 and replaces whatever is shown there; opening a task's session from it
@@ -4937,11 +4999,14 @@ argument it is read.  In the `fullscreen' position the board stays on
 the left of the frame and the sessions open beside it (see
 `harness-fullscreen'): F on the board starts or ends that layout."
   (interactive (list nil (and current-prefix-arg (harness-ui-read-position))))
-  (let* ((own (and (null directory) (harness-ui-tasks--board-of-session harness-ui-session-id)))
-         (root (unless own (harness-ui-tasks--board-root directory)))
-         (buf (or own (get-buffer-create (harness-ui-tasks--buffer-name root)))))
+  (let* ((root (if directory
+                   (harness-ui-tasks--board-root directory)
+                 (harness-ui-tasks--buffer-root)))
+         (buf (harness-ui-tasks--board-buffer root)))
     (with-current-buffer buf
-      (unless (derived-mode-p 'harness-ui-tasks-mode)
+      (unless (and (derived-mode-p 'harness-ui-tasks-mode)
+                   (not harness-ui-tasks--all)
+                   (equal root harness-ui-tasks--dir))
         (harness-ui-tasks--make-board root nil))
       (harness-ui-tasks--fetch buf))
     (harness-ui-refresh-sessions)

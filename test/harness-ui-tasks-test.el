@@ -51,6 +51,7 @@
 (declare-function harness-ui-session "harness-ui")
 (declare-function harness-ui--forget-session "harness-ui")
 (declare-function harness-tasks "harness-ui-tasks")
+(declare-function harness-ui-tasks--project-board "harness-ui-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks-edit "harness-ui-tasks")
 (declare-function harness-ui-tasks-compose-reset "harness-ui-tasks")
@@ -565,7 +566,8 @@ the board's own keys stay its own off the cards."
 (ert-deftest harness-ui-tasks-back-from-a-tasks-session ()
   "The board's key in a task's session goes back to the board the task is on.
 Whatever the session's directory: one the board's project cannot be
-told from, like a worktree git lost track of, still leads back."
+told from, like a worktree git lost track of, still leads back, for the
+session says its project (`harness-ui-session-project')."
   (harness-ui-tasks-test-with
     (let* ((elsewhere (harness-test-temp-dir))
            (session-buf nil)
@@ -586,6 +588,9 @@ told from, like a worktree git lost track of, still leads back."
               (search-forward "Come back to me")
               (harness-ui-tasks-open))
             (harness-test-wait (lambda () (eq session-buf (window-buffer window))) 5 "the session to replace the board")
+            (with-current-buffer session-buf
+              (harness-test-wait (lambda () (harness-ui-session harness-ui-session-id))
+                                 5 "the session cache to know the session"))
             (with-selected-window window
               (with-current-buffer session-buf
                 (should (eq board (call-interactively #'harness-tasks)))))
@@ -599,6 +604,72 @@ told from, like a worktree git lost track of, still leads back."
                            (should (equal elsewhere (buffer-local-value 'default-directory other))))
                   (kill-buffer other)))))
         (when (buffer-live-p session-buf) (kill-buffer session-buf))))))
+
+(ert-deftest harness-ui-tasks-follows-the-buffer-s-project ()
+  "The board's key opens the board of the project of the buffer it is pressed in.
+A board already open in another project -- one whose directory happens
+to have the same name, as two checkouts of a repository do -- is no
+reason to show that project's board after a projectile switch."
+  (harness-ui-tasks-test-with
+    (let* ((parent-a (harness-test-temp-dir))
+           (parent-b (harness-test-temp-dir))
+           (a (expand-file-name "app/" parent-a))
+           (b (expand-file-name "app/" parent-b))
+           (board-a nil)
+           (board-b nil))
+      (make-directory a t)
+      (make-directory b t)
+      (unwind-protect
+          (progn
+            ;; The board of A, open while its buffer was current.
+            (with-temp-buffer
+              (setq default-directory a)
+              (setq board-a (harness-tasks)))
+            (should (equal (file-name-as-directory (expand-file-name a))
+                           (buffer-local-value 'harness-ui-tasks--dir board-a)))
+            ;; Switching to B -- projectile leaves us in a buffer there --
+            ;; shows B's board, not the one A's name made.
+            (with-temp-buffer
+              (setq default-directory b)
+              (setq board-b (harness-tasks)))
+            (should-not (eq board-a board-b))
+            (should-not (equal (buffer-name board-a) (buffer-name board-b)))
+            (should (equal (file-name-as-directory (expand-file-name b))
+                           (buffer-local-value 'harness-ui-tasks--dir board-b)))
+            (should (eq board-b (window-buffer (selected-window))))
+            (should-not (get-buffer-window board-a))
+            ;; Each project keeps its own board, and the key from A goes back.
+            (should (eq board-a (harness-ui-tasks--project-board
+                                 (file-name-as-directory (expand-file-name a)))))
+            (with-temp-buffer
+              (setq default-directory a)
+              (should (eq board-a (harness-tasks)))))
+        (dolist (buffer (list board-a board-b))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))
+        (ignore-errors (delete-directory parent-a t))
+        (ignore-errors (delete-directory parent-b t))))))
+
+(ert-deftest harness-ui-tasks-session-buffer-follows-the-session-s-project ()
+  "From a session buffer the board's key opens the board of the session's project.
+The directory the buffer is in may be another project's -- after a
+projectile switch, say -- or a worktree gone from this machine: the
+session says its project, and the board follows it."
+  (harness-ui-tasks-test-with
+    (let* ((a (harness-test-temp-dir))
+           (b (harness-test-temp-dir))
+           (board-a (harness-tasks a))
+           (shown nil))
+      (unwind-protect
+          (progn
+            (harness-ui-cache-session (list :id "session-a" :project a :cwd a
+                                            :status "idle" :updated 1.0))
+            (with-temp-buffer
+              (setq harness-ui-session-id "session-a"
+                    default-directory b)
+              (setq shown (harness-tasks)))
+            (should (eq board-a shown)))
+        (dolist (buffer (list board-a shown))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (defvar harness-compose-attachments)
 (defvar harness-compose--files)
@@ -7430,7 +7501,7 @@ with another outcome, it is done.  A `:column' the harness gives wins."
 (declare-function harness-ui-tasks-toggle-backlog-mode "harness-ui-tasks")
 (declare-function harness-ui-tasks-adopt "harness-ui-tasks")
 (declare-function harness-ui-tasks-archive-done "harness-ui-tasks")
-(declare-function harness-ui-tasks--board-of-session "harness-ui-tasks")
+(declare-function harness-ui-tasks--project-board "harness-ui-tasks")
 (defvar harness-ui-tasks--all)
 (defvar harness-ui-tasks--project-filter)
 (defvar harness-ui-tasks--dir)
@@ -7801,13 +7872,22 @@ project archives both; filtered to one project, only that project's."
 (ert-deftest harness-ui-tasks-all-projects-session-leads-back-to-the-projects-board ()
   "From a task's session the board key leads to its project's board, not the all-projects one.
 The board of every project lists every task, so it would be the first
-to list any; a project's own board is preferred."
+to list any; the session's project picks the project's own board."
   (harness-ui-tasks-test-with-all
-    (let ((sid (plist-get (harness-call 'task/get (harness-ui-tasks-test--card-id board "Alpha here")) :session)))
-      (should (eq board (harness-ui-tasks--board-of-session sid)))
-      ;; With only the board of every project open, it is that one.
-      (with-current-buffer board (setq harness-ui-tasks--tasks nil))
-      (should (eq all (harness-ui-tasks--board-of-session sid))))))
+    (let* ((id (harness-ui-tasks-test--card-id board "Alpha here"))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (session-buf (get-buffer-create " *a task's session*")))
+      (unwind-protect
+          (progn
+            (harness-test-wait (lambda () (harness-ui-session sid)) 5 "the session cache")
+            ;; The buffer's own directory may be another project's: the
+            ;; session's project is what the board follows.
+            (with-current-buffer session-buf
+              (setq-local harness-ui-session-id sid)
+              (setq default-directory other))
+            (with-current-buffer session-buf
+              (should (eq board (harness-tasks)))))
+        (kill-buffer session-buf)))))
 
 (ert-deftest harness-ui-tasks-board-hosts-the-question-a-switch-asks ()
   "A question that asks how to carry a conversation over shows on the
