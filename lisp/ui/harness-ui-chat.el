@@ -5821,8 +5821,15 @@ wear the window's own background."
                       (harness-chat--with-display (harness-chat--recap-block room))
                     (error (harness-log 'warn "chat: no recap line: %s" (harness-error-short-message err))
                            nil)))
+           (truncated (> (string-width text) room))
+           (shown (propertize (if truncated
+                                  (concat (truncate-string-to-width text (1- room)) "\N{U+2026}")
+                                text)
+                              'face 'harness-dim-face))
            (line (concat " " (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face) " "
-                         (propertize (truncate-string-to-width text room nil nil "\N{U+2026}") 'face 'harness-dim-face)
+                         (if truncated
+                             (harness-ui-overflow-mark shown text "Activity")
+                           shown)
                          "\n"))
            ;; Emacs draws an overlay string over the face of the text it
            ;; precedes: the box's prompt or a panel, whose background would
@@ -5936,7 +5943,10 @@ face keeps it.  Icons in TEXT stay clickable but are not
 hover-highlighted: an SVG keeps the background it was rendered on, so
 it would show as a dark box."
   (let ((text (propertize text 'help-echo help 'mouse-face 'mode-line-highlight
-                          'local-map (harness-chat--segment-map command)))
+                          'local-map (harness-chat--segment-map command)
+                          ;; What the overflow popup offers when this
+                          ;; segment did not fit.
+                          'harness-ui-command command))
         (pos 0))
     ;; Face only when given: a segment around a figure that brings its
     ;; own face, as the context one does, must not wipe it.
@@ -6112,7 +6122,8 @@ whose parent the harness no longer has, has no segment."
                        #'harness-up-to-parent #'harness-chat--parent-help))))
       ;; Shown after the session's own name, which matters more: a narrow
       ;; window drops this before the name, and shortens it before that.
-      (list (funcall segment name) 65 (funcall segment (harness-truncate-end name 12))))))
+      (list (funcall segment name) 65 (funcall segment (harness-truncate-end name 12))
+            #'harness-up-to-parent))))
 
 (defvar harness-chat-header-functions nil
   "Functions putting segments in front of the chat header line.
@@ -6186,8 +6197,11 @@ What `harness-chat-header-functions' put in front leads the line and
 makes room as its own priorities say, before any of the session's own
 do; the permission mode, [menu] and the newer-messages notice stay.
 What `harness-chat-header-end-functions' add shows before [menu],
-making room as its priorities say.  WIDTH is as
-`harness-ui-fit-header' takes it."
+making room as its priorities say.  What does not fit is behind the
+clickable … that ends the line: a click, RET on it, or C-c C-o
+(`harness-ui-overflow-show') shows every hidden segment in full, with
+the command a click on it would have run.  A header that fits has no ….
+WIDTH is as `harness-ui-fit-header' takes it."
   (let* ((s (harness-chat--session))
          (non-interactive (harness-chat--non-interactive-segment s))
          (name (or (plist-get s :name) "unnamed")))
@@ -6201,33 +6215,34 @@ making room as its priorities say.  WIDTH is as
        (list (concat " " (harness-chat--segment name #'harness-rename-session
                                                 "Session name (mouse-1: rename)" 'bold))
              70 (concat " " (harness-chat--segment (harness-truncate-end name 8) #'harness-rename-session
-                                                  "Session name (mouse-1: rename)" 'bold)))
+                                                  "Session name (mouse-1: rename)" 'bold))
+             #'harness-rename-session)
        ;; Where the session came from, right after its own name.
        (harness-chat--parent-segment)
        (list (concat "  " (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
                                                  "Model (mouse-1: change)" 'harness-dim-face))
-             50)
+             50 nil #'harness-set-model)
        (list (concat "  " (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
                                                  (harness-chat--permission-command)
                                                  #'harness-chat--permission-help))
-             90)
-       (and non-interactive (list (concat "  " non-interactive) 40))
+             90 nil (harness-chat--permission-command))
+       (and non-interactive (list (concat "  " non-interactive) 40 nil #'harness-toggle-non-interactive))
        (list (concat "  " (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
                                                  #'harness-set-thinking "Thinking level (mouse-1: change)"
                                                  'harness-dim-face))
-             20)
+             20 nil #'harness-set-thinking)
        (list (concat "  " (harness-chat--segment
                            (harness-ui-format-context s)
                            #'harness-set-context-limit
                            (harness-ui-context-limit-help
                             s (harness-ui-model-context-window (plist-get s :model)))))
-             30)
-       (list (concat "  " (harness-chat--spend-segment s)) 10))
+             30 nil #'harness-set-context-limit)
+       (list (concat "  " (harness-chat--spend-segment s)) 10 nil #'harness-ui-show-usage))
       ;; Other modules' segments, the companion pet's face say.
       (harness-chat--header-end)
       (list
        (list (concat "  " (harness-chat--segment "[menu]" #'harness-groups-menu #'harness-chat--menu-help 'harness-dim-face))
-             95)
+             95 nil #'harness-groups-menu)
        ;; The cached flag, never `harness-chat--scrolled-up-p': measuring
        ;; the window (`pos-visible-in-window-p') formats its header line,
        ;; which would evaluate this again, and again, until
@@ -6237,8 +6252,8 @@ making room as its priorities say.  WIDTH is as
             (list (concat "  " (harness-chat--segment "↓ newer messages" #'harness-chat-scroll-to-bottom
                                                       "Newer content below (mouse-1: jump to it)"
                                                       'harness-status-blocked-face))
-                  88))))
-     width)))
+                  88 nil #'harness-chat-scroll-to-bottom))))
+     width t)))
 
 (defun harness-chat--mode-line ()
   "Return the mode line text: the session's status and the turn's clock.
@@ -7191,6 +7206,8 @@ a new one."
   (define-key map (kbd "C-c C-u") #'harness-up-to-parent)
   (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
   (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom)
+  ;; What the header, or the activity line, cut off.
+  (define-key map (kbd "C-c C-o") #'harness-ui-overflow-show)
   ;; Plain q is typing here.
   (define-key map (kbd "C-c C-z") #'harness-ui-bury))
 
@@ -7332,7 +7349,8 @@ the id of a session written in a message is a link to it.
         ("C-c C-k" "Cancel turn" harness-chat-cancel)]
        ["Session"
         ("C-c C-u" "Go to the session this one came from" harness-up-to-parent)
-        ("C-c M-l" "Copy a link to this session" harness-chat-copy-session-link)]
+        ("C-c M-l" "Copy a link to this session" harness-chat-copy-session-link)
+        ("C-c C-o" "What the bar cut off" harness-ui-overflow-show)]
        ["Transcript"
         (". TAB" "Fold block" harness-chat-tab)
         ("M-n" "Next message" harness-chat-next-message)

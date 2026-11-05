@@ -1053,8 +1053,10 @@ narrower board loses its name first, then its face."
                            (width (harness-ui-header-string-width header)))
                       (should (string-search (concat face " " name) header))
                       (should (< (string-search face header) (string-search "[BTW]" header)))
+                      ;; The … at the end takes room too: one column short
+                      ;; of the whole line still leaves the face.
                       (let ((narrower (with-current-buffer board
-                                        (harness-ui-tasks--header (- width (length name) 1)))))
+                                        (harness-ui-tasks--header (1- width)))))
                         (should (string-search face narrower))
                         (should-not (string-search name narrower)))
                       (let ((narrower (with-current-buffer board

@@ -4132,15 +4132,51 @@ but for [Refresh], still opening the usage dashboard."
     ;; `harness-ui-tasks--header'): the queue's switch, which had it
     ;; before, is on the Pending heading.
     (let ((header (harness-ui-tasks-test--header board 56)))
-      (should (string-match-p "\\` Tasks   Max . 5h 23% . 7d 41% . budget 0% \\[Refresh\\]\\'" header)))
-    ;; Narrower still, the budget goes and the quota stays.
+      ;; The budget goes, and the … says where it went.
+      (should (string-match-p "\\` Tasks   Max . 5h 23% . 7d 41% \\[Refresh\\] …\\'" header)))
+    ;; Narrower still, the quota stays and the budget stays behind the ….
     (let ((header (harness-ui-tasks-test--header board 50)))
-      (should (string-match-p "\\` Tasks   Max . 5h 23% . 7d 41% \\[Refresh\\]\\'" header)))
+      (should (string-match-p "\\` Tasks   Max . 5h 23% . 7d 41% \\[Refresh\\] …\\'" header))
+      (with-current-buffer board
+        (should (cl-find "Max" harness-ui--header-overflow
+                         :key (lambda (item) (plist-get item :label))
+                         :test (lambda (string label) (string-match-p string label))))))
     (with-current-buffer board
       (let* ((header (harness-ui-tasks--header 50))
              (pos (string-match "Max" header)))
         (should (get-text-property pos 'local-map header))
         (should (string-match-p "Covered by Claude Max" (get-text-property pos 'help-echo header)))))))
+
+(ert-deftest harness-ui-tasks-header-offers-what-it-cut ()
+  "A narrow board header ends in a … whose popup shows every cut segment.
+The board and its compose box both bind C-c C-o, and the popup names
+the full text of a segment a click on it would have opened."
+  (harness-ui-tasks-test-with
+    (let ((header (harness-ui-tasks-test--header board 30)))
+      (with-current-buffer board
+        (should (string-suffix-p "…" (substring-no-properties header)))
+        (should (eq #'harness-ui-overflow-show
+                    (lookup-key harness-ui-tasks-board-map (kbd "C-c C-o"))))
+        (should (eq #'harness-ui-overflow-show
+                    (lookup-key harness-ui-tasks-mode-map (kbd "C-c C-o"))))
+        (let ((items harness-ui--header-overflow)
+              (popup nil))
+          (should items)
+          (cl-letf (((symbol-function 'harness-ui--display-menu)
+                     (lambda (buffer _alist) (setq popup buffer))))
+            (harness-ui-overflow-show)
+            (should popup)
+            (with-current-buffer popup
+              (should (equal " Header " header-line-format))
+              ;; The buttons the cut took away are in the popup, with
+              ;; their full labels.
+              (let ((buttons (cl-remove-if-not (lambda (item) (plist-get item :action))
+                                                items)))
+                (should buttons)
+                (dolist (item buttons)
+                  (should (string-match-p (regexp-quote (plist-get item :label))
+                                          (buffer-string))))))
+            (kill-buffer popup)))))))
 
 ;;;; The fullscreen layout
 

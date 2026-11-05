@@ -1272,11 +1272,55 @@ costs the session no segment however narrow the window is."
           (should (equal " badge " (harness-chat--header-prefix)))
           (should (string-prefix-p " badge  " full))
           ;; One column short of the whole line: the badge goes, the
-          ;; session's own stay.
+          ;; session's own stay, and the … that ends the line says more
+          ;; is behind it.
           (should-not (string-match-p "badge" (harness-chat--header narrow)))
-          (should (equal (harness-chat--header narrow)
-                         (let ((harness-chat-header-functions nil))
-                           (harness-chat--header narrow)))))))))
+          (let ((narrow-header (harness-chat--header narrow))
+                (items (copy-sequence harness-ui--header-overflow))
+                (without (let ((harness-chat-header-functions nil))
+                           (harness-chat--header narrow))))
+            (should (string-prefix-p without narrow-header))
+            (should (equal " …" (substring narrow-header (length without))))
+            (should (cl-find "badge" items
+                             :key (lambda (item) (plist-get item :label))
+                             :test #'equal))))))))
+
+(ert-deftest harness-ui-chat-header-offers-what-it-cut ()
+  "A chat header too narrow for all of it ends in a clickable ….
+C-c C-o, or the popup the … opens, shows every dropped segment in full
+and with the command a click on it would have run; a header that fits
+has no control and leaves no overflow behind."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "Narrow")))
+           (full (with-current-buffer buf (harness-chat--header most-positive-fixnum)))
+           (narrow (with-current-buffer buf (harness-chat--header 32))))
+      (with-current-buffer buf
+        (should (string-suffix-p "…" (substring-no-properties narrow)))
+        (should (eq harness-ui-overflow-map
+                    (get-text-property (1- (length narrow)) 'keymap narrow)))
+        (should (eq #'harness-ui-overflow-show
+                    (lookup-key harness-chat-mode-map (kbd "C-c C-o"))))
+        (let* ((items harness-ui--header-overflow)
+               (model (cl-find-if (lambda (item)
+                                    (string-match-p "scripted (Demo)"
+                                                    (or (plist-get item :text) "")))
+                                  items)))
+          (should items)
+          (should model)
+          (should (functionp (plist-get model :action))))
+        (let ((popup nil))
+          (cl-letf (((symbol-function 'harness-ui--display-menu)
+                     (lambda (buffer _alist) (setq popup buffer))))
+            (harness-ui-overflow-show)
+            (should popup)
+            (with-current-buffer popup
+              (should (equal " Header " header-line-format))
+              (should (string-match-p "scripted (Demo)" (buffer-string)))
+              (should (string-match-p "\\[change\\]" (buffer-string))))
+            (kill-buffer popup)))
+        ;; The whole header still fits, unchanged, with nothing behind it.
+        (should (equal full (harness-chat--header most-positive-fixnum)))
+        (should-not harness-ui--header-overflow)))))
 
 (defun harness-ui-chat-test-segment (header command)
   "Return (TEXT POS) of the segment of HEADER that runs COMMAND, or nil."

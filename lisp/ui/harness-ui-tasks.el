@@ -1917,6 +1917,10 @@ their buttons just run ACTION."
                                         (if down (harness-ui-tasks--pressed-help help) help))
                              'keymap harness-ui-tasks-button-map
                              'harness-task-button id)))
+    ;; The overflow popup names what a click does: keep the command the
+    ;; button's click lambda wraps.
+    (when (symbolp action)
+      (put-text-property 0 (length button) 'harness-ui-command action button))
     (if down
         ;; The same label and the same width: only the look changes, and
         ;; the highlight under the mouse goes, as a button that is down
@@ -2056,12 +2060,19 @@ on it: a box that grew a line or a new attachment changes what fits."
                                   (point-max) (window-body-height window t))
           (buffer-substring-no-properties (marker-position harness-ui-tasks--list-end) (point-max)))))
 
-(defun harness-ui-tasks--fit (string room)
-  "STRING shortened to ROOM columns (at least 12), keeping its properties."
+(defun harness-ui-tasks--fit (string room &optional overflow)
+  "STRING shortened to ROOM columns (at least 12), keeping its properties.
+With OVERFLOW, the … that ends a shortened line is an overflow control:
+a click, RET on it, or C-c C-o shows the whole line and every button
+the cut took away (`harness-ui-overflow-show').  A line that fits is
+unchanged, with or without OVERFLOW."
   (let ((room (max 12 room)))
     (if (<= (string-width string) room)
         string
-      (concat (truncate-string-to-width string (1- room)) "…"))))
+      (let ((short (concat (truncate-string-to-width string (1- room)) "…")))
+        (if overflow
+            (harness-ui-overflow-mark short string "Task bar")
+          short)))))
 
 (defconst harness-ui-tasks--collapse-min-width 48
   "Board width below which cards keep their second line.
@@ -3327,7 +3338,10 @@ thinking level instead."
                                             (call-interactively command)))
                                         help
                                         (if step (intern (format "%s@%s" command step)) command))
-              'face 'harness-dim-face))
+              'face 'harness-dim-face
+              ;; The overflow popup names what a click does; the button
+              ;; wraps the setting's command in the step it sets.
+              'harness-ui-command command))
 
 ;;;; The steps of a new task: write-up or plan, then the work
 
@@ -3590,8 +3604,8 @@ still, the whole line shortens from its end."
   (let ((line (concat settings note)))
     (cond ((or (null room) (<= (string-width line) room)) line)
           ((and keep (>= (- room (string-width note)) harness-ui-tasks--min-settings-room))
-           (concat (harness-ui-tasks--fit settings (- room (string-width note))) note))
-          (t (harness-ui-tasks--fit line room)))))
+           (concat (harness-ui-tasks--fit settings (- room (string-width note)) t) note))
+          (t (harness-ui-tasks--fit line room t)))))
 
 ;;;; How many tasks work at once
 
@@ -3643,7 +3657,8 @@ a wrong one.  It stands out at 0, when no task starts by itself."
                                (lambda () (call-interactively #'harness-ui-tasks-set-max-running))
                                (harness-ui-tasks--max-running-help n)
                                'harness-ui-tasks-set-max-running)
-     'face (if (harness-ui-tasks--held-p n) 'harness-task-held-face 'harness-dim-face))))
+     'face (if (harness-ui-tasks--held-p n) 'harness-task-held-face 'harness-dim-face)
+     'harness-ui-command 'harness-ui-tasks-set-max-running)))
 
 (defconst harness-ui-tasks--max-running-choices
   '("1" "2" "3" "4" "5" "6" "8" "10" "no limit" "0")
@@ -3802,7 +3817,8 @@ the board's search each lead with their icon, in their accent."
                      (t "")))
          (body (concat icon (harness-ui-tasks--compose-label)))
          (label (harness-ui-tasks--fit (concat bar body)
-                                       (- room (string-width cancel) (string-width toggle)))))
+                                       (- room (string-width cancel) (string-width toggle))
+                                       t)))
     ;; The bar, the icon and the label each keep their own look: the
     ;; band behind them all, the accent on bar and icon, the label face
     ;; on the text.
@@ -3811,7 +3827,7 @@ the board's search each lead with their icon, in their accent."
       (when accent
         (add-face-text-property (length bar) (length label) accent t label)))
     ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
-    (harness-ui-tasks--fit (concat label toggle cancel) room)))
+    (harness-ui-tasks--fit (concat label toggle cancel) room t)))
 
 (defun harness-ui-tasks--mode-notice (text face)
   "The coloured line above the compose box: TEXT in FACE."
@@ -3826,9 +3842,9 @@ the board's search each lead with their icon, in their accent."
 BUTTON, a string or nil, stays whole; TEXT shortens when the two do not
 fit together."
   (if (null button)
-      (harness-ui-tasks--fit text room)
+      (harness-ui-tasks--fit text room t)
     (let ((room (- room (string-width button) 2)))
-      (concat (harness-ui-tasks--fit text (max 0 room))
+      (concat (harness-ui-tasks--fit text (max 0 room) t)
               (and (>= room 0) (concat "  " button))))))
 
 (defun harness-ui-tasks--mode-notices ()
@@ -3897,7 +3913,7 @@ BAR are as `harness-ui-tasks--label-line' takes them."
   (let ((lines nil))
     (when harness-ui-tasks--error
       (let ((text (propertize (concat "  " harness-ui-tasks--error) 'face 'harness-tool-error-face)))
-        (push (list 'error (lambda (room) (harness-ui-tasks--fit text room)) band) lines)))
+        (push (list 'error (lambda (room) (harness-ui-tasks--fit text room t)) band) lines)))
     (push (list 'label (lambda (room) (harness-ui-tasks--label-line room messaging bar)) band) lines)
     (unless harness-ui-tasks--target
       ;; In Refine and Plan, the step before the work, then the work: a
@@ -4266,7 +4282,9 @@ Another TARGET ends the search the box took, keys and all
   "Return the header-line segment TEXT; a click on it runs COMMAND.
 HELP is its tooltip."
   (propertize text 'mouse-face 'mode-line-highlight 'help-echo help
-              'keymap (harness-ui-mouse-keymap command)))
+              'keymap (harness-ui-mouse-keymap command)
+              ;; What the overflow popup offers when this did not fit.
+              'harness-ui-command command))
 
 (defun harness-ui-tasks--queue-suspended-p ()
   "Non-nil when the board's project has its pending queue suspended.
@@ -4374,7 +4392,11 @@ A project's board has [All projects], which shows the board of every
 project.  That board names no project but \"all projects\", or the one it
 is filtered to, and has [Project: all] -- the filter -- and [Project
 board], which leads back; [Add session] is there only while it is
-filtered to a project.  WIDTH is as `harness-ui-fit-header' takes it."
+filtered to a project.  What does not fit is behind the clickable …
+that ends the line: a click, RET on it, or C-c C-o
+\(`harness-ui-overflow-show') shows every hidden segment in full, with
+the command a click on it would have run.  A header that fits has no ….
+WIDTH is as `harness-ui-fit-header' takes it."
   (let* ((groups (harness-ui-tasks--visible))
          ;; Other modules' segments: strings join into one, lists stand
          ;; on their own.
@@ -4414,28 +4436,29 @@ filtered to a project.  WIDTH is as `harness-ui-fit-header' takes it."
                            (format "[Project: %s]" (if harness-ui-tasks--project-filter name "all"))
                            #'harness-ui-tasks-filter-project
                            "Show the tasks of one project, or of every project"))
-                  70))
+                  70 nil #'harness-ui-tasks-filter-project))
        (list (concat (funcall gap) (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
                                                                "Ask about the tasks in a side conversation"))
-             60)
+             60 nil #'harness-ui-tasks-btw)
        (and (or (not harness-ui-tasks--all) harness-ui-tasks--project-filter)
             (list (concat " " (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
                                                          "Make an ongoing session of this project a task"))
-                  20))
+                  20 nil #'harness-ui-tasks-adopt))
        (list (concat " " (harness-ui-tasks--segment
                           (if harness-ui-tasks--all "[Project board]" "[All projects]")
                           #'harness-ui-tasks-toggle-projects
                           (if harness-ui-tasks--all
                               "Show the board of one project"
                             "Show the tasks of every project")))
-             30)
+             30 nil #'harness-ui-tasks-toggle-projects)
        ;; Showing archived tasks is not the usual board: that stays longer.
        (list (concat " " (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
                                                     #'harness-ui-tasks-toggle-archived "Show or hide archived tasks"))
-             (if harness-ui-tasks--show-archived 75 55))
-       (list (concat " " (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")) 80)
+             (if harness-ui-tasks--show-archived 75 55) nil #'harness-ui-tasks-toggle-archived)
+       (list (concat " " (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")) 80
+             nil #'harness-ui-tasks-refresh)
        (and harness-ui-tasks--loading (list (propertize "  loading…" 'face 'harness-dim-face) 85))))
-     width)))
+     width t)))
 
 ;;;; Data
 
@@ -4761,6 +4784,8 @@ compose box, as every letter the board does not bind does
   (define-key map (kbd "/") #'harness-ui-tasks-search)
   (define-key map (kbd "g") #'harness-ui-tasks-refresh)
   (define-key map (kbd "F") #'harness-fullscreen)
+  ;; What the header, or a line above the box, cut off.
+  (define-key map (kbd "C-c C-o") #'harness-ui-overflow-show)
   (define-key map (kbd "q") #'harness-ui-quit-view)
   (define-key map (kbd "?") #'harness-menu))
 
@@ -4780,6 +4805,8 @@ compose box, as every letter the board does not bind does
   (define-key map [remap keyboard-quit] #'harness-ui-tasks-compose-quit)
   (define-key map (kbd "C-c C-n") #'harness-ui-tasks-next)
   (define-key map (kbd "C-c C-p") #'harness-ui-tasks-previous)
+  ;; What the bar cut off, from the box too.
+  (define-key map (kbd "C-c C-o") #'harness-ui-overflow-show)
   ;; q's job from the compose box too, where q is typing.
   (define-key map (kbd "C-c C-z") #'harness-ui-bury))
 
@@ -4868,6 +4895,7 @@ act on from there.
         (". V" "Review on or off" harness-ui-tasks-toggle-review)
         (". F" "Fullscreen layout" harness-fullscreen)
         (". g" "Refresh" harness-ui-tasks-refresh)
+        ("C-c C-o" "What the bar cut off" harness-ui-overflow-show)
         ("C-c C-z" "Bury (q)" harness-ui-bury)]
        ["Compose box"
         ("C-c C-c" "Submit" harness-ui-tasks-submit)

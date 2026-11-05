@@ -12680,9 +12680,9 @@ modules hook into a chat buffer without owning it:
 or queued from its box (the text as typed, and the attachments),
 `harness-chat-header-functions` (buffer-local) puts segments in front of
 its header line, leaving the session's own segments as they are, each a
-string or `(TEXT PRIORITY MIN)` as `harness-ui-fit-header` takes it,
-`harness-chat-header-end-functions` adds segments after the session's
-own, before [menu], each a string or `(TEXT PRIORITY MIN)` as
+string or `(TEXT PRIORITY MIN ACTION)` as `harness-ui-fit-header` takes
+it, `harness-chat-header-end-functions` adds segments after the session's
+own, before [menu], each a string or `(TEXT PRIORITY MIN ACTION)` as
 `harness-ui-fit-header` takes it (the companion pet's face, priority 2,
 goes first in a narrow window), and the
 buffer-local `harness-chat-placeholder` replaces the empty box's usual

@@ -214,6 +214,11 @@ for the one that composes a new task." :group 'harness-ui)
 (defface harness-header-face '((t :inherit header-line))
   "Session header line." :group 'harness-ui)
 
+(defface harness-ui-overflow-face '((t :inherit harness-caution-face :weight bold))
+  "The … that ends a bar which cut something off.
+It is a control: a click, RET on it, or the bar's overflow key shows
+everything that did not fit." :group 'harness-ui)
+
 (defface harness-plan-face '((t :inherit font-lock-constant-face))
   "The name of the subscription plan that pays for a session." :group 'harness-ui)
 
@@ -3186,16 +3191,426 @@ and a header font of another size count; columns on a text terminal."
         (if (fboundp 'string-pixel-width) (string-pixel-width s) (* (frame-char-width) (string-width s))))
     (string-width string)))
 
-(defun harness-ui-fit-header (segments &optional width)
+;;;; Overflow: what a bar could not show
+
+;; A bar -- a header line, the lines above a compose box, a turn's
+;; activity line -- fits itself to its window.  When it has to cut
+;; something, it ends in a … that is a control: a click, RET on it, or
+;; `harness-ui-overflow-show' (C-c C-o in a chat and on a task board)
+;; opens everything it left out, in full and with the actions of the
+;; parts it cut.  A bar that fits has no such control and is unchanged.
+
+(defvar-local harness-ui--header-overflow nil
+  "The segments the last header line could not show, as overflow items.
+`harness-ui-fit-header' sets it when it is asked for an overflow
+control; an empty list or nil means the header fits.  The items are
+plists of `:label', `:text', `:help', `:command' and `:action', as
+`harness-ui-overflow-show' takes them.")
+
+(defvar-local harness-ui--header-overflow-title nil
+  "How the overflow popup names the header, or nil for the default.")
+
+(defvar-local harness-ui-overflow--origin nil
+  "The buffer whose bar an overflow popup belongs to.")
+
+(defvar-local harness-ui-overflow--origin-window nil
+  "The window of `harness-ui-overflow--origin' to come back to.")
+
+(defvar harness-ui-overflow-map
+  (let ((map (make-sparse-keymap)))
+    (dolist (key '([mouse-1] [mouse-2] [header-line mouse-1] [header-line mouse-2]
+                   [mode-line mouse-1] [mode-line mouse-2]))
+      (define-key map key #'harness-ui-overflow-click))
+    (define-key map (kbd "RET") #'harness-ui-overflow-click)
+    map)
+  "Keymap of a … that says its bar cut something off.")
+
+(defun harness-ui-overflow-help ()
+  "Return the tooltip of an overflow control.
+It names the key that opens the overflow, when the current buffer binds
+`harness-ui-overflow-show'."
+  (let ((key (ignore-errors (substitute-command-keys "\\[harness-ui-overflow-show]"))))
+    (if (or (null key) (string-empty-p key) (string-prefix-p "M-x " key))
+        "Overflow (mouse-1)"
+      (format "Overflow (mouse-1, %s)" key))))
+
+(defun harness-ui-overflow-indicator ()
+  "Return the clickable … that ends a bar which cut something off."
+  (propertize " …"
+              'face 'harness-ui-overflow-face
+              'mouse-face 'mode-line-highlight
+              'help-echo (harness-ui-overflow-help)
+              'keymap harness-ui-overflow-map
+              'pointer 'hand))
+
+(defun harness-ui-overflow--report-map (report)
+  "Return a keymap showing REPORT, for the … of a fitted line.
+It reads the click's window itself, so an overlay string's … -- the
+activity line's -- opens the same report wherever it is drawn."
+  (let ((map (make-sparse-keymap))
+        (run (lambda (&rest _)
+               (interactive)
+               (let* ((event last-input-event)
+                      (window (and (mouse-event-p event)
+                                   (posn-window (event-start event)))))
+                 (with-current-buffer
+                     (if (window-live-p window) (window-buffer window) (current-buffer))
+                   (harness-ui-overflow-show-report report))))))
+    (dolist (key '([mouse-1] [mouse-2] [header-line mouse-1] [header-line mouse-2]
+                   [mode-line mouse-1] [mode-line mouse-2]))
+      (define-key map key run))
+    (define-key map (kbd "RET") run)
+    map))
+
+(defun harness-ui-overflow-mark (text full &optional title)
+  "Make the last character of TEXT the overflow control for FULL.
+FULL is the whole line TEXT was fitted from, properties and all, so
+that the buttons in the part that did not fit can be offered again.
+TITLE, when given, names the bar in the popup.  Return TEXT."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (let* ((start (1- (length text)))
+           (report (cons (or title "Bar")
+                         (harness-ui-overflow--line-items full start))))
+      (put-text-property start (length text) 'harness-ui-overflow-full full text)
+      (put-text-property start (length text) 'harness-ui-overflow-shown start text)
+      (put-text-property start (length text) 'harness-ui-overflow-title title text)
+      (put-text-property start (length text) 'harness-ui-overflow-items (cdr report) text)
+      (put-text-property start (length text) 'keymap
+                         (harness-ui-overflow--report-map report) text)
+      (put-text-property start (length text) 'mouse-face 'mode-line-highlight text)
+      (put-text-property start (length text) 'help-echo (harness-ui-overflow-help) text)
+      (put-text-property start (length text) 'pointer 'hand text)
+      (add-face-text-property start (length text) 'harness-ui-overflow-face t text)))
+  text)
+
+(defun harness-ui-overflow--label (text)
+  "Return TEXT, one line, cut to a menu's width."
+  (let ((one (string-trim (harness-ui-one-line text))))
+    (if (string-empty-p one) "…" (harness-truncate-end one 80))))
+
+(defun harness-ui-overflow--text (text)
+  "Return TEXT's words alone, trimmed, for the overflow popup."
+  (string-trim (substring-no-properties text)))
+
+(defun harness-ui-overflow--first-property (property text)
+  "Return TEXT's first value of PROPERTY, or nil.
+A header segment leads with the space that separates it from the one
+before, and that space carries none of the segment's properties."
+  (let ((pos 0) (size (length text)) value)
+    (while (and (< pos size)
+                (null (setq value (get-text-property pos property text))))
+      (setq pos (next-single-property-change pos property text size)))
+    value))
+
+(defun harness-ui-overflow--help (text)
+  "Return TEXT's first string `help-echo', or nil."
+  (let ((help (harness-ui-overflow--first-property 'help-echo text)))
+    (and (stringp help) help)))
+
+(defun harness-ui-overflow--thunk (action data)
+  "Return a function of no arguments running ACTION, or nil.
+ACTION is a button's `action' property or a command; DATA is a
+button's `button-data'.  A command runs interactively, so it can ask
+for what it needs; a plain function is called with DATA."
+  (cond ((and (symbolp action) (commandp action))
+         (lambda () (call-interactively action)))
+        ((functionp action)
+         (let ((arity (ignore-errors (func-arity action))))
+           (if (and (consp arity) (eql (car arity) 0) (eql (cdr arity) 0))
+               (lambda () (funcall action))
+             (lambda () (funcall action data)))))
+        ((commandp action)
+         (lambda () (call-interactively action)))))
+
+(defun harness-ui-overflow--text-command (text)
+  "Return the command TEXT is a control for, or nil.
+A header segment names its command in `harness-ui-command'; a button
+carries an `action'."
+  (let ((command (harness-ui-overflow--first-property 'harness-ui-command text))
+        (action (get-text-property 0 'action text)))
+    (cond ((and command (commandp command)) command)
+          ((and (get-text-property 0 'button text) action) action))))
+
+(defun harness-ui-overflow--text-action (text)
+  "Return a thunk running what TEXT is a control for, or nil.
+A button's `action' runs with its `button-data'."
+  (when-let* ((command (harness-ui-overflow--text-command text)))
+    (harness-ui-overflow--thunk command (get-text-property 0 'button-data text))))
+
+(defun harness-ui-overflow--button-items (text from)
+  "Return overflow items for the buttons of TEXT at or after FROM.
+Every button the fitted line cut, wholly or in part, is offered with
+its own action, so the action of a clipped part stays reachable."
+  (let ((size (length text))
+        (pos (max 0 (min (or from 0) (length text))))
+        items)
+    (while (< pos size)
+      (let ((next (next-single-property-change pos 'button text size)))
+        (when (get-text-property pos 'button text)
+          (let* ((start (or (previous-single-property-change (1+ pos) 'button text) 0))
+                 (end (or next size))
+                 (part (substring text start end))
+                 (label (harness-ui-overflow--label
+                         (substring-no-properties part)))
+                 (help (get-text-property start 'help-echo text)))
+            (push (list :label label
+                        :text (harness-ui-overflow--text part)
+                        :help (and (stringp help) help)
+                        :command (harness-ui-overflow--text-command part)
+                        :action (harness-ui-overflow--text-action part))
+                  items)))
+        (setq pos (or next size))))
+    (nreverse items)))
+
+(defun harness-ui-overflow--line-items (full from)
+  "Return overflow items for FULL, a fitted line, cut at FROM.
+The whole line comes first, then every button in the part that did not
+fit.  FULL carries the text properties of the original line."
+  (let* ((plain (harness-ui-overflow--text full))
+         (items (and (not (string-empty-p plain))
+                     (list (list :label (harness-ui-overflow--label plain)
+                                 :text plain
+                                 :help "Whole line")))))
+    (append items (harness-ui-overflow--button-items full from))))
+
+(defun harness-ui-overflow--line-at (pos)
+  "Return the report of the fitted line at POS, or nil.
+POS may be anywhere on the line, not only on its ….  A bar can cut in
+the middle -- the settings before the line's last button, say -- so the
+whole line is searched, not just its end."
+  (let* ((pos (max (point-min) (min pos (point-max))))
+         (end (save-excursion (goto-char pos) (line-end-position)))
+         (at (or (and (get-text-property pos 'harness-ui-overflow-full) pos)
+                 (save-excursion
+                   (goto-char pos)
+                   (let ((p (line-beginning-position)) found)
+                     (while (and (not found) (< p end))
+                       (if (get-text-property p 'harness-ui-overflow-full)
+                           (setq found p)
+                         (setq p (next-single-property-change
+                                  p 'harness-ui-overflow-full nil end))))
+                     found)))))
+    (when at
+      (let ((full (get-text-property at 'harness-ui-overflow-full)))
+        (cons (or (get-text-property at 'harness-ui-overflow-title)
+                  "Bar")
+              (harness-ui-overflow--line-items
+               full (get-text-property at 'harness-ui-overflow-shown)))))))
+
+(defun harness-ui-overflow--nearest-line (pos)
+  "Return the report of the nearest fitted line above or below POS.
+The lines above come first: a reader in a compose box, under the lines
+that bar, means those."
+  (save-excursion
+    (goto-char pos)
+    (beginning-of-line)
+    (let ((found nil))
+      (while (and (not found) (zerop (forward-line -1)))
+        (setq found (harness-ui-overflow--line-at
+                     (max (point-min) (1- (line-end-position))))))
+      (unless found
+        (goto-char pos)
+        (beginning-of-line)
+        (while (and (not found) (zerop (forward-line 1)))
+          (setq found (harness-ui-overflow--line-at
+                       (max (point-min) (1- (line-end-position)))))))
+      found)))
+
+(defun harness-ui-overflow-report (&optional pos)
+  "Return (TITLE . ITEMS) for what the bar at POS cut off, or nil.
+POS defaults to point.  A line fitted with `harness-ui-overflow-mark'
+has its own report, and one near POS is taken when POS is not on it --
+a reader in a compose box means the lines just above.  Otherwise a
+header that `harness-ui-fit-header' cut off has one."
+  (let ((pos (if (integer-or-marker-p (or pos (point)))
+                 (min (max (or pos (point)) (point-min)) (point-max))
+               (point))))
+    (or (harness-ui-overflow--line-at pos)
+        (harness-ui-overflow--nearest-line pos)
+        (and harness-ui--header-overflow
+             (cons (or harness-ui--header-overflow-title
+                       "Header")
+                   harness-ui--header-overflow)))))
+
+(defun harness-ui-overflow--item-map (item)
+  "Return the keymap of ITEM in the overflow popup."
+  (let ((map (make-sparse-keymap))
+        (run (lambda (&rest _)
+               (interactive)
+               (harness-ui-overflow--run item))))
+    (dolist (key '([mouse-1] [mouse-2] [header-line mouse-1] [header-line mouse-2]
+                   [mode-line mouse-1] [mode-line mouse-2]))
+      (define-key map key run))
+    (define-key map (kbd "RET") run)
+    map))
+
+(defun harness-ui-overflow--run (item)
+  "Do ITEM's action in the buffer the overflow came from, and close the popup.
+ITEM is one of `harness-ui-overflow-report'."
+  (let* ((menu (current-buffer))
+         (menu-window (get-buffer-window menu (selected-frame)))
+         (origin harness-ui-overflow--origin)
+         (origin-window harness-ui-overflow--origin-window)
+         (action (plist-get item :action)))
+    (when (window-live-p menu-window)
+      (with-selected-window menu-window
+        (quit-window)))
+    (when (and action (buffer-live-p origin))
+      (with-current-buffer origin
+        (when (window-live-p origin-window)
+          (select-window origin-window))
+        (condition-case err
+            (funcall action)
+          (error (message "Overflow: %s" (error-message-string err))))))))
+
+(defun harness-ui-overflow--action-name (item)
+  "Return a short word naming ITEM's action, or nil.
+A command's name says what it does: `harness-set-model' changes,
+`harness-toggle-supervisor' toggles."
+  (let ((command (plist-get item :command)))
+    (when (symbolp command)
+      (let ((name (symbol-name command)))
+        (cond ((string-match-p "toggle" name) "toggle")
+              ((string-match-p "rename" name) "rename")
+              ((string-match-p "refresh" name) "refresh")
+              ((string-match-p "reset" name) "reset")
+              ((string-match-p "usage" name) "usage")
+              ((string-match-p "menu\\'" name) "menu")
+              ((string-match-p "parent" name) "open")
+              ((string-match-p "adopt" name) "add")
+              ((string-match-p "btw" name) "ask")
+              ((string-match-p "filter\\|projects\\|archived" name) "show")
+              ((string-match-p "scroll" name) "jump")
+              ((string-match-p "set-\\|change" name) "change")
+              (t nil))))))
+
+(defun harness-ui-overflow--fill (title items)
+  "Fill the current buffer with the overflow ITEMS.
+TITLE, a short noun, heads the window.  Every item shows its whole text,
+wrapped; an item with an action is clickable and names what it does."
+  (let ((inhibit-read-only t))
+    (setq-local header-line-format (format " %s " (or title "Overflow")))
+    (erase-buffer)
+    (if (null items)
+        (insert (propertize "  Nothing hidden\n" 'face 'harness-dim-face))
+      (dolist (item items)
+        (let ((text (or (plist-get item :text) (plist-get item :label) ""))
+              (action (plist-get item :action)))
+          (insert "  ")
+          (let ((start (point)))
+            (insert text)
+            (when action
+              (add-text-properties
+               start (point)
+               (list 'button t 'follow-link t 'mouse-face 'highlight
+                     'keymap (harness-ui-overflow--item-map item)
+                     'help-echo "Mouse-1: run"))))
+          (when (and action (not (string-prefix-p "[" (string-trim text))))
+            (insert (propertize (format "   [%s]"
+                                        (or (harness-ui-overflow--action-name item)
+                                            "run"))
+                                'face 'harness-dim-face)))
+          (insert "\n")))
+      (insert "\n"))
+    (insert (propertize "  q close · RET run" 'face 'harness-dim-face)
+            "\n")
+    (goto-char (point-min))))
+
+(define-derived-mode harness-ui-overflow-mode special-mode "Overflow"
+  "Major mode of the popup listing what a bar cut off.
+The text of every hidden part is shown whole, wrapped, and a part with
+an action can be clicked, or chosen with RET, to do that action in the
+buffer the bar belongs to.  q closes it."
+  (setq-local truncate-lines nil
+              word-wrap t
+              header-line-format " Overflow "))
+
+(defun harness-ui-overflow-show-report (report)
+  "Show REPORT, a (TITLE . ITEMS) as `harness-ui-overflow-report' returns.
+The popup shows every item in full, and each action it can still offer;
+a click or RET does it in the buffer the bar belongs to."
+  (unless report
+    (user-error "Nothing hidden"))
+  (let ((origin (current-buffer))
+        (origin-window (selected-window))
+        (buffer (get-buffer-create "*Harness overflow*")))
+    (with-current-buffer buffer
+      (harness-ui-overflow-mode)
+      (setq-local harness-ui-overflow--origin origin
+                  harness-ui-overflow--origin-window origin-window)
+      (harness-ui-overflow--fill (car report) (cdr report))
+      (set-buffer-modified-p nil))
+    (when-let* ((window (harness-ui--display-menu buffer '((inhibit-same-window . t)))))
+      ;; The menu is a plain buffer, not a transient: fit its window to
+      ;; what it lists, below the bar it came from, so no item is cut off.
+      (when (window-live-p window)
+        (with-selected-window window
+          (ignore-errors
+            (fit-window-to-buffer window (max window-min-height (- (frame-height) 4)))))))
+    buffer))
+
+(defun harness-ui-overflow-show (&optional pos)
+  "Show everything the bar at POS cut off, its header's when POS is nil.
+A bar fitted with `harness-ui-overflow-mark' -- the lines above a
+compose box, a turn's activity line -- has its own hidden parts; a
+header fitted with `harness-ui-fit-header' has those of its last draw.
+The popup shows every hidden part in full, and each action it can still
+offer; a click or RET does it in the buffer the bar belongs to.  In a
+chat and on a task board this is bound to C-c C-o."
+  (interactive)
+  (harness-ui-overflow-show-report (harness-ui-overflow-report pos)))
+
+(defun harness-ui-overflow-click (event)
+  "Show what the header line cut off, on EVENT over its ….
+A fitted line's own … has its report in its keymap
+\(`harness-ui-overflow--report-map'), so this one is the header's."
+  (interactive "e")
+  (let* ((start (ignore-errors (event-start event)))
+         (window (and start (posn-window start))))
+    (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
+      (harness-ui-overflow-show-report
+       (and harness-ui--header-overflow
+            (cons (or harness-ui--header-overflow-title
+                      "Header")
+                  harness-ui--header-overflow))))))
+
+(defun harness-ui--header-overflow-items (original items)
+  "Return overflow items for ORIGINAL segments that ITEMS no longer show whole.
+A segment that was dropped, or shortened to its MIN, is in the list with
+its full text and its action, in display order."
+  (let (cut)
+    (dolist (orig original)
+      (let ((now (cl-find orig items)))
+        (when (or (null now)
+                  (not (equal (plist-get now :text) (plist-get orig :full))))
+          (let* ((full (plist-get orig :full))
+                 (command (or (plist-get orig :action)
+                              (harness-ui-overflow--text-command full)))
+                 (action (or (plist-get orig :action)
+                             (harness-ui-overflow--text-action full)))
+                 (help (harness-ui-overflow--help full)))
+            (push (list :label (harness-ui-overflow--label full)
+                        :text (harness-ui-overflow--text full)
+                        :help (and (stringp help) help)
+                        :command command
+                        :action (if (plist-get orig :action)
+                                    (harness-ui-overflow--thunk action nil)
+                                  action))
+                  cut)))))
+    (nreverse cut)))
+
+(defun harness-ui-fit-header (segments &optional width overflow)
   "Return the header line made of SEGMENTS, fitted to WIDTH.
-SEGMENTS are in display order, each a string or (TEXT PRIORITY MIN):
+SEGMENTS are in display order, each a string or (TEXT PRIORITY MIN ACTION):
 
 - TEXT, with the separator in front of it, such as \"  Model (Claude)\",
   so that a segment which goes takes its separator with it;
 - PRIORITY, higher for a segment more worth keeping, or t to keep it
   always;
 - MIN, optional: the same segment shortened, shown when the line still
-  does not fit without it.
+  does not fit without it;
+- ACTION, optional: the command a click on the segment runs, also
+  offered beside the full text in the overflow popup.
 
 When the whole line is wider than WIDTH, segments make room lowest
 priority first, and the rightmost first among equals, until the rest
@@ -3205,6 +3620,12 @@ wide is it dropped.  A segment whose priority is t is never dropped,
 only shortened.  What cannot be made to fit is left to the window,
 which cuts it as usual.
 
+With OVERFLOW, a line that had to drop or shorten a segment ends in a
+…, a control that shows the whole of every segment that did not fit,
+with its action (`harness-ui-overflow-show').  The segments are kept in
+`harness-ui--header-overflow' for it, and the line leaves room for the
+….  A line that fits is returned unchanged, with no control.
+
 WIDTH defaults to the room of the selected window, which is the window
 whose header line is drawn while a `header-line-format' `:eval' form
 runs.  When everything fits this is one measurement, so it can run on
@@ -3213,40 +3634,56 @@ every redisplay."
                          for i from 0
                          for text = (if (consp s) (car s) s)
                          when (and text (stringp text) (not (string-empty-p text)))
-                         collect (list :index i :text text
+                         collect (list :index i :text text :full text
                                        :priority (if (consp s) (nth 1 s) t)
-                                       :min (and (consp s) (nth 2 s)))))
+                                       :min (and (consp s) (nth 2 s))
+                                       :action (and (consp s) (nth 3 s)))))
+         (original (copy-sequence items))
          (width (or width (harness-ui-header-width)))
          (whole (mapconcat (lambda (it) (plist-get it :text)) items ""))
          (total (harness-ui-header-string-width whole)))
     (if (<= total width)
-        whole
-      (let ((droppable (sort (cl-remove-if-not (lambda (it) (numberp (plist-get it :priority)))
-                                               (copy-sequence items))
-                             (lambda (a b) (or (< (plist-get a :priority) (plist-get b :priority))
-                                               (and (= (plist-get a :priority) (plist-get b :priority))
-                                                    (> (plist-get a :index) (plist-get b :index))))))))
+        (progn
+          (when overflow (setq-local harness-ui--header-overflow nil))
+          whole)
+      (let* ((indicator (and overflow (harness-ui-overflow-indicator)))
+             (budget (if indicator
+                         (- width (harness-ui-header-string-width indicator))
+                       width))
+             (droppable (sort (cl-remove-if-not (lambda (it) (numberp (plist-get it :priority)))
+                                                (copy-sequence items))
+                              (lambda (a b) (or (< (plist-get a :priority) (plist-get b :priority))
+                                                (and (= (plist-get a :priority) (plist-get b :priority))
+                                                     (> (plist-get a :index) (plist-get b :index))))))))
         ;; The least important segments go first, one at a time, and no
         ;; more of them than the window needs.  One with a shortened form
         ;; takes it first and goes only when it is not enough: a name is
         ;; worth a few columns even when the model and the counts are not.
-        (while (and droppable (> total width))
+        (while (and droppable (> total budget))
           (let ((it (pop droppable)))
             (when-let* ((min (plist-get it :min)))
               (let ((was (harness-ui-header-string-width (plist-get it :text))))
                 (plist-put it :text min)
                 (cl-decf total (- was (harness-ui-header-string-width min)))))
-            (when (> total width)
+            (when (> total budget)
               (cl-decf total (harness-ui-header-string-width (plist-get it :text)))
               (setq items (delq it items)))))
         ;; What may not be dropped, a segment a mode puts in front of the
         ;; session's own, shortens too: nothing else is left to give.
         (dolist (it (reverse items))
-          (when (and (> total width) (plist-get it :min))
+          (when (and (> total budget) (plist-get it :min))
             (let ((was (harness-ui-header-string-width (plist-get it :text))))
               (plist-put it :text (plist-get it :min))
               (cl-decf total (- was (harness-ui-header-string-width (plist-get it :text)))))))
-        (mapconcat (lambda (it) (plist-get it :text)) items "")))))
+        (let* ((fitted (mapconcat (lambda (it) (plist-get it :text)) items ""))
+               (cut (and overflow (harness-ui--header-overflow-items original items))))
+          (if cut
+              (progn
+                (setq-local harness-ui--header-overflow cut
+                            harness-ui--header-overflow-title "Header")
+                (concat fitted indicator))
+            (when overflow (setq-local harness-ui--header-overflow nil))
+            fitted))))))
 
 (defun harness-ui-text-height (window from to limit)
   "Return how many pixels the text from FROM to TO takes in WINDOW.

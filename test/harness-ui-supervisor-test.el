@@ -144,11 +144,18 @@ the counts keep the room the badge would have taken."
         (should (< (string-width own) (string-width full)))
         (should (string-match-p " supervisor " full))
         ;; One column short of the whole line: the badge goes, the
-        ;; session's own stay.
+        ;; session's own stay, and the … that ends the line says more is
+        ;; behind it.
         (should-not (string-match-p "supervisor\\|hands-on" (harness-chat--header narrow)))
-        (should (equal (harness-chat--header narrow)
-                       (let ((harness-chat-header-functions nil))
-                         (harness-chat--header narrow))))
+        (let ((narrow-header (harness-chat--header narrow))
+              (items (copy-sequence harness-ui--header-overflow))
+              (without (let ((harness-chat-header-functions nil))
+                          (harness-chat--header narrow))))
+          (should (string-prefix-p without narrow-header))
+          (should (equal " …" (substring narrow-header (length without))))
+          (should (cl-find "supervisor" items
+                           :key (lambda (item) (plist-get item :label))
+                           :test #'equal)))
         (should (string-match-p "Scripted (Demo)" (harness-chat--header narrow)))
         (should (string-match-p "Ask" (harness-chat--header narrow)))))))
 
