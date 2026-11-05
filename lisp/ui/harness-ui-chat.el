@@ -1808,9 +1808,12 @@ A green circle when it ran, a yellow one while it runs or when it was
 refused, a red triangle when it ran and failed.  CALL is the call's
 node: one the harness recorded (`harness-outside-node-p') runs whatever
 the session does, until the harness records its result."
-  (let ((outcome (harness-ui-tool-outcome result)))
-    (cond ((and (null result) (or (harness-outside-node-p call)
-                                  (member (plist-get (harness-chat--session) :status) '("running" "blocked"))))
+  (let ((outcome (harness-ui-tool-outcome result))
+        (session (harness-chat--session)))
+    (cond ((and (null result)
+                (or (harness-outside-node-p call)
+                    (equal (plist-get session :status) "running")
+                    (harness-session-blocked-on-request-p session)))
            (harness-chat--status 'caution "running" "The call has not finished yet"))
           ((null result) (propertize "– no result" 'face 'harness-dim-face))
           ((memq outcome '(failed denied)) (harness-chat--outcome-status outcome))
@@ -4027,7 +4030,9 @@ both places."
     (cond ((equal status "running")
            (unless harness-chat--turn-start (setq harness-chat--turn-start (float-time)))
            (harness-chat--start-spinner))
-          ((not (equal status "blocked"))
+          ;; A task's session blocked between turns waits for the
+          ;; user's reply: its turn is over, as an idle one's is.
+          ((not (harness-session-blocked-on-request-p session))
            (setq harness-chat--turn-start nil
                  ;; The turn is over, even if the news of it was lost.
                  harness-chat--activity nil)
@@ -6558,11 +6563,15 @@ keeps it only while it is visible."
     (maphash (lambda (_ buf)
                (when (buffer-live-p buf)
                  (with-current-buffer buf
-                   (let ((status (plist-get (harness-chat--session) :status))
-                         (visible (get-buffer-window buf 'visible)))
-                     (when (or (equal status "running") (and visible (equal status "blocked")))
+                   (let* ((session (harness-chat--session))
+                          (status (plist-get session :status))
+                          (turn (or (equal status "running")
+                                    (harness-session-blocked-on-request-p session)))
+                          (visible (get-buffer-window buf 'visible)))
+                     (when (or (equal status "running")
+                               (and visible turn))
                        (setq any t))
-                     (when (and visible (member status '("running" "blocked")))
+                     (when (and visible turn)
                        (force-mode-line-update)
                        (harness-chat--refresh-activity))))))
              harness-chat--buffers)

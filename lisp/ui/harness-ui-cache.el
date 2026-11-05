@@ -183,24 +183,28 @@ before; the prompt is not."
 NOW is the current time by default.  The panel shows once the cache
 SESSION's requests last used has lapsed (its `:cache' `:expires' is
 past), and at once when that cache is of a model SESSION no longer uses
-\(`:from'), while SESSION waits for the user: idle or closed.  A cache a
-redaction dropped (its `:dropped', the moment, which is its `:expires'
-too) has lapsed from then on, however long its provider would have
-kept it; the state carries `:dropped' for the panel to say so.  A
-session whose turn is still running shows nothing: a session blocked on
-an answer is in the middle of a turn, and the panel speaks of the
-user's next message, which only a session that is not running has.  So does a
-session this UI sent a prompt that has no answer yet
-\(`harness-ui-cache--running-p'), whatever its record reads.  States
-that read the same are `equal', so a session update that changes
-nothing the panel says does not draw it again."
+\(`:from'), while SESSION waits for the user: idle, closed, or blocked
+between turns, as a task waiting for the reply is.  A cache a redaction
+dropped (its `:dropped', the moment, which is its `:expires' too) has
+lapsed from then on, however long its provider would have kept it; the state
+carries `:dropped' for the panel to say so.  A session whose turn is
+still running shows nothing: one blocked on a request is in the middle
+of a turn, and the panel speaks of the user's next message, which only
+a session that is not running has.  So does a session this UI sent a
+prompt that has no answer yet (`harness-ui-cache--running-p'),
+whatever its record reads.  States that read the same are `equal', so a
+session update that changes nothing the panel says does not draw it
+again."
   (let* ((cache (plist-get session :cache))
          (expires (plist-get cache :expires))
          (dropped (plist-get cache :dropped))
          (from (harness-ui-cache--other-model session))
-         (status (format "%s" (plist-get session :status))))
+         (status (format "%s" (plist-get session :status)))
+         (at-rest (or (member status '("idle" "inactive"))
+                      (and (equal status "blocked")
+                           (not (harness-session-blocked-on-request-p session))))))
     (when (and (numberp expires)
-               (member status '("idle" "inactive"))
+               at-rest
                (not (harness-ui-cache--running-p session))
                (or from (>= (or now (float-time)) expires)))
       (append (list :at (plist-get cache :at) :ttl (plist-get cache :ttl) :expires expires

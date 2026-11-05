@@ -4,6 +4,7 @@
 (require 'harness-test-helpers)
 
 (defvar harness-tasks-context-limit)
+(defvar harness-session--interrupted)
 ;; The tasks module is not loaded here; declaring the option special lets
 ;; a test bind it, as the tool that reads it binds it in reality.
 
@@ -1422,6 +1423,25 @@ compaction, which reach no provider, are left alone."
         (clrhash harness-sessions)
         (harness-session--load-all)
         (should (equal '(tool-call) (harness-session-test-kinds quiet)))))))
+
+(ert-deftest harness-session-blocked-without-a-request-loads-quietly ()
+  "A session saved blocked with nothing pending was not mid-turn.
+The tasks module keeps a task's session blocked between turns, with no
+request pending, until the user's reply: a harness that stops then has
+nothing to settle, and reports no interruption.  A blocked session that
+waited on a request is settled, as the tests above show."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append id '(:kind user :content "hand it in"))
+      (harness-call 'session/append id '(:kind assistant :content "Done."))
+      (harness-call 'session/set-status id 'blocked)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (eq 'inactive (plist-get (harness-call 'session/get id) :status)))
+      (should (equal '(user assistant) (harness-session-test-kinds id)))
+      (should-not (cl-find id harness-session--interrupted
+                           :key (lambda (item) (plist-get item :id)) :test #'equal)))))
 
 (ert-deftest harness-session-interrupted-question-named-in-hint ()
   (harness-session-test-with

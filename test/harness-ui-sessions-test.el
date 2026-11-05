@@ -3011,6 +3011,12 @@ before the session says it waits no more."
           (should-not (harness-ui-sessions-test--line "busy"))
           (should (string-match-p "y allows it, n denies it"
                                   (harness-ui-sessions--waiting-help (harness-ui-session "asks"))))
+          ;; Blocked between turns, with nothing pending, it waits for the
+          ;; user's reply (`harness-session-blocked-on-request-p').
+          (should (string-match-p
+                   "waits for your reply"
+                   (harness-ui-sessions--waiting-help
+                    (plist-put (copy-sequence (harness-ui-session "asks")) :pending nil))))
           ;; [Allow] answers over the bus, and the line goes at once.
           (harness-ui-sessions-test--goto "asks")
           (forward-line 1)

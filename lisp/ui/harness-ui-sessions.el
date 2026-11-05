@@ -1996,8 +1996,12 @@ session is marked."
   (harness-move-session directory (harness-ui-sessions--one-id "Move") keep-old))
 
 (defun harness-ui-sessions--turn-p (id)
-  "Return non-nil when session ID has a turn to cancel: it runs or is blocked."
-  (and (member (plist-get (harness-ui-session id) :status) '("running" "blocked")) t))
+  "Return non-nil when session ID has a turn to cancel: it runs or waits in one.
+A session blocked between turns, waiting for the user's reply, has none
+\(`harness-session-blocked-on-request-p')."
+  (let ((session (harness-ui-session id)))
+    (or (equal (plist-get session :status) "running")
+        (harness-session-blocked-on-request-p session))))
 
 (defun harness-ui-sessions-cancel ()
   "Cancel the running turn of the marked sessions, else of the session at point.
@@ -2286,11 +2290,16 @@ and stays paused."
   (harness-ui-sessions--fetch-tasks t))
 
 (defun harness-ui-sessions--waiting-help (session)
-  "Return the tooltip of SESSION's status cell, saying what it waits on."
+  "Return the tooltip of SESSION's status cell, saying what it waits on.
+A session blocked with no request pending waits between turns: the
+tasks module keeps the session of a task whose turn ended talking to
+the user blocked until the reply, in the session or in a thread, starts
+a turn."
   (when (equal (plist-get session :status) "blocked")
-    (if (equal (harness-ui-pending-status session) "question")
-        "blocked on a question; SPC shows it, to answer it"
-      "blocked on a permission request; y allows it, n denies it, SPC shows it")))
+    (pcase (harness-ui-pending-status session)
+      ("question" "blocked on a question; SPC shows it, to answer it")
+      ("permission" "blocked on a permission request; y allows it, n denies it, SPC shows it")
+      (_ "blocked, waiting for you: its turn ended and it waits for your reply, in the session or in a thread"))))
 
 (defun harness-ui-sessions-requests ()
   "Pop out what the session at point waits on.

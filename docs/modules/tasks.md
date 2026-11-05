@@ -62,10 +62,14 @@ its work in (`harness-tasks-working-phase`): a turn that ends with a
 reply, not with `hand_in`, is the agent talking to the user -- a
 question, an answer to feedback, a note of what it is about to do --
 and leaves the task active, in the working phase, waiting for the
-next message; no report is made for it.  The phase is for what is
-still owed -- work, a question only the user can answer, an open
-thread -- not for an approval before handing in, and its purpose is
-to work with the user until they are satisfied, not to reach hand_in:
+next message; no report is made for it.  Between turns its session
+says `blocked` on the user, as one waiting on a request does, until
+the next message starts a turn (`harness-tasks--sync-reply-block`):
+the agent has answered what it was asked and waits for the reply.
+The phase is for what is still owed -- work, a question only the
+user can answer, an open thread -- not for an approval before
+handing in, and its purpose is to work with the user until they are
+satisfied, not to reach hand_in:
 the prompt tells the agent to hand in at once when nothing is
 outstanding, that a message from the user sends the task back to
 work, so handing in never ends the conversation, and that the
@@ -283,7 +287,9 @@ States:
             verify it or send it back with feedback.  A round that
             handed in work needing no merge (`:no-merge`) also waits
             here, and verifying it completes the task without the
-            merge queue.
+            merge queue.  Its turn is over, and it waits in its own
+            column, not in needs-input: the review is what it waits
+            for.
   done      merged (or finished, outside git), and verified with
             review; a follow-up message moves the task back to active
 
@@ -304,8 +310,12 @@ Every task a method returns or an event carries also has a derived
                 permission or a question -- also while the task is
                 starting or resumed and the turn has not begun, held
                 by the question a cold prompt cache asks first
-                (harness-cowboy.el) --, or it (or its refinement)
-                stopped part way
+                (harness-cowboy.el) --, it (or its refinement)
+                stopped part way, or the agent ended a turn talking to
+                the user and waits for the reply (`:outcome`
+                conversing, `harness-tasks--sync-reply-block`).  A
+                task in review is not here: its own column says the
+                same thing more precisely.
   review        finished, waiting for the user to verify it
   merging       its branch holds a place in the merge queue: queued,
                 merging, or its session resolving the conflicts
@@ -484,8 +494,10 @@ here logs, emits or returns one.
 - `session/list` ([session](session.md))
 - `session/nodes` ([session](session.md))
 - `session/resume` ([session](session.md))
+- `session/runtime` ([session](session.md))
 - `session/set-plan` ([session](session.md))
 - `session/set-provider-state` ([session](session.md))
+- `session/set-status` ([session](session.md))
 - `session/update` ([session](session.md))
 - `supervisor/set` ([supervisor](supervisor.md)), when it is loaded
 - `usage/budget-hold` ([usage](usage.md)), when it is loaded
@@ -507,6 +519,7 @@ here logs, emits or returns one.
 - `session/deleted` → `harness-tasks--on-session-deleted`
 - `session/ext-changed` → `harness-tasks--on-priority-changed`
 - `session/pending-changed` → `harness-tasks--on-pending-changed`
+- `session/status` → `harness-tasks--on-session-rest`
 - `session/status` → `harness-tasks--on-session-status`
 - `usage/budgets-changed` → `harness-tasks--on-hold-event`
 

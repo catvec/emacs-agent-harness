@@ -3691,10 +3691,23 @@ Return the tool calls of S answered so, each (:tool NAME :call-id ID)."
     (mapcar (lambda (call) (list :tool (plist-get call :tool) :call-id (plist-get call :call-id)))
             calls)))
 
+(defun harness-session--interrupted-record-p (plist)
+  "Non-nil when saved session PLIST had a turn the harness stopped in.
+That is a saved `running', or a saved `blocked' that waited on a
+request: the turn that would read its answer ended with the process.
+A session the tasks module marked `blocked' because a task's turn ended
+talking to the user waits on no request and has no turn to settle: it
+loads closed like any other session at rest."
+  (or (equal (plist-get plist :status) "running")
+      (and (equal (plist-get plist :status) "blocked")
+           (let ((pending (plist-get plist :pending)))
+             (and (seqp pending) (> (length pending) 0))))))
+
 (defun harness-session--load-all ()
   "Load every persisted session record (nodes stay on disk until needed).
-Sessions saved mid-turn are settled with `harness-session--settle', and
-listed in `harness-session--interrupted' for whoever recovers them."
+Sessions saved mid-turn (`harness-session--interrupted-record-p') are
+settled with `harness-session--settle', and listed in
+`harness-session--interrupted' for whoever recovers them."
   (setq harness-session--interrupted nil)
   (let (interrupted loaded)
     (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
@@ -3703,7 +3716,7 @@ listed in `harness-session--interrupted' for whoever recovers them."
           (let ((s (harness-session--from-plist pl)))
             (puthash (plist-get pl :id) s harness-sessions)
             (push s loaded)
-            (when (member (plist-get pl :status) '("running" "blocked"))
+            (when (harness-session--interrupted-record-p pl)
               (push (list s (plist-get pl :pending) (intern (plist-get pl :status))) interrupted))))))
     (dolist (entry interrupted)
       (pcase-let ((`(,s ,pending ,status) entry))

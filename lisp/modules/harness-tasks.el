@@ -51,10 +51,14 @@
 ;; reply, not with `hand_in', is the agent talking to the user -- a
 ;; question, an answer to feedback, a note of what it is about to do --
 ;; and leaves the task active, in the working phase, waiting for the
-;; next message; no report is made for it.  The phase is for what is
-;; still owed -- work, a question only the user can answer, an open
-;; thread -- not for an approval before handing in, and its purpose is
-;; to work with the user until they are satisfied, not to reach hand_in:
+;; next message; no report is made for it.  Between turns its session
+;; says `blocked' on the user, as one waiting on a request does, until
+;; the next message starts a turn (`harness-tasks--sync-reply-block'):
+;; the agent has answered what it was asked and waits for the reply.
+;; The phase is for what is still owed -- work, a question only the
+;; user can answer, an open thread -- not for an approval before
+;; handing in, and its purpose is to work with the user until they are
+;; satisfied, not to reach hand_in:
 ;; the prompt tells the agent to hand in at once when nothing is
 ;; outstanding, that a message from the user sends the task back to
 ;; work, so handing in never ends the conversation, and that the
@@ -272,7 +276,9 @@
 ;;             verify it or send it back with feedback.  A round that
 ;;             handed in work needing no merge (`:no-merge') also waits
 ;;             here, and verifying it completes the task without the
-;;             merge queue.
+;;             merge queue.  Its turn is over, and it waits in its own
+;;             column, not in needs-input: the review is what it waits
+;;             for.
 ;;   done      merged (or finished, outside git), and verified with
 ;;             review; a follow-up message moves the task back to active
 ;;
@@ -293,8 +299,12 @@
 ;;                 permission or a question -- also while the task is
 ;;                 starting or resumed and the turn has not begun, held
 ;;                 by the question a cold prompt cache asks first
-;;                 (harness-cowboy.el) --, or it (or its refinement)
-;;                 stopped part way
+;;                 (harness-cowboy.el) --, it (or its refinement)
+;;                 stopped part way, or the agent ended a turn talking to
+;;                 the user and waits for the reply (`:outcome'
+;;                 conversing, `harness-tasks--sync-reply-block').  A
+;;                 task in review is not here: its own column says the
+;;                 same thing more precisely.
 ;;   review        finished, waiting for the user to verify it
 ;;   merging       its branch holds a place in the merge queue: queued,
 ;;                 merging, or its session resolving the conflicts
@@ -1001,6 +1011,15 @@ make another one on the branch the first is taking
 Kept from `session/status' while the session stays blocked, so a task
 knows how long it has waited (`harness-tasks--blocked-since').")
 
+(defvar harness-tasks--reply-blocked (make-hash-table :test 'equal)
+  "Session id -> t while its task at work keeps it `blocked' between turns.
+A task whose turn ended talking to the user waits for their reply
+\(`:outcome' `conversing', `harness-tasks--sync-reply-block'): its
+session says `blocked' as one waiting on a request does, with nothing
+pending.  The mark says which blocks the tasks module made: a task that
+goes on takes its own away, and a session blocked on a request keeps
+that block until the request is answered.")
+
 (defvar harness-tasks--lend-timers (make-hash-table :test 'equal)
   "Task id -> timer that runs the scheduler once the task lends its slot.
 Armed while the task's session is blocked on the user
@@ -1060,12 +1079,88 @@ that session brings the task back to work, so the session stays."
     (harness-tasks--oldest-first out)))
 
 (defun harness-tasks--put (task)
-  "Store TASK, schedule a save and emit `task/changed'.  Return its view."
+  "Store TASK, schedule a save and emit `task/changed'.  Return its view.
+The session of a task that waits for the user's reply says so, and one
+that goes on stops saying it (`harness-tasks--sync-reply-block')."
   (puthash (plist-get task :id) task harness-tasks--table)
+  (harness-tasks--sync-reply-block task)
   (harness-tasks--save-soon)
   (let ((view (harness-tasks--view task)))
     (harness-emit 'task/changed view)
     view))
+
+(defun harness-tasks--waiting-for-reply-p (task)
+  "Non-nil when TASK waits for the user's reply, between turns.
+Its turn ended talking to the user, in the working phase (`:outcome'
+`conversing'): the next message, the answer in a thread, the feedback
+that carries the work on is the user's.  Not while their message is on
+its way to it (`harness-tasks--waking-p'), nor while work the session
+left running goes on (`:waiting'), nor in the merge queue: TASK does
+not wait for the user then."
+  (and (eq (plist-get task :state) 'active)
+       (eq (plist-get task :outcome) 'conversing)
+       (harness-tasks--working-phase-p task)
+       (not (harness-json-true-p (plist-get task :archived)))
+       (not (plist-get task :waiting))
+       (not (plist-get task :merge-status))
+       (not (harness-tasks--waking-p task))))
+
+(defun harness-tasks--sync-reply-block (task &optional adopt)
+  "Make TASK's session say it waits for the user, when it does between turns.
+A task whose turn ended talking to the user (`:outcome' `conversing')
+waits for their reply, and until their next message starts a turn its
+session is `blocked', as the session of a pending request is
+\(`harness-session-waiting-on-user-p'): the session list, the mode
+line's count and the task board, whose needs-input column follows the
+same, say who waits for the user.  A task that goes on -- its next turn,
+a hand-in, a stop -- takes the block away again, unless a request waits
+on its session, which keeps it blocked and then goes idle when answered.
+Only a session at rest changes: one closed waits in no list, and one
+whose turn runs is at work.  With ADOPT, a `blocked' status with nothing
+pending is taken as this module's block: after a reload the marker table
+no longer says which blocks it made, and the pass that follows a start
+takes away the one a task no longer waits for.  TASK is the record as
+stored, or as it is to be stored: this reads the session and changes its
+status, and touches no record.  Return non-nil when the status changed."
+  (let* ((sid (plist-get task :session))
+         (session (and sid (harness-call 'session/exists-p sid)
+                       (harness-call 'session/get sid))))
+    (when session
+      (let* ((status (plist-get session :status))
+             (pending (let ((items (plist-get session :pending)))
+                        (and (seqp items) (> (length items) 0))))
+             (waiting (harness-tasks--waiting-for-reply-p task))
+             (ours (gethash sid harness-tasks--reply-blocked)))
+        (cond
+         ((and waiting (eq status 'idle))
+          (puthash sid t harness-tasks--reply-blocked)
+          (harness-call 'session/set-status sid 'blocked)
+          t)
+         ((and waiting (eq status 'blocked) (not pending))
+          ;; A block nothing holds is this module's, whether this put it
+          ;; there or a harness that started before it: the task still
+          ;; waits, so keep it.
+          (puthash sid t harness-tasks--reply-blocked)
+          nil)
+         (waiting nil)
+         ((not (eq status 'blocked))
+          (when ours (remhash sid harness-tasks--reply-blocked))
+          nil)
+         (pending
+          ;; A request holds the session now: it stays blocked for that,
+          ;; and goes idle when answered, not back to the block that is
+          ;; over.
+          (when ours
+            (remhash sid harness-tasks--reply-blocked)
+            (harness-call 'session/runtime sid :status-before-block 'idle))
+          nil)
+         ((or ours adopt)
+          ;; The wait is over: the block goes, to idle as an answered
+          ;; request does.
+          (remhash sid harness-tasks--reply-blocked)
+          (harness-call 'session/set-status sid 'idle)
+          t)
+         (t nil))))))
 
 (defun harness-tasks--set (id &rest plist)
   "Merge PLIST into task ID and store it.  Return its view.
@@ -1579,10 +1674,11 @@ repository stores."
 That is pending, backlog, needs-input, review, merging, active, done or
 cancelled.  A done task the user cancelled (`harness-tasks--cancelled-p')
 is cancelled, not done: the done column holds finished work only.  A
-turn that ended talking to the user (`:outcome' `conversing') is at
-work, in the working phase, and shows there: only a question or a
-permission the user must answer makes a task need their input.
-A backlog task (`harness-tasks--backlog-p'), and the write-up an agent
+turn that ended talking to the user (`:outcome' `conversing') waits for
+their reply, whether its session says so or was closed at a restart:
+the task shows in needs-input (`harness-tasks--sync-reply-block').  A
+backlog task
+(`harness-tasks--backlog-p'), and the write-up an agent
 does for it, show in the backlog: only the user starts one, so it is no
 queued pending task (`harness-tasks--queued-p').  A task whose branch
 holds a place in the merge queue shows in merging however it holds it:
@@ -1594,7 +1690,8 @@ active before the turn it starts actually begins.
 A session that waits for the user (`harness-session-waiting-on-user-p')
 puts its task in needs-input before anything else: before it starts or
 is woken, and whatever state it is in, as the session list's blocked
-filter says the same of the session.  A turn that has not begun waits
+filter says the same of the session, unless its own column says it
+better (a task in review).  A turn that has not begun waits
 for the user too: a restarted harness resumes the tasks it was working
 on with a message that meets a prompt cache gone cold, and the question
 that asks what goes first (harness-cowboy.el) blocks the session before
@@ -1618,9 +1715,12 @@ user."
                ((plist-get task :merge-status) 'merging)
                ((harness-tasks--waking-p task) 'active)
                ((eq (plist-get session :status) 'running) 'active)
-               ;; A turn that ended talking to the user is at work, not
-               ;; waiting on them: the working phase goes on until something
-               ;; is asked or handed in.
+               ;; A turn that ended talking to the user waits for their
+               ;; reply (`harness-tasks--sync-reply-block'): the task
+               ;; needs input, also while its session is closed at a
+               ;; restart and says nothing.
+               ((harness-tasks--waiting-for-reply-p task) 'needs-input)
+               ;; The working phase off: a reply is a round of work.
                ((eq (plist-get task :outcome) 'conversing) 'active)
                ((plist-get task :outcome) 'needs-input)
                (t 'active))))))
@@ -2748,14 +2848,16 @@ without it."
 ;; pre-empted one and a follow-up only take free slots, and a priority
 ;; changed otherwise only reorders the queue.
 ;;
-;; Lending: a task whose own session waits on the user keeps its slot,
-;; its turn going on once answered -- until it has waited
+;; Lending: a task whose own session waits inside a turn on the user
+;; keeps its slot, its turn going on once answered -- until it has waited
 ;; `harness-tasks-lend-blocked-slot-after'.  Then it lends the slot
 ;; (`harness-tasks--lending-p'): it holds none, so the scheduler fills
 ;; it like any free slot, by priority.  How long it has waited is how
 ;; long its session has been blocked (`harness-tasks--blocked-since'),
 ;; and a timer per blocked task runs the scheduler when the wait is up
 ;; (`harness-tasks--arm-lend-timer'), as nothing else happens then.  A
+;; task whose turn ended talking to the user waits between turns, with
+;; no turn to go on: it holds no slot to lend.  A
 ;; task that waits on work its session left running (`:waiting', or
 ;; work `agent/outstanding' reports mid-turn) lends nothing, as that
 ;; work goes on, and neither does a task working in a borrowed slot,
@@ -2777,11 +2879,16 @@ without it."
 
 (defun harness-tasks--working-p (task)
   "Non-nil when TASK is at work: starting, running or blocked mid-turn.
-That includes its session's turns for the merge queue (state merging),
-which `harness-tasks--holds-slot-p' leaves out: they take no slot."
+A session blocked between its turns, waiting for the user's reply
+\(`harness-tasks--sync-reply-block'), has no turn: the task waits, it is
+not at work.  That includes its session's turns for the merge queue
+\(state merging), which `harness-tasks--holds-slot-p' leaves out: they
+take no slot."
   (or (gethash (plist-get task :id) harness-tasks--starting)
       (and (memq (plist-get task :state) '(active merging))
-           (memq (plist-get (harness-tasks--session task) :status) '(running blocked)))))
+           (let ((session (harness-tasks--session task)))
+             (or (eq (plist-get session :status) 'running)
+                 (harness-session-blocked-on-request-p session))))))
 
 (defun harness-tasks--top-level-p (session)
   "Non-nil when SESSION (a plist) is top-level: no other session started it.
@@ -2795,7 +2902,9 @@ and the session list shows them under it."
 It does while it starts, and while it is active with its own session
 running or blocked mid-turn: one waiting on the user keeps its slot, as
 its turn goes on once answered -- until it has waited long enough to
-lend it (`harness-tasks--lending-p'), when it holds none.  So does one
+lend it (`harness-tasks--lending-p'), when it holds none.  A session
+blocked between its turns, waiting for the user's reply, has no turn to
+go on, and the task holds no slot, as with an idle session.  So does one
 that waits on work its session left running (`:waiting', see
 `agent/outstanding'), such as the workers of a supervisor's plan.  Only
 that session counts, and only when it is top-level
@@ -2811,7 +2920,8 @@ and nor does writing a backlog task up (refining)."
                   (setq session (harness-tasks--session task))
                   (harness-tasks--top-level-p session)
                   (or (plist-get task :waiting)
-                      (memq (plist-get session :status) '(running blocked)))))
+                      (eq (plist-get session :status) 'running)
+                      (harness-session-blocked-on-request-p session))))
          (not (harness-tasks--lending-p task session)))))
 
 (defun harness-tasks--lending-on-p ()
@@ -2837,15 +2947,18 @@ not blocked (`harness-session-waiting-on-user-p')."
           (and times (apply #'min times))))))
 
 (defun harness-tasks--blocked-p (task &optional session)
-  "Non-nil when active TASK's own top-level session is blocked on the user.
-SESSION is TASK's session plist when the caller has it.  It is blocked
-when it waits for the user (`harness-session-waiting-on-user-p'): the
-same question the board's needs-input column and the session list's
-blocked filter ask."
+  "Non-nil when active TASK's own top-level session is blocked inside a turn.
+SESSION is TASK's session plist when the caller has it.  That is a
+session waiting on a request (`harness-session-blocked-on-request-p'),
+whose turn goes on once answered: the question the board's needs-input
+column and the session list's blocked filter ask.  A session blocked
+between its turns, waiting for the user's reply
+\(`harness-tasks--sync-reply-block'), has no turn to go on, and is not
+this: nothing is lent for it."
   (and (eq (plist-get task :state) 'active)
        (let ((session (or session (harness-tasks--session task))))
          (and (harness-tasks--top-level-p session)
-              (harness-session-waiting-on-user-p session)))))
+              (harness-session-blocked-on-request-p session)))))
 
 (defun harness-tasks--lend-due-at (task &optional session)
   "Return when TASK, blocked on the user, has waited long enough to lend its slot.
@@ -3307,6 +3420,28 @@ being cancelled as its question goes is over first."
         (harness-tasks--arm-lend-timer task)
         (unless blocked
           (harness-run-soon #'harness-tasks--reclaim (plist-get task :id)))))))
+
+(defun harness-tasks--on-session-rest (session-id status &rest _)
+  "Say that a session of a task waiting for the user says so.
+On `session/status': a session that comes to rest at idle has ended its
+turn, and a task whose turn ended talking to the user keeps it blocked
+until their next message starts a turn
+\(`harness-tasks--sync-reply-block').  A session resumed after a
+restart, or opened again after it was closed, comes round the same
+way."
+  (when (eq status 'idle)
+    (when-let* ((task (harness-tasks--by-session session-id)))
+      (harness-tasks--sync-reply-block task))))
+
+(defun harness-tasks--sync-reply-blocks ()
+  "Say on every task's session that it waits for the user, when it does.
+The pass after a start or a reload: a session that was loaded closed
+says nothing until it is opened again (`harness-tasks--on-session-rest'),
+and one opened before the task was read says it here.  A block a harness
+that ran before this one left on the session of a task that no longer
+waits goes too."
+  (maphash (lambda (_ task) (harness-tasks--sync-reply-block task t))
+           harness-tasks--table))
 
 (defun harness-tasks--make-room (task)
   "Find TASK, which the user sends back from review, a slot to work in now.
@@ -5054,13 +5189,21 @@ starts again when the hold ends (`harness-tasks--refresh-holds')."
 (defun harness-tasks--on-session-deleted (session-id &rest _)
   "Forget the task of deleted SESSION-ID, and since when it was blocked."
   (remhash session-id harness-tasks--blocked-at)
+  (remhash session-id harness-tasks--reply-blocked)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (harness-tasks--forget-attachments (plist-get task :id))
     (harness-tasks--remove (plist-get task :id))))
 
 (defun harness-tasks--remove (id)
-  "Drop task ID, write the stores and emit `task/deleted'."
-  (remhash id harness-tasks--table)
+  "Drop task ID, write the stores and emit `task/deleted'.
+The block the wait for the user put on its session goes with it, when
+the session stays."
+  (let ((task (gethash id harness-tasks--table)))
+    ;; Out of the table first: the status goes to idle, and the handler
+    ;; that sees a session come to rest must find no task waiting.
+    (remhash id harness-tasks--table)
+    (when task
+      (harness-tasks--sync-reply-block (plist-put (copy-sequence task) :state 'done))))
   (remhash id harness-tasks--starting)
   (remhash id harness-tasks--waking)
   (harness-tasks--save-soon)
@@ -5176,10 +5319,12 @@ restart."
 (defun harness-tasks--pick-up ()
   "Soon pick up the work a stopped harness left, then start waiting tasks.
 Runs once the modules are up, and again when a store read later adds
-records.  Each step leaves alone the tasks something already works on.
-Last, the tasks without a title are named."
+records.  Each step leaves alone the tasks something already works on;
+a task whose turn ended talking to the user has its session say it
+waits for the reply.  Last, the tasks without a title are named."
   (harness-run-soon #'harness-tasks--recover)
   (harness-run-soon #'harness-tasks--resume-merges)
+  (harness-run-soon #'harness-tasks--sync-reply-blocks)
   (harness-run-soon #'harness-tasks--recover-refinements)
   (harness-run-soon #'harness-tasks--schedule)
   (harness-run-soon #'harness-tasks--name-untitled))
@@ -6532,7 +6677,10 @@ ends cleanly, which the review step picks up as usual
   "Put task ID in review by hand, without waiting for its agent to hand in.
 The task is at work: its last turn ended, in the working phase
 \(`harness-tasks--working-phase-p') or stopped part way, and its session
-is neither running nor waiting on the user.  The report it handed in
+is neither running nor stopped inside a turn on a question
+\(`harness-session-blocked-on-request-p'); one waiting between turns for
+the user's reply can be put in review all the same, and its wait ends
+with it.  The report it handed in
 last stands when it speaks for this round; otherwise the harness records
 that none was handed in, with the session's last message as its summary
 \(`harness-tasks--missing-report'), or says the work was put in review
@@ -6547,7 +6695,7 @@ task already in review is left as it is.  Return the task's view."
       (error "Task %s is not at work" id))
      ((harness-tasks--turn-p task)
       (error "Task %s is working; put it in review when its turn ends" id))
-     ((harness-session-waiting-on-user-p (harness-tasks--session task))
+     ((harness-session-blocked-on-request-p (harness-tasks--session task))
       (error "Task %s waits for your answer; answer it, or stop the task first" id))
      (t
       (let* ((report (cond ((and (plist-get task :report)
@@ -6813,6 +6961,7 @@ process's own, and goes on."
   (harness-on 'session/deleted #'harness-tasks--on-session-deleted)
   (harness-on 'session/pending-changed #'harness-tasks--on-pending-changed)
   (harness-on 'session/status #'harness-tasks--on-session-status)
+  (harness-on 'session/status #'harness-tasks--on-session-rest)
   (harness-on 'merge/started #'harness-tasks--on-merge-started)
   (harness-on 'merge/conflict #'harness-tasks--on-merge-conflict)
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
@@ -6834,6 +6983,7 @@ process's own, and goes on."
   (harness-add-filter 'agent/before-turn #'harness-tasks--before-turn 2)
   (harness-add-filter 'session/before-move #'harness-tasks--before-move)
   (harness-run-soon #'harness-tasks--arm-lend-timers)
+  (harness-run-soon #'harness-tasks--sync-reply-blocks)
   (if (harness-module-ready-p 'tasks)
       (harness-run-soon #'harness-tasks--name-untitled)
     (harness-tasks--pick-up)))

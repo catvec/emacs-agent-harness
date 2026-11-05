@@ -763,6 +763,20 @@ other."
     (should-not (harness-session-waiting-on-user-p nil))
     (should (eq t (harness-session-waiting-on-user-p (list :status 'blocked))))))
 
+(ert-deftest harness-util-session-blocked-on-request ()
+  "A session is blocked on a request only while one is pending.
+The tasks module keeps a task's session `blocked' between turns, with
+no request pending, until the user replies: a view that offers to
+cancel a turn, or says what one does, asks this, not the status alone."
+  (let ((question (list :id "p1" :kind 'question :payload (list :question "Which?"))))
+    (should (harness-session-blocked-on-request-p (list :status 'blocked :pending (list question))))
+    (should (harness-session-blocked-on-request-p (list :status "blocked" :pending (vector question))))
+    (should-not (harness-session-blocked-on-request-p (list :status 'blocked)))
+    (should-not (harness-session-blocked-on-request-p (list :status "blocked" :pending [])))
+    (should-not (harness-session-blocked-on-request-p (list :status 'running :pending (list question))))
+    (should-not (harness-session-blocked-on-request-p (list :status 'idle)))
+    (should-not (harness-session-blocked-on-request-p nil))))
+
 (ert-deftest harness-util-node-fold ()
   "A hint that folds several lines under a title reads the same after JSON.
 Items without text, and a fold with no title or no item, are no fold."

@@ -958,6 +958,7 @@ POSITION is its place in line among queued tasks."
                          ("merge-failed" (format "could not merge into %s: %s" (harness-ui-tasks--base task)
                                                  (or (plist-get task :error) "?")))
                          ("adopted" "waiting for your next message")
+                         ("conversing" "waiting for your reply")
                          ("cannot-continue" (format "cannot continue — %s"
                                                     (or (plist-get task :error) "it said it cannot finish")))
                          ((and "interrupted" (guard (harness-ui-tasks--refining-p task)))
@@ -1616,6 +1617,9 @@ come alone, as for the card's buttons."
              ("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
              ("Drop" harness-ui-tasks-cancel)))
           (_ (cond
+              ((equal (plist-get task :outcome) "conversing")
+               '(("Reply" harness-ui-tasks-reply) ("Pause" harness-ui-tasks-pause)
+                 ("Open" harness-ui-tasks-open) ("Mark done" harness-ui-tasks-complete)))
               ((equal (plist-get task :outcome) "merge-failed")
                '(("Retry merge" harness-ui-tasks-merge) ("Pause" harness-ui-tasks-pause)
                  ("Reply" harness-ui-tasks-reply) ("Open" harness-ui-tasks-open)

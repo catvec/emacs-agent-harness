@@ -214,8 +214,12 @@ Return a kind of `harness-ui-compact-kinds', or nil to cancel."
 ;;;; Compacting
 
 (defun harness-ui-compact-running-p (session)
-  "Non-nil while SESSION, a session plist, runs a turn or waits inside one."
-  (member (format "%s" (plist-get session :status)) '("running" "blocked")))
+  "Non-nil while SESSION, a session plist, runs a turn or waits inside one.
+A session blocked between turns, waiting for the user's reply, runs
+none, and compacts as one at rest
+\(`harness-session-blocked-on-request-p')."
+  (or (equal (format "%s" (plist-get session :status)) "running")
+      (harness-session-blocked-on-request-p session)))
 
 (defconst harness-ui-compact-running-choices
   '((?i "interrupt the step and compact now"

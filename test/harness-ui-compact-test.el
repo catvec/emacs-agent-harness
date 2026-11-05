@@ -181,11 +181,16 @@ the model."
 now, or to queue the compaction for the turn's next boundary;
 cancelling does nothing.  An idle session still compacts now."
   (let ((harness-ui--sessions (make-hash-table :test 'equal))
+        (question (list :id "p1" :kind 'question :payload (list :question "Which?")))
         calls asked)
-    ;; Running, blocked inside a turn, or the symbol: all a running turn.
+    ;; Running, blocked on a request inside a turn, or the symbol: all a
+    ;; running turn.  Blocked between turns, with no request pending, is
+    ;; a task waiting for the user's reply: a turn at rest.
     (should (harness-ui-compact-running-p '(:status "running")))
-    (should (harness-ui-compact-running-p '(:status "blocked")))
+    (should (harness-ui-compact-running-p (list :status "blocked" :pending (list question))))
     (should (harness-ui-compact-running-p '(:status running)))
+    (should-not (harness-ui-compact-running-p '(:status "blocked")))
+    (should-not (harness-ui-compact-running-p '(:status "blocked" :pending nil)))
     (should-not (harness-ui-compact-running-p '(:status "idle")))
     (puthash "s1" (list :id "s1" :name "Parser work" :status "running") harness-ui--sessions)
     (cl-letf (((symbol-function 'harness-ui-call)

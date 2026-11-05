@@ -2055,10 +2055,11 @@ the buffer -- and laid out on every redisplay -- until then."
     (let ((ov harness-chat--activity-overlay))
       (and ov (overlay-buffer ov) (overlay-get ov 'before-string)))))
 
-(defun harness-ui-chat-test-set-status (buf status)
-  "Make BUF's session STATUS, as a `_harness/session' push would."
+(defun harness-ui-chat-test-set-status (buf status &optional pending)
+  "Make BUF's session STATUS, with PENDING requests, as a push would."
   (with-current-buffer buf
     (let ((session (plist-put (copy-sequence (harness-chat--session)) :status status)))
+      (setq session (plist-put session :pending pending))
       (harness-ui-cache-session session)
       (harness-chat--apply-update (list :sessionUpdate "_harness/session" :session session)))))
 
@@ -8400,7 +8401,10 @@ A call the run cannot take, one that is not coalescable, stays outside."
            (buf (harness-ui-chat-test-open sid)))
       (with-current-buffer buf
         (setq harness-chat--turn-start (- (float-time) 120))
-        (harness-ui-chat-test-set-status buf "blocked")
+        ;; Blocked on an answer: the turn still goes on.
+        (harness-ui-chat-test-set-status
+         buf "blocked"
+         (list (list :id "p1" :kind 'question :payload (list :question "Which?"))))
         (let ((line (harness-chat--mode-line)))
           (should (string-match-p "blocked" line))
           (should-not (string-match-p "2m00s" line))

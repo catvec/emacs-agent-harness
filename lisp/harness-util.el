@@ -1564,17 +1564,36 @@ holds it from JSON: its status a symbol or a string, its `:pending' a
 list or a vector.  It waits when a request is pending on it -- a
 permission, an ask_user question, a question the harness asks itself,
 such as the one a message meets when its session's prompt cache went
-cold -- or its status says `blocked'.  A session's status is `blocked'
-exactly while a request is pending (`session/pending-add'), so the two
-say the same: this takes either, so that a view that reads one and a
-view that reads the other cannot disagree.  What every view that says
-who waits for the user -- the session list's blocked filter, the
-mode line's count, the task board's needs-input column, the task slots
--- asks, rather than each deciding for itself."
+cold -- or its status says `blocked'.  A request makes it `blocked'
+while it waits (`session/pending-add'), and so does the tasks module
+when a task's turn ends talking to the user: the session of a task at
+work waits `blocked' between turns for the reply that carries the work
+on, until the next message or a thread's answer starts a turn.  That is
+why this takes either the request or the status, so that a view that
+reads one and a view that reads the other cannot disagree.  What every
+view that says who waits for the user -- the session list's blocked
+filter, the mode line's count, the task board's needs-input column, the
+task slots -- asks, rather than each deciding for itself."
   (and (listp session)
        (let ((pending (plist-get session :pending)))
          (or (and (seqp pending) (> (length pending) 0))
              (equal (format "%s" (plist-get session :status)) "blocked")))
+       t))
+
+(defun harness-session-blocked-on-request-p (session)
+  "Non-nil when SESSION is blocked on a request, not between turns.
+Its status is `blocked' while a request waits on it
+\(`session/pending-add'), and the tasks module keeps the session of a
+task that ended its turn talking to the user `blocked' between turns,
+with no request pending (`harness-session-waiting-on-user-p').
+A view that asks what a running turn does -- or offers to cancel one --
+asks this, rather than whether the status is `blocked': a turn that a
+between-turns wait holds nothing of is no turn at all.  SESSION is a
+session plist, its `:pending' a list or a vector."
+  (and (listp session)
+       (equal (format "%s" (plist-get session :status)) "blocked")
+       (let ((pending (plist-get session :pending)))
+         (and (seqp pending) (> (length pending) 0)))
        t))
 
 ;;;; Paths

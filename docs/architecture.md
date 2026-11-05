@@ -1412,10 +1412,17 @@ Owns session records, nodes, status, queue, pending requests, persistence
 Restarts: records are written shortly after a change, at once when the
 status changes, and all of them on exit; nodes are appended as they
 come.  Every session loads `inactive` (closed until something resumes
-it).  One saved `running` or `blocked` was interrupted mid-turn by a
-harness that stopped, so loading settles it: each tool call without a
-result gets one (`:is-error t`, `:meta (:interrupted t)`) and a hint
-says what it was doing or which question it waited on.  So does a call
+it).  One saved `running`, or one saved `blocked` on a request, was
+interrupted mid-turn by a harness that stopped, so loading settles it:
+each tool call without a result gets one (`:is-error t`, `:meta
+(:interrupted t)`) and a hint says what it was doing or which question
+it waited on.  A saved `blocked` with nothing pending waits for no
+request: the tasks module kept it so between turns, for a task whose
+turn ended talking to the user and waits for the reply, and it has no
+turn to settle.  It loads
+closed like any session at rest, without an interruption, and says
+`blocked` again when it is opened
+(`harness-session--interrupted-record-p`).  So does a call
 the harness recorded for it in its parent (`harness-outside-node-p`,
 with its id as `:child-id`: the merge queue's conflict resolver), which
 nothing else would answer; the parent need not have been running.  Only calls
@@ -1787,7 +1794,12 @@ redact).
   their id already.
 - `session/pending-add ID REQUEST` → id; `session/pending-resolve ID PID ANSWER`;
   `session/pending ID`.  Event `session/pending-changed ID ITEMS`.
-  Status becomes `blocked` while anything is pending.
+  Status becomes `blocked` while anything is pending.  The tasks module
+  keeps the session of a task whose turn ended talking to the user
+  `blocked` between turns too, with nothing pending, until the reply
+  starts a turn (`harness-session-waiting-on-user-p`).
+  `harness-session-blocked-on-request-p` tells the two apart for a view
+  that offers to cancel a turn or says what one does.
 - `session/pending-dismiss ID &optional REASON CALLS-ONLY` → how many it
   dismissed: ends the requests nobody will answer, each by whoever holds
   it (`question/cancel`; `permission/answer` denying the call, once, for
@@ -6823,11 +6835,16 @@ the session list's blocked filter, the mode line's count and the slot
 page ask too, and asked of the session before anything else: a task
 being resumed after a restart is `starting`, and the question a cold
 prompt cache asks before its turn begins blocks the session, so it is
-`needs-input`, not `active`) or the task stopped part way, `merging` while its
+`needs-input`, not `active`), when the task's turn ended talking to the
+user and it waits for the reply (`:outcome` `conversing`, which the
+tasks module keeps the session blocked for,
+`harness-tasks--sync-reply-block`), or when the task stopped part way,
+`merging` while its
 branch holds a place in the merge queue (`:merge-status` is queued,
 merging or conflict; `:merge-queued` is when it joined, which orders the
 board's section), `review` while its finished work waits for the user's
-verdict, and `cancelled` for a task that is `done` with the outcome
+verdict (its own column, the review category the board has for that,
+whatever the session says), and `cancelled` for a task that is `done` with the outcome
 `cancelled` and was never merged (`harness-tasks--cancelled-p`): the user
 stopped its turn (`task/cancel`) and marked it done (`task/complete`,
 which keeps the outcome), so the done column keeps finished work only.  A

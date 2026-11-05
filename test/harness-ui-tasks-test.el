@@ -2500,8 +2500,10 @@ review, in its menu, puts it back without waiting for a hand-in."
         (let ((task (harness-call 'task/get id)))
           (should (equal "working" (plist-get task :phase)))
           (should (plist-get task :report)))
-        ;; At work, not waiting on the user: no question was asked, the
-        ;; turn ended talking to them.
+        ;; With the working phase off, which the tests' setup binds, a
+        ;; reply is a round of work: the task stays at work, not waiting
+        ;; on them.  On, it would wait for the reply in Requires your
+        ;; input (`harness-ui-tasks-a-task-waiting-for-the-reply-needs-input').
         (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Fix the flaky test")
         (harness-ui-tasks-test--goto-card board "Fix the flaky test")
         (with-current-buffer board
@@ -2510,6 +2512,39 @@ review, in its menu, puts it back without waiting for a hand-in."
           (call-interactively #'harness-ui-tasks-force-review))
         (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Fix the flaky test")
         (should (eq 'review (plist-get (harness-call 'task/get id) :state)))))))
+
+(ert-deftest harness-ui-tasks-a-task-waiting-for-the-reply-needs-input ()
+  "A task whose turn ended talking to the user waits in Requires your input.
+The agent answered and waits for the reply: its session is blocked with
+nothing pending, the card says it waits for your reply, and Reply is
+its first action.  Putting it in review by hand ends the wait, and the
+card shows the review's own column."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-working-phase t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Which parser should I use?")
+             (:type done :stop-reason end-turn))))
+      (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
+      (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*Fix the flaky test")
+      (let* ((item (car (harness-call 'task/list default-directory)))
+             (id (plist-get item :id))
+             (sid (plist-get item :session)))
+        (should (eq 'needs-input (plist-get item :column)))
+        (should (equal "working" (plist-get item :phase)))
+        (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+        (should-not (plist-get (harness-call 'session/get sid) :pending))
+        (harness-ui-tasks-test--goto-card board "Fix the flaky test")
+        (with-current-buffer board
+          (should (string-match-p "waiting for your reply"
+                                  (harness-ui-tasks-test--card-text board "Fix the flaky test")))
+          (should (equal '("Reply" "Pause")
+                         (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
+          (should (member '("Put in review" harness-ui-tasks-force-review)
+                          (harness-ui-tasks--actions (harness-ui-tasks--task))))
+          (call-interactively #'harness-ui-tasks-force-review))
+        (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Fix the flaky test")
+        (should (eq 'review (plist-get (harness-call 'task/get id) :column)))
+        (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))))))
 
 (ert-deftest harness-ui-tasks-review-verify-and-send-back ()
   "Finished work waits in Ready for review: R sends it back with feedback, v accepts it."

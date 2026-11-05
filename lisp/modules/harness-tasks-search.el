@@ -230,10 +230,14 @@ title is its prompt's first line."
       (string-trim name))))
 
 (defun harness-tasks-search--working-p (task &optional session)
-  "Non-nil when TASK is at work: its SESSION runs a turn, or waits mid-turn."
+  "Non-nil when TASK is at work: its SESSION runs a turn, or waits mid-turn.
+A task whose turn ended talking to the user has its session blocked
+between turns while it waits for the reply: it has no turn, is not at
+work, and nothing is stopped or archived as one."
   (let ((session (or session (harness-tasks-search--session task)))
         (sid (plist-get task :session)))
-    (or (member (harness-tasks-search--str (plist-get session :status)) '("running" "blocked"))
+    (or (equal (harness-tasks-search--str (plist-get session :status)) "running")
+        (harness-session-blocked-on-request-p session)
         (and sid (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid) t))))
 
 (defun harness-tasks-search--archived-p (task)

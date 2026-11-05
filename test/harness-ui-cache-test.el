@@ -75,20 +75,25 @@
 
 (ert-deftest harness-ui-cache-state-shows-once-the-cache-lapsed ()
   "The panel shows once the cache lapsed while the session waits for the
-user: idle or closed.  Never before, never while its turn runs (a
-session blocked on an answer is in the middle of one), never without a
-cache."
-  (let ((s (harness-ui-cache-test--session)))
+user: idle or closed, and blocked between turns, as a task at work
+waiting for the reply is.  Never before, never while its turn runs (a session blocked on an
+answer is in the middle of one), never without a cache."
+  (let ((s (harness-ui-cache-test--session))
+        (question (list :id "p1" :kind 'question :payload (list :question "Which?"))))
     (should-not (harness-ui-cache--state s 1299.9))
     (should (harness-ui-cache--state s 1300.0))
     (should (= 84000 (plist-get (harness-ui-cache--state s 2000.0) :context)))
     (should (harness-ui-cache--state (harness-ui-cache-test--session :status "inactive") 2000.0))
     ;; A status as the harness process has it, a symbol.
     (should (harness-ui-cache--state (harness-ui-cache-test--session :status 'idle) 2000.0))
-    ;; A blocked session waits on an answer, which is the middle of its
-    ;; turn: the next request is that turn's, not the user's next message.
-    (should-not (harness-ui-cache--state (harness-ui-cache-test--session :status "blocked") 2000.0))
-    (should-not (harness-ui-cache--state (harness-ui-cache-test--session :status 'blocked) 2000.0))
+    ;; Blocked between turns, no request pending: a task at work,
+    ;; waiting for the user's next message.
+    (should (harness-ui-cache--state (harness-ui-cache-test--session :status "blocked") 2000.0))
+    (should (harness-ui-cache--state (harness-ui-cache-test--session :status 'blocked) 2000.0))
+    ;; Blocked on an answer, which is the middle of its turn: the next
+    ;; request is that turn's, not the user's next message.
+    (should-not (harness-ui-cache--state
+                 (harness-ui-cache-test--session :status "blocked" :pending (list question)) 2000.0))
     ;; A running session's requests keep the cache.
     (should-not (harness-ui-cache--state (harness-ui-cache-test--session :status "running") 2000.0))
     ;; A new session, or one whose requests used no cache.
@@ -545,10 +550,15 @@ cache.  States that read the same are `equal', whenever they are asked."
                    (harness-ui-cache--state s 1100.0)))
     (should (= 1100.0 (plist-get (harness-ui-cache--state s 1200.0) :dropped)))
     (should (equal (harness-ui-cache--state s 1200.0) (harness-ui-cache--state s 90000.0)))
-    ;; Closed, or waiting on the user, it shows; mid-turn, or blocked on an answer, it does not.
+    ;; Closed, waiting on the user, or blocked between turns, it shows;
+    ;; mid-turn, or blocked on an answer, it does not.
     (should (harness-ui-cache--state (harness-ui-cache-test--dropped :status "inactive") 2000.0))
+    (should (harness-ui-cache--state (harness-ui-cache-test--dropped :status "blocked") 2000.0))
     (should-not (harness-ui-cache--state (harness-ui-cache-test--dropped :status "running") 2000.0))
-    (should-not (harness-ui-cache--state (harness-ui-cache-test--dropped :status "blocked") 2000.0))
+    (should-not (harness-ui-cache--state
+                 (harness-ui-cache-test--dropped :status "blocked"
+                                                 :pending (list (list :id "p1" :kind 'question)))
+                 2000.0))
     ;; A cache that lapsed by itself names no drop, and a drop that is no time is not read.
     (dolist (cache (list '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m")
                          '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m" :dropped nil)
