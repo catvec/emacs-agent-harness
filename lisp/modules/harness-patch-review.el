@@ -119,6 +119,20 @@
 ;; check.  Without the module there is no such check, and the hook is
 ;; empty.
 ;;
+;; THE LAST CLOSE.  The user closing the last thread that has a sent
+;; comment and is open leaves the review with nothing to answer.  In the
+;; working phase the agent has to know: it may be waiting for the user,
+;; and nothing the user typed would tell it.  So that close sends its
+;; session a message of the harness's own
+;; (`harness-patch-review--wake-agent'), and the agent takes a turn as it
+;; would for a message the user typed: it sees that no thread is left
+;; open, and hands the work in when nothing is outstanding.  The message
+;; does not say to hand in -- the task's prompt does.  Only the user's
+;; close does this: the agent's own close is in a turn of its own, a
+;; close in a task waiting for review needs no turn, and a thread of
+;; drafts was never a question the work had to answer
+;; (`harness-patch-review-wake-on-last-close').
+;;
 ;; THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
 ;; the session while the agent was at work -- steering, quoting what the
 ;; agent said and answering it -- was never feedback, so no round holds
@@ -1033,15 +1047,21 @@ The UI sends the operations the user makes: `add-comment', `set-status',
 `edit-comment', `delete-comment', `add-version', and `mark-reviewed' and
 `unmark-reviewed' for a close by the agent the user has looked at, or
 no longer has.  Return (:changed BOOL).  `patch-review/changed' announces
-what changed to every UI, so that each performs it on its own copy."
+what changed to every UI, so that each performs it on its own copy.  The
+user closing the last open thread of a task at work also wakes its agent
+\(`harness-patch-review-wake-on-last-close')."
   (let ((kind (let ((value (plist-get op :op)))
                 (cond ((symbolp value) value)
                       ((stringp value) (intern value))))))
     (unless (memq kind '(add-comment set-status edit-comment delete-comment add-version
                                      mark-reviewed unmark-reviewed))
       (signal 'harness-error (list (format "The review does not take %S operations from a UI" kind))))
-    (let ((set (harness-patch-review--set-for task-id t)))
-      (list :changed (and (change-review-dispatch set op) t)))))
+    (let ((set (harness-patch-review--set-for task-id t))
+          changed)
+      (setq changed (and (change-review-dispatch set op) t))
+      (when (and changed (harness-patch-review--last-close-p set op))
+        (harness-run-soon #'harness-patch-review--maybe-wake task-id))
+      (list :changed changed))))
 
 (harness-defmethod patch-review/send-replies (task-id)
   "Send the replies the user wrote in the threads of task TASK-ID's review.
@@ -1050,6 +1070,18 @@ its agent as one message, a thread block each, and are marked sent.
 Return (:sent N).  A task waiting for review signals `harness-error': its
 drafts go with the feedback that sends it back."
   (list :sent (harness-patch-review--send-working-replies task-id)))
+
+(defun harness-patch-review--sent-open-threads (set)
+  "Return the threads of SET that are open and have a sent comment.
+These are the threads a hand-in waits on (`patch-review/open-threads',
+`harness-patch-review--hand-in-blocker'): a draft the user has not sent is
+no question the work has to answer yet."
+  (cl-remove-if-not
+   (lambda (thread)
+     (and (change-review-thread-open-p thread)
+          (cl-some (lambda (comment) (not (change-review-comment-draft-p comment)))
+                   (change-review-thread-comments thread))))
+   (change-review-set-threads set)))
 
 (harness-defmethod patch-review/open-threads (task-id)
   "Return the open threads of task TASK-ID's review, as a list of plists.
@@ -1061,12 +1093,7 @@ review has none, and nothing is made."
     (mapcar (lambda (thread)
               (list :id (change-review-thread-id thread)
                     :where (harness-patch-review--where thread)))
-            (cl-remove-if-not
-             (lambda (thread)
-               (and (change-review-thread-open-p thread)
-                    (cl-some (lambda (comment) (not (change-review-comment-draft-p comment)))
-                             (change-review-thread-comments thread))))
-             (change-review-set-threads set)))))
+            (harness-patch-review--sent-open-threads set))))
 
 (harness-defmethod patch-review/threads-text (task-id &optional status)
   "Return the threads of task TASK-ID's review as text for its agent.
@@ -1413,6 +1440,78 @@ review sends its drafts with the feedback that sends it back."
                         task-id (harness-error-message e))))
         (change-review-mark-sent set replies :time time :meta (list :working t))
         (length replies)))))
+
+;;;; The last close
+
+(defcustom harness-patch-review-wake-on-last-close t
+  "When non-nil, closing the last open thread of a task at work wakes its agent.
+The user closing the last thread of a task's review that has a sent
+comment and is open leaves nothing of the review to answer.  The close
+then sends the task's session a message of the harness's own, from
+\"review\", and the agent takes a turn as it would for a message the user
+typed: it sees that no thread is left open, and hands the work in when
+nothing is outstanding.  The message does not say to hand in -- the task's
+prompt does.  It goes only in the working phase: a task waiting for review
+needs no turn when its threads are closed, and the agent closing a thread
+itself is not woken.  Off, closing a thread never starts a turn."
+  :type 'boolean :group 'harness)
+
+(defconst harness-patch-review-last-close-message
+  "The user closed the last open thread of this task's review; no thread is left to answer."
+  "What the agent reads when the user closes the last open thread of its review.
+It says what changed, not what to do: the task's prompt says to hand the
+work in when nothing is outstanding.")
+
+(defun harness-patch-review--last-close-p (set op)
+  "Non-nil when OP is the user closing the last sent open thread of SET.
+The thread OP closes has a sent comment, and no other thread with a sent
+comment is open now.  A close of a thread of drafts is not one: no
+question was waiting on it.  A close the agent makes is not either: it is
+in a turn of its own, and it knows."
+  (and (eq 'set-status (intern (format "%s" (plist-get op :op))))
+       (equal "closed" (format "%s" (plist-get op :status)))
+       (equal "user" (format "%s" (plist-get (plist-get op :author) :kind)))
+       (when-let* ((thread (change-review-find-thread set (plist-get op :thread))))
+         (and (cl-some (lambda (comment) (not (change-review-comment-draft-p comment)))
+                       (change-review-thread-comments thread))
+              (null (harness-patch-review--sent-open-threads set))))))
+
+(defun harness-patch-review--wake-agent (task)
+  "Send TASK's agent the harness's message that its last thread is closed.
+It starts a turn as a message the user typed would, and steers one already
+running (`agent/prompt', from `(harness-sender-system \"review\")').  The
+message says only what changed: whether to hand the work in is the agent's
+and its task prompt's.  A task with no session, or a harness that cannot
+prompt one, wakes nothing; a failure is logged."
+  (let ((session (plist-get task :session)))
+    (when (and (stringp session) (not (harness-string-blank-p session))
+               (harness-method-exists-p 'agent/prompt)
+               (harness-call 'session/exists-p session))
+      (harness-catch
+       (harness-call-async 'agent/prompt session
+                           (list (list :type "text" :text harness-patch-review-last-close-message))
+                           (list :from (harness-sender-system "review")))
+       (lambda (err)
+         (harness-log 'warn "patch-review: the agent of %s was not woken by its last close: %s"
+                      (plist-get task :id) (harness-error-message err)))))))
+
+(defun harness-patch-review--maybe-wake (task-id)
+  "Wake the agent of TASK-ID when its review has no sent open thread left.
+Only in the working phase, and only with
+`harness-patch-review-wake-on-last-close' on: a task waiting for review
+needs no turn when its threads are closed.  It is called from the command
+loop after the review changed, so it sees the review as it is then, and a
+thread opened in between keeps the agent from waking."
+  (when harness-patch-review-wake-on-last-close
+    (condition-case err
+        (let ((task (ignore-errors (harness-call 'task/get task-id)))
+              (set (harness-patch-review--set-for task-id)))
+          (when (and task set
+                     (harness-patch-review--working-task-p task)
+                     (null (harness-patch-review--sent-open-threads set)))
+            (harness-patch-review--wake-agent task)))
+      (error (harness-log 'warn "patch-review: waking the agent of %s after its last close failed: %s"
+                          task-id (harness-error-message err))))))
 
 ;;;; What the agent reads
 

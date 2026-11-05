@@ -119,6 +119,31 @@
     (harness-tasks--set id :branch "task/fix" :base "main" :project default-directory)
     id))
 
+(defun harness-patch-review-test--working-task ()
+  "Submit a task whose first turn only talks, leaving it at work; return its id.
+It is active in the working phase, with branch task/fix.  The turn after it
+runs the script the test bound, not this one."
+  (let* ((harness-provider-demo-script-override
+          '((:type text :delta "One thing first: which parser?\n")
+            (:type done :stop-reason end-turn)))
+         (id (plist-get (harness-call 'task/submit default-directory "Fix the flaky test") :id)))
+    (harness-test-wait
+     (lambda ()
+       (let ((task (harness-call 'task/get id)))
+         (and (eq 'active (plist-get task :state))
+              (equal "working" (plist-get task :phase))
+              (eq 'conversing (plist-get task :outcome)))))
+     15 "the task to be left at work")
+    (harness-tasks--set id :branch "task/fix" :base "main" :project default-directory)
+    id))
+
+(defun harness-patch-review-test--spin (&optional seconds)
+  "Run timers and process output for SECONDS, so a wake would show."
+  (let ((end (+ (float-time) (or seconds 0.2))))
+    (while (< (float-time) end)
+      (accept-process-output nil 0.01)
+      (sit-for 0.005))))
+
 (defun harness-patch-review-test--user-comment (id text &rest keys)
   "Add the user's comment TEXT to task ID's review, as a UI does; return its id.
 KEYS: :thread, :location (data), :revision, :sent."
@@ -298,6 +323,108 @@ the check off, and a harness that did not load the module adds no check."
         (remove-hook 'harness-tools-handin-block-functions #'harness-patch-review--hand-in-blocker)
         (let ((result (hand-in sid)))
           (should-not (plist-get result :is-error)))))))
+
+(ert-deftest harness-patch-review-the-last-close-of-a-task-at-work-wakes-the-agent ()
+  "The user closing the last open thread of a task at work sends its agent a
+system message, which starts a turn: the agent hands the work in without
+the user saying anything, and the message does not say to."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             (thread (car (harness-patch-review-test--user-comment id "Why eighteen?" :sent 5.0))))
+        (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+        (should (plist-get (harness-call 'patch-review/apply id
+                                         (list :op "set-status" :thread thread :status "closed"
+                                               :id "s-last" :time 6.0
+                                               :author '(:kind "user" :name "Noah")))
+                           :changed))
+        ;; Nothing the user typed: the close starts the turn that hands in.
+        (harness-test-wait (lambda () (eq 'review (plist-get (harness-call 'task/get id) :state)))
+                           15 "the agent to hand in after the last close")
+        (let* ((node (cl-find-if (lambda (node)
+                                   (equal harness-patch-review-last-close-message
+                                          (plist-get node :content)))
+                                 (harness-call 'session/nodes sid)))
+               (sender (and node (harness-node-sender node))))
+          (should node)
+          (should (eq 'system (harness-sender-kind sender)))
+          (should (equal "review" (plist-get sender :source)))
+          ;; What changed, not what to do: the task's prompt says to hand in.
+          (should-not (string-match-p "hand_in\\|hand in"
+                                      harness-patch-review-last-close-message)))))))
+
+(ert-deftest harness-patch-review-only-the-last-close-wakes-a-task-at-work ()
+  "A close that leaves a sent thread open, the agent's own close and a
+thread of drafts start no turn; the user's last close of a task at work
+does."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t)
+          (wakes nil))
+      (cl-letf (((symbol-function 'harness-patch-review--wake-agent)
+                 (lambda (task) (push (plist-get task :id) wakes))))
+        (let* ((id (harness-patch-review-test--working-task))
+               (first (car (harness-patch-review-test--user-comment id "Why one?" :sent 5.0)))
+               (second (car (harness-patch-review-test--user-comment id "Why two?" :sent 5.0))))
+          ;; One sent thread is still open: nothing to tell the agent yet.
+          (harness-call 'patch-review/apply id
+                        (list :op "set-status" :thread first :status "closed"
+                              :id "s-first" :time 6.0 :author '(:kind "user" :name "Noah")))
+          (harness-patch-review-test--spin)
+          (should-not wakes)
+          ;; The last one: the agent hears of it.
+          (harness-call 'patch-review/apply id
+                        (list :op "set-status" :thread second :status "closed"
+                              :id "s-second" :time 7.0 :author '(:kind "user" :name "Noah")))
+          (harness-test-wait (lambda () wakes) 5 "the last close to wake the agent")
+          (should (equal (list id) wakes))
+          ;; The agent closing a thread itself is in a turn of its own.
+          (setq wakes nil)
+          (let ((third (car (harness-patch-review-test--user-comment id "Why three?" :sent 8.0))))
+            (harness-patch-review-test--tool
+             "review_comment" (list :thread third :body "Because." :status "closed") id))
+          (harness-patch-review-test--spin)
+          (should-not wakes)
+          ;; A thread of drafts was no question the work had to answer.
+          (setq wakes nil)
+          (let ((draft (car (harness-patch-review-test--user-comment id "Still writing this"))))
+            (harness-call 'patch-review/apply id
+                          (list :op "set-status" :thread draft :status "closed"
+                                :id "s-draft" :time 9.0 :author '(:kind "user" :name "Noah"))))
+          (harness-patch-review-test--spin)
+          (should-not wakes))))))
+
+(ert-deftest harness-patch-review-a-close-in-review-wakes-no-agent ()
+  "A task waiting for review needs no turn when its threads are closed: the
+last close there starts nothing."
+  (harness-patch-review-test-with
+    (let ((wakes nil))
+      (cl-letf (((symbol-function 'harness-patch-review--wake-agent)
+                 (lambda (task) (push (plist-get task :id) wakes))))
+        (let* ((id (harness-patch-review-test--task))
+               (thread (car (harness-patch-review-test--user-comment id "Why eighteen?" :sent 5.0))))
+          (harness-call 'patch-review/apply id
+                        (list :op "set-status" :thread thread :status "closed"
+                              :id "s-review" :time 6.0 :author '(:kind "user" :name "Noah")))
+          (harness-patch-review-test--spin)
+          (should-not wakes))))))
+
+(ert-deftest harness-patch-review-the-last-close-wakes-only-when-asked ()
+  "With `harness-patch-review-wake-on-last-close' off, the last close of a
+task at work starts no turn."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t)
+          (harness-patch-review-wake-on-last-close nil)
+          (wakes nil))
+      (cl-letf (((symbol-function 'harness-patch-review--wake-agent)
+                 (lambda (task) (push (plist-get task :id) wakes))))
+        (let* ((id (harness-patch-review-test--working-task))
+               (thread (car (harness-patch-review-test--user-comment id "Why eighteen?" :sent 5.0))))
+          (harness-call 'patch-review/apply id
+                        (list :op "set-status" :thread thread :status "closed"
+                              :id "s-off" :time 6.0 :author '(:kind "user" :name "Noah")))
+          (harness-patch-review-test--spin)
+          (should-not wakes))))))
 
 (ert-deftest harness-patch-review-performs-an-operation-once ()
   "The same operation sent twice changes nothing and announces nothing the second time."

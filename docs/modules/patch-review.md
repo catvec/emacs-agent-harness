@@ -129,6 +129,20 @@ thread is a statement that its point is done, never a way around the
 check.  Without the module there is no such check, and the hook is
 empty.
 
+THE LAST CLOSE.  The user closing the last thread that has a sent
+comment and is open leaves the review with nothing to answer.  In the
+working phase the agent has to know: it may be waiting for the user,
+and nothing the user typed would tell it.  So that close sends its
+session a message of the harness's own
+(`harness-patch-review--wake-agent`), and the agent takes a turn as it
+would for a message the user typed: it sees that no thread is left
+open, and hands the work in when nothing is outstanding.  The message
+does not say to hand in -- the task's prompt does.  Only the user's
+close does this: the agent's own close is in a turn of its own, a
+close in a task waiting for review needs no turn, and a thread of
+drafts was never a question the work had to answer
+(`harness-patch-review-wake-on-last-close`).
+
 THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
 the session while the agent was at work -- steering, quoting what the
 agent said and answering it -- was never feedback, so no round holds
@@ -171,11 +185,16 @@ to say.
 
 - `harness-tasks-feedback-additions-functions`
 
+### Options
+
+- `harness-patch-review-wake-on-last-close` — When non-nil, closing the last open thread of a task at work wakes its agent.
+
 ## Uses
 
 ### Methods it calls
 
 - `agent/prompt` ([agent](agent.md)), when it is loaded
+- `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md)), when it is loaded
 - `session/node` ([session](session.md))
 - `session/nodes` ([session](session.md)), when it is loaded
