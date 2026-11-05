@@ -375,6 +375,13 @@ stays from one turn to the next (`harness-chat-toggle-recap').")
 (defvar-local harness-chat--notes nil
   "Tool call id -> the note the running turn's activity gives the call.
 The note is drawn under the call's own block (see `harness-chat--note-lines').")
+(defvar-local harness-chat-fold-gutter nil
+  "Column the chat draws its disclosure arrows at, or nil to draw them in place.
+The chat's one-column margin puts its blocks' text at column 1, and every
+fold arrow shares that gutter, aligned with a space `:align-to' so an
+icon drawn wider than its character moves nothing.  A view that draws
+the chat's tool calls among its own text, such as the access view
+\(`harness-chat-tool-view-setup'), leaves it nil, for its own gutter.")
 (defvar-local harness-chat--activity-overlay nil
   "Overlay whose `before-string' is the activity line.
 It is empty and sits at `harness-chat--activity-position': the end of
@@ -487,17 +494,22 @@ visible line ends in a newline of the block's own face."
 (defalias 'harness-chat--mouse-map #'harness-ui-action-map
   "Alias of `harness-ui-action-map'.")
 
-(defun harness-chat--fold-button (collapsed action &optional help)
+(defun harness-chat--fold-button (collapsed action &optional help content)
   "Return a ▸/▾ toggle button string for a block; ACTION runs on click.
-COLLAPSED picks the icon; HELP is the tooltip."
-  (let ((icon (harness-ui-icon (if collapsed 'harness-icon-collapsed 'harness-icon-expanded))))
-    (propertize (if (string-empty-p icon) (if collapsed "+" "-") icon)
-                'harness-chat-fold-icon t
-                'face 'harness-dim-face
-                'mouse-face 'highlight
-                'help-echo (or help "mouse-1, TAB: expand or collapse")
-                'follow-link t
-                'keymap (harness-chat--mouse-map action))))
+COLLAPSED picks the icon; HELP is the tooltip.  In the chat, where
+`harness-chat-fold-gutter' names a column, the button sits in that
+column; CONTENT, when given, is the column the text after it starts at."
+  (let* ((icon (harness-ui-icon (if collapsed 'harness-icon-collapsed 'harness-icon-expanded)))
+         (icon (propertize (if (string-empty-p icon) (if collapsed "+" "-") icon)
+                           'harness-chat-fold-icon t
+                           'face 'harness-dim-face
+                           'mouse-face 'highlight
+                           'help-echo (or help "mouse-1, TAB: expand or collapse")
+                           'follow-link t
+                           'keymap (harness-chat--mouse-map action))))
+    (if harness-chat-fold-gutter
+        (harness-ui-fold-arrow icon harness-chat-fold-gutter content)
+      icon)))
 
 (defun harness-chat--button (label action &rest props)
   "Return a button string LABEL running ACTION (a function of no arguments).
@@ -2609,12 +2621,11 @@ line."
          ;; four columns of indent, whatever width the button is drawn.
          (indent "    ")
          (header (propertize
-                  (concat " "
-                          (harness-chat--fold-button
+                  (concat (harness-chat--fold-button
                            (harness-chat-block-collapsed block)
                            (lambda () (interactive) (harness-chat-toggle-block id))
-                           "mouse-1, TAB: show or hide the lines")
-                          (propertize " " 'display `(space :align-to ,(1+ (length indent))))
+                           "mouse-1, TAB: show or hide the lines"
+                           (1+ (length indent)))
                           ;; The newest line is a hover away, without opening it.
                           (propertize (plist-get fold :title) 'face 'harness-hint-face
                                       'help-echo (format "Latest: %s"
@@ -4510,11 +4521,11 @@ left through every draw of the tail.  A list longer than
            (collapsed (harness-chat--todos-collapsed-p))
            (fold (harness-chat--fold-button collapsed
                                             #'harness-chat-toggle-todos
-                                            "mouse-1, TAB: show or hide the todo list"))
+                                            "mouse-1, TAB: show or hide the todo list"
+                                            2))
            (start (point)))
       (add-text-properties 0 (length fold) '(harness-chat-todos t) fold)
       (insert fold
-              " "
               (propertize (concat (harness-ui-icon 'harness-chat-icon-plan)
                                   (format " Todo list  %d/%d" done total))
                           'face 'harness-label-face
@@ -7624,6 +7635,7 @@ the id of a session written in a message is a link to it.
   (setq-local truncate-lines nil
               word-wrap t
               search-invisible 'open
+              harness-chat-fold-gutter 1
               header-line-format '(:eval (harness-chat--header))
               mode-line-format '(" " (:eval (harness-chat--mode-line)) "  " mode-line-misc-info))
   (add-to-invisibility-spec 'harness-chat-fold)

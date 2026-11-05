@@ -317,6 +317,27 @@ string is a copy: a caller may add properties to it."
   "Return a copy of PLIST without KEY."
   (cl-loop for (k v) on plist by #'cddr unless (eq k key) nconc (list k v)))
 
+(defun harness-ui-fold-arrow (icon &optional column content)
+  "Return ICON in the disclosure gutter, at window column COLUMN.
+COLUMN, a column from the left edge of the window, defaults to 0.  A
+space aligned to it comes before ICON, so the arrow lines up with the
+others whatever precedes it, however wide the icon is drawn.  CONTENT,
+when given, is the column the text after ICON starts at; a space
+aligned to it follows the icon.  A nil CONTENT puts nothing after the
+icon: the caller adds its own space."
+  (concat (propertize " " 'display (list 'space :align-to (or column 0)))
+          icon
+          (if content
+              (propertize " " 'display (list 'space :align-to content))
+            "")))
+
+(defun harness-ui-fold-gutter (icon indent)
+  "Return ICON in the left gutter, INDENT's columns kept after it.
+INDENT is what stood before ICON when it was not in the gutter.  The
+label after ICON stays where it was: ICON, then INDENT and the space
+that followed ICON."
+  (concat icon (make-string (1+ (length indent)) ?\s)))
+
 (defun harness-ui-status-icon (status)
   "Return the icon string for session STATUS (symbol or string), with face."
   (let ((status (if (stringp status) (intern status) status)))

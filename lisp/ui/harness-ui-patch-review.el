@@ -504,6 +504,7 @@
 (defvar change-review-ui--set)
 (defvar change-review-ui--redraw-function)
 (defvar change-review-ui--details)
+(defvar change-review-ui--fold-gutter-at-left)
 (defvar harness-ui-review-pending-functions)
 (defvar harness-ui-popout--max-height)
 (defvar harness-ui-popout-window-parameters)
@@ -3125,7 +3126,9 @@ comment's under its bar, which goes on down the lines."
              (concat (make-string lead ?\s)
                      (propertize "┃" 'face (get-text-property (+ pos lead) 'face string))
                      "      ")
-           (make-string (+ lead 4) ?\s))
+           ;; The arrow is in the left gutter when the library puts it
+           ;; there, taking the two columns that used to indent it.
+           (make-string (+ lead (if change-review-ui--fold-gutter-at-left 6 4)) ?\s))
          string)
         (setq pos (1+ end))))
     string))
@@ -3224,7 +3227,8 @@ folded for the round, but where the user commented (`--file-folded-p',
 `--thread-fold'); COMPACT, the tree beside Ediff, and ALWAYS-OPEN draw
 them as they were."
   (harness-ui-patch-review--ensure-fold-round review)
-  (let* ((set (harness-ui-patch-review--r-set review))
+  (let* ((change-review-ui--fold-gutter-at-left t)
+         (set (harness-ui-patch-review--r-set review))
          (filter (or change-review-ui--filter 'open))
          (counts (change-review-thread-counts set))
          (folded (and (not compact) (not always-open)
@@ -3645,12 +3649,15 @@ The view is drawn again."
   "Return the row of directory NODE, at PATH, at DEPTH in the file tree.
 It says how many files the directory holds and the lines they add and
 delete, and whether it is folded (`harness-ui-patch-review-toggle-directory');
-COMPACT leaves the count of files out."
+COMPACT leaves the count of files out.  The disclosure arrow goes in
+the tree's left gutter, column 0; DEPTH's indent follows it, so the
+name stays in the column it had."
   (pcase-let* ((`(,count ,added ,deleted) (harness-ui-patch-review--tree-stats node))
                (indent (harness-ui-patch-review--tree-indent depth))
                (folded (harness-ui-patch-review--directory-folded-p review path compact))
-               (row (concat indent
-                            (propertize (if folded "▸ " "▾ ") 'face 'harness-dim-face)
+               (row (concat (harness-ui-fold-gutter
+                             (propertize (if folded "▸" "▾") 'face 'harness-dim-face)
+                             indent)
                             (propertize (concat (plist-get node :name) "/") 'face 'bold)
                             (if compact ""
                               (concat "  " (propertize (harness-ui-patch-review--plural count "file")

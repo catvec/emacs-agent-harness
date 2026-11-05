@@ -1086,14 +1086,25 @@ words of the thread are worth more there.")
   "The widest a thread drawn as one line is, in a window that has more room.
 It is a summary to run an eye down, not to read across a whole screen.")
 
+(defvar change-review-ui--fold-gutter-at-left nil
+  "Non-nil draws a thread's fold marker in the line's left gutter.
+The marker then starts at column 0 and PREFIX's columns follow it, so
+every thread's marker lines up while what comes after it stays where it
+was.  Nil keeps the marker in the last two columns of PREFIX, where a
+view may put it to align it with the text that precedes it.")
+
 (defun change-review-ui--fold-gutter (prefix marker)
   "Return PREFIX with MARKER, a string one column wide, in its last two columns.
 A space follows it, so the line goes on where it did without the marker.
 PREFIX is spaces; one that is shorter than two columns is followed by
-the marker and the space."
-  (if (string-suffix-p "  " prefix)
-      (concat (substring prefix 0 -2) marker " ")
-    (concat prefix marker " ")))
+the marker and the space.  With `change-review-ui--fold-gutter-at-left'
+the marker starts the line instead, and PREFIX's columns follow it."
+  (cond
+   (change-review-ui--fold-gutter-at-left
+    (concat marker (make-string (max 0 (1- (length prefix))) ?\s)))
+   ((string-suffix-p "  " prefix)
+    (concat (substring prefix 0 -2) marker " "))
+   (t (concat prefix marker " "))))
 
 (defun change-review-ui--fold-marker (set thread fold)
   "Return the triangle that folds THREAD of SET, drawn with FOLD, a button."
@@ -3318,9 +3329,9 @@ heading the triangle and the names that fold and open them, when it is
 non-nil."
   (let* ((open (cl-count-if #'change-review-thread-open-p threads))
          (name (if file file "The change as a whole"))
-         (triangle (cond ((not foldable) "▾ ")
-                         (folded "▸ ")
-                         (t "▾ ")))
+         (triangle (cond ((not foldable) "▾")
+                         (folded "▸")
+                         (t "▾")))
          (fold (if foldable
                    (change-review-ui--link
                     triangle
@@ -3336,7 +3347,10 @@ non-nil."
                      'change-review-ui-file-face)
                   (propertize name 'face 'change-review-ui-file-face))))
     (propertize
-     (concat indent fold label
+     (concat (if change-review-ui--fold-gutter-at-left
+                 (concat fold (make-string (1+ (length indent)) ?\s))
+               (concat indent fold " "))
+             label
              (propertize (format "   %d %s%s" (length threads)
                                  (if (= 1 (length threads)) "thread" "threads")
                                  (if (eq filter 'all) (format " · %d open" open) ""))

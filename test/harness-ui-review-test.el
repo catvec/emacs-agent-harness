@@ -636,7 +636,7 @@ line, and its text opens that session, like the chat's call block."
         (should (string-match-p "^  \\[Open in the session\\]$" text))
         ;; A blank line between pieces of evidence, a caption with its own.
         (should (string-match-p "^a note\n\n" text))
-        (should (string-match-p "^(fix)\n  the fix\n\n  [▾▸] 3\\. bash: make test\n  \\[tool call\\]" text)))
+        (should (string-match-p "^(fix)\n  the fix\n\n[▾▸]   3\\. bash: make test\n  \\[tool call\\]" text)))
       ;; None after the last: what follows the report keeps its own spacing.
       (should (string-suffix-p "  [Open in the session]\n" full))
       ;; The session line opens the sub-agent, and so does the call's text.

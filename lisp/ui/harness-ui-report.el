@@ -203,14 +203,20 @@ one stays so for the next."
   (propertize (buttonize label (lambda (_) (funcall function)) nil help)
               'mouse-face 'highlight))
 
-(defun harness-ui-report--fold-button (task key folded label)
-  "Return LABEL as the fold button of TASK's KEY, folded when FOLDED."
-  (harness-ui-report--button
-   (format "%s %s" (if folded "▸" "▾") label)
-   (lambda ()
-     (harness-ui-report--set-fold task key (not folded))
-     (harness-ui-report--refresh task))
-   (if folded "Show it" "Hide it")))
+(defun harness-ui-report--fold-button (task key folded label &optional indent)
+  "Return LABEL as the fold button of TASK's KEY, folded when FOLDED.
+INDENT, when given, is what stood before the button: the arrow goes in
+the left gutter and INDENT keeps the label in the column it had."
+  (let* ((arrow (if folded "▸" "▾"))
+         (text (if indent
+                   (concat (harness-ui-fold-gutter arrow indent) label)
+                 (format "%s %s" arrow label))))
+    (harness-ui-report--button
+     text
+     (lambda ()
+       (harness-ui-report--set-fold task key (not folded))
+       (harness-ui-report--refresh task))
+     (if folded "Show it" "Hide it"))))
 
 (defun harness-ui-report--set-evidence-fold (task folded)
   "Fold every piece of evidence of TASK's report when FOLDED, else open them.
@@ -633,9 +639,9 @@ it, when there is one, says what it shows."
          (folded (harness-ui-report--folded-p task key nil))
          (caption (plist-get item :caption))
          (kind (format "%s" (plist-get item :kind))))
-    (insert "  "
-            (harness-ui-report--fold-button
-             task key folded (format "%d. %s" number (harness-ui-report--item-label item)))
+    (insert (harness-ui-report--fold-button
+             task key folded (format "%d. %s" number (harness-ui-report--item-label item))
+             "  ")
             "\n")
     (unless folded
       (pcase kind

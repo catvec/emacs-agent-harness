@@ -432,7 +432,7 @@ Nothing else does: the board has no button for them."
         (should (string-match-p "^    M  a\\.el +\\+2 −2$" text))
         (should (string-match-p "^    D  b\\.el +\\+0 −5$" text))
         (should (string-match-p "^    R  c\\.el → d\\.el +\\+1 −1$" text))
-        (should (string-match-p "^  ▸ docs/  1 file  \\+1 −0$" text))
+        (should (string-match-p "^▸   docs/  1 file  \\+1 −0$" text))
         (should-not (string-match-p "é\\.txt" text))
         (should (string-match-p "^    M  img\\.bin +binary$" text))
         (should (string-match-p "^  RET: compare" text))
@@ -464,7 +464,7 @@ Nothing else does: the board has no button for them."
         (call-interactively (key-binding "t"))
         (harness-ui-patch-review-test--wait-text popout "^  ✔ A  docs/é\\.txt")
         (call-interactively #'harness-ui-patch-review-toggle-file-tree)
-        (harness-ui-patch-review-test--wait-text popout "^  ▸ docs/")
+        (harness-ui-patch-review-test--wait-text popout "^▸   docs/")
         ;; n and p move between the files: here with every file approved, so
         ;; with skipping the approved files off (`harness-ui-patch-review-skips-approved-files').
         (let ((harness-ui-patch-review-skip-approved nil))
@@ -549,12 +549,12 @@ opens with its files under it; t shows them flat instead."
     (let* ((review (harness-ui-patch-review-test--review repo))
            (text (harness-ui-patch-review--section review nil)))
       ;; A directory with no comment of the user's starts folded, one line.
-      (should (string-match-p "^  ▸ docs/  1 file  \\+1 −0$" text))
+      (should (string-match-p "^▸   docs/  1 file  \\+1 −0$" text))
       (should-not (string-match-p "é\\.txt" text))
       ;; Opened, its files are under it, with their own names.
       (puthash "docs" 'open (harness-ui-patch-review--r-folded review))
       (setq text (harness-ui-patch-review--section review nil))
-      (should (string-match-p "^  ▾ docs/  1 file  \\+1 −0$" text))
+      (should (string-match-p "^▾   docs/  1 file  \\+1 −0$" text))
       (should (string-match-p "^      A  é\\.txt +\\+1 −0" text))
       (should-not (string-match-p "^    A  docs/é\\.txt" text))
       ;; The entries of a directory sort by name.
@@ -567,7 +567,7 @@ opens with its files under it; t shows them flat instead."
       (setf (harness-ui-patch-review--r-tree review) nil)
       (let ((text (harness-ui-patch-review--section review nil)))
         (should (string-match-p "^    A  docs/é\\.txt +\\+1 −0$" text))
-        (should-not (string-match-p "^  ▸ docs/" text))))))
+        (should-not (string-match-p "^▸   docs/" text))))))
 
 (ert-deftest harness-ui-patch-review-starts-files-and-threads-folded ()
   "A review starts with its directories folded, each file's threads a line,
@@ -582,28 +582,28 @@ starts open, and so does a thread they wrote in."
                     review "a.el" '(:new . 2) "Is the second one right?")
                    (harness-ui-patch-review-test--section review))))
       ;; The directory no one commented in is folded, its file not in sight.
-      (should (string-match-p "^  ▸ docs/  1 file  \\+1 −0$" text))
+      (should (string-match-p "^▸   docs/  1 file  \\+1 −0$" text))
       (should-not (string-search "é.txt" text))
       ;; A file with no comment of the user's is one line, no thread drawn.
-      (should (string-match-p "^  ▸ a\\.el +1 thread$" text))
+      (should (string-match-p "^▸   a\\.el +1 thread$" text))
       (should-not (string-search "Is the second one right?" text))
       ;; The user comments on a file in docs/: the directory opens to show
       ;; it, and the file's threads, the thread the user wrote in, stay open.
       (harness-ui-patch-review-test--comment-on review "docs/é.txt" nil "Needs a caption")
       (setq text (harness-ui-patch-review-test--section review))
-      (should (string-match-p "^  ▾ docs/  1 file  \\+1 −0$" text))
+      (should (string-match-p "^▾   docs/  1 file  \\+1 −0$" text))
       (should (string-match-p "^      A  é\\.txt +\\+1 −0" text))
-      (should (string-match-p "^  ▾ docs/é\\.txt +1 thread$" text))
-      (should (string-match-p "^  ▾ ● [^ ]+ · the file · 1 comment · open " text))
+      (should (string-match-p "^▾   docs/é\\.txt +1 thread$" text))
+      (should (string-match-p "^▾   ● [^ ]+ · the file · 1 comment · open " text))
       (should (string-search "Needs a caption" text))
       ;; The agent's file is still folded.
-      (should (string-match-p "^  ▸ a\\.el +1 thread$" text))
+      (should (string-match-p "^▸   a\\.el +1 thread$" text))
       (should-not (string-search "Is the second one right?" text))
       ;; A thread of the user's on the change as a whole is open too.
       (change-review-comment set "Overall: fine."
                              :author (change-review-user "Noah" "noah@example.org"))
       (setq text (harness-ui-patch-review-test--section review))
-      (should (string-match-p "^  ▾ The change as a whole +1 thread$" text))
+      (should (string-match-p "^▾   The change as a whole +1 thread$" text))
       (should (string-search "Overall: fine." text)))))
 
 (ert-deftest harness-ui-patch-review-expands-and-collapses-all ()
@@ -621,30 +621,30 @@ new round starts folded again."
       (harness-ui-patch-review-test--press-nth
        (harness-ui-patch-review-test--rich-section review) "[Expand all]" 0)
       (should (eq 'open (gethash "docs" (harness-ui-patch-review--r-folded review))))
-      (should (string-match-p "^  ▾ docs/"
+      (should (string-match-p "^▾   docs/"
                               (harness-ui-patch-review-test--section review)))
       (harness-ui-patch-review-test--press-nth
        (harness-ui-patch-review-test--rich-section review) "[Collapse all]" 0)
       (should (eq 'folded (gethash "docs" (harness-ui-patch-review--r-folded review))))
-      (should (string-match-p "^  ▸ docs/"
+      (should (string-match-p "^▸   docs/"
                               (harness-ui-patch-review-test--section review)))
       ;; The agent's file and thread fold; the user's open.
-      (should (string-match-p "^  ▸ a\\.el +1 thread$"
+      (should (string-match-p "^▸   a\\.el +1 thread$"
                               (harness-ui-patch-review-test--section review)))
-      (should (string-match-p "^  ▾ d\\.el +1 thread$"
+      (should (string-match-p "^▾   d\\.el +1 thread$"
                               (harness-ui-patch-review-test--section review)))
       ;; Every file and thread opens, the agent's too.
       (harness-ui-patch-review-test--press-nth
        (harness-ui-patch-review-test--rich-section review) "[Expand all]" 1)
       (let ((text (harness-ui-patch-review-test--section review)))
-        (should (string-match-p "^  ▾ a\\.el +1 thread$" text))
+        (should (string-match-p "^▾   a\\.el +1 thread$" text))
         (should (string-search "Is the second one right?" text)))
       ;; And folds to a line each.
       (harness-ui-patch-review-test--press-nth
        (harness-ui-patch-review-test--rich-section review) "[Collapse all]" 1)
       (let ((text (harness-ui-patch-review-test--section review)))
-        (should (string-match-p "^  ▸ a\\.el +1 thread$" text))
-        (should (string-match-p "^  ▸ d\\.el +1 thread$" text))
+        (should (string-match-p "^▸   a\\.el +1 thread$" text))
+        (should (string-match-p "^▸   d\\.el +1 thread$" text))
         (should-not (string-search "Is the second one right?" text))
         (should-not (string-search "On the file" text)))
       ;; A new round starts the defaults again: the agent's file folded,
@@ -659,10 +659,10 @@ new round starts folded again."
       (let ((version (change-review-latest-version set)))
         (setf (change-review-version-meta version) (list :round 1)))
       (let ((text (harness-ui-patch-review-test--section review)))
-        (should (string-match-p "^  ▸ docs/" text))
-        (should (string-match-p "^  ▸ a\\.el +1 thread$" text))
+        (should (string-match-p "^▸   docs/" text))
+        (should (string-match-p "^▸   a\\.el +1 thread$" text))
         (should-not (string-search "Is the second one right?" text))
-        (should (string-match-p "^  ▾ d\\.el +1 thread$" text))
+        (should (string-match-p "^▾   d\\.el +1 thread$" text))
         (should (string-search "On the file" text))))))
 
 (ert-deftest harness-ui-patch-review-collapse-keys ()
@@ -674,35 +674,78 @@ same when clicked."
            (review (gethash id harness-ui-patch-review--reviews)))
       (harness-ui-patch-review-test--agent-comment-on
        review "a.el" '(:new . 2) "Is the second one right?")
-      (harness-ui-patch-review-test--wait-text popout "^  ▸ a\\.el +1 thread$")
+      (harness-ui-patch-review-test--wait-text popout "^▸   a\\.el +1 thread$")
       (with-current-buffer popout
         (goto-char (harness-ui-patch-review--row-start id 0))
         (should (eq #'harness-ui-patch-review-expand-all (key-binding "E")))
         (should (eq #'harness-ui-patch-review-collapse-all (key-binding "C")))
         (call-interactively (key-binding "E")))
-      (harness-ui-patch-review-test--wait-text popout "^  ▾ docs/")
+      (harness-ui-patch-review-test--wait-text popout "^▾   docs/")
       (with-current-buffer popout
         (goto-char (harness-ui-patch-review--row-start id 0))
         (call-interactively (key-binding "C")))
-      (harness-ui-patch-review-test--wait-text popout "^  ▸ docs/")
+      (harness-ui-patch-review-test--wait-text popout "^▸   docs/")
       ;; On the threads, the keys open and fold the comments.
       (with-current-buffer popout
         (goto-char (harness-ui-patch-review--threads-position))
         (should (eq #'harness-ui-patch-review-expand-all-threads (key-binding "E")))
         (should (eq #'harness-ui-patch-review-collapse-all-threads (key-binding "C")))
         (call-interactively (key-binding "E")))
-      (harness-ui-patch-review-test--wait-text popout "^  ▾ a\\.el +1 thread$")
+      (harness-ui-patch-review-test--wait-text popout "^▾   a\\.el +1 thread$")
       (harness-ui-patch-review-test--wait-text popout "Is the second one right\\?")
       (with-current-buffer popout
         (goto-char (harness-ui-patch-review--threads-position))
         (call-interactively (key-binding "C")))
-      (harness-ui-patch-review-test--wait-text popout "^  ▸ a\\.el +1 thread$")
+      (harness-ui-patch-review-test--wait-text popout "^▸   a\\.el +1 thread$")
       (harness-ui-patch-review-test--wait-text popout "Is the second one right\\?" t)
       ;; What the user writes opens the file and thread it is in, though
       ;; both were folded.
       (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 3) "A new question")
-      (harness-ui-patch-review-test--wait-text popout "^  ▾ a\\.el +2 threads$")
+      (harness-ui-patch-review-test--wait-text popout "^▾   a\\.el +2 threads$")
       (harness-ui-patch-review-test--wait-text popout "A new question"))))
+
+(defun harness-ui-patch-review-test--fold-arrow-columns (text)
+  "Return the columns of the disclosure arrows at the starts of TEXT's lines.
+A line whose first non-space character is a triangle and then a space is
+a foldable thing's line: a heading, a directory row, a file's threads,
+or a thread's header."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (let (columns)
+      (while (re-search-forward "^\\( *\\)\\([▸▾]\\) " nil t)
+        (push (length (match-string 1)) columns))
+      (nreverse columns))))
+
+(ert-deftest harness-ui-patch-review-fold-arrows-share-the-left-gutter ()
+  "The report's disclosure arrows all start in one left gutter, column 0.
+The changes' heading, every directory in the file tree however deep it
+is, every file's threads and every thread card line up there, while
+the names after the arrows keep the columns their depth gives them.
+The tree beside Ediff draws the same gutter."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo)))
+      (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")
+      (dolist (compact '(nil t))
+        (let* ((text (harness-ui-patch-review--section review nil compact))
+               ;; COMPACT is the tree beside Ediff: its threads are in a
+               ;; pane of their own, drawn from the same section.
+               (threads (if compact
+                            (harness-ui-patch-review--threads-section review t)
+                          text))
+               (columns (append (harness-ui-patch-review-test--fold-arrow-columns text)
+                                (when compact
+                                  (harness-ui-patch-review-test--fold-arrow-columns threads)))))
+          (ert-info ((format "compact: %S" compact))
+            (should (>= (length columns) (if compact 1 4)))
+            (should (equal '(0) (delete-dups (copy-sequence columns))))
+            ;; The labels stay where they were: a directory's name and a
+            ;; file's thread count start in the same columns as before.
+            (should (string-match-p (if compact
+                                        "^▾   docs/ +\\+1 −0$"
+                                      "^▸   docs/ +1 file  \\+1 −0$")
+                                    text))
+            (should (string-match-p "^▾   a\\.el +1 thread$" threads))))))))
 
 (ert-deftest harness-ui-patch-review-approves-a-file-until-it-changes ()
   "Approving a file marks it seen; the file's path and blob keep it approved.
@@ -1366,11 +1409,11 @@ point on the next one.  The box stays in sight under Ediff."
           ;; The threads are a section below the files, by file, each drawn as the
           ;; library draws a thread, the draft marked.
           (should (string-match-p "^▾ Threads  \\[open 2\\]" text))
-          (should (string-match-p "^  ▾ a\\.el +1 thread$" text))
+          (should (string-match-p "^▾   a\\.el +1 thread$" text))
           ;; In this window there is no room for the button that deletes a
           ;; thread of drafts, which is the first thing a header gives up; the
           ;; draft has the buttons that edit it and delete it.
-          (should (string-match-p "^  ▾ ● [^ ]+ · line 2 · 1 comment · open +\\[Reply\\] \\[Close\\] \\[Diff\\]$" text))
+          (should (string-match-p "^▾   ● [^ ]+ · line 2 · 1 comment · open +\\[Reply\\] \\[Close\\] \\[Diff\\]$" text))
           (should (string-match-p "^    ┃ 1/1  .* · draft  \\[Edit\\] \\[Delete\\]  ▸ where$" text))
           (should (string-match-p "^    ┃      Why two\\?$" text))))
       ;; The review stays, for Ediff again.
@@ -1672,7 +1715,8 @@ which revision, the place in the thread."
       (with-current-buffer popout
         (goto-char (point-min))
         (re-search-forward "● [^ ]+ · line 18 ·")
-        (beginning-of-line)
+        ;; The arrow before the mark is the fold button; point goes on the mark.
+        (goto-char (match-beginning 0))
         ;; The header of a thread is the thread's: the library's commands find it.
         (should (equal (change-review-thread-id (harness-ui-patch-review-test--thread-of review eighteen))
                        (get-text-property (point) 'change-review-thread)))
@@ -2548,10 +2592,10 @@ and RET on it act in the report."
         ;; Below the files, under a heading with the filter buttons.
         (should (< (string-match "^  RET: compare" text)
                    (string-match "^▾ Threads  \\[open 2\\] +to review 0 +reviewed 0 +closed 1 +all 3" text)
-                   (string-match "^  ▾ a\\.el +1 thread$" text)))
+                   (string-match "^▾   a\\.el +1 thread$" text)))
         ;; The change as a whole first, then the files in the order of the diff.
-        (should (< (string-match "^  ▾ The change as a whole +1 thread$" text)
-                   (string-match "^  ▾ a\\.el +1 thread$" text)))
+        (should (< (string-match "^▾   The change as a whole +1 thread$" text)
+                   (string-match "^▾   a\\.el +1 thread$" text)))
         (should (string-match-p "^    ┃      Why two\\?$" text))
         ;; Open threads at first: the closed one of b.el is behind the filter.
         (should-not (string-search "Who used b3?" text))
@@ -2585,7 +2629,7 @@ and RET on it act in the report."
       (harness-ui-patch-review-test--wait-text popout "Who used b3\\?")
       (should (string-match-p "^▾ Threads  +open 2 +to review 0 +reviewed 0 +closed 1 +\\[all 3\\]"
                               (harness-ui-patch-review-test--text popout)))
-      (should (string-match-p "^  ▾ b\\.el +1 thread · 0 open$" (harness-ui-patch-review-test--text popout)))
+      (should (string-match-p "^▾   b\\.el +1 thread · 0 open$" (harness-ui-patch-review-test--text popout)))
       (with-current-buffer popout (change-review-ui-set-filter 'open))
       (harness-ui-patch-review-test--wait-text popout "Who used b3\\?" t)
       ;; The keys of a thread act in the report: x closes it, and it draws again
@@ -2621,8 +2665,11 @@ on the header, and on a comment RET shows where it was made."
       ;; On the name of the file: that file in Ediff.
       (with-current-buffer popout
         (goto-char (point-min))
-        (re-search-forward "^  ▾ a\\.el +1 thread$")
-        (beginning-of-line)
+        (re-search-forward "^▾   a\\.el +1 thread$")
+        ;; The arrow starts the line and is a fold button; the spaces after
+        ;; it are the heading's, where RET compares the file.
+        (goto-char (match-beginning 0))
+        (forward-char 1)
         (should (equal "a.el" (get-text-property (point) 'change-review-file)))
         (call-interactively (key-binding (kbd "RET"))))
       (let ((control (harness-ui-patch-review-test--control review 0)))
@@ -2631,7 +2678,8 @@ on the header, and on a comment RET shows where it was made."
       (with-current-buffer popout
         (goto-char (point-min))
         (re-search-forward "● [^ ]+ · line 18 ·")
-        (beginning-of-line)
+        ;; The arrow before the mark is the fold button; point goes on the mark.
+        (goto-char (match-beginning 0))
         (should (eq #'change-review-ui-show-in-diff (key-binding "d")))
         (call-interactively (key-binding "d")))
       (let* ((control (harness-ui-patch-review-test--control review 0))
@@ -3631,7 +3679,7 @@ same as the key."
              (tree (harness-ui-patch-review--r-tree-buffer review)))
         (with-current-buffer tree
           (goto-char (point-min))
-          (re-search-forward "^  ▾ docs/")
+          (re-search-forward "^▾   docs/")
           (beginning-of-line)
           (call-interactively (key-binding "a")))
         (should-not (funcall approved "docs/é.txt"))
@@ -3678,7 +3726,7 @@ not (a file stays viewed when its approval goes)."
              (dir-row (lambda ()
                         (with-current-buffer tree
                           (goto-char (point-min))
-                          (re-search-forward "^  ▾ docs/")
+                          (re-search-forward "^▾   docs/")
                           (beginning-of-line)
                           (call-interactively (key-binding "a"))))))
         (should (equal '(1 . 1) (funcall panel)))
@@ -3805,22 +3853,22 @@ directory approves its files, and stops approving them when they all are."
       ;; The directory starts folded: one line, no file of it in sight.
       (with-current-buffer popout
         (goto-char (point-min))
-        (re-search-forward "^  ▸ docs/")
+        (re-search-forward "^▸   docs/")
         (beginning-of-line)
         (should (equal "docs" (get-text-property (point) 'harness-ui-patch-review-dir)))
         (should (eq #'harness-ui-patch-review-toggle-directory (key-binding (kbd "TAB"))))
         (should (eq #'harness-ui-patch-review-toggle-directory (key-binding (kbd "RET"))))
         (should (eq #'harness-ui-patch-review-mouse-toggle-directory (lookup-key (get-text-property (point) 'keymap) [mouse-1])))
         (call-interactively (key-binding (kbd "TAB"))))
-      (harness-ui-patch-review-test--wait-text popout "^  ▾ docs/  1 file  \\+1 −0$")
+      (harness-ui-patch-review-test--wait-text popout "^▾   docs/  1 file  \\+1 −0$")
       (should (string-search "é.txt" (harness-ui-patch-review-test--text popout)))
       ;; Folded again, its files go.
       (with-current-buffer popout
         (goto-char (point-min))
-        (re-search-forward "^  ▾ docs/")
+        (re-search-forward "^▾   docs/")
         (beginning-of-line)
         (call-interactively (key-binding (kbd "TAB"))))
-      (harness-ui-patch-review-test--wait-text popout "^  ▸ docs/  1 file  \\+1 −0$")
+      (harness-ui-patch-review-test--wait-text popout "^▸   docs/  1 file  \\+1 −0$")
       (should-not (string-search "é.txt" (harness-ui-patch-review-test--text popout)))
       (should (eq 'folded (gethash "docs" (harness-ui-patch-review--r-folded review))))
       ;; The files of other directories stay, and so does the order: n from d.el goes
@@ -3829,13 +3877,13 @@ directory approves its files, and stops approving them when they all are."
         (goto-char (harness-ui-patch-review--row-start id 2))
         (call-interactively (key-binding "n")))
       (harness-ui-patch-review-test--wait-text popout "^      A  é\\.txt")
-      (should (string-match-p "^  ▾ docs/" (harness-ui-patch-review-test--text popout)))
+      (should (string-match-p "^▾   docs/" (harness-ui-patch-review-test--text popout)))
       (with-current-buffer popout
         (should (eql 3 (cdr (harness-ui-patch-review--at-point)))))
       ;; a on a directory: its files.
       (with-current-buffer popout
         (goto-char (point-min))
-        (re-search-forward "^  ▾ docs/")
+        (re-search-forward "^▾   docs/")
         (beginning-of-line)
         (call-interactively (key-binding "a")))
       (harness-ui-patch-review-test--wait-text popout "^    ✔ A  é\\.txt")
@@ -3843,7 +3891,7 @@ directory approves its files, and stops approving them when they all are."
                review (harness-ui-patch-review-test--file review "docs/é.txt")))
       (with-current-buffer popout
         (goto-char (point-min))
-        (re-search-forward "^  ▾ docs/")
+        (re-search-forward "^▾   docs/")
         (beginning-of-line)
         (call-interactively (key-binding "a")))
       ;; No longer approved, and still seen.
@@ -3854,14 +3902,14 @@ directory approves its files, and stops approving them when they all are."
       ;; next file, in the folded directory, which unfolds.
       (with-current-buffer popout
         (goto-char (point-min))
-        (re-search-forward "^  ▾ docs/")
+        (re-search-forward "^▾   docs/")
         (beginning-of-line)
         (call-interactively (key-binding (kbd "TAB"))))
-      (harness-ui-patch-review-test--wait-text popout "^  ▸ docs/")
+      (harness-ui-patch-review-test--wait-text popout "^▸   docs/")
       (harness-ui-patch-review-ediff review 2)
       (with-current-buffer (harness-ui-patch-review-test--control review 2)
         (call-interactively #'harness-ui-patch-review-ediff-quit))
-      (harness-ui-patch-review-test--wait-text popout "^  ▾ docs/")
+      (harness-ui-patch-review-test--wait-text popout "^▾   docs/")
       (with-current-buffer popout
         (should (eql 3 (cdr (harness-ui-patch-review--at-point))))))))
 
@@ -4226,7 +4274,7 @@ review, an approval or a thread."
                  (string-match "^▾ Threads  \\[open 0\\]" text)
                  (string-match "No open threads\\." text)
                  (string-match "\\[Verify\\]" text)))
-      (should (string-match-p "^  ▸ docs/  1 file  \\+1 −0$" text))
+      (should (string-match-p "^▸   docs/  1 file  \\+1 −0$" text))
       (should (string-match-p "^  \\[✓\\] Skip approved s +\\[✓\\] Auto-approve u +\\[✓\\] Tree t +\\[Expand all\\] \\[Collapse all\\]$" text))
       ;; The rows, drawn with the banner's text, keep the keys they have in the report.
       (with-current-buffer chat
@@ -4248,11 +4296,11 @@ review, an approval or a thread."
         (goto-char (harness-ui-patch-review--row-start id 0))
         (call-interactively (key-binding "t")))
       (harness-ui-patch-review-test--wait-text chat "^    A  docs/é\\.txt")
-      (should-not (string-match-p "^  ▸ docs/" (harness-ui-patch-review-test--text chat)))
+      (should-not (string-match-p "^▸   docs/" (harness-ui-patch-review-test--text chat)))
       (with-current-buffer chat
         (goto-char (harness-ui-patch-review--row-start id 0))
         (call-interactively (key-binding "t")))
-      (harness-ui-patch-review-test--wait-text chat "^  ▸ docs/")
+      (harness-ui-patch-review-test--wait-text chat "^▸   docs/")
       ;; An approval, a thread -- by the user or the agent -- shows in the banner.
       (harness-ui-patch-review--approve review (harness-ui-patch-review-test--file review "a.el") t t)
       (harness-ui-patch-review--refresh review)
@@ -4389,7 +4437,7 @@ hides the column, T goes to the threads, and the column goes when Ediff ends."
         (let ((text (harness-ui-patch-review-test--text tree)))
           (should (string-prefix-p "Changes (6)" text))
           (should (string-match-p "^▶ +D  *b\\.el" text))
-          (should (string-match-p "^  ▾ docs/ +\\+1 −0$" text))
+          (should (string-match-p "^▾   docs/ +\\+1 −0$" text))
           (should (string-match-p "M a\\.el +\\+2 −2 ●1 ✎1" text))
           ;; The threads are the pane's below, not the tree's.
           (should-not (string-search "Threads" text))
@@ -4424,14 +4472,14 @@ hides the column, T goes to the threads, and the column goes when Ediff ends."
         ;; TAB folds a directory in the tree, and in the report too.
         (with-current-buffer tree
           (goto-char (point-min))
-          (re-search-forward "^  ▾ docs/")
+          (re-search-forward "^▾   docs/")
           (beginning-of-line)
           (call-interactively (key-binding (kbd "TAB"))))
-        (should (string-match-p "^  ▸ docs/" (harness-ui-patch-review-test--text tree)))
-        (harness-ui-patch-review-test--wait-text popout "^  ▸ docs/")
+        (should (string-match-p "^▸   docs/" (harness-ui-patch-review-test--text tree)))
+        (harness-ui-patch-review-test--wait-text popout "^▸   docs/")
         (with-current-buffer tree
           (goto-char (point-min))
-          (re-search-forward "^  ▸ docs/")
+          (re-search-forward "^▸   docs/")
           (beginning-of-line)
           (call-interactively (key-binding (kbd "TAB"))))
         ;; T, from the control panel: to the threads, in their pane.
@@ -5697,21 +5745,21 @@ diff changes is placed in that diff."
         ;; The thread on b.el, which the branch deleted and the last review
         ;; saw so, is where it was: placed against the whole change.
         (should (equal '(same 3) (let ((p (funcall where b3))) (list (plist-get p :status) (plist-get p :line)))))
-        (should (string-match-p "^  ▾ b\\.el   1 thread$" text))
-        (should (string-match-p "^  ▾ ● [^ ]+ · line 3 · 1 comment · open " text))
-        (should (string-match-p "^  ▾ d\\.el   1 thread$" text))
-        (should (string-match-p "^  ▾ ● [^ ]+ · the file · 1 comment · open " text))
+        (should (string-match-p "^▾   b\\.el   1 thread$" text))
+        (should (string-match-p "^▾   ● [^ ]+ · line 3 · 1 comment · open " text))
+        (should (string-match-p "^▾   d\\.el   1 thread$" text))
+        (should (string-match-p "^▾   ● [^ ]+ · the file · 1 comment · open " text))
         ;; The line of the thread on a.el, in the file the diff shows, moved.
         (should (equal '(moved 21 18)
                        (let ((p (funcall where eighteen)))
                          (list (plist-get p :status) (plist-get p :line) (plist-get p :was)))))
-        (should (string-match-p "^  ▾ ● [^ ]+ · line 21 (was 18) · 1 comment · open " text)))
+        (should (string-match-p "^▾   ● [^ ]+ · line 21 (was 18) · 1 comment · open " text)))
       ;; With the whole change shown again the threads are all there still,
       ;; each under its file.
       (harness-ui-patch-review-test--choose review 'base)
       (let ((text (harness-ui-patch-review-test--section review)))
-        (should (string-match-p "^  ▾ b\\.el   1 thread$" text))
-        (should (string-match-p "^  ▾ d\\.el   1 thread$" text))))))
+        (should (string-match-p "^▾   b\\.el   1 thread$" text))
+        (should (string-match-p "^▾   d\\.el   1 thread$" text))))))
 
 (ert-deftest harness-ui-patch-review-names-the-versions-ediff-compares ()
   "Ediff's two versions are named after what they are in the diff shown: the
@@ -6619,7 +6667,7 @@ rows; the agent closing it again brings it back."
         (harness-ui-patch-review-test--wait-text popout "Because two reads better\\.")
         (let ((text (harness-ui-patch-review-test--text popout)))
           (should (string-match-p "^▾ Threads  +open 1 +to review 0 +\\[reviewed 1\\]" text))
-          (should (string-match-p "^  ▾ a\\.el +1 thread$" text)))
+          (should (string-match-p "^▾   a\\.el +1 thread$" text)))
         (with-current-buffer popout (change-review-ui-set-filter 'unreviewed))
         (harness-ui-patch-review-test--wait-text popout "Because two reads better\\." t)
         ;; Opened and closed again by the agent, it waits once more.
@@ -6787,7 +6835,7 @@ marks it reviewed."
         (with-current-buffer popout (change-review-ui-set-filter 'unreviewed))
         (harness-ui-patch-review-test--wait-text popout "Yes: nothing else is needed\\.")
         (let ((text (harness-ui-patch-review-test--text popout)))
-          (should (string-match-p "^  ▾ The change as a whole +1 thread$" text))
+          (should (string-match-p "^▾   The change as a whole +1 thread$" text))
           (should-not (string-search "Fine as it is." text)))
         (with-current-buffer popout
           (goto-char (point-min))

@@ -2582,11 +2582,15 @@ on a board too narrow for one-line cards
                      (harness-session-waiting-on-user-p session)
                      (harness-ui-tasks--wide-icon-p icon)))
          (nudge (and pause (harness-ui-tasks--mark-nudge icon)))
-         (left (concat (cond ((not nudge)
-                              (concat "  " (if (string-empty-p chevron) "" (concat chevron " "))))
-                             ((string-empty-p chevron)
-                              (concat " " (harness-ui-tasks--pad (- (frame-char-width) nudge))))
-                             (t (concat "  " chevron
+         ;; The chevron sits in the card's left gutter, column 0, as a
+         ;; section's does; the spaces that indented it follow it, so the
+         ;; icon and the title keep the columns they had, pixel for pixel.
+         (left (concat (cond ((string-empty-p chevron)
+                              (if nudge
+                                  (concat " " (harness-ui-tasks--pad (- (frame-char-width) nudge)))
+                                "  "))
+                             ((not nudge) (concat chevron "   "))
+                             (t (concat chevron "  "
                                         (harness-ui-tasks--pad (- (frame-char-width) nudge)))))
                        icon
                        (if nudge (harness-ui-tasks--pad (+ (frame-char-width) nudge)) " "))))
@@ -3096,13 +3100,18 @@ line instead."
                     (at (pcase column
                           (`(end . ,n) (max bol (- eol n)))
                           (`(,_ . ,n) (min eol (+ bol n)))))
+                    ;; A card's line starts with its disclosure button:
+                    ;; point put there would push that, not open the card.
+                    (safe (or (cl-loop for p from bol below eol
+                                       unless (harness-ui-tasks--button-at p) return p)
+                              bol))
                     (same (and button
                                (or (harness-ui-tasks--find-button (car button) bol eol)
                                    (and key (harness-ui-tasks--find-button
                                              (car button) start (harness-ui-tasks--key-end start key)))))))
                (cond
                 (same (min (+ (nth 1 same) (cdr button)) (1- (nth 2 same))))
-                ((harness-ui-tasks--button-at at) bol)
+                ((harness-ui-tasks--button-at at) safe)
                 (t at)))))))))))
 
 (defun harness-ui-tasks--places ()

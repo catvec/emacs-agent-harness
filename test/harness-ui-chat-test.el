@@ -879,6 +879,53 @@ on a background and bar of its own; the user's own messages are as before."
                 (should (harness-chat-block-collapsed block))
                 (should (equal "harness-icon-collapsed.svg" (icon)))))))))))
 
+(defun harness-ui-chat-test-display-column (pos)
+  "Return the display column POS is drawn at in the window showing its buffer.
+The line prefix, the window margin, and an icon or space drawn wider
+than its character are counted, as a reader sees them."
+  (let ((window (or (get-buffer-window (current-buffer) t) (selected-window))))
+    (save-excursion
+      (goto-char pos)
+      (car (window-text-pixel-size window (line-beginning-position) pos)))))
+
+(ert-deftest harness-ui-chat-fold-arrows-share-the-left-gutter ()
+  "Every disclosure arrow of a chat sits in one left gutter, column 1.
+The transcript's margin starts its text at column 1; the arrow of a
+tool call's group, of a hint, and of the todo list share that column,
+so they line up vertically however each line is drawn."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Gutter"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/append sid '(:kind user :content "Give me the tour"))
+      (harness-call 'session/append sid '(:kind assistant :content "Looking around."))
+      (harness-call 'session/append sid '(:kind thinking :content "Two files to read."))
+      (harness-ui-chat-test-append-call sid "read_file" "c1" "Read file: a.el" '(:path "a.el"))
+      (harness-ui-chat-test-append-call sid "read_file" "c2" "Read file: b.el" '(:path "b.el"))
+      (harness-call 'session/append sid
+                    (list :kind "hint" :content "Several things happened (2)\nalpha\nbeta"
+                          :meta (harness-ui-chat-test--fold-meta "alpha" "beta")))
+      (harness-call 'session/set-todos sid
+                    '((:id "1" :text "Read the files" :status "completed")
+                      (:id "2" :text "Write the fix" :status "in-progress")))
+      (harness-test-wait (lambda ()
+                           (and (harness-ui-chat-test-find buf "tool call")
+                                (harness-ui-chat-test-find buf "Several things happened (2)")
+                                (harness-ui-chat-test-find buf "Todo list")))
+                         5 "the foldable blocks")
+      (with-current-buffer buf
+        (set-window-buffer (selected-window) buf)
+        (let ((pos (point-min))
+              columns)
+          (while (setq pos (text-property-any pos (point-max) 'harness-chat-fold-icon t))
+            ;; A group folded shut keeps its members' arrows in the buffer,
+            ;; out of sight: those are no line's arrow here.
+            (unless (invisible-p pos)
+              (push (harness-ui-chat-test-display-column pos) columns))
+            (setq pos (1+ pos)))
+          (should (>= (length columns) 3))
+          ;; One gutter for every arrow, whatever line it is on.
+          (should (equal '(1) (delete-dups (copy-sequence columns)))))))))
+
 ;;;; Hints that fold
 
 (defun harness-ui-chat-test--fold-items (&rest texts)

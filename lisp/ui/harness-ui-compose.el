@@ -202,6 +202,8 @@ brings ATT back, to where it stood (see `harness-compose--sync-tokens').")
   "Overlays showing the tokens of the box's attachments as chips.")
 (defvar-local harness-compose--thread-rails nil
   "Overlays drawing the rail beside the words under the cards of threads.")
+(defvar-local harness-compose--quote-wraps nil
+  "Overlays making a quoted line's wrapped lines start under its words.")
 (defvar-local harness-compose--area nil
   "Where point was last in the box, once the box held a card.
 `own' for your own message, or the number of the reply it was in.  What
@@ -518,10 +520,12 @@ that does something else than compose -- sending a message to a session,
 say.  Point ends after the box's final newline.  The tokens of its
 attachments show as chips (`harness-compose--show-tokens')."
   (dolist (ov (append (list harness-compose-overlay harness-compose--placeholder harness-compose--indent)
+                      harness-compose--quote-wraps
                       harness-compose--token-overlays harness-compose--thread-rails
                       harness-compose--area-hints))
     (when ov (delete-overlay ov)))
   (setq harness-compose--token-overlays nil
+        harness-compose--quote-wraps nil
         harness-compose--thread-rails nil
         harness-compose--area-hints nil)
   (when text
@@ -565,7 +569,8 @@ attachments show as chips (`harness-compose--show-tokens')."
       (overlay-put harness-compose--indent 'wrap-prefix indent))
     (setq harness-compose--placeholder (make-overlay (1- (point)) (point)))
     (harness-compose-update-placeholder)
-    (harness-compose--show-tokens)))
+    (harness-compose--show-tokens)
+    (harness-compose--line-up-quote-wraps)))
 
 (defun harness-compose-hide ()
   "Take the box off the buffer, keeping the words and the attachments.
@@ -574,6 +579,7 @@ of `harness-compose-insert'; `harness-compose-insert' brings the box
 back with the text it held (`harness-compose--text'), so a draft is no
 less a draft for being out of sight."
   (dolist (ov (append (list harness-compose-overlay harness-compose--placeholder harness-compose--indent)
+                      harness-compose--quote-wraps
                       harness-compose--token-overlays harness-compose--thread-rails
                       harness-compose--area-hints))
     (when ov (delete-overlay ov)))
@@ -581,6 +587,7 @@ less a draft for being out of sight."
         harness-compose--placeholder nil
         harness-compose--indent nil
         harness-compose--token-overlays nil
+        harness-compose--quote-wraps nil
         harness-compose--thread-rails nil
         harness-compose--area-hints nil)
   (when harness-compose-start (set-marker harness-compose-start nil))
@@ -1153,7 +1160,8 @@ back."
       (delete-region harness-compose-start harness-compose-end)
       (save-excursion (goto-char harness-compose-start) (insert text)))
     (harness-compose-update-placeholder)
-    (harness-compose--show-tokens)))
+    (harness-compose--show-tokens)
+    (harness-compose--line-up-quote-wraps)))
 
 (defun harness-compose-clear ()
   "Empty the box and drop the attachments, then redraw."
@@ -1242,6 +1250,57 @@ The box may have been out of sight: its windows follow it again
 `compose-quote-insert-hook' in the box's buffer."
   (cl-incf harness-compose--jumps)
   (harness-compose-update-placeholder))
+
+(defconst harness-compose--quote-prefix-regexp "\\(?:> ?\\)+"
+  "Regexp matching the Markdown quote prefix at the start of a line of the box.")
+
+(defun harness-compose--line-up-quote-wraps ()
+  "Start a quoted line's wrapped lines under its words.
+A line of the box that begins with Markdown's \"> \" shows its words
+after the prefix, two columns further in than the box's own text.  Its
+wrapped lines go on under those words, behind the box's indent and as
+many columns as the prefix takes, rather than at the box's indent alone.
+The overlays are made again only when the lines or their prefix move."
+  (when (harness-compose-live-p)
+    (let* ((start (marker-position harness-compose-start))
+           (end (marker-position harness-compose-end))
+           (base (and harness-compose--indent
+                      (overlay-buffer harness-compose--indent)
+                      (overlay-get harness-compose--indent 'wrap-prefix)))
+           (want nil))
+      (save-excursion
+        (goto-char start)
+        (while (< (point) end)
+          (let ((bol (point))
+                (eol (line-end-position)))
+            (when (and (< bol eol)
+                       (save-excursion
+                         (goto-char bol)
+                         (looking-at harness-compose--quote-prefix-regexp)))
+              (push (list (max bol start) (min eol end)
+                          (concat base
+                                  (propertize (make-string (string-width (match-string-no-properties 0)) ?\s)
+                                              'face harness-compose--face)))
+                    want))
+            (goto-char (min end (1+ eol))))))
+      (setq want (nreverse want))
+      (unless (equal want (mapcar (lambda (ov)
+                                    (list (overlay-start ov) (overlay-end ov)
+                                          (overlay-get ov 'wrap-prefix)))
+                                  harness-compose--quote-wraps))
+        (mapc #'delete-overlay harness-compose--quote-wraps)
+        (setq harness-compose--quote-wraps
+              (mapcar (lambda (w)
+                        (let ((ov (make-overlay (nth 0 w) (nth 1 w) nil nil t)))
+                          (overlay-put ov 'line-prefix base)
+                          (overlay-put ov 'wrap-prefix (nth 2 w))
+                          ;; Below the rails beside the words under a
+                          ;; card, which keep their columns in a quote.
+                          (overlay-put ov 'priority 5)
+                          (overlay-put ov 'harness-compose-quote-wrap t)
+                          (overlay-put ov 'evaporate t)
+                          ov))
+                      want))))))
 
 (defun harness-compose--setup-quoting ()
   "Make this buffer quote in its box, with compose-quote."
@@ -1962,7 +2021,8 @@ The area of a box with cards that point is in is noted first
       (progn
         (harness-compose--note-area)
         (when (harness-compose--sync-tokens)
-          (harness-compose-redraw)))
+          (harness-compose-redraw))
+        (harness-compose--line-up-quote-wraps))
     (error (harness-log 'warn "compose: keeping the tokens failed: %S" err))))
 
 (defun harness-compose--show-tokens ()

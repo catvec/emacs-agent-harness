@@ -2213,6 +2213,36 @@ quote stays one block.  Indentation stays, as code needs."
   (should (equal "> one\n>\n>   two" (compose-quote-string "\n \none  \n\t\n  two\n\n")))
   (should (equal "> one" (compose-quote-string "one"))))
 
+(ert-deftest harness-ui-compose-quote-wraps-under-its-words ()
+  "A quoted line's wrapped lines start under the quote's words.
+The prompt takes two columns and the quote's \"> \" two more, so the
+first line's words start four columns in; a line too long for the
+window goes on there, not under the prompt, and a plain line after the
+quote keeps the box's own indent."
+  (harness-ui-compose-test-with
+    (harness-compose-set
+     (concat (compose-quote-string (string-join (make-list 40 "word") " "))
+             "\n\n"
+             (string-join (make-list 40 "plain") " ")))
+    (let* ((start (marker-position harness-compose-start))
+           ;; `line-beginning-position' stops at the prompt's field.
+           (prompt (save-excursion (goto-char start) (current-column)))
+           (quoted (seq-filter (lambda (ov) (overlay-get ov 'harness-compose-quote-wrap))
+                               (overlays-in start (point-max))))
+           (plain-line (save-excursion
+                         (goto-char harness-compose-end)
+                         (line-beginning-position))))
+      ;; One quoted line; the plain line after it has no quote to line up.
+      (should (= 1 (length quoted)))
+      (dolist (ov quoted)
+        ;; The words of the first line start after the prompt and the
+        ;; quote's prefix; the wrapped lines start in that same column.
+        (should (= (+ prompt 2) (string-width (overlay-get ov 'wrap-prefix))))
+        (should (= prompt (string-width (overlay-get ov 'line-prefix)))))
+      (should-not (cl-some (lambda (ov) (and (<= (overlay-start ov) plain-line)
+                                             (< plain-line (overlay-end ov))))
+                           quoted)))))
+
 (ert-deftest harness-ui-compose-quote-reply-starts-a-thread ()
   "C-c > replies in a thread: a card in the box, never a Markdown quote.
 The box's host names the target (`harness-quote-target-functions'), the
