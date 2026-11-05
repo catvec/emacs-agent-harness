@@ -10904,17 +10904,23 @@ to each change would fill the transcript (and cut every run of tool
 calls the chat folds in two), so the changes of one stretch share a
 hint per session, the session's note of slot changes, a folding hint
 (see Node: `harness-node-fold`, `:key` "tool-slots-load").  The first
-change is a hint of its own, with the line above.  A change that comes
-within ten minutes of the note's last (`harness-tool-slots-load--note-window`,
-counted from the last change, so changes that keep coming keep the note
-open) is added to the note with `session/update-node`, wherever the
-note stands in the transcript: the session's messages and tool calls
-since do not matter, and nothing is written where the session now is.
-The title then reads "Slots changed due to system load (3 changes)" and
+change is a hint of its own, with the line above.  A later change is
+added to the note with `session/update-node`, wherever the note stands
+in the transcript -- the session's messages and tool calls since do not
+matter, and nothing is written where the session now is -- when it comes
+within ten minutes of the note's last
+\(`harness-tool-slots-load--note-window`, counted from the last change,
+so changes that keep coming keep the note open), or when the session has
+written nothing since the note at all.  A session that stands still --
+one the user left blocked, or one running a long call -- writes nothing
+between the changes, and its changes are one stretch however far apart
+they come: the window is for a session that has moved on.  The title
+then reads "Slots changed due to system load (3 changes)" and
 the chat draws it as that one line, closed, with a line to a change
 under it, each with its time (see ui-chat).  A change after a quieter
-spell starts a note of its own, so the transcript still shows where in
-the session's work the load moved; so does one that finds the note full
+spell, in a session that has moved on since the note, starts a note of
+its own, so the transcript still shows where in the session's work the
+load moved; so does one that finds the note full
 (`harness-tool-slots-load--note-limit`, 20 changes, so a load that moves
 for hours does not write one ever longer note anew at each change), or
 off the branch the session's transcript is on now, or gone.  Only the

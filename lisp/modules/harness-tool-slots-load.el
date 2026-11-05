@@ -55,15 +55,19 @@
 ;; waiting: "Tool slots reduced from 18 to 5: system load 1.8x on this
 ;; machine".  A load that moves a lot would fill every transcript with
 ;; them, so the changes of one stretch share one message per session.
-;; The first is a hint as above; a change that follows within ten
-;; minutes of the last is added to that hint instead of a new one,
-;; whatever else the session has done meanwhile, and the chat draws it
-;; as one line, "Slots changed due to system load (3 changes)", that
-;; opens to the changes with the time of each.  After a quieter spell
-;; the next change starts a hint of its own, so the transcript still
-;; shows where in the session's work the load moved.  The hint is a
-;; folding one (`harness-node-fold').  A session's model is never sent
-;; hints, so none of this changes what it reads.
+;; The first is a hint as above; a later change is added to that hint
+;; instead of a new one, whatever the session has done meanwhile, when
+;; it comes within ten minutes of the hint's last, or when the session
+;; has written nothing since the hint at all.  A session the user left
+;; blocked, or one running a long call, stands still for as long as it
+;; takes: its changes are one stretch however far apart they come.  The
+;; chat draws the hint as one line, "Slots changed due to system load (3
+;; changes)", that opens to the changes with the time of each.  A change
+;; after a quiet spell, in a session that has moved on since the hint,
+;; starts a hint of its own, so the transcript still shows where in the
+;; session's work the load moved.  The hint is a folding one
+;; (`harness-node-fold').  A session's model is never sent hints, so
+;; none of this changes what it reads.
 ;;
 ;; That note is the history, and it stands where the first change of its
 ;; stretch landed.  How the slots stand now is the machine's, not a
@@ -431,7 +435,10 @@ It tells this module's notes from other hints that fold.")
 A change that comes this soon after the note's last is added to the
 note; a later one starts another.  A load that moves back and forth
 within minutes therefore makes one note, and a build an hour on, with
-the machine quiet between, a note of its own.")
+the machine quiet between, a note of its own.  The window counts only
+while the session has written something since the note: one that
+stands still keeps its note however long the next change takes (see
+`harness-tool-slots-load--open-note').")
 
 (defvar harness-tool-slots-load--note-limit 20
   "Most changes one note of slot changes holds.
@@ -474,19 +481,28 @@ did; several read as the title and a line to a change, with its time."
 (defun harness-tool-slots-load--open-note (id now)
   "Return session ID's note that a change at NOW is added to, or nil.
 That is the session's newest note of slot changes on the branch its
-transcript is on, when its last change is less than
-`harness-tool-slots-load--note-window' old and it holds fewer than
-`harness-tool-slots-load--note-limit' changes.  A newer note that is
-closed is the last word: an older one is older still."
-  (cl-loop for node in (reverse (harness-call 'session/nodes id))
-           for fold = (and (eq (plist-get node :kind) 'hint) (harness-node-fold node))
-           when (and fold (equal (plist-get fold :key) harness-tool-slots-load--note-key))
-           return (let* ((items (plist-get fold :items))
-                         (last (plist-get (car (last items)) :ts)))
-                    (and (< (length items) harness-tool-slots-load--note-limit)
-                         (numberp last)
-                         (< (- now last) harness-tool-slots-load--note-window)
-                         node))))
+transcript is on, when it holds fewer than
+`harness-tool-slots-load--note-limit' changes and either its last
+change is less than `harness-tool-slots-load--note-window' old or
+nothing has been written to the session since it.  A session that
+stands still -- waiting on the user, or running one long call --
+writes nothing between the changes, and its changes are one stretch
+however far apart they come: the window is for a session that has
+moved on, so the transcript still shows where in its work the load
+moved.  A newer note that is closed is the last word: an older one is
+older still."
+  (let* ((path (harness-call 'session/nodes id))
+         (newest (plist-get (car (last path)) :id)))
+    (cl-loop for node in (reverse path)
+             for fold = (and (eq (plist-get node :kind) 'hint) (harness-node-fold node))
+             when (and fold (equal (plist-get fold :key) harness-tool-slots-load--note-key))
+             return (let* ((items (plist-get fold :items))
+                           (last (plist-get (car (last items)) :ts)))
+                      (and (< (length items) harness-tool-slots-load--note-limit)
+                           (numberp last)
+                           (or (equal (plist-get node :id) newest)
+                               (< (- now last) harness-tool-slots-load--note-window))
+                           node)))))
 
 (defun harness-tool-slots-load--note-add (id node text now)
   "Add the change TEXT, at NOW, to NODE, the note of session ID."

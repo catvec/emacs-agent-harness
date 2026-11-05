@@ -878,7 +878,8 @@ The transcript then shows where in the session's work the load moved."
 
 (ert-deftest harness-tool-slots-load-the-window-is-counted-from-the-last-change ()
   "A note stays open while the changes keep coming, however long it has been.
-Its window is that of its last change, not of its first."
+Its window is that of its last change, not of its first -- for a
+session that has moved on since, which is what the window is for."
   (harness-tool-slots-load-test-with-sessions
     (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
           (harness-tool-slots-count 8)
@@ -887,10 +888,12 @@ Its window is that of its last change, not of its first."
       (cl-letf (((symbol-function 'float-time)
                  (lambda (&optional _) harness-tool-slots-load-test--clock)))
         ;; Four changes, 400 seconds apart: 1200 seconds from the first
-        ;; to the last, which is twice the window of 600.
+        ;; to the last, which is twice the window of 600.  The session
+        ;; works between them, so the note is not where it stopped.
         (dolist (load '(1.5 0.2 1.5 0.2))
           (harness-tool-slots-load-test--move load)
-          (cl-incf harness-tool-slots-load-test--clock 400.0))
+          (cl-incf harness-tool-slots-load-test--clock 400.0)
+          (harness-call 'session/append id (list :kind 'assistant :content "work")))
         (should (= 1 (length (harness-tool-slots-load-test--notes id))))
         (should (= 4 (length (harness-tool-slots-load-test--lines
                               (car (harness-tool-slots-load-test--notes id))))))
@@ -902,6 +905,42 @@ Its window is that of its last change, not of its first."
         (should (equal (list harness-tool-slots-load-test--reduced)
                        (harness-tool-slots-load-test--lines
                         (cadr (harness-tool-slots-load-test--notes id)))))))))
+
+(ert-deftest harness-tool-slots-load-a-session-that-stands-still-keeps-its-note ()
+  "A session that writes nothing keeps one note, however far apart the changes.
+A session the user left blocked, or one running a long call, is one
+stretch of its transcript -- nothing is written between the changes --
+so its changes share a note and the chat draws them as one collapsed
+line, not a line each.  The window is for a session that moved on."
+  (harness-tool-slots-load-test-with-sessions
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (harness-tool-slots-count 8)
+          (harness-tool-slots-burst 0)
+          (harness-tool-slots-load-test--clock 1000.0))
+      (harness-call 'session/append id '(:kind user :content "build it and wait"))
+      (cl-letf (((symbol-function 'float-time)
+                 (lambda (&optional _) harness-tool-slots-load-test--clock)))
+        ;; Four changes, an hour apart, and the session writes nothing
+        ;; in between: the user is answering something else, or the call
+        ;; it waits on goes on.
+        (dolist (load '(1.5 0.2 1.5 0.2))
+          (harness-tool-slots-load-test--move load)
+          (cl-incf harness-tool-slots-load-test--clock 3600.0))
+        (let ((notes (harness-tool-slots-load-test--notes id)))
+          (should (= 1 (length notes)))
+          (should (equal "Slots changed due to system load (4 changes)"
+                         (plist-get (harness-node-fold (car notes)) :title)))
+          (should (= 4 (length (harness-tool-slots-load-test--lines (car notes)))))
+          (should (= 1 (length (harness-tool-slots-load-test--hints id)))))
+        ;; The session writes, and a change later than the window starts
+        ;; a note where it now stands.
+        (harness-call 'session/append id '(:kind assistant :content "done"))
+        (cl-incf harness-tool-slots-load-test--clock 700.0)
+        (harness-tool-slots-load-test--move 2.0)
+        (let ((notes (harness-tool-slots-load-test--notes id)))
+          (should (= 2 (length notes)))
+          (should (equal (list harness-tool-slots-load-test--floor)
+                         (harness-tool-slots-load-test--lines (cadr notes)))))))))
 
 (ert-deftest harness-tool-slots-load-a-full-note-is-closed ()
   "A note that holds as many changes as it may is closed, and the next starts another."
@@ -918,7 +957,13 @@ Its window is that of its last change, not of its first."
         (should (= 2 (length notes)))
         (should (= 2 (length (harness-tool-slots-load-test--lines (car notes)))))
         (should (equal (list harness-tool-slots-load-test--floor)
-                       (harness-tool-slots-load-test--lines (cadr notes))))))))
+                       (harness-tool-slots-load-test--lines (cadr notes)))))
+      ;; The note that follows is where the session stopped, so the next
+      ;; change joins it, to fill it in its turn.
+      (harness-tool-slots-load-test--move 1.5)
+      (let ((notes (harness-tool-slots-load-test--notes id)))
+        (should (= 2 (length notes)))
+        (should (= 2 (length (harness-tool-slots-load-test--lines (cadr notes)))))))))
 
 (ert-deftest harness-tool-slots-load-a-note-off-the-branch-is-left-alone ()
   "A session that went back before its note does not add to the note.

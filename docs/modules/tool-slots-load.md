@@ -65,15 +65,19 @@ session is told as a system message, so the user sees why calls are
 waiting: "Tool slots reduced from 18 to 5: system load 1.8x on this
 machine".  A load that moves a lot would fill every transcript with
 them, so the changes of one stretch share one message per session.
-The first is a hint as above; a change that follows within ten
-minutes of the last is added to that hint instead of a new one,
-whatever else the session has done meanwhile, and the chat draws it
-as one line, "Slots changed due to system load (3 changes)", that
-opens to the changes with the time of each.  After a quieter spell
-the next change starts a hint of its own, so the transcript still
-shows where in the session's work the load moved.  The hint is a
-folding one (`harness-node-fold`).  A session's model is never sent
-hints, so none of this changes what it reads.
+The first is a hint as above; a later change is added to that hint
+instead of a new one, whatever the session has done meanwhile, when
+it comes within ten minutes of the hint's last, or when the session
+has written nothing since the hint at all.  A session the user left
+blocked, or one running a long call, stands still for as long as it
+takes: its changes are one stretch however far apart they come.  The
+chat draws the hint as one line, "Slots changed due to system load (3
+changes)", that opens to the changes with the time of each.  A change
+after a quiet spell, in a session that has moved on since the hint,
+starts a hint of its own, so the transcript still shows where in the
+session's work the load moved.  The hint is a folding one
+(`harness-node-fold`).  A session's model is never sent hints, so
+none of this changes what it reads.
 
 That note is the history, and it stands where the first change of its
 stretch landed.  How the slots stand now is the machine's, not a
