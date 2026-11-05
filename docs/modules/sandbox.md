@@ -8,6 +8,7 @@ Kernel sandbox (bwrap / systemd-run / MXC on macOS, or NVIDIA OpenShell on reque
 - **Source:** [lisp/modules/harness-sandbox.el](../../lisp/modules/harness-sandbox.el)
 - **Loaded:** by default
 - **Requires:** [config](config.md)
+- **Required by:** [secret-sandbox](secret-sandbox.md)
 
 ## About
 
@@ -186,8 +187,23 @@ MXC and OpenShell signal `harness-sandbox-unavailable` for
 real capabilities of the host, being setuid or run by root.  See
 "Capabilities" below.
 
-Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
-`sandbox/capabilities`, `sandbox/capability-name`.
+Profiles: `sandbox/wrap` takes `:profile`, `default` being the
+sandbox above.  `locked` is the secret-file sandbox (the module
+secret-sandbox asks for it): a minimal environment built from `:env`
+instead of the harness's own, the network off, no capability and
+nothing writable but the sandbox's private temporary directory, and
+`:hide` paths covered after every other mount so that a secret file
+the agent must not read is not shown even where a directory holding
+it is.  Only bwrap and MXC give it; systemd-run and OpenShell, the
+`off` policy, no backend and a remote directory signal
+`harness-sandbox-unavailable` rather than run with a wider view.
+`sandbox/profiles` says what the backend in force can give, so a
+caller can refuse before it asks the user.  A locked command has no
+network at all; no option opens it.
+
+Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/profiles`,
+`sandbox/confined-p`, `sandbox/capabilities`,
+`sandbox/capability-name`.
 
 ## Provides
 
@@ -198,6 +214,7 @@ Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
 - `sandbox/check` — Start a throwaway OpenShell sandbox, run a command in it, say how it went.
 - `sandbox/confined-p` (cwd) — Non-nil when commands run in CWD are confined by a sandbox backend.
 - `sandbox/detect` — Look for the backends again, choose one, and return `sandbox/status`.
+- `sandbox/profiles` (&optional cwd) — Say which sandbox profiles `sandbox/wrap` can enforce for CWD, and how.
 - `sandbox/status` — Return (:backend BACKEND :available (BACKENDS…) :policy POLICY :limits (TEXT…)).
 - `sandbox/wrap` (cwd command &rest opts) — Return COMMAND (a list of strings) wrapped to run confined in CWD.
 

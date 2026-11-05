@@ -78,6 +78,10 @@ exist (`harness-tools--in-scope-p`).
 - `tools/get` (name) — Return the spec of tool NAME or nil.
 - `tools/list` (&optional session-id) — Return tool specs available to SESSION-ID (or all), after `agent/tools`.
 
+### Tools
+
+- `read_harness_errors` — Read the details the harness writes of its own errors. When something inside the harness fails -- a promise callback or handler, an event subscriber, a filter, a module's initialisation, a timer, a process filter or sentinel -- the harness appends a report to a details file with the stack trace taken where the error was signalled, what the harness was doing, and the session and task ids. This returns the most recent reports, newest first. The file is not readable without the user's permission: the call asks for it, and is refused when nobody can be asked, so do not work around a refusal. Use it to diagnose a harness bug, then read the harness source the stack names.
+
 ### Events
 
 - `permission/decided` — (SESSION-ID REQUEST DECISION) after the permission chain.

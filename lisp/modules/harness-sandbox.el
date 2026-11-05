@@ -177,8 +177,23 @@
 ;; real capabilities of the host, being setuid or run by root.  See
 ;; "Capabilities" below.
 ;;
-;; Methods: `sandbox/wrap', `sandbox/status', `sandbox/confined-p',
-;; `sandbox/capabilities', `sandbox/capability-name'.
+;; Profiles: `sandbox/wrap' takes `:profile', `default' being the
+;; sandbox above.  `locked' is the secret-file sandbox (the module
+;; secret-sandbox asks for it): a minimal environment built from `:env'
+;; instead of the harness's own, the network off, no capability and
+;; nothing writable but the sandbox's private temporary directory, and
+;; `:hide' paths covered after every other mount so that a secret file
+;; the agent must not read is not shown even where a directory holding
+;; it is.  Only bwrap and MXC give it; systemd-run and OpenShell, the
+;; `off' policy, no backend and a remote directory signal
+;; `harness-sandbox-unavailable' rather than run with a wider view.
+;; `sandbox/profiles' says what the backend in force can give, so a
+;; caller can refuse before it asks the user.  A locked command has no
+;; network at all; no option opens it.
+;;
+;; Methods: `sandbox/wrap', `sandbox/status', `sandbox/profiles',
+;; `sandbox/confined-p', `sandbox/capabilities',
+;; `sandbox/capability-name'.
 
 ;;; Code:
 
@@ -723,6 +738,16 @@ Only bwrap can, for a local CWD, with a sandbox policy other than
      (t (format "no sandbox backend can confine its commands (%s), and only bwrap can give a command a capability"
                 (harness-sandbox--missing-programs))))))
 
+(defun harness-sandbox--refuse-locked (command why)
+  "Signal `harness-sandbox-unavailable': a locked COMMAND cannot be confined.
+WHY says what stands in the way.  A command that is to read a secret
+must not run in a wider sandbox, whatever the policy says: the secret
+would be in reach of the agent's own commands."
+  (harness-log 'error "sandbox: a locked command needs the locked profile, but %s; refusing to run %S"
+               why (car command))
+  (signal 'harness-sandbox-unavailable
+          (list (format "a locked command cannot run without the locked profile, but %s" why))))
+
 (defun harness-sandbox--refuse-capabilities (command capabilities why)
   "Signal `harness-sandbox-unavailable': COMMAND cannot be given CAPABILITIES.
 WHY says what stands in the way.  It is the caller's to give them up:
@@ -1170,8 +1195,49 @@ there."
        (cl-loop for (var . value) in (harness-sandbox--git-env (plist-get git :common))
                 collect (format "--setenv=%s=%s" var value))))))
 
+(defconst harness-sandbox--private-home "/tmp"
+  "The home a locked command gets.
+It is the sandbox's own private /tmp, the only place a locked command
+may write.  A real home is never passed on: it would show the
+credentials the locked profile exists to keep away from the agent.")
+
+(defun harness-sandbox--locked-env (env)
+  "Return the minimal environment of a locked command, as (NAME . VALUE).
+ENV, an alist, adds to it; the harness's own environment is not used.
+PATH is the harness's, so a command finds the tools the user has; HOME
+and TMPDIR are the sandbox's private /tmp; LANG and TERM are passed on
+when set."
+  (append
+   (list (cons "PATH" (or (getenv "PATH") "/usr/local/bin:/usr/bin:/bin"))
+         (cons "HOME" harness-sandbox--private-home)
+         (cons "TMPDIR" harness-sandbox--private-home)
+         (cons "HARNESS_SANDBOX" "bwrap"))
+   (cl-loop for name in '("LANG" "TERM")
+            for value = (getenv name)
+            when value collect (cons name value))
+   (cl-loop for (name . value) in env
+            when (and (stringp name) (stringp value)) collect (cons name value))))
+
+(defun harness-sandbox--hide-args (hide)
+  "Return bwrap arguments that hide each path in HIDE.
+A file is bound to `/dev/null', a directory covered by a tmpfs, after
+every other mount, so a path shown by a mount below it is hidden too.
+A path under /proc, /dev or /sys is left alone: covering one of those
+would break the sandbox itself."
+  (cl-loop for path in hide
+           for named = (and (stringp path) (not (file-remote-p path))
+                            (expand-file-name path))
+           for real = (and named (file-exists-p named)
+                           (directory-file-name (file-truename named)))
+           when (and real
+                     (not (cl-some (lambda (system) (harness-path-within-p system real))
+                                   '("/proc" "/dev" "/sys"))))
+           append (if (file-directory-p real)
+                      (list "--tmpfs" real)
+                    (list "--ro-bind" "/dev/null" real))))
+
 (cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable read-only
-                                                   scratch capabilities env)
+                                                   scratch capabilities env profile hide)
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
 namespace; WRITABLE and READABLE list extra directories or files to
@@ -1189,6 +1255,14 @@ know is left out, whatever it holds, and so is every one with READ-ONLY.
 Whether the capability may be granted at all is for `sandbox/wrap'
 \(`harness-sandbox--bwrap-capabilities').
 
+PROFILE, when `locked', is the secret-file sandbox: no capability, a
+minimal environment built from ENV (an alist of NAME . VALUE, which adds
+to PATH, HOME, TMPDIR, LANG, TERM and HARNESS_SANDBOX; the harness's
+own environment is cleared with `--clearenv'), and HIDE, paths bound to
+`/dev/null' (a file) or a tmpfs (a directory) after every other mount so
+that nothing shows them.  For any other profile ENV adds to the
+environment the command inherits, and HIDE still hides.
+
 $HOME keeps its path: an empty tmpfs covers the home directory, so
 ~/x names the same path inside as outside and shows only what is
 mounted there.  A home directory inside CWD is shown as it is; one no
@@ -1199,11 +1273,12 @@ under it too."
          (inside (harness-sandbox--home-inside-p cwd))
          (real-home (and (not inside) (harness-sandbox--real-home)))
          (private (and (not inside) (not real-home) harness-sandbox--home))
+         (locked (eq profile 'locked))
          ;; Worked out once: the mounts show what the registrations of
          ;; the other worktrees must be kept from.
-         (mounts (harness-sandbox--mounts readable writable cwd private))
+         (mounts (harness-sandbox--mounts readable writable cwd (unless locked private)))
          (scratch-mounts (harness-sandbox--scratch-mounts scratch cwd))
-         (registry (unless read-only
+         (registry (unless (or read-only locked)
                      (harness-sandbox--hidden-registrations cwd mounts scratch-mounts))))
     (append
      (list program
@@ -1229,26 +1304,34 @@ under it too."
      ;; The scratch directories last, writable whatever holds them.
      (cl-loop for (source . dest) in scratch-mounts
               append (list "--bind" source dest))
+     ;; The paths kept from the command, after every mount that could show them.
+     (harness-sandbox--hide-args hide)
      (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
            "--die-with-parent" "--new-session")
      ;; Only the registry's own names, none for a command that changes nothing.
      (unless read-only
        (cl-loop for name in (delete-dups (delq nil (mapcar #'harness-sandbox-capability-name capabilities)))
                 append (list "--cap-add" name)))
-     (list "--chdir" cwd
-           "--setenv" "HARNESS_SANDBOX" "bwrap")
-     (and private (list "--setenv" "HOME" private))
-     (cl-loop for (name . value) in env
-              append (list "--setenv" (format "%s" name) (format "%s" value)))
+     (list "--chdir" cwd)
+     (if locked
+         (append (list "--clearenv")
+                 (cl-loop for (name . value) in (harness-sandbox--locked-env env)
+                          append (list "--setenv" name value)))
+       (append (list "--setenv" "HARNESS_SANDBOX" "bwrap")
+               (and private (list "--setenv" "HOME" private))
+               (cl-loop for (name . value) in env
+                        append (list "--setenv" (format "%s" name) (format "%s" value)))))
      (unless network (list "--unshare-net"))
      (list "--")
      command)))
 
 (cl-defun harness-sandbox--systemd-command (program cwd command &key (network t) writable readable read-only
-                                                     scratch env)
+                                                     scratch env hide)
   "Build the systemd-run command line running COMMAND in CWD.
 PROGRAM is the systemd-run executable; NETWORK, WRITABLE, READABLE,
-READ-ONLY and SCRATCH are as for `harness-sandbox--bwrap-command'.
+READ-ONLY, SCRATCH and ENV are as for `harness-sandbox--bwrap-command'.
+HIDE lists paths made inaccessible with `InaccessiblePaths=', after
+every mount that could show them.
 READ-ONLY binds CWD, the git directories and every WRITABLE entry with
 `BindReadOnlyPaths=', sets no `ReadWritePaths=' but for the SCRATCH
 directories, and makes the rest of the file system read-only with
@@ -1290,6 +1373,11 @@ too, so ~/x reaches them."
                                         source (if (equal source dest) "" (concat ":" dest))))
               else do (harness-log 'debug "sandbox: systemd cannot show %s at %s" source dest))
      (harness-sandbox--systemd-git-args cwd read-only registry)
+     (cl-loop for path in hide
+              for named = (and (stringp path) (not (file-remote-p path))
+                               (expand-file-name path))
+              when (and named (harness-sandbox--systemd-path-p named))
+              append (list "-p" (concat "InaccessiblePaths=" named)))
      (cl-loop for (source . dest) in scratch-mounts
               do (unless (and (harness-sandbox--systemd-path-p source) (harness-sandbox--systemd-path-p dest))
                    (error "Sandbox scratch directory %s cannot be written in a systemd setting" dest))
@@ -1360,12 +1448,17 @@ temporary directory (see `harness-sandbox--mxc-command').")
   (directory-file-name (file-truename (expand-file-name path))))
 
 (cl-defun harness-sandbox--mxc-command (program cwd command &key (network t) writable readable read-only tmp
-                                                 scratch extra-env)
+                                                 scratch extra-env profile hide)
   "Build the MXC command line running COMMAND in CWD, on macOS.
 PROGRAM is MXC's executor, mxc-exec-mac, given the whole description
 of the command as base64-encoded JSON (`--config-base64').  NETWORK,
 WRITABLE, READABLE and READ-ONLY are as for
-`harness-sandbox--bwrap-command'.  TMP is the command's private
+`harness-sandbox--bwrap-command'.
+
+PROFILE, when `locked', builds the environment from EXTRA-ENV (an
+alist) and nothing of the harness's, denies the network, and refuses
+when HIDE names a path the sandbox shows: MXC cannot hide a file inside
+a directory it mounts.  TMP is the command's private
 temporary directory, which `sandbox/wrap' makes: $TMPDIR names it, so
 does the command's Cocoa home (see below), it is writable, and the
 command line removes it when COMMAND ends.  The SCRATCH directories
@@ -1413,6 +1506,7 @@ tree itself, and finds the command in it by its parent processes.
 
 This only reads the file system: it writes nothing, TMP included."
   (let* ((cwd (directory-file-name (expand-file-name cwd)))
+         (locked (eq profile 'locked))
          (tmp (and tmp (harness-sandbox--mxc-path tmp)))
          (mounts (harness-sandbox--mounts readable writable cwd nil))
          (scratch-mounts (harness-sandbox--scratch-mounts scratch cwd))
@@ -1452,17 +1546,30 @@ This only reads the file system: it writes nothing, TMP included."
          (command-line (concat (mapconcat #'harness-sandbox--sh-quote command " ")
                                (and tmp (concat "; s=$?; rm -rf -- " (harness-sandbox--sh-quote tmp)
                                                 "; exit $s"))))
-         (env (harness-sandbox--mxc-env
-               (append (and tmp (list (cons "TMPDIR" (file-name-as-directory tmp))
-                                      ;; Cocoa's home, which is TMP too (see
-                                      ;; `harness-sandbox--mxc-cocoa-home-variable').
-                                      (cons harness-sandbox--mxc-cocoa-home-variable tmp)))
-                       ;; As Emacs sets it for a process it starts itself.
-                       (list (cons "PWD" cwd)
-                             (cons "HARNESS_SANDBOX" "mxc"))
-                       (and git (harness-sandbox--git-env (plist-get git :common)))
-                       extra-env)))
-         (net (if network "allow" "deny"))
+         (env (if locked
+                  (append (list (concat "PATH=" (or (getenv "PATH")
+                                                    "/usr/local/bin:/usr/bin:/bin"))
+                                (concat "HOME=" (file-name-as-directory (or tmp "/tmp")))
+                                (concat "TMPDIR=" (file-name-as-directory (or tmp "/tmp")))
+                                (concat "PWD=" cwd)
+                                "HARNESS_SANDBOX=mxc")
+                          (cl-loop for name in '("LANG" "TERM")
+                                   for value = (getenv name)
+                                   when value collect (concat name "=" value))
+                          (cl-loop for (name . value) in extra-env
+                                   when (and (stringp name) (stringp value))
+                                   collect (concat name "=" value)))
+                (harness-sandbox--mxc-env
+                 (append (and tmp (list (cons "TMPDIR" (file-name-as-directory tmp))
+                                        ;; Cocoa's home, which is TMP too (see
+                                        ;; `harness-sandbox--mxc-cocoa-home-variable').
+                                        (cons harness-sandbox--mxc-cocoa-home-variable tmp)))
+                         ;; As Emacs sets it for a process it starts itself.
+                         (list (cons "PWD" cwd)
+                               (cons "HARNESS_SANDBOX" "mxc"))
+                         (and git (harness-sandbox--git-env (plist-get git :common)))
+                         extra-env))))
+         (net (if (and network (not locked)) "allow" "deny"))
          (json (harness-json-encode
                 (list :version "1.0.0"
                       :containment "seatbelt"
@@ -1475,6 +1582,17 @@ This only reads the file system: it writes nothing, TMP included."
                       :network (list :egress (list :default net)
                                      :ingress (list :default net :hostLoopback net))
                       :seatbelt (list :nestedPty t)))))
+    (dolist (path hide)
+      (let* ((named (and (stringp path) (not (file-remote-p path))
+                         (expand-file-name path)))
+             (real (and named (file-exists-p named)
+                        (directory-file-name (file-truename named)))))
+        (when (and real
+                   (cl-some (lambda (shown) (harness-path-within-p shown real))
+                            (delete-dups (append rw ro))))
+          (signal 'harness-sandbox-unavailable
+                  (list (format "MXC cannot hide %s: it lies under a directory the sandbox shows"
+                                real))))))
     (list program "--config-base64"
           ;; Bytes: Emacs 29's `json-serialize' still gives text.
           (base64-encode-string (if (multibyte-string-p json) (encode-coding-string json 'utf-8-unix) json)
@@ -2166,7 +2284,18 @@ rules of `harness-sandbox-openshell-network-rules', or none with
 `:network nil'.
 They ask for no confinement: where COMMAND runs unconfined it reaches
 them anyway.  A remote CWD or the `off' policy return COMMAND
-unchanged.  Signals `harness-sandbox-unavailable' when the policy is
+unchanged.
+
+`:profile' is `default' or `locked'.  `locked' is the secret-file
+sandbox: the network off, `:read-only' always, no capability, the
+`:scratch' and `:writable' options refused, and `:env' the command's
+whole environment rather than an addition to the harness's.  It fails
+closed for every case in which it cannot be given, whatever the policy:
+the `off' policy, a remote CWD, no backend, systemd-run and OpenShell
+signal `harness-sandbox-unavailable'.  bwrap and MXC give it.
+`:hide' lists paths the backend keeps out of the command's sight, after
+every mount that could show them.
+  Signals `harness-sandbox-unavailable' when the policy is
 `required' and no backend exists.  A `:read-only' command fails closed
 instead of running unconfined: it signals `harness-sandbox-unavailable'
 too for the `off' policy, for a remote CWD and for no backend, whatever
@@ -2187,14 +2316,50 @@ has its user's own rights, and is returned as it is, with a line in
 the debug log."
   (let* ((policy (harness-sandbox--policy cwd))
          (network (if (plist-member opts :network) (plist-get opts :network) t))
+         (profile (or (plist-get opts :profile) 'default))
+         (hide (plist-get opts :hide))
          (writable (plist-get opts :writable))
          (readable (plist-get opts :readable))
          (read-only (harness-json-true-p (plist-get opts :read-only)))
          (scratch (plist-get opts :scratch))
          (env (plist-get opts :env))
+         (locked (eq profile 'locked))
          ;; A command that changes nothing is given no capability.
          (capabilities (and (not read-only) (plist-get opts :capabilities))))
+    (unless (memq profile '(default locked))
+      (error "Sandbox profile %S is neither `default' nor `locked'" profile))
+    (when (and locked (or (plist-get opts :writable) (plist-get opts :scratch)
+                          (plist-get opts :capabilities)))
+      (error "A locked command takes no writable directory, no scratch directory and no capability"))
     (cond
+     (locked
+      (cond
+       ((or (eq policy 'off) (file-remote-p cwd))
+        (harness-sandbox--refuse-locked
+         command (if (eq policy 'off) "the sandbox policy is `off'"
+                   (format "%s is on another host, where the sandbox does not reach" cwd))))
+       ((eq harness-sandbox--backend 'bwrap)
+        (let ((program (alist-get 'bwrap harness-sandbox--programs)))
+          (harness-sandbox--bwrap-command program cwd command
+                                          :network nil :writable nil :readable readable
+                                          :read-only t :scratch nil
+                                          :profile 'locked :env env :hide hide)))
+       ((eq harness-sandbox--backend 'mxc)
+        (let ((tmp (with-file-modes #o700 (make-temp-file "harness-sandbox-" t))))
+          (condition-case err
+              (harness-sandbox--mxc-command (alist-get 'mxc harness-sandbox--programs) cwd command
+                                            :network nil :writable nil :readable readable
+                                            :read-only t :tmp tmp :scratch nil
+                                            :profile 'locked :extra-env env :hide hide)
+            (error (ignore-errors (delete-directory tmp t))
+                   (signal (car err) (cdr err))))))
+       ((eq harness-sandbox--backend 'openshell)
+        (harness-sandbox--refuse-locked command "OpenShell cannot give the locked profile"))
+       ((eq harness-sandbox--backend 'systemd)
+        (harness-sandbox--refuse-locked
+         command "systemd-run shows the whole file system read-only; the locked profile needs a backend that shows only what it mounts"))
+       (t
+        (harness-sandbox--refuse-locked command (harness-sandbox--missing-programs)))))
      ((and read-only (eq policy 'off))
       (harness-sandbox--refuse-read-only command "the sandbox policy is `off'"))
      ((eq policy 'off)
@@ -2212,7 +2377,7 @@ the debug log."
         (harness-sandbox--bwrap-command program cwd command
                                         :network network :writable writable :readable readable
                                         :read-only read-only :scratch scratch
-                                        :env env
+                                        :env env :profile profile :hide hide
                                         :capabilities (and capabilities
                                                            (harness-sandbox--bwrap-capabilities
                                                             command capabilities program)))))
@@ -2223,7 +2388,7 @@ the debug log."
          "systemd-run --user cannot give a unit a capability, it can only lower its own"))
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
                                         :network network :writable writable :readable readable
-                                        :read-only read-only :scratch scratch :env env))
+                                        :read-only read-only :scratch scratch :env env :hide hide))
      ((eq harness-sandbox--backend 'openshell)
       (when capabilities
         (harness-sandbox--refuse-capabilities
@@ -2243,7 +2408,8 @@ the debug log."
             (harness-sandbox--mxc-command (alist-get 'mxc harness-sandbox--programs) cwd command
                                           :network network :writable writable :readable readable
                                           :read-only read-only :tmp tmp
-                                          :scratch scratch :extra-env env)
+                                          :scratch scratch :extra-env env
+                                          :profile profile :hide hide)
           (error (ignore-errors (delete-directory tmp t))
                  (signal (car err) (cdr err))))))
      (read-only
@@ -2275,6 +2441,41 @@ why, and `:backend' is what the harness fell back to."
           (and harness-sandbox--requested
                (list :requested harness-sandbox--requested
                      :problem harness-sandbox--problem))))
+
+(harness-defmethod sandbox/profiles (&optional cwd)
+  "Say which sandbox profiles `sandbox/wrap' can enforce for CWD, and how.
+Return a plist (:backend BACKEND :profiles (PROFILE…) :hide BOOL
+:why TEXT).  `:profiles' names the profiles `sandbox/wrap' can give a
+command run in CWD: `default' always, and `locked' only where the
+backend implements it -- bwrap and MXC on macOS; systemd-run and
+OpenShell cannot give the locked profile's limited view, and signal
+rather than run with a wider one.  `:hide' says the backend can keep a
+path out of a command's sight with `:hide' (bwrap, systemd-run and MXC
+can; MXC refuses one lying under a directory it shows).  `:why',
+present when `locked' is missing, says what stands in the way.  CWD
+defaults to the current directory; a remote one, the `off' policy and
+no backend leave only `default', as `sandbox/wrap' refuses a locked
+command there whatever the policy."
+  (let* ((policy (harness-sandbox--policy cwd))
+         (backend harness-sandbox--backend)
+         (profiles '(default))
+         (why nil))
+    (cond
+     ((eq policy 'off) (setq why "the sandbox policy is `off'"))
+     ((and cwd (file-remote-p cwd))
+      (setq why (format "%s is on another host, where the sandbox does not reach"
+                        (abbreviate-file-name cwd))))
+     ((null backend) (setq why (harness-sandbox--missing-programs)))
+     ((eq backend 'bwrap) (setq profiles '(default locked)))
+     ((eq backend 'mxc) (setq profiles '(default locked)))
+     ((eq backend 'openshell)
+      (setq why "OpenShell cannot give the locked profile's minimal environment and file set"))
+     ((eq backend 'systemd)
+      (setq why "systemd-run shows the whole file system read-only; the locked profile needs a backend that shows only what it mounts")))
+    (list :backend (or backend 'none)
+          :profiles profiles
+          :hide t
+          :why why)))
 
 (harness-defmethod sandbox/detect ()
   "Look for the backends again, choose one, and return `sandbox/status'.

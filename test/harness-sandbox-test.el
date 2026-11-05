@@ -2371,5 +2371,139 @@ and nothing else."
       (delete-directory cwd t)
       (delete-directory scratch t))))
 
+
+;;;; Profiles
+
+(ert-deftest harness-sandbox-profiles-per-backend ()
+  "`sandbox/profiles' says what each backend can give."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto))
+    (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+      (let ((profiles (harness-call 'sandbox/profiles cwd)))
+        (should (eq 'bwrap (plist-get profiles :backend)))
+        (should (equal '(default locked) (plist-get profiles :profiles)))
+        (should (plist-get profiles :hide))
+        (should-not (plist-get profiles :why))))
+    (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+      (let ((profiles (harness-call 'sandbox/profiles cwd)))
+        (should (eq 'systemd (plist-get profiles :backend)))
+        (should (equal '(default) (plist-get profiles :profiles)))
+        (should (string-match-p "systemd-run" (plist-get profiles :why)))))
+    (harness-sandbox-test-with-executables nil
+      (let* ((harness-sandbox-policy 'off)
+             (profiles (harness-call 'sandbox/profiles cwd)))
+        (should (equal '(default) (plist-get profiles :profiles)))
+        (should (string-match-p "off" (plist-get profiles :why)))))
+    (harness-sandbox-detect)
+    (delete-directory cwd t)))
+
+(ert-deftest harness-sandbox-locked-bwrap-arguments ()
+  "The locked profile clears the environment, keeps the sources out and writes nothing."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (secret (harness-test-temp-dir))
+           (hidden (expand-file-name "hidden.txt" secret))
+           (harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto)
+           (command '("sh" "-c" "true")))
+      (with-temp-file hidden (insert "not for the command\n"))
+      (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+        (let* ((cmd (harness-call 'sandbox/wrap cwd command
+                                  :profile 'locked :network nil
+                                  :env (list (cons "HARNESS_SECRET_FILE" "/x/secret") (cons "TOKEN" "abc"))
+                                  :hide (list hidden) :readable (list secret)))
+               (env (cl-loop for tail on cmd
+                             when (equal (car tail) "--setenv")
+                             collect (list (cadr tail) (caddr tail)))))
+          (should (member "--clearenv" cmd))
+          (should (member "--unshare-net" cmd))
+          (should-not (cl-some (lambda (word) (equal word "--cap-add")) cmd))
+          (should (harness-sandbox-test--subseq-p
+                   (list "--ro-bind" (directory-file-name cwd) (directory-file-name cwd)) cmd))
+          (should (harness-sandbox-test--subseq-p
+                   (list "--ro-bind" (directory-file-name secret) (directory-file-name secret)) cmd))
+          (should (harness-sandbox-test--subseq-p (list "--ro-bind" "/dev/null" hidden) cmd))
+          (should (member (list "PATH" (or (getenv "PATH") "/usr/local/bin:/usr/bin:/bin")) env))
+          (should (member '("HOME" "/tmp") env))
+          (should (member '("TMPDIR" "/tmp") env))
+          (should (member '("HARNESS_SANDBOX" "bwrap") env))
+          (should (member '("HARNESS_SECRET_FILE" "/x/secret") env))
+          (should (member '("TOKEN" "abc") env))
+          (should-not (assoc "SECRET_LEAK" env))
+          ;; The hidden path is covered after the directory that shows it.
+          (should (< (cl-position (directory-file-name secret) cmd :test #'equal)
+                     (cl-position "/dev/null" cmd :test #'equal)))
+          (should (equal command (cdr (member "--" cmd))))))
+      (harness-sandbox-detect)
+      (delete-directory cwd t)
+      (delete-directory secret t))))
+
+(ert-deftest harness-sandbox-locked-fails-closed ()
+  "A locked command runs nowhere but where the profile can be given."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (command '("sh" "-c" "true"))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto))
+    (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+      ;; A profile that is neither default nor locked is a mistake, not a request.
+      (should-error (harness-call 'sandbox/wrap cwd command :profile 'wide)))
+    (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+      (should-error (harness-call 'sandbox/wrap cwd command :profile 'locked)
+                    :type 'harness-sandbox-unavailable))
+    (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+      (let ((harness-sandbox-policy 'off))
+        (should-error (harness-call 'sandbox/wrap cwd command :profile 'locked)
+                      :type 'harness-sandbox-unavailable))
+      (should-error (harness-call 'sandbox/wrap cwd command :profile 'locked
+                                  :writable (list cwd))))
+    (harness-sandbox-detect)
+    (delete-directory cwd t)))
+
+
+(ert-deftest harness-sandbox-locked-mxc-arguments ()
+  "MXC's locked config: a minimal environment, no network, and no hidden path inside a mount."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (mounted (harness-test-temp-dir))
+         (hidden (expand-file-name "hidden.txt" mounted))
+         (inside (expand-file-name "inside.txt" mounted))
+         (harness-sandbox-policy 'preferred)
+         (command '("sh" "-c" "true")))
+    (with-temp-file hidden (insert "x\n"))
+    (with-temp-file inside (insert "y\n"))
+    (unwind-protect
+        (let* ((cmd (harness-sandbox--mxc-command
+                     "/usr/bin/mxc-exec-mac" cwd command
+                     :network t :readable (list mounted) :read-only t
+                     :tmp mounted :scratch nil :profile 'locked
+                     :extra-env (list (cons "HARNESS_SECRET_FILE" "/x/secret")
+                                      (cons "TOKEN" "abc"))
+                     :hide (list "/etc/hostname")))
+               (json (decode-coding-string
+                      (base64-decode-string (cadr (member "--config-base64" cmd))) 'utf-8))
+               (config (json-parse-string json :object-type 'plist :array-type 'list)))
+          ;; Locked turns the network off whatever `:network' said.
+          (should (equal "deny" (plist-get (plist-get (plist-get config :network) :egress) :default)))
+          (should (equal "deny" (plist-get (plist-get (plist-get config :network) :ingress) :default)))
+          (let ((env (plist-get (plist-get config :process) :env)))
+            (should (member "HARNESS_SECRET_FILE=/x/secret" env))
+            (should (member "TOKEN=abc" env))
+            (should (member "HARNESS_SANDBOX=mxc" env))
+            (should (cl-some (lambda (entry) (string-prefix-p "HOME=" entry)) env))
+            (should (cl-some (lambda (entry) (string-prefix-p "PATH=" entry)) env))
+            (should-not (cl-some (lambda (entry) (string-prefix-p "SECRET_LEAK=" entry)) env)))
+          ;; A path inside a directory MXC shows cannot be hidden: it signals.
+          (should-error (harness-sandbox--mxc-command
+                         "/usr/bin/mxc-exec-mac" cwd command
+                         :readable (list mounted) :read-only t :tmp mounted
+                         :profile 'locked :hide (list inside))
+                        :type 'harness-sandbox-unavailable))
+      (delete-directory cwd t)
+      (delete-directory mounted t))))
+
 (provide 'harness-sandbox-test)
 ;;; harness-sandbox-test.el ends here

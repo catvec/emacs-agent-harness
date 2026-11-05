@@ -194,11 +194,11 @@ text to a call:
                           :messages messages))
 ```
 
-A registered prompt joins `harness-prompt-names`, the page, the audit
-and the overrides at once; the audit reports it like the built-in ones
-(an undeclared `{{placeholder}}`, a missing purpose).  It appears in
-Customize through the "a prompt not in the registry" entry, since the
-menu of names is built when the library loads.
+A registered prompt joins `harness-prompt-names`, the page, the audit,
+the overrides and the Customize menu at once; the audit reports it like
+the built-in ones (an undeclared `{{placeholder}}`, a missing purpose).
+Its module is the one it registers with, so it is grouped with that
+module on the page.
 
 ### Why a library, not a module
 
@@ -313,3 +313,9 @@ that does not use it gains no hooks, options or timers from it.
 | `provider-check-vision` | Asks for the colour of the red image in the vision check. | none | harness-provider-check--check-vision |
 | `provider-check-instructions` | Asks the model to resubmit, to check it follows a tool description's label. | none | harness-provider-check--check-instructions |
 | `provider-check-instructions-system` | The system prompt of the check that the model follows a tool's instructions. | none | harness-provider-check--check-instructions |
+
+### secret-sandbox
+
+| Prompt | Purpose | Variables | Used by |
+|---|---|---|---|
+| `secret-sandbox-withheld` | Tells the agent that a locked run's output, exit status and duration are not returned. | none | harness-secret-sandbox--withheld |

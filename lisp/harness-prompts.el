@@ -355,16 +355,41 @@ prompts are in the order they were added, grouped by module.")
 
 ;;;; Overrides
 
-(defconst harness-prompts--name-type
+(defvar harness-prompts--registered nil
+  "The prompts modules registered at run time, newest first.
+`harness-prompt-register' adds to it; `harness-prompts--entries' is the
+built-in registry followed by these.")
+
+(defvar harness-prompts--registered-names nil
+  "Every prompt name a module has registered, newest first.
+It is what the Customize type of `harness-prompt-overrides' names a
+prompt from, so a name stays in the menu even if the variable above is
+bound for a while, as a test does.")
+
+(defun harness-prompts--name-type ()
+  "Return the Customize type of a prompt's name: the registry's names, or a symbol.
+The symbol is for a name an override names before the registry has it;
+`harness-prompts-audit' reports such a name.  A prompt a module
+registers joins the type too, so it is in the Customize menu."
   `(choice :tag "Prompt"
            ,@(mapcar (lambda (entry)
                        `(const :tag ,(symbol-name (plist-get entry :name))
                                ,(plist-get entry :name)))
                      harness-prompts--registry)
-           (symbol :tag "A prompt not in the registry"))
-  "The Customize type of a prompt's name: the registry's names, or a symbol.
-The symbol is for a name an override names before the registry has it;
-`harness-prompts-audit' reports such a name.")
+           ,@(mapcar (lambda (name)
+                       `(const :tag ,(symbol-name name) ,name))
+                     (reverse harness-prompts--registered-names))
+           (symbol :tag "A prompt not in the registry")))
+
+(defun harness-prompts--overrides-type ()
+  "Return the Customize type of `harness-prompt-overrides'.
+The prompt names in it are the ones registered now, so a module's
+prompt is in the menu as soon as it registers it."
+  `(alist :tag "Overrides, by model"
+          :key-type (choice (string :tag "Model id")
+                            (const :tag "Every model not named" t))
+          :value-type (alist :key-type ,(harness-prompts--name-type)
+                             :value-type (string :tag "Template"))))
 
 (defcustom harness-prompt-overrides nil
   "Alist of model id to the prompt templates it should be sent instead.
@@ -385,11 +410,7 @@ entry covers a prompt, its default template is sent, so nil changes
 nothing.  `harness-prompt-overrides-file' holds more overrides; this
 alist wins over it at the same specificity, and an exact model entry
 wins over the t entry whatever it came from."
-  :type `(alist :tag "Overrides, by model"
-                :key-type (choice (string :tag "Model id")
-                                  (const :tag "Every model not named" t))
-                :value-type (alist :key-type ,harness-prompts--name-type
-                                   :value-type (string :tag "Template")))
+  :type (harness-prompts--overrides-type)
   :group 'harness-prompts)
 
 (defcustom harness-prompt-overrides-file nil
@@ -409,11 +430,6 @@ file it came from.  Nil, the default, reads no file."
   "The overrides last read from `harness-prompt-overrides-file'.
 A plist (:file FILE :mtime MTIME :overrides ALIST), so an unchanged file
 is read once.")
-
-(defvar harness-prompts--registered nil
-  "The prompts modules registered at run time, newest first.
-`harness-prompt-register' adds to it; `harness-prompts--entries' is the
-built-in registry followed by these.")
 
 (defun harness-prompts--entries ()
   "Return the built-in prompts and the ones modules registered."
@@ -447,6 +463,8 @@ model call.  Registering NAME again replaces its entry."
     (setq harness-prompts--registered
           (cons entry (cl-remove name harness-prompts--registered
                                  :key (lambda (one) (plist-get one :name)))))
+    (cl-pushnew name harness-prompts--registered-names)
+    (put 'harness-prompt-overrides 'custom-type (harness-prompts--overrides-type))
     entry))
 
 (defun harness-prompt-variables (name)

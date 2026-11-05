@@ -41,6 +41,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;plugins            ; Projects' plugins: what a project's trusted .dir-locals.el loads, and…
  ;;recap              ; Write the recaps task cards and running chats show, with a short model…
  ;;redact             ; Takes a secret out of the transcripts and every other copy the harness…
+ ;;secret-sandbox     ; Secret files a locked sandbox lets a command use, never the agent.
  ;;secrets            ; Secret references, masking of tool output and the guard against…
  ;;seed               ; Seed sessions: forks onto a model that share one warm prompt cache.
  ;;session-search     ; Searches session transcripts: an SQLite full-text index, grep, and…
@@ -143,6 +144,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [resilience](resilience.md) | by default | [session](session.md), [agent](agent.md), [tools](tools.md) | Carry on sessions a stopped harness cut short, tell the parent and the user when a sub-agent waits for them, answer its unanswered prompts by default, and report stalled turns. |
 | [retry](retry.md) | by default | [session](session.md), [agent](agent.md) | Try a step again after a transient network or rate-limit failure. |
 | [sandbox](sandbox.md) | by default | [config](config.md) | Kernel sandbox (bwrap / systemd-run / MXC on macOS, or NVIDIA OpenShell on request) for spawned tool processes. |
+| [secret-sandbox](secret-sandbox.md) |  | [secrets](secrets.md), [sandbox](sandbox.md), [perms](perms.md), [session](session.md) | Secret files a locked sandbox lets a command use, never the agent. |
 | [secrets](secrets.md) |  | [store](store.md) | Secret references, masking of tool output and the guard against writing placeholders. |
 | [seed](seed.md) |  | [session](session.md), [agent](agent.md) | Seed sessions: forks onto a model that share one warm prompt cache. |
 | [session](session.md) | by default | [store](store.md), [project](project.md) | Session records, conversation DAG, queue and pending requests. |
@@ -379,7 +381,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `naming/auto-p` | [naming](naming.md) | [tasks](tasks.md) (50) |
 | `naming/system-prompt` | [naming](naming.md) | [tasks](tasks.md) (60) |
 | `notification/before-send` | [notifications](notifications.md) |  |
-| `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [perms](perms.md) (5, 6, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
+| `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [perms](perms.md) (5, 6, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secret-sandbox](secret-sandbox.md) (2, 21), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
 | `permission/dir-entries` | [perms](perms.md) | [access](access.md) (50) |
 | `session/before-move` | [session](session.md) | [merge](merge.md) (50), [tasks](tasks.md) (50) |
 | `task/before-hand-in` | [tools-handin](tools-handin.md) |  |
@@ -387,7 +389,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `tools/output` | [tools](tools.md) | [redact](redact.md) (4), [secrets](secrets.md) (5) |
 | `tools/output-text` | [agent](agent.md), [tools](tools.md) | [redact](redact.md) (4), [secrets](secrets.md) (5) |
 | `tools/result` | [tools](tools.md) | [access](access.md) (95) |
-| `tools/sandbox-options` | [tools-shell](tools-shell.md) | [access](access.md) (80), [commit-attribution](commit-attribution.md) (50), [readonly](readonly.md) (90) |
+| `tools/sandbox-options` | [tools-shell](tools-shell.md) | [access](access.md) (80), [commit-attribution](commit-attribution.md) (50), [readonly](readonly.md) (90), [secret-sandbox](secret-sandbox.md) (50) |
 | `worktree/before-remove` | [worktree](worktree.md) |  |
 | `worktree/lock-existing-p` | [worktree](worktree.md) | [tasks](tasks.md) (50) |
 
@@ -423,6 +425,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-chat-top-functions` | [ui-chat](ui-chat.md) |  |
 | `harness-corporate-mode-change-hook` | `harness-core.el` | [acp](acp.md), [acp-remote](acp-remote.md), [ui](ui.md) |
 | `harness-describe-modules-functions` | `harness-core.el` | [ui](ui.md), `harness.el` |
+| `harness-error-report--previous-signal-hook` | `harness-errors.el` |  |
 | `harness-gremlin-cleanup-hook` | [gremlin](gremlin.md) |  |
 | `harness-log-hook` | `harness-core.el` | `harness-server.el` |
 | `harness-module-init-hook` | `harness-core.el` |  |

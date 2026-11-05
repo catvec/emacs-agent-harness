@@ -90,6 +90,8 @@ connection tells it.  This file provides:
 - `harness-ui-bury` — Put this buffer out of sight, bringing back what its window showed before.
 - `harness-ui-context-limit-click` — Change the context limit of the session whose token figure EVENT clicked.
 - `harness-ui-image-view` — View the image FILE in a window of its own, with the viewer's keys.
+- `harness-ui-overflow-click` — Show what the header line cut off, on EVENT over its ….
+- `harness-ui-overflow-show` — Show everything the bar at POS cut off, its header's when POS is nil.
 - `harness-ui-quit-view` — Put this view out of sight, bringing back what its window showed before.
 - `harness-ui-show-usage` — Show the usage dashboard: costs, the plan's quota and the budgets.
 - `harness-ui-view-wake` — Bring the current view up to date now, though no window showed it for a while.

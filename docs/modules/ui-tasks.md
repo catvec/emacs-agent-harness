@@ -346,7 +346,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-session-resume` — Resume this session's paused task: the queue starts it when its turn comes.
 - `harness-ui-tasks-session-retry` — Have this session's task, which stopped part way, work on it again.
 - `harness-ui-tasks-session-start` — Start this session's task now, even with every slot busy.
-- `harness-ui-tasks-session-start-now` — Start this session's queued task at once, the [Start now] of its settings line.
+- `harness-ui-tasks-session-start-now` — Start this session's task now, even with every slot busy.
 - `harness-ui-tasks-set-max-running` — Let N of each project's tasks work at once; N nil means no limit.
 - `harness-ui-tasks-show-all` — Show every task of the section at point, however tall it makes the board.
 - `harness-ui-tasks-show-fewer` — Let the section at point fit the window again.
