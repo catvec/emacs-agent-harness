@@ -2570,20 +2570,24 @@ CLOSE, a string, is put at the end of the first header, such as a
 button that removes the thread.  RAIL, a string, is what starts every
 line, as `harness-thread-rail' makes it, which is also the default: the
 host that has a bar down its lines of its own gives the blanks that
-stand for it, not a second bar.
+stand for it, not a second bar.  A line that heads a reference -- or the
+one line of a new thread -- says so with `harness-thread-card-head', so
+that the quote under it need not flash under the mouse.
 The card is no text of the buffer; the caller puts it where it goes."
   (let* ((rail (or rail (harness-thread-rail)))
          (room (max 16 (- (or room 72) (string-width rail))))
          (refs (harness-thread-refs data))
          (first t) lines)
     (if (null refs)
-        (push (concat rail (propertize "↩ a new thread" 'face 'harness-thread-header-face)
-                      (if close (concat "  " close) ""))
-              lines)
+        (let ((line (concat rail (propertize "↩ a new thread" 'face 'harness-thread-header-face)
+                            (if close (concat "  " close) ""))))
+          (put-text-property 0 (length line) 'harness-thread-card-head t line)
+          (push line lines))
       (dolist (ref refs)
         (let ((header (concat rail
                               (propertize (concat "↩ " (harness-thread-ref-label ref))
                                           'face 'harness-thread-header-face))))
+          (put-text-property 0 (length header) 'harness-thread-card-head t header)
           (push (if (and first close) (concat header "  " close) header) lines)
           (setq first nil)
           (dolist (line (harness-thread-ref-lines ref room))
@@ -2752,11 +2756,14 @@ Less the prompt's and the rail's."
   "Return the card of ATT, a reply in a thread, as the string a token shows.
 Its lines are parted by line breaks, the last without one, since the
 text goes on with its own; the first header ends with [×], which removes
-the thread.  A click on the rest shows what the reply is to."
+the thread.  A click on the rest shows what the reply is to; only the
+headers show that under the mouse, since a long quote lighting up whole
+is jarring."
   (let* ((data (plist-get att :thread))
          (props (list 'help-echo (harness-compose--thread-help data)
                       'keymap (harness-compose--chip-map att)
-                      'mouse-face 'highlight 'pointer 'hand))
+                      'pointer 'hand))
+         (head-props (append props (list 'mouse-face 'highlight)))
          (close (propertize "[×]" 'face 'harness-thread-header-face 'mouse-face 'highlight 'pointer 'hand
                             'help-echo "Remove this thread; the words under it stay"
                             'keymap (let ((m (make-sparse-keymap)))
@@ -2769,13 +2776,19 @@ the thread.  A click on the rest shows what the reply is to."
                              ;; A box with a bar of its own has no rail.
                              (and harness-compose--accent (harness-thread-rail harness-compose--face t)))
                             "\n"))
-         (pos 0))
+         (line-start 0))
     ;; Everywhere but on the button, which has its own.
-    (while (< pos (length card))
-      (let ((next (next-single-property-change pos 'keymap card (length card))))
-        (unless (get-text-property pos 'keymap card)
-          (add-text-properties pos next props card))
-        (setq pos next)))
+    (while (< line-start (length card))
+      (let* ((line-end (or (string-search "\n" card line-start) (length card)))
+             (line-props (if (get-text-property line-start 'harness-thread-card-head card)
+                             head-props props))
+             (pos line-start))
+        (while (< pos line-end)
+          (let ((next (next-single-property-change pos 'keymap card line-end)))
+            (unless (get-text-property pos 'keymap card)
+              (add-text-properties pos next line-props card))
+            (setq pos next)))
+        (setq line-start (if (< line-end (length card)) (1+ line-end) (length card)))))
     card))
 
 (defun harness-compose--thread-rail ()
@@ -2846,8 +2859,9 @@ A new thread has no quote to show, edit or copy: only taking it back."
 ;; can be quoted with `harness-quote-target': a function of BEG and END,
 ;; the part selected, returning the references of what is quoted
 ;; (`harness-thread-block').  The mark draws the same affordance
-;; everywhere -- `harness-quote-target-face' under the mouse, and a
-;; tooltip naming the key -- and the same command turns the references
+;; everywhere -- the target's first line in `harness-quote-target-face'
+;; under the mouse, and a tooltip naming the key -- and the same command
+;; turns the references
 ;; into the same quote (`harness-thread-quote'): a header saying what
 ;; each is and linking it, then its words.  A view whose text is not all
 ;; targets, lines of a diff or a report's evidence, says which are at
@@ -2864,10 +2878,17 @@ and returns a list of references (`harness-thread-block').")
   "What a quotable target says on hover, the same everywhere.")
 
 (defface harness-quote-target-face '((t :inherit highlight))
-  "How a quotable target shows under the mouse, and while it is chosen.
+  "How the first line of a quotable target shows under the mouse.
 The same face marks a chat message, a tool-call group, a thread card, a
-review comment and the task's report, so C-c > has one affordance."
+review comment and the task's report, so C-c > has one affordance; only
+the first line takes it, so a long message does not light up whole."
   :group 'harness-compose)
+
+(defconst harness-quote-target-highlight-width 80
+  "The widest first line of a quote target that shows under the mouse.
+A first line wider than this is a message's own words, not a header, and
+highlighting it -- wrapping over many rows -- is jarring.  The target
+still says what C-c > does there on hover.")
 
 (defvar-local harness-quote-target-functions nil
   "Functions that say what C-c > quotes at point, or in a region.
@@ -2887,16 +2908,27 @@ keeps threads sets its own; the default is `harness-quote-default-handler'.")
   "Make BEG to END of OBJECT a quote target; FUNCTION returns its references.
 OBJECT is this buffer by default, or a string, as `put-text-property'
 takes one.  HELP is what the target says on hover,
-`harness-quote-target-help' by default.  The target shows in
-`harness-quote-target-face' under the mouse.  A button or a link keeps
-the mouse face and the help it has of its own."
+`harness-quote-target-help' by default.  The first line of the target
+shows in `harness-quote-target-face' under the mouse when it is no wider
+than `harness-quote-target-highlight-width', so a long message does not
+light up whole; the rest says what C-c > does without the flash.  A
+button or a link keeps the mouse face and the help it has of its own."
   (put-text-property beg end harness-quote-target-property function object)
-  (let ((pos beg))
-    (while (< pos end)
-      (let ((next (next-single-property-change pos 'mouse-face object end)))
-        (unless (get-text-property pos 'mouse-face object)
-          (put-text-property pos next 'mouse-face 'harness-quote-target-face object))
-        (setq pos next))))
+  (let* ((line-end (if (stringp object)
+                       (or (string-search "\n" object beg) end)
+                     (save-excursion
+                       (goto-char beg)
+                       (min end (line-end-position)))))
+         (first (if (stringp object)
+                    (substring object beg line-end)
+                  (buffer-substring-no-properties beg line-end))))
+    (when (<= (string-width first) harness-quote-target-highlight-width)
+      (let ((pos beg))
+        (while (< pos line-end)
+          (let ((next (next-single-property-change pos 'mouse-face object line-end)))
+            (unless (get-text-property pos 'mouse-face object)
+              (put-text-property pos next 'mouse-face 'harness-quote-target-face object))
+            (setq pos next))))))
   (let ((pos beg))
     (while (< pos end)
       (let ((next (next-single-property-change pos 'help-echo object end)))

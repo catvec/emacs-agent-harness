@@ -1072,12 +1072,20 @@ that deletes it); when a closed thread was closed gives the date for how
 long ago, the place the thread moved to goes, then when it was closed,
 then who closed it, the count of comments and last the buttons.")
 
+(defconst change-review-ui--collapsed-header-with-buttons-steps
+  '((:delete nil) (:status short) (:buttons compact) (:note nil) (:count nil)
+    (:status who) (:status bare))
+  "What the header of a thread drawn as one line gives up while its buttons stay.
+As `change-review-ui--header-steps': the other buttons go first, leaving
+[Reply] and [Close] or [Reopen], since the thread is answered or closed
+from the line it is folded to; then where the thread is and the count of
+comments go.  The words take the room that is left.")
+
 (defconst change-review-ui--collapsed-header-steps
   '((:delete nil) (:status short) (:buttons nil) (:note nil) (:count nil) (:status who) (:status bare))
-  "What the header of a thread drawn as one line gives up.
-As `change-review-ui--header-steps', but the buttons go as soon as the
-status is short, and the count of comments before when it was closed: the
-words of the thread are worth more there.")
+  "What the header of a thread drawn as one line gives up when its buttons do.
+Used when even the compact buttons leave too little room for the words:
+the buttons go first, then where the thread is and the count of comments.")
 
 (defconst change-review-ui--quote-room 30
   "How many columns a thread drawn as one line wants for its first words.")
@@ -1085,6 +1093,13 @@ words of the thread are worth more there.")
 (defconst change-review-ui--collapsed-width 100
   "The widest a thread drawn as one line is, in a window that has more room.
 It is a summary to run an eye down, not to read across a whole screen.")
+
+(defconst change-review-ui--min-room 3
+  "The fewest lines of a comment a thread short of room still draws.
+A comment is cut to fewer than `change-review-ui-max-comment-lines' to
+make a thread fit its window, but not to fewer than this.  It is the
+fewest columns a thread drawn as one line keeps for its words, too: the
+buttons go before the words do.")
 
 (defvar change-review-ui--fold-gutter-at-left nil
   "Non-nil draws a thread's fold marker in the line's left gutter.
@@ -1119,34 +1134,38 @@ the marker starts the line instead, and PREFIX's columns follow it."
   "Return the buttons of THREAD in SET, drawn for VIEW, or nil.
 VIEW is `threads' or `diff': the diff view leaves out [Diff], since the
 thread is there already.  OPTIONS are those of
-`change-review-ui--header-steps': `:buttons' nil leaves them all out and
-`:delete' nil the button that deletes a thread of drafts."
-  (when (change-review-ui--opt options :buttons t)
-    (let ((open (change-review-thread-open-p thread)))
-      (concat
-       (change-review-ui--button "[Reply]" "Reply to this thread"
-                                 (lambda () (change-review-ui-reply-to-thread set thread)))
-       " "
-       (change-review-ui--button (if open "[Close]" "[Reopen]")
-                                 (if open "Close this thread: it is done"
-                                   "Open this thread again")
-                                 (lambda () (change-review-ui-toggle-thread set thread)))
-       (if (change-review-thread-unreviewed-p set thread)
+`change-review-ui--header-steps': `:buttons' nil leaves them all out,
+`compact' leaves [Reply] and [Close] or [Reopen] only, and `:delete' nil
+the button that deletes a thread of drafts."
+  (let ((buttons (change-review-ui--opt options :buttons t)))
+    (when buttons
+      (let ((open (change-review-thread-open-p thread))
+            (compact (eq buttons 'compact)))
+        (concat
+         (change-review-ui--button "[Reply]" "Reply to this thread"
+                                   (lambda () (change-review-ui-reply-to-thread set thread)))
+         " "
+         (change-review-ui--button (if open "[Close]" "[Reopen]")
+                                   (if open "Close this thread: it is done"
+                                     "Open this thread again")
+                                   (lambda () (change-review-ui-toggle-thread set thread)))
+         (if (and (not compact) (change-review-thread-unreviewed-p set thread))
+             (concat " " (change-review-ui--button
+                          "[Mark reviewed]"
+                          "You looked at how this thread was closed: it no longer waits for you"
+                          (lambda () (change-review-ui-mark-thread-reviewed set thread))))
+           "")
+         (if (or compact (eq view 'diff))
+             ""
            (concat " " (change-review-ui--button
-                        "[Mark reviewed]"
-                        "You looked at how this thread was closed: it no longer waits for you"
-                        (lambda () (change-review-ui-mark-thread-reviewed set thread))))
-         "")
-       (if (eq view 'diff)
-           ""
-         (concat " " (change-review-ui--button
-                      "[Diff]" "Show this thread in the diff view"
-                      (lambda () (change-review-visit set thread)))))
-       ;; A thread of drafts is the author's alone: it can be taken back.
-       (if (and (change-review-ui--opt options :delete t)
-                (change-review-thread-draft-p thread))
-           (concat " " (change-review-ui--delete-thread-button set thread))
-         "")))))
+                        "[Diff]" "Show this thread in the diff view"
+                        (lambda () (change-review-visit set thread)))))
+         ;; A thread of drafts is the author's alone: it can be taken back.
+         (if (and (not compact)
+                  (change-review-ui--opt options :delete t)
+                  (change-review-thread-draft-p thread))
+             (concat " " (change-review-ui--delete-thread-button set thread))
+           ""))))))
 
 (defun change-review-ui--build-thread-header (set thread view placement prefix fold options)
   "Return the first line of THREAD in SET, drawn for VIEW, after PREFIX.
@@ -1156,7 +1175,8 @@ it where the last two columns of PREFIX are.  OPTIONS are those of
 `change-review-ui--header-steps': `:status' is nil for all of it, `short',
 `who' or `bare'; `:note', `:count', `:delete' and `:buttons' are nil to
 leave out where the thread is, how many comments it has, the button
-that deletes a thread of drafts and the buttons."
+that deletes a thread of drafts and the buttons; `:buttons' `compact'
+leaves [Reply] and [Close] or [Reopen] only."
   (let* ((open (change-review-thread-open-p thread))
          (location (change-review-thread-location thread))
          (placed (change-review-ui--opt options :note t))
@@ -1195,12 +1215,17 @@ PLACEMENT says where the thread is now.  FOLD is how the thread is
 folded when it can be folded (`change-review-ui-thread-fold'), nil when
 not.  With KEEP a line that does not fit when it says the least is
 returned as it is, not cut.  BUTTONS nil leaves the buttons of the
-thread out, for a host that shows them another way."
+thread out, for a host that shows them another way: a thread drawn as one
+line then gives up the words' room, not the buttons, unless BUTTONS are
+left out (`change-review-ui--collapsed-header-steps')."
   (change-review-ui--fit
    width
    (lambda (options)
      (change-review-ui--build-thread-header set thread view placement prefix fold options))
-   (if (eq fold 'collapsed) change-review-ui--collapsed-header-steps change-review-ui--header-steps)
+   (if (eq fold 'collapsed)
+       (if buttons change-review-ui--collapsed-header-with-buttons-steps
+         change-review-ui--collapsed-header-steps)
+     change-review-ui--header-steps)
    keep (and (null buttons) '(:buttons nil))))
 
 (defconst change-review-ui--footer-steps
@@ -1246,40 +1271,48 @@ the answer does."
   "Return THREAD of SET as one line: the header, then the first words of its root.
 The line is at most WIDTH columns wide, and no wider than
 `change-review-ui--collapsed-width'.  The header gives up what it can
-\(`change-review-ui--collapsed-header-steps') to leave the words
-`change-review-ui--quote-room' columns, or what they need if that is
-less; when it has given up all it can, the words are the room that is
-left.  FOLD, INDENT, VIEW and PLACEMENT are those of
-`change-review-ui-thread-string'; BUTTONS nil leaves the buttons out.
-The words are a button that opens the thread when the thread can be
-folded."
+to leave the words `change-review-ui--quote-room' columns, or what they
+need if that is less.  [Reply] and [Close] or [Reopen] stay as long as
+they leave the words some room (`change-review-ui--min-room' columns);
+when they do not, they go and the header says more
+\(`change-review-ui--collapsed-header-steps').  FOLD, INDENT, VIEW and
+PLACEMENT are those of `change-review-ui-thread-string'; BUTTONS nil
+leaves the buttons out.  The words are a button that opens the thread
+when the thread can be folded."
   (let* ((width (min width change-review-ui--collapsed-width))
          (rich (change-review-ui-body-summary set (change-review-thread-root thread)))
          (text (substring-no-properties rich))
          (wanted (min (+ 2 (string-width text)) change-review-ui--quote-room))
+         (target (- width 2 wanted))
          (header (change-review-ui--thread-header set thread view placement indent
-                                                  (- width 2 wanted) fold t buttons))
-         (room (- width (string-width header) 2 2))
-         (words (and (>= room 3) (truncate-string-to-width text room nil nil "…"))))
-    (concat (if (> (string-width header) (- width 2 3))
-                ;; Not even the least of a header leaves room for words.
-                (truncate-string-to-width header width nil nil "…")
-              header)
-            (if words
-                (concat "  "
-                        (if fold
-                            (change-review-ui--link
-                             (concat "“" words "”")
-                             "Show the conversation of this thread (TAB)"
-                             (lambda () (change-review-ui-set-fold set thread 'expanded))
-                             'change-review-ui-meta-face)
-                          ;; The faces the set gave the words stay, over the meta face.
-                          (let ((shown (copy-sequence (truncate-string-to-width rich room nil nil "…")))
-                                (meta 'change-review-ui-meta-face))
-                            (add-face-text-property 0 (length shown) meta t shown)
-                            (concat (propertize "“" 'face meta) shown (propertize "”" 'face meta)))))
-              "")
-            "\n")))
+                                                  target fold t buttons))
+         (room (- width (string-width header) 2 2)))
+    ;; The compact buttons stay while the words have room beside them.
+    (when (and buttons (< room change-review-ui--min-room))
+      (setq header (change-review-ui--thread-header set thread view placement indent
+                                                    target fold t nil)
+            room (- width (string-width header) 2 2)))
+    (let ((words (and (>= room change-review-ui--min-room)
+                      (truncate-string-to-width text room nil nil "…"))))
+      (concat (if (> (string-width header) (- width 2 3))
+                  ;; Not even the least of a header leaves room for words.
+                  (truncate-string-to-width header width nil nil "…")
+                header)
+              (if words
+                  (concat "  "
+                          (if fold
+                              (change-review-ui--link
+                               (concat "“" words "”")
+                               "Show the conversation of this thread (TAB)"
+                               (lambda () (change-review-ui-set-fold set thread 'expanded))
+                               'change-review-ui-meta-face)
+                            ;; The faces the set gave the words stay, over the meta face.
+                            (let ((shown (copy-sequence (truncate-string-to-width rich room nil nil "…")))
+                                  (meta 'change-review-ui-meta-face))
+                              (add-face-text-property 0 (length shown) meta t shown)
+                              (concat (propertize "“" 'face meta) shown (propertize "”" 'face meta)))))
+                "")
+              "\n"))))
 
 (defun change-review-ui--more-row (set thread indent count)
   "Return the line that says COUNT more lines of THREAD of SET are not drawn.
@@ -1350,11 +1383,6 @@ LEFT-OUT is non-nil when something was: comments or lines of one."
     (let ((lines (apply #'append (nreverse lines))))
       (cons lines (and (cl-some (lambda (line) (get-text-property 0 'change-review-cut line)) lines)
                        t)))))
-
-(defconst change-review-ui--min-room 3
-  "The fewest lines of a comment a thread short of room still draws.
-A comment is cut to fewer than `change-review-ui-max-comment-lines' to
-make a thread fit its window, but not to fewer than this.")
 
 (defun change-review-ui--fit-rows (set thread indent width details fold rooms)
   "Return the comments of THREAD of SET, drawn to take ROOMS lines if they can.
@@ -2012,8 +2040,11 @@ The mouse selects it.")
 (defun change-review-ui--selectable (text)
   "Return TEXT, a thread drawn, with the mouse's keys on its comments' text.
 They are those of `change-review-ui-text-map'.  The text of a thread is a
-quotable target too: it shows `highlight' under the mouse, as a message
-of a chat or a report does, and says what C-c > does there."
+quotable target too: its header -- and each comment's -- shows
+`highlight' under the mouse, as a message of a chat or a report does, and
+says what C-c > does there.  The body of a comment is a target as well,
+but does not flash under the mouse: a long reply lighting up whole is
+jarring, and its header already says what the target is."
   (let ((text (copy-sequence text)) (pos 0)
         (length (length text)))
     (while (and (< pos length)
@@ -2025,6 +2056,7 @@ of a chat or a report does, and says what C-c > does there."
     ;; newlines and bars between: a run of it says what it is by
     ;; `change-review-body', the comment text, or not, the thread's own.  A
     ;; button's mark stays its own, so the runs end where any of them does.
+    ;; Every run says what C-c > does there.
     (let ((pos 0))
       (while (< pos length)
         (if (null (get-text-property pos 'change-review-thread text))
@@ -2038,8 +2070,6 @@ of a chat or a report does, and says what C-c > does there."
                                length)
                            (or (next-single-property-change pos 'help-echo text length)
                                length))))
-            (unless (get-text-property pos 'mouse-face text)
-              (put-text-property pos next 'mouse-face 'highlight text))
             (unless (get-text-property pos 'help-echo text)
               (put-text-property pos next 'help-echo
                                  (if (get-text-property pos 'change-review-body text)
@@ -2047,6 +2077,22 @@ of a chat or a report does, and says what C-c > does there."
                                    "C-c > replies to this thread")
                                  text))
             (setq pos next)))))
+    ;; Only the lines that head a thread or a comment show the target: the
+    ;; body of a long reply keeps its tooltip, not a highlight over all of it.
+    ;; A button or a link keeps the mouse face it has of its own.
+    (dolist (start '(change-review-thread-start change-review-comment-start))
+      (let ((pos 0))
+        (while (< pos length)
+          (if (not (get-text-property pos start text))
+              (setq pos (or (next-single-property-change pos start text length) length))
+            (let* ((end (or (string-search "\n" text pos) length))
+                   (at pos))
+              (while (< at end)
+                (let ((next (or (next-single-property-change at 'mouse-face text end) end)))
+                  (unless (get-text-property at 'mouse-face text)
+                    (put-text-property at next 'mouse-face 'highlight text))
+                  (setq at next)))
+              (setq pos (1+ end)))))))
     text))
 
 (defun change-review-ui--mark-selection (text selection)
@@ -3370,7 +3416,9 @@ threads and comments, so the commands of this library, such as
 `change-review-ui-reply' and `change-review-ui-toggle-status', find
 the thread or the comment at point in the buffer that shows it.  Its
 comments' text is the mouse's to select, and a thread a quotable
-target (`change-review-ui--selectable').
+target (`change-review-ui--selectable'): its header and each comment's
+show under the mouse, while a comment's body says what C-c > does on
+hover without lighting up whole.
 
 FILTER is `open', `closed', `all', `unreviewed' (the closed threads
 that wait for the user's review) or `reviewed' (the threads the user
@@ -3380,8 +3428,9 @@ wrap to, by default that of the window showing the current buffer, and
 INDENT starts every line.  EMPTY is the line to say when the filter
 lets no thread through, by default one that says so.  BUTTONS nil
 leaves the buttons of each thread's header out, for a host that offers
-its actions another way.  The head of the
-threads, their filter buttons, is `change-review-ui-threads-heading'.
+its actions another way; `compact' leaves [Reply] and [Close] or
+[Reopen] only.  The head of the threads, their filter buttons, is
+`change-review-ui-threads-heading'.
 
 FILE-FOLD, when given, is a function of a file (a path, or nil for the
 change as a whole) that says the file's threads are drawn folded: its

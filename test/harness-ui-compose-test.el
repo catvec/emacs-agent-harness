@@ -225,6 +225,27 @@ The quote is the reason for the reply: a card never cuts it short."
       (should (> (length lines) 2))
       (should (cl-every (lambda (line) (<= (string-width line) 80)) lines)))))
 
+(ert-deftest harness-ui-compose-thread-card-shows-the-headers-under-the-mouse ()
+  "A card is clickable throughout, but only its headers show under the
+mouse: a long quote below them does not light up whole, which would be
+jarring."
+  (harness-ui-compose-test-with
+    (let* ((text (string-join (make-list 20 "The deployment waits for the build.") " "))
+           (ref (list :kind "chat" :node "n-1" :who "agent" :text text))
+           (att (harness-compose-add-thread (list ref)))
+           (card (overlay-get (car (harness-ui-compose-test--cards)) 'display))
+           (header (string-search "↩" card))
+           (quote (string-search "The deployment waits" card)))
+      (should att)
+      (should header)
+      (should quote)
+      (should (eq 'highlight (get-text-property header 'mouse-face card)))
+      (should-not (get-text-property quote 'mouse-face card))
+      ;; The quote is still the card's: a click shows it, and hover says so.
+      (should (get-text-property quote 'keymap card))
+      (should (string-search "The deployment waits"
+                             (get-text-property quote 'help-echo card))))))
+
 (ert-deftest harness-ui-compose-thread-rail-gives-way-to-a-bar-of-the-host ()
   "The rail is two columns, a bar and a space; where the host has a bar down
 its lines already it is two blanks, so the lines have the one bar, and the
@@ -2212,6 +2233,26 @@ and spaces ending a line; a blank line within it is a bare \">\", so the
 quote stays one block.  Indentation stays, as code needs."
   (should (equal "> one\n>\n>   two" (compose-quote-string "\n \none  \n\t\n  two\n\n")))
   (should (equal "> one" (compose-quote-string "one"))))
+
+(ert-deftest harness-ui-compose-quote-target-shows-only-a-short-first-line ()
+  "A quote target shows under the mouse on its first line, and only when
+that line is no wider than `harness-quote-target-highlight-width'.  A
+long message, its own words and no header, does not light up whole; the
+target and its tooltip still cover it."
+  (harness-ui-compose-test-with
+    (dolist (case (list (cons "A short message\nand its body." t)
+                        (cons (concat (make-string 120 ?x) "\nand its body.") nil)))
+      (let* ((text (copy-sequence (car case)))
+             (body (1+ (string-search "\n" text))))
+        (harness-quote--mark 0 (length text) (lambda (&rest _) '("ref")) "C-c > replies" text)
+        (should (functionp (get-text-property body 'harness-quote-target text)))
+        (should (equal "C-c > replies" (get-text-property body 'help-echo text)))
+        (should-not (get-text-property body 'mouse-face text))
+        (if (cdr case)
+            (progn
+              (should (eq 'harness-quote-target-face (get-text-property 0 'mouse-face text)))
+              (should-not (get-text-property (1- body) 'mouse-face text)))
+          (should-not (get-text-property 0 'mouse-face text)))))))
 
 (ert-deftest harness-ui-compose-quote-wraps-under-its-words ()
   "A quoted line's wrapped lines start under the quote's words.

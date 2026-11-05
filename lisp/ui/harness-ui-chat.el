@@ -2524,14 +2524,18 @@ agent's, and under the fold what the call was and what it returned."
 They are those of the compose box's card (`harness-thread-card-lines'),
 each a button that shows the reference it is of.  They start with blanks,
 not the rail: a message of yours has its bar down every line already
-\(`harness-chat--margin'), and the card has no second."
+\(`harness-chat--margin'), and the card has no second.  Only the header
+of a reference shows that under the mouse, not the whole quote."
   (mapcar (lambda (line)
-            (let ((ref (get-text-property 0 'harness-thread-ref line)))
+            (let ((ref (get-text-property 0 'harness-thread-ref line))
+                  (head (get-text-property 0 'harness-thread-card-head line)))
               (add-text-properties
                0 (length line)
-               (list 'help-echo (format "%s: mouse-1, RET shows it" (harness-thread-ref-label ref))
-                     'mouse-face 'highlight 'follow-link t 'pointer 'hand
-                     'keymap (harness-chat--mouse-map (lambda () (harness-chat-show-ref ref))))
+               (append
+                (list 'help-echo (format "%s: mouse-1, RET shows it" (harness-thread-ref-label ref)))
+                (when head (list 'mouse-face 'highlight))
+                (list 'follow-link t 'pointer 'hand
+                      'keymap (harness-chat--mouse-map (lambda () (harness-chat-show-ref ref)))))
                line)
               line))
           (harness-thread-card-lines data (harness-chat--content-width) nil (harness-thread-rail nil t))))
@@ -3369,7 +3373,9 @@ subject: \"1 tool call: Read file x.el\"."
   "Mark each card of a reply in a thread in TEXT as a quote target of its own.
 The card already says which reference each of its lines is of
 \(`harness-thread-ref'); C-c > on one quotes what the card quotes, with
-the card's own header and link, not the message the card is in."
+the card's own header and link, not the message the card is in.  Only
+the header of a reference shows the target under the mouse: the quote
+below it is a target too, but a long one lighting up whole is jarring."
   (let ((pos 0)
         (length (length text)))
     (while (< pos length)
@@ -3379,7 +3385,14 @@ the card's own header and link, not the message the card is in."
           (harness-quote--mark pos next
                                (lambda (_from _to) (list ref))
                                "C-c > replies to what this card quotes, in a thread"
-                               text))
+                               text)
+          ;; The quote keeps the target and its tooltip, not the highlight.
+          (let ((line pos))
+            (while (< line next)
+              (let ((end (or (string-search "\n" text line) next)))
+                (unless (get-text-property line 'harness-thread-card-head text)
+                  (remove-text-properties line (min end next) '(mouse-face nil) text))
+                (setq line (if (< end next) (1+ end) next))))))
         (setq pos next))))
   text)
 
@@ -3418,6 +3431,8 @@ the card's own header and link, not the message the card is in."
     ;; The block is a quotable target whole, and each card of a reply in
     ;; a thread in it is one of its own: C-c > on the card quotes what
     ;; the card quotes, not the message around it (`harness-quote-reply').
+    ;; The first line shows the target under the mouse; the body does not
+    ;; flash whole, which a long message would make jarring.
     (harness-quote--mark
      0 (length text)
      (lambda (from to)

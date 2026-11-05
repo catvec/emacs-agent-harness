@@ -2063,16 +2063,23 @@ The task is at work, so the reply waits in the thread for [Send replies]."
       (harness-media--settle 0.5))))
 
 (defun harness-media-shot-chat-threads ()
-  "The threads of a task at work, in place of its compose box.
+  "The threads of a task taken back to work, in place of its compose box.
 The task handed its work in, then was taken back to work with
 [Keep working]; C-c T shows the review's threads -- the filter, the
 keys, the cards, and the replies waiting to be sent -- where the box
 was, and [Compose] brings the box back with the words it held.  The
-open thread is one the user made in the review, as a review's threads
-are made, and the draft under it waits for [Send replies] or C-c C-c."
+task is in its working phase but waits for the user's next message, as
+[Keep working] leaves it (`harness-tasks--waiting-for-reply-p'), so
+the threads are its conversation.  The open thread is one the user made
+in the review, as a review's threads are made, and the draft under it
+waits for [Send replies] or C-c C-c."
   (let ((id (plist-get (plist-get harness-media--world :tasks) :slow)))
     (harness-call 'task/return-to-work id)
-    (harness-media--wait-task id (lambda (task) (equal (harness-media--column task) "active"))
+    ;; The task is at work -- its state and phase are the working ones --
+    ;; but it waits for the user's next message, as the review's [Keep
+    ;; working] leaves it: its column is needs-input until a turn starts
+    ;; (`harness-tasks--waiting-for-reply-p').
+    (harness-media--wait-task id (lambda (task) (equal (format "%s" (plist-get task :state)) "active"))
                               "to be back at work")
     (unless (harness-call 'patch-review/open-threads id)
       (harness-media--user-thread id "Does the warning include the request id?"))

@@ -13255,10 +13255,13 @@ drawn under a line -- adds a function to its buffer-local
 resolved by `harness-quote-targets`, in that order and then in the
 order of the region; only when neither finds anything does the command
 say "Nothing to reply here".  The mark draws the one affordance
-everywhere (`harness-quote--mark`): `harness-quote-target-face` under
-the mouse, which inherits `highlight`, and a `help-echo` that names the
-key.  A button or a link keeps the mouse face and the help it has of
-its own, so a target never hides what it is drawn over.
+everywhere (`harness-quote--mark`): the target's first line in
+`harness-quote-target-face` under the mouse, which inherits `highlight`,
+when that line is no wider than `harness-quote-target-highlight-width`,
+and a `help-echo` that names the key across the whole target.  A long
+message then does not light up whole when the mouse passes over it.  A
+button or a link keeps the mouse face and the help it has of its own, so
+a target never hides what it is drawn over.
 
 The quote is one too: `harness-thread-quote` makes it, the header
 `harness-thread-ref-header` and the link `harness-thread-ref-link` of
@@ -15884,10 +15887,10 @@ set draws every surface through the library's own refresh):
 - the chat's threads view (`harness-chat-show-threads`, C-c T): the same
   section in place of the compose box, its heading line ending in the
   chat's [Compose] button (`harness-chat--threads-view-compose-button`).
-  It draws the threads open and without the buttons each header has
-  elsewhere; one compact line of keys and, while a task at work has
-  replies waiting, one line with [Send replies] and C-c C-c take their
-  place (`harness-ui-patch-review--compose-thread-map`).  The review
+  It draws the threads open, with the buttons each header has elsewhere;
+  one compact line of keys and, while a task at work has replies waiting,
+  one line with [Send replies] and C-c C-c sit above them
+  (`harness-ui-patch-review--compose-thread-map`).  The review
   banner passes NO-THREADS to `--section` while the view shows, so the
   threads are in one place; a task at work has no banner to begin with.
 - the column beside Ediff (below): the tree of the files, and the threads

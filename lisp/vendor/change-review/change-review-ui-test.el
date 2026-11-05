@@ -330,6 +330,28 @@ whether it is a draft, and where it is in the thread."
           (push (get-text-property 0 'change-review-comment string) seen))
         (should (equal ids (reverse seen)))))))
 
+(ert-deftest change-review-ui-marks-only-the-headers-of-a-thread-for-the-mouse ()
+  "A thread drawn is a quotable target: its header, and each comment's, shows
+that under the mouse.  The body of a comment is a target too, and says so on
+hover, but does not light up whole -- a long reply would be jarring."
+  (change-review-ui-test--drawing
+    (let* ((set (change-review-ui-test--set))
+           (thread (car (change-review-ui-test--populate set)))
+           (text (change-review-ui-threads-string set :filter 'all :width 90))
+           (header (text-property-any 0 (length text) 'change-review-thread-start t text))
+           (comment-header (text-property-any 0 (length text) 'change-review-comment-start t text))
+           (body (string-search "Because the retry loop needs it." text)))
+      (should header)
+      (should comment-header)
+      (should body)
+      (should (eq 'highlight (get-text-property header 'mouse-face text)))
+      (should (eq 'highlight (get-text-property comment-header 'mouse-face text)))
+      (should (string-match-p "\\`C-c > replies to this comment"
+                             (get-text-property body 'help-echo text)))
+      (should-not (get-text-property body 'mouse-face text))
+      ;; Two lines of the comment, one after the other, are both plain.
+      (should-not (get-text-property (string-search "Second line" text) 'mouse-face text)))))
+
 (ert-deftest change-review-ui-draws-a-closed-thread-and-who-closed-it ()
   "A closed thread says closed, by whom and when, and can be one line.
 This one the agent closed, so it waits for the user's review as well."
@@ -1323,7 +1345,7 @@ conversation.  Clicking it, or the words of a thread of one line, folds it."
       ;; One line: the triangle takes the place of the indent.
       (let ((one (funcall line 'collapsed)))
         (should (= 1 (length (change-review-ui-test--lines one))))
-        (should (string-match-p "\\`▸ ✓ [^ ]+ · 1 comment · closed by Claude[^\n]*· reviewed  “Fine\\.”\n\\'"
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · closed by Claude[^\n]*· reviewed   \\[Reply\\] \\[Reopen\\]  “Fine\\.”\n\\'"
                                 (substring-no-properties one)))
         (change-review-ui-test--press one "▸")
         (should (eq 'expanded (change-review-ui-thread-fold set thread)))
@@ -1977,7 +1999,8 @@ and a thread in a list does too."
 
 (ert-deftest change-review-ui-gives-a-thread-of-one-line-the-room-it-wants-for-its-words ()
   "The header of a thread of one line leaves out what it can to leave its
-words thirty columns, or the room they need; no line is wider than a hundred."
+words thirty columns, or the room they need, while [Reply] and [Close]
+stay as long as they fit; no line is wider than a hundred."
   (change-review-ui-test--drawing
     (cl-letf (((symbol-function 'float-time) (lambda (&rest _) change-review-ui-test--now))
               (change-review-ui-relative-times t))
@@ -1995,14 +2018,17 @@ words thirty columns, or the room they need; no line is wider than a hundred."
         ;; Room for the buttons as well as the words.
         (should (string-match-p "\\`▸ ✓ [^ ]+ · 1 comment · closed 2m ago   \\[Reply\\] \\[Reopen\\]  “These are the words of the r…”\\'"
                                 (funcall one 90)))
-        ;; Not for the buttons: the words have what they want.
-        (should (string-match-p "\\`▸ ✓ [^ ]+ · 1 comment · closed 2m ago  “These are the words of the …”\\'"
+        ;; Room for the compact buttons, but not for how long ago it was
+        ;; closed nor the count: [Reply] and [Reopen] stay on the line.
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · closed   \\[Reply\\] \\[Reopen\\]  “These are the words of the …”\\'"
                                 (funcall one 70)))
-        ;; Not for the count of comments either.
-        (should (string-match-p "\\`▸ ✓ [^ ]+ · closed 2m ago  “These are the words of the ro…”\\'"
+        ;; The compact buttons stay while the words have room beside them.
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · closed   \\[Reply\\] \\[Reopen\\]  “These are the wor…”\\'"
                                 (funcall one 60)))
-        ;; The least a header says, and the words what is left.
-        (should (string-match-p "\\`▸ ✓ [^ ]+ · closed  “These are the words of the…”\\'" (funcall one 50)))
+        (should (string-match-p "\\`▸ ✓ [^ ]+ · closed   \\[Reply\\] \\[Reopen\\]  “These a…”\\'"
+                                (funcall one 50)))
+        ;; The words would have too little room: the buttons go, and the
+        ;; header says more in their place.
         (should (string-match-p "\\`▸ ✓ [^ ]+ · closed  “These are the wo…”\\'" (funcall one 40)))
         ;; In a wide window the line is a hundred columns at most.
         (should (= 100 (string-width (funcall one 160))))

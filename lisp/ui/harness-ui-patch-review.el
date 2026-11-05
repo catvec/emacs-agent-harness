@@ -14,9 +14,9 @@
 ;; waiting; [Send replies] sends them together (`patch-review/send-replies'),
 ;; as one message to the agent, which answers them in their threads, and
 ;; so does C-c C-c on the threads the chat shows in place of its box.
-;; The compose view's threads are drawn without a button on every header
-;; -- the keys and one line over them do what the buttons did -- and the
-;; review banner leaves its copy of them out while they show there.
+;; The compose view's threads have the buttons their headers have
+;; elsewhere, and the keys and the line over them do the same; the review
+;; banner leaves its copy of them out while they show there.
 ;; [Diff] rereads the worktree's current HEAD on each click while the task
 ;; works; historical source links stay at the commit they name.  These
 ;; live views are local, not new hand-ins or baselines for the last review.
@@ -3221,11 +3221,10 @@ the review's set (`harness-ui-patch-review--view'), so the library's
 commands find the thread or comment at point and its buttons draw the
 section again.  ALWAYS-OPEN draws them whole, with no fold button: the
 threads view the chat puts in place of its box is the threads, not a
-line that hides them.  It leaves the buttons off each thread's header
-and its footer -- the keys and the line over them do what they did --
-and says how many replies wait in one line with the way to send them.
-TRAILING, a string, ends the heading line: the chat puts its [Compose]
-button there.
+line that hides them.  Every thread has its buttons, as the report's
+do, and the view says how many replies wait in one line with the way to
+send them.  TRAILING, a string, ends the heading line: the chat puts
+its [Compose] button there.
 The report and the banner start the threads of each file and each thread
 folded for the round, but where the user commented (`--file-folded-p',
 `--thread-fold'); COMPACT, the tree beside Ediff, and ALWAYS-OPEN draw
@@ -3269,7 +3268,6 @@ them as they were."
                     set :filter filter :details change-review-ui--details
                     :width (harness-ui-patch-review--text-width (if compact 2 8))
                     :indent "  "
-                    :buttons (not always-open)
                     :file-fold (and fold-comments
                                     (lambda (file)
                                       (harness-ui-patch-review--file-folded-p review file)))

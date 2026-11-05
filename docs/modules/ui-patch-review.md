@@ -24,9 +24,9 @@ writes there is a draft as anywhere, and the threads say how many are
 waiting; [Send replies] sends them together (`patch-review/send-replies`),
 as one message to the agent, which answers them in their threads, and
 so does C-c C-c on the threads the chat shows in place of its box.
-The compose view's threads are drawn without a button on every header
--- the keys and one line over them do what the buttons did -- and the
-review banner leaves its copy of them out while they show there.
+The compose view's threads have the buttons their headers have
+elsewhere, and the keys and the line over them do the same; the review
+banner leaves its copy of them out while they show there.
 [Diff] rereads the worktree's current HEAD on each click while the task
 works; historical source links stay at the commit they name.  These
 live views are local, not new hand-ins or baselines for the last review.

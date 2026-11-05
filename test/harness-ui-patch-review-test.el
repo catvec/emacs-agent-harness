@@ -4169,9 +4169,11 @@ view holds the threads only, not the report and the files above them;
           ;; The same threads view, with its filter, where the box was.
           (should (string-match-p "Why two?" view))
           (should-not (string-match-p "❯ A draft of mine\\." view))
-          ;; The compose view's threads offer their keys, not a button apiece.
+          ;; The compose view's threads have the buttons of their headers,
+          ;; and their keys in the line over them.
           (should (string-match-p "RET jump · r reply" view))
-          (should-not (string-match-p "\\[Reply\\]\\|\\[Close\\]\\|\\[Diff\\]" view))
+          (should (string-match-p "\\[Reply\\] \\[Close\\]" view))
+          (should (string-search "┃ [Reply] [Close] [Diff]" view))
           ;; Not the report and not the files.
           (should-not (string-match-p "Handed in" view))
           (should-not (string-match-p "Changes (" view)))
@@ -4185,6 +4187,51 @@ view holds the threads only, not the report and the files above them;
         (should-not (string-match-p "\\[Compose\\]"
                                     (buffer-substring-no-properties
                                      (marker-position harness-chat--transcript-end) (point-max))))))))
+
+(ert-deftest harness-ui-patch-review-threads-have-their-buttons-and-do-not-flash-whole ()
+  "The threads view keeps [Reply] and [Close] on each thread, at its header
+and its end.  Hovering a thread marks its header, and each comment's, as a
+quotable target; the body of a reply does not light up whole."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (root (harness-ui-patch-review-test--comment-on
+                  review "a.el" '(:new . 2)
+                  (concat "Why two? " (string-join (make-list 30 "A long answer.") " "))))
+           (thread (harness-ui-patch-review-test--thread-of review root))
+           (text (with-temp-buffer (harness-ui-patch-review--threads-section review nil t))))
+      (ignore thread)
+      ;; The header and the end of the thread have them.
+      (should (string-match-p "● .*\\[Reply\\] \\[Close\\] \\[Diff\\]" text))
+      (should (string-search "┃ [Reply] [Close] [Diff]" text))
+      ;; The header shows the quotable target under the mouse; the body,
+      ;; which can be long, says so on hover without flashing whole.
+      (let ((header (string-search "● " text))
+            (body (string-search "A long answer." text)))
+        (should header)
+        (should body)
+        (should (eq 'highlight (get-text-property header 'mouse-face text)))
+        (should (string-match-p "\\`C-c > replies to this comment"
+                               (get-text-property body 'help-echo text)))
+        (should-not (get-text-property body 'mouse-face text))))))
+
+(ert-deftest harness-ui-patch-review-collapsed-thread-keeps-reply-and-close ()
+  "A thread folded to one line keeps [Reply] and [Close] on it, so it is
+answered or closed from the line it is folded to without opening it."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (set (harness-ui-patch-review--r-set review))
+           (file (car (harness-ui-patch-review--r-files review)))
+           (root (harness-ui-patch-review-test--agent-comment-on
+                  review "a.el" '(:new . 2) "Why two?"))
+           (thread (harness-ui-patch-review-test--thread-of review root)))
+      (ignore thread)
+      (setq change-review-ui--filter 'all)
+      ;; Let the round's folds settle, then open the file, keeping the
+      ;; thread itself folded to one line.
+      (with-temp-buffer (harness-ui-patch-review--threads-section review))
+      (change-review-ui-set-file-fold set (change-review-file-path file) nil t)
+      (let ((text (with-temp-buffer (harness-ui-patch-review--threads-section review))))
+        (should (string-match-p "▸ .*\\[Reply\\] \\[Close\\]" text))))))
 
 (ert-deftest harness-ui-patch-review-starts-a-new-thread-from-the-threads-view ()
   "The threads view offers [New thread]: it brings the compose box back with a
@@ -6617,11 +6664,11 @@ thread at the current difference."
 
 (ert-deftest harness-ui-patch-review-marks-the-comments-it-quotes ()
   "Every comment the review draws is marked as a quotable target, as a chat's
-message or a report is: `highlight' under the mouse and a help that says
-what C-c > does there.  Under a line of Ediff the comment's text and the
-header of its thread carry the mark; in the threads view the comment C-c >
-quotes does too, and says what it quotes -- the whole comment, with the
-header and link of its thread."
+message or a report is, with a help that says what C-c > does there.  Its
+body does not highlight on hover -- a long reply flashing whole would be
+jarring -- but the header of its thread, and of the comment, do.  Under a
+line of Ediff and in the threads view alike: C-c > on the comment quotes
+the whole comment, with the header and link of its thread."
   (harness-ui-patch-review-test-with-task
     (let* ((harness-ui-patch-review-ediff-tree nil)
            (popout (harness-ui-patch-review-test--changes board id))
@@ -6635,10 +6682,12 @@ header and link of its thread."
                      (funcall callback (concat initial "Fine."))))
            (body-help "C-c > replies to this comment, quoting it")
            (thread-help "C-c > replies to this thread")
-           (marked (lambda (string text help)
+           (marked (lambda (string text help &optional body)
                      (let ((pos (string-search text string)))
                        (should pos)
-                       (should (eq 'highlight (get-text-property pos 'mouse-face string)))
+                       (if body
+                           (should-not (get-text-property pos 'mouse-face string))
+                         (should (eq 'highlight (get-text-property pos 'mouse-face string))))
                        (should (equal help (get-text-property pos 'help-echo string)))))))
       (ignore popout comment)
       (harness-ui-patch-review-ediff review 0)
@@ -6650,7 +6699,7 @@ header and link of its thread."
         (let ((drawn (with-current-buffer new
                        (mapconcat (lambda (overlay) (or (overlay-get overlay 'after-string) ""))
                                   (overlays-in (point-min) (point-max)) ""))))
-          (funcall marked drawn "only ever uses one" body-help)
+          (funcall marked drawn "only ever uses one" body-help 'body)
           (funcall marked drawn "●" thread-help))
         ;; The threads view: the same mark, and C-c > on the comment quotes
         ;; it in its thread, as under the line.
@@ -6664,8 +6713,12 @@ header and link of its thread."
                 (should (eq #'harness-quote-reply (key-binding (kbd "C-c >"))))
                 (goto-char (point-min))
                 (let ((pos (progn (search-forward "only ever uses one") (match-beginning 0))))
-                  (should (eq 'highlight (get-text-property pos 'mouse-face)))
+                  (should-not (get-text-property pos 'mouse-face))
                   (should (equal body-help (get-text-property pos 'help-echo)))
+                  (goto-char (point-min))
+                  (search-forward "●")
+                  (should (eq 'highlight (get-text-property (match-beginning 0) 'mouse-face)))
+                  (should (equal thread-help (get-text-property (match-beginning 0) 'help-echo)))
                   (let ((change-review-ui-read-function reader))
                     (call-interactively #'harness-quote-reply)))
                 (should (equal (harness-test-comment-quoted

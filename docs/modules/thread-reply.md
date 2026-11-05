@@ -59,7 +59,6 @@ is only the corrections of the turn that runs.
 - `session/hint` ([session](session.md))
 - `session/nodes` ([session](session.md))
 - `task/for-session` ([tasks](tasks.md)), when it is loaded
-- `tools/list` ([tools](tools.md))
 
 ### Events it handles
 

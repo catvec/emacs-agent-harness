@@ -4647,6 +4647,13 @@ first line ends with a link to it."
           ;; The markers and the data are not text.
           (should-not (string-search "answer in a thread block" text))
           (should-not (string-search "[thread" text))
+          ;; Only the card's headers show the quote target under the mouse;
+          ;; the quote below them does not light up whole.
+          (let ((header (harness-ui-chat-test-find buf "↩ agent's message" (harness-chat-block-start block)))
+                (quote (harness-ui-chat-test-find buf "The deploy is pending." (harness-chat-block-start block))))
+            (should (get-text-property header 'mouse-face))
+            ;; The find gives the place after the words: the last one is theirs.
+            (should-not (get-text-property (1- quote) 'mouse-face)))
           ;; The thread's link opens the review at it.
           (let ((link (harness-ui-chat-test-find buf "thread t-3f2a1b09" (harness-chat-block-start block))))
             (should (equal "harness:thread/t-3f2a1b09" (get-text-property (1- link) 'harness-url))))
@@ -11180,9 +11187,14 @@ order the calls ran; a group is one target, as its summary is one line."
                          (format "> Your earlier call of read_file (harness:session/%s/message/%s):"
                                  sid id))))
           (should pos)
-          ;; The group is marked as one target, with the one affordance.
-          (should (eq 'harness-quote-target-face (get-text-property pos 'mouse-face)))
-          (should (string-match-p "\\`C-c > replies" (get-text-property pos 'help-echo)))
+          ;; The group is marked as one target, with the one affordance on
+          ;; its first line -- the sender line -- while its summary says
+          ;; what C-c > does without flashing.
+          (let ((start (marker-position (harness-chat-group-start group))))
+            (should (eq 'harness-quote-target-face (get-text-property start 'mouse-face)))
+            (should (string-match-p "\\`C-c > replies" (get-text-property start 'help-echo))))
+          (should (functionp (get-text-property (1- pos) 'harness-quote-target)))
+          (should (string-match-p "\\`C-c > replies" (get-text-property (1- pos) 'help-echo)))
           (should (string-match-p (concat "^" (regexp-quote (funcall header "c1")) "$") text))
           (should (string-match-p (concat "^" (regexp-quote (funcall header "c2")) "$") text))
           (should (< (string-search (funcall header "c1") text)
@@ -11220,7 +11232,9 @@ message the card is in."
 (ert-deftest harness-ui-chat-marks-the-targets-it-quotes ()
   "A message is marked as the one kind of quote target: the shared hover
 face, a tooltip naming C-c >, and the function that says what quoting it
-quotes.  The card of a reply in a thread is marked the same way."
+quotes.  Only its first line shows the face: the body of a long message
+does not flash whole.  The card of a reply in a thread is marked the
+same way."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
@@ -11228,10 +11242,18 @@ quotes.  The card of a reply in a thread is marked the same way."
       (harness-call 'session/append sid '(:kind user :content "Good."))
       (harness-test-wait (lambda () (harness-ui-chat-test-find buf "The build is green.")) 5 "the message")
       (with-current-buffer buf
-        (let ((pos (1- (harness-ui-chat-test-find buf "The build is green."))))
-          (should (functionp (get-text-property pos 'harness-quote-target)))
-          (should (eq 'harness-quote-target-face (get-text-property pos 'mouse-face)))
-          (should (string-match-p "\\`C-c > replies" (get-text-property pos 'help-echo))))
+        (let* ((block (car (harness-ui-chat-test-blocks buf "assistant")))
+               (head (harness-ui-chat-test-find buf "Agent" (harness-chat-block-start block)))
+               (body (1- (harness-ui-chat-test-find buf "The build is green."))))
+          (should head)
+          ;; The header shows the target under the mouse.
+          (should (functionp (get-text-property (1- head) 'harness-quote-target)))
+          (should (eq 'harness-quote-target-face (get-text-property (1- head) 'mouse-face)))
+          (should (string-match-p "\\`C-c > replies" (get-text-property (1- head) 'help-echo)))
+          ;; The body is the target too, without the highlight.
+          (should (functionp (get-text-property body 'harness-quote-target)))
+          (should-not (get-text-property body 'mouse-face))
+          (should (string-match-p "\\`C-c > replies" (get-text-property body 'help-echo))))
         ;; A reply's card in the box is a target too, and what it quotes.
         (harness-compose-add-thread
          (list (list :kind "chat" :who "agent" :text "The build is green.")))
