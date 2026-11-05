@@ -17,27 +17,41 @@
   '(:kind "chat" :node "n-1" :who "agent" :from 4 :to 22 :text "The build is green.")
   "A reference to a part of a message of the agent's.")
 
+(defconst harness-thread-test--link "harness:message/n-1"
+  "The link to the node of `harness-thread-test--chat', which names no session.")
+
+(defconst harness-thread-test--header
+  (format "Your earlier message (%s):" harness-thread-test--link)
+  "The line that opens the quote of `harness-thread-test--chat'.")
+
+(defconst harness-thread-test--quoted-good
+  (concat "> " harness-thread-test--header "\n>\n> The build is green.\n\nGood.")
+  "The text of a reply, \"Good.\", to `harness-thread-test--chat'.")
+
 (defconst harness-thread-test--diff
   '(:kind "diff" :file "lisp/a.el" :side "new" :line 18 :end 19 :revision "0123456789abcdef"
     :text "(setq a18 'eighteen)\n(setq a19 19)")
   "A reference to two lines of a diff.")
 
 (ert-deftest harness-thread-quotes-the-references-the-way-a-mail-does ()
-  "The text of a reply is the quote of each reference, with a header for
-what is not the agent's own words, a blank line between two, the response, and
-the thread's marker once the thread is a comment in a review."
+  "The text of a reply is the quote of each reference, with a header that says
+where it is from and links the message, a blank line between two, the
+response, and the thread's marker once the thread is a comment in a review."
   (let ((data (list :refs (list harness-thread-test--chat) :response "Good.")))
-    (should (equal "> The build is green.\n\nGood." (harness-thread-text data)))
-    (should (equal "> The build is green.\n\nGood.\n\n[thread t-1a2b: answer with review_comment]"
+    (should (equal (concat "> " harness-thread-test--header "\n>\n> The build is green.\n\nGood.")
+                   (harness-thread-text data)))
+    (should (equal (concat "> " harness-thread-test--header
+                           "\n>\n> The build is green.\n\nGood.\n\n[thread t-1a2b: answer with review_comment]")
                    (harness-thread-text (append data (list :id "t-1a2b"))))))
   ;; Several references: a quote each, and a multi-line quote line by line.
-  (should (equal "> One.\n>\n> More.\n\n> Two.\n\nAll good."
+  (should (equal (concat "> Your earlier message (harness:message/n-1):\n>\n> One.\n>\n> More.\n\n"
+                         "> Your earlier message (harness:message/n-2):\n>\n> Two.\n\nAll good.")
                  (harness-thread-text
                   (list :refs (list '(:kind "chat" :node "n-1" :who "agent" :text "One.\n\nMore.")
                                     '(:kind "chat" :node "n-2" :who "agent" :text "Two."))
                         :response "All good."))))
   ;; The user's own message, a diff and a buffer say where they are from.
-  (should (equal "> My earlier message:\n>\n> Check it.\n\nDone."
+  (should (equal "> My earlier message (harness:message/n-3):\n>\n> Check it.\n\nDone."
                  (harness-thread-text (list :refs '((:kind "chat" :node "n-3" :who "you" :text "Check it."))
                                             :response "Done."))))
   (should (equal (concat "> In lisp/a.el, lines 18-19 (after the change, at 01234567):\n>\n"
@@ -50,6 +64,43 @@ the thread's marker once the thread is a comment in a review."
                  (harness-thread-text (list :refs '((:kind "diff" :file "a.el" :side "old" :line 7 :text "x"))
                                             :response "Why?")))))
 
+(ert-deftest harness-thread-quote-links-the-message-it-quotes ()
+  "A quote of the chat names the message it is of, with the canonical link.
+The model reads the message again by it, a message from before a compaction
+too, and the agent's own words are no exception: the id of the node was in
+the reference, but never reached the model.  The link names the session when
+the reference does, else it is to a message of the session the reply is sent in."
+  (let ((ref (append harness-thread-test--chat '(:session "s-1f2e"))))
+    (should (equal "harness:session/s-1f2e/message/n-1" (harness-thread-ref-link ref)))
+    (should (equal (list :kind 'message :session "s-1f2e" :message "n-1")
+                   (harness-links-parse (harness-thread-ref-link ref))))
+    (should (equal "Your earlier message (harness:session/s-1f2e/message/n-1):" (harness-thread-ref-header ref)))
+    ;; In the text, quoted with the words: a reader that takes the quote
+    ;; apart finds it whole.
+    (should (equal (concat "> Your earlier message (harness:session/s-1f2e/message/n-1):\n>\n"
+                           "> The build is green.\n\nGood.")
+                   (harness-thread-text (list :refs (list ref) :response "Good.")))))
+  (should (equal "harness:message/n-1" (harness-thread-ref-link harness-thread-test--chat)))
+  ;; Whose words they are, the model's own or the user's.
+  (dolist (case '(("agent" nil "Your earlier message") ("agent" "thinking" "Your earlier thinking")
+                  ("plan" nil "Your earlier plan") ("thread" nil "Your earlier answer in a thread")
+                  ("report" nil "Your earlier report") ("tool" "bash" "Your earlier call of bash")
+                  ("tool" nil "Your earlier tool call") ("message" nil "An earlier message")
+                  ("you" nil "My earlier message") ("user" nil "My earlier message")))
+    (pcase-let ((`(,who ,label ,owner) case))
+      (should (equal (format "%s (harness:message/n-9):" owner)
+                     (harness-thread-ref-header
+                      (append (list :kind "chat" :node "n-9" :who who :text "x")
+                              (and label (list :label label))))))))
+  ;; Nothing to link: a diff, a buffer, a reference that names no node.  The
+  ;; header is what it was: nothing for the agent's words, the user's own message.
+  (should-not (harness-thread-ref-link harness-thread-test--diff))
+  (should-not (harness-thread-ref-link '(:kind "buffer" :name "notes" :node "n-1" :text "todo")))
+  (should-not (harness-thread-ref-link '(:kind "chat" :who "agent" :text "x")))
+  (should-not (harness-thread-ref-link '(:kind "chat" :node "" :who "agent" :text "x")))
+  (should-not (harness-thread-ref-header '(:kind "chat" :who "agent" :text "x")))
+  (should (equal "My earlier message:" (harness-thread-ref-header '(:kind "chat" :who "you" :text "x")))))
+
 (ert-deftest harness-thread-makes-a-block-of-its-data ()
   "The block's text is the whole reply and its data is kept to draw it from;
 the response can come with the data or after it.  Whatever a JSON array parsed
@@ -58,7 +109,7 @@ as is a list, and a key without a value is not kept."
          (data (plist-get block :thread)))
     (should (harness-thread-block-p block))
     (should (equal "text" (plist-get block :type)))
-    (should (equal "> The build is green.\n\nGood." (plist-get block :text)))
+    (should (equal harness-thread-test--quoted-good (plist-get block :text)))
     (should (equal "Good." (harness-thread-response block)))
     (should (equal "Good." (plist-get data :response)))
     (should-not (plist-member data :id)))
@@ -76,9 +127,9 @@ as is a list, and a key without a value is not kept."
 paragraph apart, so a quote starts a line; a message of plain text is
 unchanged and keeps no `:blocks'."
   (let ((reply (harness-thread-block (list :refs (list harness-thread-test--chat)) "Good.")))
-    (should (equal "Intro\n\n> The build is green.\n\nGood."
+    (should (equal (concat "Intro\n\n" harness-thread-test--quoted-good)
                    (harness-blocks-text (list (list :type "text" :text "Intro") reply))))
-    (should (equal "> The build is green.\n\nGood." (harness-blocks-text (list reply))))
+    (should (equal harness-thread-test--quoted-good (harness-blocks-text (list reply))))
     (should-not (harness-blocks-only-text-p (list reply)))
     (should (harness-blocks-only-text-p (list (list :type "text" :text "Intro"))))))
 
@@ -90,7 +141,7 @@ message shows as the node it will be."
          (blocks (harness-attachments-to-blocks (list att))))
     (should (equal (list (harness-thread-block (plist-get att :thread) "Good.")) blocks))
     (let ((node (harness-queued-message-node (list :id "q-1" :text "Intro" :attachments (list att)))))
-      (should (equal "Intro\n\n> The build is green.\n\nGood." (plist-get node :content)))
+      (should (equal (concat "Intro\n\n" harness-thread-test--quoted-good) (plist-get node :content)))
       (should (equal blocks (cl-remove-if-not #'harness-thread-block-p (plist-get node :blocks)))))))
 
 (ert-deftest harness-thread-block-comes-over-acp ()
@@ -100,7 +151,7 @@ response make the block, as the compose box's attachment does."
          (block (harness-acp--block-from-acp
                  (list :type "text" :text "Good." :_harness (list :thread data)))))
     (should (equal (harness-thread-block data "Good.") block))
-    (should (equal "> The build is green.\n\nGood." (plist-get block :text))))
+    (should (equal harness-thread-test--quoted-good (plist-get block :text))))
   ;; A plain text block is still one.
   (should (equal '(:type "text" :text "words") (harness-acp--block-from-acp '(:type "text" :text "words"))))
   ;; And it survives the JSON between the processes.
@@ -112,6 +163,18 @@ response make the block, as the compose box's attachment does."
     (should (= 2 (length (harness-thread-refs (plist-get block :thread)))))
     (should (equal "chat" (harness-thread-ref-kind (car (harness-thread-refs (plist-get block :thread))))))
     (should (equal 18 (plist-get (cadr (harness-thread-refs (plist-get block :thread))) :line)))))
+
+(ert-deftest harness-thread-every-quote-is-a-headed-block-quote ()
+  "A message of the chat, a review comment and a report quote the same way:
+a line that says what it is and links it, then the words as a block quote.
+What differs is what the header says, never how the quote is made."
+  (dolist (ref (list harness-thread-test--chat
+                     '(:kind "comment" :author "Noah" :file "a.el" :line 2
+                       :task "t-1" :thread "t-2" :text "Why two?")
+                     '(:kind "report" :who "report" :task "t-1" :text "# Done\n\nFixed.")))
+    (ert-info ((format "%s" (harness-thread-ref-kind ref)))
+      (let ((quote (harness-thread-quote (list :refs (list ref)))))
+        (should (string-match-p "\\`> [^\n]+:\n>\n> " quote))))))
 
 (provide 'harness-thread-test)
 ;;; harness-thread-test.el ends here

@@ -2000,13 +2000,42 @@ The mouse selects it.")
 
 (defun change-review-ui--selectable (text)
   "Return TEXT, a thread drawn, with the mouse's keys on its comments' text.
-They are those of `change-review-ui-text-map'."
-  (let ((text (copy-sequence text)) (pos 0))
-    (while (and (< pos (length text))
-                (setq pos (text-property-not-all pos (length text) 'change-review-body nil text)))
-      (let ((to (next-single-property-change pos 'change-review-body text (length text))))
+They are those of `change-review-ui-text-map'.  The text of a thread is a
+quotable target too: it shows `highlight' under the mouse, as a message
+of a chat or a report does, and says what C-c > does there."
+  (let ((text (copy-sequence text)) (pos 0)
+        (length (length text)))
+    (while (and (< pos length)
+                (setq pos (text-property-not-all pos length 'change-review-body nil text)))
+      (let ((to (next-single-property-change pos 'change-review-body text length)))
         (add-text-properties pos to (list 'keymap change-review-ui-text-map 'pointer 'text) text)
         (setq pos to)))
+    ;; The text of a thread is the header, each comment's own lines, and the
+    ;; newlines and bars between: a run of it says what it is by
+    ;; `change-review-body', the comment text, or not, the thread's own.  A
+    ;; button's mark stays its own, so the runs end where any of them does.
+    (let ((pos 0))
+      (while (< pos length)
+        (if (null (get-text-property pos 'change-review-thread text))
+            (setq pos (or (next-single-property-change pos 'change-review-thread text length)
+                          length))
+          (let ((next (min (or (next-single-property-change pos 'change-review-thread text length)
+                               length)
+                           (or (next-single-property-change pos 'change-review-body text length)
+                               length)
+                           (or (next-single-property-change pos 'mouse-face text length)
+                               length)
+                           (or (next-single-property-change pos 'help-echo text length)
+                               length))))
+            (unless (get-text-property pos 'mouse-face text)
+              (put-text-property pos next 'mouse-face 'highlight text))
+            (unless (get-text-property pos 'help-echo text)
+              (put-text-property pos next 'help-echo
+                                 (if (get-text-property pos 'change-review-body text)
+                                     "C-c > replies to this comment, quoting it"
+                                   "C-c > replies to this thread")
+                                 text))
+            (setq pos next)))))
     text))
 
 (defun change-review-ui--mark-selection (text selection)
@@ -3325,7 +3354,9 @@ threads drawn as `change-review-ui-thread-string' draws it in the
 threads view, a blank line after each.  The text carries the ids of its
 threads and comments, so the commands of this library, such as
 `change-review-ui-reply' and `change-review-ui-toggle-status', find
-the thread or the comment at point in the buffer that shows it.
+the thread or the comment at point in the buffer that shows it.  Its
+comments' text is the mouse's to select, and a thread a quotable
+target (`change-review-ui--selectable').
 
 FILTER is `open', `closed', `all', `unreviewed' (the closed threads
 that wait for the user's review) or `reviewed' (the threads the user
@@ -3346,7 +3377,8 @@ when given, is a function of a thread that says how it is folded, as
 drawn whole, as the threads view draws them."
   (let ((groups (change-review-threads-by-file set filter))
         (width (or width (change-review-ui-current-width))))
-    (if (null groups)
+    (change-review-ui--selectable
+     (if (null groups)
         (propertize (concat indent
                             (or empty (pcase filter
                                         ('open "No open threads.")
@@ -3374,7 +3406,7 @@ drawn whole, as the threads view draws them."
                           :buttons buttons)
                          "\n"))
                threads "")))))
-       groups ""))))
+       groups "")))))
 
 (defun change-review-ui--screen-row ()
   "Return the row of the selected window point is on, 0 being its top row.

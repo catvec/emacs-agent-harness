@@ -6156,6 +6156,7 @@ thread at the current difference."
                     set two "Because the first pass needs a placeholder."
                     :author bot :sent (float-time)))
            (thread (harness-ui-patch-review-test--thread-of review two))
+           first-quote draft-quote
            (calls nil)
            (reader (lambda (prompt initial callback &optional point)
                      (push (list prompt initial point) calls)
@@ -6187,14 +6188,26 @@ thread at the current difference."
           (goto-char (point-min))
           (let ((change-review-ui-read-function reader))
             (call-interactively #'harness-ui-patch-review-thread-reply)))
-        (should (equal "> only ever uses one\n\nI see."
+        (setq first-quote (harness-test-comment-quoted
+                           "only ever uses one" "Noah" "a.el:2" id
+                           (change-review-thread-id thread)))
+        (should (equal (concat first-quote "I see.")
                        (change-review-comment-body (change-review-thread-last-comment thread))))
+        ;; The draft keeps the header and the link, and quotes as any
+        ;; comment: its words, which are a quote and an answer, under the
+        ;; line that says whose it is.
+        (setq draft-quote
+              (harness-test-comment-quoted
+               (concat first-quote "I see.")
+               (change-review-author-label
+                (change-review-comment-author (change-review-thread-last-comment thread)))
+               "a.el:2" id (change-review-thread-id thread)))
         (should (equal (change-review-comment-id two)
                        (change-review-comment-reply-to (change-review-thread-last-comment thread))))
         (should (change-review-comment-draft-p (change-review-thread-last-comment thread)))
         (pcase-let ((`(,prompt ,initial ,point) (car calls)))
           (should (string-match-p "\\`Reply to Noah's comment 1/2 on a\\.el:2" prompt))
-          (should (equal "> only ever uses one\n\n" initial))
+          (should (equal first-quote initial))
           (should (eq 'end point)))
         ;; With nothing selected: the last comment of the thread, whole.
         (change-review-ui-flush)
@@ -6204,7 +6217,7 @@ thread at the current difference."
           (let ((change-review-ui-read-function (lambda (_p initial _callback &optional _point)
                                                   (push initial calls))))
             (call-interactively #'harness-ui-patch-review-thread-reply)))
-        (should (equal "> > only ever uses one\n>\n> I see.\n\n" (car calls)))
+        (should (equal draft-quote (car calls)))
         ;; The control panel quotes the last comment of the thread at the current
         ;; difference, which is on line 2.
         (with-current-buffer control
@@ -6214,7 +6227,7 @@ thread at the current difference."
             (call-interactively #'harness-ui-patch-review-quote-reply)))
         (pcase-let ((`(,prompt ,initial ,point) (car calls)))
           (should (string-match-p "\\`Reply to Noah's comment 3/3" prompt))
-          (should (equal "> > only ever uses one\n>\n> I see.\n\n" initial))
+          (should (equal draft-quote initial))
           (should (eq 'end point)))
         (ignore answer)
         ;; What is selected in a version is what the control panel quotes, as what
@@ -6230,13 +6243,77 @@ thread at the current difference."
               (call-interactively #'harness-ui-patch-review-quote-reply)))
           (pcase-let ((`(,prompt ,initial ,point) (car calls)))
             (should (string-match-p "\\`Reply to Claude's comment 2/" prompt))
-            (should (equal "> Because\n\n" initial))
+            (should (equal (harness-test-comment-quoted
+                            "Because" "Claude" "a.el:2" id
+                            (change-review-thread-id thread))
+                           initial))
             (should (eq 'end point)))
           (should-not (with-current-buffer new (change-review-ui--overlay-selection))))
         ;; The second difference has no thread: nothing to quote.
         (with-current-buffer control
           (ediff-next-difference)
           (should-error (call-interactively #'harness-ui-patch-review-quote-reply) :type 'user-error)
+          (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
+(ert-deftest harness-ui-patch-review-marks-the-comments-it-quotes ()
+  "Every comment the review draws is marked as a quotable target, as a chat's
+message or a report is: `highlight' under the mouse and a help that says
+what C-c > does there.  Under a line of Ediff the comment's text and the
+header of its thread carry the mark; in the threads view the comment C-c >
+quotes does too, and says what it quotes -- the whole comment, with the
+header and link of its thread."
+  (harness-ui-patch-review-test-with-task
+    (let* ((harness-ui-patch-review-ediff-tree nil)
+           (popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (comment (harness-ui-patch-review-test--comment-on
+                     review "a.el" '(:new . 2) "Why two? The loop only ever uses one."))
+           (thread (harness-ui-patch-review-test--thread-of review comment))
+           (calls nil)
+           (reader (lambda (_prompt initial callback &optional _point)
+                     (push initial calls)
+                     (funcall callback (concat initial "Fine."))))
+           (body-help "C-c > replies to this comment, quoting it")
+           (thread-help "C-c > replies to this thread")
+           (marked (lambda (string text help)
+                     (let ((pos (string-search text string)))
+                       (should pos)
+                       (should (eq 'highlight (get-text-property pos 'mouse-face string)))
+                       (should (equal help (get-text-property pos 'help-echo string)))))))
+      (ignore popout comment)
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (new (nth 2 (harness-ui-patch-review--ediff-buffers review))))
+        ;; Under the line of a version: the comment's text is the mouse's,
+        ;; and the header of its thread says that C-c > there replies to the
+        ;; thread, its last comment whole.
+        (let ((drawn (with-current-buffer new
+                       (mapconcat (lambda (overlay) (or (overlay-get overlay 'after-string) ""))
+                                  (overlays-in (point-min) (point-max)) ""))))
+          (funcall marked drawn "only ever uses one" body-help)
+          (funcall marked drawn "●" thread-help))
+        ;; The threads view: the same mark, and C-c > on the comment quotes
+        ;; it in its thread, as under the line.
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-threads))
+        (let ((view (cl-find-if (lambda (buffer)
+                                  (eq 'change-review-threads-mode (buffer-local-value 'major-mode buffer)))
+                                (buffer-list))))
+          (should view)
+          (unwind-protect
+              (with-current-buffer view
+                (should (eq #'harness-quote-reply (key-binding (kbd "C-c >"))))
+                (goto-char (point-min))
+                (let ((pos (progn (search-forward "only ever uses one") (match-beginning 0))))
+                  (should (eq 'highlight (get-text-property pos 'mouse-face)))
+                  (should (equal body-help (get-text-property pos 'help-echo)))
+                  (let ((change-review-ui-read-function reader))
+                    (call-interactively #'harness-quote-reply)))
+                (should (equal (harness-test-comment-quoted
+                                "Why two? The loop only ever uses one."
+                                "Noah" "a.el:2" id (change-review-thread-id thread))
+                               (car calls))))
+            (kill-buffer view)))
+        (with-current-buffer control
           (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
 ;;;; Self-contained

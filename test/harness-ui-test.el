@@ -565,7 +565,7 @@ module leaves the entry out, so the menu is unharmed."
       (should (string-match-p "C-c C-a +Attach file or task" text))
       ;; Pasting is C-y; C-c C-v is the review banner's [Verify].
       (should (string-match-p "C-y +Paste; an image attaches" text))
-      (should (string-match-p "C-c > +Reply in a thread; C-u quotes" text))
+      (should (string-match-p "C-c > +Reply in a thread" text))
       ;; A key of a panel above the box, which types there, and the box's own M-< and M->.
       (should (string-match-p "C-c \\. +A key of the panel above, from the box" text))
       (should (string-match-p "M-< +Top of the box, then the buffer" text))

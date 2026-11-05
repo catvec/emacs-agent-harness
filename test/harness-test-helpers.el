@@ -718,5 +718,42 @@ link a `mouse-2' (`mouse-1-click-follows-link'), then the keymaps at POS."
         (push `(,(intern (format "%smouse-%d" prefix n)) ,posn ,@click-count) events)))
     (execute-kbd-macro (vconcat (nreverse events)))))
 
+;;;; Quotes
+
+(defun harness-test-quote-header (node session &optional who)
+  "Return the header line of the quote of NODE, a message of SESSION, by WHO.
+WHO is \"you\" for the user's own message, \"plan\", \"thinking\" or
+\"thread\" for those of the agent's; every other is the agent's message.  The header
+says whose words they are and links the message
+\(`harness-thread-ref-header')."
+  (format "%s (harness:session/%s/message/%s):"
+          (pcase who
+            ("you" "My earlier message")
+            ("plan" "Your earlier plan")
+            ("thinking" "Your earlier thinking")
+            ("thread" "Your earlier answer in a thread")
+            (_ "Your earlier message"))
+          session node))
+
+(defun harness-test-quoted (text node session &optional who)
+  "Return TEXT, a message NODE of SESSION by WHO, quoted as the chat quotes it.
+That is its header, the line that links it, and the words as a block
+quote, with the blank line a quote in the box ends with."
+  (concat "> " (harness-test-quote-header node session who) "\n>\n"
+          (harness-thread-quote-lines text) "\n\n"))
+
+(defun harness-test-comment-quoted (text author place task thread)
+  "Return TEXT, a review comment by AUTHOR on PLACE, quoted by C-c >.
+TASK and THREAD name the review the comment is in; PLACE reads
+\"a.el:2\", the file and lines it was made on."
+  (concat "> "
+          (format "%s's comment%s (%s):"
+                  author
+                  (if place (concat " on " place) "")
+                  (harness-links-thread-url task thread))
+          "\n>\n"
+          (harness-thread-quote-lines text)
+          "\n\n"))
+
 (provide 'harness-test-helpers)
 ;;; harness-test-helpers.el ends here

@@ -19,11 +19,13 @@ major mode, then `harness-compose-insert` wherever it draws the box
 
   - multi-line editing: RET and C-j insert a newline, a placeholder
     shows while the box is empty;
-  - quoting to reply: C-c > quotes the region, or the message at
-    point, in the box as Markdown, point under it for the reply, with
-    the compose-quote library; in a quote in the box M-RET splits it,
-    to answer the part above, and C-c [ elides part of it as [...]
-    (a chat's C-c > starts a thread instead, its C-u C-c > quotes);
+  - replying to a quote: C-c > always replies in a thread, the same
+    everywhere -- a card in the box for each region replied to, what
+    it is and the part quoted, the reply typed under it.  No prefix
+    argument quotes in the box instead.  A prompt is not a reply:
+    `harness-prompt-region` in the box is the library's Markdown
+    quote, where a quote can be split with M-RET and elided with
+    C-c [ as [...];
   - replies in threads: a card in the box for each region replied to,
     what it is and the part of it quoted, with the words of the reply
     typed under it, in the same box (see the Threads section).  A
@@ -106,6 +108,10 @@ prompt blocks with `harness-compose-attachment-block`.
 
 ## Provides
 
+### Hooks
+
+- `harness-quote-target-functions` — Functions that say what C-c > quotes at point, or in a region.
+
 ### Commands
 
 - `harness-compose-add-attachment` — Attach the file PATH (with MIME) to the next message.
@@ -130,6 +136,7 @@ prompt blocks with `harness-compose-attachment-block`.
 - `harness-compose-toggle-reply` — Switch between your own message and the reply under a card.
 - `harness-compose-yank` — Attach the image or the files on the clipboard, else yank text.
 - `harness-compose-yank-pop` — Swap the media just yanked for an earlier capture of the media ring.
+- `harness-quote-reply` — Reply to the quotable target at point, or to every target the region covers.
 
 ### Options
 

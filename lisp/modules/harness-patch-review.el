@@ -64,9 +64,10 @@
 ;; its feedback as text.  The first time a task's set is made, the
 ;; comments quoted in those rounds become closed threads of the set, with
 ;; ids that follow from where they were, so that they are made once.  A
-;; reply written inline, under a quote of the agent's own words (the
-;; compose box's `C-u C-c >'), keeps that quote above its text: "silence"
-;; says nothing without the line it answers.
+;; reply written inline, under a quote of the agent's own words (what a
+;; compose box's C-c > made before every reply was a thread), keeps that
+;; quote above its text: "silence" says nothing without the line it
+;; answers.
 ;;
 ;; THE THREADS STARTED IN THE CHAT.  The compose box's `C-c >' starts a
 ;; thread on purpose: the region it replies to -- a part of a message,
@@ -548,10 +549,11 @@ that is a comment in a thread, the comment is what the reply follows."
   "Return what the comment of the thread DATA says: the quotes, then the response.
 The lines of a diff the thread is on are its location, which the review
 shows with the thread: only the words a person would not find there are
-quoted."
+quoted.  A person reads the comment, so the quotes have no links to the
+messages they are of: the agent reads those in the reply itself."
   (let ((quoted (cl-remove-if (lambda (ref) (equal (harness-thread-ref-kind ref) "diff"))
                               (harness-thread-refs data))))
-    (harness-thread-text (list :refs quoted :response (plist-get data :response)))))
+    (harness-thread-text (list :refs quoted :response (plist-get data :response)) t)))
 
 (defun harness-patch-review--thread-location (data)
   "Return the location in the diff the thread DATA is on, or nil.

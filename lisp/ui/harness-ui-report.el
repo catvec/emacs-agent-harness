@@ -555,13 +555,54 @@ in the chat; an id in what shows as code stays as it is."
                                        #'harness-ui-markdown-code-at-p))
   (unless (bolp) (insert "\n")))
 
+(defun harness-ui-report--ref (text &optional task)
+  "Return the reference to TEXT, what TASK's report says, for a quote.
+TASK is the report's task by default
+\(`harness-ui-report--task'): the reference names it, so its quote links
+to the report the task handed in; the session is kept for a view that
+has no task."
+  (let ((task (or task harness-ui-report--task)))
+    (list :kind "report" :who "report" :label "hand-in report" :text text
+          :task (plist-get task :id) :session (plist-get task :session))))
+
 (defun harness-ui-report--insert-message (text)
   "Insert TEXT, a message the session wrote in Markdown, rendered.
-\\[compose-quote-reply] on it quotes TEXT whole, as written,
-wherever it shows: the popout, or the banner of the task's session."
-  (let ((start (point)))
+C-c > on it quotes TEXT whole, as written, with the header and link of
+the report; wherever it shows: the popout, or the banner of the task's
+session."
+  (let ((start (point))
+        ;; The text may be read in another buffer, the chat's banner say:
+        ;; the reference keeps the task it is of.
+        (task harness-ui-report--task))
     (harness-ui-report--insert-markdown text)
-    (put-text-property start (point) 'compose-quote text)))
+    (put-text-property start (point) 'compose-quote text)
+    (harness-quote--mark
+     start (point)
+     (lambda (beg end)
+       (let* ((selected (string-trim (buffer-substring-no-properties beg end)))
+              ;; The message whole quotes as it was written: what is
+              ;; drawn loses the markers of a heading, faces alone.
+              (whole (equal (harness-quote--target-run beg) (cons beg end))))
+         (list (harness-ui-report--ref (if (or whole (string-empty-p selected))
+                                           text selected)
+                                       task))))
+     "C-c > replies to the report, in a thread")))
+
+(defun harness-ui-report--quote-target (beg end)
+  "Return the references C-c > quotes from BEG to END in a report popout.
+A region quotes the text it selects, under the name of the report and its
+lines; without one the report's summary is quoted, as its box does."
+  (cond
+   ((and (> end beg) (not (harness-compose-in-p beg)))
+    (let ((text (string-trim (buffer-substring-no-properties beg end))))
+      (unless (string-blank-p text)
+        (list (list :kind "buffer" :name (buffer-name)
+                    :line (save-excursion (goto-char beg) (line-number-at-pos))
+                    :end (save-excursion (goto-char end) (line-number-at-pos))
+                    :text text)))))
+   (t
+    (when-let* ((summary (harness-ui-report--quote)))
+      (list (harness-ui-report--ref summary))))))
 
 (defun harness-ui-report--quote ()
   "Return the message this popout's report shows, to quote, or nil.
@@ -802,10 +843,19 @@ box's placeholder."
   "Return the hint of this popout's empty box."
   (or (cdr harness-ui-report--box) "Message…"))
 
+(defun harness-ui-report--quote-reply (refs)
+  "Reply to REFS in a thread, a card in the box of the report popout.
+A review comment the report draws is the review's to reply to: the view
+that draws its threads answers it before this does
+\(`harness-quote-handler-function')."
+  (harness-quote-default-handler refs))
+
 (defun harness-ui-report--insert-buffer (task)
   "Insert TASK's report in the current popout, and name it in its header."
   (harness-ui-report--insert task)
-  (setq-local compose-quote-function #'harness-ui-report--quote)
+  (setq-local compose-quote-function #'harness-ui-report--quote
+              harness-quote-target-functions (list #'harness-ui-report--quote-target)
+              harness-quote-handler-function #'harness-ui-report--quote-reply)
   (force-mode-line-update))
 
 ;;;; In the session

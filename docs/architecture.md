@@ -1150,8 +1150,9 @@ TEXT)` (`harness-attachments-to-blocks`).
 Where a reply is a comment of a review is the patch-review module's; the
 `<thread>` form in the words, and sending a malformed reply back, is the
 thread-reply module's (see patch-review, thread-reply, tools-review).
-The chat starts a thread with `C-c >`
-(`harness-chat-thread-reply`): the transcript says what a region of it is,
+The chat replies with `C-c >` (`harness-chat-thread-reply`, which is
+`harness-quote-reply` here: the buffer's handler is
+`harness-chat--quote-reply`): the transcript says what a region of it is,
 so the command reads that, not the words.  Every block of text is marked
 with its node (`harness-chat-node`), the text of a message with which part
 of the node it is (`harness-chat-part`) and, a block at a time, where in
@@ -1162,6 +1163,13 @@ selected and, when it reads the same in the source as drawn, where that
 stands in the node's words (`harness-chat--block-ref`); several nodes are
 several refs, in order.  Without a region the node point is on, whole, or
 from the box the agent's last message (`harness-chat--default-refs`).
+Every block is a quote target of its own, marked when it is rendered
+(`harness-chat--render-block`), and a card of a reply in a thread is a
+target inside it (`harness-chat--mark-thread-cards`): C-c > on the card
+quotes what the card quotes, not the message around it.  A group of tool
+calls quotes every call folded under it (`harness-chat--group-refs`,
+from the calls' nodes, their drawing hidden), and the report a task
+handed in is a reference of its own, quoted as any other in a thread.
 In Ediff's versions of a file in a review the same key is
 `harness-ui-patch-review-thread-reply`: the ref is the file, the side
 (whichever of the two buffers it is), the lines and the review's revision
@@ -8837,8 +8845,9 @@ whose strict syntax it reads, and the correction of a malformed reply;
   round's time, against the commit the round names (`(at SHA)`), with
   ids that follow from the task, the round and the comment's place in
   it, so that reading the rounds again adds nothing.  A reply written
-  inline, under a quote of the agent's own words (the compose box's
-  `C-c >`), keeps the quote above its text as a block quote
+  inline, under a quote of the agent's own words (what a compose box's
+  `C-c >` made before every reply was a thread), keeps the quote above
+  its text as a block quote
   (`harness-patch-review--reply-text`, from the `:prose` the reply
   format returns): "silence" says nothing without the line it answers.
   A paragraph that is only a rule (`---`, `***`, `___`, `===`), typed to
@@ -12002,7 +12011,7 @@ follows (`answering you: “...”`, from the result's `:meta` `:parent`)
 and the thread's status, then the words rendered as the agent's, on no
 tool background, and under the fold the call's input and output.  It is a
 message of the agent's for the jumps (`M-n`, `M-p`: kind `thread` in
-`harness-chat--message-kinds`, not an action), `C-c C-w` and `C-u C-c >`
+`harness-chat--message-kinds`, not an action), `C-c C-w` and `C-c >`
 (`harness-chat--block-markdown` reads its `:body`).  A message of the
 user's that holds replies in threads draws each as the card it was in
 the box, and the words under it as far in as the card, under the
@@ -13008,15 +13017,55 @@ sends them as `harness-compose-attachment-block` makes a message's, an
 image with its bytes, and the harness hands them to the model with the
 answer (see `question/answer`).
 
-Quoting to reply is the `compose-quote` library's (lisp/vendor/compose-quote;
-see Vendored libraries), which knows nothing of the harness: the box is
-only the composition it quotes into.  `C-c >` in the box's keymap is
-`compose-quote-reply`; it puts what a reply answers in the box as a
-Markdown quote, its lines after "> ", with point under it, a blank line
-apart (`compose-quote-insert`, `compose-quote-string`).
-`harness-compose-setup` makes its buffer a quoting one
+QUOTABLE TARGETS.  `C-c >` is one command in every view,
+`harness-quote-reply`: it finds what can be quoted at point, or
+everything the region covers, and replies to it.  A view says what its
+quotable text is with the text property `harness-quote-target`, whose
+value is a function of the part selected (BEG and END) returning
+references (`harness-thread-block`); a view whose quotable text is not
+all of its text -- lines of a diff, the evidence of a report, a comment
+drawn under a line -- adds a function to its buffer-local
+`harness-quote-target-functions` (an abnormal hook) instead.  Both are
+resolved by `harness-quote-targets`, in that order and then in the
+order of the region; only when neither finds anything does the command
+say "Nothing to reply here".  The mark draws the one affordance
+everywhere (`harness-quote--mark`): `harness-quote-target-face` under
+the mouse, which inherits `highlight`, and a `help-echo` that names the
+key.  A button or a link keeps the mouse face and the help it has of
+its own, so a target never hides what it is drawn over.
+
+The quote is one too: `harness-thread-quote` makes it, the header
+`harness-thread-ref-header` and the link `harness-thread-ref-link` of
+each reference, then its words as a block quote.  A chat message's
+header names whose words they are and links the node
+(harness:session/ID/message/NODE, or harness:message/NODE for a reply
+sent in the session); a review comment's names its author, the file and
+lines it was made on and the thread (harness:task/TASK/thread/THREAD);
+a report's names the task and links it (harness:task/TASK); a diff's or
+a buffer's says the file and the lines.  What replies, and how, is the
+view's (`harness-quote-handler-function`): a chat starts a thread on
+the references (`harness-compose-add-thread`), a review comments in the
+thread as a draft (`change-review-ui-reply-to-comment`), a report
+popout, a task board or any other box starts a thread in the compose
+box (`harness-quote-default-handler`).  Every reply is a thread: there
+is no prefix argument, and no reply is a Markdown quote in the box.
+The marked targets are, in the chat, every
+block of the transcript and every card of a reply in a thread, the
+summary of a group of tool calls (which quotes every call folded under
+it) and the cards in the box; in the report, its summary; in a review,
+the comments of its threads wherever it draws them, the lines of a
+version Ediff compares and the thread at the current difference of the
+control panel; in the library's threads view, every comment.
+
+`harness-compose-setup` makes a box a quoting one
 (`harness-compose--setup-quoting`, which turns `compose-quote-mode` on)
-by setting what the library asks of a host:
+by setting what the `compose-quote` library (lisp/vendor/compose-quote;
+see Vendored libraries) asks of a host.  The library quotes a region in
+the box as Markdown, which a prompt uses (`harness-prompt-region`,
+`C-c h >`) and which a card's quote is edited like; it is no reply and
+`harness-quote-reply` does not fall back to it: a target it finds none
+of says "Nothing to reply here".  The library knows nothing of the
+harness: the box is only the composition it quotes into.
 
 - `compose-quote-area-function` is `harness-compose--quote-area`, the
   box as the composition: (START END FRONT), the box's text and FRONT,
@@ -13031,16 +13080,18 @@ by setting what the library asks of a host:
   from the label line above the block, code spans their backticks,
   links their `[label](url)`, bullets their `-` and the quote bar its
   `>`, while invisible text -- a folded block's body -- is left out.
-- Without a region the message at point is quoted whole, as written, at
-  point in the box or else at its end.  Which message that is the host
-  says: text it marks with a `compose-quote` property, a string, is
-  quoted as that Markdown (a report's summary carries it,
-  `harness-ui-report--insert-message`, into the chat's review banner
-  too), and elsewhere the buffer-local `compose-quote-function` returns
-  it -- the chat's `harness-chat--quote-at-point` the response, plan or
-  thinking point is on, else the nearest response or plan above point,
-  so the last one from the box; a report popout's
-  `harness-ui-report--quote` its summary.
+- Without a region `compose-quote-reply` quotes the message at point
+  whole, as written, at point in the box or else at its end.  Which
+  message that is the host says: text it marks with a `compose-quote`
+  property, a string, is quoted as that Markdown (a report's summary
+  carries it, `harness-ui-report--insert-message`, into the chat's
+  review banner too), and elsewhere the buffer-local
+  `compose-quote-function` returns it -- the chat's
+  `harness-chat--quote-at-point` the response, plan or thinking point is
+  on, else the nearest response or plan above point, so the last one
+  from the box; a report popout's `harness-ui-report--quote` its
+  summary.  A prompt in a box is this command's; C-c > is the marked
+  targets'.
 - A chat's message comes with the thread it answers
   (`harness-chat--quote-markdown`): an answer that quotes nothing itself
   is quoted with the message it answers nested under it, one `>` level
@@ -13055,10 +13106,10 @@ by setting what the library asks of a host:
   any message of its is, without the nesting: the replies of that thread
   are kept together by the review, not by the quote, and a reply in a
   thread to it is a comment in the same thread
-  (`harness-patch-review--register-thread`).  In a chat `C-c >` is not
-  this command but starts a thread (`harness-chat-thread-reply`, a remap
-  of `compose-quote-reply` in `harness-chat-mode-map`); `C-u C-c >`, and
-  a region in the box, call the library's command.
+  (`harness-patch-review--register-thread`).  In a chat `C-c >` is
+  `harness-quote-reply`, whose handler starts a thread; a prefix
+  argument changes nothing, and a region in the box is no reply target:
+  the prompt's quote, `C-c h >`, is the library's where it is.
 - `compose-quote-insert-hook` has `harness-compose--quoted` on it in the
   box's buffer: the box may be out of sight, so it counts a jump
   (`harness-compose--jumps`), which makes its windows follow it again,
@@ -13067,11 +13118,11 @@ by setting what the library asks of a host:
 Answering inline: `compose-quote-mode` also keeps `compose-quote-inline-mode`
 on while point is in a quote in the box, and off elsewhere (on
 `post-command-hook`).  A quote is a run of lines of the box that start
-with `>`, so one typed or pasted in counts as much as one `C-c >` put
-there, and a `>` line of the transcript never does.  In a quote `M-RET`
-(`compose-quote-split`) splits it where point is -- the part above, an
-empty line for the answer to it, the part below -- and `C-c [`
-(`compose-quote-elide`) replaces the region, or the rest of the
+with `>`, so one typed or pasted in counts as much as a prompt's
+`C-c h >` put there, and a `>` line of the transcript never does.  In a
+quote `M-RET` (`compose-quote-split`) splits it where point is -- the
+part above, an empty line for the answer to it, the part below -- and
+`C-c [` (`compose-quote-elide`) replaces the region, or the rest of the
 paragraph from point (with a prefix argument, the rest of the quote),
 with `[...]` (`compose-quote-elision`), so a bit of front matter stays
 for context.  Both are edits of the box's text, one undo each, and what
@@ -13244,8 +13295,10 @@ Prompting with the region: `harness-prompt-region` (`C-c h >`, bound in
 `harness-ui-map` when the chat module is ready, and `>` in the harness
 menu; autoloaded) starts a message with the active region of any buffer,
 not only a harness one.  In a buffer with a live compose box -- a chat,
-the board, a popout -- it is `harness-compose-quote-reply` of the
-region.  Anywhere else the text goes into the box of the newest session
+the board, a popout -- it is `compose-quote-reply` of the region: a
+Markdown quote, a prompt rather than a reply (`C-c >`, which always
+starts a thread, is no prompt).  Anywhere else the text goes into the
+box of the newest session
 of the buffer's project (`harness-chat--project-sessions`; with a prefix
 argument one chosen among them or a new one,
 `harness-chat--read-prompt-session`; a project with no session gets one
@@ -13257,7 +13310,7 @@ lines, or the buffer's name --, then the text, in a fenced code block in
 the buffer's language (`harness-chat--code-language`; the fence longer
 than any run of backticks in the text) when the buffer is a `prog-mode`
 or `conf-mode` one, otherwise as a Markdown quote
-(`harness-compose-quote-string`).  Blank lines around the text are left
+(`compose-quote-string`).  Blank lines around the text are left
 out, and the lines named are those of what is left.  The chat is shown
 and selected, the text appended to the box under a draft, a blank line
 apart, with another blank line after it and point there, ready for the
@@ -15374,10 +15427,26 @@ with no version has no turn to measure, and every reviewed close counts as
 this turn's.  The filter is the library's, so the report, the banner, the
 threads view and the diff view all have it, the same and in one place.
 
-QUOTE REPLY.  C-c > (`change-review-ui-quote-reply`) answers a comment as
-a mail does: a reply, a draft in the thread, that starts with part of the
-comment quoted -- `> ` before each line, as `compose-quote-string` makes a
-quote of the session's box -- point under it.  What is quoted is what is
+QUOTE REPLY.  In the views the harness draws the review in -- the report,
+its banner in the task's session, the tree and the versions of an Ediff,
+the threads view -- C-c > is `harness-quote-reply`, as everywhere: the
+comment at point, or in the region, is a reference of kind `comment`
+(`harness-ui-patch-review--comment-ref`, which names its author, the
+file, the side and the lines, the task and the thread), and
+`harness-thread-quote` makes the quote, the line that says whose comment
+it is and links the thread first, then the words.  The handler
+(`harness-ui-patch-review--quote-reply`) reads the reply as a draft in
+that comment's thread (`change-review-ui-reply-to-comment`), so it goes
+with the feedback; a selection of more than one thread says so rather
+than choose.  The buffers the review draws its threads in compose their
+handler with the one they had (`harness-ui-patch-review--quote-handler`),
+so a comment wins over the report or message it is drawn in and
+everything else replies with that one's handler.  The library's own
+`change-review-ui-quote-reply` answers a comment the way its own views
+did, and its selection mechanics are what reads the part of a comment
+selected.  It answers a comment as a mail does: a reply, a draft in the
+thread, that starts with part of the comment quoted -- `> ` before each
+line -- point under it.  What is quoted is what is
 selected, read back as the text of the comment and not as it is drawn: the
 drawing wraps the text under a bar between a header and the lines that say
 where it was made, so each line the text is drawn on says where in the

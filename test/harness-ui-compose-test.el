@@ -327,7 +327,10 @@ from there as the block of that reply; queued, it is the same block."
       (should (equal "Why?" (plist-get block :text)))
       (should (equal (list harness-ui-compose-test--ref) (plist-get (plist-get (plist-get block :_harness) :thread) :refs)))
       (should (harness-thread-block-p read))
-      (should (equal "> The build is green.\n> The deploy is pending.\n\nWhy?" (plist-get read :text)))
+      ;; With the link to the message it quotes, which the model reads it by.
+      (should (equal (concat "> Your earlier message (harness:message/n-1):\n>\n"
+                             "> The build is green.\n> The deploy is pending.\n\nWhy?")
+                     (plist-get read :text)))
       (should (equal (list read) (harness-agent-attachments-to-blocks atts))))))
 
 (ert-deftest harness-ui-compose-thread-comes-back-into-the-box ()
@@ -2192,13 +2195,15 @@ lists the project's files alone, reads them from it, and marks no candidate."
 ;;;; Quoting
 
 (defun harness-ui-compose-test--quote (&optional from to)
-  "Type C-c > with the region from FROM to TO, when given; return the box's text.
-The key goes through the command loop, as typed."
+  "Run `compose-quote-reply' on the region FROM to TO; return the box's text.
+That is the library's quote, which a prompt uses in a box
+\(`harness-prompt-region'); the box's own C-c > starts a thread.
+The region is the command's, as typed."
   (when from
     (setq-local transient-mark-mode t)
     (goto-char to)
     (push-mark from t t))
-  (execute-kbd-macro (kbd "C-c >"))
+  (call-interactively #'compose-quote-reply)
   (harness-compose-text))
 
 (ert-deftest harness-ui-compose-quote-string ()
@@ -2208,14 +2213,48 @@ quote stays one block.  Indentation stays, as code needs."
   (should (equal "> one\n>\n>   two" (compose-quote-string "\n \none  \n\t\n  two\n\n")))
   (should (equal "> one" (compose-quote-string "one"))))
 
-(ert-deftest harness-ui-compose-quote-reply-quotes-the-region ()
-  "C-c > quotes the region in the box, as Markdown, point under the quote.
-The quote follows what the box holds, a blank line apart, and a blank
-line follows it, so what is typed next is the reply.  Point jumps into
-the box, which its windows follow.  A region reaching into the box
-quotes its part above the box; one in the box becomes a quote in place."
+(ert-deftest harness-ui-compose-quote-reply-starts-a-thread ()
+  "C-c > replies in a thread: a card in the box, never a Markdown quote.
+The box's host names the target (`harness-quote-target-functions'), the
+card quotes it as `harness-thread-quote' does, and the words typed under
+it are the reply the message carries.  A box with nothing to reply to
+says so with the one message."
   (harness-ui-compose-test-with
-    (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
+    (should (eq 'harness-quote-reply (key-binding (kbd "C-c >"))))
+    (should-error (harness-quote-reply) :type 'user-error)
+    (setq-local harness-quote-target-functions
+                (lambda (_beg _end)
+                  (list (list :kind "chat" :who "agent" :node "n-1"
+                              :text (buffer-substring-no-properties
+                                     (line-beginning-position)
+                                     (line-end-position))))))
+    ;; "transcript", of "The transcript.\n".
+    (goto-char (+ (point-min) 4))
+    (execute-kbd-macro (kbd "C-c >"))
+    (should (= 1 (length harness-compose-attachments)))
+    (should (equal "\n[reply 1]\n" (harness-compose-text)))
+    (should-not (string-search "> " (harness-compose-text)))
+    (should (= (point) harness-compose-end))
+    (should (equal '("The transcript.")
+                   (mapcar (lambda (ref) (plist-get ref :text))
+                           (harness-thread-refs
+                            (plist-get (car harness-compose-attachments) :thread)))))
+    (execute-kbd-macro "Why?")
+    (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+      (should (equal "" text))
+      (should (= 1 (length atts)))
+      (should (equal "Why?" (plist-get (car atts) :response))))))
+
+(ert-deftest harness-ui-compose-quote-reply-quotes-the-region ()
+  "`compose-quote-reply', the library's, quotes the region in the box as Markdown.
+That is a prompt's quote, `harness-prompt-region' using it in a box; the
+box's C-c > starts a thread instead.  The quote follows what the box
+holds, a blank line apart, and a blank line follows it, so what is typed
+next is the reply.  Point jumps into the box, which its windows follow.
+A region reaching into the box quotes its part above the box; one in the
+box becomes a quote in place."
+  (harness-ui-compose-test-with
+    (should (eq 'harness-quote-reply (key-binding (kbd "C-c >"))))
     (let ((jumps harness-compose--jumps))
       ;; "transcript", of "The transcript.\n".
       (should (equal "> transcript\n\n" (harness-ui-compose-test--quote (+ (point-min) 4) (+ (point-min) 14))))
@@ -2236,10 +2275,12 @@ quotes its part above the box; one in the box becomes a quote in place."
     (should (equal "The transcript.\n" (harness-ui-compose-test--transcript)))))
 
 (ert-deftest harness-ui-compose-quote-reply-without-a-region ()
-  "Without a region C-c > quotes the message at point, whole, as written.
-Text marked with a `compose-quote' property says which, else
-the host's `compose-quote-function'; with neither, nothing is
-quoted.  The quote goes at point in the box, else at its end."
+  "Without a region `compose-quote-reply' quotes the message at point, whole.
+That is the library's quote, which a prompt uses in a box; the box's
+C-c > starts a thread instead.  Text marked with a `compose-quote'
+property says which message, else the host's `compose-quote-function';
+with neither, nothing is quoted.  The quote goes at point in the box,
+else at its end."
   (harness-ui-compose-test-with
     (goto-char (point-min))
     (should-error (compose-quote-reply) :type 'user-error)
@@ -2287,10 +2328,11 @@ They are the key sequences `harness-compose-map' binds, as vectors, and
 
 (ert-deftest harness-ui-compose-quote-inline-mode-follows-point ()
   "The inline mode is on while point is in a quote in the box, and off elsewhere.
-\\`C-c >' quotes two lines into the box.  Point moving up into the quote
-turns `compose-quote-inline-mode' on, which binds \\`M-RET' and \\`C-c ['
-and leaves every other key of the box as it was; out of it, onto the
-empty line under the quote or into the transcript, it is off.  A line of
+`compose-quote-reply' quotes two lines into the box.  Point moving up
+into the quote turns `compose-quote-inline-mode' on, which binds
+\\`M-RET' and \\`C-c [' and leaves every other key of the box as it was;
+out of it, onto the empty line under the quote or into the transcript,
+it is off.  A line of
 the read-only transcript that starts with \">\" is not a quote of the
 box: the mode stays off there."
   (harness-ui-compose-test-with
@@ -2314,7 +2356,7 @@ box: the mode stays off there."
     (should compose-quote-inline-mode)
     (should (eq 'compose-quote-split (key-binding (kbd "M-RET"))))
     (should (eq 'compose-quote-elide (key-binding (kbd "C-c ["))))
-    (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
+    (should (eq 'harness-quote-reply (key-binding (kbd "C-c >"))))
     (harness-ui-compose-test--keys "C-p")
     (should compose-quote-inline-mode)
     ;; Up into the transcript.
@@ -2406,11 +2448,13 @@ region the rest of the paragraph.  Undo brings the text back, each time."
 
 (ert-deftest harness-ui-compose-quote-keeps-the-names-it-had ()
   "The box quotes with the library; the names it quoted with remain as aliases.
-\\`C-c >' is `compose-quote-reply', which `harness-compose-quote-reply' now
-names, as `harness-compose-quote-string' names `compose-quote-string'
-and `harness-compose-quote-function' `compose-quote-function'."
+\\`C-c >' is `harness-quote-reply', the one reply of every view, which
+starts a thread; the box's library quote is `compose-quote-reply'.
+`harness-compose-quote-reply' names `compose-quote-reply', as
+`harness-compose-quote-string' names `compose-quote-string' and
+`harness-compose-quote-function' `compose-quote-function'."
   (harness-ui-compose-test-with
-    (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
+    (should (eq 'harness-quote-reply (key-binding (kbd "C-c >"))))
     (should (eq (indirect-function 'compose-quote-reply)
                 (indirect-function 'harness-compose-quote-reply)))
     (should (eq (indirect-function 'compose-quote-string)

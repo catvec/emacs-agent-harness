@@ -3148,6 +3148,24 @@ subject: \"1 tool call: Read file x.el\"."
                                    :help "Show or hide the individual tool calls")
              "\n")))))
 
+(defun harness-chat--mark-thread-cards (text)
+  "Mark each card of a reply in a thread in TEXT as a quote target of its own.
+The card already says which reference each of its lines is of
+\(`harness-thread-ref'); C-c > on one quotes what the card quotes, with
+the card's own header and link, not the message the card is in."
+  (let ((pos 0)
+        (length (length text)))
+    (while (< pos length)
+      (let* ((next (or (next-single-property-change pos 'harness-thread-ref text length) length))
+             (ref (get-text-property pos 'harness-thread-ref text)))
+        (when ref
+          (harness-quote--mark pos next
+                               (lambda (_from _to) (list ref))
+                               "C-c > replies to what this card quotes, in a thread"
+                               text))
+        (setq pos next))))
+  text)
+
 (defun harness-chat--render-block (block)
   "Return the full text of BLOCK: its body, then the separator newline."
   (let* ((kind (harness-chat-block-kind block))
@@ -3180,6 +3198,16 @@ subject: \"1 tool call: Read file x.el\"."
     (add-text-properties 0 (length text)
                          (list 'harness-chat-node (harness-chat-block-id block) 'read-only t 'rear-nonsticky t)
                          text)
+    ;; The block is a quotable target whole, and each card of a reply in
+    ;; a thread in it is one of its own: C-c > on the card quotes what
+    ;; the card quotes, not the message around it (`harness-quote-reply').
+    (harness-quote--mark
+     0 (length text)
+     (lambda (from to)
+       (when-let* ((ref (harness-chat--block-ref block from to)))
+         (list ref)))
+     nil text)
+    (harness-chat--mark-thread-cards text)
     ;; A call that started a sub-agent opens its session from anywhere on
     ;; the block, not only from its session line: mouse-1 or RET on the
     ;; title, the input, the output.  Buttons keep their own keys.  The
@@ -3586,12 +3614,49 @@ it folds into their group with them."
   "Return how many of the blocks IDS are coalescable tool calls."
   (cl-count-if #'harness-chat--coalescable-block-p ids))
 
+(defun harness-chat--call-ref (block)
+  "Return the reference to BLOCK, a tool call, read from its node.
+The words are what the call's fold says it was: its title, what it was
+given and what it returned.  A call folded into a group has no text of
+the buffer to read, its drawing hidden."
+  (let* ((node (harness-chat-block-node block))
+         (who (harness-chat--block-who block))
+         (title (harness-ui-tool-title-string (plist-get node :tool) (plist-get node :title) 120))
+         (input (plist-get node :input))
+         (line (and input (harness-chat--input-summary input title)))
+         (output (string-trim (or (plist-get (harness-chat-block-result block) :output) "")))
+         (text (string-trim (string-join (delq nil (list title line output)) "\n"))))
+    (append (list :kind "chat" :node (harness-chat-block-id block) :who (car who))
+            (and (stringp harness-ui-session-id) (not (string-empty-p harness-ui-session-id))
+                 (list :session harness-ui-session-id))
+            (and (cdr who) (list :label (cdr who)))
+            (list :text (harness-chat--limit-quote text)))))
+
+(defun harness-chat--group-refs (group)
+  "Return the references of the calls folded under GROUP, whole, in order.
+C-c > on the group's summary quotes each of them, as a reply to one tool
+call quotes that call.  They are read from their nodes: a group hides
+the drawing of its calls."
+  (let (refs)
+    (dolist (block (harness-chat--group-calls group))
+      (when-let* ((start (marker-position (harness-chat-block-start block)))
+                  (end (marker-position (harness-chat-block-end block))))
+        (push (or (harness-chat--block-ref block start end)
+                  (harness-chat--call-ref block))
+              refs)))
+    (nreverse refs)))
+
 (defun harness-chat--group-text (group)
   "Return the summary text of GROUP followed by its separator newline."
   (let ((text (concat (harness-chat--with-display (harness-chat--render-group group)) "\n")))
     (add-text-properties 0 (length text)
                          (list 'harness-chat-group (harness-chat-group-id group) 'read-only t 'rear-nonsticky t)
                          text)
+    (harness-quote--mark
+     0 (length text)
+     (lambda (_from _to) (harness-chat--group-refs group))
+     "C-c > replies to these tool calls, in a thread"
+     text)
     text))
 
 (defun harness-chat--fold-member-head (block)
@@ -4565,7 +4630,7 @@ as the box binds it, with the example of a panel's key after it, as the
 tooltips of the task board's box and a popout's name it.  Attaching
 takes a task as well as a file (task:ID)."
   (concat "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, "
-          "C-c C-a attaches a file or task, C-c > quotes, "
+          "C-c C-a attaches a file or task, C-c > replies in a thread, "
           (harness-compose-panel-keys) " KEY: a key of the panel above"))
 
 ;;;; The threads of the review, in place of the box
@@ -6680,7 +6745,8 @@ that is drawn."
 
 (defun harness-chat--block-ref (block from to)
   "Return the reference to the text of BLOCK from FROM to TO, or nil for none.
-A plist (`harness-thread-block'): the node, who wrote it, the part of it
+A plist (`harness-thread-block'): the node and the session it is in, who
+wrote it, the part of it
 \(`harness-chat-part') and, when the renderer marked it, where in the
 node's words that stands -- narrowed to the words themselves when they
 read the same in the source as on the screen -- and the words, as
@@ -6701,14 +6767,44 @@ that says there is more, which a message replied to as it is has."
                   (harness-ui-markdown-source from to))))
          (part (car (car runs)))
          ;; Where the drawn words stand in the words says nothing of all of them.
-         (span (and (not whole) (harness-chat--source-span runs))))
+         (span (and (not whole) (harness-chat--source-span runs)))
+         (all-runs (harness-chat--part-runs
+                    (marker-position (harness-chat-block-start block))
+                    (marker-position (harness-chat-block-end block))))
+         ;; The whole run of PART the selection is in, and whether it is
+         ;; the whole of it: a message selected whole quotes as it was
+         ;; written, what is drawn losing the markers of emphasis, which
+         ;; are faces alone (`harness-ui-markdown-source'), and an answer
+         ;; with the message it answers under it, as in the box
+         ;; (`harness-chat--quote-markdown').
+         (run (cl-find-if (lambda (one)
+                            (and (equal (nth 0 one) part)
+                                 (< (nth 1 one) to)
+                                 (< from (nth 2 one))))
+                          all-runs))
+         (whole-run (and run (<= from (nth 1 run)) (<= (nth 2 run) to)))
+         (nested (and whole-run
+                      (or (member (harness-chat-block-kind block) '("assistant" "plan"))
+                          (harness-chat--thread-message-p block))
+                      (harness-chat--quote-markdown block))))
     (when (equal part "content")
       (let* ((source (harness-chat--message-text block))
+             (whole (and whole-run span (stringp source)
+                         (= (car span) 0) (= (cdr span) (length source))))
              (hit (and span (string-search text source (car span)))))
-        (when (and hit (<= (+ hit (length text)) (cdr span)))
-          (setq span (cons hit (+ hit (length text)))))))
+        ;; A message selected whole quotes as it was written.
+        (cond (whole (setq text (string-trim source)))
+              ((and hit (<= (+ hit (length text)) (cdr span)))
+               (setq span (cons hit (+ hit (length text))))))))
+    (when nested
+      (setq text (string-trim nested)))
     (unless (string-empty-p text)
+      ;; The session is in it so that the model has a link back to the
+      ;; message (`harness-thread-ref-link'), also when it was quoted from
+      ;; a part of the conversation the model no longer holds.
       (append (list :kind "chat" :node (harness-chat-block-id block) :who (car who))
+              (and (stringp harness-ui-session-id) (not (string-empty-p harness-ui-session-id))
+                   (list :session harness-ui-session-id))
               (and (cdr who) (list :label (cdr who)))
               (and part (list :part part))
               (and span (list :from (car span) :to (cdr span)))
@@ -6763,7 +6859,46 @@ response, a plan, or its words in a thread."
                (list ref)))
         (harness-chat--quote-ref nil nil))))
 
-(defun harness-chat-thread-reply (&optional plain)
+(defun harness-chat--thread-refs-in (beg end)
+  "Return the references of the cards of replies in threads from BEG to END.
+Nil unless every word between is a card's or blank, so a region that
+reaches past a card quotes the message around it, not the card alone."
+  (let ((pos beg) refs (all t))
+    (while (< pos end)
+      (let ((next (min end (next-single-property-change pos 'harness-thread-ref nil end)))
+            (ref (get-text-property pos 'harness-thread-ref)))
+        (if ref
+            (cl-pushnew ref refs :test #'equal)
+          (unless (string-blank-p (buffer-substring-no-properties pos next)) (setq all nil)))
+        (setq pos next)))
+    (and all refs (nreverse refs))))
+
+(defun harness-chat--quote-target (beg end)
+  "Return the references C-c > quotes from BEG to END in this chat.
+A card of a reply in a thread, in the transcript or in the box, quotes
+what the card says; a region of the transcript the messages it covers;
+point on a message that message; from the box the agent's last.  A
+region in the box is the box's own to quote, and is left to the command."
+  (cond
+   ((and (harness-compose-in-p beg) (> end beg)) nil)
+   ((harness-compose-in-p beg)
+    (or (when-let* ((att (harness-compose--thread-at-point beg)))
+          (harness-thread-refs (plist-get att :thread)))
+        (harness-chat--default-refs)))
+   ((> end beg)
+    (or (harness-chat--thread-refs-in beg end)
+        (harness-chat--region-refs beg end)
+        (harness-chat--quote-ref beg end)))
+   (t (harness-chat--default-refs))))
+
+(defun harness-chat--quote-reply (refs)
+  "Reply to REFS in this chat: a card in the box, sent as a <thread>.
+A review comment drawn in the chat is the review's to reply to, not the
+chat's: the view that draws its threads says so
+\(`harness-quote-handler-function')."
+  (harness-compose-add-thread refs))
+
+(defun harness-chat-thread-reply ()
   "Start a reply in a thread to the region, or the message at point.
 What the region is from is read off the transcript, and the thread starts
 with that recorded: the region of one message is a reference to that
@@ -6771,35 +6906,19 @@ message and the part selected; a region across several messages is a
 reference to each, in order; the report a task handed in, drawn under
 the transcript, is a reference to the part selected of it.  Without a
 region the message point is on is replied to, whole; from the box the
-agent's last message.  A card in the compose box shows what the reply is
-to, and the words written under it are the reply: sent in a task's
-session it is a comment in a thread of the task's review, which the
-agent answers there.  Click a card to see the message it is to.
+agent's last message, or the target of the card point is on.  A card in
+the compose box shows what the reply is to, and the words written under
+it are the reply: sent in a task's session it is a comment in a thread
+of the task's review, which the agent answers there.  Click a card to
+see the message it is to.
 
-With a prefix argument PLAIN, a region in the box, or text that says what
-it is quoted as -- the report a task handed in, drawn under the
-transcript (`compose-quote') -- the region or the message is quoted in
-the box as Markdown instead, a block quote to answer inline
-\(`compose-quote-reply').  C-c > otherwise always starts a thread in a
-chat, wherever point is, the box included."
-  (interactive "P")
-  (cond
-   ((or plain
-        (and (use-region-p) (harness-compose-in-p (region-beginning))
-             (harness-compose-in-p (region-end)))
-        (get-text-property (if (use-region-p) (region-beginning) (point)) 'compose-quote))
-    (call-interactively #'compose-quote-reply))
-   (t
-    (let* ((in-box (harness-compose-in-p))
-           (region (and (use-region-p) (not in-box)))
-           (refs (if region
-                     (or (harness-chat--region-refs (region-beginning) (min (region-end) (harness-compose--front)))
-                         (harness-chat--quote-ref (region-beginning) (min (region-end) (harness-compose--front)))
-                         (user-error "Nothing to reply to in the selection"))
-                   (or (harness-chat--default-refs)
-                       (user-error "No message to reply to here")))))
-      (deactivate-mark)
-      (harness-compose-add-thread refs)))))
+The target and the quote are not the chat's own: C-c > is
+`harness-quote-reply' everywhere, which finds the quotable target, and
+`harness-thread-quote' quotes it, the same header and link in every
+view.  It always starts a thread; a Markdown quote in the box is no reply
+C-c > makes."
+  (interactive)
+  (harness-quote-reply))
 
 (defun harness-chat--find-quote (start end ref)
   "Return (FROM . TO), where the text of REF stands between START and END.
@@ -6929,10 +7048,10 @@ session at all."
 ;;;; Prompting with the region
 
 ;; The region of any buffer starts a message.  In a buffer with a compose
-;; box it is quoted there, as `harness-compose-quote-reply' does.  In any
-;; other it is put, with where it comes from, in the box of the newest
-;; session of the buffer's project -- or of a new one -- which opens for
-;; the request.
+;; box it is quoted there, as `compose-quote-reply' does -- Markdown, a
+;; prompt, not a reply.  In any other it is put, with where it comes
+;; from, in the box of the newest session of the buffer's project -- or
+;; of a new one -- which opens for the request.
 
 (defun harness-chat--code-language (&optional mode)
   "Return the Markdown language tag of major mode MODE, default `major-mode'.
@@ -6989,7 +7108,7 @@ text are left out; the lines named are those of what is left."
               "\n\n"
               (if (derived-mode-p 'prog-mode 'conf-mode)
                   (harness-chat--fence text (harness-chat--code-language))
-                (harness-compose-quote-string text))))))
+                (compose-quote-string text))))))
 
 (defun harness-chat--prompt-labels (sessions)
   "Return (LABEL . SESSION) for each of SESSIONS, the labels all different.
@@ -7038,7 +7157,7 @@ yet."
   "Prompt a session with the region: start a message in its box with it.
 The region of any buffer will do.  In one with a compose box -- a chat,
 the task board, a popout -- it is quoted there, as
-\\[harness-compose-quote-reply] does.  In any other buffer the box of the
+\\[compose-quote-reply] does.  In any other buffer the box of the
 newest session of the buffer's project gets it, as the start of a
 message: a line saying where it comes from -- the file and its lines, or
 the buffer's name -- and the text, in a fenced code block when the
@@ -7053,7 +7172,7 @@ or a new one."
   (unless (use-region-p)
     (user-error "Select the text to prompt with first"))
   (if (harness-compose-live-p)
-      (harness-compose-quote-reply (region-beginning) (region-end))
+      (compose-quote-reply (region-beginning) (region-end))
     (let* ((root (harness-chat--project-root default-directory))
            (text (harness-chat--region-prompt (region-beginning) (region-end) root))
            (sessions (harness-chat--project-sessions root))
@@ -7194,7 +7313,10 @@ a new one."
   (define-key map (kbd "C-M-p") #'harness-chat-previous-action)
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
   ;; C-c > is compose-quote's, a minor mode's, whose key outranks this
-  ;; map's: replying here starts a thread, which the remap leads to.
+  ;; map's: replying here starts a thread, which the remap leads to.  The
+  ;; key is bound here too, for where the minor mode is not on (the menu
+  ;; reads the map alone).
+  (define-key map (kbd "C-c >") #'harness-chat-thread-reply)
   (define-key map [remap compose-quote-reply] #'harness-chat-thread-reply)
   ;; Links, to point at a message, a tool call or the session.
   (define-key map (kbd "C-c C-l") #'harness-chat-copy-link)
@@ -7242,12 +7364,13 @@ to see the message it is to.
 The box then has a line for a message of your own above the card, and
 \\<harness-compose-map>\\[harness-compose-toggle-reply] moves point out of the reply to it, and back into the reply;
 what is typed from outside the box goes to the one written in last.
-\\<harness-chat-mode-map>\\[universal-argument] \\[harness-chat-thread-reply] quotes the region or the message in the box instead, as
-Markdown, to answer a quote inline, part by part: in a quote in the box,
-\\<compose-quote-inline-mode-map>\\[compose-quote-split] splits it where point is, to answer that part, and
+The reply is always a thread: \\[harness-chat-thread-reply] never writes a
+\"> \" quote in the box, the card being the one form.  A card's quote can
+be edited (\\[harness-compose-edit-thread]): in it,
+\\<compose-quote-inline-mode-map>\\[compose-quote-split] splits the quote where point is, to answer that part, and
 \\[compose-quote-elide] elides the region, or the rest of the paragraph, as [...].
-\\<harness-chat-mode-map>\\[harness-prompt-region] does the same for the region, here and in any
-other buffer, where it opens the box of the project's newest session
+\\<harness-chat-mode-map>\\[harness-prompt-region] puts a region in the box as a prompt, here and in
+any other buffer, where it opens the box of the project's newest session
 with the text and where it comes from.
 
 \\[harness-compose-add-attachment] attaches a file, or a task as task:ID.  The attachment
@@ -7301,6 +7424,8 @@ the id of a session written in a message is a link to it.
                          :redraw #'harness-chat--render-tail
                          :bottom t)
   (setq-local compose-quote-function #'harness-chat--quote-at-point
+              harness-quote-target-functions (list #'harness-chat--quote-target)
+              harness-quote-handler-function #'harness-chat--quote-reply
               harness-compose-thread-open-function #'harness-chat--open-thread
               harness-compose-commands (mapcar #'car harness-chat-commands)
               harness-ui-markdown-thread-function #'harness-chat--render-thread-tag
@@ -7330,7 +7455,7 @@ the id of a session written in a message is a link to it.
         (". s" "Send a queued message now" harness-chat-send-queued)
         ("C-c C-a" "Attach file or task" harness-compose-add-attachment)
         ("C-y" "Paste; an image attaches" harness-compose-yank)
-        ("C-c >" "Reply in a thread; C-u quotes" harness-chat-thread-reply)
+        ("C-c >" "Reply in a thread" harness-chat-thread-reply)
         ("C-c T" "Threads of the hand-in, in place of the box" harness-chat-toggle-threads)
         ("C-c <" "Out of the reply to your message, and back" harness-compose-toggle-reply)
         ("M-RET" "Split a quote to answer inline" compose-quote-split)

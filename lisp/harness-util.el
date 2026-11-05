@@ -34,6 +34,8 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'json)
+;; How a link to a message reads, for the quote of one (`harness-thread-ref-link').
+(require 'harness-links)
 
 ;;;; JSON
 
@@ -1366,12 +1368,76 @@ came over JSON or was made here."
           ((and (integerp end) (> end line)) (format "%d-%d" line end))
           (t (format "%d" line)))))
 
-(defun harness-thread-ref-header (ref)
+(defun harness-thread-ref-link (ref)
+  "Return the canonical link to what REF quotes, or nil.
+Of the chat, the link of harness-links.el to the node REF names, in the
+session it was quoted from (`:session'):
+harness:session/ID/message/NODE.  The words of a message the model no
+longer holds -- a quote from before a compaction -- are a call away with
+it: NODE is the id the session tools read a message by.  A reference
+without the session is to a message of the session the reply is sent in,
+harness:message/NODE.  Of a comment in a review it is the link to its
+thread, harness:task/TASK/thread/THREAD; of the report a task handed in,
+the link to the task, harness:task/TASK.  Nil for a reference to a diff
+or a buffer, or one that names too little."
+  (let ((kind (harness-thread-ref-kind ref))
+        (node (plist-get ref :node))
+        (session (plist-get ref :session))
+        (task (plist-get ref :task))
+        (thread (plist-get ref :thread)))
+    (pcase kind
+      ("chat"
+       (when (and (stringp node) (not (string-empty-p node)))
+         (harness-links-message-url (and (stringp session) (not (string-empty-p session)) session) node)))
+      ("comment"
+       (when (and (stringp task) (not (string-empty-p task))
+                  (stringp thread) (not (string-empty-p thread)))
+         (harness-links-thread-url task thread)))
+      ("report"
+       (cond ((and (stringp task) (not (string-empty-p task))) (harness-links-task-url task))
+             ((and (stringp node) (not (string-empty-p node)))
+              (harness-links-message-url (and (stringp session) (not (string-empty-p session)) session) node)))))))
+
+(defun harness-thread-ref-place (ref)
+  "Return where REF is from, for the header of its quote, or nil.
+A comment says its file and lines; a diff does what `harness-thread-ref-header'
+says of it.  Nil when REF names no place."
+  (let ((lines (harness-thread-line-label ref))
+        (file (plist-get ref :file)))
+    (cond ((not (or lines file)) nil)
+          (file (format "%s%s" file (if lines (format ":%s" lines) "")))
+          (t (format "line%s %s" (if (and lines (string-search "-" lines)) "s" "") lines)))))
+
+(defun harness-thread-chat-owner (ref)
+  "Return whose words the chat REF quotes, as the model reads them.
+\"My earlier message\" is the user's; the others are the model's own, so
+they are \"Your\": the agent's message, its thinking, its plan, its
+answer in a thread, the report it handed in, a call of a tool.  A
+message the harness or another session sent is \"An earlier message\"."
+  (let ((label (plist-get ref :label)))
+    (pcase (format "%s" (plist-get ref :who))
+      ((or "you" "user") "My earlier message")
+      ("agent" (if (equal label "thinking") "Your earlier thinking" "Your earlier message"))
+      ("plan" "Your earlier plan")
+      ("thread" "Your earlier answer in a thread")
+      ("report" "Your earlier report")
+      ("tool" (if (stringp label) (format "Your earlier call of %s" label) "Your earlier tool call"))
+      (_ "An earlier message"))))
+
+(defun harness-thread-ref-header (ref &optional without-link)
   "Return the line that opens the quote of REF, a region's reference, or nil.
-The words of the agent need none: a quote says whose they are.  Anything
-else says where the quote is from, as the agent could not tell otherwise:
-the message of the user's own, the file and lines of a diff, a buffer."
-  (let ((lines (harness-thread-line-label ref)))
+It says where the quote is from, as the agent could not tell otherwise:
+the file and lines of a diff, a buffer, a comment in a review and the
+report a task handed in; and, for a part of the chat, whose words they
+are and the link to the message they are of (`harness-thread-ref-link'),
+which the model may read again by it -- the words of a message cut away
+by a compaction included.  A chat reference with no node to link to, or
+WITHOUT-LINK, a quote for a reader who has no use for the link, says
+nothing for the agent's own words, which a quote shows to be its own,
+and \"My earlier message:\" for the user's.  Every reference that names
+something has a header, so a quote reads the same wherever it is made."
+  (let ((lines (harness-thread-line-label ref))
+        (link (and (not without-link) (harness-thread-ref-link ref))))
     (pcase (harness-thread-ref-kind ref)
       ("diff"
        (let ((revision (and (plist-get ref :revision) (format "%s" (plist-get ref :revision)))))
@@ -1384,8 +1450,21 @@ the message of the user's own, the file and lines of a diff, a buffer."
        (format "In %s%s:"
                (or (plist-get ref :file) (plist-get ref :name) "a buffer")
                (if lines (format ", line%s %s" (if (string-search "-" lines) "s" "") lines) "")))
-      (_ (when (member (format "%s" (plist-get ref :who)) '("you" "user"))
-           "My earlier message:")))))
+      ("comment"
+       (let ((author (plist-get ref :author))
+             (place (harness-thread-ref-place ref)))
+         (format "%s%s%s:"
+                 (if (stringp author) (format "%s's comment" author) "A comment")
+                 (if place (format " on %s" place) "")
+                 (if link (format " (%s)" link) ""))))
+      ("report"
+       (if link
+           (format "%s (%s):" (harness-thread-chat-owner ref) link)
+         "Hand-in report:"))
+      (_ (if link
+             (format "%s (%s):" (harness-thread-chat-owner ref) link)
+           (when (member (format "%s" (plist-get ref :who)) '("you" "user"))
+             "My earlier message:"))))))
 
 (defun harness-thread-quote-lines (text)
   "Return TEXT as a block quote: \"> \" before each line, \">\" for a blank one."
@@ -1393,16 +1472,19 @@ the message of the user's own, the file and lines of a diff, a buffer."
              (split-string (string-trim-right (or text "") "[ \t\n]+") "\n")
              "\n"))
 
-(defun harness-thread-quote (data)
+(defun harness-thread-quote (data &optional without-links)
   "Return the quotes of the thread DATA's references, the way a mail quotes.
 Each reference is a block quote -- the line that says where it is from
 \(`harness-thread-ref-header') first, if it has one -- and a blank line
 parts two.  Every line of it starts with \">\": a reader that takes a
-reply apart, quotes and answers, finds the quote whole."
+reply apart, quotes and answers, finds the quote whole.  The model reads
+the quote with the links to the messages it is of; WITHOUT-LINKS leaves
+them out, for a reader who is a person (a comment in a review, the quote
+copied from a card)."
   (mapconcat (lambda (ref)
                (let ((text (plist-get ref :text)))
                  (harness-thread-quote-lines
-                  (string-join (delq nil (list (harness-thread-ref-header ref)
+                  (string-join (delq nil (list (harness-thread-ref-header ref without-links)
                                                (and (stringp text) (not (string-blank-p text)) text)))
                                "\n\n"))))
              (harness-thread-refs data) "\n\n"))
@@ -1416,12 +1498,14 @@ The quote as a block quote, then the words, as a mail keeps a reply."
                    (plist-get block :body)))
    "\n\n"))
 
-(defun harness-thread-text (data)
+(defun harness-thread-text (data &optional without-links)
   "Return the text of a reply in the thread DATA: quotes, response, marker.
-The marker line follows once the thread has an `:id'."
+The marker line follows once the thread has an `:id'.  The quotes have the
+links to the messages they are of, which the model reads; for a person
+WITHOUT-LINKS leaves them out (`harness-thread-quote')."
   (string-join
    (cl-remove-if #'string-empty-p
-                 (list (harness-thread-quote data)
+                 (list (harness-thread-quote data without-links)
                        (string-trim (let ((response (plist-get data :response))) (if (stringp response) response "")))
                        (if-let* ((id (plist-get data :id))) (harness-thread-marker id) "")))
    "\n\n"))

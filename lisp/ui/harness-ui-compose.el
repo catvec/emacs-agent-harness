@@ -9,11 +9,13 @@
 ;;
 ;;   - multi-line editing: RET and C-j insert a newline, a placeholder
 ;;     shows while the box is empty;
-;;   - quoting to reply: C-c > quotes the region, or the message at
-;;     point, in the box as Markdown, point under it for the reply, with
-;;     the compose-quote library; in a quote in the box M-RET splits it,
-;;     to answer the part above, and C-c [ elides part of it as [...]
-;;     (a chat's C-c > starts a thread instead, its C-u C-c > quotes);
+;;   - replying to a quote: C-c > always replies in a thread, the same
+;;     everywhere -- a card in the box for each region replied to, what
+;;     it is and the part quoted, the reply typed under it.  No prefix
+;;     argument quotes in the box instead.  A prompt is not a reply:
+;;     `harness-prompt-region' in the box is the library's Markdown
+;;     quote, where a quote can be split with M-RET and elided with
+;;     C-c [ as [...];
 ;;   - replies in threads: a card in the box for each region replied to,
 ;;     what it is and the part of it quoted, with the words of the reply
 ;;     typed under it, in the same box (see the Threads section).  A
@@ -248,12 +250,14 @@ the box with its project alone (`harness-compose-project-function').")
   (define-key map (kbd "C-j") #'harness-compose-newline)
   (define-key map (kbd "C-c C-a") #'harness-compose-add-attachment)
   ;; `>' is Markdown's quote, and C-c with a punctuation key is a major
-  ;; mode's to bind, the box's hosts all being major modes.  A host with
-  ;; threads replies in one, remapping `compose-quote-reply' (the chat
-  ;; does); a prefix argument quotes inline, as compose-quote does.  The
-  ;; key is compose-quote's in the box; bound here too, for a host that
-  ;; runs the box without the library.
-  (define-key map (kbd "C-c >") #'compose-quote-reply)
+  ;; mode's to bind, the box's hosts all being major modes.  C-c > is the
+  ;; harness's own command, which knows every quotable target
+  ;; (`harness-quote-reply') and replies in a thread; it never quotes
+  ;; inline in the box.  Compose-quote binds the key in its minor mode,
+  ;; which outranks this map: the remap leads it here, as it does in the
+  ;; chat.
+  (define-key map (kbd "C-c >") #'harness-quote-reply)
+  (define-key map [remap compose-quote-reply] #'harness-quote-reply)
   ;; `<' is `>''s other half: out of the reply `C-c >' started, to your own
   ;; message, and back into it.
   (define-key map (kbd "C-c <") #'harness-compose-toggle-reply)
@@ -1178,13 +1182,13 @@ where typing from outside the box does (`harness-compose--entry-point')."
 
 ;;;; Quoting
 
-;; C-c > quotes in the box, as Markdown, what the reply answers: the
-;; region, or else the message at point.  The compose-quote library does
-;; it, the box being the composition it quotes into
-;; (`harness-compose--quote-area'): its prompt is the front of it, so a
-;; region reaching in from above counts up to the prompt and is quoted at
-;; the box's end.  What the region selects above the box is read back
-;; into Markdown, the renderer undone, with `harness-ui-markdown-source'
+;; The box quotes with the compose-quote library, the box being the
+;; composition it quotes into (`harness-compose--quote-area'): a prompt
+;; (`harness-prompt-region', C-c h >) quotes the region in the box as
+;; Markdown, its prompt being the front of it, so a region reaching in
+;; from above counts up to the prompt and is quoted at the box's end.
+;; What the region selects above the box is read back into Markdown, the
+;; renderer undone, with `harness-ui-markdown-source'
 ;; (`compose-quote-source-function').  Which message is at point the host
 ;; says, as text it marks with a `compose-quote' property -- a string,
 ;; the Markdown the text was rendered from -- or, for the rest of the
@@ -1192,6 +1196,10 @@ where typing from outside the box does (`harness-compose--entry-point')."
 ;; library's inline mode answers it part by part: M-RET splits it where
 ;; point is, C-c [ elides part of it as [...].  That mode binds nothing
 ;; else, so the box's own keys work in a quote too.
+;;
+;; C-c > is not this: it replies in a thread everywhere
+;; (`harness-quote-reply'), a card in the box for the references, and no
+;; prefix argument quotes Markdown instead.
 
 (defun harness-compose--front ()
   "Return where the box starts, its prompt included."
@@ -1221,8 +1229,8 @@ The box may have been out of sight: its windows follow it again
   (add-hook 'compose-quote-insert-hook #'harness-compose--quoted nil t)
   ;; Its post-command tracking turns the inline mode on in a quote of the
   ;; box, and off elsewhere.  Its map binds C-c > to `compose-quote-reply',
-  ;; which a host with threads of its own remaps (`harness-chat-thread-reply'
-  ;; in a chat).
+  ;; which the harness's remap leads to `harness-quote-reply': the box's
+  ;; reply is a thread.
   (compose-quote-mode 1))
 
 ;; Quoting was the box's own once: the library's names took over.
@@ -2405,8 +2413,9 @@ sets it: the chat shows the message.")
 (defun harness-thread-ref-label (ref)
   "Return what the card of a thread says REF, a region's reference, is.
 Of a part of the chat that is who wrote it -- the agent's message, its
-plan, its answer in a thread, your own message, a call of a tool -- and of
-a diff or a buffer the file and its lines."
+plan, its answer in a thread, your own message, a call of a tool -- of a
+review comment its author and place, and of a diff or a buffer the file
+and its lines."
   (let ((lines (harness-thread-line-label ref)))
     (pcase (harness-thread-ref-kind ref)
       ("diff" (concat (or (plist-get ref :file) "the change")
@@ -2414,6 +2423,11 @@ a diff or a buffer the file and its lines."
                       (if (equal (format "%s" (plist-get ref :side)) "old") " (before)" " (after)")))
       ("buffer" (concat (or (plist-get ref :file) (plist-get ref :name) "buffer")
                         (and lines (concat ":" lines))))
+      ("comment"
+       (let ((place (harness-thread-ref-place ref))
+             (author (plist-get ref :author)))
+         (concat (if (stringp author) (format "%s's comment" author) "review comment")
+                 (and place (concat " on " place)))))
       (_ (let ((label (plist-get ref :label)))
            (pcase (format "%s" (plist-get ref :who))
              ("agent" "agent's message")
@@ -2741,8 +2755,172 @@ A new thread has no quote to show, edit or copy: only taking it back."
           (cons "Edit what this replies to…" (lambda () (harness-compose-edit-thread att)))
           (cons "Remove the thread, keep my words" (lambda () (harness-compose-remove-attachment att)))
           (cons "Copy the quote" (lambda ()
-                                   (kill-new (harness-thread-quote (plist-get att :thread)))
+                                   (kill-new (harness-thread-quote (plist-get att :thread) t))
                                    (message "Copied the quote"))))))
+
+;;;; Quote targets
+
+;; C-c > (`harness-quote-reply') replies to the quotable target at point,
+;; or to every target the region covers, in order.  A view marks what it
+;; can be quoted with `harness-quote-target': a function of BEG and END,
+;; the part selected, returning the references of what is quoted
+;; (`harness-thread-block').  The mark draws the same affordance
+;; everywhere -- `harness-quote-target-face' under the mouse, and a
+;; tooltip naming the key -- and the same command turns the references
+;; into the same quote (`harness-thread-quote'): a header saying what
+;; each is and linking it, then its words.  A view whose text is not all
+;; targets, lines of a diff or a report's evidence, says which are at
+;; point with `harness-quote-target-functions'.  Only when neither finds
+;; anything is there nothing to reply to.
+
+(defconst harness-quote-target-property 'harness-quote-target
+  "Text property whose value is a function returning what C-c > quotes.
+The function is called with BEG and END, the part of its text selected,
+and returns a list of references (`harness-thread-block').")
+
+(defconst harness-quote-target-help
+  "C-c > replies to this in a thread"
+  "What a quotable target says on hover, the same everywhere.")
+
+(defface harness-quote-target-face '((t :inherit highlight))
+  "How a quotable target shows under the mouse, and while it is chosen.
+The same face marks a chat message, a tool-call group, a thread card, a
+review comment and the task's report, so C-c > has one affordance."
+  :group 'harness-compose)
+
+(defvar-local harness-quote-target-functions nil
+  "Functions that say what C-c > quotes at point, or in a region.
+Each is called with BEG and END, point twice when there is no region, in
+this buffer, and returns a list of references (`harness-thread-block') or
+nil; the first that finds something wins.  A view whose text is not all
+quotable -- lines of a diff, a report's evidence -- adds one.  It is an
+abnormal hook: `add-hook' with a non-nil LOCAL argument.")
+
+(defvar-local harness-quote-handler-function nil
+  "Function that replies to the references `harness-quote-targets' returns.
+Called with the references; it starts a thread of its own -- a card in
+the box, a draft in a review comment's thread.  A chat or a review that
+keeps threads sets its own; the default is `harness-quote-default-handler'.")
+
+(defun harness-quote--mark (beg end function &optional help object)
+  "Make BEG to END of OBJECT a quote target; FUNCTION returns its references.
+OBJECT is this buffer by default, or a string, as `put-text-property'
+takes one.  HELP is what the target says on hover,
+`harness-quote-target-help' by default.  The target shows in
+`harness-quote-target-face' under the mouse.  A button or a link keeps
+the mouse face and the help it has of its own."
+  (put-text-property beg end harness-quote-target-property function object)
+  (let ((pos beg))
+    (while (< pos end)
+      (let ((next (next-single-property-change pos 'mouse-face object end)))
+        (unless (get-text-property pos 'mouse-face object)
+          (put-text-property pos next 'mouse-face 'harness-quote-target-face object))
+        (setq pos next))))
+  (let ((pos beg))
+    (while (< pos end)
+      (let ((next (next-single-property-change pos 'help-echo object end)))
+        (unless (get-text-property pos 'help-echo object)
+          (put-text-property pos next 'help-echo (or help harness-quote-target-help) object))
+        (setq pos next))))
+  end)
+
+(defun harness-quote--target-run (pos)
+  "Return (START . END) of the quote target at POS, or nil.
+That is the whole run of text the target property covers there: without
+a region, C-c > quotes the whole of what point is on."
+  (when-let* ((function (get-text-property pos harness-quote-target-property)))
+    ;; A search back from the middle of a run finds its start; from the
+    ;; first character it finds the run before, which is no part of it.
+    (cons (if (and (> pos (point-min))
+                   (eq (get-text-property (1- pos) harness-quote-target-property)
+                       function))
+              (or (previous-single-property-change pos harness-quote-target-property)
+                  (point-min))
+            pos)
+          (or (next-single-property-change pos harness-quote-target-property)
+              (point-max)))))
+
+(defun harness-quote--unique (refs)
+  "Return REFS without duplicates, in order."
+  (let (out)
+    (dolist (ref refs (nreverse out))
+      (unless (member ref out) (push ref out)))))
+
+(defun harness-quote--fallback-targets (beg end)
+  "Return the references the buffer's `harness-quote-target-functions' find.
+BEG and END are point twice when there is no region."
+  (run-hook-with-args-until-success 'harness-quote-target-functions beg end))
+
+(defun harness-quote-targets (&optional beg end)
+  "Return the references C-c > would quote from BEG to END.
+Each marked target the text covers (`harness-quote-target-property'), in
+order, with the part selected of it; with no marked target, what the
+buffer's `harness-quote-target-functions' find.  Nil when there is
+nothing to quote."
+  (let* ((beg (or beg (point)))
+         (end (or end beg))
+         (refs
+          (if (= beg end)
+              (pcase-let ((`(,start . ,stop) (or (harness-quote--target-run beg)
+                                                 (cons beg end))))
+                (when-let* ((function (get-text-property beg harness-quote-target-property)))
+                  (funcall function start stop)))
+            (let ((pos beg) found)
+              (while (< pos end)
+                (let* ((next (min end (next-single-property-change
+                                       pos harness-quote-target-property nil end)))
+                       (function (get-text-property pos harness-quote-target-property)))
+                  (when function
+                    (setq found (append found (funcall function pos next))))
+                  (setq pos next)))
+              found))))
+    (harness-quote--unique
+     (or refs (harness-quote--fallback-targets beg end)))))
+
+(defun harness-quote-default-handler (refs)
+  "Reply to REFS in a thread: a card in the compose box.
+The handler of a view that keeps no threads of its own: the report's
+popout, the task board, any other box.  The card shows what each
+reference is and its words; what is written under it is the reply, sent
+as a <thread> block."
+  (unless (harness-compose-live-p)
+    (user-error "No reply is being composed here"))
+  (harness-compose-add-thread refs))
+
+(defun harness-compose--thread-at-point (&optional pos)
+  "Return the reply in a thread whose card is at POS, or nil.
+POS is point by default."
+  (let ((pos (or pos (point))))
+    (when-let* ((overlay (cl-find-if
+                          (lambda (overlay)
+                            (and (overlay-get overlay 'harness-compose-attachment)
+                                 (plist-get (overlay-get overlay 'harness-compose-attachment) :thread)
+                                 (<= (overlay-start overlay) pos)
+                                 (< pos (overlay-end overlay))))
+                          (overlays-at pos))))
+      (overlay-get overlay 'harness-compose-attachment))))
+
+(defun harness-quote-reply ()
+  "Reply to the quotable target at point, or to every target the region covers.
+A target is text the view marks (`harness-quote-target-property'), or
+what its `harness-quote-target-functions' find: a chat message, a
+tool-call group, a thread card, a review comment, lines of a change, the
+report a task handed in.  The reply is always a thread
+\(`harness-quote-handler-function'): a card in the box that shows each
+reference and the words written under it, sent as a <thread> block, or
+a draft in a review comment's thread.  No reply is a Markdown quote in the
+box: the thread is the form, and `harness-thread-quote' the one quote
+its card shows.
+
+Signal `user-error' \"Nothing to reply here\" only when there is no
+target at point and the region covers none."
+  (interactive)
+  (let* ((beg (if (use-region-p) (region-beginning) (point)))
+         (end (if (use-region-p) (region-end) (point)))
+         (refs (harness-quote-targets beg end)))
+    (unless refs (user-error "Nothing to reply here"))
+    (deactivate-mark)
+    (funcall (or harness-quote-handler-function #'harness-quote-default-handler) refs)))
 
 ;;;; Changing what a reply answers
 

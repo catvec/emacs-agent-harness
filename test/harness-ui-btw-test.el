@@ -663,7 +663,7 @@ From Lisp a question can be asked at once; it names the BTW."
   "C-c > in a BTW starts a reply in a thread to its answer, as in a chat: a card in
 the box, point under it, and the words under the card are the reply.  A BTW is
 no task's session, so it has no review: what C-c C-c sends is the quote and the
-reply, as a mail has them.  C-u C-c > quotes the answer in the box as Markdown."
+reply, as a mail has them.  A prefix argument changes nothing."
   (harness-ui-btw-test-with
     (pcase-let ((`(,_parent . ,parent-window) (harness-ui-btw-test--open-session)))
       (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
@@ -675,25 +675,35 @@ reply, as a mail has them.  C-u C-c > quotes the answer in the box as Markdown."
         (harness-test-wait (lambda () (string-match-p "Two tasks are in progress"
                                                       (harness-ui-btw-test--buffer-text buffer)))
                            5 "the answer in the BTW")
+        (let* ((node (with-current-buffer buffer
+                       (cl-loop for id in harness-chat--order
+                                for block = (gethash id harness-chat--blocks)
+                                when (and block (string-search
+                                                 "Two tasks are in progress."
+                                                 (harness-chat--message-text block)))
+                                return (harness-chat-block-id block))))
+               (quoted (harness-test-quoted "Two tasks are in progress." node sid)))
         (with-selected-window window
           (should (eq 'harness-chat-thread-reply (key-binding (kbd "C-c >"))))
-          ;; The quote, as Markdown, with the prefix argument.
+          ;; A prefix argument changes nothing: a card, and the reply under it.
           (let ((current-prefix-arg nil))
             (execute-kbd-macro (kbd "C-u C-c >")))
-          (should (equal "> Two tasks are in progress.\n\n" (harness-compose-text)))
-          (harness-compose-set "")
-          ;; A thread, without.
-          (execute-kbd-macro (kbd "C-c >"))
           (should (equal "\n[reply 1]\n" (harness-compose-text)))
           (should (= (point) harness-compose-end))
           (should (equal '("Two tasks are in progress.")
                          (mapcar (lambda (ref) (plist-get ref :text))
                                  (harness-thread-refs (plist-get (car harness-compose-attachments) :thread)))))
+          (harness-compose-clear)
+          ;; And so does the key alone.
+          (goto-char harness-compose-end)
+          (execute-kbd-macro (kbd "C-c >"))
+          (should (equal "\n[reply 1]\n" (harness-compose-text)))
+          (should (= (point) harness-compose-end))
           (execute-kbd-macro "Which two?")
           (call-interactively (key-binding (kbd "C-c C-c"))))
         (harness-test-wait (lambda () (= 2 (length (harness-ui-btw-test--user-texts sid)))) 5 "the reply sent")
-        (should (equal "> Two tasks are in progress.\n\nWhich two?"
-                       (cadr (harness-ui-btw-test--user-texts sid))))))))
+        (should (equal (concat quoted "Which two?")
+                       (cadr (harness-ui-btw-test--user-texts sid)))))))))
 
 (defun harness-ui-btw-test--goto-tree-node (id)
   "Move point to the tree row of node ID."

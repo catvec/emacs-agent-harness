@@ -74,9 +74,10 @@ THE EARLIER ROUNDS.  A task sent back before there were threads kept
 its feedback as text.  The first time a task's set is made, the
 comments quoted in those rounds become closed threads of the set, with
 ids that follow from where they were, so that they are made once.  A
-reply written inline, under a quote of the agent's own words (the
-compose box's `C-u C-c >`), keeps that quote above its text: "silence"
-says nothing without the line it answers.
+reply written inline, under a quote of the agent's own words (what a
+compose box's C-c > made before every reply was a thread), keeps that
+quote above its text: "silence" says nothing without the line it
+answers.
 
 THE THREADS STARTED IN THE CHAT.  The compose box's `C-c >` starts a
 thread on purpose: the region it replies to -- a part of a message,

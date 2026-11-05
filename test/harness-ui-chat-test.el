@@ -729,7 +729,9 @@ the ids stay plain."
                                   (get-text-property (1- known-end) 'help-echo)))
           (dolist (pos (list (- unknown-end 36) (1- unknown-end) (1- word-end) known-end))
             (should-not (get-text-property pos 'keymap))
-            (should-not (get-text-property pos 'mouse-face))
+            ;; The block is a quote target, whose own hover face it wears;
+            ;; a link's is `highlight' (`harness-ui-chat-test-link-p').
+            (should-not (eq 'highlight (get-text-property pos 'mouse-face)))
             (should-not (harness-ui-chat-test-face-at pos 'harness-ui-session-link-face))
             (should (harness-ui-chat-test-face-at pos 'harness-ui-output-face))))
         ;; The call that is given the id: it stands in the input summary, in
@@ -3113,55 +3115,66 @@ window's point ends at the end of the box, under the quote."
         (execute-kbd-macro (kbd (or keys "C-c >"))))
       (cons (harness-compose-text) (= (window-point) harness-compose-end)))))
 
-(defun harness-ui-chat-test-plain-quote (buf from &optional to)
-  "Type C-u C-c > in BUF, point at FROM, or the region from FROM to TO.
-Return what `harness-ui-chat-test-quote' does."
-  (harness-ui-chat-test-quote buf from to "C-u C-c >"))
+(defun harness-ui-chat-test-thread-quote (buf from &optional to keys)
+  "Type C-c > (or KEYS) in BUF, point at FROM, or the region FROM to TO.
+Return (QUOTE . UNDER): the quote of the reply in a thread the key
+started, as `harness-thread-quote' makes it, and the blank line the box's
+quote ends with, and what `harness-ui-chat-test-quote' returns as UNDER."
+  (let ((before (with-current-buffer buf (copy-sequence harness-compose-attachments))))
+    (pcase-let ((`(,_text . ,under) (harness-ui-chat-test-quote buf from to keys)))
+      (cons (with-current-buffer buf
+              ;; The box may have been emptied since the last reply, whose
+              ;; card is kept aside then: what the key added is what is new.
+              (let ((new (cl-set-difference harness-compose-attachments before)))
+                (unless new (error "The key started no reply in a thread"))
+                (concat (harness-thread-quote (plist-get (car (last new)) :thread)) "\n\n")))
+            under))))
 
 (ert-deftest harness-ui-chat-quote-reply ()
-  "C-u C-c > quotes an agent's message in the box, as Markdown, to answer inline.
+  "C-c > starts a reply in a thread to an agent's message.
 Without a region the response or plan point is on, whole, as written;
 elsewhere -- the user's message, the box -- the one above point, so
 from the box the last.  A region quotes what it selects as it shows,
-read back into Markdown, and nothing a fold hides.  Point ends under
-the quote, ready for the reply.  C-c > itself starts a thread."
+read back into Markdown, and nothing a fold hides.  The reply is a card
+in the box, its quote `harness-thread-quote' of the references, and
+point ends at the end of the box."
   (harness-ui-chat-test-with
-    (let ((sid (harness-ui-chat-test-session)))
-      (harness-call 'session/append sid '(:kind user :content "fix the parser"))
-      (harness-call 'session/append sid '(:kind thinking :content "The parser drops the last token."))
-      (harness-call 'session/append sid '(:kind assistant :content "Fixed **the parser**: it was `parse-it`."))
-      (harness-call 'session/append sid '(:kind user :content "and the tests?"))
-      (harness-call 'session/append sid (list :kind 'plan :title "Tests" :content "1. Add a test\n2. Run it"))
-      (harness-call 'session/append sid '(:kind assistant :content "Run them:\n\n```sh\nmake test\n```\n\nThey pass."))
+    (let* ((sid (harness-ui-chat-test-session))
+           (n-user (plist-get (harness-call 'session/append sid '(:kind user :content "fix the parser")) :id))
+           (n-thinking (plist-get (harness-call 'session/append sid '(:kind thinking :content "The parser drops the last token.")) :id))
+           (n-fixed (plist-get (harness-call 'session/append sid '(:kind assistant :content "Fixed **the parser**: it was `parse-it`.")) :id))
+           (n-ask (plist-get (harness-call 'session/append sid '(:kind user :content "and the tests?")) :id))
+           (n-plan (plist-get (harness-call 'session/append sid (list :kind 'plan :title "Tests" :content "1. Add a test\n2. Run it")) :id))
+           (n-run (plist-get (harness-call 'session/append sid '(:kind assistant :content "Run them:\n\n```sh\nmake test\n```\n\nThey pass.")) :id)))
       (let ((buf (harness-ui-chat-test-open sid))
-            (fixed "> Fixed **the parser**: it was `parse-it`.\n\n"))
+            (fixed (harness-test-quoted "Fixed **the parser**: it was `parse-it`." n-fixed sid)))
         (with-current-buffer buf
           (should (eq 'harness-chat-thread-reply (key-binding (kbd "C-c >"))))
           (should (eq 'compose-quote-reply (key-binding (kbd "C-c >") nil t)))
           ;; From the box: the last message.
-          (should (equal '("> Run them:\n>\n> ```sh\n> make test\n> ```\n>\n> They pass.\n\n" . t)
-                         (harness-ui-chat-test-plain-quote buf harness-compose-end)))
+          (should (equal (cons (harness-test-quoted "Run them:\n\n```sh\nmake test\n```\n\nThey pass." n-run sid) t)
+                         (harness-ui-chat-test-thread-quote buf harness-compose-end)))
           (harness-compose-set "")
           ;; On a response: that one.
-          (should (equal (cons fixed t) (harness-ui-chat-test-plain-quote buf (harness-ui-chat-test-find buf "Fixed"))))
-          ;; On the user's message after it: it again, after what the box holds.
-          (should (equal (cons (concat fixed fixed) t)
-                         (harness-ui-chat-test-plain-quote buf (harness-ui-chat-test-find buf "and the tests"))))
+          (should (equal (cons fixed t) (harness-ui-chat-test-thread-quote buf (harness-ui-chat-test-find buf "Fixed"))))
+          ;; On the user's message after it: that one.
+          (should (equal (cons (harness-test-quoted "and the tests?" n-ask sid "you") t)
+                         (harness-ui-chat-test-thread-quote buf (harness-ui-chat-test-find buf "and the tests"))))
           (harness-compose-set "")
           ;; On the plan: the plan.
-          (should (equal '("> 1. Add a test\n> 2. Run it\n\n" . t)
-                         (harness-ui-chat-test-plain-quote buf (harness-ui-chat-test-find buf "Add a test"))))
+          (should (equal (cons (harness-test-quoted "1. Add a test\n2. Run it" n-plan sid "plan") t)
+                         (harness-ui-chat-test-thread-quote buf (harness-ui-chat-test-find buf "Add a test"))))
           (harness-compose-set "")
           ;; A region: what it selects, the code block fenced again.
-          (should (equal '("> Run them:\n>\n> ```sh\n> make test\n> ```\n\n" . t)
-                         (harness-ui-chat-test-plain-quote buf (- (harness-ui-chat-test-find buf "Run them:") 9)
+          (should (equal (cons (harness-test-quoted "Run them:\n\n```sh\nmake test\n```" n-run sid) t)
+                         (harness-ui-chat-test-thread-quote buf (- (harness-ui-chat-test-find buf "Run them:") 9)
                                                      (harness-ui-chat-test-find buf "make test"))))
           (should-not (region-active-p))
           (harness-compose-set "")
           ;; Over the folded thinking: what shows of it, its header, alone.
-          (let ((text (car (harness-ui-chat-test-plain-quote buf (- (harness-ui-chat-test-find buf "fix the parser") 14)
+          (let ((text (car (harness-ui-chat-test-thread-quote buf (- (harness-ui-chat-test-find buf "fix the parser") 14)
                                                        (harness-ui-chat-test-find buf "parse-it")))))
-            (should (string-prefix-p "> fix the parser\n" text))
+            (should (string-prefix-p (concat "> " (harness-test-quote-header n-user sid "you")) text))
             (should (string-match-p "^> .*thinking (6 words)$" text))
             (should (string-match-p "^> Fixed the parser: it was `parse-it`$" text))
             (should-not (string-match-p "drops the last token" text))))))))
@@ -3408,26 +3421,31 @@ its abbreviated path."
     (harness-ui-chat-test-with-buffer "*code*" #'emacs-lisp-mode ""
       (should (equal "emacs-lisp" (harness-chat--code-language))))))
 
-(ert-deftest harness-ui-chat-prompt-region-in-a-chat-quotes-as-c-c->-does ()
-  "Where there is a compose box -- here a chat -- the region is quoted in it.
-That is what \\[harness-compose-quote-reply] does, a prefix argument changes
-nothing, and no session is opened or made."
+(ert-deftest harness-ui-chat-prompt-region-in-a-chat-quotes-in-the-box ()
+  "Where there is a compose box -- here a chat -- the region is a prompt in it.
+That is what \\[compose-quote-reply] does: the region in a Markdown quote,
+with no card and no thread; a prefix argument changes nothing, and no
+session is opened or made.  C-c > is not that command: it starts a reply
+in a thread to the region instead."
   (harness-ui-chat-test-with
-    (let ((sid (harness-ui-chat-test-session)))
-      (harness-call 'session/append sid '(:kind user :content "fix the parser"))
-      (harness-call 'session/append sid '(:kind assistant :content "Run them:\n\n```sh\nmake test\n```\n\nThey pass."))
+    (let* ((sid (harness-ui-chat-test-session))
+           (n-run (progn
+                    (harness-call 'session/append sid '(:kind user :content "fix the parser"))
+                    (plist-get (harness-call 'session/append sid '(:kind assistant :content "Run them:\n\n```sh\nmake test\n```\n\nThey pass.")) :id))))
       (let* ((buf (harness-ui-chat-test-open sid))
              (from (- (harness-ui-chat-test-find buf "Run them:") 9))
              (to (harness-ui-chat-test-find buf "make test"))
-             (quoted '("> Run them:\n>\n> ```sh\n> make test\n> ```\n\n" . t))
+             (region "Run them:\n\n```sh\nmake test\n```")
+             (quoted (cons (concat (compose-quote-string region) "\n\n") t))
              (opened nil))
         (cl-letf (((symbol-function 'harness-ui-display-session) (lambda (&rest args) (push args opened)))
                   ((symbol-function 'harness-new-session) (lambda (&rest args) (push args opened))))
-          (should (equal quoted (harness-ui-chat-test-plain-quote buf from to)))
-          (with-current-buffer buf (harness-compose-set ""))
           (should (equal quoted (harness-ui-chat-test-quote buf from to "C-c h >")))
           (with-current-buffer buf (harness-compose-set ""))
           (should (equal quoted (harness-ui-chat-test-quote buf from to "C-u C-c h >")))
+          (with-current-buffer buf (harness-compose-set ""))
+          (should (equal (cons (harness-test-quoted region n-run sid) t)
+                         (harness-ui-chat-test-thread-quote buf from to)))
           (should-not opened))))))
 
 (ert-deftest harness-ui-chat-prompt-region-needs-text-selected ()
@@ -3603,50 +3621,33 @@ that of another project never."
           (harness-open-latest-session))
         (should (equal (cadr ids) opened))))))
 
-(ert-deftest harness-ui-chat-quote-answers-inline ()
-  "A chat's box answers a quote of the agent's message inline, like any box.
-With point in the quote the library's inline mode is on: M-RET splits the
-quote there, for an answer to the part above, and C-c [ elides the rest of
-the paragraph as [...].  Out of the quote, in the transcript, the mode is
-off.  The transcript is left as it was."
+(ert-deftest harness-ui-chat-c-u-c-c->-starts-a-thread-too ()
+  "A prefix argument changes nothing: C-u C-c > starts a reply in a thread.
+There is no inline Markdown quote in the box to split or elide; the
+card's quote is edited in a buffer of its own (C-c e), and the
+transcript is left as it was."
   (harness-ui-chat-test-with
-    (let ((sid (harness-ui-chat-test-session))
-          (compose-quote-inline-hint nil)
-          (inhibit-message t))
-      (harness-call 'session/append sid '(:kind user :content "status?"))
-      (harness-call 'session/append sid '(:kind assistant :content "The build is green. The deploy is pending."))
-      (let* ((buf (harness-ui-chat-test-open sid))
-             (green (harness-ui-chat-test-find buf "The build is green.")))
+    (let* ((sid (harness-ui-chat-test-session))
+           (n-green (progn
+                      (harness-call 'session/append sid '(:kind user :content "status?"))
+                      (plist-get (harness-call 'session/append sid
+                                                '(:kind assistant :content "The build is green. The deploy is pending."))
+                                 :id))))
+      (let ((buf (harness-ui-chat-test-open sid)))
         (with-current-buffer buf
           (save-window-excursion
             (set-window-buffer nil buf)
             (let ((transcript (buffer-substring-no-properties (point-min) (harness-compose--front))))
               (should compose-quote-mode)
               (should-not compose-quote-inline-mode)
-              ;; From the box: the agent's last message, quoted.
               (goto-char harness-compose-end)
               (let ((current-prefix-arg nil)) (execute-kbd-macro (kbd "C-u C-c >")))
-              (should (equal "> The build is green. The deploy is pending.\n\n" (harness-compose-text)))
-              (should-not compose-quote-inline-mode)
-              ;; After "green.": split the quote there, and answer.
-              (goto-char (+ harness-compose-start (length "> The build is green.")))
-              (execute-kbd-macro (kbd "C-b C-f"))
-              (should compose-quote-inline-mode)
-              (execute-kbd-macro (kbd "M-RET"))
-              (should (equal "> The build is green.\n\n\n\n> The deploy is pending.\n\n" (harness-compose-text)))
-              (should (= (point) (+ harness-compose-start (length "> The build is green.\n\n"))))
-              (should-not compose-quote-inline-mode)
-              (execute-kbd-macro "Good.")
-              (should (equal "> The build is green.\n\nGood.\n\n> The deploy is pending.\n\n" (harness-compose-text)))
-              ;; Elide the second part, from "pending": the rest of its paragraph.
-              (goto-char (+ harness-compose-start (length "> The build is green.\n\nGood.\n\n> The deploy is ")))
-              (execute-kbd-macro (kbd "C-b C-f"))
-              (should compose-quote-inline-mode)
-              (execute-kbd-macro (kbd "C-c ["))
-              (should (equal "> The build is green.\n\nGood.\n\n> The deploy is [...]\n\n" (harness-compose-text)))
-              ;; In the transcript, the same words as the quote's: not a quote.
-              (goto-char green)
-              (execute-kbd-macro (kbd "C-f"))
+              ;; One card, its quote the agent's last message.
+              (should (= 1 (length harness-compose-attachments)))
+              (should (equal (harness-test-quoted "The build is green. The deploy is pending." n-green sid)
+                             (concat (harness-thread-quote
+                                      (plist-get (car harness-compose-attachments) :thread))
+                                     "\n\n")))
               (should-not compose-quote-inline-mode)
               (should (equal transcript (buffer-substring-no-properties (point-min) (harness-compose--front)))))))))))
 
@@ -3660,18 +3661,18 @@ quotes something carries the thread already, and is quoted as it stands."
   (harness-ui-chat-test-with
     (let ((compose-quote-inline-hint nil)
           (inhibit-message t))
-      (let ((sid (harness-ui-chat-test-session "Thread")))
-        (harness-call 'session/append sid '(:kind user :content "please check the build"))
-        (harness-call 'session/append sid '(:kind assistant :content "The build is green. The deploy is pending."))
-        (harness-call 'session/append sid '(:kind user :content "> The build is green.\n\nGood.\n\n> The deploy is pending.\n\nI will watch it."))
-        (harness-call 'session/append sid '(:kind assistant :content "All green in the logs."))
+      (let* ((sid (harness-ui-chat-test-session "Thread"))
+             (n-last (progn
+                       (harness-call 'session/append sid '(:kind user :content "please check the build"))
+                       (harness-call 'session/append sid '(:kind assistant :content "The build is green. The deploy is pending."))
+                       (harness-call 'session/append sid '(:kind user :content "> The build is green.\n\nGood.\n\n> The deploy is pending.\n\nI will watch it."))
+                       (plist-get (harness-call 'session/append sid '(:kind assistant :content "All green in the logs.")) :id))))
         (let ((buf (harness-ui-chat-test-open sid)))
           (with-current-buffer buf
             (save-window-excursion
               (set-window-buffer nil buf)
-              (goto-char harness-compose-end)
-              (let ((current-prefix-arg nil)) (execute-kbd-macro (kbd "C-u C-c >")))
-              (should (equal (concat "> All green in the logs.\n"
+              (should (equal (concat "> " (harness-test-quote-header n-last sid) "\n>\n"
+                                     "> All green in the logs.\n"
                                      ">\n"
                                      "> > > The build is green.\n"
                                      "> >\n"
@@ -3679,19 +3680,19 @@ quotes something carries the thread already, and is quoted as it stands."
                                      "> >\n"
                                      "> > > The deploy is pending.\n"
                                      "> >\n"
-                                     "> > I will watch it.\n"
-                                     "\n")
-                             (harness-compose-text)))))))
-      (let ((sid (harness-ui-chat-test-session "Thread that quotes")))
-        (harness-call 'session/append sid '(:kind user :content "status?"))
-        (harness-call 'session/append sid '(:kind assistant :content "> status?\n\nAll green."))
+                                     "> > I will watch it.\n\n")
+                             (car (harness-ui-chat-test-thread-quote buf harness-compose-end))))))))
+      (let* ((sid (harness-ui-chat-test-session "Thread that quotes"))
+             (n-green (progn
+                        (harness-call 'session/append sid '(:kind user :content "status?"))
+                        (plist-get (harness-call 'session/append sid '(:kind assistant :content "> status?\n\nAll green.")) :id))))
         (let ((buf (harness-ui-chat-test-open sid)))
           (with-current-buffer buf
             (save-window-excursion
               (set-window-buffer nil buf)
-              (goto-char harness-compose-end)
-              (let ((current-prefix-arg nil)) (execute-kbd-macro (kbd "C-u C-c >")))
-              (should (equal "> > status?\n>\n> All green.\n\n" (harness-compose-text))))))))))
+              (should (equal (concat "> " (harness-test-quote-header n-green sid) "\n>\n"
+                                     "> > status?\n>\n> All green.\n\n")
+                             (car (harness-ui-chat-test-thread-quote buf harness-compose-end)))))))))))
 
 ;;;; Threads
 
@@ -3836,7 +3837,7 @@ its error or reason under the fold."
           (should (harness-ui-chat-test-find buf "No thread t-nope" (harness-chat-block-start failed))))))))
 
 (ert-deftest harness-ui-chat-quotes-the-agents-words-in-a-thread ()
-  "C-u C-c > quotes what the agent said in a thread as it quotes any message of
+  "C-c > replies to what the agent said in a thread as to any message of
 its, from the box the last one, from a point on it that one, and a region of it
 as it shows."
   (harness-ui-chat-test-with
@@ -3849,19 +3850,25 @@ as it shows."
            (list :sessionUpdate "_harness/node"
                  :node (list :id "a1" :kind "assistant" :content "The deploy is pending.")))
           (harness-ui-chat-test-thread-answer harness-ui-chat-test--thread-meta)
-          (should (equal '("> Since the **nightly** job.\n>\n> It waits for the migration.\n\n" . t)
-                         (harness-ui-chat-test-plain-quote buf harness-compose-end)))
+          (should (equal (cons (harness-test-quoted "Since the **nightly** job.\n\nIt waits for the migration."
+                                                    "n-rc1" sid "thread")
+                               t)
+                         (harness-ui-chat-test-thread-quote buf harness-compose-end)))
           (harness-compose-set "")
           ;; Point on it, and on the plain message above it.
-          (should (equal '("> Since the **nightly** job.\n>\n> It waits for the migration.\n\n" . t)
-                         (harness-ui-chat-test-plain-quote buf (harness-ui-chat-test-find buf "It waits for"))))
+          (should (equal (cons (harness-test-quoted "Since the **nightly** job.\n\nIt waits for the migration."
+                                                    "n-rc1" sid "thread")
+                               t)
+                         (harness-ui-chat-test-thread-quote buf (harness-ui-chat-test-find buf "It waits for"))))
           (harness-compose-set "")
-          (should (equal '("> The deploy is pending.\n\n" . t)
-                         (harness-ui-chat-test-plain-quote buf (harness-ui-chat-test-find buf "The deploy is"))))
+          (should (equal (cons (harness-test-quoted "The deploy is pending." "a1" sid) t)
+                         (harness-ui-chat-test-thread-quote buf (harness-ui-chat-test-find buf "The deploy is"))))
           (harness-compose-set "")
           ;; A region of it, read back as Markdown.
-          (should (equal '("> It waits for the migration\n\n" . t)
-                         (harness-ui-chat-test-plain-quote buf (- (harness-ui-chat-test-find buf "It waits for the migration") 26)
+          (should (equal (cons (concat "> " (harness-test-quote-header "n-rc1" sid "thread") "\n>\n"
+                                       "> It waits for the migration\n\n")
+                               t)
+                         (harness-ui-chat-test-thread-quote buf (- (harness-ui-chat-test-find buf "It waits for the migration") 26)
                                                      (harness-ui-chat-test-find buf "the migration")))))))))
 
 (ert-deftest harness-ui-chat-moves-between-the-agents-answers-in-a-thread ()
@@ -4060,14 +4067,15 @@ The same key does it in the box and out of it, wherever the chat binds it."
           (should (eq 'harness-chat-thread-reply (key-binding (kbd "C-c >")))))))))
 
 (ert-deftest harness-ui-chat-c-c->-with-nothing-to-reply-to-says-so ()
-  "A session with no message yet has nothing for C-c > to reply to, and says so."
+  "A session with no message yet has nothing for C-c > to reply to, and says so
+in the one wording every view uses."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
       (with-current-buffer buf
         (goto-char harness-compose-end)
         (let ((err (should-error (call-interactively #'harness-chat-thread-reply) :type 'user-error)))
-          (should (string-match-p "message to reply to" (error-message-string err))))))))
+          (should (equal "Nothing to reply here" (error-message-string err))))))))
 
 (ert-deftest harness-ui-chat-draws-a-thread-block-in-a-message ()
   "A <thread> block in a message is drawn as a thread card, not as tags.
@@ -5886,7 +5894,7 @@ and a popout's tooltips and menus say the same (their own tests)."
         ;; The tooltip of the prompt.
         (let ((help (get-text-property (1- harness-compose-start) 'help-echo)))
           (should (string-match-p "\\`C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, " help))
-          (should (string-match-p "C-c C-a attaches a file or task, C-c > quotes, " help))
+          (should (string-match-p "C-c C-a attaches a file or task, C-c > replies in a thread, " help))
           (should (string-match-p "C-c \\. KEY: a key of the panel above\\'" help)))
         ;; It follows a rebinding of the key.
         (cl-letf (((symbol-function 'harness-compose-panel-keys) (lambda () "C-c ,")))
@@ -10536,6 +10544,89 @@ result meta; the chat rebuilds the report from what the call was given."
             (should (string-search "Keys are compared with" text))
             (should (string-search "See the diff." text))))))))
 
+(ert-deftest harness-ui-chat-quotes-a-tool-call-group ()
+  "C-c > on a group's summary replies to every call folded under it.
+Each has the header and the link every quote of a chat's has, in the
+order the calls ran; a group is one target, as its summary is one line."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-flet ((call (id path)
+                    (harness-chat--apply-update
+                     (list :sessionUpdate "_harness/node"
+                           :node (list :id id :kind "tool-call" :tool "read_file"
+                                       :call-id id :title (concat "Read file " path)
+                                       :input (list :path path))))))
+          (call "c1" "a.el")
+          (call "c2" "b.el"))
+        (let* ((pos (harness-ui-chat-test-find buf "2 tool calls: Read file ×2"))
+               (group (car (hash-table-values harness-chat--groups))))
+          (let* ((text (car (harness-ui-chat-test-thread-quote buf pos)))
+               (header (lambda (id)
+                         (format "> Your earlier call of read_file (harness:session/%s/message/%s):"
+                                 sid id))))
+          (should pos)
+          ;; The group is marked as one target, with the one affordance.
+          (should (eq 'harness-quote-target-face (get-text-property pos 'mouse-face)))
+          (should (string-match-p "\\`C-c > replies" (get-text-property pos 'help-echo)))
+          (should (string-match-p (concat "^" (regexp-quote (funcall header "c1")) "$") text))
+          (should (string-match-p (concat "^" (regexp-quote (funcall header "c2")) "$") text))
+          (should (< (string-search (funcall header "c1") text)
+                     (string-search (funcall header "c2") text)))
+          (should (string-match-p "^> Read file a\\.el$" text))
+          (should (string-match-p "^> Read file b\\.el$" text))))))))
+
+(ert-deftest harness-ui-chat-quotes-the-card-in-the-box-it-is-to ()
+  "C-c > on a reply's card in the box replies to what the card quotes.
+A card is a target of its own in the box: it quotes the references the
+thread holds, with the header and the link every quote has, not the
+message the card is in."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (node (plist-get (harness-call 'session/append sid
+                                          '(:kind assistant :content "The build is green."))
+                            :id))
+           (buf (harness-ui-chat-test-open sid))
+           (quoted (harness-test-quoted "The build is green." node sid)))
+      (with-current-buffer buf
+        ;; C-c > makes the card; its words are the reply.
+        (harness-ui-chat-test-quote buf (harness-ui-chat-test-find buf "The build is green.")
+                                    nil "C-c >")
+        (should (= 1 (length harness-compose-attachments)))
+        ;; Point on the card, in the box.
+        (let ((card (car (harness-compose--cards))))
+          (should card)
+          (goto-char (nth 1 card))
+          (should (harness-compose--thread-at-point))
+          (let ((text (car (harness-ui-chat-test-thread-quote buf (point)))))
+            ;; The reply quotes what the card quotes, a thread of its own.
+            (should (equal quoted text))
+            (should (= 2 (length harness-compose-attachments)))))))))
+
+(ert-deftest harness-ui-chat-marks-the-targets-it-quotes ()
+  "A message is marked as the one kind of quote target: the shared hover
+face, a tooltip naming C-c >, and the function that says what quoting it
+quotes.  The card of a reply in a thread is marked the same way."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/append sid '(:kind assistant :content "The build is green."))
+      (harness-call 'session/append sid '(:kind user :content "Good."))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "The build is green.")) 5 "the message")
+      (with-current-buffer buf
+        (let ((pos (1- (harness-ui-chat-test-find buf "The build is green."))))
+          (should (functionp (get-text-property pos 'harness-quote-target)))
+          (should (eq 'harness-quote-target-face (get-text-property pos 'mouse-face)))
+          (should (string-match-p "\\`C-c > replies" (get-text-property pos 'help-echo))))
+        ;; A reply's card in the box is a target too, and what it quotes.
+        (harness-compose-add-thread
+         (list (list :kind "chat" :who "agent" :text "The build is green.")))
+        (let ((card (car (harness-compose--cards))))
+          (should card)
+          (goto-char (nth 1 card))
+          (should (harness-quote-targets (point) (point))))))))
+
 (ert-deftest harness-ui-chat-hand-in-folds-when-its-report-shows-elsewhere ()
   "A hand_in call stays folded while something else shows its report.
 A function on `harness-chat-hand-in-fold-functions' says so; once it
@@ -10589,3 +10680,4 @@ and the call opens again, its body the report."
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
+

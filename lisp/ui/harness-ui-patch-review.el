@@ -3026,6 +3026,7 @@ again.  The library's commands act on the thread or the comment at point.")
   (define-key map (kbd "RET") #'harness-ui-patch-review-thread-return)
   (define-key map (kbd "d") #'change-review-ui-show-in-diff)
   (define-key map (kbd "r") #'change-review-ui-reply)
+  (define-key map (kbd "C-c >") #'harness-quote-reply)
   (define-key map (kbd "x") #'change-review-ui-toggle-status)
   (define-key map (kbd "m") #'change-review-ui-toggle-reviewed)
   (define-key map (kbd "M") #'change-review-ui-mark-all-reviewed)
@@ -3689,6 +3690,18 @@ the report or the session of the task."
   (harness-ui-patch-review--find-property
    'harness-ui-patch-review-threads t (harness-ui-patch-review--section-start)))
 
+(defun harness-ui-patch-review--install-quote-keys (buffer)
+  "Make BUFFER's C-c > the one quote reply, with the comments it draws.
+A buffer of the library's threads view shows review comments; C-c > there
+is `harness-quote-reply', with the same target and the same quote as in
+the report and in a version."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq-local harness-quote-target-functions (list #'harness-ui-patch-review--quote-target)
+                  harness-quote-handler-function #'harness-ui-patch-review--quote-reply)
+      (local-set-key (kbd "C-c >") #'harness-quote-reply)))
+  buffer)
+
 (defun harness-ui-patch-review-threads (&optional filter)
   "Go to the threads of the review at point: a section below its files.
 In the report of a task's changes, in its session's review banner and in
@@ -3729,7 +3742,8 @@ quoted."
           ;; The links of its comments to files are the branch's.
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
-              (setq default-directory (harness-ui-patch-review--link-directory review))))
+              (setq default-directory (harness-ui-patch-review--link-directory review)))
+            (harness-ui-patch-review--install-quote-keys buffer))
           buffer)))))
 
 (defun harness-ui-patch-review-toggle-file-tree ()
@@ -4559,6 +4573,19 @@ the buffer again; a change of the set draws it too
   (setq-local change-review-ui--set (harness-ui-patch-review--r-set review)
               change-review-ui--redraw-function redraw
               change-review-ui-read-hint-function #'harness-ui-patch-review--read-hint)
+  ;; C-c > replies to the comment at point or in the region, wherever the
+  ;; review draws its threads: the report, the banner, the threads view.
+  ;; It comes before the view's own target, so a comment wins over the
+  ;; message or report it is drawn in.
+  (setq-local harness-quote-target-functions
+              (cons #'harness-ui-patch-review--quote-target
+                    (remove #'harness-ui-patch-review--quote-target
+                            harness-quote-target-functions)))
+  ;; A comment is a reply in its own thread, not in the thread a chat's
+  ;; box would make of it; what else the buffer shows quotes as before.
+  (unless (eq harness-quote-handler-function #'harness-ui-patch-review--quote-handler)
+    (setq-local harness-ui-patch-review--base-quote-handler harness-quote-handler-function
+                harness-quote-handler-function #'harness-ui-patch-review--quote-handler))
   (unless change-review-ui--filter
     (setq-local change-review-ui--filter (if harness-ui-patch-review-closed-threads 'all 'open))))
 
@@ -5105,6 +5132,110 @@ Signal when there is none."
     (cons review (or (car threads)
                      (user-error "No thread here; c starts one")))))
 
+(defun harness-ui-patch-review--comment-ref (set thread comment &optional text)
+  "Return the reference to COMMENT of THREAD in SET, a review comment.
+TEXT is what is quoted of it, its whole body by default.  The reference
+names the task and the thread, so its quote links to the review, and
+where the comment was made, so the header says that too."
+  (let* ((review (harness-ui-patch-review--set-review set))
+         (task (and review (harness-ui-patch-review--r-id review)))
+         (location (or (change-review-comment-location comment)
+                       (change-review-thread-location thread)))
+         (author (ignore-errors
+                   (change-review-author-label (change-review-comment-author comment)))))
+    (append (list :kind "comment" :who "comment" :author author
+                  :thread (change-review-thread-id thread)
+                  :comment (change-review-comment-id comment)
+                  :text (or text (change-review-comment-body comment)))
+            (and task (list :task task))
+            (and location
+                 (append (list :file (change-review-location-file location)
+                               :side (format "%s" (change-review-location-side location))
+                               :line (change-review-location-line location))
+                         (and (change-review-location-end-line location)
+                              (list :end (change-review-location-end-line location))))))))
+
+(defun harness-ui-patch-review--comment-refs ()
+  "Return references to the review comments selected, or at point, or nil.
+A selection of the mouse in a thread drawn under a line, or the region of
+a view whose comments are text, is read as the text of the comments it
+holds (`change-review-ui--selected-parts'); point on a comment, or on the
+header of a thread, is the comment or the thread's last."
+  (when-let* ((set (and (boundp 'change-review-ui--set) change-review-ui--set)))
+    (let* ((parts (or (when-let* ((selection (change-review-ui--overlay-selection)))
+                        (list selection))
+                      (and (use-region-p)
+                           (change-review-ui--region-parts (region-beginning) (region-end)))))
+           (entries
+            (cond
+             (parts
+              (cl-loop for (id start end) in parts
+                       for found = (change-review-find-comment set id)
+                       when found
+                       collect (let ((body (change-review-comment-body (cdr found))))
+                                 (list (car found) (cdr found)
+                                       (substring body (min start (length body))
+                                                  (min end (length body)))))))
+             ((use-region-p) nil)
+             (t
+              (pcase-let ((`(,_set ,thread ,comment)
+                           (condition-case nil (change-review-ui--target) (error nil))))
+                (and comment (list (list thread comment
+                                         (change-review-comment-body comment)))))))))
+      (cl-loop for (thread comment text) in entries
+               unless (string-blank-p text)
+               collect (harness-ui-patch-review--comment-ref set thread comment text)))))
+
+(defvar-local harness-ui-patch-review--base-quote-handler nil
+  "The handler C-c > had before the review put its comments in this buffer.")
+
+(defun harness-ui-patch-review--quote-handler (refs)
+  "Reply to REFS: the review's comments in their thread, else as before.
+A buffer the review draws its threads in -- the report, a chat's
+threads view, the tree beside Ediff -- quotes its comments here, and
+what else it shows with the handler it had
+\(`harness-ui-patch-review--base-quote-handler')."
+  (if (cl-some (lambda (ref) (equal (harness-thread-ref-kind ref) "comment")) refs)
+      (harness-ui-patch-review--quote-reply refs)
+    (funcall (or harness-ui-patch-review--base-quote-handler
+                 #'harness-quote-default-handler)
+             refs)))
+
+(defun harness-ui-patch-review--quote-target (beg end)
+  "Return the review comments C-c > quotes from BEG to END, or nil.
+That is what `harness-ui-patch-review--comment-refs' finds at point or in
+the region; a version of a file adds its own target for selected lines."
+  (ignore beg end)
+  (harness-ui-patch-review--comment-refs))
+
+(defun harness-ui-patch-review--quote-reply (refs)
+  "Reply with the quote of REFS, comments of a review, as a draft.
+The reply is in the last comment's thread, with the quote of each
+reference, `harness-thread-quote' making the header and link of every one."
+  (let* ((comments (cl-remove-if-not
+                    (lambda (ref) (equal (harness-thread-ref-kind ref) "comment"))
+                    refs))
+         (last (car (last comments)))
+         (thread-ids (delete-dups (mapcar (lambda (ref) (plist-get ref :thread)) comments)))
+         (set (or (and (boundp 'change-review-ui--set) change-review-ui--set)
+                  (when-let* ((review (harness-ui-patch-review--review-here)))
+                    (harness-ui-patch-review--r-set review))))
+         (found (and set last (change-review-find-comment set (plist-get last :comment)))))
+    (unless comments (user-error "Nothing to reply here"))
+    (when (cdr thread-ids)
+      (user-error "The selection is of more than one thread: select in one, to reply in it"))
+    (unless found (user-error "That comment is not in a review here"))
+    ;; What was selected is quoted now; the next C-c > takes the comment
+    ;; at point whole.  A control panel quotes a version's selection, and
+    ;; that version's goes too.
+    (deactivate-mark)
+    (when-let* ((version (ignore-errors (harness-ui-patch-review--selected-version))))
+      (change-review-ui-clear-selection version))
+    (change-review-ui-clear-selection)
+    (change-review-ui-reply-to-comment
+     set (car found) (cdr found)
+     (harness-thread-quote (list :refs comments)))))
+
 (defun harness-ui-patch-review-reply ()
   "Reply to the thread at the current difference, or at point, in Ediff.
 As a draft, in the thread: it goes with the feedback.  A thread that is
@@ -5122,23 +5253,74 @@ The selection is the mouse's (`change-review-ui-mouse-select')."
                        (with-current-buffer buffer (change-review-ui--overlay-selection))))
                 (list (plist-get state :b) (plist-get state :a)))))
 
+(defun harness-ui-patch-review--version-quote-target (beg end)
+  "Return what C-c > quotes from BEG to END in a version Ediff compares.
+Text of a comment selected with the mouse quotes that comment; a region
+of the file quotes its lines; point alone quotes the comment there, or
+the thread under the line."
+  (ignore beg end)
+  (or (harness-ui-patch-review--comment-refs)
+      (when (and (use-region-p) (not (change-review-ui--overlay-selection)))
+        (condition-case nil
+            (list (harness-ui-patch-review--region-ref (harness-ui-patch-review--current)))
+          (user-error nil)))))
+
+(defun harness-ui-patch-review--version-quote-reply (refs)
+  "Reply to REFS in a version Ediff compares.
+Lines of the diff make a card in the feedback box, as C-c > on them
+does; a comment of the review is a reply in its thread, with the quote
+`harness-thread-quote' makes."
+  (let ((diff (cl-remove-if-not (lambda (ref) (equal (harness-thread-ref-kind ref) "diff"))
+                                refs)))
+    (if (null diff)
+        (harness-ui-patch-review--quote-reply refs)
+      (let* ((review (harness-ui-patch-review--current))
+             (popout (harness-ui-patch-review--feedback-box review)))
+        (deactivate-mark)
+        (with-current-buffer popout
+          (setq-local harness-compose-thread-open-function
+                      (lambda (_data ref) (harness-ui-patch-review--show-ref review ref)))
+          (goto-char harness-compose-end)
+          (harness-compose-add-thread diff))
+        ;; A file with a comment of the reviewer's is not an approved one.
+        (let ((file (and (integerp harness-ui-patch-review--index)
+                         (nth harness-ui-patch-review--index
+                              (harness-ui-patch-review--r-files review)))))
+          (harness-ui-patch-review-edit-feedback
+           (concat "A reply in a thread is waiting for your words."
+                   (and (harness-ui-patch-review--withdraw-approval review file t)
+                        (format " %s is no longer approved." (change-review-file-path file))))))))))
+
+(defun harness-ui-patch-review--control-quote-target (beg end)
+  "Return what C-c > quotes in the control panel, from BEG to END.
+That is the text of a comment selected in either version, else the last
+comment of the thread at the current difference; nil when there is
+neither, and so nothing to quote."
+  (ignore beg end)
+  (or (if-let* ((version (harness-ui-patch-review--selected-version)))
+          (with-current-buffer version (harness-ui-patch-review--comment-refs))
+        nil)
+      (when-let* ((review (harness-ui-patch-review--current))
+                  (file (and (integerp harness-ui-patch-review--index)
+                             (nth harness-ui-patch-review--index
+                                  (harness-ui-patch-review--r-files review))))
+                  (threads (harness-ui-patch-review--ediff-threads review file)))
+        (let ((thread (car threads)))
+          (list (harness-ui-patch-review--comment-ref
+                 (harness-ui-patch-review--r-set review) thread
+                 (change-review-thread-last-comment thread)))))))
+
 (defun harness-ui-patch-review-quote-reply ()
   "Reply with a quote, from the control panel of an Ediff of a task's change.
 With text of a comment selected in either version, a reply to that comment
-with the text quoted, as \\<harness-ui-patch-review-lines-mode-map>\\[change-review-ui-quote-reply] does in the version.  Without, the
-reply r makes, to the thread at the current difference, that starts with
-its last comment quoted, as a mail's reply does, point under it.  Either
-way a draft in the thread, which goes with the feedback, and a closed
-thread is open again, as r makes it."
+with the text quoted.  Without, the reply r makes, to the thread at the
+current difference, that starts with its last comment quoted, as a mail's
+reply does, point under it.  Either way a draft in the thread, which goes
+with the feedback, and a closed thread is open again, as r makes it.
+What is quoted comes from the one place C-c > does, with the header and
+link `harness-thread-quote' gives every quote."
   (interactive)
-  (if-let* ((version (harness-ui-patch-review--selected-version)))
-      (with-current-buffer version
-        (call-interactively #'change-review-ui-quote-reply))
-    (pcase-let ((`(,review . ,thread) (harness-ui-patch-review--ediff-thread)))
-      (change-review-ui-reply-to-thread
-       (harness-ui-patch-review--r-set review) thread
-       (change-review-ui-quote-string
-        (change-review-comment-body (change-review-thread-last-comment thread)))))))
+  (harness-quote-reply))
 
 (defun harness-ui-patch-review--region-ref (review)
   "Return the reference to the region selected in this version of a file of REVIEW.
@@ -5181,27 +5363,10 @@ of the review, on those lines, which the agent answers.  Point goes to the
 box.  The file has a comment of yours now, so it is not approved: a file
 that was is no longer (`harness-ui-patch-review--withdraw-approval'), and
 leaving it in Ediff does not approve it.  Without a region, or with text of
-a comment selected with the mouse, this is the library's quote reply
-\(\\[change-review-ui-quote-reply])."
+a comment selected with the mouse, it replies to the comment, quoting it,
+as C-c > does everywhere (`harness-quote-reply')."
   (interactive)
-  (if (or (not (use-region-p)) (change-review-ui--overlay-selection))
-      (call-interactively #'change-review-ui-quote-reply)
-    (let* ((review (harness-ui-patch-review--current))
-           (ref (harness-ui-patch-review--region-ref review))
-           (popout (harness-ui-patch-review--feedback-box review)))
-      (deactivate-mark)
-      (with-current-buffer popout
-        (setq-local harness-compose-thread-open-function
-                    (lambda (_data ref) (harness-ui-patch-review--show-ref review ref)))
-        (goto-char harness-compose-end)
-        (harness-compose-add-thread (list ref)))
-      ;; A file with a comment of the reviewer's is not an approved one.
-      (let ((file (and (integerp harness-ui-patch-review--index)
-                       (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review)))))
-        (harness-ui-patch-review-edit-feedback
-         (concat "A reply in a thread is waiting for your words."
-                 (and (harness-ui-patch-review--withdraw-approval review file t)
-                      (format " %s is no longer approved." (change-review-file-path file)))))))))
+  (harness-quote-reply))
 
 (defun harness-ui-patch-review-toggle-thread ()
   "Close the thread at the current difference, or at point, or open it again."
@@ -5781,6 +5946,10 @@ they are, as `harness-ui-patch-review--place-from-texts' gives it)."
       (setq-local harness-ui-patch-review--review review
                   harness-ui-patch-review--index
                   (cl-position file (harness-ui-patch-review--r-files review) :test #'eq)
+                  harness-quote-target-functions
+                  (list #'harness-ui-patch-review--version-quote-target)
+                  harness-quote-handler-function
+                  #'harness-ui-patch-review--version-quote-reply
                   change-review-ui--set (harness-ui-patch-review--r-set review)
                   ;; The links of a comment to files are the branch's.
                   default-directory (harness-ui-patch-review--link-directory review)
@@ -6023,7 +6192,10 @@ It gets the review's keys and help, and gives the report back as it ends."
   (setq harness-ui-patch-review--review review
         harness-ui-patch-review--index index)
   (setq-local ediff-brief-help-message-function #'harness-ui-patch-review--ediff-help
-              change-review-ui-read-hint-function #'harness-ui-patch-review--read-hint)
+              change-review-ui-read-hint-function #'harness-ui-patch-review--read-hint
+              harness-quote-target-functions
+              (list #'harness-ui-patch-review--control-quote-target)
+              harness-quote-handler-function #'harness-ui-patch-review--quote-reply)
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map ediff-mode-map)
     (define-key map "c" #'harness-ui-patch-review-comment)
@@ -6644,6 +6816,7 @@ comments link to the files as the branch has them."
       (let ((buffer (change-review-open-threads (harness-ui-patch-review--r-set review) 'all)))
         (with-current-buffer buffer
           (setq default-directory (harness-ui-patch-review--link-directory review)))
+        (harness-ui-patch-review--install-quote-keys buffer)
         (unless (harness-ui-patch-review--goto-thread buffer id)
           (message "The thread %s is not in the review" id))))))
 

@@ -834,7 +834,9 @@ telling the model how; the node keeps the blocks, for the chat to draw."
                    "Good.")))
       (harness-test-await (harness-call 'agent/prompt id (list (list :type "text" :text "Intro") reply)))
       (let ((user (car (harness-call 'session/nodes id))))
-        (should (equal "Intro\n\n> The build is green.\n\nGood." (plist-get user :content)))
+        (should (equal (concat "Intro\n\n> Your earlier message (harness:message/n-1):\n>\n"
+                               "> The build is green.\n\nGood.")
+                       (plist-get user :content)))
         (should (harness-thread-block-p (cadr (plist-get user :blocks))))))))
 
 (defun harness-agent-test-image (dir)

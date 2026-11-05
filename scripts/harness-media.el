@@ -2677,16 +2677,14 @@ before did not do what the picture needs."
     (error "The compose box does not match %S: %S" regexp (harness-compose-text))))
 
 (defun harness-media-shot-quote-reply ()
-  "A reply of the agent's quoted in the compose box and answered inline.
+  "A part of the agent's reply as a card in the compose box, answered under it.
 The session is asked how to retry failed webhooks and answers in three
-paragraphs.  Then, with the keys a user presses in the box: C-u C-c > quotes
-the whole reply; C-SPC at the start of the long paragraph's middle and
-C-c [ at its end elide it as [...], keeping the front and the end of
-that paragraph for context; M-RET splits the quote after the paragraph,
-for an answer typed under what is above; and the last paragraph, the
-question, is answered under it.  Point ends in the box, after the second
-answer.  The session is made here and deleted after, so no other
-picture shows it."
+paragraphs.  With the keys a user presses: the opening of the answer is
+selected and C-c > starts a reply in a thread on it -- a card in the box
+that says whose words they are and links the message, the part quoted
+under it -- and the words typed under the card are the reply; the box
+holds no Markdown quote.  Point ends in the box, after the answer.  The
+session is made here and deleted after, so no other picture shows it."
   (let ((id (harness-media--new-session :name "Design the webhook retries"
                                         :model "claude:claude-opus-5-5"
                                         :permission-mode 'accept-edits)))
@@ -2696,31 +2694,16 @@ picture shows it."
            (code (car (delq chat (window-list nil 'nomini)))))
       (select-window chat)
       (with-current-buffer buffer
-        ;; From the box, C-u C-c > quotes the agent's last reply, whole
-        ;; (C-c > itself starts a thread).
-        (goto-char harness-compose-end)
-        (harness-media--keys "C-u C-c >")
-        (harness-media--box-expect "\\`> Yes, and the request path")
-        ;; The middle of the long paragraph: from "A background thread"
-        ;; through "between attempts."  The region is the user's, from
-        ;; C-SPC to where point is.
-        (harness-media--box-goto "A background thread")
-        (harness-media--keys "C-SPC")
-        (harness-media--box-goto "between attempts\\." t)
-        (unless (region-active-p) (error "C-SPC did not start a region"))
-        (harness-media--keys "C-c [")
-        (harness-media--box-expect "is due\\. \\[\\.\\.\\.\\] Once an hour")
-        ;; M-RET at the end of that paragraph splits the quote there: the
-        ;; question stays a quote of its own, and point is on the empty
-        ;; line between them.
-        (harness-media--box-goto "not a thread\\." t)
-        (harness-media--keys "M-RET")
-        (harness-media--box-expect "not a thread\\.\n\n\n\n> One decision is yours")
-        (harness-media--type "Agreed, but give up after six hours, not one: our partners' maintenance windows are long.")
-        ;; The question, answered under it.
-        (goto-char harness-compose-end)
-        (harness-media--type "Only logged for now. One warning when a delivery gives up is enough.")
-        (harness-media--box-expect "long\\.\n\n> One decision is yours.*\n\nOnly logged for now\\."))
+        ;; The opening of the answer, selected as a user selects it.
+        (harness-media--select-text
+         "Yes, and the request path can stay as it is: notify() already returns the URLs that failed, so create_order() can keep those deliveries and try them again later")
+        (harness-media--keys "C-c >")
+        ;; The reply is a card, and the box holds its token, not a quote.
+        (harness-media--box-expect "\\`\n\\[reply 1\\]\n\\'")
+        (unless (= 1 (length harness-compose-attachments))
+          (error "C-c > started no reply in a thread"))
+        (harness-media--type "Agreed. Keep the retry table out of the order path, though: a failed delivery should not hold up a request.")
+        (harness-media--box-expect "request\\.$"))
       ;; The box has grown: the frame fits the chat as it stands.
       (harness-media--fit (max (harness-media--text-lines chat) (harness-media--text-lines code)) 30)
       (harness-media--to-bottom buffer)
@@ -2728,16 +2711,17 @@ picture shows it."
     (harness-call 'session/delete id)))
 
 (defun harness-media-shot-quote-thread ()
-  "A reply quoted in the compose box with the thread it answers.
+  "A reply in a thread whose quote carries the thread it answers.
 The session is a short exchange about webhooks: the agent says a failed
 delivery is retried once, the user answers both parts of that inline,
-and the agent answers that it changed them.  From the box, C-c > quotes
-the agent's answer, and under it the reply it answers, one level
-deeper: what that reply quoted is deeper still, so the thread's replies
-quote each other and it reads back in order.  The agent's line is split
-with M-RET there and the user's answer typed under it.  Point ends in
-the box, after the answer.  The session is made here and deleted after,
-so no other picture shows it."
+and the agent answers that it changed them.  From the box, C-c > starts
+a reply in a thread to the agent's answer: a card in the box under the
+header that names and links it, its quote the whole answer -- and under
+it the reply it answers, one level deeper, the agent's message that
+reply quoted deeper still, so the thread's replies quote each other and
+it reads back in order.  The answer is typed under the card, and point
+ends there.  The session is made here and deleted after, so no other
+picture shows it."
   (let ((id (harness-media--new-session :name "Retry failed webhooks"
                                         :model "claude:claude-opus-5-5"
                                         :permission-mode 'accept-edits)))
@@ -2754,29 +2738,67 @@ so no other picture shows it."
            (code (car (delq chat (window-list nil 'nomini)))))
       (select-window chat)
       (with-current-buffer buffer
-        ;; From the box, C-u C-c > quotes the agent's last reply and, under
-        ;; it, the inline reply it answers, the agent's message that
-        ;; reply quoted under that.
+        ;; From the box, C-c > starts a reply in a thread to the agent's
+        ;; last answer, its quote the whole answer and the thread it
+        ;; answers.
         (goto-char harness-compose-end)
-        (harness-media--keys "C-u C-c >")
-        (harness-media--box-expect "\\`> Changed: three tries")
-        (harness-media--box-expect "> > > A failed delivery is retried once, 30 seconds later\\.")
-        (harness-media--box-expect "> > Log the URL too\\.")
-        ;; The agent's line answered: M-RET splits the quote there, and
-        ;; the answer goes on the empty line under it.
-        (harness-media--box-goto "Changed: three tries[^\n]*" t)
-        (harness-media--keys "M-RET")
-        (harness-media--box-expect "log line\\.\n\n\n\n> > > A failed delivery")
+        (harness-media--keys "C-c >")
+        (harness-media--box-expect "\\`\n\\[reply 1\\]\n\\'")
+        (let ((refs (harness-thread-refs
+                     (plist-get (car harness-compose-attachments) :thread))))
+          (unless (and refs
+                       (string-match-p "^> > A failed delivery is retried once, 30 seconds later\\."
+                                       (plist-get (car refs) :text))
+                       (string-match-p "^> Log the URL too\\." (plist-get (car refs) :text)))
+            (error "The card quotes not the thread: %S" refs)))
         (harness-media--type "Good. Ship it with the release.")
-        (harness-media--box-expect "log line\\.\n\nGood\\. Ship it with the release\\."))
+        (harness-media--box-expect "release\\.$"))
       ;; The box has grown: the frame fits the chat as it stands.
       (harness-media--fit (max (harness-media--text-lines chat) (harness-media--text-lines code)) 30)
       (harness-media--to-bottom buffer)
-      ;; Scrolling put point at the box's end; the picture has it after
-      ;; the answer typed under the agent's line.
-      (with-current-buffer buffer
-        (harness-media--box-goto "Good\\. Ship it with the release\\." t))
       (harness-media--capture "quote-thread"))
+    (harness-call 'session/delete id)))
+
+(defun harness-media-shot-quote-calls ()
+  "A group of tool calls as one card in the box, every call under its header.
+The session is asked which endpoint is slowest and reads three files to
+say.  Point is on the group's summary -- \"3 tool calls: Read file x3\" --
+where C-c > starts a reply in a thread to every call folded under it: a
+card whose quote is each call, under the header of its own that names it
+and links it, and the answer typed under them all.  The calls are long
+-- a read is its file -- so the picture quotes the start of each, as a
+smaller `harness-chat-thread-quote-limit' does."
+  (let ((id (harness-media--new-session :name "Quote the calls"
+                                        :model "claude:claude-opus-5-5"
+                                        :permission-mode 'accept-edits)))
+    (harness-media--prompt id "Which endpoint is slowest?")
+    (let* ((buffer (harness-media--chat-shot id "acme/app.py"))
+           (chat (get-buffer-window buffer))
+           (code (car (delq chat (window-list nil 'nomini)))))
+      (select-window chat)
+      (with-current-buffer buffer
+        ;; The group of reads the answer rests on, above the answer.
+        (goto-char (point-max))
+        (unless (re-search-backward "3 tool calls: Read file" nil t)
+          (error "The reads are not drawn as a group: %S" (buffer-string)))
+        (let ((harness-chat-thread-quote-limit 180))
+          (harness-media--keys "C-c >"))
+        (harness-media--box-expect "\\`\n\\[reply 1\\]\n\\'")
+        (let ((refs (harness-thread-refs
+                     (plist-get (car harness-compose-attachments) :thread))))
+          (unless (= 3 (length refs))
+            (error "The card quotes %d calls, not three" (length refs)))
+          (let ((firsts (mapcar (lambda (ref)
+                                  (car (split-string (substring-no-properties (plist-get ref :text)) "\n")))
+                                refs)))
+            (unless (equal '("Read file acme/app.py" "Read file acme/products.py" "Read file acme/db.py")
+                           firsts)
+              (error "The card quotes the wrong calls: %S" firsts))))
+        ;; Point is under the card, which the answer follows.
+        (harness-media--type "That is enough of the reads; the query itself says the rest."))
+      (harness-media--fit (max (harness-media--text-lines chat) (harness-media--text-lines code)) 30)
+      (harness-media--to-bottom buffer)
+      (harness-media--capture "quote-calls"))
     (harness-call 'session/delete id)))
 
 ;;;; Answering a reply in its thread
@@ -4383,8 +4405,9 @@ Ediff on acme/app.py, the thread on the renamed function under its line in
 the branch's version.  The mouse is dragged over the end of the agent's
 answer, which a region could not hold, the thread being a string an
 overlay shows: the selection is marked (`review-select').  Then C-c >:
-the reply opens in a buffer of its own with the part quoted, point under
-it, and an answer is typed (`review-quote')."
+the reply opens in a buffer of its own with the part quoted under the
+line that names the comment and links its thread, point under it, and an
+answer is typed (`review-quote')."
   (let ((popout (harness-media--review-layout)))
     (ignore popout)
     (let* ((review harness-media--review)
@@ -4631,6 +4654,7 @@ names."
     ("menu" . harness-media-shot-menu)
     ("remote" . harness-media-shot-remote)
     ("version" . harness-media-shot-version)
+    ("quote-calls" . harness-media-shot-quote-calls)
     ;; Last: they write a month of chats the other pictures must not show.
     ("insights" . harness-media-shot-insights)
     ("insights-activity" . harness-media-shot-insights-activity)

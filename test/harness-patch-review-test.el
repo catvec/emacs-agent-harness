@@ -1479,7 +1479,9 @@ announced to every UI like any other."
         ;; The blocks that go on know their threads, and end with the markers.
         (should (equal (plist-get first :id) (plist-get data :id)))
         (should (equal (plist-get comment :id) (plist-get data :comment)))
-        (should (equal (concat "> The build is green.\n\nGood.\n\n" (harness-thread-marker (plist-get first :id)))
+        (should (equal (concat "> Your earlier message (" (harness-links-message-url nil (plist-get agent :id))
+                               "):\n>\n> The build is green.\n\nGood.\n\n"
+                               (harness-thread-marker (plist-get first :id)))
                        (plist-get (car blocks) :text)))
         (should (equal (list (plist-get second :id)) (harness-thread-marker-ids (plist-get (cadr blocks) :text))))
         (should (equal "Good." (harness-thread-response (car blocks)))))
@@ -1626,7 +1628,10 @@ The import of the words typed by hand does not make them again either."
            (task (harness-call 'task/get id))
            (additions (harness-patch-review--additions task (harness-tasks--words blocks))))
       ;; The text of the blocks: the note, then the reply with its marker.
-      (should (string-prefix-p "Quick note first.\n\n> Rolled back.\n\nWhy?\n\n[thread t-" text))
+      (should (string-prefix-p (concat "Quick note first.\n\n> Your earlier message ("
+                                       (harness-links-message-url nil (plist-get agent :id))
+                                       "):\n>\n> Rolled back.\n\nWhy?\n\n[thread t-")
+                               text))
       ;; The words are the note: the reply is a thread, no words.
       (should (equal "Quick note first." (harness-tasks--words blocks)))
       (should additions)

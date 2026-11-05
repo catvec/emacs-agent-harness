@@ -500,33 +500,38 @@ when the task leaves review."
        5 "the hand_in call to open once the banner goes"))))
 
 (ert-deftest harness-ui-review-quotes-the-summary-for-the-feedback ()
-  "C-c > on the report's summary quotes it in the box, whole, as written.
+  "C-c > on the report's summary starts a reply in a thread that quotes it.
 In the session the banner's summary is quoted from point on it; in the
-report popout from anywhere, its box included, the feedback going under
-the quote."
+report popout from anywhere, its box included.  The card is the reply,
+its quote the summary, whole, as written."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid))
-          (quoted "> # Done\n>\n> The flaky test is fixed.\n\n"))
+          (quoted (concat "> Your earlier report (" (harness-links-task-url id) "):\n>\n"
+                          "> # Done\n>\n> The flaky test is fixed.")))
       (harness-ui-review-test--wait-report chat)
       (with-current-buffer chat
         (goto-char harness-chat--transcript-end)
         ;; The summary's, not the banner's "Fix the flaky test" nor the
         ;; problem above it, which both hold "The flaky test".
         (let ((case-fold-search nil)) (search-forward "The flaky test is fixed."))
-        ;; The session's C-c > starts a thread, but the banner's report says
-        ;; what it quotes as (`compose-quote'), and that is a quote.
+        ;; The banner's report says what it quotes, and the chat's reply
+        ;; is a card of it.
         (should (eq 'harness-chat-thread-reply (key-binding (kbd "C-c >"))))
         (execute-kbd-macro (kbd "C-c >"))
-        (should (equal quoted (harness-compose-text)))
+        (should (equal quoted
+                       (harness-thread-quote
+                        (plist-get (car harness-compose-attachments) :thread))))
         (should (= (point) harness-compose-end))
         (harness-compose-set ""))
       (let ((popout (harness-ui-review-test--report board id)))
         (should (with-current-buffer popout (harness-compose-live-p)))
         (with-selected-window (get-buffer-window popout)
           (goto-char harness-compose-end)
-          (should (eq 'compose-quote-reply (key-binding (kbd "C-c >"))))
+          (should (eq 'harness-quote-reply (key-binding (kbd "C-c >"))))
           (execute-kbd-macro (kbd "C-c >"))
-          (should (equal quoted (harness-compose-text)))
+          (should (equal quoted
+                         (harness-thread-quote
+                          (plist-get (car harness-compose-attachments) :thread))))
           (should (= (point) harness-compose-end)))))))
 
 (ert-deftest harness-ui-review-report-opens-the-call-in-the-transcript ()
