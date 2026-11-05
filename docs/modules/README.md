@@ -69,7 +69,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;gremlin            ; Slow, hanging, noisy, lying and boundary-testing chaos tools.
  ;;handin             ; The hand_in tool: a task session hands its finished work in and stops.
  ;;notify             ; Notification and Notification providers: agents reach the user through…
- ;;review             ; The review_threads and review_comment tools: a task's agent reads and…
+ ;;review             ; The review_threads tool: a task's agent reads the threads of its…
  ;;sessions           ; Tools to list, search, read, message, control, move and wait on…
  ;;ssh                ; SSH: shell commands on another host, through TRAMP.
  ;;web                ; Web search (pluggable providers, Brave built in; else the model…
@@ -171,7 +171,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [tools-notify](tools-notify.md) |  | [tools](tools.md), [notifications](notifications.md) | Notification and Notification providers: agents reach the user through the notifications module. |
 | [tools-plan](tools-plan.md) | by default | [tools](tools.md), [session](session.md) | The Plan tool: record a plan for a complex task, shown to the user. |
 | [tools-question](tools-question.md) | by default | [tools](tools.md), [session](session.md) | The Question tool (ask_user), and the questions the harness asks the user itself. |
-| [tools-review](tools-review.md) |  | [tools](tools.md), [session](session.md) | The review_threads and review_comment tools: a task's agent reads and answers the threads of its review. |
+| [tools-review](tools-review.md) |  | [tools](tools.md), [session](session.md) | The review_threads tool: a task's agent reads the threads of its review and answers them in <thread> blocks. |
 | [tools-session-info](tools-session-info.md) | by default | [tools](tools.md), [session](session.md) | The Session info tool (session_info): the current session and its live access, described to the model. |
 | [tools-sessions](tools-sessions.md) |  | [tools](tools.md), [session](session.md), [agent](agent.md) | Tools to list, search, read, message, control, move and wait on sessions and tasks. |
 | [tools-shell](tools-shell.md) | by default | [tools](tools.md) | Bash (asynchronous, sandboxed when available) and Emacs Lisp evaluation. |

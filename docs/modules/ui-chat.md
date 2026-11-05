@@ -61,11 +61,13 @@ task's review (`harness-ui-report-hand-in-functions`) -- and a fold in
 it draws the call again (`harness-chat-refresh-hand-ins`).  It stays
 folded while something else shows that report already, the review
 banner of a task waiting for review
-(`harness-chat-hand-in-fold-functions`).  A `review_comment` call with
-words -- the agent's answer in a thread of the task's review, to a
-reply of yours -- is drawn as the message it is, from the agent, with
-the call under its fold
-(`harness-chat--render-thread-message`); a message of yours holds
+(`harness-chat-hand-in-fold-functions`).  An agent answers a thread
+in a <thread> block of its message, which draws as the card a reply
+in a thread is (`harness-chat--render-thread-tag`); a call of the
+reply tool that was removed, `review_comment`, with words is drawn as
+the message it was, from the agent, with the call under its fold
+(`harness-chat--render-thread-message`), so the transcript kept from
+before still reads as it did; a message of yours holds
 its replies in threads as cards, what each replies to and the words
 under it, with a link to the thread (`harness-chat--render-replies`).
 A message with many replies draws the first and the last
@@ -85,7 +87,7 @@ A message of either side may hold a reply in a thread as a <thread>
 block (`harness-thread-parse-blocks`): it draws as the same card, a
 line naming the thread, what it answers and its status, the words
 under it (`harness-chat--render-thread-tag`), so the user and the
-agent reply in the one form.
+agent reply in the one form and the tool has nothing to add.
 The text of a message is marked with the node and the part of it it
 is (`harness-chat-part`), and where its source was (`harness-md-source`),
 so that C-c > knows what a region is from (`harness-chat--region-refs`).

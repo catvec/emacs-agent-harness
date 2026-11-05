@@ -28,18 +28,19 @@ from, the report's summary as its description, and, as its author,
 the agent, with the session and the `hand_in` call that handed it in.
 
 The module is the single writer of a task's threads, so the user's
-Emacs and the agent's tools never disagree: the UI sends the
-operations the user makes (`patch-review/apply`), the tools send the
-agent's (`review_comment`), the module performs them on the set it
-keeps in the state directory, one document a task
-(patch-review/TASK.json), and announces each in `patch-review/changed`
-for every UI to perform on its own copy.  An operation names what it
-adds by id, so performing one twice is harmless.
+Emacs and the agent's messages never disagree: the UI sends the
+operations the user makes (`patch-review/apply`), the agent's
+<thread> blocks its answers (`patch-review/comment`), the module
+performs them on the set it keeps in the state directory, one
+document a task (patch-review/TASK.json), and announces each in
+`patch-review/changed` for every UI to perform on its own copy.  An
+operation names what it adds by id, so performing one twice is
+harmless.
 
 THE AUTHORS.  The user writes as themselves, by name and address.  An
-agent's comment records the agent, the session and the tool call that
-made it (`review_comment`), the link back to that point of the
-conversation.
+agent's comment records the agent and the session; a comment made by
+the reply tool before it was removed also records the call, the link
+back to that point of the conversation.
 
 THE DRAFTS.  What the user writes in a thread is a draft until it is
 sent, and a blank one is no comment at all.  A task waiting for review
@@ -48,8 +49,9 @@ report's box, a message typed in its session, another client -- gets
 them, `harness-tasks-feedback-additions-functions` asking this module
 for the text, which quotes the diff above each comment as a reply on a
 mailing list does and names each comment's thread.  The agent answers a
-thread with `review_comment`, closing it when its point is done; the
-user closes it in turn, once they agree.
+thread in a <thread> block of its message, closing it with
+status="closed" when its point is done; the user closes it in turn,
+once they agree.
 
 THE WORKING PHASE.  A task at work is in the working phase: its review
 is a conversation with the user, and there is no feedback that could
@@ -89,20 +91,19 @@ the task's review (`harness-patch-review--on-message`, an
 the feedback with, asks for it itself before the round of feedback is
 kept, `harness-patch-review--on-feedback-attachments`, a filter on
 `task/feedback-attachments`): a reference to a comment of the
-agent's in a thread (`review_comment`) or to an earlier reply of the
-user's makes it a reply in that thread, which a close does not keep
-from opening again; lines of a diff put it on those lines, at the
+agent's in a thread (the call that made it) or to an earlier reply of
+the user's makes it a reply in that thread, which a close does not
+keep from opening again; lines of a diff put it on those lines, at the
 revision; any other starts a thread on the change as a whole.  The
 block that goes on, and is recorded, has the thread's id, and its text
 is one <thread> block (`harness-thread-marker`), which is how the agent
-knows the thread to answer in, and with which tool, and how the chat
+knows the thread to answer in and how the chat
 draws a link to it.  A reply that is a thread is no words: the tasks
 module leaves it out of the words a task is sent back with
 (`harness-tasks--words`), so they are not a thread of their own too,
 and the import of rounds and of words by hand, which reads text, skips
-what names a thread.  Only a task's session has a review, and only
-an agent that has `review_comment` can answer in it: any other
-session's replies stay plain, answered inline.
+what names a thread.  Only a task's session has a review: any other session's
+replies stay plain, answered inline.
 
 THE <thread> FORM IN MESSAGES.  A reply in a thread can be written in
 the message itself, by the user and the agent alike
@@ -209,7 +210,6 @@ to say.
 - `store/save` ([store](store.md))
 - `task/for-session` ([tasks](tasks.md))
 - `task/get` ([tasks](tasks.md))
-- `tools/list` ([tools](tools.md)), when it is loaded
 
 ### Events it handles
 

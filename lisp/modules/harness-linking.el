@@ -47,7 +47,7 @@
 ;; a Markdown link that reads as what it names, an autolink keeps its
 ;; form.  What a Markdown renderer shows as code is not touched.  The
 ;; tools that carry the words of an agent do this before the words go on
-;; (`harness-tools-written'): hand_in, review_comment, session_send,
+;; (`harness-tools-written'): hand_in, session_send,
 ;; ask_user, plan, spawn_agent, task_submit and task_control, in the
 ;; session of the agent that wrote them and before the call that wrote
 ;; them; and so does the turn for each assistant message it finishes,
@@ -75,7 +75,7 @@ The user reads your messages in Emacs, where a link to something in the harness 
 - [text](harness:call/last) -- a tool call of this session: last is the newest, #3 the third newest, bash#2 the second newest bash call, or give a node id. For another session's: harness:session/ID/call/NODE.
 - [text](harness:message/last) -- a message of this session: last is your newest, first the first user message, #2, user#1, assistant#2, or a node id.
 - [text](harness:thread/ID) -- a thread of your task's review, the id in its `<thread id=\"...\">` tag; harness:task/TASK/thread/ID for another task's; harness:task/ID is a task.
-Use them to point at evidence (\"all tests pass: [the run](harness:call/bash)\"), at the sessions you report on or ask for something, and at the threads you answer. They work in your messages, in the texts of hand_in, review_comment, ask_user and plan, and in what you send to other sessions. last, #3 and the like mean what they mean when you write them: the harness writes them out as ids. A link that names nothing is left as you wrote it (the result of a call that carries it says so); check the ids. Inside backquotes or a fenced block a link is plain text."
+Use them to point at evidence (\"all tests pass: [the run](harness:call/bash)\"), at the sessions you report on or ask for something, and at the threads you answer. They work in your messages, in the texts of hand_in, ask_user and plan, and in what you send to other sessions. last, #3 and the like mean what they mean when you write them: the harness writes them out as ids. A link that names nothing is left as you wrote it (the result of a call that carries it says so); check the ids. Inside backquotes or a fenced block a link is plain text."
   "The Links section of the system prompt.
 It is added after the Planning section (`harness-linking--system-prompt'),
 and says what `harness-linking-resolve' accepts.")

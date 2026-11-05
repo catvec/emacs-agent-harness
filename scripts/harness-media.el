@@ -1282,9 +1282,8 @@ The handle is the one the approval message names."
     ("Run the project's check suite" . harness-media--notes-child-script)
     ("old build" . harness-media--decisions-script)
     ;; The thread-reply picture: a reply the harness made comments in
-    ;; threads of (the tags of its <thread> blocks name them), and the
-    ;; question before it.
-    ("<thread id=" . harness-media--thread-script)
+    ;; threads of (its <thread> blocks name them), and the question before it.
+    ("answer in a thread block" . harness-media--thread-script)
     ("Failed webhook deliveries" . harness-media--thread-first-script)
     ("dropped after one try" . harness-media--quote-script)
     ;; The denied call and the user's approval of it.
@@ -2841,16 +2840,24 @@ message: the message holds a reply in a thread in each."
 (defun harness-media--thread-script (request)
   "The turn of the thread-reply picture's session after the user's reply.
 The reply's replies are comments in threads, and the tag of each <thread>
-block names its thread (`harness-thread-marker'): the agent reads the id
-there and answers in the thread, with `review_comment', as a model does."
-  (cl-loop for id in (harness-media--thread-ids request)
-           for (body . status) in harness-media--thread-answers
-           collect (harness-media--tool "review_comment" :thread id :body body :status status)))
+block names its thread (`harness-thread-marker'): the agent reads the id there
+and answers in the thread, in a <thread> block of its message, as a
+model does."
+  (let ((text (cl-loop for id in (harness-media--thread-ids request)
+                       for (body . status) in harness-media--thread-answers
+                       concat (format "<thread id=\"%s\"%s>\n%s\n</thread>\n\n"
+                                      id
+                                      (if status (format " status=\"%s\"" status) "")
+                                      body))))
+    `((:type text :delta ,text)
+      (:type done :stop-reason end-turn))))
 
 (defun harness-media--thread-answers-made (id)
   "Return how many comments in a thread the agent of session ID has made."
-  (cl-count "review_comment" (harness-call 'session/nodes id)
-            :key (lambda (node) (plist-get node :tool)) :test #'equal))
+  (cl-loop for node in (harness-call 'session/nodes id)
+           when (and (eq 'assistant (plist-get node :kind))
+                     (string-search "<thread" (or (plist-get node :content) "")))
+           sum (length (harness-thread-parse-blocks (plist-get node :content)))))
 
 (defun harness-media--select-text (text)
   "Select TEXT, as drawn in the transcript before the box: the region, point at its end.
@@ -2964,8 +2971,7 @@ The slow-request task's agent said what it changed in a message; the user
 replied to a part of it, as the chat sends the reply -- the message goes
 through the filter that makes the reply a comment in a thread of the
 review (`harness-patch-review--on-message') -- and the agent answered in
-the thread with `review_comment', its call in the session.  Return the
-thread's id."
+the thread with a <thread> block of its message.  Return the thread's id."
   (let* ((id (plist-get (plist-get harness-media--world :tasks) :slow))
          (sid (plist-get (harness-media--task id) :session))
          (user-full-name "Noah Huppert") (user-mail-address "noah@acme.example")
@@ -2980,12 +2986,11 @@ thread's id."
                        sid '(:from nil))))
            (thread (plist-get (plist-get text :thread) :id))
            (body "Once per request, as it is: one line each. The health check is not timed, because `timed` wraps the application and `/health` is routed before it, so startup does not log.")
-           (call "toolu_media_thread"))
+           (answer (harness-thread-block (list :id thread) body))
+           (node (harness-call 'session/append sid (list :kind 'assistant :content (plist-get answer :text)))))
       (unless thread (error "The reply made no thread"))
-      (harness-call 'session/append sid
-                    (list :kind 'tool-call :call-id call :tool "review_comment"
-                          :input (list :thread thread :body body)))
-      (harness-call 'patch-review/comment id body :thread thread :session sid :call-id call)
+      (harness-thread-reply--on-assistant-message
+       (plist-get answer :text) sid (plist-get node :id))
       thread)))
 
 (defun harness-media-shot-thread-reply-review ()

@@ -1035,9 +1035,14 @@ and changes the thread's status."
         (when parsed
           (let ((close (string-match "</thread>" text after)))
             (when close
-              (let ((close-end (match-end 0)))
-                (when-let* ((content (harness-thread--strict-content
-                                      (substring text after close))))
+              (let* ((close-end (match-end 0))
+                     (inner (substring text after close))
+                     ;; A block with only a status is a block: closing or
+                     ;; opening a thread needs no words.
+                     (content (or (harness-thread--strict-content inner)
+                                  (and (cdr parsed) (string-empty-p (string-trim inner))
+                                       (cons nil nil)))))
+                (when content
                   (list :start start :end close-end
                         :id (car parsed) :status (cdr parsed)
                         :quote (car content) :body (cdr content)

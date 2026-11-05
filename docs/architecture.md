@@ -8929,8 +8929,10 @@ whose strict syntax it reads, and the correction of a malformed reply;
   against the version records.
 - Authors.  The user is `user-full-name` and `user-mail-address` of the
   harness's Emacs, the login name without the first.  An agent is the
-  model's name with its session id, and for a comment written with
-  `review_comment` the id of the tool call.
+  model's name with its session id; the author of a comment made by a
+  <thread> block records the message and where the block starts
+  (`:message`, `:block-start`), and one made by the reply tool before it
+  was removed records the tool call.
 - The earlier rounds.  A task sent back before threads existed kept its
   feedback as text.  The first time its set is made, each comment the
   reply format finds in a round of `:feedback`
@@ -8981,21 +8983,22 @@ whose strict syntax it reads, and the correction of a malformed reply;
   `task/feedback-attachments` that returns the attachments with the
   thread's id), so the text of the round has the block and a message that
   waits for a slot is kept as the thread it made.  Only the user's own messages count (no
-  `:from`), in the session of a task whose agent has `review_comment` (the
-  filter asks `tools/list`): a session that is no task's has no review, and
-  a reply there goes as the quotes and the words, answered inline
-  (`harness-agent--inline-reply-note`).
+  `:from`), in the session of a task: a session that is no task's has
+  no review, and a reply there goes as the quotes and the words,
+  answered inline (`harness-agent--inline-reply-note`).
   `harness-patch-review--register-thread` makes the comment: the user's,
   sent, its body the quotes of the references -- not those of lines of a
   diff, which the review shows as the thread's location -- and the
   response (`harness-thread-text`), and `:meta` `:chat`, `:session` and
   `:refs`.  Where it goes follows from the references, in order.  A
-  reference to a node of the session's transcript that is a
-  `review_comment` call whose comment the set has (the comment's author
-  records the call id), or an earlier reply of the user's that is a
-  comment (its block has `:comment`), makes the reply a comment in that
-  thread, a reply to the comment it follows; a closed thread is open
-  again, with a change of status by the user.  A reference to lines of a
+  reference to a node of the session's transcript that made a comment of
+  the set -- a <thread> block of the agent's message (its author records
+  the message and the block's start), a tool call of the reply tool
+  before it was removed (the comment's author records the call id) --
+  or to an earlier reply of the user's that is a comment (its block has
+  `:comment`), makes the reply a comment in that thread, a reply to the
+  comment it follows; a closed thread is open again, with a change of
+  status by the user.  A reference to lines of a
   diff puts a new thread on that file and those lines, at the revision the
   reference names, the lines as the location's excerpt.  Any other starts
   a thread on the change as a whole.  A reply that has its thread
@@ -9037,10 +9040,19 @@ whose strict syntax it reads, and the correction of a malformed reply;
   turn is corrected at most `harness-thread-reply-attempts` times (2 by
   default), each correction one step more, so a model that cannot write
   the form is not sent round forever; after the last, a hint says the
-  reply was left as written.
-- The closes.  The agent closes a thread (`review_comment` with the
+  reply was left as written.  Every block is a comment: an agent that
+  wants to say two things in one thread writes two blocks, and both are
+  kept, in the order it wrote them.  A block with only status="closed"
+  closes the thread without words, and one with no id starts a thread on
+  the change as a whole.  The same block of the same message, read again,
+  is the comment it made, not another, and the comment records the
+  message's node and the block's start in its author's `:meta`
+  (`:message`, `:block-start`), which is how a reply the user makes to
+  the card in the chat follows that comment; a call of the removed tool
+  records its `:tool-call` still.
+- The closes.  The agent closes a thread in a <thread> block with the
   status `closed`: a change of status in the thread's history, its author
-  the agent); whether the point is done is the user's to say.  A thread
+  the agent; whether the point is done is the user's to say.  A thread
   closed by someone other than the user is TO REVIEW
   (`change-review-thread-unreviewed-p`) until the user has looked at it,
   and the mark is the library's: the operation `mark-reviewed` (`:thread`,
@@ -9055,7 +9067,7 @@ whose strict syntax it reads, and the correction of a malformed reply;
   its own; a task whose threads were closed before the marks existed has
   them all to review.  The agent is told, with the line that says how to
   answer a thread (`harness-patch-review--attribution`) and in the
-  description of `review_comment`, that the user looks at every thread it
+  working-phase prompt of a task, that the user looks at every thread it
   closes, so that it says what it changed and where.
 - The files viewed.  The files the reviewer compared in Ediff and those
   approved are kept in `patch-review-viewed/TASK-ID.json`: `:seen` and
@@ -9092,21 +9104,24 @@ whose strict syntax it reads, and the correction of a malformed reply;
   their ids and authors -- only the comments sent, since the drafts are
   the user's until they send the task back; `patch-review/comment
   TASK-ID BODY &rest OPTS` → `(:thread ID :status "open"|"closed"
-  :comment DATA :parent PARENT)` adding the agent's comment; PARENT is
-  the comment it follows in its thread, the thread's last, as `(:id :author
-  :kind :excerpt)`: who wrote it and the start of what it says, the
-  answer's first line when it has a quote above it
+  :comment DATA :parent PARENT)` adding the agent's comment;
+  PARENT is the comment it follows in its thread, the thread's last, as
+  `(:id :author :kind :excerpt)`: who wrote it and the start of what it
+  says, the answer's first line when it has a quote above it
   (`harness-patch-review--parent-data`), nil when the comment starts the
   thread.  OPTS: `:thread` (an id,
   or the start of one that is unique, naming a thread to answer; else
   the comment starts a thread), `:status` (`open` or `closed`, set after
-  the comment; with no BODY, only the status changes), `:session` and
-  `:call-id` (who wrote it: the author's session and tool call),
+  the comment; with no BODY, only the status changes), `:session`,
+  `:call-id` and `:message`/`:block-start` (who wrote it: the author's
+  session and tool call, or the node and <thread> block of its message),
   `:file`, `:line` and `:side` (where a new thread is), `:revision` (the
-  commit the agent was at; else the latest version).  A thread that does
-  not exist, a status that is neither, or neither a body nor a status,
-  signals an error that says what there is.  All are callable over ACP
-  as `_harness/patch-review/…`.
+  commit the agent was at; else the latest version).  Every comment is
+  kept: an agent that wants to say two things in one thread makes two
+  comments, and both are there.  A thread that does not exist, a status
+  that is neither, or neither a body nor a status, signals an error that
+  says what there is.  All are callable
+  over ACP as `_harness/patch-review/…`.
 - Event `patch-review/changed TASK-ID OP`: an operation changed the
   threads of a task's review (`change-review-changed-functions`); OP is
   the plist to perform on a copy.  ACP forwards it to every client,
@@ -9117,9 +9132,10 @@ whose strict syntax it reads, and the correction of a malformed reply;
   `harness-tasks-feedback-additions-functions` (see tasks).  Called as
   the task is sent back, it returns the drafts of its set as text: a
   line saying what the quotes are and how to answer
-  (`review_comment`, with the thread's id, and close the thread once
-  what it raises is done, saying in the answer what changed and where,
-  since the user looks at every thread the agent closes), then each
+  (in a <thread id="..."> block, and close the thread with
+  status="closed" once what it raises is done, saying in the answer what
+  changed and where, since the user looks at every thread the agent
+  closes), then each
   comment quoted from the diff as a
   reply on a mailing list quotes it, a reply in a thread after the
   comments before it, each with its `<thread id="…">` tag
@@ -9132,22 +9148,19 @@ whose strict syntax it reads, and the correction of a malformed reply;
   are kept and nothing is added to them.
 - `tools-review` defines `review_threads` (input: `status` open or
   closed, `task` a task id; lists a task's threads with
-  `patch-review/threads-text`) and `review_comment` (input: `thread`,
-  `body`, `status`, `file`, `line`, `side`, `task`; calls
-  `patch-review/comment` with the session, the call id and the commit
-  the session's directory is at; the result's `:meta` keeps `:thread`
-  (the id as the review has it), `:status`, `:comment` and `:parent`, on
-  the node, so the chat can draw the call as the agent's message it is).
-  Both are kind `meta` and offered to
-  the sessions of tasks only: a filter on `agent/tools` (50) drops them
-  from any other, and the catalogue keeps them; `task` names another
-  task's review.  They need no approval
+  `patch-review/threads-text`).  It is kind `meta` and offered to the
+  sessions of tasks only: a filter on `agent/tools` (50) drops it from
+  any other, and the catalogue keeps it; `task` names another task's
+  review.  It needs no approval
   (`harness-perms--auto-allow-tools`), and a supervising session is
-  offered them (`harness-supervisor--coordination-tools`): answering
-  the reviewer is coordination.
-- Tests: test/harness-patch-review-test.el (the module and the tools),
-  test/harness-ui-patch-review-test.el (the adapter), and the library's
-  own, in lisp/vendor/change-review.
+  offered it (`harness-supervisor--coordination-tools`): reading what
+  the reviewer said is coordination.  There is no reply tool:
+  `review_comment` was removed, so an agent answers in the <thread>
+  blocks of its message, and no call can make a second reply beside
+  one.
+- Tests: test/harness-patch-review-test.el (the module, the reply blocks
+  and the reading tool), test/harness-ui-patch-review-test.el (the
+  adapter), and the library's own, in lisp/vendor/change-review.
 
 ### linking
 
@@ -9235,7 +9248,7 @@ link names a task or a thread, and says so when they are not there.
   in the result with `harness-tools-with-note`: `hand_in` (the summary,
   the problem, the reproduction, the notes and the captions; code is
   left alone; the turn ends, so the note is for the transcript),
-  `review_comment` (the body), `session_send` (the message, in the
+  `session_send` (the message, in the
   sender's terms), `ask_user` (the question; its result is the answer,
   so no note), `plan`, `spawn_agent` (the prompt, in the parent's terms)
   and `task_submit`; `task_control`'s message and reject texts are
@@ -9248,8 +9261,8 @@ link names a task or a thread, and says so when they are not there.
   link naming nothing is left as written.  It skips an internal session
   (the harness's own model calls).  `session_read`, `session_search` and
   `session_history` end with a line that shows how to link a node, with
-  the real ids, and say so in their descriptions, as `session_send`,
-  `review_comment` and `review_threads` do; `review_threads` lists each
+  the real ids, and say so in their descriptions, as `session_send`
+  and `review_threads` do; `review_threads` lists each
   thread with its `harness:task/TASK/thread/ID`.
 - Tests: test/harness-links-test.el (the library), test/harness-linking-test.el
   (resolving, writing out, the prompt, the turn's hook with the demo
@@ -9411,7 +9424,7 @@ and a message for the echo area.  Only the user calls it.
   `web_fetch web_search`, the coordination tools (`ask_user todo_write
   hand_in notify session_control session_send session_move
   set_non_interactive set_priority task_control task_submit
-  session_settings review_threads review_comment`), the tool that asks
+  session_settings review_threads`), the tool that asks
   for a directory (`harness-perms-dir-tool`) and
   `harness-supervisor-tools` (`no_plan_needed submit_plan
   retry_step`), plus `bash` when
@@ -9921,8 +9934,7 @@ TRAMP prefixes come from the session host):
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/return-to-pending/pause/resume/merge/verify/reject/complete/archive/restore/delete/priority, and on a project with no task_id: suspend-queue/resume-queue, pause-all/resume-all, auto-queue/manual-queue for its backlog mode), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives), cwd (the project of the project actions; default: this session's), all_projects (every project, for suspend-queue/resume-queue/pause-all/resume-all) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review and cancelled, done a cancelled task too, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
-| `review_threads` | Review threads | status (open/closed), task (default: the session's own) | meta (tools-review; task sessions only; lists the threads of the task's review with the comments the user sent, by id; needs no approval: `harness-perms--auto-allow-tools`) |
-| `review_comment` | Review comment | thread (an id, or the start of one), body, status (open/closed), file, line, side (new/old), task (default: the session's own) | meta (tools-review; task sessions only; answers a thread, or starts one on the change or on a file and line, and may close or reopen the thread -- the thread of a reply of the user's in a thread started in the chat is named by the tag of the `<thread>` block after it; the comment records the session, this call and the commit the session is at, and the result keeps which thread and comment on the node, for the chat; needs no approval: `harness-perms--auto-allow-tools`) |
+| `review_threads` | Review threads | status (open/closed), task (default: the session's own) | meta (tools-review; task sessions only; lists the threads of the task's review with the comments the user sent, by id; the agent answers in the <thread> blocks of its message; needs no approval: `harness-perms--auto-allow-tools`) |
 | `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), restart (explicitly stop the instance first, discarding unsaved work) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; it runs the checkout's `scripts/dev.sh` and the Elisp that daemon loads outside the sandbox, code the session may have written, so it is an exec call decided by the mode as bash is and is not among the tools that need no approval; its frame stays lowered and cannot take focus, so opening it never raises or focuses a frame) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
@@ -12154,7 +12166,8 @@ dismissed question, or a failed or refused call, shows none).  The
 answer is the block's last lines, after its details and outside their
 fold, so a folded block still shows it; there each of its rows ends on
 a newline of its own, and so is drawn to the window's edge in the
-user's colour.  The reverse is a `review_comment` call with words (its
+user's colour.  The reverse is a call of the reply tool before it was
+removed, `review_comment`, with words (its
 `:body`) that did not fail and was not refused
 (`harness-chat--thread-message-p`): the agent's answer in a thread of
 the task's review is a message from the agent, so the block is drawn as
@@ -12229,7 +12242,7 @@ failed is counted in the summary; its reason and [Approve] show once
 the group is opened.
 The calls the user should see stay out of the list: the other tools
 that run things (`elisp`, `ssh`), what writes
-(`edit_file`, `write_file`, `review_comment`), what acts on other
+(`edit_file`, `write_file`), what acts on other
 sessions or tasks (`spawn_agent`, `session_send`, `task_submit`), what
 waits or watches (`ask_user`, `session_wait`, `task_wait`,
 `watch_events`) and what reaches the web (`web_search`, `web_fetch`).
@@ -13315,7 +13328,8 @@ harness: the box is only the composition it quotes into.
   (`harness-chat--quoted-markdown-p`, `harness-chat--answering-block`,
   the newest user message older than it among the blocks the transcript
   holds).  What the agent wrote in a thread of a task's review (a
-  `review_comment` call, `harness-chat--thread-message-p`) is quoted as
+  <thread> block, or a call of the removed reply tool,
+  `harness-chat--thread-message-p`) is quoted as
   any message of its is, without the nesting: the replies of that thread
   are kept together by the review, not by the quote, and a reply in a
   thread to it is a comment in the same thread
@@ -15666,7 +15680,8 @@ the reply, so a set kept elsewhere has nothing new to know, and the echo
 area says "Thread t-3f9a is open again".  A reply that is none -- blank,
 or only the quote it started with -- changes nothing, and a thread that is
 open already gets no change of status.  Only the user's reply opens: the
-agent's comment in a closed thread (`review_comment`), and a reply
+agent's comment in a closed thread (a <thread> block, or a call of the
+removed reply tool), and a reply
 imported from a mail (`change-review-mail-import-reply`), whose author
 is the sender, leave the status as it is.  The chat does the same for a
 reply in a thread (`harness-patch-review--register-thread`).  The
@@ -15764,8 +15779,8 @@ its own subtype (`harness-ui-patch-review--set`):
 - The author of every comment typed here is the user
   (`change-review-own-author-p` is true of any user); an agent's author
   follows to its conversation (`change-review-follow-author` opens the
-  session at the tool call).  A task's agent writes with the
-  `review_comment` tool.
+  session at the tool call).  A task's agent writes in the <thread>
+  blocks of its message.
 - Where a thread is now (`change-review-placement`) is worked out in
   git (`harness-ui-patch-review--place-threads`): the thread's line in
   the revision it was written against, carried through `git diff -U0` of
@@ -15775,8 +15790,9 @@ its own subtype (`harness-ui-patch-review--set`):
   gone.  This needs nothing the review keeps, so it survives a restart.
 - A comment is written against a commit, which every comment records by
   its sha: the commit the branch was read at for a comment made in Ediff
-  (the one its excerpt is from), the commit the agent was at for the
-  agent's (`review_comment`).  In an Ediff the commit is the one the
+  (the one its excerpt is from), the latest version for the agent's
+  block (a comment a call of the removed reply tool made records the
+  commit the agent was at).  In an Ediff the commit is the one the
   Ediff shows (`change-review-default-revision`), so a reply made in the
   Ediff of an earlier commit is written against that commit.  The
   commit is the code the comment is about, and the branch has gone past
@@ -15802,7 +15818,8 @@ its own subtype (`harness-ui-patch-review--set`):
   approved, and a comment made in it is written against that commit.
   `change-review-send` goes to the feedback box.
 - A comment is Markdown (`harness-ui-patch-review-markdown`, on): the
-  user writes it in a buffer, an agent in its `review_comment` call, and
+  user writes it in a buffer, an agent in a <thread> block or in a call
+  of the removed reply tool, and
   both use emphasis, `code`, fenced blocks, lists, quotes, tables and
   links.  `change-review-ui-body-lines` renders it as the chat renders a
   message (`harness-ui-markdown-render-lines`: wrapped to the room under

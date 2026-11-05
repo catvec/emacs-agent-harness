@@ -42,14 +42,17 @@
 (require 'harness-util)
 
 (declare-function harness-judge-ask "harness-judge" (&rest args))
+(declare-function harness-patch-review--set-for "harness-patch-review" (task-id &optional create))
+(declare-function harness-patch-review--block-comment "harness-patch-review" (set session-id node-id block-start))
 
 ;;;; Reading the form in a message
 
-(defun harness-thread-reply--answerable-p (session-id)
-  "Non-nil when the agent of SESSION-ID has the tool that answers a thread."
-  (and (harness-method-exists-p 'tools/list)
-       (cl-some (lambda (spec) (equal (plist-get spec :name) "review_comment"))
-                (ignore-errors (harness-call 'tools/list session-id)))))
+(defun harness-thread-reply--answerable-p (_session-id)
+  "Non-nil when a message in SESSION-ID can be kept as a reply in a thread.
+That is when the review module keeps threads: a task's agent answers in
+the <thread> blocks of its message, and needs no tool to do it.  The
+callers look the task up themselves."
+  (and (harness-method-exists-p 'patch-review/comment) t))
 
 (defun harness-thread-reply--blocks (task-id session-id blocks draft)
   "Return BLOCKS with each <thread> reply in a text block made a comment.
@@ -100,8 +103,8 @@ a line in the log: the agent still reads what the user wrote."
 (defun harness-thread-reply--on-message (blocks session-id info)
   "Make the <thread> replies of the user's message BLOCKS comments of a review.
 An `agent/message' filter, INFO being (:from FROM ...): only the user's
-own messages count, in the session of a task whose agent has
-`review_comment', the tool that answers a thread.  The harness's own
+own messages count, in the session of a task whose review keeps
+threads.  The harness's own
 messages and another session's agent's are no replies.  Each block that
 names a thread is a comment in it, a draft while the task waits for
 review, and the block that goes on is the thread block the chat draws,
@@ -155,8 +158,8 @@ in the words, for the agent to read."
   "Make the <thread> reply blocks in TEXT comments of SESSION-ID's task review.
 An `agent/assistant-message' filter: TEXT is the final words of the
 agent's message, NODE-ID its node.  Each block that names a thread
-answers that thread, and one without an id starts a thread, as
-review_comment would; status closes or opens it.  The text is left as
+answers that thread, and one without an id starts a thread; status
+closes or opens it.  The text is left as
 the agent wrote it: the chat draws its blocks, and the transcript keeps
 what the agent said for the turns after.  A block the review cannot take
 is logged, and the message goes on."
@@ -167,19 +170,28 @@ is logged, and the message goes on."
                     (id (plist-get task :id))
                     ((harness-method-exists-p 'patch-review/comment))
                     ((harness-thread-reply--answerable-p session-id)))
-          (dolist (block (harness-thread-parse-blocks text))
-            (condition-case block-err
-                (let ((thread (plist-get block :id))
-                      (status (plist-get block :status))
-                      (body (harness-thread-render-text block)))
-              (when (or thread (not (string-blank-p body)))
-                (harness-call 'patch-review/comment id body
-                              :thread thread
-                              :status (and (member status '("open" "closed")) status)
-                              :session session-id)))
-              (error
-               (harness-log 'warn "thread-reply: thread block in message %s of %s not recorded: %s"
-                            node-id session-id (harness-error-message block-err))))))
+          (let ((set (harness-patch-review--set-for id t)))
+            (dolist (block (harness-thread-parse-blocks text))
+              (condition-case block-err
+                  (let ((thread (plist-get block :id))
+                        (status (plist-get block :status))
+                        (body (harness-thread-render-text block))
+                        (start (plist-get block :start)))
+                    (when (or thread (not (string-blank-p body)))
+                      ;; The same block of the same message, read again -- a
+                      ;; node finalized twice -- is the comment it made, not
+                      ;; another.
+                      (unless (harness-patch-review--block-comment
+                               set session-id node-id start)
+                        (harness-call 'patch-review/comment id body
+                                      :thread thread
+                                      :status (and (member status '("open" "closed")) status)
+                                      :session session-id
+                                      :message node-id
+                                      :block-start start))))
+                (error
+                 (harness-log 'warn "thread-reply: thread block in message %s of %s not recorded: %s"
+                              node-id session-id (harness-error-message block-err)))))))
       (error (harness-log 'warn "thread-reply: the thread blocks of a message in %s were not recorded: %s"
                           session-id (harness-error-message err)))))
   text)
@@ -358,7 +370,7 @@ SUGGESTIONS are corrected blocks from a judge, or nil."
                         "A model suggests these corrected blocks (keep your own words):")
                       "\n\n"
                       (mapconcat (lambda (block) (format "```\n%s\n```" block)) fixed "\n\n")))
-            "Write the reply again in this form; review_threads lists the threads and their ids. To answer a thread with the tool instead, call review_comment."))
+            "Write the reply again in this form; review_threads lists the threads and their ids, and there is no tool to answer with."))
      "\n\n")))
 
 (defun harness-thread-reply--repair-answer (session)

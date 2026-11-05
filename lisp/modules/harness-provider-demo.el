@@ -30,7 +30,7 @@
 ;;                 each call's usage -- for the live token count
 ;;   a thread      a reply that is a comment in a thread of the task's
 ;;                 review, whose <thread> block names the thread
-;;                 (`harness-thread-marker'): review_comment answers it
+;;                 (`harness-thread-marker'): a <thread> block answers it
 ;;   anything else echo the prompt back as markdown
 ;;
 ;; A session writing a backlog task up (the system prompt has the task
@@ -400,21 +400,20 @@ one (see the Commentary)."
 (defun harness-provider-demo--thread (request)
   "Return the script of an agent answering the threads of REQUEST's newest message.
 The reply is a comment in each thread whose <thread> tag it names
-\(`harness-thread-marker'): the agent answers each in its thread with
-review_comment, as it is told to, and leaves it open for the user to go on.
-The tool calls end the request each, as a real model's do, and the rest of
-the script goes on when their results are in."
-  (let ((ids (harness-provider-demo--thread-ids request)))
-    `(,@(cl-loop
-         for id in ids
-         for n from 1
-         collect `(:type tool-call :id ,(format "demo-th%d" n) :name "review_comment"
-                         :input (:thread ,id
-                                 :body ,(concat "This is the demo provider answering in the thread: a real "
-                                                "agent would say what it changed and where.\n\n"
-                                                "Quote this answer with `C-c >` and reply to it, and the "
-                                                "reply is a comment in the same thread.")
-                                 :status "open")))
+\(`harness-thread-marker'): the agent answers each in a <thread> block
+of its message, as it is told to, and leaves it open for the user to go
+on.  The blocks are the message itself: a real model says them in its
+final words."
+  (let* ((ids (harness-provider-demo--thread-ids request))
+         (body (concat "This is the demo provider answering in the thread: a real "
+                       "agent would say what it changed and where.\n\n"
+                       "Quote this answer with `C-c >` and reply to it, and the "
+                       "reply is a comment in the same thread."))
+         (text (mapconcat (lambda (id)
+                            (format "<thread id=\"%s\" status=\"open\">\n%s\n</thread>"
+                                    id body))
+                          ids "\n\n")))
+    `((:type text :delta ,text)
       (:type usage :input 500 :output 60 :cost 0.001 :context 700)
       (:type done :stop-reason end-turn))))
 

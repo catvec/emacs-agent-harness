@@ -5545,6 +5545,10 @@ by hand, the report it handed in is still the one reviewed."
                (prompt (harness-run-filter 'agent/system-prompt "Base." session)))
           (should (string-match-p "You are in the working phase" prompt))
           (should (string-match-p "<thread id=\\\"THREAD_ID\\\">" prompt))
+          ;; The block is the only way to answer; a thread may get more than one.
+          (should (string-match-p "a thread gets as many blocks as you have things to say in it" prompt))
+          (should (string-match-p "The user looks at every thread you close" prompt))
+          (should-not (string-match-p "review_comment" prompt))
           ;; Not a checkpoint before handing in: the agent hands in as soon
           ;; as nothing is owed, and never asks leave to.
           (should (string-match-p "not a checkpoint before handing in" prompt))

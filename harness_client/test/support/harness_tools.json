@@ -31,7 +31,6 @@
   {"name": "request_escalation", "label": "Request escalation", "kind": "meta", "coalescable": false},
   {"name": "rerun_approved", "label": "Rerun approved call", "kind": "meta", "coalescable": false},
   {"name": "retry_step", "label": "Retry step", "kind": "meta", "coalescable": false},
-  {"name": "review_comment", "label": "Review comment", "kind": "meta", "coalescable": false},
   {"name": "review_threads", "label": "Review threads", "kind": "meta", "coalescable": true},
   {"name": "session_control", "label": "Control session", "kind": "meta", "coalescable": false},
   {"name": "session_history", "label": "Session history", "kind": "read", "coalescable": true},

@@ -2,7 +2,7 @@
 
 # tools-review
 
-The review_threads and review_comment tools: a task's agent reads and answers the threads of its review.
+The review_threads tool: a task's agent reads the threads of its review and answers them in <thread> blocks.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-tools-review.el](../../lisp/modules/harness-tools-review.el)
@@ -13,8 +13,8 @@ The review_threads and review_comment tools: a task's agent reads and answers th
 ## About
 
 A task's review is a set of threads of comments (harness-patch-review.el).
-The user writes in them; the task's agent reads and answers them with
-two tools.
+The user writes in them; the task's agent reads them with one tool and
+answers them in the <thread> blocks of its message.
 
 `review_threads` lists the threads of the agent's own task -- or of
 another task, named by id -- with the comments the user sent: the ids
@@ -23,52 +23,38 @@ feedback that sends a task back already carries the threads it is
 about, so the tool is for what the agent has lost since, a compacted
 context say.
 
-`review_comment` adds a comment of the agent's to a thread, and may
-close the thread or open it again; a thread it closes waits for the
-user to review it, so its answer says what changed and where.  The
-comment records the agent, the session and this very tool call, so
-that whoever reads the thread can follow it to the point of the
-conversation it came from, and the commit the agent was at, so that a
-reply that says "fixed" says where.  With no thread it starts one, on
-the change as a whole, or on a file and line of it.
+The agent answers in the message itself, as a <thread> block
+(harness-patch-review.el), the format the task's prompt names: no call
+is needed to answer, and the harness has no reply tool.  A thread gets
+as many blocks as the agent has things to say in it, and every one is
+kept.  A block that names no thread starts one, on the change as a
+whole; status="closed" closes the thread, status="open" opens it again.
 
-A reply in a thread can also be written in the agent's message itself,
-as a <thread> block (harness-thread-reply.el), the format the task's
-prompt names: no call is needed to answer.  The tools remain for what
-a block does not say -- listing the threads, starting one on a file
-and line, and closing one without words.
-
-Both are offered to task sessions: a session that is no task's has no
-review (the filter `agent/tools` removes them), unless it names a task.
+The tool is offered to task sessions: a session that is no task's has no
+review (the filter `agent/tools` removes it), unless it names a task.
 
 The user's replies that quote the agent's words are comments in threads
-of the review too, and the message the agent reads names the thread
-each is in (harness-patch-review.el): `review_comment` is how the agent
-answers in it.  The result of a call says which thread and comment it
-made, and which comment it follows (`:meta`), which the transcript keeps
-so that the chat can draw the call as the message from the agent that it
-is: the words of the comment, under the thread's name.
+of the review too, and the message the agent reads names the thread each
+is in (harness-patch-review.el): the agent answers it in the block that
+names the thread.
+
 In the chat, runs of calls fold under one summary line, but only the
 calls of tools on an explicit allow list (`:coalescable`, see
 harness-tools.el), so that a call the user should see stays in view.
 `review_threads` is on it, with `session_read`, `read_file` and the
 other reads: it lists what is there and changes nothing, so its call
 joins the run of reads around it instead of cutting that run in two.
-`review_comment` is not: it writes what the user reads next, and its
-call stays in view.
 
 ## Provides
 
 ### Tools
 
-- `review_comment` — Answer a thread of the review of your work, or start one. The thread id is in the <thread id="..."> line of the feedback, and review_threads lists them. A reply of the user's that quotes your own words is a <thread> block too, the id of the thread it answers in its tag: answer it here, in that thread, instead of in a message of your own; the chat shows your comment as your answer. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) only once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. A thread is the user's question: close it because it is answered, never in a batch to reach hand_in. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. Link what you mean in it, the tool call that proves a fix or the message you answer: [the test run](harness:call/bash#1). With thread and status but no body, only the status changes. A reply can also be written in your message as a <thread id="..."><quote>what it answers</quote>the reply</thread> block, as the prompt shows; review_threads lists the threads, and this tool starts one on a file and line.
-- `review_threads` — List the threads of comments in the review of your task's work: for each, its id, whether it is open or closed, where in the change it is, a link to it that you can put in a message, and the comments the user sent, with who wrote them. Use it to find the thread to answer with review_comment when the feedback that sent the task back is no longer in your context. With status, only the open or only the closed threads; with task, another task's review.
+- `review_threads` — List the threads of comments in the review of your task's work: for each, its id, whether it is open or closed, where in the change it is, a link to it that you can put in a message, and the comments the user sent, with who wrote them. Use it to find the thread to answer when the feedback that sent the task back is no longer in your context: answer in your message with a <thread id="..."><quote>what you answer</quote>your answer</thread> block, and put status="closed" in the tag to close the thread. With status, only the open or only the closed threads; with task, another task's review.
 
 ## Uses
 
 ### Methods it calls
 
-- `patch-review/comment` ([patch-review](patch-review.md)), when it is loaded
 - `patch-review/threads-text` ([patch-review](patch-review.md)), when it is loaded
 - `task/for-session` ([tasks](tasks.md)), when it is loaded
 - `task/get` ([tasks](tasks.md)), when it is loaded

@@ -57,7 +57,7 @@ as it was written and reported, one sentence each; a bare link becomes
 a Markdown link that reads as what it names, an autolink keeps its
 form.  What a Markdown renderer shows as code is not touched.  The
 tools that carry the words of an agent do this before the words go on
-(`harness-tools-written`): hand_in, review_comment, session_send,
+(`harness-tools-written`): hand_in, session_send,
 ask_user, plan, spawn_agent, task_submit and task_control, in the
 session of the agent that wrote them and before the call that wrote
 them; and so does the turn for each assistant message it finishes,

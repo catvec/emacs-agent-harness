@@ -4230,8 +4230,8 @@ result it has the thread of its input."
 
 (ert-deftest harness-ui-chat-draws-a-thread-call-that-says-nothing-as-a-tool-call ()
   "A review_comment call that failed, was refused, or only opens or closes a
-thread -- no words -- is no message of the agent's: it is a tool call,
-its error or reason under the fold."
+thread -- no words to show as a message -- is no message of the agent's: it is
+a tool call, its error or reason under the fold."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
@@ -4645,7 +4645,7 @@ first line ends with a link to it."
               (should (memq 'harness-user-face
                             (ensure-list (get-text-property (1- (length prefix)) 'face prefix))))))
           ;; The markers and the data are not text.
-          (should-not (string-search "answer with review_comment" text))
+          (should-not (string-search "answer in a thread block" text))
           (should-not (string-search "[thread" text))
           ;; The thread's link opens the review at it.
           (let ((link (harness-ui-chat-test-find buf "thread t-3f2a1b09" (harness-chat-block-start block))))
@@ -8076,7 +8076,7 @@ way."
           (dolist (tool '("session_info" "review_threads" "bash" "read_file"))
             (should (member tool harness-chat--coalescable)))
           ;; Off the list: what writes.
-          (dolist (tool '("review_comment" "edit_file" "write_file"))
+          (dolist (tool '("edit_file" "write_file"))
             (should-not (member tool harness-chat--coalescable))))
         ;; Loaded: the three calls are one run.
         (should (equal '(("session_info" "review_threads" "session_info"))

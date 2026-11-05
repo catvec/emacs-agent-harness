@@ -50,11 +50,13 @@
 ;; it draws the call again (`harness-chat-refresh-hand-ins').  It stays
 ;; folded while something else shows that report already, the review
 ;; banner of a task waiting for review
-;; (`harness-chat-hand-in-fold-functions').  A `review_comment' call with
-;; words -- the agent's answer in a thread of the task's review, to a
-;; reply of yours -- is drawn as the message it is, from the agent, with
-;; the call under its fold
-;; (`harness-chat--render-thread-message'); a message of yours holds
+;; (`harness-chat-hand-in-fold-functions').  An agent answers a thread
+;; in a <thread> block of its message, which draws as the card a reply
+;; in a thread is (`harness-chat--render-thread-tag'); a call of the
+;; reply tool that was removed, `review_comment', with words is drawn as
+;; the message it was, from the agent, with the call under its fold
+;; (`harness-chat--render-thread-message'), so the transcript kept from
+;; before still reads as it did; a message of yours holds
 ;; its replies in threads as cards, what each replies to and the words
 ;; under it, with a link to the thread (`harness-chat--render-replies').
 ;; A message with many replies draws the first and the last
@@ -74,7 +76,7 @@
 ;; block (`harness-thread-parse-blocks'): it draws as the same card, a
 ;; line naming the thread, what it answers and its status, the words
 ;; under it (`harness-chat--render-thread-tag'), so the user and the
-;; agent reply in the one form.
+;; agent reply in the one form and the tool has nothing to add.
 ;; The text of a message is marked with the node and the part of it it
 ;; is (`harness-chat-part'), and where its source was (`harness-md-source'),
 ;; so that C-c > knows what a region is from (`harness-chat--region-refs').
@@ -2354,15 +2356,17 @@ under it and it is \"▾\", a button that folds them away again."
 ;;;; The agent's answers in a thread
 
 ;; A reply of yours in a thread (C-c >, `harness-chat-thread-reply') is a
-;; comment in a thread of the task's review, and the agent answers it with
-;; `review_comment' (harness-tools-review.el) in that thread.  What it writes there is a
-;; message from the agent, so the chat draws the call as one: its words,
+;; comment in a thread of the task's review, and the agent answers it in
+;; a <thread> block of its message; a call of
+;; the reply tool that once did, `review_comment' (harness-tools-review.el),
+;; is history, drawn the same way.  What either writes there is a
+;; message from the agent, so the chat draws it as one: its words,
 ;; as any message of the agent's, under a line that names the thread and
 ;; says which comment it follows -- the reverse of how the answer to a
 ;; question the agent asked is drawn, a message of yours in the agent's
-;; tool call.  The call itself, its input and what it returned, folds
-;; under the message.  A call that failed, or was refused, said nothing:
-;; it is a tool call like any other.
+;; tool call.  A call's input and what it returned fold under the
+;; message.  A call that failed, or was refused, said nothing: it is a
+;; tool call like any other.
 
 (defconst harness-chat--thread-tool "review_comment"
   "Name of the tool the agent comments in a thread of the review with.")
@@ -2413,8 +2417,9 @@ in the thread; a call that only opens or closes a thread has none."
 
 (defun harness-chat--thread-message-p (block)
   "Non-nil when BLOCK is a tool call drawn as the agent's message in a thread.
-That is a call of `review_comment' with words that did not fail and was
-not refused (`harness-chat--thread-input')."
+That is a call of the reply tool that was removed, `review_comment', with
+words that did not fail and was not refused (`harness-chat--thread-input').
+The transcript kept from before it was removed still reads as it did."
   (and (harness-chat-block-p block)
        (equal (harness-chat-block-kind block) "tool-call")
        (harness-chat--thread-input (harness-chat-block-node block))
@@ -7018,8 +7023,9 @@ Markdown link [NAME](harness:session/ID)."
 
 (defun harness-chat--block-markdown (block)
   "Return the Markdown BLOCK shows, as it was written, or nil for none.
-A plan's is its content, and the agent's words in a thread, a call of
-`review_comment', are its `:body' (`harness-chat--thread-input')."
+A plan's is its content, and an agent's words in a thread, a call of
+the removed reply tool `review_comment', are its `:body'
+\(`harness-chat--thread-input')."
   (let ((text (cond ((equal (harness-chat-block-kind block) "plan")
                      (plist-get (harness-chat-block-node block) :content))
                     ((equal (harness-chat-block-kind block) "tool-call")

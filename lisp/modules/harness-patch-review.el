@@ -18,18 +18,19 @@
 ;; the agent, with the session and the `hand_in' call that handed it in.
 ;;
 ;; The module is the single writer of a task's threads, so the user's
-;; Emacs and the agent's tools never disagree: the UI sends the
-;; operations the user makes (`patch-review/apply'), the tools send the
-;; agent's (`review_comment'), the module performs them on the set it
-;; keeps in the state directory, one document a task
-;; (patch-review/TASK.json), and announces each in `patch-review/changed'
-;; for every UI to perform on its own copy.  An operation names what it
-;; adds by id, so performing one twice is harmless.
+;; Emacs and the agent's messages never disagree: the UI sends the
+;; operations the user makes (`patch-review/apply'), the agent's
+;; <thread> blocks its answers (`patch-review/comment'), the module
+;; performs them on the set it keeps in the state directory, one
+;; document a task (patch-review/TASK.json), and announces each in
+;; `patch-review/changed' for every UI to perform on its own copy.  An
+;; operation names what it adds by id, so performing one twice is
+;; harmless.
 ;;
 ;; THE AUTHORS.  The user writes as themselves, by name and address.  An
-;; agent's comment records the agent, the session and the tool call that
-;; made it (`review_comment'), the link back to that point of the
-;; conversation.
+;; agent's comment records the agent and the session; a comment made by
+;; the reply tool before it was removed also records the call, the link
+;; back to that point of the conversation.
 ;;
 ;; THE DRAFTS.  What the user writes in a thread is a draft until it is
 ;; sent, and a blank one is no comment at all.  A task waiting for review
@@ -38,8 +39,9 @@
 ;; them, `harness-tasks-feedback-additions-functions' asking this module
 ;; for the text, which quotes the diff above each comment as a reply on a
 ;; mailing list does and names each comment's thread.  The agent answers a
-;; thread with `review_comment', closing it when its point is done; the
-;; user closes it in turn, once they agree.
+;; thread in a <thread> block of its message, closing it with
+;; status="closed" when its point is done; the user closes it in turn,
+;; once they agree.
 ;;
 ;; THE WORKING PHASE.  A task at work is in the working phase: its review
 ;; is a conversation with the user, and there is no feedback that could
@@ -79,20 +81,19 @@
 ;; the feedback with, asks for it itself before the round of feedback is
 ;; kept, `harness-patch-review--on-feedback-attachments', a filter on
 ;; `task/feedback-attachments'): a reference to a comment of the
-;; agent's in a thread (`review_comment') or to an earlier reply of the
-;; user's makes it a reply in that thread, which a close does not keep
-;; from opening again; lines of a diff put it on those lines, at the
+;; agent's in a thread (the call that made it) or to an earlier reply of
+;; the user's makes it a reply in that thread, which a close does not
+;; keep from opening again; lines of a diff put it on those lines, at the
 ;; revision; any other starts a thread on the change as a whole.  The
 ;; block that goes on, and is recorded, has the thread's id, and its text
 ;; is one <thread> block (`harness-thread-marker'), which is how the agent
-;; knows the thread to answer in, and with which tool, and how the chat
+;; knows the thread to answer in and how the chat
 ;; draws a link to it.  A reply that is a thread is no words: the tasks
 ;; module leaves it out of the words a task is sent back with
 ;; (`harness-tasks--words'), so they are not a thread of their own too,
 ;; and the import of rounds and of words by hand, which reads text, skips
-;; what names a thread.  Only a task's session has a review, and only
-;; an agent that has `review_comment' can answer in it: any other
-;; session's replies stay plain, answered inline.
+;; what names a thread.  Only a task's session has a review: any other session's
+;; replies stay plain, answered inline.
 ;;
 ;; THE <thread> FORM IN MESSAGES.  A reply in a thread can be written in
 ;; the message itself, by the user and the agent alike
@@ -234,13 +235,16 @@
          (format "%s (%s)" (capitalize (match-string 1 model)) (match-string 2 model)))
         (t model)))
 
-(defun harness-patch-review--agent (session-id &optional call-id)
+(defun harness-patch-review--agent (session-id &optional call-id message block-start)
   "Return the agent of SESSION-ID as an author.
-CALL-ID is the tool call that made the comment, if any."
+CALL-ID is the tool call that made the comment, if a call did.  MESSAGE
+and BLOCK-START say which message, and which of its <thread> blocks,
+made it, so that a reply to that block in the chat follows the comment."
   (let ((session (and (stringp session-id) (harness-method-exists-p 'session/get)
                       (ignore-errors (harness-call 'session/get session-id)))))
     (change-review-agent (harness-patch-review--model-name (plist-get session :model))
-                         :session session-id :tool-call call-id)))
+                         :session session-id :tool-call call-id
+                         :meta (and message (list :message message :block-start block-start)))))
 
 (defun harness-patch-review--task (id)
   "Return the task ID, or signal an error when there is none."
@@ -452,8 +456,8 @@ with the comments of its rounds of feedback."
 ;; is a comment in a thread of the task's review, made when the message is
 ;; sent: the `agent/message' filter below makes one of each block that has
 ;; the data and no thread yet, and nothing is read out of the words.  A
-;; reference to a comment of the agent's in a thread (a `review_comment'
-;; call) or to an earlier reply of the user's in one makes the reply a
+;; reference to a comment of the agent's in a thread (the tool call that
+;; made it) or to an earlier reply of the user's in one makes the reply a
 ;; comment in that thread, which is how the replies of a conversation stay
 ;; together, and a close does not keep it from opening again: the user is
 ;; the one to say a point is done.  A reference to lines of a diff puts the
@@ -464,8 +468,7 @@ with the comments of its rounds of feedback."
 ;; The block that goes on, and is recorded, has the thread's id
 ;; (`:thread'), and its text is the <thread> block of the reply
 ;; (`harness-thread-marker'), which tells the agent the thread to answer in,
-;; with the tool that answers it, and the code that turns typed words into
-;; threads that this one is made.
+;; and the code that turns typed words into threads that this one is made.
 
 (defun harness-patch-review--kind (node)
   "Return the kind of NODE, a transcript node, as a string."
@@ -527,18 +530,71 @@ CALL-ID is the id of a tool call: the author of its comment records it."
                             (change-review-thread-comments thread))
              when comment return (cons thread comment))))
 
+(defun harness-patch-review--block-comment (set session-id node-id block-start)
+  "Return (THREAD . COMMENT) that the block of message NODE-ID made in SET.
+BLOCK-START is where the block starts in the message.  The comment is
+the agent's, in SESSION-ID, the message and the block in its author's
+meta; nil when no comment of the set is that one."
+  (when (and (stringp node-id) (numberp block-start))
+    (cl-loop for thread in (change-review-set-threads set)
+             for comment = (cl-find-if
+                            (lambda (comment)
+                              (let ((author (change-review-comment-author comment)))
+                                (and author
+                                     (equal (change-review-author-kind author) 'agent)
+                                     (equal (change-review-author-session author) session-id)
+                                     (equal (plist-get (change-review-author-meta author)
+                                                       :message)
+                                            node-id)
+                                     (equal (plist-get (change-review-author-meta author)
+                                                       :block-start)
+                                            block-start))))
+                            (change-review-thread-comments thread))
+             when comment return (cons thread comment))))
+
 (defun harness-patch-review--ref-parent (set session-id ref)
   "Return (THREAD . COMMENT) of SET that the chat reference REF is, or nil.
 REF is a region of a node of SESSION-ID's transcript: when that node is a
-`review_comment' call of the agent's, or an earlier reply of the user's
+<thread> block of the agent's message, a tool call that made a comment
+before the reply tool was removed, or an earlier reply of the user's
 that is a comment in a thread, the comment is what the reply follows."
   (when (and (equal (harness-thread-ref-kind ref) "chat") (stringp (plist-get ref :node)))
     (when-let* ((node (condition-case nil
                           (harness-call 'session/node session-id (plist-get ref :node))
                         (error nil))))
       (pcase (harness-patch-review--kind node)
-        ("tool-call" (and (equal (plist-get node :tool) "review_comment")
-                          (harness-patch-review--call-comment set (plist-get node :call-id))))
+        ("tool-call" (harness-patch-review--call-comment set (plist-get node :call-id)))
+        ("assistant"
+         (let* ((content (or (plist-get node :content) ""))
+                (from (plist-get ref :from))
+                (part (plist-get ref :part))
+                (text (plist-get ref :text))
+                (blocks (harness-thread-parse-blocks content))
+                (matching
+                 (when (and (stringp text) (not (string-empty-p text)))
+                   (cl-remove-if-not
+                    (lambda (block)
+                      (string-search text (or (plist-get block :body) "")))
+                    blocks))))
+           (or
+            ;; The words of a block, drawn as a card: PART says so.
+            (when (and (equal part "body") (= 1 (length matching)))
+              (harness-patch-review--block-comment
+               set session-id (plist-get node :id)
+               (plist-get (car matching) :start)))
+            ;; A reference into the raw message: the block it lands in.
+            (cl-loop for block in blocks
+                     when (and (numberp from)
+                               (<= (plist-get block :start) from)
+                               (< from (plist-get block :end)))
+                     return (harness-patch-review--block-comment
+                             set session-id (plist-get node :id)
+                             (plist-get block :start)))
+            ;; A reference that names no offset: the one block there is.
+            (when (and (null from) (= 1 (length blocks)))
+              (harness-patch-review--block-comment
+               set session-id (plist-get node :id)
+               (plist-get (car blocks) :start))))))
         ("user" (cl-some (lambda (block)
                            (when-let* (((harness-thread-block-p block))
                                        (id (plist-get (plist-get block :thread) :comment)))
@@ -606,10 +662,11 @@ box and sent again, edits the comment instead of making another."
              (list :id (change-review-thread-id thread) :comment (change-review-comment-id comment))))))
 
 (defun harness-patch-review--answerable-p (session-id)
-  "Non-nil when the agent of SESSION-ID has the tool that answers a thread."
-  (and (harness-method-exists-p 'tools/list)
-       (cl-some (lambda (spec) (equal (plist-get spec :name) "review_comment"))
-                (ignore-errors (harness-call 'tools/list session-id)))))
+  "Non-nil when SESSION-ID can answer in the threads of its task's review.
+That is when this module keeps threads, which every task's session has:
+with no reply tool, the agent answers in the <thread> blocks of its
+message.  The callers look the task up themselves."
+  (harness-thread-reply--answerable-p session-id))
 
 (defun harness-patch-review--new-thread-p (block)
   "Non-nil when BLOCK is a reply in a thread the review has not made yet."
@@ -676,8 +733,7 @@ this keeps it."
 (defun harness-patch-review--on-message (blocks session-id info)
   "Make the replies in threads of the user's message BLOCKS comments of a review.
 An `agent/message' filter, INFO being (:from FROM ...): only the user's
-own messages count, in the session of a task whose agent has
-`review_comment', the tool that answers a thread.  The harness's own
+own messages count, in the session of a task's review.  The harness's own
 messages and another session's agent's are no replies.  Each block with
 thread data (`harness-thread-block') and no thread yet becomes a comment
 \(`harness-patch-review--register-thread'), and the block that goes on
@@ -710,13 +766,11 @@ feedback that sends the task back (`task/reject'), an attachment with
 the words written under it.  Return ATTACHMENTS, each such reply with the
 thread's data now carrying its thread's id and its comment's: the round of
 feedback is kept after that, and a message kept for a slot goes out with
-the threads it made.  They come back as they were when the task's agent
-cannot answer a thread (it has no `review_comment'), and replies that
-have their thread already are left alone."
+the threads it made.  Replies that have their thread already are left
+alone."
   (let ((session-id (plist-get task :session)))
     (if (not (and (stringp session-id)
-                  (cl-some #'harness-patch-review--new-thread-attachment-p attachments)
-                  (harness-patch-review--answerable-p session-id)))
+                  (cl-some #'harness-patch-review--new-thread-attachment-p attachments)))
         attachments
       (let ((set (harness-patch-review--set-for (plist-get task :id) t)))
         (mapcar (lambda (attachment)
@@ -1120,51 +1174,61 @@ PARENT says which comment it follows in its thread, the one before it
 \(`harness-patch-review--parent-data'), nil when it starts the thread.
 OPTS: `:thread' answers that thread (an id, or a prefix of one that is
 unique), else the comment starts a thread; `:status' closes or opens
-the thread afterwards; `:session' and `:call-id' say which session and
-tool call wrote it; `:file', `:line' and `:side' say where in the change
-a new thread is; `:revision' the commit the agent was at.  With no BODY
-`:status' alone changes the thread's status.  Signal an error naming
-the threads there are when `:thread' names none."
+the thread afterwards; `:session' and `:call-id' say which session and,
+when a tool call made it, which call wrote it; `:message' and
+`:block-start' say which message, and which of its <thread> blocks,
+wrote it; `:file', `:line' and `:side' say where in the change a new
+thread is; `:revision' the commit the agent was at.  With no BODY
+`:status' alone changes the thread's status.  Every comment is kept: an
+agent that wants to say two things in one thread makes two comments,
+and both are there.  Signal an error naming the threads there are when
+`:thread' names none."
   (let* ((set (harness-patch-review--set-for task-id t))
-         (thread (and (plist-get opts :thread)
-                      (or (change-review-find-thread set (plist-get opts :thread))
+         (named (plist-get opts :thread))
+         (thread (and named
+                      (or (change-review-find-thread set named)
                           (signal 'harness-error
                                   (list (format "No thread %s in this review; threads: %s"
-                                                (plist-get opts :thread)
+                                                named
                                                 (mapconcat (lambda (th) (change-review-thread-id th))
                                                            (change-review-set-threads set) ", ")))))))
-         (author (harness-patch-review--agent (plist-get opts :session) (plist-get opts :call-id)))
+         (author (harness-patch-review--agent (plist-get opts :session)
+                                              (plist-get opts :call-id)
+                                              (plist-get opts :message)
+                                              (plist-get opts :block-start)))
          (status (let ((value (plist-get opts :status)))
                    (and value (intern (format "%s" value)))))
          (time (float-time))
-         ;; The comment the new one follows: the newest of the thread there is.
-         (parent (and thread (harness-patch-review--parent-data
-                              (change-review-thread-last-comment thread))))
-         comment)
+         ;; The comment a new one follows: the newest of the thread there is.
+         (parent-before (and thread (change-review-thread-last-comment thread))))
     (when (and status (not (memq status '(open closed))))
       (signal 'harness-error (list "A thread's status is open or closed")))
     (when (and (harness-string-blank-p body) (not (and thread status)))
       (signal 'harness-error (list "A comment needs text; to only open or close a thread, name the thread and a status")))
-    (unless (harness-string-blank-p body)
-      (setq comment
-            (change-review-comment
-             set (string-trim body)
-             :thread thread :author author :time time :sent time
-             :revision (or (plist-get opts :revision)
-                           (when-let* ((version (change-review-latest-version set)))
-                             (change-review-version-id version)))
-             :location (and (not thread) (plist-get opts :file)
-                            (change-review-make-location
-                             :file (plist-get opts :file)
-                             :side (if (member (format "%s" (plist-get opts :side)) '("old" "before")) 'old 'new)
-                             :line (plist-get opts :line))))))
-    (when (and status (or thread comment))
-      (change-review-update-status
-       set (or thread (change-review-comment-thread comment)) status
-       :author author :time (+ time 0.001)))
-    (let ((thread (or thread (change-review-find-thread set (change-review-comment-thread comment)))))
-      (list :thread (change-review-thread-id thread)
-            :status (symbol-name (change-review-thread-status thread))
+    (let* ((comment
+            (unless (harness-string-blank-p body)
+              (change-review-comment
+               set (string-trim body)
+               :thread thread :author author :time time :sent time
+               :revision (or (plist-get opts :revision)
+                             (when-let* ((version (change-review-latest-version set)))
+                               (change-review-version-id version)))
+               :location (and (not thread) (plist-get opts :file)
+                              (change-review-make-location
+                               :file (plist-get opts :file)
+                               :side (if (member (format "%s" (plist-get opts :side)) '("old" "before")) 'old 'new)
+                               :line (plist-get opts :line))))))
+           (reply-thread (or thread
+                             (and comment (change-review-find-thread
+                                           set (change-review-comment-thread comment)))))
+           (parent (harness-patch-review--parent-data parent-before)))
+      (when (and status (or reply-thread comment))
+        (change-review-update-status
+         set (or reply-thread (change-review-comment-thread comment)) status
+         :author author :time (+ time 0.001)))
+      (list :thread (and reply-thread (change-review-thread-id reply-thread))
+            :status (and reply-thread
+                         (symbol-name (change-review-thread-status reply-thread)))
             :comment (and comment (change-review-comment-to-data comment))
             :parent parent))))
 
@@ -1238,7 +1302,7 @@ Return a promise of (:seen N :unviewed M :revision COMMIT :tip COMMIT)."
 (defun harness-patch-review--attribution (task set)
   "Return the line before the first quote of the drafts of TASK's review in SET."
   (let ((version (change-review-latest-version set)))
-    (format "My review comments on your branch %s%s%s. Each is quoted from the diff, with my comment under the lines it is about; the <thread id=\"...\"> line names the thread it belongs to. These threads are what I want worked on with you, not a check to get to hand_in. Answer a thread with the review_comment tool, giving its id, and close it (status \"closed\") only once what it raises is done: a thread left open is not done, and neither is one closed unanswered or in a batch. I look at every thread you close, so say in your answer what you changed and where."
+    (format "My review comments on your branch %s%s%s. Each is quoted from the diff, with my comment under the lines it is about; the <thread id=\"...\"> line names the thread it belongs to. These threads are what I want worked on with you, not a check to get to hand_in. Answer a thread in your message with a <thread id=\"THREAD_ID\"><quote>what you answer</quote>your answer</thread> block, giving its id, and close it (status=\"closed\") only once what it raises is done: a thread left open is not done, and neither is one closed unanswered or in a batch. I look at every thread you close, so say in your answer what you changed and where."
             (or (plist-get task :branch) "")
             (if version (format " (at %s)" (change-review-short-revision (change-review-version-tip version))) "")
             (if (and version (change-review-version-base version))
@@ -1352,7 +1416,7 @@ review sends its drafts with the feedback that sends it back."
       (let* ((time (float-time))
              (blocks
               (cons (list :type "text"
-                          :text "I wrote replies in the threads of the review of your work. Answer each in its thread with review_comment.")
+                          :text "I wrote replies in the threads of the review of your work. Answer each in its thread with a <thread id=\"THREAD_ID\"> block in your message.")
                     (mapcar (lambda (comment)
                               (let* ((thread (car (change-review-find-comment set (change-review-comment-id comment))))
                                      (body (change-review-comment-body comment)))
@@ -1503,7 +1567,7 @@ module is loaded, so a harness without threads gates nothing; with
 either.  Return the text for the agent, naming the threads to answer."
   (when (bound-and-true-p harness-tools-handin-require-closed-threads)
     (when-let* ((open (harness-call 'patch-review/open-threads (plist-get task :id))))
-      (format "hand_in: %d thread%s of this task's review %s still open: %s. They are the user's questions: answer each in its thread with review_comment and close it only when what it raises is done -- never in a batch just to hand in. Then call hand_in."
+      (format "hand_in: %d thread%s of this task's review %s still open: %s. They are the user's questions: answer each in its thread with a <thread id=\"THREAD_ID\"> block and close it (status=\"closed\") only when what it raises is done -- never in a batch just to hand in. Then call hand_in."
               (length open) (if (= 1 (length open)) "" "s")
               (if (= 1 (length open)) "is" "are")
               (string-join

@@ -1,10 +1,10 @@
-;;; harness-tools-review.el --- The review_threads and review_comment tools  -*- lexical-binding: t; -*-
+;;; harness-tools-review.el --- The review_threads tool  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
 ;; A task's review is a set of threads of comments (harness-patch-review.el).
-;; The user writes in them; the task's agent reads and answers them with
-;; two tools.
+;; The user writes in them; the task's agent reads them with one tool and
+;; answers them in the <thread> blocks of its message.
 ;;
 ;; `review_threads' lists the threads of the agent's own task -- or of
 ;; another task, named by id -- with the comments the user sent: the ids
@@ -13,39 +13,27 @@
 ;; about, so the tool is for what the agent has lost since, a compacted
 ;; context say.
 ;;
-;; `review_comment' adds a comment of the agent's to a thread, and may
-;; close the thread or open it again; a thread it closes waits for the
-;; user to review it, so its answer says what changed and where.  The
-;; comment records the agent, the session and this very tool call, so
-;; that whoever reads the thread can follow it to the point of the
-;; conversation it came from, and the commit the agent was at, so that a
-;; reply that says "fixed" says where.  With no thread it starts one, on
-;; the change as a whole, or on a file and line of it.
+;; The agent answers in the message itself, as a <thread> block
+;; (harness-patch-review.el), the format the task's prompt names: no call
+;; is needed to answer, and the harness has no reply tool.  A thread gets
+;; as many blocks as the agent has things to say in it, and every one is
+;; kept.  A block that names no thread starts one, on the change as a
+;; whole; status="closed" closes the thread, status="open" opens it again.
 ;;
-;; A reply in a thread can also be written in the agent's message itself,
-;; as a <thread> block (harness-thread-reply.el), the format the task's
-;; prompt names: no call is needed to answer.  The tools remain for what
-;; a block does not say -- listing the threads, starting one on a file
-;; and line, and closing one without words.
-;;
-;; Both are offered to task sessions: a session that is no task's has no
-;; review (the filter `agent/tools' removes them), unless it names a task.
+;; The tool is offered to task sessions: a session that is no task's has no
+;; review (the filter `agent/tools' removes it), unless it names a task.
 ;;
 ;; The user's replies that quote the agent's words are comments in threads
-;; of the review too, and the message the agent reads names the thread
-;; each is in (harness-patch-review.el): `review_comment' is how the agent
-;; answers in it.  The result of a call says which thread and comment it
-;; made, and which comment it follows (`:meta'), which the transcript keeps
-;; so that the chat can draw the call as the message from the agent that it
-;; is: the words of the comment, under the thread's name.
+;; of the review too, and the message the agent reads names the thread each
+;; is in (harness-patch-review.el): the agent answers it in the block that
+;; names the thread.
+;;
 ;; In the chat, runs of calls fold under one summary line, but only the
 ;; calls of tools on an explicit allow list (`:coalescable', see
 ;; harness-tools.el), so that a call the user should see stays in view.
 ;; `review_threads' is on it, with `session_read', `read_file' and the
 ;; other reads: it lists what is there and changes nothing, so its call
 ;; joins the run of reads around it instead of cutting that run in two.
-;; `review_comment' is not: it writes what the user reads next, and its
-;; call stays in view.
 
 ;;; Code:
 
@@ -67,23 +55,9 @@ That is the task INPUT names, else the task of the calling session."
           ((and (stringp sid) (harness-method-exists-p 'task/for-session))
            (plist-get (harness-call 'task/for-session sid) :id)))))
 
-(defun harness-tools-review--head (ctx)
-  "Return a promise of the commit the calling session is at, or nil."
-  (let ((cwd (plist-get ctx :cwd)))
-    (if (and (stringp cwd) (not (file-remote-p cwd)) (file-directory-p cwd))
-        (harness-then
-         (harness-run-command '("git" "--no-pager" "rev-parse" "--verify" "--quiet" "HEAD^{commit}")
-                              :cwd cwd :timeout 20 :name "review-comment-head"
-                              :env '(("GIT_OPTIONAL_LOCKS" . "0")))
-         (lambda (result)
-           (let ((out (string-trim (or (plist-get result :stdout) ""))))
-             (and (eql (plist-get result :exit) 0) (string-match-p "\\`[0-9a-f]\\{7,64\\}\\'" out) out)))
-         (lambda (_) nil))
-      (harness-resolved nil))))
-
 (defconst harness-tools-review--no-task
-  "This session has no task, so no review to read or answer; name a task with the task argument."
-  "What the tools say when there is no task to review.")
+  "This session has no task, so no review to read; name a task with the task argument."
+  "What the tool says when there is no task to review.")
 
 (defun harness-tools-review--threads (input ctx)
   "Handler of review_threads: list the threads of the task INPUT and CTX name."
@@ -96,60 +70,9 @@ That is the task INPUT names, else the task of the calling session."
       (harness-tool-error "Reviews with threads are not enabled in this harness (the patch-review module)."))
      (t (harness-tool-ok (harness-call 'patch-review/threads-text id status))))))
 
-(defun harness-tools-review--meta (result)
-  "Return what the transcript keeps of RESULT, from `patch-review/comment'.
-The thread's id as the review has it (the call may have named it by the
-start of it), its status, the comment made -- none when only the status
-changed -- and the comment it follows in the thread: who wrote it and the
-start of it, which the chat draws under the answer's thread."
-  (append (list :thread (plist-get result :thread) :status (plist-get result :status))
-          (and (plist-get result :comment)
-               (list :comment (plist-get (plist-get result :comment) :id)))
-          (and (plist-get result :parent)
-               (list :parent (plist-get result :parent)))))
-
-(defun harness-tools-review--comment (input ctx)
-  "Handler of review_comment: add the agent's comment INPUT says, in CTX's session.
-The links in the comment are written out in full first
-\(`harness-tools-written'): the reviewer follows them from the thread,
-not from the session the comment was written in."
-  (let* ((id (harness-tools-review--task-id input ctx))
-         (written (harness-tools-written (plist-get input :body) ctx))
-         (body (car written)))
-    (cond
-     ((null id) (harness-tool-error harness-tools-review--no-task))
-     ((not (harness-method-exists-p 'patch-review/comment))
-      (harness-tool-error "Reviews with threads are not enabled in this harness (the patch-review module)."))
-     (t
-      (harness-then
-       (harness-tools-review--head ctx)
-       (lambda (head)
-         (condition-case err
-             (let* ((result (harness-call 'patch-review/comment id body
-                                          :thread (plist-get input :thread)
-                                          :status (plist-get input :status)
-                                          :file (plist-get input :file)
-                                          :line (plist-get input :line)
-                                          :side (plist-get input :side)
-                                          :session (plist-get ctx :session-id)
-                                          :call-id (plist-get ctx :call-id)
-                                          :revision head))
-                    (comment (plist-get result :comment)))
-               (harness-tool-ok
-                (harness-tools-with-note
-                 (format "%s thread %s, which is now %s."
-                         (if comment
-                             (format "Added comment %s to%s" (plist-get comment :id)
-                                     (if (plist-get input :thread) "" " the new"))
-                           "Changed")
-                         (plist-get result :thread) (plist-get result :status))
-                 (cdr written))
-                :meta (harness-tools-review--meta result)))
-           (harness-error (harness-tool-error (harness-error-message err))))))))))
-
 (harness-define-tool "review_threads"
   :label "Review threads"
-  :description "List the threads of comments in the review of your task's work: for each, its id, whether it is open or closed, where in the change it is, a link to it that you can put in a message, and the comments the user sent, with who wrote them. Use it to find the thread to answer with review_comment when the feedback that sent the task back is no longer in your context. With status, only the open or only the closed threads; with task, another task's review."
+  :description "List the threads of comments in the review of your task's work: for each, its id, whether it is open or closed, where in the change it is, a link to it that you can put in a message, and the comments the user sent, with who wrote them. Use it to find the thread to answer when the feedback that sent the task back is no longer in your context: answer in your message with a <thread id=\"...\"><quote>what you answer</quote>your answer</thread> block, and put status=\"closed\" in the tag to close the thread. With status, only the open or only the closed threads; with task, another task's review."
   :schema '(:type "object"
             :properties (:status (:type "string" :enum ("open" "closed")
                                   :description "Only the threads with this status. Default: all.")
@@ -160,44 +83,22 @@ not from the session the comment was written in."
   :subject (lambda (input) (plist-get input :status))
   :handler #'harness-tools-review--threads)
 
-(harness-define-tool "review_comment"
-  :label "Review comment"
-  :description "Answer a thread of the review of your work, or start one. The thread id is in the <thread id=\"...\"> line of the feedback, and review_threads lists them. A reply of the user's that quotes your own words is a <thread> block too, the id of the thread it answers in its tag: answer it here, in that thread, instead of in a message of your own; the chat shows your comment as your answer. Write what you did or why you disagree, briefly, in Markdown: the review draws it rendered, so name code in `backquotes`, put lines of code in a fenced block and steps in a list; the user looks at every thread you close, so when you close one say what you changed and where. Close the thread (status closed) only once what it raises is done; leave it open when it is not, or when you want the user's answer, and never close a thread you only argued against. A thread is the user's question: close it because it is answered, never in a batch to reach hand_in. Without thread a new thread starts: on the change as a whole, or on file and line of it, to explain something to the user where they will read the diff. The comment records this call, so the user can follow it back to this point of the conversation. Link what you mean in it, the tool call that proves a fix or the message you answer: [the test run](harness:call/bash#1). With thread and status but no body, only the status changes. A reply can also be written in your message as a <thread id=\"...\"><quote>what it answers</quote>the reply</thread> block, as the prompt shows; review_threads lists the threads, and this tool starts one on a file and line."
-  :schema '(:type "object"
-            :properties (:thread (:type "string"
-                                  :description "The id of the thread to answer, or the start of it when unique. Omit to start a new thread.")
-                         :body (:type "string"
-                                :description "Your comment, in Markdown. Optional only when changing a thread's status.")
-                         :status (:type "string" :enum ("open" "closed")
-                                  :description "Set the thread's status after the comment: closed when it is done.")
-                         :file (:type "string"
-                                :description "For a new thread: the path of the file it is about.")
-                         :line (:type "integer"
-                                :description "For a new thread: the line of that file, as in the file after your change (the file before it with side old).")
-                         :side (:type "string" :enum ("new" "old")
-                                :description "For a new thread: new, the default, or old for a line of the file before your change.")
-                         :task (:type "string"
-                                :description "A task id, to comment in another task's review. Default: your own.")))
-  :kind 'meta
-  :subject (lambda (input) (harness-first-line (or (plist-get input :body) (plist-get input :status) "") 60))
-  :handler #'harness-tools-review--comment)
-
 (defun harness-tools-review--tools (names session)
-  "Drop the review tools from NAMES unless SESSION is a task's.
+  "Drop the review tool from NAMES unless SESSION is a task's.
 The catalogue (SESSION nil) keeps every tool."
   (if (and session (not (and (harness-method-exists-p 'task/for-session)
                              (harness-call 'task/for-session (plist-get session :id)))))
-      (cl-remove-if (lambda (name) (member name '("review_threads" "review_comment"))) names)
+      (cl-remove-if (lambda (name) (member name '("review_threads"))) names)
     names))
 
 (defun harness-tools-review--init ()
-  "Offer the review tools to task sessions only."
+  "Offer the review tool to task sessions only."
   (harness-add-filter 'agent/tools #'harness-tools-review--tools 50))
 
 (harness-tools-review--init)
 
 (harness-define-module 'tools-review
-  :doc "The review_threads and review_comment tools: a task's agent reads and answers the threads of its review."
+  :doc "The review_threads tool: a task's agent reads the threads of its review and answers them in <thread> blocks."
   :requires '(tools session)
   :init #'harness-tools-review--init)
 

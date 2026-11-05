@@ -363,12 +363,13 @@
 ;; shown -- a revision that is not there, a review before this one of
 ;; which nothing is known -- is said, and the diff shown stays.
 ;;
-;; WHAT THE AGENT CLOSED.  The agent answers a thread with its
-;; `review_comment' tool and closes it when its point is done; whether
-;; it is, is for the reviewer to say.  A thread the agent closed is "to
-;; review" until the reviewer has looked at it (the library's
-;; `change-review-thread-unreviewed-p'), however many rounds ago it was
-;; closed.  The report's heading counts them as a button that lists
+;; WHAT THE AGENT CLOSED.  The agent answers a thread in a <thread> block
+;; of its message and closes it with status="closed" when its point is
+;; done; whether it is, is for the reviewer to say.  A thread the agent
+;; closed is "to review" until the reviewer has looked at it (the
+;; library's `change-review-thread-unreviewed-p'), however many rounds
+;; ago it was closed.  The report's heading counts them as a button that
+;; lists
 ;; them (`[3 to review]', the threads view with its filter on them), a
 ;; file's row says how many it has, and the report lists them under
 ;; their file, a line each, with the open threads.  Ediff draws them
