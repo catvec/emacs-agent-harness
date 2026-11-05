@@ -578,6 +578,35 @@ from, the report's summary and the agent that handed it in."
       (should (equal '(1 2) (mapcar (lambda (v) (plist-get v :number))
                                     (plist-get (harness-call 'patch-review/get id) :versions)))))))
 
+(ert-deftest harness-patch-review-uses-the-tasks-declared-merge-base ()
+  "A version's base is the branch the task named at hand-in, not the project's main.
+The task's branch starts from a release branch main has moved past, so
+its review diff must be read against release, and its file list holds
+only the task's own change."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)))
+      ;; Main moves on, release starts there and moves on too, and the
+      ;; task's branch is based on release.
+      (harness-patch-review-test--git dir "checkout" "-q" "main")
+      (with-temp-file (expand-file-name "main.txt" dir) (insert "main\n"))
+      (harness-patch-review-test--git dir "add" "main.txt")
+      (harness-patch-review-test--git dir "commit" "-q" "-m" "main work")
+      (harness-patch-review-test--git dir "checkout" "-q" "-b" "release")
+      (with-temp-file (expand-file-name "release.txt" dir) (insert "release\n"))
+      (harness-patch-review-test--git dir "add" "release.txt")
+      (harness-patch-review-test--git dir "commit" "-q" "-m" "release work")
+      (let ((release (string-trim (harness-patch-review-test--git dir "rev-parse" "release"))))
+        (harness-patch-review-test--git dir "checkout" "-q" "task/fix")
+        (harness-patch-review-test--git dir "rebase" "-q" "release")
+        ;; The task hands in again, naming the branch its work belongs on.
+        (harness-call 'task/hand-in id (list :summary "# Done" :problem "The flaky test"
+                                             :evidence '("looks good") :merge-base "release"))
+        (should (equal "release" (plist-get (harness-call 'task/get id) :base)))
+        (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+        (let ((version (car (plist-get (harness-call 'patch-review/get id) :versions))))
+          (should (equal release (plist-get version :base)))
+          (should (equal "release" (plist-get (plist-get version :meta) :base-branch))))))))
+
 (ert-deftest harness-patch-review-records-no-version-without-a-branch ()
   "A task that worked in the main checkout has no branch, so no version."
   (harness-patch-review-test-with

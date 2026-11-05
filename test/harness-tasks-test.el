@@ -3992,6 +3992,126 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (harness-test-wait (lambda () (string-empty-p (harness-tasks-test--git root "branch" "--list" (plist-get task :branch))))
                          30 "branch deletion"))))
 
+(ert-deftest harness-tasks-hand-in-declares-the-merge-base ()
+  "A task names the branch its work belongs on when it hands the work in.
+The branch is its merge base from then on, and verifying merges the
+work there, rather than into the branch the task was made from."
+  (harness-tasks-test-with-git
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
+             (:type text :delta "Changed it.")
+             (:type tool-call :id "h1" :name "hand_in"
+              :input (:problem "The shared file"
+                      :summary "# Done" :evidence ("looks good")
+                      ;; A full ref is the branch it names.
+                      :merge_base "refs/heads/release"))
+             (:type done :stop-reason end-turn))))
+      ;; Release starts where main is now; main moves on after it.
+      (harness-tasks-test--git root "branch" "release")
+      (let ((release (string-trim (harness-tasks-test--git root "rev-parse" "release"))))
+        (with-temp-file (expand-file-name "main-only.txt" root) (insert "main\n"))
+        (harness-tasks-test--git root "add" "main-only.txt")
+        (harness-tasks-test--git root "commit" "-q" "-m" "main moves on")
+        (let ((id (harness-tasks-test-submit "Change the shared file")))
+          (harness-tasks-test-wait-state id 'review)
+          (let ((task (harness-tasks-test-task id)))
+            ;; The branch the task named at hand-in is its base from then
+            ;; on, and the report keeps what it said.
+            (should (equal "release" (plist-get task :base)))
+            (should (equal "release" (plist-get (plist-get task :report) :merge-base))))
+          ;; Verifying merges into release by its ref: main's checkout
+          ;; and its branch never move.  The branch was made from main,
+          ;; after release, so what merging it into release brings is the
+          ;; task's change and main's commit.  The review reads the work
+          ;; against release too: the review module tests the version's
+          ;; base against a task's.
+          (harness-call 'task/verify id)
+          (harness-tasks-test-wait-state id 'done)
+          (let ((task (harness-tasks-test-task id)))
+            (should (plist-get task :merged))
+            (should (equal (list :root root :branch "release") (plist-get task :merge-target)))
+            ;; The branch moved from where it was: nothing was checked out
+            ;; to receive the merge commit.
+            (should (equal release (string-trim (harness-tasks-test--git root "rev-parse" "release^"))))
+            (should (equal "two" (string-trim (harness-tasks-test--git root "show" "release:shared.txt"))))
+            (should (equal "main" (string-trim (harness-tasks-test--git root "show" "release:main-only.txt"))))
+            (should (equal "one" (string-trim (harness-tasks-test--git root "show" "main:shared.txt"))))
+            (should (equal "one\n" (harness-tasks-test--main-text root)))))))))
+
+(ert-deftest harness-tasks-hand-in-checks-the-merge-base-it-is-given ()
+  "A hand-in naming a branch the project has not got is refused, as is its own.
+The refusal lists the local branches the project has, nothing is
+recorded, and the task keeps working."
+  (harness-tasks-test-with-git
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-working-phase t)
+          (harness-tasks-require-verification t))
+      (harness-tasks-test--git root "branch" "release")
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait (lambda () (eq 'conversing (plist-get (harness-tasks-test-task id) :outcome)))
+                           10 "the task to be left at work")
+        (let ((result (harness-test-await
+                       (harness-call-async 'tools/execute sid
+                                           (list :id "h1" :name "hand_in"
+                                                 :input (list :problem "Nested quotes"
+                                                              :summary "# Done"
+                                                              :evidence '("looks good")
+                                                              :merge_base "nope"))))))
+          (should (plist-get result :is-error))
+          (should (string-match-p "no local branch nope" (plist-get result :content)))
+          (should (string-match-p "release" (plist-get result :content)))
+          (should (string-match-p "main" (plist-get result :content))))
+        (let ((result (harness-test-await
+                       (harness-call-async 'tools/execute sid
+                                           (list :id "h2" :name "hand_in"
+                                                 :input (list :problem "Nested quotes"
+                                                              :summary "# Done"
+                                                              :evidence '("looks good")
+                                                              :merge_base (plist-get (harness-tasks-test-task id)
+                                                                                     :branch)))))))
+          (should (plist-get result :is-error))
+          (should (string-match-p "this task's own branch" (plist-get result :content))))
+        (should-not (plist-get (harness-tasks-test-task id) :report))
+        (should (eq 'active (harness-tasks-test-state id)))))))
+
+(ert-deftest harness-tasks-git-base-of-a-task-submitted-in-a-worktree ()
+  "A task submitted from a worktree builds on that worktree's branch.
+Its base is that branch, not the one the project's checkout has out, so
+a task of a task works on the work it was made beside."
+  (harness-tasks-test-with-git
+    (let ((release-wt (file-name-as-directory
+                       (expand-file-name "release-wt" (file-name-directory (directory-file-name root))))))
+      (harness-tasks-test--git root "branch" "release")
+      (harness-tasks-test--git root "worktree" "add" "-q" release-wt "release")
+      (let* ((release (string-trim (harness-tasks-test--git release-wt "rev-parse" "HEAD")))
+             (id (plist-get (harness-call 'task/submit release-wt "Change the shared file") :id))
+             (task nil))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :branch))
+                           5 "the task's worktree")
+        (setq task (harness-tasks-test-task id))
+        (should (equal "release" (plist-get task :base)))
+        ;; Its session is told the branch its work goes back to, and that
+        ;; it may name another at hand-in.
+        (let ((prompt (harness-run-filter 'agent/system-prompt ""
+                                          (harness-call 'session/get (plist-get task :session)))))
+          (should (string-match-p "merges back into release" prompt))
+          (should (string-match-p "Do not merge, rebase onto or push release yourself" prompt))
+          (should (string-match-p "give that branch as merge_base when you hand in" prompt)))
+        (harness-tasks-test-wait-state id 'done)
+        ;; The task branch started at the release worktree's tip.
+        (should (equal release
+                       (string-trim (harness-tasks-test--git (plist-get task :worktree)
+                                                             "rev-parse" "HEAD^"))))
+        ;; The release worktree and branch have the work; main does not.
+        (should (equal "two\n"
+                       (with-temp-buffer
+                         (insert-file-contents (expand-file-name "shared.txt" release-wt))
+                         (buffer-string))))
+        (should (equal "one\n" (harness-tasks-test--main-text root)))))))
+
 (ert-deftest harness-tasks-git-merge-failure-needs-input ()
   (harness-tasks-test-with-git
     ;; Uncommitted edits at the root make the merge refuse to run.
@@ -4199,6 +4319,24 @@ the task's own session.  With one slot, the next task starts meanwhile."
       (let* ((store (harness-tasks-test--read (harness-tasks-test--store root)))
              (record (car (plist-get store :tasks))))
         (should (harness-json-true-p (plist-get record :main-tree)))))))
+
+(ert-deftest harness-tasks-declared-base-survives-a-restart ()
+  "The merge base a task named at hand-in is kept in the project's store across a restart."
+  (harness-tasks-test-with
+    (let* ((harness-tasks-store-in-repository t)
+           (harness-tasks-max-running 0)
+           (root (harness-tasks-test--make-repo))
+           (id (plist-get (harness-call 'task/submit root "fix the release") :id)))
+      (harness-call 'task/hand-in id (list :summary "# Done" :problem "Fix the release"
+                                           :evidence '("looks good") :merge-base "release"))
+      (should (equal "release" (plist-get (harness-call 'task/get id) :base)))
+      (harness-tasks-flush)
+      (harness-tasks-test--restart)
+      (should (equal "release" (plist-get (harness-tasks-test-task id) :base)))
+      ;; The stored record names it too.
+      (let* ((store (harness-tasks-test--read (harness-tasks-test--store root)))
+             (record (car (plist-get store :tasks))))
+        (should (equal "release" (plist-get record :base)))))))
 
 ;;;; Where tasks are kept
 

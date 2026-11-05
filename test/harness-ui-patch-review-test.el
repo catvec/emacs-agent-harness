@@ -249,6 +249,36 @@ main's own commits after it are not the task's."
     (should (plist-get (harness-test-await (harness-ui-patch-review--read-branch repo "task/fix" "main" repo))
                        :dirty))))
 
+(ert-deftest harness-ui-patch-review-reads-the-declared-merge-base ()
+  "The file diff is read against the branch the task declared.
+Its branch was made from release, which main has moved past: the diff
+holds the task's own files, not release's, and the base says release."
+  (harness-ui-patch-review-test-with-repo
+    ;; A release branch with a commit of its own; the task's branch
+    ;; rebased onto it while main keeps its own commit.
+    (harness-ui-patch-review-test--git repo "checkout" "-q" "main")
+    (harness-ui-patch-review-test--git repo "checkout" "-q" "-b" "release" "task/fix^")
+    (harness-ui-patch-review-test--write repo "release.txt" "release work\n")
+    (harness-ui-patch-review-test--git repo "add" "release.txt")
+    (harness-ui-patch-review-test--git repo "commit" "-q" "-m" "Release work")
+    (harness-ui-patch-review-test--git repo "checkout" "-q" "task/fix")
+    (harness-ui-patch-review-test--git repo "rebase" "-q" "release")
+    (harness-ui-patch-review-test--git repo "checkout" "-q" "main")
+    (let* ((release (harness-ui-patch-review-test--git repo "rev-parse" "release"))
+           (main (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix"))
+           (review (harness-ui-patch-review--review-for
+                    (harness-ui-patch-review-test--task repo :base "release"))))
+      (should-not (equal release main))
+      (harness-test-await (harness-ui-patch-review--load review))
+      (should-not (harness-ui-patch-review--r-error review))
+      (should (equal release (harness-ui-patch-review--r-merge-base review)))
+      (should (equal "release" (harness-ui-patch-review--r-base review)))
+      (should (equal '("a.el" "b.el" "d.el" "docs/é.txt" "img.bin" "new.el")
+                     (mapcar (lambda (file) (change-review-file-path file))
+                             (harness-ui-patch-review--r-files review))))
+      (should-not (cl-find "release.txt" (harness-ui-patch-review--r-files review)
+                           :key #'change-review-file-path :test #'equal)))))
+
 (ert-deftest harness-ui-patch-review-reads-what-it-can ()
   "A base that is not there is HEAD's; a branch that is not there says so."
   (harness-ui-patch-review-test-with-repo

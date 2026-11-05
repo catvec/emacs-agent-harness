@@ -40,9 +40,16 @@ named after its title and its id (`harness-tasks--branch-name`: the
 short title the cheap naming model gave it, see Titles, else the
 first words of its prompt),
 its session is told to commit there, and when the agent finishes the
-branch goes through the merge queue (the `merge` module) into the
-branch checked out at the project root -- a main checkout, which the
-queue takes as a target in its own right, with no session behind it.
+branch goes through the merge queue (the `merge` module) into its
+MERGE BASE: by default the branch checked out where it was submitted --
+a task started from a worktree builds on that worktree's branch rather
+than the project's default -- and otherwise the branch the task itself
+names when it hands the work in (`hand_in` `merge_base`), for work that
+belongs on a branch of its own.  The base is the same one the review
+reads the branch's file diff against, through its own module.
+The merge queue takes the base branch as a target of its own, with no
+session behind it: it merges into the base's checkout when a worktree
+has it out, else it moves the branch's ref.
 It is the same queue, the same conflict resolution and the same
 events as a sub-agent merging into the session that started it, which
 a task's own session may have started: its branch waits in the queue

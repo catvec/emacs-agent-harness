@@ -6521,12 +6521,20 @@ loads on its own.
 
 One queue serves every merge: a sub-agent's branch into the session
 that started it (its working directory, a worktree), a task's branch
-into the main checkout, nested at any depth.  What a merge names is a
-*target*, not a parent: the session the branch merges into, or -- for a
-branch with no session to merge into, a task's -- the main checkout
-itself, given as its directory.  Both are keyed, locked, scheduled and
-resolved the same way, and both emit the same events, so a task's
-session may itself be a target with a queue of its own.
+into the checkout or the branch it was made from, nested at any depth.
+What a merge names is a *target*, not a parent: the session the branch
+merges into; or -- for a branch with no session to merge into, a
+task's -- the main checkout itself, given as its directory; or a branch
+of that checkout, `(:root DIR :branch BRANCH)`, which is a task's merge
+base when it is
+not the branch the checkout has out.  All are keyed, locked, scheduled
+and resolved the same way, and all emit the same events, so a task's
+session may itself be a target with a queue of its own.  A branch
+target merges into the branch's checkout when one of the repository's
+worktrees has it out, else it moves the branch's ref with
+`git update-ref` (compare-and-swap) onto the finished commit: no
+working tree is touched, and a branch no worktree has out need not be
+checked out to receive work.
 
 - `merge/enqueue CHILD-SID TARGET &optional :message` → position;
   `merge/queue TARGET`; `merge/view TARGET` (`merge/queue` items then
@@ -6535,10 +6543,11 @@ session may itself be a target with a queue of its own.
   `merge/pending SESSION-SID` (the merges into a session that are not
   through yet: queued, merging or in conflict; what it may not hand in
   past, see tools); `merge/status CHILD-SID`; `merge/cancel CHILD-SID`.
-  TARGET is a session id or a directory.  When the target is a session
-  and it reaches a step boundary (`agent/step` filter) or is idle, the
-  head of its queue gets the lock; a main checkout has no session to
-  wait for and starts as soon as the lock is free.  Each merge is a
+  TARGET is a session id, a directory, or the plist
+  `(:root DIR :branch BRANCH)`.  When the target is a session and it
+  reaches a step boundary (`agent/step` filter) or is idle, the head of
+  its queue gets the lock; a checkout and a branch have no session to
+  wait for and start as soon as the lock is free.  Each merge is a
   transaction that never leaves the target's checkout mid-merge.
   `git merge-tree --write-tree` merges the child's branch
   into the target's HEAD off to the side; a clean result becomes ONE
@@ -6821,12 +6830,19 @@ Task mode: one session per task.  TASK =
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
 :waiting nil|"what the session started runs outside its turn"
-:error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
+:error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-target TARGET :merge-status nil|queued|merging|conflict
 :merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :queued-at F :waits ((:at F :seconds F :priority "low|medium|high") ...)
 :paused nil|F :return-reason returned|preempted|reclaimed|sent-back|quota|budget
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`, and a
 read of a queued task also has `:hold` (below) while something holds it back.
+`:base` is the task's merge base: the branch checked out where it was
+submitted (the project root's, or a worktree's when it was submitted
+from one), which its own branch is made from -- or the local branch the
+task names when it hands the work in (`hand_in` `merge_base'), which is
+then what the review reads the work against and what verifying merges
+it into.  Only the task sets it: a submission, the board and the tool
+that submits a task name no base.
 `:column` is derived on every read: `backlog` for a backlog task or
 its write-up -- one the scheduler never starts, for the user's
 `task/start` -- `needs-input` when the session is
@@ -6872,10 +6888,16 @@ the level the rest of the harness reads, and the queues the session's
 work waits in -- the tool slots above all -- are served by it (see
 priority).
 
-- `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
-  :thinking :non-interactive :supervisor :refine :main-tree :priority)` → task; it
+- `task/submit CWD PROMPT &optional (:attachments :model
+  :permission-mode :thinking :non-interactive :supervisor :refine
+  :main-tree :priority)` → task; it
   starts when one of its project's `harness-tasks-max-running` slots is
-  free.  Its session is made now, at the task's directory, idle, with
+  free.  In a git project its branch is made from the branch checked out
+  in CWD -- a worktree's branch, for a task submitted from one, so a
+  task of a task builds on its parent's branch -- and merges back into
+  it; a task whose work belongs on another local branch names that one
+  at hand-in (`hand_in` `merge_base'), not at submission.  Its
+  session is made now, at the task's directory, idle, with
   the task's priority and the settings of its first turn (a backlog
   task's write-up settings) in it, so the task has somewhere to live --
   and the priority has -- from the start; the work goes on in that
@@ -7221,10 +7243,13 @@ priority).
   found without a title (from before, or whose naming failed) are named
   at start-up (`harness-tasks--pick-up`) and on reload.
 - With nothing to review (below), a turn ending `end-turn` queues
-  `merge/enqueue SID TARGET`, TARGET being the project root itself: the
-  main checkout, which the merge queue takes as a target with no session
-  behind it (`merge/enqueue` accepts a directory); `merge/finished …
-  merged` makes the task `done`.
+  `merge/enqueue SID TARGET`, TARGET being the task's merge base: its
+  `:base` branch as `(:root PROJECT :branch BASE)`, or the project root
+  itself when the task has no base -- a checkout or a branch the merge
+  queue takes as a target with no session behind it (`merge/enqueue`
+  accepts both), so the work goes back to the branch it was made from,
+  or the one the task named at hand-in, never assuming the project's
+  checked-out branch; `merge/finished … merged` makes the task `done`.
   While its branch holds a place in the queue the task is in the
   `merging` column (`:merge-queued` says when it joined).
   Failures the agent can fix (uncommitted work) are steered by the merge
@@ -8863,9 +8888,11 @@ whose strict syntax it reads, and the correction of a malformed reply;
 - Versions.  `task/review` -- the work was handed in -- records a
   version of the set (`add-version`; one already recorded changes
   nothing): its id and tip are the commit the task's branch ends at, its
-  base the merge base with the task's `:base`, read with git in the
-  task's project, else its worktree, when that is a directory of this
-  machine; a task with no branch, or no repository here, records none.
+  base the merge base with the task's `:base` branch (the branch the
+  work was made from, or the one the task named at hand-in), read with
+  git in the task's project, else its
+  worktree, when that is a directory of this machine; a task with no
+  branch, or no repository here, records none.
   Its time, description and title are the report's, and its author the
   agent with its session and the report's `:call-id`, the `hand_in`
   call that handed the work in (`hand_in` puts the id in the report);
@@ -15811,11 +15838,14 @@ directory, when the harness is not remote
 (`harness-ui-connection-address`); else the panel says why.  Git runs in
 the Emacs that shows the UI, with `GIT_OPTIONAL_LOCKS=0`, so that it
 takes no lock the task's own git could trip on.  `git merge-base` of the
-branch with the task's `:base` (HEAD when that is blank or gone) gives
-the commit compared with; `git diff --raw -z -M --no-abbrev` and the
-patch between the two give the files and their hunks, paired by path,
-and `git status` in the worktree tells the panel to say when it has
-changes not committed.
+branch with the task's `:base` branch -- the branch the work was made
+from, or the one it named at hand-in, and merges back into; HEAD when
+that is blank or gone --
+gives the commit compared with; `git diff --raw -z -M --no-abbrev` and
+the patch between the two give the files and their hunks, paired by
+path, and `git status` in the worktree tells the panel to say when it
+has changes not committed.  So the diff is the task's own work, not
+what its merge base brought with it.
 
 THE DIFF SHOWN.  The commits compared are the reviewer's choice
 (`harness-ui-patch-review-select-diff`, on d and the buttons of the

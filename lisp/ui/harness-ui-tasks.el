@@ -477,11 +477,12 @@ project's tasks.  `harness-ui-tasks-filter-project' sets it.")
 A plist of `:model', `:thinking', `:permission-mode', `:non-interactive'
 and, when the harness has the supervisor module, `:supervisor', seeded
 from the harness's task defaults and changed with the usual session
-commands.  The model and thinking level of the other steps are there
-too, seeded the same way: `:refine-model' and `:refine-thinking' write
-a task up in Refine, `:plan-model' and `:plan-thinking' plan it in
-Plan, and `:plan-work-model' and `:plan-work-thinking' do a planned
-task's work (see `harness-ui-tasks--step-keys').")
+commands, and `:main-tree', where it works.  The model and thinking
+level of the other steps are there too, seeded the same way:
+`:refine-model' and `:refine-thinking' write a task up in Refine,
+`:plan-model' and `:plan-thinking' plan it in Plan, and
+`:plan-work-model' and `:plan-work-thinking' do a planned task's work
+\(see `harness-ui-tasks--step-keys').")
 (defvar-local harness-ui-tasks--loading t)
 (defvar-local harness-ui-tasks--error nil "Last failure, shown above the compose box.")
 (defvar-local harness-ui-tasks--show-archived nil)

@@ -2,7 +2,7 @@
 
 # merge
 
-Merge queue: worktree branches merged into the session they were built on, or into the main checkout.
+Merge queue: worktree branches merged into the session they were built on, a checkout, or a branch of one.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-merge.el](../../lisp/modules/harness-merge.el)
@@ -14,13 +14,18 @@ Merge queue: worktree branches merged into the session they were built on, or in
 
 A session working in a git worktree asks for its branch to be merged
 with `merge/enqueue`, naming the *target*: the session whose working
-directory the branch merges into, or, for a task's branch, the main
-checkout itself (a directory).  One queue per target, served one
-merge at a time: the head of the queue takes the target's lock when
-that session is idle, or when its running turn reaches a step
-boundary (the `agent/step` and `agent/before-turn` filters hold it
-until the lock is free again).  A main checkout has no session to
-hold: its merges start as soon as the lock is free.
+directory the branch merges into, a main checkout (a directory), or a
+branch of one, `(:root DIR :branch BRANCH)`.  A task's branch merges
+into its merge base: the branch it was made from, which may not be
+the one the checkout has out.  The queue merges into the branch's
+checkout when one of the repository's worktrees has it out, else it
+moves the branch's ref by compare-and-swap; either way only a
+finished commit lands.  One queue per target, served one merge at a
+time: the head of the queue takes the target's lock when that session
+is idle, or when its running turn reaches a step boundary (the
+`agent/step` and `agent/before-turn` filters hold it until the lock
+is free again).  A main checkout and a branch have no session to
+hold: their merges start as soon as the lock is free.
 
 Targets nest.  A session may itself work in a worktree -- a task's
 session does -- and start sub-agents in worktrees of their own, each
@@ -117,7 +122,7 @@ Everything runs asynchronously through `harness-run-command`.
 - `merge/cancel` (child-id) — Remove CHILD-ID from its merge queue.
 - `merge/enqueue` (child-id target &rest opts) — Queue CHILD-ID's worktree branch for a merge into TARGET.
 - `merge/pending` (session-id) — Return the merges SESSION-ID waits for, as `merge/queue` items.
-- `merge/queue` (target) — Return the merge queue of TARGET: a session id, or a main checkout's directory.
+- `merge/queue` (target) — Return the merge queue of TARGET: a session, a checkout or a branch.
 - `merge/status` (child-id) — Return the merge status of CHILD-ID (queued, merging, conflict) or nil.
 - `merge/view` (target) — Return the merge queue of TARGET as a session's chat shows it.
 
@@ -129,7 +134,7 @@ Everything runs asynchronously through `harness-run-command`.
 
 - `merge/conflict` — (CHILD-ID TARGET FILES) when a merge would conflict; they are resolved in the child's worktree.
 - `merge/finished` — (CHILD-ID TARGET STATUS) merged, failed, aborted or cancelled.
-- `merge/queued` — (CHILD-ID TARGET POSITION) after a merge was requested, TARGET naming the queue: the session the branch merges into, or a main checkout's directory.
+- `merge/queued` — (CHILD-ID TARGET POSITION) after a merge was requested, TARGET naming the queue: the session the branch merges into, a main checkout's directory, or its (:root DIR :branch BRANCH) plist.
 - `merge/resolver` — (CHILD-ID TARGET RESOLVER-ID) when a fresh session starts resolving a merge's conflicts.
 - `merge/started` — (CHILD-ID TARGET) when a merge takes its target's lock.
 

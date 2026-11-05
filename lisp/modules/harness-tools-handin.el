@@ -37,6 +37,19 @@
 ;; changed nothing -- and verifying it completes it without the merge
 ;; queue.
 ;;
+;; `merge_base' is how the task itself says where its work belongs: a
+;; local branch, when the work is not made from the branch it belongs
+;; on.  The task, not the user, is the one that knows -- it has read the
+;; project -- so nothing of the board or of `task_submit' sets a base.
+;; The task's default base is the branch checked out where it was
+;; submitted (`harness-tasks--make-worktree'), and it names this only to
+;; go elsewhere.  The branch is checked before the report is recorded:
+;; one the project does not have, or the task's own branch, refuses the
+;; hand-in and lists what it could name, so a typo does not merge the
+;; work into nowhere.  A branch that is there becomes the task's
+;; `:base': what the review reads its changes against and what
+;; verifying merges them into (`task/hand-in').
+;;
 ;; The tool is offered to task sessions only: the filter `agent/tools'
 ;; removes it where there is no task to hand the work in to.
 ;;
@@ -395,6 +408,50 @@ of a caption; a code block is code, and what it says is left alone."
       (setq item (plist-put item :caption (funcall written (plist-get item :caption)))))
     item))
 
+(defun harness-tools-handin--branches (root)
+  "Return a promise of the local branches of the repository at ROOT.
+They are the newest commit first.  The promise resolves to nil when git
+cannot read ROOT, so a check that cannot be made refuses nothing."
+  (harness-catch
+   (harness-then
+    (harness-run-command (list "git" "for-each-ref" "--sort=-committerdate"
+                               "--format=%(refname:short)" "refs/heads/")
+                         :cwd root :name "harness-hand-in-git")
+    (lambda (result)
+      (and (eql (plist-get result :exit) 0)
+           (split-string (or (plist-get result :stdout) "") "\n" t))))
+   (lambda (_) nil)))
+
+(defun harness-tools-handin--merge-base (task declared)
+  "Return a promise of what DECLARED, a branch, is for TASK's hand-in.
+The promise resolves to `(:base NAME)' when TASK's work can merge into
+that branch, and to `(:error TEXT)' when it cannot: the task has no
+branch of its own, DECLARED is that branch, or the project has no local
+branch of that name -- whose branches the error then lists.  A project
+whose branches cannot be read takes the name as it is: the merge queue
+says what it cannot do."
+  (cond
+   ((not (plist-get task :worktree))
+    (harness-resolved
+     (list :error
+           "hand_in: this task has no branch of its own to merge, so merge_base has nothing to name; hand in without it.")))
+   ((equal declared (plist-get task :branch))
+    (harness-resolved
+     (list :error
+           (format "hand_in: %s is this task's own branch.  merge_base names the local branch the work belongs on, other than the task's own; leave it out to merge into the branch the task was made from." declared))))
+   (t
+    (harness-then
+     (harness-tools-handin--branches (plist-get task :project))
+     (lambda (branches)
+       (cond
+        ((or (null branches) (member declared branches)) (list :base declared))
+        (t (list :error
+                 (format "hand_in: the project has no local branch %s.  Its branches are: %s.  Give merge_base one of them, or leave it out to merge into the branch the task was made from."
+                         declared
+                         (let ((names (seq-take branches 20)))
+                           (concat (string-join names ", ")
+                                   (if (> (length branches) (length names)) ", …" ""))))))))))))
+
 (defun harness-tools-handin--merges-pending (sid)
   "Return the merges SID waits for, or nil.
 Those are the branches its own sub-agents have merging into its working
@@ -477,63 +534,78 @@ the session's branch is built on has to be in it first."
         (if bad
             (harness-tools-handin--invalid "%s" (string-join (nreverse bad) "\n"))
           (let ((task (and (harness-method-exists-p 'task/for-session)
-                           (harness-call 'task/for-session sid))))
+                           (harness-call 'task/for-session sid)))
+                (declared (harness-branch-name (plist-get input :merge_base))))
             (if (not task)
                 (harness-tools-handin--invalid
                  "hand_in is for a task's session, and this session is no task. Finish your turn normally instead.")
-              (let ((refusal (and (not cannot)
-                                  (harness-tools-handin--blocked task))))
-                (if refusal
-                    (harness-tools-handin--invalid "%s" refusal)
-                  (let* ((report (append (list :summary summary :problem problem)
-                                     (and reproduction (list :reproduction reproduction))
-                                     (list :evidence items :at (float-time))
-                                     ;; The call that handed the work in: the review
-                                     ;; names it as the author of the version.
-                                     (and (plist-get ctx :call-id) (list :call-id (plist-get ctx :call-id)))
-                                     (and cannot (list :cannot-continue t))
-                                     (and no-merge (list :no-merge t))))
-                     (record
-                      (lambda ()
-                        (harness-call 'task/hand-in (plist-get task :id) report)
-                        (harness-call 'session/hint sid
-                                      (cond (cannot "Task cannot continue; it waits for the user")
-                                            (no-merge "Handed in; nothing to merge")
-                                            (t "Handed in for review")))
-                        (harness-tool-ok
-                         (harness-tools-with-note
-                          (cond
-                          (cannot
-                           (format "Recorded: this task cannot continue. %s\n\nThe task goes to Requires your input for the user's decision, and nothing merges; this turn ends."
-                                   (harness-first-line summary 200)))
-                          (no-merge
-                           (format "Handed in (nothing to merge): %s\n\n%d piece%s of evidence; the task waits for the user's review, and verifying it completes it without merging."
-                                   (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s")))
-                          (t
-                           (format "Handed in: %s\n\n%d piece%s of evidence; the task now waits for the user's review, and this turn ends."
-                                   (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s"))))
-                          (and notes (string-join (delete-dups (nreverse notes)) "\n")))
-                         :end-turn t
-                         ;; The report rides the result, so the transcript can draw
-                         ;; the review the task view draws, after it left review too.
-                         :meta (list :report report :task-id (plist-get task :id))))))
-                ;; Work that is to be merged is put to the project's own checks
-                ;; (`task/before-hand-in'), when it has any; a task that
-                ;; cannot continue, or has nothing to merge, is not.
-                (if (or cannot no-merge
-                        (not (memq 'task/before-hand-in (harness-filters))))
-                    (funcall record)
-                  (harness-then (harness-tools-handin--refusal task sid)
-                                (lambda (refusal)
-                                  (if refusal
-                                      (harness-tools-handin--invalid "%s" refusal)
-                                    (funcall record)))
-                                ;; A check that cannot be made refuses nothing.
-                                (lambda (_) (funcall record)))))))))))))))
+              (harness-then
+               ;; The branch the task names is checked before anything is
+               ;; recorded: a hand-in for work that merges says where it
+               ;; merges, and the review reads the work against it.
+               (if (and declared (not cannot) (not no-merge))
+                   (harness-tools-handin--merge-base task declared)
+                 (harness-resolved (list :base nil)))
+               (lambda (check)
+                 (if (plist-get check :error)
+                     (harness-tools-handin--invalid "%s" (plist-get check :error))
+                   (let ((base (plist-get check :base))
+                         (refusal (and (not cannot)
+                                       (harness-tools-handin--blocked task))))
+                     (if refusal
+                         (harness-tools-handin--invalid "%s" refusal)
+                       (let* ((report (append (list :summary summary :problem problem)
+                                              (and reproduction (list :reproduction reproduction))
+                                              (list :evidence items :at (float-time))
+                                              ;; The call that handed the work in: the review
+                                              ;; names it as the author of the version.
+                                              (and (plist-get ctx :call-id) (list :call-id (plist-get ctx :call-id)))
+                                              (and cannot (list :cannot-continue t))
+                                              (and no-merge (list :no-merge t))
+                                              ;; Where the work belongs, when the task named
+                                              ;; another branch than the one it was made from.
+                                              (and base (list :merge-base base))))
+                              (record
+                               (lambda ()
+                                 (harness-call 'task/hand-in (plist-get task :id) report)
+                                 (harness-call 'session/hint sid
+                                               (cond (cannot "Task cannot continue; it waits for the user")
+                                                     (no-merge "Handed in; nothing to merge")
+                                                     (t "Handed in for review")))
+                                 (harness-tool-ok
+                                  (harness-tools-with-note
+                                   (cond
+                                    (cannot
+                                     (format "Recorded: this task cannot continue. %s\n\nThe task goes to Requires your input for the user's decision, and nothing merges; this turn ends."
+                                             (harness-first-line summary 200)))
+                                    (no-merge
+                                     (format "Handed in (nothing to merge): %s\n\n%d piece%s of evidence; the task waits for the user's review, and verifying it completes it without merging."
+                                             (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s")))
+                                    (t
+                                     (format "Handed in: %s\n\n%d piece%s of evidence; the task now waits for the user's review, and this turn ends."
+                                             (harness-first-line summary 200) (length items) (if (= 1 (length items)) "" "s"))))
+                                   (and notes (string-join (delete-dups (nreverse notes)) "\n")))
+                                  :end-turn t
+                                  ;; The report rides the result, so the transcript can draw
+                                  ;; the review the task view draws, after it left review too.
+                                  :meta (list :report report :task-id (plist-get task :id))))))
+                         ;; Work that is to be merged is put to the project's own checks
+                         ;; (`task/before-hand-in'), when it has any; a task that
+                         ;; cannot continue, or has nothing to merge, is not.
+                         (if (or cannot no-merge
+                                 (not (memq 'task/before-hand-in (harness-filters))))
+                             (funcall record)
+                           (harness-then (harness-tools-handin--refusal task sid)
+                                         (lambda (refusal)
+                                           (if refusal
+                                               (harness-tools-handin--invalid "%s" refusal)
+                                             (funcall record)))
+                                         ;; A check that cannot be made refuses nothing.
+                                         (lambda (_) (funcall record))))))))))))))))))
 
 (harness-define-tool "hand_in"
   :label "Hand in the finished work"
-  :description "Hand the finished work in and stop: the turn ends, the task leaves the working phase, and it waits for the user's review with your summary and evidence in front of them. Call it when the work is complete, not to answer a message or report progress: a plain reply is the working phase, and the task stays with you. Do not ask first whether the work is ready to hand in, and do not show what you are about to hand in for approval -- before the first hand-in, hand it in. When the review has open threads, they are the user's questions: answer each in its thread and close it only when done -- never in a batch just to hand in. Every open thread must be answered and closed first, or hand_in is refused. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. A project can refuse a hand-in until a check of its own has passed; the refusal then says what to run first. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. \"bash\"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says."
+  :description "Hand the finished work in and stop: the turn ends, the task leaves the working phase, and it waits for the user's review with your summary and evidence in front of them. Call it when the work is complete, not to answer a message or report progress: a plain reply is the working phase, and the task stays with you. Do not ask first whether the work is ready to hand in, and do not show what you are about to hand in for approval -- before the first hand-in, hand it in. When the review has open threads, they are the user's questions: answer each in its thread and close it only when done -- never in a batch just to hand in. Every open thread must be answered and closed first, or hand_in is refused. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. If the work belongs on another local branch of the project than the one the task was made from, pass merge_base with that branch: the review then reads your changes against it and verifying merges them into it, rather than into the branch the task was made from. A branch the project does not have, or the task's own branch, is refused with the branches it could name. A project can refuse a hand-in until a check of its own has passed; the refusal then says what to run first. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. \"bash\"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says."
   :schema '(:type "object"
             :properties (:problem (:type "string"
                                   :description "A short summary of what must be fixed and how to see it, in markdown. The review shows it at the top: with many tasks going on, the title alone does not say what the work was for. Say what the user must check, not the task prompt again.")
@@ -558,7 +630,9 @@ the session's branch is built on has to be in it first."
                          :cannot_continue (:type "boolean"
                                            :description "Set true when the task cannot be finished. Record what blocks it in summary; evidence may be empty. The task goes to the user's input instead of review, and nothing merges.")
                          :no_merge (:type "boolean"
-                                    :description "Set true when the work needs no merge, such as an informational task or one that changed nothing: verifying it completes it without the merge queue."))
+                                    :description "Set true when the work needs no merge, such as an informational task or one that changed nothing: verifying it completes it without the merge queue.")
+                         :merge_base (:type "string"
+                                      :description "Optional: the local branch the work belongs on, when it is not the branch the task was made from. The review reads the changes against it and verifying merges them into it. A branch the project does not have, or the task's own, is refused, listing the branches that exist."))
             :required ("problem" "summary" "evidence"))
   :kind 'meta
   :timeout 60000

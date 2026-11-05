@@ -4,13 +4,18 @@
 
 ;; A session working in a git worktree asks for its branch to be merged
 ;; with `merge/enqueue', naming the *target*: the session whose working
-;; directory the branch merges into, or, for a task's branch, the main
-;; checkout itself (a directory).  One queue per target, served one
-;; merge at a time: the head of the queue takes the target's lock when
-;; that session is idle, or when its running turn reaches a step
-;; boundary (the `agent/step' and `agent/before-turn' filters hold it
-;; until the lock is free again).  A main checkout has no session to
-;; hold: its merges start as soon as the lock is free.
+;; directory the branch merges into, a main checkout (a directory), or a
+;; branch of one, `(:root DIR :branch BRANCH)'.  A task's branch merges
+;; into its merge base: the branch it was made from, which may not be
+;; the one the checkout has out.  The queue merges into the branch's
+;; checkout when one of the repository's worktrees has it out, else it
+;; moves the branch's ref by compare-and-swap; either way only a
+;; finished commit lands.  One queue per target, served one merge at a
+;; time: the head of the queue takes the target's lock when that session
+;; is idle, or when its running turn reaches a step boundary (the
+;; `agent/step' and `agent/before-turn' filters hold it until the lock
+;; is free again).  A main checkout and a branch have no session to
+;; hold: their merges start as soon as the lock is free.
 ;;
 ;; Targets nest.  A session may itself work in a worktree -- a task's
 ;; session does -- and start sub-agents in worktrees of their own, each
@@ -150,13 +155,15 @@ cost, and a PROVIDER:NAME is that model, at the child's level."
 
 (defvar harness-merge--queues (make-hash-table :test 'equal)
   "Target key -> list of queue entries, oldest first.
-A target is the session a branch merges into, keyed by its id, or a
-main checkout, keyed by its directory.  An entry is (:child ID :target
-KEY :parent ID-or-nil :cwd DIR :status queued|merging|conflict
-:requested FLOAT :message STRING :branch NAME :files (…)
-:resolver ID).  `:parent' is the target session's id, nil for a main
-checkout, and `:cwd' the directory the branch merges into.
-`:resolver' is the fresh session resolving the entry's conflicts.")
+A target is the session a branch merges into, keyed by its id, a main
+checkout, keyed by its directory, or a branch of one, keyed by its root
+and branch.  An entry is (:child ID :target KEY :parent ID-or-nil :cwd
+DIR :target-branch NAME :status queued|merging|conflict :requested
+FLOAT :message STRING :branch NAME :files (…) :resolver ID).
+`:parent' is the target session's id, nil for a checkout or a branch,
+`:cwd' the directory the branch merges into and `:target-branch' the
+branch there, nil for the checkout's own.  `:resolver' is the fresh
+session resolving the entry's conflicts.")
 
 (defvar harness-merge--locks (make-hash-table :test 'equal)
   "Target key -> child session id holding the merge lock.")
@@ -253,34 +260,58 @@ never lose work.")
 ;;;; Targets
 
 ;; A merge target is a session -- the branch merges into its working
-;; directory -- or a main checkout, named by its directory.  Both are
-;; keyed as one string, so the queues, the locks and the history are
-;; looked up the same way at any depth.
+;; directory -- a main checkout named by its directory, or a branch of
+;; such a checkout, `(:root DIR :branch BRANCH)': a task's branch may
+;; merge into the base branch it was made from, whether that branch is
+;; checked out in a worktree or only a ref of the repository.  A session
+;; and a checkout are keyed as one string; a branch target is keyed by a
+;; plist, so a branch's merges have a queue, a lock and a history of
+;; their own, apart from the checkout's.
+
+(defun harness-merge--branch-name (value)
+  "Return VALUE as a branch name, or nil when it is blank.
+VALUE may name the ref in full (`refs/heads/MAIN'); its prefix is taken
+off so the branch can be read and updated by its short name."
+  (harness-branch-name value))
 
 (defun harness-merge--key (target)
-  "Return the queue key of TARGET: a session id, or a directory.
-TARGET is a session id, a directory, the plist (:root DIR) or the
-plist (:session ID).  A session the harness does not know keys its own
-id: it simply has no queue."
+  "Return the queue key of TARGET.
+TARGET is a session id, a directory, the plist (:root DIR), the plist
+(:root DIR :branch BRANCH) or the plist (:session ID).  A session the
+harness does not know keys its own id: it simply has no queue.  A
+branch target keys `(:root DIR :branch BRANCH)', a plist of its own, so
+its queue is not the checkout's."
   (cond
    ((and (stringp target) (file-directory-p target))
     (directory-file-name (expand-file-name target)))
    ((consp target)
-    (harness-merge--key (or (plist-get target :root) (plist-get target :session))))
+    (let ((root (plist-get target :root))
+          (branch (harness-merge--branch-name (plist-get target :branch))))
+      (if (and root branch)
+          (list :root (directory-file-name (file-name-as-directory (expand-file-name root)))
+                :branch branch)
+        (harness-merge--key (or root (plist-get target :session))))))
    (t target)))
 
 (defun harness-merge--target (target)
   "Return TARGET as a plist (:key KEY :cwd DIR :session ID).
 TARGET is a session id, a directory (a main checkout), or a plist --
-`(:root DIR)' or `(:session ID)'.  `:session' is the target's session
-id, nil for a main checkout.  Signal `harness-error' when TARGET names
-no session, and return a session target whose directory is missing as
-it is: the merge itself refuses it."
-  (let ((key (harness-merge--key target))
-        (id (if (consp target) (plist-get target :session) target)))
+`(:root DIR)', `(:root DIR :branch BRANCH)' or `(:session ID)'.
+`:session' is the target's session id, nil for a checkout;
+`:target-branch' is the branch the merge goes into, nil when the
+checkout's checked out branch is the target.  Signal `harness-error'
+when TARGET names no session, and return a session target whose
+directory is missing as it is: the merge itself refuses it."
+  (let* ((key (harness-merge--key target))
+         (id (if (consp target) (plist-get target :session) target))
+         (root (if (consp target) (plist-get target :root) nil))
+         (branch (and (consp target) (harness-merge--branch-name (plist-get target :branch)))))
     (cond
-     ((and (consp target) (plist-get target :root))
-      (list :key key :cwd (file-name-as-directory key) :session nil))
+     ((and root branch)
+      (list :key key :cwd (file-name-as-directory (expand-file-name root))
+            :session nil :target-branch branch))
+     (root
+      (list :key key :cwd (file-name-as-directory (expand-file-name root)) :session nil))
      ((file-directory-p key)
       (list :key key :cwd (file-name-as-directory key) :session nil))
      (t
@@ -289,11 +320,18 @@ it is: the merge itself refuses it."
         (list :key key :cwd (plist-get session :cwd) :session id))))))
 
 (defun harness-merge--target-label (target)
-  "Return a short label for TARGET's queue key: a session name, or a directory's."
+  "Return a short label for TARGET: a session name, a directory's, or a branch's."
   (let ((key (harness-merge--key target)))
-    (if (harness-merge--session key)
-        (harness-merge--label key)
-      (abbreviate-file-name (directory-file-name key)))))
+    (cond
+     ((consp key)
+      (format "%s (branch %s)"
+              (abbreviate-file-name (plist-get key :root))
+              (plist-get key :branch)))
+     ((harness-merge--session key)
+      (harness-merge--label key))
+     ((stringp key)
+      (abbreviate-file-name (directory-file-name key)))
+     (t "the target"))))
 
 (defun harness-merge--git (cwd &rest args)
   "Run git ARGS in CWD; return a promise of (:exit :stdout :stderr)."
@@ -304,6 +342,33 @@ it is: the merge itself refuses it."
   "Non-nil when DIR is inside a git repository or worktree."
   (and dir (file-directory-p dir)
        (locate-dominating-file dir ".git")))
+
+(defun harness-merge--checkout-of-branch (root branch)
+  "Return a promise of the directory BRANCH is checked out in under ROOT.
+That is one of ROOT's worktrees, ROOT itself included; nil when no
+worktree has BRANCH checked out.  A bare worktree has no checkout to
+move, and one whose directory is gone has none to keep in step, so
+neither counts.  A branch target whose branch is checked out is merged
+in that checkout, as a directory target is, so a worktree's index and
+working tree never move under it."
+  (harness-then
+   (harness-merge--git root "worktree" "list" "--porcelain")
+   (lambda (result)
+     (when (eql (plist-get result :exit) 0)
+       (let (found)
+         (dolist (entry (split-string (or (plist-get result :stdout) "") "\n\n" t))
+           (let ((path nil) (branch-name nil) (bare nil))
+             (dolist (line (split-string entry "\n" t))
+               (cond
+                ((string-prefix-p "worktree " line)
+                 (setq path (file-name-as-directory (substring line 9))))
+                ((string= line "bare") (setq bare t))
+                ((string-prefix-p "branch refs/heads/" line)
+                 (setq branch-name (substring line 18)))))
+             (when (and (not bare) path (equal branch-name branch)
+                        (file-directory-p path))
+               (setq found path))))
+         found)))))
 
 (defun harness-merge--parent-running-p (parent-id)
   "Non-nil while the session PARENT-ID has a running turn.
@@ -318,7 +383,7 @@ A main checkout has no session and is never running: nil."
 `:name' is the child's name, which the chat shows beside its state,
 and `:reason' and `:finished' the outcome and time of a finished merge."
   (list :child (plist-get entry :child) :parent (plist-get entry :parent)
-        :target (plist-get entry :target)
+        :target (plist-get entry :target) :target-branch (plist-get entry :target-branch)
         :position position :status (plist-get entry :status)
         :requested (plist-get entry :requested) :resolver (plist-get entry :resolver)
         :name (harness-merge--label (plist-get entry :child))
@@ -350,10 +415,11 @@ it yet; it merges once those are through (see `harness-merge--pump')."
 (harness-defmethod merge/enqueue (child-id target &rest opts)
   "Queue CHILD-ID's worktree branch for a merge into TARGET.
 TARGET is the session whose working directory the branch merges into,
-or a directory: a task's branch merges into the main checkout, where
-there is no session to name.  OPTS may carry `:message' for the log.
-The child must have a `:worktree'.  Return the 1-based queue position.
-Emits `merge/queued'.
+a directory (a main checkout, where there is no session to name), or
+the plist `(:root DIR :branch BRANCH)': a branch of that repository,
+for a task whose base branch is not the one the checkout has out.  OPTS
+may carry `:message' for the log.  The child must have a `:worktree'.
+Return the 1-based queue position.  Emits `merge/queued'.
 
 A session that is itself a target of merges still queued (its own
 sub-agents') may be queued in its turn, but its merge waits until they
@@ -373,6 +439,7 @@ are through: a branch merges on top of the work it was built on."
     (when (harness-merge--entry child-id)
       (signal 'harness-error (list (format "Session %s is already queued for a merge" child-id))))
     (let* ((entry (list :child child-id :target key :parent parent-id :cwd cwd :status 'queued
+                        :target-branch (plist-get resolved :target-branch)
                         :requested (float-time) :message (plist-get opts :message)))
            (entries (append (gethash key harness-merge--queues) (list entry)))
            (position (length entries)))
@@ -385,10 +452,11 @@ are through: a branch merges on top of the work it was built on."
       position)))
 
 (harness-defmethod merge/queue (target)
-  "Return the merge queue of TARGET: a session id, or a main checkout's directory.
-Each item is (:child :parent :target :position :status :requested
-:resolver :name :reason :finished); only the live merges, not the ones
-already finished (`merge/view' shows those too)."
+  "Return the merge queue of TARGET: a session, a checkout or a branch.
+TARGET is a session id, a directory, or `(:root DIR :branch BRANCH)'.
+Each item is (:child :parent :target :target-branch :position :status
+:requested :resolver :name :reason :finished); only the live merges,
+not the ones already finished (`merge/view' shows those too)."
   (cl-loop for e in (gethash (harness-merge--key target) harness-merge--queues) for i from 1
            collect (harness-merge--public e i)))
 
@@ -666,80 +734,107 @@ history through it."
                   "\n")))))))
 
 (defun harness-merge--run-git-merge (entry parent-cwd branch retries)
-  "Merge BRANCH into PARENT-CWD for ENTRY as one transaction.
-The merge is computed off to the side with `git merge-tree'; only a
-clean result reaches the checkout, by fast-forward.  RETRIES counts
-the fresh attempts left when the parent's HEAD moves meanwhile."
-  (let ((fail (lambda (why) (when (harness-merge--live-p entry) (harness-merge--finish entry 'failed why)))))
+  "Merge BRANCH into ENTRY's target for ENTRY as one transaction.
+PARENT-CWD is the target's repository.  A plain target is the branch
+PARENT-CWD has checked out; a branch target is that branch's checkout
+when one of the repository's worktrees has it out, else the branch's
+own ref, which moves without a working tree.  The merge is computed off
+to the side with `git merge-tree'; only a clean result reaches the
+checkout, by fast-forward, or the ref, by a compare-and-swap.  RETRIES
+counts the fresh attempts left when the target moves meanwhile."
+  (let ((fail (lambda (why) (when (harness-merge--live-p entry) (harness-merge--finish entry 'failed why))))
+        (target-branch (plist-get entry :target-branch)))
     (harness-then
-     (harness-all (list (harness-merge--rev parent-cwd "HEAD")
-                                (harness-merge--rev parent-cwd branch)
-                                (harness-merge--git parent-cwd "rev-parse" "--abbrev-ref" "HEAD")))
-     (lambda (revs)
-       (pcase-let ((`(,head ,tip ,target) revs))
-         (cond
-          ((not (harness-merge--live-p entry)) nil)
-          ((null head) (funcall fail "the parent's checkout has no commit"))
-          ((null tip) (funcall fail (format "branch %s not found" branch)))
-          (t
-           (harness-merge--set entry :base head)
-           (harness-then
-            (harness-merge--git parent-cwd "merge-base" "--is-ancestor" tip head)
-            (lambda (ancestor)
-              (if (eql (plist-get ancestor :exit) 0)
-                  ;; Nothing to merge: the branch is in already.
-                  (when (harness-merge--live-p entry) (harness-merge--finish entry 'merged))
-                (harness-then
-                 (harness-merge--recorded-base parent-cwd branch tip)
-                 (lambda (base)
-                   (harness-then
-                    (apply #'harness-merge--git parent-cwd
-                           (append (list "merge-tree" "--write-tree" "--name-only" "--no-messages")
-                                   (when base (list (concat "--merge-base=" base)))
-                                   (list head tip)))
-                    (lambda (tree)
-                      (let ((lines (split-string (plist-get tree :stdout) "\n" t)))
-                        (cond
-                         ((not (harness-merge--live-p entry)) nil)
-                         ((eql (plist-get tree :exit) 1)
-                          (harness-merge--conflict entry parent-cwd branch head (string-trim (plist-get target :stdout))
-                                                   (delete-dups (cdr lines))))
-                         ((not (eql (plist-get tree :exit) 0))
-                          (funcall fail (harness-merge--out tree)))
-                         (t
-                          (let ((merged (car lines)))
-                            (harness-then
-                             (harness-merge--tree parent-cwd head)
-                             (lambda (head-tree)
+     (if target-branch
+         (harness-merge--checkout-of-branch parent-cwd target-branch)
+       (harness-resolved nil))
+     (lambda (checkout)
+       (let* ((ref-p (and target-branch (null checkout)))
+              (cwd (or checkout parent-cwd))
+              (head-rev (if ref-p (concat "refs/heads/" target-branch) "HEAD")))
+         (harness-then
+          (harness-all (list (harness-merge--rev parent-cwd head-rev)
+                             (harness-merge--rev cwd branch)
+                             (if target-branch
+                                 (harness-resolved target-branch)
+                               (harness-merge--git cwd "rev-parse" "--abbrev-ref" "HEAD"))))
+          (lambda (revs)
+            (pcase-let ((`(,head ,tip ,target-rev) revs))
+              (let ((target (if target-branch target-branch
+                              (string-trim (plist-get target-rev :stdout)))))
+                (cond
+                 ((not (harness-merge--live-p entry)) nil)
+                 ((null head)
+                  (funcall fail (if target-branch
+                                    (format "the target branch %s is not there" target-branch)
+                                  "the target's checkout has no commit")))
+                 ((null tip) (funcall fail (format "branch %s not found" branch)))
+                 (t
+                  (harness-merge--set entry :base head)
+                  (harness-then
+                   (harness-merge--git cwd "merge-base" "--is-ancestor" tip head)
+                   (lambda (ancestor)
+                     (if (eql (plist-get ancestor :exit) 0)
+                         ;; Nothing to merge: the branch is in already.
+                         (when (harness-merge--live-p entry)
+                           (harness-merge--finish entry 'merged))
+                       (harness-then
+                        (harness-merge--recorded-base cwd branch tip)
+                        (lambda (base)
+                          (harness-then
+                           (apply #'harness-merge--git cwd
+                                  (append (list "merge-tree" "--write-tree" "--name-only" "--no-messages")
+                                          (when base (list (concat "--merge-base=" base)))
+                                          (list head tip)))
+                           (lambda (tree)
+                             (let ((lines (split-string (plist-get tree :stdout) "\n" t)))
                                (cond
                                 ((not (harness-merge--live-p entry)) nil)
-                                ((and head-tree (equal head-tree merged))
-                                 ;; Nothing to commit: the branch's work is in
-                                 ;; the checkout already, as a squash merge
-                                 ;; leaves no ancestor behind.
-                                 (harness-then
-                                  (harness-merge--record-merged-tip parent-cwd branch tip)
-                                  (lambda (_)
-                                    (when (harness-merge--live-p entry)
-                                      (harness-merge--finish entry 'merged)))))
+                                ((eql (plist-get tree :exit) 1)
+                                 (harness-merge--conflict entry cwd branch head target
+                                                          (delete-dups (cdr lines))))
+                                ((not (eql (plist-get tree :exit) 0))
+                                 (funcall fail (harness-merge--out tree)))
                                 (t
-                                 (harness-then
-                                  (harness-merge--message entry parent-cwd branch head base tip)
-                                  (lambda (message)
-                                    (when (harness-merge--live-p entry)
-                                      (harness-merge--commit-and-advance
-                                       entry parent-cwd branch retries head tip merged message))))))))))))))))))))))))))
+                                 (let ((merged (car lines)))
+                                   (harness-then
+                                    (harness-merge--tree cwd head)
+                                    (lambda (head-tree)
+                                      (cond
+                                       ((not (harness-merge--live-p entry)) nil)
+                                       ((and head-tree (equal head-tree merged))
+                                        ;; Nothing to commit: the branch's work is
+                                        ;; in the target already, as a squash
+                                        ;; merge leaves no ancestor behind.
+                                        (harness-then
+                                         (harness-merge--record-merged-tip cwd branch tip)
+                                         (lambda (_)
+                                           (when (harness-merge--live-p entry)
+                                             (harness-merge--finish entry 'merged)))))
+                                       (t
+                                        (harness-then
+                                         (harness-merge--message entry cwd branch head base tip)
+                                         (lambda (message)
+                                           (when (harness-merge--live-p entry)
+                                             (harness-merge--commit-and-advance
+                                              entry parent-cwd cwd branch retries head tip merged
+                                              message ref-p target-branch))))))))))))))))))))))))))))))
 
-(defun harness-merge--commit-and-advance (entry parent-cwd branch retries head tip tree message)
-  "Commit TREE as ENTRY's merge onto HEAD; fast-forward PARENT-CWD to it.
-ENTRY, BRANCH and RETRIES are as for `harness-merge--run-git-merge';
-TIP is the branch's tip and MESSAGE the commit message.  HEAD is the
-commit's only parent: the branch's own commits stay where they are and
-the target gains the one commit that carries their work.  TIP is
+(defun harness-merge--commit-and-advance (entry parent-cwd cwd branch retries head tip tree message
+                                                ref-p target-branch)
+  "Commit TREE as ENTRY's merge onto HEAD; move the target onto it.
+CWD is where the target's repository is read; PARENT-CWD is the target
+as `harness-merge--run-git-merge' was given it.  ENTRY, BRANCH and
+RETRIES are as for that function; TIP is the branch's tip and MESSAGE
+the commit message.  HEAD is the commit's only parent: the branch's own
+commits stay where they are and the target gains the one commit that
+carries their work.  With REF-P, the commit moves the ref of
+TARGET-BRANCH by compare-and-swap, for a branch no worktree has out;
+otherwise CWD is the checkout that the commit fast-forwards.  TIP is
 recorded (`harness-merge--record-merged-tip') so the branch's next work
 is merged from the right base."
   (harness-then
-   (harness-merge--git parent-cwd "commit-tree" "--no-gpg-sign" tree "-p" head "-m" message)
+   (harness-merge--git cwd "commit-tree" "--no-gpg-sign" tree "-p" head "-m" message)
    (lambda (commit)
      (let ((sha (string-trim (plist-get commit :stdout))))
        (cond
@@ -748,22 +843,24 @@ is merged from the right base."
          (harness-merge--finish entry 'failed (harness-merge--out commit)))
         (t
          (harness-then
-          (harness-merge--git parent-cwd "merge" "--ff-only" "--no-edit" sha)
+          (if ref-p
+              (harness-merge--git cwd "update-ref" (concat "refs/heads/" target-branch) sha head)
+            (harness-merge--git cwd "merge" "--ff-only" "--no-edit" sha))
           (lambda (ff)
             (cond
              ((not (harness-merge--live-p entry)) nil)
              ((eql (plist-get ff :exit) 0)
               (harness-then
-               (harness-merge--record-merged-tip parent-cwd branch tip)
+               (harness-merge--record-merged-tip cwd branch tip)
                (lambda (_)
                  (when (harness-merge--live-p entry)
                    (harness-merge--finish entry 'merged)))))
              (t
-              ;; Git changed nothing.  A HEAD that moved is merged again;
+              ;; Nothing changed.  A target that moved is merged again;
               ;; anything else (local changes in the way, a merge in
-              ;; progress) is the parent checkout's to sort out.
+              ;; progress, a locked ref) is the target's to sort out.
               (harness-then
-               (harness-merge--rev parent-cwd "HEAD")
+               (harness-merge--rev cwd (if ref-p (concat "refs/heads/" target-branch) "HEAD"))
                (lambda (now)
                  (cond
                   ((not (harness-merge--live-p entry)) nil)
@@ -772,24 +869,31 @@ is merged from the right base."
                   (t
                    (harness-merge--finish
                     entry 'failed
-                    (format "the parent's checkout %s was left untouched: %s"
-                            (directory-file-name parent-cwd) (harness-merge--out ff)))))))))))))))))
+                    (format "%s was left untouched: %s"
+                            (if ref-p
+                                (format "the target branch %s" target-branch)
+                              (format "the target's checkout %s" (directory-file-name cwd)))
+                            (harness-merge--out ff)))))))))))))))))
 
-(defun harness-merge--conflict (entry parent-cwd branch head target files)
-  "Hand ENTRY's conflicts in FILES to be resolved; the parent is untouched.
-BRANCH would have merged into PARENT-CWD at commit HEAD, the tip of the
-branch TARGET.  The parent's lock goes at once; HEAD is merged into
-the child's branch in its worktree, by a fresh session or the child
-itself (`harness-merge-conflict-resolver'), and merge_done is called."
+(defun harness-merge--conflict (entry cwd branch head target files)
+  "Hand ENTRY's conflicts in FILES to be resolved; the target is untouched.
+BRANCH would have merged into CWD, the target's checkout or repository,
+at commit HEAD, the tip of the branch TARGET.  The target's lock goes
+at once; HEAD is merged into the child's branch in its worktree, by a
+fresh session or the child itself (`harness-merge-conflict-resolver'),
+and merge_done is called."
   (let* ((child-id (plist-get entry :child))
          (parent-id (plist-get entry :parent))
          (key (plist-get entry :target))
          (child (harness-merge--session child-id))
          (child-cwd (directory-file-name (or (plist-get child :cwd) "")))
          (short (substring head 0 (min 12 (length head))))
+         (where (if (plist-get entry :target-branch)
+                    (format "%s (branch %s)" (directory-file-name cwd) (plist-get entry :target-branch))
+                  (directory-file-name cwd)))
          (instructions
           (format "run `git merge %s` (the tip of %s), resolve the conflicts, `git add` the files and commit the merge with `git commit --no-edit`. Keep both sides' work. Do not touch %s. When the merge is committed, call the merge_done tool and the branch is merged again."
-                  short (if (string-empty-p target) "the target" target) (directory-file-name parent-cwd)))
+                  short (if (string-empty-p target) "the target" target) (directory-file-name cwd)))
          (listing (mapconcat (lambda (f) (concat "- " f)) files "\n")))
     (harness-merge--set entry :status 'conflict :files files :resolver nil)
     (when (equal (gethash key harness-merge--locks) child-id)
@@ -801,8 +905,8 @@ itself (`harness-merge-conflict-resolver'), and merge_done is called."
     (let ((resolver (and (eq harness-merge-conflict-resolver 'fresh)
                          (harness-merge--start-resolver
                           entry child
-                          (format "You resolve merge conflicts for the merge queue of the agent harness.\n\nThe branch %s, in the git worktree %s (your working directory), was to be merged into %s, but that would conflict in these files:\n%s\n\nNothing was changed there. Bring the parent's work into the branch instead, in the worktree %s: %s\n\nYou start fresh: read both sides first (`git log --oneline %s..HEAD` is the branch's own work, `git log --oneline HEAD..%s` the parent's) and understand what each change is for before you resolve. Change nothing beyond the merge itself.%s"
-                                  branch child-cwd (directory-file-name parent-cwd) listing child-cwd instructions
+                          (format "You resolve merge conflicts for the merge queue of the agent harness.\n\nThe branch %s, in the git worktree %s (your working directory), was to be merged into %s, but that would conflict in these files:\n%s\n\nNothing was changed there. Bring the target's work into the branch instead, in the worktree %s: %s\n\nYou start fresh: read both sides first (`git log --oneline %s..HEAD` is the branch's own work, `git log --oneline HEAD..%s` the target's) and understand what each change is for before you resolve. Change nothing beyond the merge itself.%s"
+                                  branch child-cwd where listing child-cwd instructions
                                   short short
                                   (if (plist-get entry :message)
                                       (format "\n\nThe branch's merge request said: %s" (plist-get entry :message))
@@ -815,8 +919,8 @@ itself (`harness-merge-conflict-resolver'), and merge_done is called."
                                                (harness-merge--label child-id) (string-join files ", ")))
         (harness-merge--steer
          child-id
-         (format "Merging your branch %s into %s would conflict in these files:\n%s\n\nNothing was changed there. Bring the parent's work into your branch instead, in your own worktree %s: %s"
-                 branch (directory-file-name parent-cwd) listing child-cwd instructions))))
+         (format "Merging your branch %s into %s would conflict in these files:\n%s\n\nNothing was changed there. Bring the target's work into your branch instead, in your own worktree %s: %s"
+                 branch where listing child-cwd instructions))))
     (harness-run-soon #'harness-merge--pump key)))
 
 (defun harness-merge--start-resolver (entry child prompt)
@@ -1191,14 +1295,14 @@ session resolving a merge's conflicts works in the child's worktree."
 
 (harness-merge--init)
 
-(harness-declare-event 'merge/queued "(CHILD-ID TARGET POSITION) after a merge was requested, TARGET naming the queue: the session the branch merges into, or a main checkout's directory.")
+(harness-declare-event 'merge/queued "(CHILD-ID TARGET POSITION) after a merge was requested, TARGET naming the queue: the session the branch merges into, a main checkout's directory, or its (:root DIR :branch BRANCH) plist.")
 (harness-declare-event 'merge/started "(CHILD-ID TARGET) when a merge takes its target's lock.")
 (harness-declare-event 'merge/conflict "(CHILD-ID TARGET FILES) when a merge would conflict; they are resolved in the child's worktree.")
 (harness-declare-event 'merge/resolver "(CHILD-ID TARGET RESOLVER-ID) when a fresh session starts resolving a merge's conflicts.")
 (harness-declare-event 'merge/finished "(CHILD-ID TARGET STATUS) merged, failed, aborted or cancelled.")
 
 (harness-define-module 'merge
-  :doc "Merge queue: worktree branches merged into the session they were built on, or into the main checkout."
+  :doc "Merge queue: worktree branches merged into the session they were built on, a checkout, or a branch of one."
   :requires '(session agent)
   :init #'harness-merge--init)
 

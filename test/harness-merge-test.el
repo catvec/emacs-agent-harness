@@ -1160,5 +1160,114 @@ merging or in conflict; once it is through, the same call goes."
         (should-not (plist-get r :is-error))
         (should (equal "Done." (plist-get (gethash "t-1" reports) :summary)))))))
 
+(ert-deftest harness-merge-conflict-with-a-branch-no-worktree-has-out ()
+  "A branch target's conflict is resolved in the child's worktree.
+The branch's ref does not move until merge_done queues the branch again,
+and the project's checkout is untouched throughout."
+  (harness-merge-test-with
+    (let* ((release-wt (file-name-as-directory (expand-file-name "release-src" base)))
+           (harness-merge-conflict-resolver 'child))
+      ;; A release commit both sides cannot agree on, made in a worktree
+      ;; that goes when it is committed: the branch is a ref alone.
+      (harness-merge-test--git root "worktree" "add" "-q" "-b" "release" release-wt)
+      (harness-merge-test--write release-wt "README" "release version\n")
+      (harness-merge-test--commit release-wt "release edit" "README")
+      (harness-merge-test--git root "worktree" "remove" (directory-file-name release-wt))
+      (let* ((release (string-trim (harness-merge-test--git root "rev-parse" "release")))
+             (main (string-trim (harness-merge-test--git root "rev-parse" "main")))
+             (target (list :root (directory-file-name root) :branch "release"))
+             (conflicts nil) (finished nil))
+        (harness-merge-test--write wt "README" "child version\n")
+        (harness-merge-test--commit wt "child edit" "README")
+        (harness-on 'merge/conflict (lambda (c p files) (push (list c p files) conflicts)))
+        (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+        (harness-call 'merge/enqueue child target)
+        (harness-test-wait (lambda () conflicts) 10 "the branch conflict")
+        (should (equal (list child target '("README")) (car conflicts)))
+        (should (eq 'conflict (harness-call 'merge/status child)))
+        (should (equal release (string-trim (harness-merge-test--git root "rev-parse" "release"))))
+        (should (equal main (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+        ;; The child is steered to merge the release commit and resolve it.
+        (harness-test-wait
+         (lambda () (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user))
+                                 (harness-call 'session/nodes child)))
+         10 "the child steering")
+        (let ((user (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user))
+                                (harness-call 'session/nodes child))))
+          (should (string-match-p (regexp-quote (concat "git merge " (substring release 0 12)))
+                                  (plist-get user :content)))
+          (should (string-match-p "branch release" (plist-get user :content))))
+        (ignore-errors (harness-merge-test--git wt "merge" "-q" release))
+        (harness-merge-test--write wt "README" "resolved version\n")
+        (harness-merge-test--git wt "add" "README")
+        (harness-merge-test--git wt "commit" "-q" "--no-edit")
+        (let ((r (harness-merge-test--merge-done child)))
+          (should-not (plist-get r :is-error)))
+        (harness-test-wait (lambda () finished) 10 "the branch merge")
+        (should (equal (list child target 'merged) (car finished)))
+        (should (equal "resolved version"
+                       (string-trim (harness-merge-test--git root "show" "release:README"))))
+        (should (equal "hello"
+                       (string-trim (harness-merge-test--git root "show" "main:README"))))
+        (should (equal main (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))))))
+
+(ert-deftest harness-merge-into-a-branch-no-worktree-has-out ()
+  "A branch target moves that branch's ref, not the checkout's branch.
+A task made from a release branch that is not checked out merges back
+into the release ref; the main checkout and its branch stay as they
+were."
+  (harness-merge-test-with
+    (harness-merge-test--git root "branch" "release")
+    (harness-merge-test--write wt "feature.txt" "new feature\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    (let ((finished nil)
+          (target (list :root root :branch "release"))
+          (main (string-trim (harness-merge-test--git root "rev-parse" "main"))))
+      (harness-on 'merge/finished (lambda (c _p s) (push (cons c s) finished)))
+      (should (= 1 (harness-call 'merge/enqueue child target :message "a release fix")))
+      (harness-test-wait (lambda () finished) 10 "the branch merge")
+      (should (equal (cons child 'merged) (car finished)))
+      ;; The release branch has the work; main and its checkout do not.
+      (should (equal "new feature\n"
+                     (harness-merge-test--git root "show" "release:feature.txt")))
+      (should-not (file-exists-p (expand-file-name "feature.txt" root)))
+      (should (equal main (string-trim (harness-merge-test--git root "rev-parse" "main"))))
+      (should (equal main (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+      ;; The branch's queue is its own, and it is through.
+      (should (null (harness-call 'merge/queue target)))
+      (should (null (harness-call 'merge/queue root)))
+      (should (cl-some (lambda (h) (string-match-p
+                                    (format "Merge into %s (branch release) finished: merged"
+                                            (regexp-quote (directory-file-name root)))
+                                    h))
+                       (harness-merge-test--hints child))))))
+
+(ert-deftest harness-merge-into-a-branch-checked-out-in-a-worktree ()
+  "A branch target checked out elsewhere merges into that checkout.
+The worktree keeps its index and working tree in step with the branch
+it has out, rather than the ref moving under it."
+  (harness-merge-test-with
+    (let* ((release-wt (file-name-as-directory (expand-file-name "release" base))))
+      (harness-merge-test--git root "branch" "release")
+      (harness-merge-test--git root "worktree" "add" "-q" release-wt "release")
+      (harness-merge-test--write wt "feature.txt" "new feature\n")
+      (harness-merge-test--commit wt "add feature" "feature.txt")
+      (let ((finished nil)
+            (target (list :root root :branch "release"))
+            (main (string-trim (harness-merge-test--git root "rev-parse" "main"))))
+        (harness-on 'merge/finished (lambda (c _p s) (push (cons c s) finished)))
+        (harness-call 'merge/enqueue child target)
+        (harness-test-wait (lambda () finished) 10 "the branch merge")
+        (should (equal (cons child 'merged) (car finished)))
+        (should (equal "new feature\n"
+                       (with-temp-buffer
+                         (insert-file-contents (expand-file-name "feature.txt" release-wt))
+                         (buffer-string))))
+        (should (equal (string-trim (harness-merge-test--git root "rev-parse" "release"))
+                       (string-trim (harness-merge-test--git release-wt "rev-parse" "HEAD"))))
+        (should (string-empty-p (harness-merge-test--git release-wt "status" "--porcelain")))
+        (should-not (file-exists-p (expand-file-name "feature.txt" root)))
+        (should (equal main (string-trim (harness-merge-test--git root "rev-parse" "main"))))))))
+
 (provide 'harness-merge-test)
 ;;; harness-merge-test.el ends here

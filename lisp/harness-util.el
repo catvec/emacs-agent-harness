@@ -1967,6 +1967,17 @@ KEY extracts the string to match; LIMIT caps the result count."
   "Non-nil when S is nil or only whitespace."
   (or (null s) (string-blank-p s)))
 
+(defun harness-branch-name (value)
+  "Return VALUE as a branch name, or nil when it is blank.
+VALUE may name the ref in full (`refs/heads/MAIN'); its prefix is taken
+off so the branch can be read and updated by its short name."
+  (let ((name (and (stringp value) (string-trim value))))
+    (cond
+     ((or (null name) (string-empty-p name)) nil)
+     ((string-prefix-p "refs/heads/" name) (substring name 11))
+     ((string-prefix-p "heads/" name) (substring name 6))
+     (t name))))
+
 (defun harness-safe-substring (string from &optional to)
   "Like `substring' on STRING, but clamps FROM and TO into its range."
   (let* ((len (length string))

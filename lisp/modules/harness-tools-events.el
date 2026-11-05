@@ -245,8 +245,13 @@ MAX defaults to `harness-tools-events--detail-chars'; nil gives nil."
       (format "task %s %S" (plist-get task :id) title))))
 
 (defun harness-tools-events--target-label (target)
-  "Return how an event names TARGET, a merge's: a session, or a directory."
+  "Return how an event names TARGET, a merge's: a session, directory or branch.
+A branch target is the plist `(:root DIR :branch BRANCH)'."
   (cond ((harness-tools-events--session target) (harness-tools-events--session-label target))
+        ((and (consp target) (plist-get target :root))
+         (format "%s (branch %s)"
+                 (abbreviate-file-name (directory-file-name (plist-get target :root)))
+                 (plist-get target :branch)))
         ((stringp target) (abbreviate-file-name (directory-file-name target)))
         (t "its target")))
 

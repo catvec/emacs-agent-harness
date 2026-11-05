@@ -29,9 +29,16 @@
 ;; short title the cheap naming model gave it, see Titles, else the
 ;; first words of its prompt),
 ;; its session is told to commit there, and when the agent finishes the
-;; branch goes through the merge queue (the `merge' module) into the
-;; branch checked out at the project root -- a main checkout, which the
-;; queue takes as a target in its own right, with no session behind it.
+;; branch goes through the merge queue (the `merge' module) into its
+;; MERGE BASE: by default the branch checked out where it was submitted --
+;; a task started from a worktree builds on that worktree's branch rather
+;; than the project's default -- and otherwise the branch the task itself
+;; names when it hands the work in (`hand_in' `merge_base'), for work that
+;; belongs on a branch of its own.  The base is the same one the review
+;; reads the branch's file diff against, through its own module.
+;; The merge queue takes the base branch as a target of its own, with no
+;; session behind it: it merges into the base's checkout when a worktree
+;; has it out, else it moves the branch's ref.
 ;; It is the same queue, the same conflict resolution and the same
 ;; events as a sub-agent merging into the session that started it, which
 ;; a task's own session may have started: its branch waits in the queue
@@ -1211,6 +1218,14 @@ changes: the task runs where the project is checked out, on no branch,
 and nothing merges when its turn ends."
   (harness-json-true-p (plist-get task :main-tree)))
 
+(defun harness-tasks--base-name (task)
+  "Return TASK's merge base as a branch name, or nil when it has none.
+A base is the branch a task's work merges into and what the review
+reads its changes against: the branch the task was made from, or the
+one it named at hand-in (`hand_in' `merge_base').  A blank one is
+none; a full `refs/heads/' prefix is taken off."
+  (harness-branch-name (plist-get task :base)))
+
 (defun harness-tasks--start-order (tasks)
   "Return TASKS in the order they get slots (destructively).
 That is the highest priority first (`harness-priority-above-p', which
@@ -1839,26 +1854,47 @@ which a start took before its title came."
             (string-remove-prefix "t-" (plist-get task :id)))))
 
 (defun harness-tasks--make-worktree (task)
-  "Return a promise of TASK's worktree plist, with `:base' the root's branch.
-The branch is named after the task's title.  A title that is on its way
-\(`harness-tasks--title-wait') is waited for a moment before the branch
-is made, so a task that starts as it is submitted gets it too."
-  (let ((root (plist-get task :project)))
+  "Return a promise of TASK's worktree plist, with `:base' its merge base.
+The base is the one the task carries (`harness-tasks--base-name': the
+branch an earlier start made its branch from, or one it named when it
+handed work in), else the branch checked out where the task was
+submitted -- the project root's when that is the same -- so work
+started from a worktree builds on that branch rather than the project's
+default.  The task's branch is named after its title.  A title that is
+on its way (`harness-tasks--title-wait') is waited for a moment before
+the branch is made, so a task that starts as it is submitted gets it
+too."
+  (let* ((root (plist-get task :project))
+         (cwd (or (plist-get task :cwd) root))
+         (declared (harness-tasks--base-name task)))
     (harness-then
-     (harness-call-async 'worktree/branch root)
+     (if declared
+         (harness-resolved declared)
+       (harness-call-async 'worktree/branch cwd))
      (lambda (base)
        (harness-then
         (harness-tasks--title-wait (plist-get task :id))
         (lambda (_)
           (harness-then
-           (harness-call-async 'worktree/create root :branch (harness-tasks--branch-name task))
+           (harness-call-async 'worktree/create root :branch (harness-tasks--branch-name task)
+                               :base (or base "HEAD"))
            (lambda (wt) (append (list :base base) wt)))))))))
+
+(defun harness-tasks--merge-target (task)
+  "Return the merge queue target of TASK.
+That is the task's merge base branch, so its work goes back where its
+branch was made from even when the project's checkout has another
+branch out; the project root itself when the task declared no base."
+  (let ((base (harness-tasks--base-name task)))
+    (if base
+        (list :root (plist-get task :project) :branch base)
+      (plist-get task :project))))
 
 (defun harness-tasks--enqueue-merge (id)
   "Queue task ID's branch for the merge queue, or put the task before the user.
-The target is the project root: the main checkout, which the merge
-queue takes as a target of its own.  `:merge-queued' records when the
-branch joined the queue."
+The target is the task's merge base (`harness-tasks--merge-target'):
+the branch it was made from, whether checked out or only a ref of the
+project.  `:merge-queued' records when the branch joined the queue."
   (let* ((task (harness-tasks--get id))
          (attempts (1+ (or (plist-get task :merge-attempts) 0))))
     (cond
@@ -1869,7 +1905,7 @@ branch joined the queue."
      ((harness-call 'merge/status (plist-get task :session)) nil)
      (t
       (condition-case err
-          (let ((target (plist-get task :project)))
+          (let ((target (harness-tasks--merge-target task)))
             (harness-tasks--set id :state 'merging :merge-status 'queued :merge-attempts attempts
                                 :merge-target target :merge-queued (float-time) :outcome nil :error nil)
             (harness-call 'merge/enqueue (plist-get task :session) target
@@ -1974,9 +2010,9 @@ Before the task starts they write it up (`harness-tasks--refine-prompt')
 or plan it (`harness-tasks--plan-prompt'), a section that takes the
 place of the Planning one, about tools a read-only session does not
 have (`harness-readonly-system-prompt'); afterwards they learn how to
-hand the finished work in, and, in a worktree, how it reaches the main
-branch -- or, in the main tree \(`harness-tasks--main-tree-p'), that the
-work takes effect there."
+hand the finished work in, and, in a worktree, how it reaches the
+branch it merges into -- or, in the main tree
+\(`harness-tasks--main-tree-p'), that the work takes effect there."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
      ((and task (harness-tasks--refinement-p task) (harness-tasks--plan-p task)
@@ -1987,27 +2023,32 @@ work takes effect there."
       (harness-readonly-system-prompt prompt harness-tasks--refine-prompt))
      ((not task) prompt)
      (t
-      (concat prompt "\n\n## Task mode\n"
-              (cond
-               ((plist-get task :worktree)
-                (format "You are working on one task, unattended, in your own git worktree %s on branch %s. "
-                        (plist-get task :worktree) (plist-get task :branch)))
-               ((harness-tasks--main-tree-p task)
-                (format "You are working on one task, unattended, directly in the project's main working tree %s.  There is no worktree and no branch, and nothing merges your work: what you change, commit or delete takes effect right there.  Do not create a branch or a worktree, and commit only if the task asks for it. "
-                        (abbreviate-file-name (or (plist-get task :project) (plist-get task :cwd)))))
-               (t "You are working on one task of a board, unattended. "))
-              "Do the whole task there. Run the checks that cover what you changed while you work, and the project's own full check once before handing in, rather than the whole suite after every edit. "
-              (if (plist-get task :worktree)
-                  (concat "When you are done, commit all of your changes on that branch "
-                          "(git add -A, then git commit with a message saying what the change does). "
-                          (format "Do not merge, rebase onto or push %s yourself: when your turn ends the harness merges "
-                                  (or (plist-get task :base) "the main branch"))
-                          "your branch through the merge queue, and it will come back to you if the merge needs anything. ")
-                "")
-              (if harness-tasks-working-phase
-                  (concat "\n\n" harness-tasks-working-phase-prompt)
-                "")
-              "\n\n" harness-tasks-hand-in-prompt)))))
+      (let ((base (harness-tasks--base-name task)))
+        (concat prompt "\n\n## Task mode\n"
+                (cond
+                 ((plist-get task :worktree)
+                  (format "You are working on one task, unattended, in your own git worktree %s on branch %s%s. "
+                          (plist-get task :worktree) (plist-get task :branch)
+                          (if base (format ", which merges back into %s" base) "")))
+                 ((harness-tasks--main-tree-p task)
+                  (format "You are working on one task, unattended, directly in the project's main working tree %s.  There is no worktree and no branch, and nothing merges your work: what you change, commit or delete takes effect right there.  Do not create a branch or a worktree, and commit only if the task asks for it. "
+                          (abbreviate-file-name (or (plist-get task :project) (plist-get task :cwd)))))
+                 (t "You are working on one task of a board, unattended. "))
+                "Do the whole task there. Run the checks that cover what you changed while you work, and the project's own full check once before handing in, rather than the whole suite after every edit. "
+                (if (and (plist-get task :worktree) base)
+                    "If the work belongs on another local branch of the project, give that branch as merge_base when you hand in: it is then what your changes are read against and what the merge brings them into. "
+                  "")
+                (if (plist-get task :worktree)
+                    (concat "When you are done, commit all of your changes on that branch "
+                            "(git add -A, then git commit with a message saying what the change does). "
+                            (format "Do not merge, rebase onto or push %s yourself: when your turn ends the harness merges your branch%s through the merge queue, and it will come back to you if the merge needs anything. "
+                                    (or base "the project's own branch")
+                                    (if base (format " into %s" base) "")))
+                  "")
+                (if harness-tasks-working-phase
+                    (concat "\n\n" harness-tasks-working-phase-prompt)
+                  "")
+                "\n\n" harness-tasks-hand-in-prompt))))))
 
 
 
@@ -6662,16 +6703,21 @@ shown, `:recap-at' when it was made, and `:recap-turns' plus
   "Record REPORT as the work ID hands in, waiting for the user's review.
 REPORT is what the hand_in tool validated: a plist of `:summary' and
 `:evidence', and, when the session said it cannot finish or the work
-needs no merge, `:cannot-continue' or `:no-merge'.  The record is
-written and `task/changed' says so; the turn that handed it in then
-ends cleanly, which the review step picks up as usual
-(`harness-tasks--on-turn-ended')."
+needs no merge, `:cannot-continue' or `:no-merge'.  A report that names
+`:merge-base', a local branch, makes it the task's merge base from then
+on (`harness-tasks--base-name'): the branch its work merges into and
+the one the review reads its changes against, in place of the one the
+task was made from.  The record is written and `task/changed' says so;
+the turn that handed it in then ends cleanly, which the review step
+picks up as usual (`harness-tasks--on-turn-ended')."
   (harness-tasks--get id)               ; signals for an unknown task
-  ;; `harness-tasks--set' writes it soon and says `task/changed'.
-  (harness-tasks--set id :report report :report-at (float-time) :archived nil
-                      :phase harness-tasks-phase-review
-                      :cannot-continue (if (harness-json-true-p (plist-get report :cannot-continue)) t :false)
-                      :no-merge (if (harness-json-true-p (plist-get report :no-merge)) t :false)))
+  (let ((base (harness-branch-name (plist-get report :merge-base))))
+    ;; `harness-tasks--set' writes it soon and says `task/changed'.
+    (apply #'harness-tasks--set id :report report :report-at (float-time) :archived nil
+           :phase harness-tasks-phase-review
+           :cannot-continue (if (harness-json-true-p (plist-get report :cannot-continue)) t :false)
+           :no-merge (if (harness-json-true-p (plist-get report :no-merge)) t :false)
+           (and base (list :base base)))))
 
 (harness-defmethod task/force-review (id)
   "Put task ID in review by hand, without waiting for its agent to hand in.

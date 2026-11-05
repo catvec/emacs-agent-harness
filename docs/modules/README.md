@@ -117,7 +117,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [judge](judge.md) |  |  | Judges: one-off questions to the simple tier of a session's model, read as a decision, with a few lookups that only read (event watches). |
 | [linking](linking.md) | by default | [session](session.md) | Links in what agents write: sessions, messages, tool calls, tasks and review threads, found and written out in full, and taught to agents in the system prompt. |
 | [mcp](mcp.md) | by default | [config](config.md) | MCP host: starts tool servers in the session's sandbox and calls them. |
-| [merge](merge.md) |  | [session](session.md), [agent](agent.md) | Merge queue: worktree branches merged into the session they were built on, or into the main checkout. |
+| [merge](merge.md) |  | [session](session.md), [agent](agent.md) | Merge queue: worktree branches merged into the session they were built on, a checkout, or a branch of one. |
 | [naming](naming.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Name nameless sessions with a cheap model as soon as their first message is sent. |
 | [notifications](notifications.md) |  |  | Notifications for the user through pluggable providers: desktop (system) and Gotify. |
 | [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md), [thread-reply](thread-reply.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent. |
