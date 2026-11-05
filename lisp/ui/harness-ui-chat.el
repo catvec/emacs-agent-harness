@@ -44,13 +44,16 @@
 ;; compaction summaries and runs of coalescable tools (with the thinking
 ;; between their calls) collapse under overlays that isearch opens, so
 ;; every word of the conversation stays searchable; a hand_in call that
-;; succeeds opens expanded once its result is in, its body the report
-;; the task handed in -- unless something else shows that report already,
-;; the review banner of a task waiting for review, which keeps the call
-;; folded (`harness-chat-hand-in-fold-functions').  A `review_comment'
-;; call with words -- the agent's answer in a thread of the task's
-;; review, to a reply of yours -- is drawn as the message it is, from
-;; the agent, with the call under its fold
+;; succeeds opens expanded once its result is in, its body the hand-in
+;; the review draws -- the report, and the changes and threads of the
+;; task's review (`harness-ui-report-hand-in-functions') -- and a fold in
+;; it draws the call again (`harness-chat-refresh-hand-ins').  It stays
+;; folded while something else shows that report already, the review
+;; banner of a task waiting for review
+;; (`harness-chat-hand-in-fold-functions').  A `review_comment' call with
+;; words -- the agent's answer in a thread of the task's review, to a
+;; reply of yours -- is drawn as the message it is, from the agent, with
+;; the call under its fold
 ;; (`harness-chat--render-thread-message'); a message of yours holds
 ;; its replies in threads as cards, what each replies to and the words
 ;; under it, with a link to the thread (`harness-chat--render-replies').
@@ -3498,8 +3501,16 @@ reader's place in a long report stays."
     (cond
      ((null block) (user-error "No block here"))
      ((null (harness-chat-block-fold block)) (user-error "This block has nothing to fold"))
-     (t (harness-chat--set-block-collapsed
-         block (not (harness-chat-block-collapsed block)))))))
+     (t (let ((collapsed (not (harness-chat-block-collapsed block))))
+          (if (and (not collapsed) (harness-chat--hand-in-p block)
+                   (harness-chat-block-result block))
+              ;; A hand_in call draws the review as it is now: what it
+              ;; holds -- the changes and threads -- may have come in
+              ;; after the call was drawn.  Opened, it is drawn again.
+              (let ((harness-chat--batch t))
+                (setf (harness-chat-block-collapsed block) collapsed)
+                (harness-chat--rerender block))
+            (harness-chat--set-block-collapsed block collapsed)))))))
 
 (defun harness-chat-sync-hand-in-folds ()
   "Fold or open this buffer's hand_in calls as their reports are shown.
@@ -3679,6 +3690,27 @@ something else shows the report the call handed in."
        (run-hook-with-args-until-success
         'harness-chat-hand-in-fold-functions block result)
        t))
+
+(defun harness-chat-refresh-hand-ins ()
+  "Draw the hand_in calls in this buffer again, as the review shows them now.
+A hand_in call draws the report the review draws, with the changes and
+threads of the task's review (`harness-ui-report-hand-in-functions').
+A fold of the review, a comment or an approval changes what they hold,
+and the calls in the transcript are drawn again to it, so a previous
+hand-in reads as the current one does.  Nothing scrolls and no window
+follows the end: the reader's place stays.  Return non-nil when a block
+was drawn again."
+  (let ((harness-chat--batch t)
+        (ids (and harness-chat--order (copy-sequence harness-chat--order)))
+        (changed nil))
+    (dolist (id ids)
+      (let ((block (and harness-chat--blocks
+                        (gethash id harness-chat--blocks))))
+        (when (and block (harness-chat--hand-in-p block)
+                   (harness-chat-block-result block))
+          (harness-chat--rerender block)
+          (setq changed t))))
+    changed))
 
 (defun harness-chat--attach-result (call result)
   "Render RESULT, a tool-result node, in CALL, the block of its call.

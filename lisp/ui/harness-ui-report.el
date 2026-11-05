@@ -24,6 +24,16 @@
 ;; (`harness-ui-report-string'), and the hand_in call above the banner
 ;; stays folded then, so the report is read once.
 ;;
+;; The transcript's hand_in calls draw it too, each call its own round's
+;; report, expanded with the call.  What the review draws with a report
+;; -- the files and threads of its changes -- is added through
+;; `harness-ui-report-hand-in-functions', so a hand_in call reads as the
+;; review banner does; the review module adds the one drawing both use
+;; (`harness-ui-review--hand-in').  A fold in either draws where it is
+;; again: the call's buttons draw the call
+;; (`harness-ui-report--redraw-function'), the banner's draw the chat's
+;; tail, and a popout's draw the popout.
+;;
 ;; The report is drawn from the task record the harness holds: the board
 ;; and the chat both pass the record they already have, and a popout
 ;; follows `task/changed' so what it shows is current.  Once the task
@@ -138,6 +148,26 @@ PLACEHOLDER is the empty box's hint.  The first function returning
 non-nil wins; with none, the popout has no box.  The review module
 takes the feedback that sends a task back this way.")
 
+(defvar harness-ui-report--redraw-function nil
+  "Function that draws a report again where it is, or nil.
+Bound while a report is drawn into a string for a view other than a
+popout -- the review banner in a chat's tail, a hand_in call in the
+transcript -- to what draws that view again when a fold changes.  The
+buttons the drawing makes keep it, so a fold still works after the
+drawing is done.  Nil draws the report's popout and the review banner
+of its task again, as the popout's own folds ask.")
+
+(defvar harness-ui-report-hand-in-functions nil
+  "Functions that draw what a hand_in call shows with its report.
+Each is called in the buffer the call is drawn in, with the REPORT
+plist the call handed in, the TASK, the WINDOW the drawing is sized
+for, and REDRAW, a function that draws the call again where it is; it
+returns the string to draw, or nil to draw the report alone.  A module
+that knows more of the hand-in adds one: the review module draws the
+changes and threads of the task's review with the report, the same
+drawing its banner has, so the current hand-in and a previous call
+read the same.")
+
 (defvar harness-ui-report--reports (make-hash-table :test 'equal)
   "Popout key -> the task record its popout shows, kept current.")
 
@@ -189,14 +219,20 @@ one stays so for the next."
   (and harness-ui-report-auto-fold
        (or (plist-get task :feedback) (plist-get task :reopened)) t))
 
-(defun harness-ui-report--refresh (task)
-  "Draw TASK's report again where it shows: its popout or its chat."
-  (let ((id (plist-get task :id)))
-    (when (and (fboundp 'harness-ui-report-task) (harness-ui-report-task)
-               (fboundp 'harness-ui-popout-refresh))
-      (harness-ui-popout-refresh (list 'report id)))
-    (when (and (fboundp 'harness-ui-review--redraw) (plist-get task :session))
-      (harness-ui-review--redraw (plist-get task :session)))))
+(defun harness-ui-report--refresh (task &optional redraw)
+  "Draw TASK's report again where it shows: its popout or its chat.
+REDRAW draws it there when given; without it the drawing's own
+`harness-ui-report--redraw-function' says, and with neither the popout
+and the review banner of the task are drawn again, as a popout's folds
+ask."
+  (if-let* ((redraw (or redraw harness-ui-report--redraw-function)))
+      (funcall redraw)
+    (let ((id (plist-get task :id)))
+      (when (and (fboundp 'harness-ui-report-task) (harness-ui-report-task)
+                 (fboundp 'harness-ui-popout-refresh))
+        (harness-ui-popout-refresh (list 'report id)))
+      (when (and (fboundp 'harness-ui-review--redraw) (plist-get task :session))
+        (harness-ui-review--redraw (plist-get task :session))))))
 
 (defun harness-ui-report--button (label function help)
   "Return LABEL as a button running FUNCTION, with HELP."
@@ -210,36 +246,46 @@ the left gutter and INDENT keeps the label in the column it had."
   (let* ((arrow (if folded "▸" "▾"))
          (text (if indent
                    (concat (harness-ui-fold-gutter arrow indent) label)
-                 (format "%s %s" arrow label))))
+                 (format "%s %s" arrow label)))
+         (redraw harness-ui-report--redraw-function))
     (harness-ui-report--button
      text
      (lambda ()
        (harness-ui-report--set-fold task key (not folded))
-       (harness-ui-report--refresh task))
+       (harness-ui-report--refresh task redraw))
      (if folded "Show it" "Hide it"))))
 
-(defun harness-ui-report--set-evidence-fold (task folded)
-  "Fold every piece of evidence of TASK's report when FOLDED, else open them.
+(defun harness-ui-report--set-evidence-fold (task report
+                                             folded &optional redraw)
+  "Fold every piece of REPORT, TASK's, when FOLDED, else open them.
 The section and each item are set, so the next report of the task opens
-as the reader left this one."
+as the reader left this one.  REDRAW draws the report again where it is,
+as `harness-ui-report--refresh' says."
   (harness-ui-report--set-fold task "evidence" folded)
-  (let ((n (length (append (plist-get (harness-ui-report--report task) :evidence) nil))))
+  (let ((n (length (append (plist-get report :evidence) nil))))
     (dotimes (i n)
       (harness-ui-report--set-fold task (list 'evidence (1+ i)) folded)))
-  (harness-ui-report--refresh task))
+  (harness-ui-report--refresh task redraw))
 
-(defun harness-ui-report--evidence-controls (task)
-  "Return the [Collapse all] and [Expand all] buttons of TASK's evidence."
-  (if (null (plist-get (harness-ui-report--report task) :evidence))
+(defun harness-ui-report--evidence-controls (task report)
+  "Return the [Collapse all] and [Expand all] buttons of TASK's REPORT."
+  (if (null (plist-get report :evidence))
       ""
-    (concat "  "
-            (harness-ui-report--button
-             "[Collapse all]" (lambda () (harness-ui-report--set-evidence-fold task t))
-             "Hide every piece of evidence")
-            " "
-            (harness-ui-report--button
-             "[Expand all]" (lambda () (harness-ui-report--set-evidence-fold task nil))
-             "Show every piece of evidence"))))
+    (let ((redraw harness-ui-report--redraw-function))
+      (concat "  "
+              (harness-ui-report--button
+               "[Collapse all]"
+               (lambda ()
+                 (harness-ui-report--set-evidence-fold
+                  task report t redraw))
+               "Hide every piece of evidence")
+              " "
+              (harness-ui-report--button
+               "[Expand all]"
+               (lambda ()
+                 (harness-ui-report--set-evidence-fold
+                  task report nil redraw))
+               "Show every piece of evidence")))))
 
 (defvar-local harness-ui-report--expanded (make-hash-table :test 'equal)
   "Referenced tool calls whose full output this popout shows.")
@@ -263,8 +309,10 @@ string has nowhere to draw an image later.")
 
 (defvar harness-chat--transcript-end)
 (defvar harness-chat--calls)
+(defvar harness-compose-redraw-function)
 (defvar harness-ui-session-id)
 (declare-function harness-chat-block-node "harness-ui-chat" (block))
+(declare-function harness-chat--rerender "harness-ui-chat" (block))
 (declare-function harness-chat--str "harness-ui-chat" (kind))
 (declare-function harness-ui-review--task "harness-ui-review" (sid))
 
@@ -798,7 +846,7 @@ with the work -- [Verify] and [Send back]."
                  (folded (harness-ui-report--folded-p task "evidence" default)))
             (insert (harness-ui-report--fold-button
                      task "evidence" folded (format "Evidence (%d)" (length evidence)))
-                    (harness-ui-report--evidence-controls task)
+                    (harness-ui-report--evidence-controls task report)
                     "\n")
             (if (null evidence)
                 (insert (propertize "  none\n" 'face 'harness-dim-face))
@@ -875,17 +923,19 @@ banner of a task's session does.  Images fit WINDOW, by default the
 selected one.  The buttons work wherever the string is inserted."
   (harness-ui-report--string-for (harness-ui-report--report task) task window))
 
-(defun harness-ui-report--string-for (report task &optional window)
+(defun harness-ui-report--string-for (report task &optional window redraw)
   "Return REPORT, TASK's report, drawn in full, as a string; nil without one.
 Like `harness-ui-report-string', but for a report plist given directly,
-as the transcript's hand_in tool call carries."
+as the transcript's hand_in tool call carries.  REDRAW draws the report
+again where it is when a fold changes (`harness-ui-report--redraw-function')."
   (when report
     (let ((harness-ui-report--full t)
           ;; A string has nowhere to draw an image later: they are drawn
           ;; into it straight away.
           (harness-ui-report--defer-images nil)
           (harness-ui-report--window (or window (selected-window)))
-          (harness-ui-report--task task))
+          (harness-ui-report--task task)
+          (harness-ui-report--redraw-function redraw))
       (with-temp-buffer
         (harness-ui-report--insert-report report task)
         (buffer-string)))))
@@ -961,7 +1011,11 @@ it opened, a done one say, stays open through later changes."
 (defun harness-ui-report--chat-hand-in (block result)
   "Return the report BLOCK's hand_in call handed in, drawn in full, or nil.
 On `harness-chat-tool-body-functions', so an expanded hand_in call in the
-transcript shows the report the review shows, after it left review too.
+transcript shows what the review shows, after it left review too: the
+report, and what `harness-ui-report-hand-in-functions' draw with it --
+the review adds the changes and threads of the task's review, so a
+previous hand-in call reads as the current one does.  A fold in the call
+draws the call again, and the chat's tail with it.
 Nil for any other call, for a call still running, and for a hand_in
 whose report is not known: the chat then shows the call's input and
 output as usual.  So it does for one that cannot be drawn, with the
@@ -974,11 +1028,29 @@ history of the session with it."
                      (equal (harness-chat--str (plist-get node :tool)) "hand_in"))
             (when-let* ((report (or (plist-get (plist-get result :meta) :report)
                                     (harness-ui-report--from-input (plist-get node :input)))))
-              (let ((task (or (and (fboundp 'harness-ui-review--task)
-                                   (harness-ui-review--task harness-ui-session-id))
-                              (list :id (plist-get (plist-get result :meta) :task-id)
-                                    :session harness-ui-session-id))))
-                (harness-ui-report--string-for report task)))))
+              (let* ((task (or (and (fboundp 'harness-ui-review--task)
+                                    (harness-ui-review--task
+                                     harness-ui-session-id))
+                               (list :id (plist-get (plist-get result :meta)
+                                                    :task-id)
+                                     :session harness-ui-session-id)))
+                     (buffer (current-buffer))
+                     (window (car (get-buffer-window-list nil nil t)))
+                     (redraw (lambda ()
+                               (when (buffer-live-p buffer)
+                                 (with-current-buffer buffer
+                                   (harness-chat--rerender block)
+                                   ;; The review banner below shows the
+                                   ;; same hand-in; a fold shows in both.
+                                   (when (functionp
+                                          harness-compose-redraw-function)
+                                     (funcall
+                                      harness-compose-redraw-function)))))))
+                (or (run-hook-with-args-until-success
+                     'harness-ui-report-hand-in-functions
+                     report task window redraw)
+                    (harness-ui-report--string-for
+                     report task window redraw))))))
       (error (harness-log 'warn "report: a hand_in call could not be drawn as the report: %s"
                           (harness-error-short-message err 600))
              nil))))

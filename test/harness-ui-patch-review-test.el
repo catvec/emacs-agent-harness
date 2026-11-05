@@ -3953,9 +3953,32 @@ changes once the branch is read."
   (let ((chat (harness-ui-display-session sid)))
     (set-window-buffer (selected-window) chat)
     (harness-test-wait (lambda () (harness-ui-review--task sid)) 5 "the session's task")
-    (harness-ui-patch-review-test--wait-text chat "^▾ Changes (6)")
-    (harness-ui-patch-review-test--wait-text chat "^    M  a\\.el")
+    ;; The hand_in call above the banner draws the changes too: wait for the
+    ;; banner's, which is the tail's.
+    (let ((tail (lambda ()
+                  (with-current-buffer chat
+                    (buffer-substring-no-properties harness-chat--transcript-end (point-max))))))
+      (harness-test-wait (lambda () (string-match-p "^▾ Changes (6)" (funcall tail)))
+                         5 "the banner to show the changes")
+      (harness-test-wait (lambda () (string-match-p "^    M  a\\.el" (funcall tail)))
+                         5 "the banner to show the first file"))
     chat))
+
+(defun harness-ui-patch-review-test--hand-in-block (buffer)
+  "Return the hand_in call block BUFFER's transcript draws, or nil."
+  (with-current-buffer buffer
+    (let (found)
+      (maphash (lambda (_id block)
+                 (when (and (equal (harness-chat-block-kind block) "tool-call")
+                            (equal (plist-get (harness-chat-block-node block) :tool) "hand_in"))
+                   (setq found block)))
+               harness-chat--blocks)
+      found)))
+
+(defun harness-ui-patch-review-test--block-details (block)
+  "Return the text BLOCK folds away, without properties."
+  (let ((fold (harness-chat-block-fold block)))
+    (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
 
 (ert-deftest harness-ui-patch-review-replies-while-working-are-sent-together ()
   "A reply written while the task is at work is a draft, as in a review; the
@@ -4364,6 +4387,43 @@ review, an approval or a thread."
         (should (memq chat (harness-ui-patch-review--r-banners review)))
         (should (eq popout (harness-ui-patch-review--r-popout review)))))))
 
+(ert-deftest harness-ui-patch-review-shows-the-changes-in-the-hand-in-call ()
+  "The hand_in call in the transcript draws the review the banner draws: the
+changes as a tree, and the threads below them.  A fold of the call's changes
+draws the call again, so what it unfolds is there, and a comment shows in it."
+  (harness-ui-patch-review-test-with-task
+    (let* ((chat (harness-ui-patch-review-test--banner board id sid))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (block (harness-ui-patch-review-test--hand-in-block chat)))
+      (should block)
+      (with-current-buffer chat
+        (should (< (marker-position (harness-chat-block-end block)) harness-chat--transcript-end))
+        (let ((details (harness-ui-patch-review-test--block-details block)))
+          (should (string-match-p "^▾ Changes (6)" details))
+          (should (string-match-p "^    M  a\\.el" details))
+          (should (string-match-p "^▾ Threads" details)))
+        ;; The changes fold and open in the call itself.
+        (goto-char (harness-chat-block-start block))
+        (search-forward "Changes (6)")
+        (push-button (match-beginning 0))
+        (should (string-match-p "^▸ Changes (6)"
+                                (harness-ui-patch-review-test--block-details block)))
+        (should-not (string-match-p "^    M  a\\.el"
+                                    (harness-ui-patch-review-test--block-details block)))
+        (goto-char (harness-chat-block-start block))
+        (search-forward "Changes (6)")
+        (push-button (match-beginning 0))
+        (should (string-match-p "^    M  a\\.el"
+                                (harness-ui-patch-review-test--block-details block))))
+      ;; A comment shows in the call, as it does in the banner.
+      (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")
+      (harness-test-wait
+       (lambda ()
+         (with-current-buffer chat
+           (string-match-p "Why two\\?" (harness-ui-patch-review-test--block-details block))))
+       5 "the call to show the thread")
+      (harness-ui-patch-review-test--wait-text chat "Why two\\?"))))
+
 (ert-deftest harness-ui-patch-review-keeps-the-readers-place-in-the-banner ()
   "A key that changes what the banner shows -- an approval, a thread closed --
 draws its tail again; point stays on the file or the thread it was on, or, once
@@ -4385,8 +4445,9 @@ that is gone, on the line where it was, and the window shows it where it did."
           (should (eql 1 (cdr (harness-ui-patch-review--at-point))))
           (should (= line (count-screen-lines (window-start) (point)))))
         ;; On a comment of a thread: closing the thread takes it from the open ones,
-        ;; and point stays among the threads, not in the box.
-        (goto-char (point-min))
+        ;; and point stays among the threads, not in the box.  The threads show
+        ;; in the hand_in call above too: the banner's copy is the tail's.
+        (goto-char (or harness-chat--transcript-end (point-min)))
         (re-search-forward "^    ┃      Why two\\?$")
         (should (< (point) harness-compose-start))
         (call-interactively (key-binding "x")))

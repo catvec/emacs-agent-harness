@@ -456,6 +456,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-rate-functions` | [ui](ui.md) | [ui-sessions](ui-sessions.md) |
 | `harness-ui-redraw-hook` | [ui](ui.md) | [ui-acp-remote](ui-acp-remote.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-config](ui-config.md), [ui-insights](ui-insights.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-report-compose-functions` | [ui-report](ui-report.md) | [ui-review](ui-review.md) |
+| `harness-ui-report-hand-in-functions` | [ui-report](ui-report.md) | [ui-review](ui-review.md) |
 | `harness-ui-report-panel-functions` | [ui-report](ui-report.md) | [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) |
 | `harness-ui-review-changes-functions` | [ui-review](ui-review.md) | [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-review-pending-functions` | [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md) | [ui-patch-review](ui-patch-review.md) |

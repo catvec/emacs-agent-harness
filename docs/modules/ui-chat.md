@@ -55,13 +55,16 @@ Markdown renderer only when it is finalised or at most every
 compaction summaries and runs of coalescable tools (with the thinking
 between their calls) collapse under overlays that isearch opens, so
 every word of the conversation stays searchable; a hand_in call that
-succeeds opens expanded once its result is in, its body the report
-the task handed in -- unless something else shows that report already,
-the review banner of a task waiting for review, which keeps the call
-folded (`harness-chat-hand-in-fold-functions`).  A `review_comment`
-call with words -- the agent's answer in a thread of the task's
-review, to a reply of yours -- is drawn as the message it is, from
-the agent, with the call under its fold
+succeeds opens expanded once its result is in, its body the hand-in
+the review draws -- the report, and the changes and threads of the
+task's review (`harness-ui-report-hand-in-functions`) -- and a fold in
+it draws the call again (`harness-chat-refresh-hand-ins`).  It stays
+folded while something else shows that report already, the review
+banner of a task waiting for review
+(`harness-chat-hand-in-fold-functions`).  A `review_comment` call with
+words -- the agent's answer in a thread of the task's review, to a
+reply of yours -- is drawn as the message it is, from the agent, with
+the call under its fold
 (`harness-chat--render-thread-message`); a message of yours holds
 its replies in threads as cards, what each replies to and the words
 under it, with a link to the thread (`harness-chat--render-replies`).

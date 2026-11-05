@@ -11070,6 +11070,56 @@ result meta; the chat rebuilds the report from what the call was given."
             (should (string-search "Keys are compared with" text))
             (should (string-search "See the diff." text))))))))
 
+(ert-deftest harness-ui-chat-hand-in-evidence-opens-in-the-transcript ()
+  "A hand_in call's evidence folds and opens where the call is.
+A second hand-in starts with its evidence folded, as the review draws it;
+its button draws the call again in the transcript, not only the chat's
+tail, so what it folds away is there to read when it opens."
+  (harness-ui-chat-test-with
+    (dolist (m '(ui-compose ui-popout ui-tasks ui-report))
+      (harness-test-load-module m))
+    (let* ((sid (harness-ui-chat-test-session "hand-in evidence fold"))
+           (task-id (format "t-%s" (substring sid 0 8))))
+      (harness-define-tool "hand_in" :label "Hand in the finished work" :description "hand in"
+        :kind 'meta
+        :handler (lambda (_input _ctx)
+                   (harness-tool-ok "Handed in." :end-turn t
+                                    :meta (list :report (list :summary "Done."
+                                                              :problem "The parser drops nested quotes."
+                                                              :evidence (list (list :kind "note"
+                                                                                    :text "A note the fold hides")))
+                                                :task-id task-id))))
+      (let* ((buf (harness-ui-chat-test-open sid))
+             (harness-provider-demo-script-override
+              '((:type tool-call :id "h1" :name "hand_in"
+                       :input (:problem "The parser drops nested quotes."
+                               :summary "Done." :evidence ("A note the fold hides")))
+                (:type done :stop-reason end-turn))))
+        (harness-ui-chat-test-prompt buf "hand it in")
+        (with-current-buffer buf
+          (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
+            (should block)
+            (should-not (harness-chat-block-collapsed block))
+            ;; The second hand-in of a task starts its evidence folded.
+            (puthash (cons task-id "evidence") t harness-ui-report--folds)
+            (harness-chat--rerender block)
+            (cl-flet ((details ()
+                        (let ((fold (harness-chat-block-fold block)))
+                          (buffer-substring-no-properties (overlay-start fold) (overlay-end fold)))))
+              (should (string-search "▸ Evidence (1)" (details)))
+              (should-not (string-search "A note the fold hides" (details)))
+              ;; Its fold opens it in the call itself.
+              (goto-char (harness-chat-block-start block))
+              (search-forward "▸ Evidence (1)")
+              (push-button (match-beginning 0))
+              (should (string-search "▾ Evidence (1)" (details)))
+              (should (string-search "A note the fold hides" (details)))
+              ;; And [Collapse all] folds it again, there too.
+              (goto-char (harness-chat-block-start block))
+              (search-forward "[Collapse all]")
+              (push-button (match-beginning 0))
+              (should (string-search "▸ Evidence (1)" (details)))
+              (should-not (string-search "A note the fold hides" (details))))))))))
 (ert-deftest harness-ui-chat-shows-the-event-watches-of-its-session ()
   "The chat pins the session's event watches above the compose box: one
 line per live watch, with the kinds it watches and what it has seen.

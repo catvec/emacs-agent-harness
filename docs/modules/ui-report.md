@@ -34,6 +34,16 @@ expanded, between its heading and its buttons
 (`harness-ui-report-string`), and the hand_in call above the banner
 stays folded then, so the report is read once.
 
+The transcript's hand_in calls draw it too, each call its own round's
+report, expanded with the call.  What the review draws with a report
+-- the files and threads of its changes -- is added through
+`harness-ui-report-hand-in-functions`, so a hand_in call reads as the
+review banner does; the review module adds the one drawing both use
+(`harness-ui-review--hand-in`).  A fold in either draws where it is
+again: the call's buttons draw the call
+(`harness-ui-report--redraw-function`), the banner's draw the chat's
+tail, and a popout's draw the popout.
+
 The report is drawn from the task record the harness holds: the board
 and the chat both pass the record they already have, and a popout
 follows `task/changed` so what it shows is current.  Once the task
@@ -100,6 +110,7 @@ record it was about whole, and a review holds the task's hand-in.
 ### Hooks
 
 - `harness-ui-report-compose-functions` — Functions giving a report popout a compose box.
+- `harness-ui-report-hand-in-functions` — Functions that draw what a hand_in call shows with its report.
 - `harness-ui-report-panel-functions` — Functions putting a panel of their own at the end of a report popout.
 
 ### Commands

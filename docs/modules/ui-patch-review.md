@@ -53,17 +53,20 @@ is the adapter that gives that library a task to review, in this Emacs:
                conversation;
   authors      the user, by name; the agent, by session and tool call.
 
-THE CHANGES, drawn the same on three surfaces: in the review banner of
+THE CHANGES, drawn the same on four surfaces: in the review banner of
 the task's session, between the report the agent handed in and
 [Verify], so the work is looked over where it is handed in, with no
 click on [Review Changes] (the banner asks for them through
-`harness-ui-review-changes-functions`); in the report, under the
-evidence, above the review banner and its box; and in the column beside
-Ediff (below).  What the task's branch changes against its merge base
-with the branch it was made from -- what merging it brings in, not
-what that branch did since -- or the diff the reviewer chooses instead
-(see THE DIFF SHOWN), shows as a tree of the directories and their
-files, and below it the threads:
+`harness-ui-review-changes-functions`); in a hand_in call in the
+transcript, under that round's report, the same hand-in the banner
+draws (`harness-ui-report-hand-in-functions`), with the folds and the
+threads working there too; in the report, under the evidence, above
+the review banner and its box; and in the column beside Ediff (below).
+What the task's branch changes against its merge base with the branch
+it was made from -- what merging it brings in, not what that branch
+did since -- or the diff the reviewer chooses instead (see THE DIFF
+SHOWN), shows as a tree of the directories and their files, and below
+it the threads:
 
   a file      its status, its name, the lines it adds and deletes,
               a dim ✓ once it was looked at in Ediff and a bold green

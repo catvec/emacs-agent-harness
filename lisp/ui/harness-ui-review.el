@@ -25,10 +25,16 @@
 ;;
 ;; Inside the session the report is not behind a button either: it is
 ;; shown in full and always expanded, between the heading and the
-;; buttons (`harness-ui-review--report', `harness-ui-report-string').
-;; The hand_in call above it stays folded while it shows, its body that
-;; same report (`harness-chat-hand-in-fold-functions'): the work is read
-;; once, in the banner, and the call opens again when the banner goes.
+;; buttons.  It is the one drawing of a hand-in
+;; (`harness-ui-review--hand-in'): the report, then the changes and
+;; threads of the review below it.  The hand_in calls in the transcript
+;; draw it too, through `harness-ui-report-hand-in-functions', each its
+;; own report, with the same changes and threads, so a previous call
+;; reads as the current hand-in does; a fold in either draws both again.
+;; The hand_in call above the banner stays folded while it shows, its
+;; body that same report (`harness-chat-hand-in-fold-functions'): the
+;; work is read once, in the banner, and the call opens again when the
+;; banner goes.
 ;; A round whose turn ended without `hand_in' has no report, only what
 ;; the harness recorded for it (`harness-tasks--missing-report'): the
 ;; banner says in a line that nothing was handed in, its last message
@@ -330,34 +336,40 @@ The harness records one such when the turn ends without `hand_in'
   "No report: the turn ended without hand_in.  Its last message is above."
   "What the banner says of a task whose round handed no report in.")
 
-(defun harness-ui-review--report (task)
-  "Return the report TASK handed in, drawn in full for the banner, or nil.
-Inside the session the report is always expanded -- the summary and
-every piece of evidence, each referenced call with its whole output --
-and indented as the banner's text.  It is the drawing of the report
-popout [Review Changes] opens (`harness-ui-report-string'), sized for this
-buffer's window.
+(defun harness-ui-review--report (task &optional report window)
+  "Return the report TASK handed in, drawn in full for the review, or nil.
+REPORT is the report to draw, TASK's own when nil, as a hand_in call in
+the transcript has the report of its round.  Inside the session the
+report is always expanded -- the summary and every piece of evidence,
+each referenced call with its whole output.  It is the drawing of the
+report popout [Review Changes] opens (`harness-ui-report-string'), sized
+for WINDOW, by default a window showing this buffer.
 A round that handed no report in says so instead, in a line: the
 session's last message, all the harness has for it, is right above.
 A report that cannot be drawn says so rather than take the compose box
-down with it."
-  (when (and (plist-get task :report) (fboundp 'harness-ui-report-string))
-    (harness-ui-review--indent
-     (if (harness-ui-review--missing-p task)
-         (propertize (concat harness-ui-review--missing-text "\n") 'face 'warning)
-       (condition-case err
-           (or (harness-ui-report-string task (car (get-buffer-window-list nil nil t))) "")
-         (error (harness-log 'warn "review: the report could not be drawn: %s"
-                             (harness-error-short-message err 600))
-                (propertize (format "The report could not be drawn: %s\n"
-                                    (harness-error-short-message err 200))
-                            'face 'harness-dim-face)))))))
+down with it.  Unindented: the banner indents the hand-in as its text
+\(`harness-ui-review--hand-in')."
+  (when (or report (plist-get task :report))
+    (if (and (null report) (harness-ui-review--missing-p task))
+        (propertize (concat harness-ui-review--missing-text "\n")
+                    'face 'warning)
+      (condition-case err
+          (or (harness-ui-report--string-for
+               (or report (plist-get task :report)) task
+               (or window (car (get-buffer-window-list nil nil t)))
+               harness-ui-report--redraw-function)
+              "")
+        (error (harness-log 'warn "review: the report could not be drawn: %s"
+                            (harness-error-short-message err 600))
+               (propertize (format "The report could not be drawn: %s\n"
+                                   (harness-error-short-message err 200))
+                           'face 'harness-dim-face))))))
 
-(defun harness-ui-review--changes (task)
-  "Return the changes of TASK drawn for its banner, or nil.
-What `harness-ui-review-changes-functions' return, in order, indented
-as the banner's text.  A function that cannot draw them says so, as the
-report does, rather than take the compose box down with it."
+(defun harness-ui-review--changes-raw (task)
+  "Return what `harness-ui-review-changes-functions' draw for TASK, or nil.
+In order, as they draw it.  A function that cannot draw them says so in
+a short line, as the report does, rather than take the compose box down
+with it."
   (let (parts)
     (run-hook-wrapped
      'harness-ui-review-changes-functions
@@ -374,15 +386,53 @@ report does, rather than take the compose box down with it."
                                   'face 'harness-dim-face)
                       parts)))
        nil))
-    (and parts (harness-ui-review--indent (apply #'concat (nreverse parts))))))
+    (and parts (apply #'concat (nreverse parts)))))
+
+(defun harness-ui-review--changes (task)
+  "Return the changes of TASK drawn for its banner, or nil.
+What `harness-ui-review-changes-functions' return, in order, indented
+as the banner's text."
+  (when-let* ((text (harness-ui-review--changes-raw task)))
+    (harness-ui-review--indent text)))
+
+(defun harness-ui-review--hand-in (task &optional report window redraw)
+  "Return TASK's hand-in drawn as the review draws it: REPORT, then its changes.
+REPORT is the report to draw, TASK's own when nil.  It is the report in
+full -- the problem, what was handed in and the evidence -- and then
+what `harness-ui-review-changes-functions' draw for TASK: the files and
+the threads of its review, when the task is one in review.
+Unindented, as a hand_in call in a transcript draws it; the review
+banner indents it as its text.  This is the one drawing of a hand-in, so
+the current one and a previous call read the same.  REDRAW draws it
+again where it is when a fold changes; nil draws its popout and the
+review banner again (`harness-ui-report--redraw-function')."
+  (let ((harness-ui-report--redraw-function redraw))
+    (let ((report (harness-ui-review--report task report window))
+          (changes (harness-ui-review--changes-raw task)))
+      (when (or report changes)
+        (let ((report (or report "")))
+          (concat report
+                  (when changes
+                    (concat (cond ((string-empty-p report) "")
+                                  ((string-suffix-p "\n\n" report) "")
+                                  ((string-suffix-p "\n" report) "\n")
+                                  (t "\n\n"))
+                            changes))))))))
+
+(defun harness-ui-review--hand-in-call (report task window redraw)
+  "Draw REPORT, the hand-in TASK's call in the transcript handed in.
+On `harness-ui-report-hand-in-functions': the one drawing of a hand-in,
+`harness-ui-review--hand-in', so a call reads as the review banner does,
+with the changes and threads of TASK's review under its report."
+  (harness-ui-review--hand-in task report window redraw))
 
 (defun harness-ui-review--banner (task &optional report in-report changes)
   "Return the banner string for TASK, waiting for review.
 It reads as the board's Ready for review card: the mark, the heading,
 the task's title, and the buttons, with the keys beside them.
-REPORT, what TASK handed in drawn in full (`harness-ui-review--report'),
+REPORT, the hand-in TASK's review draws (`harness-ui-review--hand-in'),
 goes between the title and the buttons: the work is read before it is
-verified or sent back; CHANGES, what TASK changed
+verified or sent back; CHANGES, anything else TASK changed
 \(`harness-ui-review--changes'), follows it.  IN-REPORT is non-nil when
 the banner is drawn at the end of TASK's report popout
 \(`harness-ui-report-panel-functions'): it leaves [Review Changes] out
@@ -519,6 +569,19 @@ opens again when the task leaves review."
          (harness-ui-review--reviewing-p task)
          t)))
 
+(defun harness-ui-review--chat-redraw (buffer)
+  "Return a function that draws chat BUFFER's tail and hand_in calls again.
+The banner and the hand_in calls of the transcript draw the same hand-in;
+a fold in one shows in the other, so both are drawn again."
+  (lambda ()
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (and (boundp 'harness-compose-redraw-function)
+                   (functionp harness-compose-redraw-function))
+          (funcall harness-compose-redraw-function))
+        (when (fboundp 'harness-chat-refresh-hand-ins)
+          (harness-chat-refresh-hand-ins))))))
+
 (defun harness-ui-review--panel ()
   "Return the review banner when this session's task waits for review.
 On `harness-chat-panel-functions': nil for a session that is no task's,
@@ -536,8 +599,15 @@ sends the task's session for the feedback that sends it back
     (when (eq harness-chat-send-function #'harness-ui-review--send)
       (kill-local-variable 'harness-chat-send-function))
     (if review
-        (harness-ui-review--face (harness-ui-review--banner task (harness-ui-review--report task)
-                                                            nil (harness-ui-review--changes task)))
+        (harness-ui-review--face
+         (harness-ui-review--banner
+          task
+          (when-let* ((text (harness-ui-review--hand-in
+                             task nil nil
+                             (harness-ui-review--chat-redraw
+                              (current-buffer)))))
+            (harness-ui-review--indent text))
+          nil nil))
       ;; Not in review: the box asks for a message again, not feedback.
       (when (equal harness-chat-placeholder harness-ui-review--feedback-hint)
         (kill-local-variable 'harness-chat-placeholder))
@@ -596,14 +666,18 @@ holds is long, and its reader keeps their place."
 
 (defun harness-ui-review--init ()
   "Add the banner to every chat buffer and to report popouts; follow tasks.
-The chat folds a hand_in call while the banner shows its report
+The hand_in calls in a transcript draw the hand-in too, the banner's
+drawing (`harness-ui-report-hand-in-functions').  The chat folds a
+hand_in call while the banner shows its report
 \(`harness-chat-hand-in-fold-functions')."
   (with-eval-after-load 'harness-ui-chat
     (add-hook 'harness-chat-mode-hook #'harness-ui-review--setup)
     (add-hook 'harness-chat-hand-in-fold-functions #'harness-ui-review--hand-in-folded-p))
   (with-eval-after-load 'harness-ui-report
     (add-hook 'harness-ui-report-panel-functions #'harness-ui-review--report-panel)
-    (add-hook 'harness-ui-report-compose-functions #'harness-ui-review--report-compose))
+    (add-hook 'harness-ui-report-compose-functions #'harness-ui-review--report-compose)
+    (add-hook 'harness-ui-report-hand-in-functions
+              #'harness-ui-review--hand-in-call))
   (add-hook 'harness-ui-event-functions #'harness-ui-review--on-event))
 
 (harness-define-module 'ui-review

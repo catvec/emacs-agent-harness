@@ -685,6 +685,56 @@ line, and its text opens that session, like the chat's call block."
       ;; No report, nothing to draw.
       (should-not (harness-ui-report-string (list :id "t-none"))))))
 
+(defun harness-ui-review-test--hand-in-block (buffer)
+  "Return the hand_in call block BUFFER's transcript draws, or nil."
+  (with-current-buffer buffer
+    (let (found)
+      (maphash (lambda (_id block)
+                 (when (and (equal (harness-chat-block-kind block) "tool-call")
+                            (equal (plist-get (harness-chat-block-node block) :tool) "hand_in"))
+                   (setq found block)))
+               harness-chat--blocks)
+      found)))
+
+(defun harness-ui-review-test--block-details (block)
+  "Return the text BLOCK folds away, without properties."
+  (let ((fold (harness-chat-block-fold block)))
+    (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
+
+(ert-deftest harness-ui-review-hand-in-call-draws-the-review ()
+  "A hand_in call in the transcript draws the hand-in the banner draws.
+It is the report, then what the review's changes draw -- the files and the
+threads -- and a fold in the call opens it there, and in the banner below."
+  (harness-ui-review-test-with
+    (let* ((chat (harness-ui-review-test--open-session sid))
+           (harness-ui-review-changes-functions
+            (list (lambda (_task) "Changes of the task\n  a file\n"))))
+      (harness-ui-review-test--wait-report chat)
+      ;; The call was drawn before the changes were there; draw it again.
+      (with-current-buffer chat
+        (harness-chat-refresh-hand-ins)
+        (funcall harness-compose-redraw-function))
+      (let ((block (harness-ui-review-test--hand-in-block chat)))
+        (should block)
+        (with-current-buffer chat
+          (let ((text (harness-ui-review-test--block-details block)))
+            (should (string-search "Handed in" text))
+            (should (string-search "Changes of the task" text))
+            (should (string-search "a file" text))
+            (should (< (string-match "Handed in" text)
+                       (string-match "Changes of the task" text))))
+          ;; The banner shows the same changes.
+          (should (string-search "Changes of the task" (harness-ui-review-test--tail chat)))
+          ;; The report opens and folds in the call itself.
+          (should (string-search "a note" (harness-ui-review-test--block-details block)))
+          (goto-char (harness-chat-block-start block))
+          (search-forward "▾ Evidence")
+          (push-button (match-beginning 0))
+          (should (string-search "▸ Evidence" (harness-ui-review-test--block-details block)))
+          (should-not (string-search "a note" (harness-ui-review-test--block-details block)))
+          ;; And the banner folds with it.
+          (should-not (string-search "a note" (harness-ui-review-test--tail chat))))))))
+
 (ert-deftest harness-ui-review-report-links-the-session-ids-a-call-prints ()
   "A full session id the cache knows, in the input or the output of a tool
 call in a report, is the shared session link, as it is in the chat: RET

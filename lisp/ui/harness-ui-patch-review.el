@@ -43,17 +43,20 @@
 ;;                conversation;
 ;;   authors      the user, by name; the agent, by session and tool call.
 ;;
-;; THE CHANGES, drawn the same on three surfaces: in the review banner of
+;; THE CHANGES, drawn the same on four surfaces: in the review banner of
 ;; the task's session, between the report the agent handed in and
 ;; [Verify], so the work is looked over where it is handed in, with no
 ;; click on [Review Changes] (the banner asks for them through
-;; `harness-ui-review-changes-functions'); in the report, under the
-;; evidence, above the review banner and its box; and in the column beside
-;; Ediff (below).  What the task's branch changes against its merge base
-;; with the branch it was made from -- what merging it brings in, not
-;; what that branch did since -- or the diff the reviewer chooses instead
-;; (see THE DIFF SHOWN), shows as a tree of the directories and their
-;; files, and below it the threads:
+;; `harness-ui-review-changes-functions'); in a hand_in call in the
+;; transcript, under that round's report, the same hand-in the banner
+;; draws (`harness-ui-report-hand-in-functions'), with the folds and the
+;; threads working there too; in the report, under the evidence, above
+;; the review banner and its box; and in the column beside Ediff (below).
+;; What the task's branch changes against its merge base with the branch
+;; it was made from -- what merging it brings in, not what that branch
+;; did since -- or the diff the reviewer chooses instead (see THE DIFF
+;; SHOWN), shows as a tree of the directories and their files, and below
+;; it the threads:
 ;;
 ;;   a file      its status, its name, the lines it adds and deletes,
 ;;               a dim ✓ once it was looked at in Ediff and a bold green
@@ -2062,7 +2065,7 @@ later, as the tail of a chat is long to draw; at once with NOW."
   (when (eq review (gethash (harness-ui-patch-review--r-id review) harness-ui-patch-review--reviews))
     (dolist (buffer (harness-ui-patch-review--r-banners review))
       (when (buffer-live-p buffer)
-        (harness-ui-patch-review--redraw-chat buffer)))))
+        (harness-ui-patch-review--redraw-chat-with-hand-ins buffer)))))
 
 (defvar harness-ui-patch-review--opening-box nil
   "Non-nil while the report opens only for the box beside Ediff.
@@ -4369,12 +4372,13 @@ the second hand-in of the task on, as the report's evidence does."
 Pressing it folds the section when it is open, opens it when folded,
 and draws the surface again."
   (let ((folded (harness-ui-patch-review--folded-p review key))
-        (task (harness-ui-patch-review--fold-task review)))
+        (task (harness-ui-patch-review--fold-task review))
+        (redraw harness-ui-report--redraw-function))
     (harness-ui-report--button
      (format "%s %s" (if folded "▸" "▾") label)
      (lambda ()
        (harness-ui-report--set-fold task key (not folded))
-       (harness-ui-report--refresh task))
+       (harness-ui-report--refresh task redraw))
      (if folded "Show it" "Hide it"))))
 
 ;;;;; What starts folded, per round
@@ -4773,7 +4777,9 @@ that cannot be drawn say so in a line, and the banner goes on."
           (cl-pushnew (current-buffer) (harness-ui-patch-review--r-banners review))
           (harness-ui-patch-review--ensure-loaded review)
           (harness-ui-patch-review--view
-           review (lambda () (harness-ui-patch-review--redraw-chat (current-buffer))))
+           review (lambda ()
+                    (harness-ui-patch-review--redraw-chat-with-hand-ins
+                     (current-buffer))))
           (harness-ui-patch-review--section
            review (harness-ui-patch-review--counts review)
            nil (bound-and-true-p harness-chat--threads-view)))))))
@@ -4907,6 +4913,18 @@ window."
               (with-selected-window window
                 (recenter line)))))))))
 
+(defun harness-ui-patch-review--redraw-chat-with-hand-ins (buffer)
+  "Draw chat BUFFER's tail and the hand_in calls in its transcript again.
+A hand_in call in the transcript draws the same changes and threads as
+the review banner.  A fold, an approval or a comment in either shows in
+both, so both are drawn again; the reader keeps their place in the tail
+\(`harness-ui-patch-review--redraw-chat')."
+  (harness-ui-patch-review--redraw-chat buffer)
+  (when (and (buffer-live-p buffer)
+             (fboundp 'harness-chat-refresh-hand-ins))
+    (with-current-buffer buffer
+      (harness-chat-refresh-hand-ins))))
+
 (defun harness-ui-patch-review--chat-threads-view (&optional trailing)
   "Insert this session's review threads, for the chat's C-c T.
 On `harness-chat-threads-function': the threads of the task of the
@@ -4930,7 +4948,9 @@ says it has no threads; a task without a review says why it has none."
                               'face 'harness-dim-face 'wrap-prefix "  "))
         (harness-ui-patch-review--ensure-loaded review)
         (harness-ui-patch-review--view
-         review (lambda () (harness-ui-patch-review--redraw-chat (current-buffer))))
+         review (lambda ()
+                  (harness-ui-patch-review--redraw-chat-with-hand-ins
+                   (current-buffer))))
         (insert (harness-ui-patch-review--threads-section review nil t trailing))))
     t))
 
