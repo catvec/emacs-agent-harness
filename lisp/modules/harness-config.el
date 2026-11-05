@@ -173,7 +173,7 @@ non-interactive anyway."
     harness-btw-model
     harness-allowed-directories harness-sandbox-policy harness-non-interactive
     harness-supervisor harness-supervisor-tasks
-    harness-commit-msg-strip-attribution)
+    harness-commit-msg-strip-attribution harness-commit-attribution)
   "Settings that take part in layering.
 A module defines some of them: `harness-supervisor' the supervisor
 plugin, `harness-commit-msg-strip-attribution' the commit-msg module.
@@ -233,8 +233,8 @@ reader of the layers skips it (see `harness-config--layered-keys').")
      :keys (harness-todo-sync-steps harness-todo-sync-model))
     (commits
      :title "Commits"
-     :doc "Whether the commits made in a project lose the lines that attribute them to Claude, through a commit-msg hook the harness installs in its repository.  It is off unless you turn it on: for one project in that project's .dir-locals.el (the Project scope of this page), or for every project with the global value."
-     :keys (harness-commit-msg-strip-attribution))
+     :doc "What the harness does with the commits made in a project: whether it strips the lines that attribute them to Claude, through a commit-msg hook it installs in the repository, and whether it records which model and prompt wrote each commit, privately, through the commit-attribution module.  Both are off unless you turn them on: for one project in that project's .dir-locals.el (the Project scope of this page), or for every project with the global value."
+     :keys (harness-commit-msg-strip-attribution harness-commit-attribution))
     (notifications
      :title "Notifications"
      :doc "When the harness tells you it needs you, and where."

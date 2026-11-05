@@ -163,6 +163,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Harness introspection and control
   - Limit number of concurrent tool calls
 - Git worktrees 
+- Private commit attribution (optional, git-ai): which model and prompt wrote each commit, kept off the code remote
 - Permissions
   - Operating system level jails (Cross platform)
   - NVIDIA OpenShell, a jail backend you ask for: set `harness-sandbox-backend` to `openshell`, which `auto` never picks. Its setup is in [`docs/openshell.md`](./docs/openshell.md)
@@ -206,3 +207,113 @@ A non-comprehensive list of all the different functionality offered by modules s
 - Configuration via customize
   - Global overridden by per-project (via `.dir-locals.el`)
   - Corporate policy profiles
+
+# Private commit attribution
+
+The optional `commit-attribution` module records which model wrote
+which lines of a commit, and which prompt of a harness session asked
+for them, without publishing that information to the code remote.  It
+uses [git-ai](https://github.com/git-ai-project/git-ai) (1.7.6) for the
+line-level attribution, but runs it in a private profile: OSS telemetry
+off, prompts local, no login, and the HTTP notes backend pointing at a
+small private service instead of `refs/notes/ai` in the repository.
+The code remote, a mirror and a fork therefore have no notes to carry.
+The module keeps no prompt records of its own.  When you turn on prompt
+sync, a record of each prompt, redacted through `harness-secrets`, is
+written to the private service through a management API that is
+separate from the endpoints git-ai uses; a secret redaction triggers
+the same API, so a secret taken out of this machine is taken out of the
+service too.  The encrypted vault and the UI are later phases of the
+design.
+
+It is off by default.  Enabling it for a project in that project's
+`.dir-locals.el` (the settings page's Project scope) or globally in
+your init file turns it on:
+
+```elisp
+(harness-enable-modules :features commit-attribution)
+```
+
+```elisp
+;; .dir-locals.el of the project, or a global setting
+((nil . ((harness-commit-attribution . t))))
+```
+
+A repository needs a private notes URL before the module checkpoints
+anything; the token comes from the setting or, preferably, from the
+environment:
+
+```elisp
+(setq harness-commit-attribution-notes-url "https://notes.example.internal"
+      ;; Prefer the environment variable GIT_AI_API_KEY for the token;
+      ;; this setting is written to ~/.git-ai/config.json (mode 600).
+      harness-commit-attribution-notes-token nil)
+```
+
+Run the private notes service on a machine only your devices can reach
+(a LAN, WireGuard/Tailscale, or a TLS reverse proxy), with a token:
+
+```bash
+scripts/attribution-notes-server --db ~/attribution-notes.db \
+    --host 0.0.0.0 --port 8765 --token-file ~/.config/harness/attribution-token
+```
+
+git-ai 1.7.6 already speaks this protocol: `notes_backend.kind = "http"`
+(or `GIT_AI_NOTES_BACKEND_KIND=http`) uploads notes to
+`<base>/worker/notes/upload` and writes no `refs/notes/ai`.  Its own
+`git ai notes serve` is an in-memory reference server; the script here
+is the persistent, authenticated version of the same contract.  The
+service also has a small management API (`/management/prompts/...`)
+for the harness's own prompt records; git-ai never calls it, and it is
+where a secret redaction cleans the records the harness uploaded.
+
+Then write the private git-ai profile (it backs up the old
+`~/.git-ai/config.json` first) and check it:
+
+```elisp
+M-x harness-commit-attribution-doctor
+```
+
+or, from Lisp:
+
+```elisp
+(harness-call 'commit-attribution/configure default-directory)
+(harness-call 'commit-attribution/doctor default-directory)
+```
+
+To report, use `M-x harness-commit-attribution-report` (a revision
+range, default `HEAD`) or the methods `commit-attribution/report`,
+`commit-attribution/show` and `commit-attribution/show-prompt`.  The
+report reads the notes service and the prompt records from its
+management API, never the commit message, and counts AI lines: git-ai
+leaves human and untracked lines unattributed.  `show-prompt` asks the
+same management API.  The pre-commit safety net covers an
+edit-and-commit in one shell command while it can reach git-ai; the
+doctor says when it cannot.  The encrypted prompt vault (`harness-commit-attribution-vault`)
+and the task-report UI (`harness-commit-attribution-task-report`) are
+documented follow-ups, phases 3 and 4 of
+`docs/analysis/private-commit-model-attribution-2026-10-29.md`.
+
+The module keeps no prompt records of its own.  When prompt sync is on,
+each prompt is masked with `harness-secrets-mask-text` and stored in
+the private service: `excerpt` keeps a short redacted excerpt, `full`
+the whole redacted prompt, and `hash` only its SHA-256.  The record goes
+through the service's management API (`/management/prompts/...`),
+which is separate from the `/worker/...` endpoints git-ai uses.  The
+service stores it in plaintext behind its token, so run it on a private
+network or over TLS, and back up or prune its database as you would the
+notes:
+
+```elisp
+(setq harness-commit-attribution-prompt-sync t)
+```
+
+A report on another device links the record, and
+`commit-attribution/prune` deletes old ones through the same API.  A
+`secrets/redact` redaction (`redact_secret`, `M-x harness-redact-secret`)
+calls the management API too and rewrites the records the service
+holds, replacing the secret in place; the value is never sent.  The
+prompt hash is taken from the redacted text, never the original.
+git-ai's own `prompt_storage` stays `local`: it never receives the
+harness prompts.  Its `notes` mode (redacted prompts inside the note)
+and `default` mode (upload to git-ai's cloud) are not used here.

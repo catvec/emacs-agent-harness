@@ -8,7 +8,7 @@ Cost accounting, usage summaries, budgets, output rates and live token counts.
 - **Source:** [lisp/modules/harness-usage.el](../../lisp/modules/harness-usage.el)
 - **Loaded:** by default
 - **Requires:** [store](store.md), [session](session.md), [provider](provider.md)
-- **Required by:** [cost-compare](cost-compare.md)
+- **Required by:** [commit-attribution](commit-attribution.md), [cost-compare](cost-compare.md)
 - **Brings along:** [ui-usage](ui-usage.md) (its UI)
 
 ## About

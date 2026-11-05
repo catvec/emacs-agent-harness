@@ -34,17 +34,20 @@
 ;; the stores in turn, in `harness-redact--store-functions': the node
 ;; logs, memory and records of the sessions (`session/redact-text'), the
 ;; search index (`session/search-redact'), the logs of Claude Code
-;; (`provider/claude-redact-logs') and Copilot, and the task records
-;; (`task/redact').  Then the sessions whose provider conversation held a
-;; secret start over from their redacted transcript
-;; (`session/reset-provider'), the search index gives back the pages that
-;; held the old text (`session/search-purge'), and every session that
-;; changed gets a record in its `ext' (`:redactions') and a hint in its
-;; transcript, and is announced (`session/redacted').  A session outside
-;; the scope that shares a conversation with one inside it, and whose own
-;; transcript still holds the secret, keeps its conversation (`kept'): the
-;; log they share is clean, and a new conversation would be made from the
-;; transcript.
+;; (`provider/claude-redact-logs') and Copilot, the task records
+;; (`task/redact'), and the prompt records the private notes service
+;; holds (`harness-commit-attribution-redact-prompts', when that module
+;; is loaded: a redaction calls the service's management API and rewrites
+;; what it stored, never sending the value).  Then the sessions whose
+;; provider conversation held a secret start over from their redacted
+;; transcript (`session/reset-provider'), the search index gives back the
+;; pages that held the old text (`session/search-purge'), and every
+;; session that changed gets a record in its `ext' (`:redactions') and a
+;; hint in its transcript, and is announced (`session/redacted').  A
+;; session outside the scope that shares a conversation with one inside
+;; it, and whose own transcript still holds the secret, keeps its
+;; conversation (`kept'): the log they share is clean, and a new
+;; conversation would be made from the transcript.
 ;;
 ;; The conversation and its cache.  Only a session whose nodes (the node
 ;; log, or the nodes in memory) or whose provider's own log held the
@@ -77,7 +80,8 @@
 ;; index of hundreds of megabytes makes the purge (a VACUUM) take its
 ;; time, and the process does nothing else meanwhile.
 ;;
-;; The plain files and the buffers.  Five more stores follow the tasks:
+;; The plain files and the buffers.  Five more stores follow the one
+;; above:
 ;; the transcript files that compaction and handoff write into the
 ;; directories of the sessions' projects (`harness-redact--stage-transcripts'),
 ;; the files in which cut tool outputs are saved
@@ -192,12 +196,15 @@ Each is a plist (:secrets SECRETS :ref REF :origin ORIGIN :reason REASON
 table is the one place a value outlives the request that named it, and
 it is in memory only.")
 
+(declare-function harness-commit-attribution-redact-prompts "harness-commit-attribution" (run))
+
 (defconst harness-redact--store-functions
   '(harness-redact--stage-sessions
     harness-redact--stage-search
     harness-redact--stage-claude
     harness-redact--stage-copilot
     harness-redact--stage-tasks
+    harness-redact--stage-attribution-prompts
     harness-redact--stage-transcripts
     harness-redact--stage-spill
     harness-redact--stage-temp
@@ -976,6 +983,17 @@ A scope of sessions leaves the tasks alone."
                                        (harness-redact--n (apply #'+ (mapcar (lambda (f) (plist-get f :count)) files))
                                                           "occurrence"))
                        "")))))))
+
+(defun harness-redact--stage-attribution-prompts (run)
+  "Take the secrets of RUN out of the prompt records of the private service.
+The commit-attribution module keeps no prompt records of its own: when
+prompt sync is on, they live in the private notes service, written
+through its management API.  That module does the work when it is
+loaded; this store is how a redaction triggers it, so a secret taken out
+of this machine is taken out of the service too.  Nothing is done when
+the module is not loaded or no private service is configured."
+  (when (fboundp 'harness-commit-attribution-redact-prompts)
+    (harness-commit-attribution-redact-prompts run)))
 
 ;;;; Transcript, spill and state files
 

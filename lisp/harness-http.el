@@ -502,6 +502,62 @@ with (STATUS BODY-OR-ERROR) on HTTP or transport errors."
                              (t (funcall reject (list 'http-error status body)))))
            args)))
 
+(cl-defun harness-http-request-sync (url &key (method "GET") headers body json timeout)
+  "Make one blocking HTTP request to URL and return its response.
+METHOD, HEADERS, BODY and JSON describe the request as they do for
+`harness-http-request'.  The response is a plist (:status STATUS
+:headers HEADERS :body BODY).  This is for code that cannot wait on a
+promise, such as a store of the redaction engine
+\(`harness-redact--store-functions').  It makes one attempt, with
+TIMEOUT seconds (the `harness-http' default when nil),
+and signals a `harness-error' when curl fails; an HTTP status is
+returned as it is, whatever it is.  The URL, headers and body go
+through mode 600 files, as in `harness-http-request', so a token never
+appears on the command line."
+  (unless harness-http--curl-program
+    (error "The curl program harness-http needs is not available"))
+  (when json
+    (setq body (harness-json-encode json))
+    (unless (assoc "Content-Type" headers)
+      (push (cons "Content-Type" "application/json") headers)))
+  (when body
+    (push (cons "Content-Length" (number-to-string (string-bytes body))) headers))
+  (let* ((seconds (or timeout harness-http--default-timeout))
+         (config (harness-http--write-config url method headers))
+         (body-file (and body (harness-http--write-body body nil)))
+         (header-file (make-temp-file "harness-http-" nil ".headers"))
+         (output-file (make-temp-file "harness-http-" nil ".response"))
+         (stderr-file (make-temp-file "harness-http-" nil ".stderr"))
+         (output (generate-new-buffer " *harness-http-sync*"))
+         (args (append (list "--silent" "--show-error"
+                             "--max-time" (number-to-string seconds)
+                             "--config" config
+                             "--dump-header" header-file
+                             "--output" output-file
+                             "--write-out" "%{http_code}")
+                       (when body-file (list "--data-binary" (concat "@" body-file))))))
+    (unwind-protect
+        (let ((code (apply #'call-process harness-http--curl-program nil
+                            (list output stderr-file) nil args)))
+          (unless (and (integerp code) (zerop code))
+            (let ((stderr (string-trim (harness-read-file stderr-file))))
+              (signal 'harness-error
+                      (list (nth 1 (harness-http--curl-failure
+                                    code stderr "exited"))))))
+          (with-current-buffer output
+            (goto-char (point-min))
+            (let* ((status (string-to-number (string-trim (buffer-string))))
+                   (headers (cdr (harness-http--parse-headers
+                                  (harness-read-file header-file)))))
+              (list :status status :headers headers
+                    :body (harness-read-file output-file)))))
+      (ignore-errors (delete-file config))
+      (when body-file (ignore-errors (delete-file body-file)))
+      (ignore-errors (delete-file header-file))
+      (ignore-errors (delete-file output-file))
+      (ignore-errors (delete-file stderr-file))
+      (kill-buffer output))))
+
 ;;;; Server-sent events
 
 (defun harness-http-sse-parser (on-event)

@@ -8,7 +8,7 @@ Secret references, masking of tool output and the guard against writing placehol
 - **Source:** [lisp/modules/harness-secrets.el](../../lisp/modules/harness-secrets.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [store](store.md)
-- **Required by:** [redact](redact.md)
+- **Required by:** [commit-attribution](commit-attribution.md), [redact](redact.md)
 - **Brings along:** [ui-secrets](ui-secrets.md) (its UI)
 
 ## About

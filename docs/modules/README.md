@@ -24,6 +24,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;cache-compact      ; Compacts a conversation just before its prompt cache lapses, while it…
  ;;cache-warm         ; Keeps a session's prompt cache warm while its user is around or a tool…
  ;;chatgpt-plan       ; Sign in with ChatGPT: OAuth for open-source clients, credentials and…
+ ;;commit-attribution ; Which model and prompt wrote each commit, private and synced.
  ;;commit-msg         ; A commit-msg hook stripping Claude attribution, in the repositories…
  ;;cost-compare       ; What the recorded usage would have cost at other models' prices.
  ;;cowboy             ; Ask what goes first when a message meets a session whose prompt cache…
@@ -102,6 +103,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [cache-compact](cache-compact.md) |  | [session](session.md), [compaction](compaction.md), [cache](cache.md), [cowboy](cowboy.md) | Compacts a conversation just before its prompt cache lapses, while it is still hot in it, as the user saved for a cold cache and where they would not be asked. |
 | [cache-warm](cache-warm.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [cache](cache.md) | Keeps a session's prompt cache warm while its user is around or a tool runs: reads it again just before it lapses, for as long as that costs less than sending the conversation again. |
 | [chatgpt-plan](chatgpt-plan.md) |  |  | Sign in with ChatGPT: OAuth for open-source clients, credentials and refreshing. |
+| [commit-attribution](commit-attribution.md) |  | [config](config.md), [worktree](worktree.md), [store](store.md), [session](session.md), [tools](tools.md), [agent](agent.md), [usage](usage.md), [secrets](secrets.md) | Which model and prompt wrote each commit, private and synced. |
 | [commit-msg](commit-msg.md) |  | [config](config.md), [worktree](worktree.md) | A commit-msg hook stripping Claude attribution, in the repositories that turn it on. |
 | [compaction](compaction.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Summarise the transcript when it nears the context window, before a turn or in the middle of one; queue or interrupt one while a turn runs. |
 | [config](config.md) | by default | [project](project.md) | Layered settings through customize and dir-locals. |
@@ -382,7 +384,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `tools/output` | [tools](tools.md) | [redact](redact.md) (4), [secrets](secrets.md) (5) |
 | `tools/output-text` | [agent](agent.md), [tools](tools.md) | [redact](redact.md) (4), [secrets](secrets.md) (5) |
 | `tools/result` | [tools](tools.md) | [access](access.md) (95) |
-| `tools/sandbox-options` | [tools-shell](tools-shell.md) | [access](access.md) (80), [readonly](readonly.md) (90) |
+| `tools/sandbox-options` | [tools-shell](tools-shell.md) | [access](access.md) (80), [commit-attribution](commit-attribution.md) (50), [readonly](readonly.md) (90) |
 | `worktree/before-remove` | [worktree](worktree.md) |  |
 | `worktree/lock-existing-p` | [worktree](worktree.md) | [tasks](tasks.md) (50) |
 

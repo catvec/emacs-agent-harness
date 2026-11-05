@@ -42,17 +42,20 @@ every session.  A scan counts and changes nothing; a redaction takes
 the stores in turn, in `harness-redact--store-functions`: the node
 logs, memory and records of the sessions (`session/redact-text`), the
 search index (`session/search-redact`), the logs of Claude Code
-(`provider/claude-redact-logs`) and Copilot, and the task records
-(`task/redact`).  Then the sessions whose provider conversation held a
-secret start over from their redacted transcript
-(`session/reset-provider`), the search index gives back the pages that
-held the old text (`session/search-purge`), and every session that
-changed gets a record in its `ext` (`:redactions`) and a hint in its
-transcript, and is announced (`session/redacted`).  A session outside
-the scope that shares a conversation with one inside it, and whose own
-transcript still holds the secret, keeps its conversation (`kept`): the
-log they share is clean, and a new conversation would be made from the
-transcript.
+(`provider/claude-redact-logs`) and Copilot, the task records
+(`task/redact`), and the prompt records the private notes service
+holds (`harness-commit-attribution-redact-prompts`, when that module
+is loaded: a redaction calls the service's management API and rewrites
+what it stored, never sending the value).  Then the sessions whose
+provider conversation held a secret start over from their redacted
+transcript (`session/reset-provider`), the search index gives back the
+pages that held the old text (`session/search-purge`), and every
+session that changed gets a record in its `ext` (`:redactions`) and a
+hint in its transcript, and is announced (`session/redacted`).  A
+session outside the scope that shares a conversation with one inside
+it, and whose own transcript still holds the secret, keeps its
+conversation (`kept`): the log they share is clean, and a new
+conversation would be made from the transcript.
 
 The conversation and its cache.  Only a session whose nodes (the node
 log, or the nodes in memory) or whose provider's own log held the
@@ -85,7 +88,8 @@ log is torn.  The engine itself is one synchronous call; a search
 index of hundreds of megabytes makes the purge (a VACUUM) take its
 time, and the process does nothing else meanwhile.
 
-The plain files and the buffers.  Five more stores follow the tasks:
+The plain files and the buffers.  Five more stores follow the one
+above:
 the transcript files that compaction and handoff write into the
 directories of the sessions' projects (`harness-redact--stage-transcripts`),
 the files in which cut tool outputs are saved

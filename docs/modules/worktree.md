@@ -8,7 +8,7 @@ Git worktree listing, creation, locking, removal and status.
 - **Source:** [lisp/modules/harness-worktree.el](../../lisp/modules/harness-worktree.el)
 - **Loaded:** by default
 - **Requires:** [project](project.md)
-- **Required by:** [commit-msg](commit-msg.md)
+- **Required by:** [commit-attribution](commit-attribution.md), [commit-msg](commit-msg.md)
 - **Brings along:** [ui-worktree](ui-worktree.md) (its UI)
 
 ## About

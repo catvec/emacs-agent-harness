@@ -1,0 +1,644 @@
+#!/usr/bin/env python3
+"""A private notes service for git-ai's HTTP notes backend.
+
+git-ai runs with `notes_backend.kind = "http"` and uploads the
+authorship log of each commit here instead of writing `refs/notes/ai`
+into the code repository.  The same service answers the read endpoint
+the harness report uses.  It stores commit ids, the git-ai authorship
+log and the device id the service runs with -- never source code or
+commit messages.
+
+The harness also keeps its prompts here, one record per conversation,
+so another device can link them in its report.  Prompts have their own
+API, separate from git-ai's worker endpoints: the management API is
+what the harness reads and writes, and git-ai never sees it.  Prompt
+sync is off by default; when it is on, the harness sends the record
+only after running the prompt through its own secret masking
+(`harness-secrets`).  The record is the user's prompt or a redacted
+excerpt, the SHA-256 of that text, and the session/turn/model epoch:
+not tool output, not the transcript, not system prompts.  Prompts are
+plaintext in the SQLite database, behind the same token as the notes.
+
+Wire contract (git-ai 1.7.6, `src/notes/reference_server.rs`):
+
+  POST /worker/notes/upload
+    {"entries": [{"commit_sha": SHA, "content": LOG}, ...]}
+    -> {"success_count": N, "failure_count": M}
+
+  GET /worker/notes/?commits=SHA1,SHA2,...
+    -> {"notes": {SHA: LOG}}      (200 when at least one is known)
+    -> {"notes": {}}              (404 when none is)
+
+The harness's management API (not part of git-ai's protocol).  It is
+the only way prompts get in or out, and it is what a secret redaction
+calls to clean the records the harness already uploaded:
+
+  POST /management/prompts/upload
+    {"entries": [{"conversation": EPOCH, "record": RECORD}, ...]}
+    -> {"success_count": N, "failure_count": M}
+
+  GET /management/prompts/?conversations=EPOCH1,EPOCH2,...
+  GET /management/prompts/?sessions=SESSION1,SESSION2,...
+    -> {"prompts": {EPOCH: RECORD}}   (200 when at least one is known)
+    -> {"prompts": {}}                (404 when none is)
+
+  GET /management/status
+    -> {"ok": true, "device": DEVICE, "prompts": N}
+
+  POST /management/prompts/delete
+    {"conversations": [EPOCH, ...]}   or   {"before": ISO-8601}
+    -> {"deleted": N}
+
+"before" compares the time the prompt was recorded (the record's
+"at"), which is what pruning by retention means; a record with no
+usable time is never deleted by it.  Records are also indexed by
+session, so a redaction can ask for the conversations of the sessions
+in its scope rather than every prompt in the store.
+
+Authentication is the `X-API-Key` header git-ai sends (`--token` or
+`--token-file`, or ATTRIBUTION_NOTES_TOKEN); `Authorization: Bearer`
+is accepted too.  The service checks one token; run one service per
+trust domain, or put a per-device authenticating proxy in front of it.
+
+Usage:
+
+  scripts/attribution-notes-server --db ~/notes.db --port 8765 \\
+      --token-file ~/.config/harness/attribution-token
+
+The service is meant for a private network (LAN, WireGuard/Tailscale,
+or a TLS reverse proxy).  It is not end-to-end encrypted: the notes
+are plaintext in the SQLite database, so back the file up like any
+other private data.
+
+SQLite schema:
+
+  notes(commit_sha PRIMARY KEY, content, device, updated_at)
+  note_devices(commit_sha, device, updated_at, PRIMARY KEY(...))
+  prompts(conversation PRIMARY KEY, record, device, session, prompt_at, updated_at)
+
+A second upload for the same commit replaces the content (last write
+wins) and records the second device, so the report can say that two
+devices attributed the same commit.  A second upload for the same
+conversation replaces the record; the epoch already names one prompt.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hmac
+import json
+import os
+import re
+import signal
+import socket
+import sqlite3
+import sys
+import threading
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+DEFAULT_DB = Path(
+    os.environ.get(
+        "ATTRIBUTION_NOTES_DB",
+        str(
+            Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+            / "harness-attribution"
+            / "notes.db"
+        ),
+    )
+)
+
+SHA_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
+CONVERSATION_RE = re.compile(r"^[^,\x00-\x1f\x7f]{1,512}$")
+SESSION_RE = re.compile(r"^[^,\x00-\x1f\x7f]{1,512}$")
+MAX_ENTRY_BYTES = 64 * 1024 * 1024
+MAX_BATCH_BYTES = 256 * 1024 * 1024
+MAX_PROMPT_BYTES = 256 * 1024
+READ_LIMIT = 100
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS notes (
+    commit_sha TEXT PRIMARY KEY,
+    content    TEXT NOT NULL,
+    device     TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS note_devices (
+    commit_sha TEXT NOT NULL,
+    device     TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (commit_sha, device)
+);
+CREATE TABLE IF NOT EXISTS prompts (
+    conversation TEXT PRIMARY KEY,
+    record       TEXT NOT NULL,
+    device       TEXT,
+    session      TEXT,
+    prompt_at    TEXT,
+    updated_at   TEXT NOT NULL
+);
+"""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class Store:
+    """A SQLite store of notes and prompt records, serialised by one lock."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        # The WAL and shared-memory files SQLite makes beside the database
+        # hold the same notes; keep them private to this account.
+        os.umask(0o077)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.lock = threading.Lock()
+        self.db = sqlite3.connect(str(path), check_same_thread=False)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        with self.lock:
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=NORMAL")
+            self.db.executescript(SCHEMA)
+            self.migrate()
+            self.db.commit()
+
+    def migrate(self) -> None:
+        """Add the columns an older database of this service lacks."""
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(prompts)")}
+        for name in ("session", "prompt_at"):
+            if name not in columns:
+                self.db.execute("ALTER TABLE prompts ADD COLUMN %s TEXT" % name)
+
+    def put(self, sha: str, content: str, device: str) -> bool:
+        """Store one note; return True when it replaced an older one."""
+        now = utc_now()
+        with self.lock:
+            cursor = self.db.execute(
+                "INSERT INTO notes(commit_sha, content, device, updated_at) "
+                "VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(commit_sha) DO UPDATE SET "
+                "content=excluded.content, device=excluded.device, "
+                "updated_at=excluded.updated_at",
+                (sha, content, device, now),
+            )
+            replaced = cursor.rowcount == 1
+            self.db.execute(
+                "INSERT INTO note_devices(commit_sha, device, updated_at) "
+                "VALUES(?, ?, ?) "
+                "ON CONFLICT(commit_sha, device) DO UPDATE SET updated_at=excluded.updated_at",
+                (sha, device, now),
+            )
+            self.db.commit()
+            return replaced
+
+    def get_many(self, shas: list[str]) -> dict[str, str]:
+        if not shas:
+            return {}
+        with self.lock:
+            placeholders = ",".join("?" for _ in shas)
+            rows = self.db.execute(
+                f"SELECT commit_sha, content FROM notes WHERE commit_sha IN ({placeholders})",
+                shas,
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def put_prompt(self, conversation: str, record, device: str) -> bool:
+        """Store one prompt RECORD; return True when it replaced an older one."""
+        now = utc_now()
+        content = json.dumps(record, separators=(",", ":"), ensure_ascii=False)
+        session = record.get("session")
+        prompt_at = record.get("at")
+        if not isinstance(session, str) or len(session) > 512:
+            session = None
+        if not isinstance(prompt_at, str) or len(prompt_at) > 64:
+            prompt_at = None
+        with self.lock:
+            cursor = self.db.execute(
+                "INSERT INTO prompts(conversation, record, device, session, prompt_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(conversation) DO UPDATE SET "
+                "record=excluded.record, device=excluded.device, "
+                "session=excluded.session, prompt_at=excluded.prompt_at, "
+                "updated_at=excluded.updated_at",
+                (conversation, content, device, session, prompt_at, now),
+            )
+            replaced = cursor.rowcount == 1
+            self.db.commit()
+            return replaced
+
+    def get_prompts(self, conversations: list[str] | None = None,
+                    sessions: list[str] | None = None) -> dict:
+        if not conversations and not sessions:
+            return {}
+        clauses = []
+        values: list[str] = []
+        if conversations:
+            clauses.append(
+                "conversation IN (%s)" % ",".join("?" for _ in conversations)
+            )
+            values.extend(conversations)
+        if sessions:
+            clauses.append("session IN (%s)" % ",".join("?" for _ in sessions))
+            values.extend(sessions)
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT conversation, record FROM prompts WHERE %s"
+                % " OR ".join(clauses),
+                values,
+            ).fetchall()
+        out = {}
+        for conversation, content in rows:
+            try:
+                out[conversation] = json.loads(content)
+            except json.JSONDecodeError as exc:
+                sys.stderr.write(
+                    "attribution-notes-server: skipping a corrupt prompt record: %s\n" % exc
+                )
+        return out
+
+    def delete_prompts(self, conversations: list[str] | None = None,
+                       before: str | None = None) -> int:
+        """Delete prompt records by conversation or by recorded time."""
+        if not conversations and not before:
+            return 0
+        with self.lock:
+            if conversations:
+                cursor = self.db.execute(
+                    "DELETE FROM prompts WHERE conversation IN (%s)"
+                    % ",".join("?" for _ in conversations),
+                    conversations,
+                )
+            else:
+                cursor = self.db.execute(
+                    "DELETE FROM prompts WHERE prompt_at IS NOT NULL AND prompt_at < ?",
+                    (before,),
+                )
+            self.db.commit()
+            return cursor.rowcount
+
+    def count(self) -> int:
+        with self.lock:
+            return self.db.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+
+    def count_prompts(self) -> int:
+        with self.lock:
+            return self.db.execute("SELECT COUNT(*) FROM prompts").fetchone()[0]
+
+    def devices(self, sha: str) -> list[str]:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT device FROM note_devices WHERE commit_sha = ? ORDER BY updated_at",
+                (sha,),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def close(self) -> None:
+        with self.lock:
+            self.db.close()
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, address, handler, store: Store, token: str | None, device: str):
+        self.store = store
+        self.token = token
+        self.device = device
+        super().__init__(address, handler)
+
+
+class Handler(BaseHTTPRequestHandler):
+    server: Server
+    protocol_version = "HTTP/1.1"
+    server_version = "harness-attribution-notes/1"
+
+    def log_message(self, fmt, *args):  # noqa: D401 - BaseHTTPRequestHandler API
+        if not getattr(self.server, "quiet", False):
+            sys.stderr.write(
+                "%s %s\n" % (self.address_string(), fmt % args)
+            )
+            sys.stderr.flush()
+
+    # -- authentication -------------------------------------------------
+
+    def authorised(self) -> bool:
+        token = self.server.token
+        if token is None:
+            return True
+        given = self.headers.get("X-API-Key")
+        if not given:
+            header = self.headers.get("Authorization", "")
+            if header.lower().startswith("bearer "):
+                given = header[7:].strip()
+        return bool(given) and hmac.compare_digest(given, token)
+
+    # -- responses ------------------------------------------------------
+
+    def send_json(self, status: int, value) -> None:
+        body = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def error(self, status: int, message: str) -> None:
+        self.send_json(status, {"error": message})
+
+    def read_body(self, limit: int) -> bytes | None:
+        """Read the request body, or answer 400/413 and return None."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.error(400, "invalid Content-Length")
+            return None
+        if length < 0 or length > limit:
+            self.error(413, "request body is too large")
+            return None
+        data = b""
+        while len(data) < length:
+            chunk = self.rfile.read(min(65536, length - len(data)))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) != length:
+            self.error(400, "incomplete request body")
+            return None
+        return data
+
+    # -- routes ---------------------------------------------------------
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        if not self.authorised():
+            self.error(401, "missing or wrong API key")
+            return
+        parts = urlsplit(self.path)
+        path = parts.path.rstrip("/") or "/"
+        if path == "/health":
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "device": self.server.device,
+                    "notes": self.server.store.count(),
+                    "prompts": self.server.store.count_prompts(),
+                },
+            )
+            return
+        query = parse_qs(parts.query)
+        if path == "/management/prompts":
+            conversations: list[str] = []
+            sessions: list[str] = []
+            for value in query.get("conversations", []):
+                conversations.extend(part for part in value.split(",") if part)
+            for value in query.get("sessions", []):
+                sessions.extend(part for part in value.split(",") if part)
+            if not conversations and not sessions:
+                self.error(400, "conversations or sessions is required")
+                return
+            if len(conversations) > READ_LIMIT or len(sessions) > READ_LIMIT:
+                self.error(400, "at most %d ids per read" % READ_LIMIT)
+                return
+            if any(not CONVERSATION_RE.match(item) for item in conversations):
+                self.error(400, "conversation ids are malformed")
+                return
+            if any(not SESSION_RE.match(item) for item in sessions):
+                self.error(400, "session ids are malformed")
+                return
+            prompts = self.server.store.get_prompts(conversations, sessions)
+            if not prompts:
+                self.send_json(404, {"prompts": {}})
+                return
+            self.send_json(200, {"prompts": prompts})
+            return
+        if path == "/management/status":
+            self.send_json(200, {"ok": True, "device": self.server.device,
+                                 "prompts": self.server.store.count_prompts()})
+            return
+        if path != "/worker/notes":
+            self.error(404, "not found")
+            return
+        commits: list[str] = []
+        for value in query.get("commits", []):
+            commits.extend(part for part in value.split(",") if part)
+        if not commits:
+            self.error(400, "commits is required")
+            return
+        if len(commits) > READ_LIMIT:
+            self.error(400, "at most %d commits per read" % READ_LIMIT)
+            return
+        if any(not SHA_RE.match(sha) for sha in commits):
+            self.error(400, "commit ids must be hex strings")
+            return
+        notes = self.server.store.get_many([sha.lower() for sha in commits])
+        if not notes:
+            # git-ai treats 404 as "no notes found", as the reference
+            # server does.
+            self.send_json(404, {"notes": {}})
+            return
+        self.send_json(200, {"notes": notes})
+
+    def upload_notes(self, entries) -> tuple[int, int]:
+        success = 0
+        failure = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                failure += 1
+                continue
+            sha = entry.get("commit_sha")
+            content = entry.get("content")
+            if not isinstance(sha, str) or not SHA_RE.match(sha):
+                failure += 1
+                continue
+            if not isinstance(content, str):
+                failure += 1
+                continue
+            if len(content.encode("utf-8", "surrogatepass")) > MAX_ENTRY_BYTES:
+                failure += 1
+                continue
+            try:
+                self.server.store.put(sha.lower(), content, self.server.device)
+                success += 1
+            except sqlite3.Error as exc:
+                sys.stderr.write("attribution-notes-server: SQLite error: %s\n" % exc)
+                failure += 1
+        return success, failure
+
+    def upload_prompts(self, entries) -> tuple[int, int]:
+        success = 0
+        failure = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                failure += 1
+                continue
+            conversation = entry.get("conversation")
+            record = entry.get("record")
+            if not isinstance(conversation, str) or not CONVERSATION_RE.match(conversation):
+                failure += 1
+                continue
+            if not isinstance(record, dict):
+                failure += 1
+                continue
+            if record.get("conversation") not in (None, conversation):
+                failure += 1
+                continue
+            try:
+                encoded = json.dumps(
+                    record, separators=(",", ":"), ensure_ascii=False
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                failure += 1
+                continue
+            if len(encoded) > MAX_PROMPT_BYTES:
+                failure += 1
+                continue
+            try:
+                self.server.store.put_prompt(conversation, record, self.server.device)
+                success += 1
+            except sqlite3.Error as exc:
+                sys.stderr.write("attribution-notes-server: SQLite error: %s\n" % exc)
+                failure += 1
+        return success, failure
+
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
+        if not self.authorised():
+            self.error(401, "missing or wrong API key")
+            return
+        path = urlsplit(self.path).path.rstrip("/") or "/"
+        if path not in ("/worker/notes/upload", "/management/prompts/upload",
+                        "/management/prompts/delete"):
+            self.error(404, "not found")
+            return
+        body = self.read_body(MAX_BATCH_BYTES)
+        if body is None:
+            return
+        try:
+            request = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.error(400, "invalid JSON: %s" % exc)
+            return
+        if not isinstance(request, dict):
+            self.error(400, "the request must be an object")
+            return
+        if path == "/management/prompts/delete":
+            conversations = request.get("conversations")
+            before = request.get("before")
+            if conversations is not None and (
+                not isinstance(conversations, list)
+                or any(not isinstance(item, str) or not CONVERSATION_RE.match(item)
+                       for item in conversations)
+            ):
+                self.error(400, "conversations must be a list of conversation ids")
+                return
+            if before is not None and (
+                not isinstance(before, str) or len(before) > 64
+            ):
+                self.error(400, "before must be an ISO-8601 time")
+                return
+            if not conversations and not before:
+                self.error(400, "conversations or before is required")
+                return
+            deleted = self.server.store.delete_prompts(conversations, before)
+            self.send_json(200, {"deleted": deleted})
+            return
+        entries = request.get("entries")
+        if not isinstance(entries, list):
+            self.error(400, "entries must be a list")
+            return
+        if path == "/management/prompts/upload":
+            success, failure = self.upload_prompts(entries)
+        else:
+            success, failure = self.upload_notes(entries)
+        self.send_json(200, {"success_count": success, "failure_count": failure})
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Private notes and prompt service for the harness and git-ai's HTTP notes backend."
+    )
+    parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite database file")
+    parser.add_argument("--host", default="127.0.0.1", help="bind address")
+    parser.add_argument("--port", type=int, default=8765, help="bind port (0 picks one)")
+    parser.add_argument("--token", default=None, help="API key (prefer --token-file)")
+    parser.add_argument("--token-file", default=None, help="file holding the API key")
+    parser.add_argument(
+        "--device",
+        default=os.environ.get("ATTRIBUTION_NOTES_DEVICE") or socket.gethostname(),
+        help="device id of this service, recorded with each upload",
+    )
+    parser.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        help="serve without a token (local development only)",
+    )
+    parser.add_argument(
+        "--port-file",
+        default=None,
+        help="write the bound port to this file once listening",
+    )
+    parser.add_argument("--quiet", action="store_true", help="log no requests")
+    return parser.parse_args(argv)
+
+
+def read_token(args) -> str | None:
+    token = args.token
+    if args.token_file:
+        token = Path(args.token_file).read_text(encoding="utf-8").strip()
+    if token is None:
+        token = os.environ.get("ATTRIBUTION_NOTES_TOKEN")
+    if token is not None:
+        token = token.strip() or None
+    if token is None and not args.allow_unauthenticated:
+        sys.stderr.write(
+            "attribution-notes-server: no token.  Pass --token-file, set "
+            "ATTRIBUTION_NOTES_TOKEN, or use --allow-unauthenticated for a "
+            "local test.\n"
+        )
+        raise SystemExit(2)
+    return token
+
+
+def main(argv=None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    token = read_token(args)
+    store = Store(Path(args.db).expanduser())
+    server = Server((args.host, args.port), Handler, store, token, args.device)
+    server.quiet = args.quiet
+    host, port = server.server_address[:2]
+    if args.port_file:
+        port_path = Path(args.port_file).expanduser()
+        port_path.parent.mkdir(parents=True, exist_ok=True)
+        port_path.write_text(str(port), encoding="utf-8")
+    sys.stderr.write(
+        "attribution-notes-server listening on http://%s:%d (device %s, %d note%s)\n"
+        % (host, port, args.device, store.count(), "" if store.count() == 1 else "s")
+    )
+    sys.stderr.flush()
+
+    def stop(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        server.serve_forever(poll_interval=0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        store.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

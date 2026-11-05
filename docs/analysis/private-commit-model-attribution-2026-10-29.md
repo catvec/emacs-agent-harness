@@ -655,6 +655,22 @@ the service gives each store the minimum it needs. `prompt_storage = "notes"`
 is a reasonable alternative if the user trusts the service and wants one
 store; `default` (CAS upload) is never used in private mode.
 
+**Implementation note (phases 1--2).** The module keeps git-ai's
+`prompt_storage` at `local`, because an `agent-v1` checkpoint has no prompt
+field: git-ai cannot catalog a harness prompt it never sees.  The module
+keeps no prompt records of its own.  With
+`harness-commit-attribution-prompt-sync` on, it sends each redacted record
+to the private notes service's **management API**
+(`/management/prompts/...`), which is separate from the `/worker/...`
+endpoints git-ai uses; the report and `prune` read and delete through that
+API.  A `secrets/redact` redaction is a store of the redaction engine
+(`harness-redact--store-functions`): it reads the records of the sessions
+in its scope, replaces the secret there, and writes them back, so the
+value never goes to the service.  This is the "one store" alternative
+above, scoped to the harness's own records and off by default.  The
+encrypted vault is still the phase 3 option for users who want the
+separation.
+
 ## Accuracy, granularity and limits
 
 **Granularity.** A git-ai note gives line ranges per file and per session.
