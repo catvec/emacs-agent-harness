@@ -3296,6 +3296,61 @@ them.  Their names are no secret: that directory may be listed."
        (should (eq 'allow (harness-perms-test--behavior "grep" 'read clips)))
        (should (null (funcall probe 'requests)))))))
 
+(ert-deftest harness-perms-error-details-need-the-users-permission ()
+  "The details of the harness's errors are not part of the state a session
+may inspect: reading them is jailed as any other path outside the roots
+is, and the agent is told to use the tool that asks the user.  Listing
+names may still see the directory, as for the credentials."
+  (harness-perms-test--call-with-harness
+   (lambda (_repo _build state)
+     (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+     (let* ((probe (harness-perms-test--allowing-judge))
+            (harness-perms-auto-model "judge:x")
+            (file (harness-error-details-path))
+            (rotated (concat file ".1"))
+            (sessions (expand-file-name "sessions/s1.json" state)))
+       (should (equal file (expand-file-name "error-details.log" state)))
+       (with-temp-file file (insert "HARNESS ERROR test\n"))
+       (with-temp-file rotated (insert "HARNESS ERROR old\n"))
+       (dolist (path (list file rotated))
+         (ert-info (path)
+           (let ((d (harness-perms-test--decide
+                     (harness-perms-test--request "read_file" 'read path))))
+             (should (eq 'deny (plist-get d :behavior)))
+             (should (plist-get d :final))
+             (should (string-match-p "outside the allowed directories" (plist-get d :reason)))
+             (should (string-search "read_harness_errors" (plist-get d :hint)))
+             (should-not (string-search "No tool may read the harness's credentials"
+                                        (plist-get d :hint))))))
+       ;; The tool that reads them is jailed too, and is not told to call
+       ;; itself.
+       (let ((d (harness-perms-test--decide
+                 (harness-perms-test--request "read_harness_errors" 'read file))))
+         (should (eq 'deny (plist-get d :behavior)))
+         (should (string-search "read only when the user allows it" (plist-get d :hint))))
+       ;; The rest of the state is read as before, and a listing tool may
+       ;; still see the directory that holds the details.
+       (should (eq 'allow (harness-perms-test--behavior "read_file" 'read sessions)))
+       (should (eq 'allow (harness-perms-test--behavior "list_dir" 'read state)))
+       (should (eq 'allow (harness-perms-test--behavior "glob" 'read state)))
+       (should (eq 'deny (harness-perms-test--behavior "file_info" 'read file)))
+       ;; Nobody was asked, and the judge never saw the call.
+       (should (null (funcall probe 'requests)))
+       (should (null harness-perms-test--pending))
+       ;; With the user there, a read asks for the directory, and a grant
+       ;; is what lets it through, as for any path outside the roots.
+       (setq harness-perms-test--session
+             (plist-put harness-perms-test--session :non-interactive nil))
+       (harness-perms-test--install-pending)
+       (let* ((started (harness-perms-test--start "read_file" 'read file))
+              (p (car started)))
+         (should-not (harness-promise-settled-p p))
+         (should (eq 'continue (harness-call 'permission/answer "s1"
+                                             (plist-get (cdr started) :id)
+                                             "allow-session")))
+         (should (eq 'allow (plist-get (harness-test-await p) :behavior)))
+         (should (eq 'allow (harness-perms-test--behavior "read_file" 'read rotated))))))))
+
 (ert-deftest harness-perms-rules-beat-the-inspection-allowance ()
   "A standing rule still decides first: a user who denied a tool or a
 part of the harness keeps it denied."

@@ -62,6 +62,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'harness-core)
+(require 'harness-errors)
 (require 'harness-util)
 
 (defvar harness-state-directory)
@@ -1187,13 +1188,21 @@ call with a result that says why (`harness-tools--failure').
                                (lambda ()
                                  (funcall finish (harness-tool-error
                                                   (format "Tool %s timed out after %ss" (harness-tool-name tool) timeout))))))
-      (condition-case err
-          (let ((value (let ((harness-tools-calling-session (plist-get ctx :session-id)))
-                         (funcall (harness-tool-handler tool) input ctx))))
-            (if (harness-promise-p value)
-                (harness-then value finish fail)
-              (funcall finish value)))
-        (error (funcall fail err))))))
+      (let ((harness-error-report-session (plist-get ctx :session-id))
+            (harness-error-report--depth (1+ harness-error-report--depth))
+            (harness-error-report--signals nil))
+        (condition-case err
+            (let ((value (let ((harness-tools-calling-session (plist-get ctx :session-id)))
+                           (funcall (harness-tool-handler tool) input ctx))))
+              (if (harness-promise-p value)
+                  (harness-then value finish fail)
+                (funcall finish value)))
+          (error
+           (when (and (fboundp 'harness-error-report-internal-p)
+                      (harness-error-report-internal-p err))
+             (harness--report-error err (format "tool %s" (harness-tool-name tool))
+                                    (plist-get ctx :session-id)))
+           (funcall fail err)))))))
 
 (defun harness-tools--output-text (text session-id)
   "Return TEXT, from a tool of SESSION-ID, as `tools/output-text' lets it stand."
@@ -1306,6 +1315,61 @@ under.  Return a promise of the result."
        (harness-tools--run-handler tool input ctx)
        (lambda (result)
          (harness-tools--finish-call session-id call call-id result))))))
+
+;;;; The details of harness errors
+
+(defun harness-tools--read-harness-errors-limit (input)
+  "Return the number of reports a `read_harness_errors' call with INPUT asks for.
+The default is 5, and no call gets more than 50."
+  (let ((limit (plist-get input :limit)))
+    (cond ((numberp limit) (max 1 (min 50 (floor limit))))
+          ((and (stringp limit) (string-match-p "\\`[0-9]+\\'" limit))
+           (max 1 (min 50 (string-to-number limit))))
+          (t 5))))
+
+(defun harness-tools--read-harness-errors-paths (_input)
+  "Return the files a `read_harness_errors' call reads, for the jail.
+Both the current details file and the rotated one are named, whether
+or not they exist yet: a report may be written before the call reads,
+and the user decides about the file, not about whether it is there."
+  (harness-error-details-files))
+
+(defun harness-tools--read-harness-errors (input _ctx)
+  "Handler of read_harness_errors.
+INPUT is the call's input plist and _CTX its context."
+  (let* ((limit (harness-tools--read-harness-errors-limit input))
+         (session (let ((id (plist-get input :session)))
+                    (and (stringp id) (not (string-empty-p id)) id)))
+         (task (let ((id (plist-get input :task)))
+                 (and (stringp id) (not (string-empty-p id)) id)))
+         (file (harness-error-details-path))
+         (reports (harness-error-reports limit session task)))
+    (if (null reports)
+        (harness-tool-ok
+         (format "No harness error reports%s in %s."
+                 (cond ((and session task)
+                        (format " for session %s and task %s" session task))
+                       (session (format " for session %s" session))
+                       (task (format " for task %s" task))
+                       (t ""))
+                 file)
+         :meta (list :file file :reports 0))
+      (harness-tool-ok
+       (mapconcat (lambda (report) (plist-get report :text)) reports "\n")
+       :meta (list :file file :reports (length reports))))))
+
+(harness-define-tool "read_harness_errors"
+  :label "Read harness errors"
+  :description "Read the details the harness writes of its own errors. When something inside the harness fails -- a promise callback or handler, an event subscriber, a filter, a module's initialisation, a timer, a process filter or sentinel -- the harness appends a report to a details file with the stack trace taken where the error was signalled, what the harness was doing, and the session and task ids. This returns the most recent reports, newest first. The file is not readable without the user's permission: the call asks for it, and is refused when nobody can be asked, so do not work around a refusal. Use it to diagnose a harness bug, then read the harness source the stack names."
+  :schema '(:type "object"
+            :properties (:limit (:type "integer" :description "Most reports to return (default 5, at most 50).")
+                         :session (:type "string" :description "Only reports that happened for this session id.")
+                         :task (:type "string" :description "Only reports that happened for this task id.")))
+  :kind 'read
+  :coalescable t
+  :paths #'harness-tools--read-harness-errors-paths
+  :subject (lambda (input) (or (plist-get input :session) (plist-get input :task)))
+  :handler #'harness-tools--read-harness-errors)
 
 (harness-declare-event 'tools/started "(SESSION-ID CALL) before permission and execution.")
 (harness-declare-event 'tools/progress "(SESSION-ID CALL-ID TEXT) progress from a running tool.")

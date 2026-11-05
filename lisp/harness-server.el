@@ -120,7 +120,8 @@ because something it ran failed.  It is also where
       (when (catch 'harness-server--unwind
               (condition-case err
                   (progn (accept-process-output nil (harness-server--wait-time)) nil)
-                (t (ignore-errors
+                (t (harness--report-error err "server event loop")
+                   (ignore-errors
                      (harness-log 'error "server: event loop: %s" (error-message-string err)))
                    nil)))
         (ignore-errors
@@ -159,6 +160,9 @@ waited short, rather than leave the harness unable to run anything."
       (harness-log 'error "server: %s%s" (or context "") (error-message-string data))
     (t (ignore-errors
          (princ (format "ERROR server: %s%S\n" (or context "") data) #'external-debugging-output))))
+  ;; Before the stack that led here is forgotten, if it is: an error in a
+  ;; filter or sentinel is a harness bug, and the details are what fixes it.
+  (harness--report-error data (or context "an error in a process filter or sentinel"))
   (when (and harness-server--in-loop
              (harness-server--overflow-p data)
              (> (or (ignore-errors (harness-server--frames)) 0) (/ max-lisp-eval-depth 2)))

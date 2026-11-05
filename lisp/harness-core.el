@@ -113,6 +113,50 @@ The message goes through `harness-log-filter-function' first."
       (run-hook-with-args 'harness-log-hook level msg)
       msg)))
 
+;;;; Error details
+
+;; `harness-errors.el' writes the details of errors the harness catches
+;; at its own boundaries to a file people and agents can read, with the
+;; stack trace taken where the error was signalled.  Core keeps what a
+;; catcher and the trace hook share: the dynamic depth that says code
+;; inside such a boundary runs, the traces taken there, and the context
+;; (session, task, what the harness was doing) a report names.
+
+(defvar harness-error-report--depth 0
+  "How deeply nested the harness's error catchers run.
+Greater than zero inside a boundary whose errors `harness-errors'
+reports: the `signal-hook-function' it installs takes a stack trace of
+an error signalled there before `condition-case' unwinds it.")
+
+(defvar harness-error-report--signals nil
+  "Stack of errors signalled inside the innermost error catcher.
+Each is a plist of `:error' (the error data list), `:trace' (a string
+or nil), `:session', `:task', `:context' and `:at', newest first.
+`harness-errors' reads it in the catcher's error handler.")
+
+(defvar harness-error-report-session nil
+  "The id of the session whose work is running, for an error report.
+Bound around a turn, a tool call or a provider event; a promise keeps
+it, so a callback that runs later reports the session it belongs to.")
+
+(defvar harness-error-report-task nil
+  "The id of the task whose work is running, for an error report.")
+
+(defvar harness-error-report-context nil
+  "A short phrase saying what the harness was doing, for an error report.")
+
+(defun harness--report-error (err context &optional session)
+  "Report ERR, a harness error caught at a boundary, with CONTEXT.
+SESSION, when given, is the session the error happened for.  This does
+nothing until `harness-errors' is loaded.  A call here is a catcher of
+the harness's own, so it reports even before
+`harness-error-report-install' has added the global hooks; those hooks
+are what keep the stack trace, which a caller that did not bind
+`harness-error-report--depth' cannot have."
+  (when (fboundp 'harness-error-report-maybe)
+    (let ((harness-error-report--depth (1+ harness-error-report--depth)))
+      (harness-error-report-maybe err :context context :session session))))
+
 ;;;; Corporate mode
 
 (defvar harness-corporate-mode-change-hook nil
@@ -176,11 +220,18 @@ else changes it (see harness-policy.el)."
                                (:copier nil))
   (state 'pending)        ; pending, resolved, rejected
   value
-  callbacks)              ; list of (on-ok . on-err)
+  callbacks               ; list of (on-ok . on-err)
+  session                 ; session the promise was made for, for error reports
+  context)                ; what the harness was doing then
 
 (defun harness-make-promise ()
-  "Return a new pending promise."
-  (harness-promise--make))
+  "Return a new pending promise.
+It keeps the session and what the harness was doing around its making,
+so that a callback which runs later still reports the right context."
+  (harness-promise--make :session (and (boundp 'harness-error-report-session)
+                                       harness-error-report-session)
+                         :context (and (boundp 'harness-error-report-context)
+                                       harness-error-report-context)))
 
 (defun harness-promise-settled-p (promise)
   "Non-nil when PROMISE is resolved or rejected."
@@ -235,16 +286,23 @@ the callback signals is logged, with its backtrace when debugging, and
 goes no further."
   (let ((fn (if (eq (harness-promise-state promise) 'resolved) (car cb) (cdr cb))))
     (when fn
-      (condition-case err
-          (if (and (harness--debug-p) (fboundp 'handler-bind))
-              (handler-bind ((error #'harness--capture-backtrace))
-                (funcall fn (harness-promise-value promise)))
-            (funcall fn (harness-promise-value promise)))
-        (error
-         (harness-log 'error "promise callback failed: %s%s" (harness--short-error-text err)
-                      (if (and (harness--debug-p) harness--last-backtrace)
-                          (format "\n  frames: %s" (string-join (seq-take (cdr harness--last-backtrace) 40) " < "))
-                        "")))))))
+      (let ((harness-error-report-session
+             (or (harness-promise-session promise) harness-error-report-session))
+            (harness-error-report-context
+             (or (harness-promise-context promise) harness-error-report-context))
+            (harness-error-report--depth (1+ harness-error-report--depth))
+            (harness-error-report--signals nil))
+        (condition-case err
+            (if (and (harness--debug-p) (fboundp 'handler-bind))
+                (handler-bind ((error #'harness--capture-backtrace))
+                  (funcall fn (harness-promise-value promise)))
+              (funcall fn (harness-promise-value promise)))
+          (error
+           (harness--report-error err "promise callback")
+           (harness-log 'error "promise callback failed: %s%s" (harness--short-error-text err)
+                        (if (and (harness--debug-p) harness--last-backtrace)
+                            (format "\n  frames: %s" (string-join (seq-take (cdr harness--last-backtrace) 40) " < "))
+                          ""))))))))
 
 (defun harness-resolve (promise value)
   "Resolve PROMISE with VALUE.  If VALUE is itself a promise, adopt it."
@@ -297,7 +355,8 @@ be long (an error here is not worth megabytes in the log)."
                (harness--short-error-text err)
                (if (and (harness--debug-p) harness--last-backtrace)
                    (format "\n  frames: %s" (string-join (seq-take (cdr harness--last-backtrace) 40) " < "))
-                 "")))
+                 ""))
+  (harness--report-error err "promise handler"))
 
 (defun harness-then (promise on-ok &optional on-err)
   "Call ON-OK with the value of PROMISE, or ON-ERR with its error.
@@ -532,13 +591,19 @@ number of subscribers notified."
   (let ((n 0))
     (dolist (sub (gethash event harness--subscribers))
       (cl-incf n)
-      (condition-case err
-          (apply (cdr sub) args)
-        (error (harness-log 'error "subscriber %S for %s failed: %S" (cdr sub) event err))))
+      (let ((harness-error-report--depth (1+ harness-error-report--depth))
+            (harness-error-report--signals nil))
+        (condition-case err
+            (apply (cdr sub) args)
+          (error (harness--report-error err (format "subscriber for %s" event))
+                 (harness-log 'error "subscriber %S for %s failed: %S" (cdr sub) event err)))))
     (dolist (sub (gethash '* harness--subscribers))
-      (condition-case err
-          (funcall (cdr sub) event args)
-        (error (harness-log 'error "wildcard subscriber %S failed: %S" (cdr sub) err))))
+      (let ((harness-error-report--depth (1+ harness-error-report--depth))
+            (harness-error-report--signals nil))
+        (condition-case err
+            (funcall (cdr sub) event args)
+          (error (harness--report-error err "wildcard subscriber")
+                 (harness-log 'error "wildcard subscriber %S failed: %S" (cdr sub) err)))))
     n))
 
 (defun harness-emit-later (event &rest args)
@@ -581,9 +646,12 @@ is in the chain once, at the priority its latest code gives."
 Each function is called as (FN VALUE . ARGS) and its return value
 becomes the next VALUE.  A function that signals is skipped."
   (dolist (f (gethash name harness--filters) value)
-    (condition-case err
-        (setq value (apply (cdr f) value args))
-      (error (harness-log 'error "filter %S in %s failed: %S" (cdr f) name err)))))
+    (let ((harness-error-report--depth (1+ harness-error-report--depth))
+          (harness-error-report--signals nil))
+      (condition-case err
+          (setq value (apply (cdr f) value args))
+        (error (harness--report-error err (format "filter %s" name))
+               (harness-log 'error "filter %S in %s failed: %S" (cdr f) name err))))))
 
 (defvar harness--filter-failures (make-hash-table :test 'eq)
   "Filter chain name -> function saying what a handler that failed hands on.
@@ -613,10 +681,13 @@ That is what the chain's failure function says (see
   (let ((fn (gethash name harness--filter-failures)))
     (if (null fn)
         value
-      (condition-case inner
-          (funcall fn value handler err)
-        (error (harness-log 'error "failure function of filter %s failed: %S" name inner)
-               value)))))
+      (let ((harness-error-report--depth (1+ harness-error-report--depth))
+            (harness-error-report--signals nil))
+        (condition-case inner
+            (funcall fn value handler err)
+          (error (harness--report-error inner (format "failure function of filter %s" name))
+                 (harness-log 'error "failure function of filter %s failed: %S" name inner)
+                 value))))))
 
 (defun harness-run-filter-async (name value &rest args)
   "Run the asynchronous filter chain NAME starting from VALUE.
@@ -676,16 +747,21 @@ promise of the final value."
                                            (funcall tracer fn value v)
                                          (error (harness-log 'error "tracer of %s failed: %S" name err))))
                                      (step v (cdr rest))))))
-                      (condition-case err
-                          (let ((ret (apply fn value next args)))
-                            (when (and (harness-promise-p ret) (not called))
-                              (harness-then ret next
-                                            (lambda (e)
-                                              (harness-log 'error "async filter %S rejected: %S" fn e)
-                                              (funcall next (harness--filter-failed name fn value e))))))
-                        (error
-                         (harness-log 'error "async filter %S in %s failed: %S" fn name err)
-                         (funcall next (harness--filter-failed name fn value err))))))))
+                      (let ((harness-error-report--depth (1+ harness-error-report--depth))
+                            (harness-error-report--signals nil))
+                        (condition-case err
+                            (let ((ret (apply fn value next args)))
+                              (when (and (harness-promise-p ret) (not called))
+                                (harness-then ret next
+                                              (lambda (e)
+                                                (harness--report-error
+                                                 e (format "async filter %s rejected" name))
+                                                (harness-log 'error "async filter %S rejected: %S" fn e)
+                                                (funcall next (harness--filter-failed name fn value e))))))
+                          (error
+                           (harness--report-error err (format "async filter %s" name))
+                           (harness-log 'error "async filter %S in %s failed: %S" fn name err)
+                           (funcall next (harness--filter-failed name fn value err)))))))))
       (step value chain))
     promise))
 
@@ -842,17 +918,20 @@ the module."
                  (harness-log 'debug "module %s not initialised again: requirements not ready: %s"
                               name missing)
                  nil)
-             (condition-case err
-                 (progn
-                   (when (harness-module-init-fn m) (funcall (harness-module-init-fn m)))
-                   (setf (harness-module-error m) nil)
-                   (harness-log 'debug "module %s initialised again" name)
-                   (run-hook-with-args 'harness-module-init-hook name)
-                   t)
-               (error
-                (setf (harness-module-error m) err)
-                (harness-log 'error "module %s failed to initialise again: %S" name err)
-                nil))))
+             (let ((harness-error-report--depth (1+ harness-error-report--depth))
+                   (harness-error-report--signals nil))
+               (condition-case err
+                   (progn
+                     (when (harness-module-init-fn m) (funcall (harness-module-init-fn m)))
+                     (setf (harness-module-error m) nil)
+                     (harness-log 'debug "module %s initialised again" name)
+                     (run-hook-with-args 'harness-module-init-hook name)
+                     t)
+                 (error
+                  (setf (harness-module-error m) err)
+                  (harness--report-error err (format "module %s initialising again" name))
+                  (harness-log 'error "module %s failed to initialise again: %S" name err)
+                  nil)))))
           ((cl-notevery #'harness-module-ready-p (harness-module-requires m))
            (setf (harness-module-state m) 'failed
                  (harness-module-error m)
@@ -860,17 +939,20 @@ the module."
                          (cl-remove-if #'harness-module-ready-p (harness-module-requires m))))
            (harness-log 'warn "module %s: %s" name (harness-module-error m))
            nil)
-          (t (condition-case err
-                 (progn
-                   (when (harness-module-init-fn m) (funcall (harness-module-init-fn m)))
-                   (setf (harness-module-state m) 'ready (harness-module-error m) nil)
-                   (harness-log 'debug "module %s ready" name)
-                   (run-hook-with-args 'harness-module-init-hook name)
-                   t)
-               (error
-                (setf (harness-module-state m) 'failed (harness-module-error m) err)
-                (harness-log 'error "module %s failed to initialise: %S" name err)
-                nil))))))
+          (t (let ((harness-error-report--depth (1+ harness-error-report--depth))
+                   (harness-error-report--signals nil))
+               (condition-case err
+                   (progn
+                     (when (harness-module-init-fn m) (funcall (harness-module-init-fn m)))
+                     (setf (harness-module-state m) 'ready (harness-module-error m) nil)
+                     (harness-log 'debug "module %s ready" name)
+                     (run-hook-with-args 'harness-module-init-hook name)
+                     t)
+                 (error
+                  (setf (harness-module-state m) 'failed (harness-module-error m) err)
+                  (harness--report-error err (format "module %s initialising" name))
+                  (harness-log 'error "module %s failed to initialise: %S" name err)
+                  nil)))))))
 
 (defun harness-modules-init (&optional names)
   "Initialise NAMES (default: every registered module) in dependency order.
@@ -888,9 +970,12 @@ alone.  Return the list of module names that are ready."
   (dolist (n (reverse (harness--module-order (mapcar #'harness-module-name (harness-modules)))))
     (let ((m (gethash n harness--modules)))
       (when (eq (harness-module-state m) 'ready)
-        (condition-case err
-            (when (harness-module-shutdown-fn m) (funcall (harness-module-shutdown-fn m)))
-          (error (harness-log 'error "module %s failed to shut down: %S" n err)))
+        (let ((harness-error-report--depth (1+ harness-error-report--depth))
+              (harness-error-report--signals nil))
+          (condition-case err
+              (when (harness-module-shutdown-fn m) (funcall (harness-module-shutdown-fn m)))
+            (error (harness--report-error err (format "module %s shutting down" n))
+                   (harness-log 'error "module %s failed to shut down: %S" n err))))
         (setf (harness-module-state m) 'registered)))))
 
 (defun harness-module-disable (name)

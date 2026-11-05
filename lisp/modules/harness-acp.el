@@ -143,7 +143,7 @@ is never used for any other failure.")
     "harness/api" "harness/modules" "harness/version" "harness/reload"
     "question/" "project/" "task/" "plugins/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/"
-    "secrets/" "commit-msg/"
+    "secrets/" "commit-msg/" "errors/"
     "decision/" "access/" "patch-review/" "tool-slots/" "cache/" "link/" "todo-sync/"
     "chatgpt-plan/")
   "Bus method name prefixes callable as `_harness/NAME'.
@@ -912,7 +912,10 @@ wait on ID for good, its own request showing no answer ever came."
         (harness-then (harness-as-promise (harness-acp--invoke client method params))
                       (lambda (result) (funcall reply result nil))
                       (lambda (e) (funcall reply nil (harness-acp--error-triplet e method))))
-      (error (funcall reply nil (harness-acp--error-triplet err method))))))
+      (error (when (and (fboundp 'harness-error-report-internal-p)
+                        (harness-error-report-internal-p err))
+               (harness--report-error err (format "ACP request %s" method)))
+             (funcall reply nil (harness-acp--error-triplet err method))))))
 
 (defun harness-acp--handle-notification (client method params)
   "Run METHOD with PARAMS for CLIENT; failures are only logged.
@@ -964,6 +967,9 @@ that take a secret's text (secrets/) refuse clients on other devices.")
   "Return the value or promise of calling METHOD with PARAMS for CLIENT."
   (let ((params (harness-acp--intern-enums params))
         (standard (gethash method harness-acp--standard-methods))
+        (harness-error-report-session
+         (let ((sid (plist-get params :sessionId)))
+           (and (stringp sid) sid)))
         (harness-acp--calling-client client))
     (cond
      ((and (harness-acp-client-remote-info client) (harness-corporate-p))

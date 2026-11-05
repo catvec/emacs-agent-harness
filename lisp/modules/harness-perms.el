@@ -853,19 +853,43 @@ tool that may read the files below a directory (any tool but those of
                    (and (not listing) (harness-perms--within-p path private))))
              (harness-perms--private-paths))))
 
+(defun harness-perms--error-details-file-p (path)
+  "Non-nil when PATH is one of the files the harness writes error details to."
+  (let ((path (harness-path-normalize path)))
+    (cl-some (lambda (file)
+               (equal (harness-path-normalize file) path))
+             (harness-error-details-files))))
+
+(defun harness-perms--error-details-p (tool path)
+  "Non-nil when TOOL at PATH would read the harness's error details.
+Those are `harness-error-details-path' and the file it rotates to.  A
+session is told they exist, but they are not part of the harness it
+may inspect: it reads them with `read_harness_errors', which asks the
+user, or reads the file once the user has granted it.  As for the
+credentials, a tool that reads the contents of the files below a
+directory cannot look at one that holds them, while a tool that only
+lists names and metadata may."
+  (let ((listing (member tool harness-perms--listing-tools)))
+    (or (harness-perms--error-details-file-p path)
+        (and (not listing)
+             (cl-some (lambda (file) (harness-perms--within-p path file))
+                      (harness-error-details-files))))))
+
 (defun harness-perms--inspectable-p (request path)
   "Non-nil when REQUEST may read PATH because it is part of the harness itself.
 REQUEST must only read (its kind is `read'), PATH must lie in one of
-`harness-perms-inspection-dirs' and the call must not reach the
-harness's credentials (`harness-perms--private-p').  Symbolic links
-are resolved first, as the jail resolves them, so a link elsewhere
-does not lead into the harness, nor one in the harness out of it."
+`harness-perms-inspection-dirs', and the call must not reach the
+harness's credentials (`harness-perms--private-p') or its error
+details (`harness-perms--error-details-p').  Symbolic links are
+resolved first, as the jail resolves them, so a link elsewhere does
+not lead into the harness, nor one in the harness out of it."
   (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
        (stringp path)
        (not (harness-file-remote-p path))
        (cl-some (lambda (e) (harness-perms--within-p (plist-get e :dir) path))
                 (harness-perms-inspection-dirs))
-       (not (harness-perms--private-p (plist-get request :tool) path))))
+       (not (harness-perms--private-p (plist-get request :tool) path))
+       (not (harness-perms--error-details-p (plist-get request :tool) path))))
 
 (defun harness-perms--inspection-hint (request path)
   "Return what REQUEST's agent may still do with PATH in the harness, or \"\".
@@ -873,20 +897,30 @@ PATH is outside the session's roots.  When it lies in the harness
 itself (see `harness-perms-inspection-dirs'), a call that does more
 than read, or a request for the directory, learns that reading it
 needs no grant, and a read refused for reaching the credentials
-learns which files those are.  Elsewhere the hint is that of a skills
-directory (`harness-perms--skills-hint')."
-  (cond
-   ((or (harness-file-remote-p path)
-        (not (cl-some (lambda (e) (harness-perms--within-p (plist-get e :dir) path))
-                      (harness-perms-inspection-dirs))))
-    (harness-perms--skills-hint request path))
-   ((not (eq (harness-perms--sym (plist-get request :kind)) 'read))
-    (if (harness-perms--inspectable-p (list :kind 'read :tool "list_dir") path)
-        " It is part of the harness itself, which the tools that only read (read_file, list_dir, glob, grep, file_info) may read without a grant."
-      ""))
-   (t
-    (format " No tool may read the harness's credentials (%s); the rest of the harness needs no grant, so read or search the files and directories beside them instead."
-            (mapconcat #'harness-abbreviate-file-name (harness-perms--private-paths) ", ")))))
+learns which files those are.  The details of the harness's errors
+are the other exception: they say that `read_harness_errors' asks the
+user.  Elsewhere the hint is that of a skills directory
+\(`harness-perms--skills-hint')."
+  (let ((kind (harness-perms--sym (plist-get request :kind)))
+        (tool (plist-get request :tool)))
+    (cond
+     ((or (harness-file-remote-p path)
+          (not (cl-some (lambda (e) (harness-perms--within-p (plist-get e :dir) path))
+                        (harness-perms-inspection-dirs))))
+      (harness-perms--skills-hint request path))
+     ((harness-perms--error-details-file-p path)
+      (if (eq kind 'read)
+          (if (equal tool "read_harness_errors")
+              " The details of the harness's errors are read only when the user allows it."
+            " The details of the harness's errors are not part of the harness a session may read without the user's say: read_harness_errors returns them, and asks the user for access.")
+        ""))
+     ((not (eq kind 'read))
+      (if (harness-perms--inspectable-p (list :kind 'read :tool "list_dir") path)
+          " It is part of the harness itself, which the tools that only read (read_file, list_dir, glob, grep, file_info) may read without a grant."
+        ""))
+     (t
+      (format " No tool may read the harness's credentials (%s); the rest of the harness needs no grant, so read or search the files and directories beside them instead."
+              (mapconcat #'harness-abbreviate-file-name (harness-perms--private-paths) ", "))))))
 
 (defun harness-perms--unreachable (request roots)
   "Return the first path of REQUEST it may not reach, or nil.
@@ -3516,12 +3550,20 @@ LIMIT is how many characters of the JSON are shown, by default
   "Return the block of the judge's message that says where the harness lives.
 The judge sees inspection of the harness only when it is done by other
 means than the tools and reads the rules allow, such as Emacs Lisp;
-told where the harness is, it can tell such a call for what it is."
+told where the harness is, it can tell such a call for what it is.  It
+is told the two exceptions too: the credentials, and the details of the
+harness's own errors, which `read_harness_errors' asks the user about."
   (let ((dirs (harness-perms-inspection-dirs)))
     (if (null dirs)
         ""
-      (format "\nThe harness itself (inspecting it is ordinary work; reading its credentials, %s, is not):\n%s\n"
+      (format "\nThe harness itself (inspecting it is ordinary work; reading its credentials, %s, is not%s):\n%s\n"
               (mapconcat #'identity (harness-perms--private-paths) " and ")
+              (let ((details (and (fboundp 'harness-error-details-path)
+                                  (harness-error-details-path))))
+                (if details
+                    (format ", nor the details of its own errors, %s"
+                            (harness-abbreviate-file-name details))
+                  ""))
               (mapconcat (lambda (e)
                            (format "- %s (%s)" (plist-get e :dir)
                                    (if (eq (plist-get e :source) 'state)

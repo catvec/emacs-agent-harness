@@ -208,16 +208,18 @@ WHY says what stopped it."
 (defmacro harness-agent--try (what &rest body)
   "Run BODY; when it signals, log that WHAT failed, short, and return nil.
 WHAT, a text such as \"recording result of bash\", is evaluated only
-then.  The error is quoted short (`harness-error-short-message'): it can
-carry the whole text that failed, a tool's output of megabytes among
-it, which must not be repeated in the log.  For the steps of a turn
-that must not hold up the ones after them -- recording a tool result
-before the provider is sent it, say."
+then, and is also what the error report says the harness was doing.
+The error is quoted short (`harness-error-short-message'): it can carry
+the whole text that failed, a tool's output of megabytes among it,
+which must not be repeated in the log.  For the steps of a turn that
+must not hold up the ones after them -- recording a tool result before
+the provider is sent it, say."
   (declare (indent 1) (debug (form body)))
   (let ((err (make-symbol "err")))
     `(condition-case ,err
          (progn ,@body)
-       (error (harness-log 'error "agent: %s failed: %s" ,what (harness-error-short-message ,err))
+       (error (harness--report-error ,err (format "agent: %s" ,what))
+              (harness-log 'error "agent: %s failed: %s" ,what (harness-error-short-message ,err))
               nil))))
 
 ;;;; Activity
@@ -514,6 +516,13 @@ each command and starts empty, so a file a command leaves there is gone
 by the next call, and outside the sandbox /tmp is not an allowed
 directory.")
 
+(defconst harness-agent--error-details-line
+  "- Harness errors: unexpected failures inside the harness are written to %s with a full stack trace and the session and task ids. You cannot read that file by default: read_harness_errors returns the recent reports, and asks the user for access.\n"
+  "System prompt line naming the harness error details file (%s).
+The file is kept out of what a session may inspect, so the agent is
+told it exists and reads it through the `read_harness_errors' tool,
+which asks the user.")
+
 (defun harness-agent--tmp-dir (session)
   "Return SESSION's own temporary directory, made if missing, or nil."
   (let ((id (plist-get session :id)))
@@ -530,10 +539,14 @@ Its Environment section names the session's own temporary directory,
 made here when it is missing (see `session/tmp-dir'), so the directory
 the model is told about exists when it reads about it."
   (let* ((tmp (harness-agent--tmp-dir session))
-         (base (format "%s\n\n## Environment\n- Working directory: %s\n%s- Project: %s\n- Date: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
+         (details (and (boundp 'harness-error-reporting) harness-error-reporting
+                       (fboundp 'harness-error-details-path)
+                       (harness-error-details-path)))
+         (base (format "%s\n\n## Environment\n- Working directory: %s\n%s%s- Project: %s\n- Date: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
                       harness-agent--base-system-prompt
                       (plist-get session :cwd)
                       (if tmp (format harness-agent--tmp-dir-line tmp) "")
+                      (if details (format harness-agent--error-details-line details) "")
                       (or (and (harness-method-exists-p 'project/name)
                                (harness-call 'project/name (plist-get session :project)))
                           (plist-get session :project))
@@ -1370,6 +1383,7 @@ head.  See `session/provider-continuation'."
   "Start a turn of SESSION-ID with the message BLOCKS; return its promise.
 FROM, when non-nil, is who sent the message (see `agent/prompt')."
   (let* ((session (harness-call 'session/get session-id))
+         (harness-error-report-session session-id)
          (promise (harness-make-promise))
          (turn (make-harness-agent-turn :session-id session-id :promise promise :started (float-time)))
          (entry (harness-agent--message-entry blocks from))
@@ -1649,8 +1663,10 @@ is that model's provider's, whatever the session's model is by now.  The
 one thing a finished turn still takes is the usage a tool's end left its
 provider to report (`harness-agent--late-event')."
   (if (not (harness-agent--current-p turn))
-      (harness-agent--late-event turn ev model)
-    (let ((sid (harness-agent-turn-session-id turn)))
+      (let ((harness-error-report-session (harness-agent-turn-session-id turn)))
+        (harness-agent--late-event turn ev model))
+    (let ((sid (harness-agent-turn-session-id turn))
+          (harness-error-report-session (harness-agent-turn-session-id turn)))
       (pcase (plist-get ev :type)
         ('start nil)
         ('activity

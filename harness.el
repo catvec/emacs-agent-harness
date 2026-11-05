@@ -203,7 +203,8 @@ Only the ACP client half is used: its TCP server stays off here.")
 (defconst harness--self-file (expand-file-name "harness.el" harness-directory)
   "Absolute path of this file, reloaded first by `harness-reload'.")
 
-(defconst harness--core-files '("lisp/harness-core.el" "lisp/harness-util.el"
+(defconst harness--core-files '("lisp/harness-core.el" "lisp/harness-errors.el"
+                               "lisp/harness-util.el"
                                "lisp/harness-http.el" "lisp/harness-elisp.el")
   "Files loaded before any module, in order, relative to `harness-directory'.
 They define the macros modules expand, so a change to one recompiles
@@ -568,6 +569,10 @@ Return non-nil when every module loaded and initialised."
         (harness-load-compiled (harness--path f))
       (error (harness-log 'error "compiling %s failed: %S; loading source" f err)
              (load (harness--path f) nil 'nomessage))))
+  ;; The details of harness errors, from here on: before any module loads,
+  ;; so that a module that fails to load or initialise is reported too.
+  (when (fboundp 'harness-error-report-install)
+    (harness-error-report-install))
   ;; Before any module: which ones load is a setting too.  Required
   ;; too, in case the library files left it out: no policy is no option.
   (condition-case err
@@ -586,6 +591,7 @@ Return non-nil when every module loaded and initialised."
       (condition-case err
           (harness--load-file f)
         (error (push (cons (harness--file-module-name f) err) failed)
+               (harness--report-error err (format "loading %s" f))
                (harness-log 'error "loading %s failed: %S" f err))))
     (when harness-process
       ;; The harness process serves ACP; this Emacs only connects to it.

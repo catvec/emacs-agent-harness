@@ -115,6 +115,21 @@ default) the layers above are split across two Emacs processes:
   a write that comes in line behind one waiting longer than that closes
   the peer, which has not read for so long, and the write in flight
   fails rather than wait on.
+- An error the harness catches at one of its own boundaries -- a promise
+  callback or handler, an event subscriber, a filter, a module's init, a
+  timer, a process filter or sentinel -- is written to
+  `harness-error-details-file` (`error-details.log` in the state
+  directory by default) with the stack trace taken where it was
+  signalled, the session and task it happened for, and what the harness
+  was doing (lisp/harness-errors.el).  The trace is taken by a
+  `signal-hook-function` before `condition-case` unwinds it.  The
+  reports are read back as plists by `harness-error-reports`, which the
+  `errors/recent` and `errors/path` methods give a client, and which the
+  `read_harness_errors` tool gives an agent.  The details files are
+  kept out of the state a session may inspect, as the credentials are:
+  a read of them goes through the permission chain as any other path
+  outside the roots, so the tool asks the user, and the agent's system
+  prompt says so.
 - The UI reads the child's socket when its event loop reports it
   readable, and handles what it read from a timer, a slice at a time
   (`harness-acp-receive-slice`; see acp).  The loop does not always get
