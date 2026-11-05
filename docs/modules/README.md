@@ -134,7 +134,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [redact](redact.md) |  | [secrets](secrets.md), [session](session.md), [store](store.md) | Takes a secret out of the transcripts and every other copy the harness keeps. |
 | [resilience](resilience.md) | by default | [session](session.md), [agent](agent.md), [tools](tools.md) | Carry on sessions a stopped harness cut short, tell the parent and the user when a sub-agent waits for them, answer its unanswered prompts by default, and report stalled turns. |
 | [retry](retry.md) | by default | [session](session.md), [agent](agent.md) | Try a step again after a transient network or rate-limit failure. |
-| [sandbox](sandbox.md) | by default | [config](config.md) | Kernel sandbox (bwrap / systemd-run / MXC on macOS) for spawned tool processes. |
+| [sandbox](sandbox.md) | by default | [config](config.md) | Kernel sandbox (bwrap / systemd-run / MXC on macOS, or NVIDIA OpenShell on request) for spawned tool processes. |
 | [secrets](secrets.md) |  | [store](store.md) | Secret references, masking of tool output and the guard against writing placeholders. |
 | [seed](seed.md) |  | [session](session.md), [agent](agent.md) | Seed sessions: forks onto a model that share one warm prompt cache. |
 | [session](session.md) | by default | [store](store.md), [project](project.md) | Session records, conversation DAG, queue and pending requests. |

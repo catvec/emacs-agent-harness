@@ -1791,7 +1791,9 @@ macOS; what follows sees the backend it chose."
                 (harness-sandbox-detect)
                 (should (eq 'mxc harness-sandbox--backend))
                 (should (equal (list (cons 'mxc path)) harness-sandbox--programs))
-                (should (equal (list path) asked)))))
+                ;; MXC's executor is the one looked for as a path; OpenShell's
+                ;; program is looked for everywhere, by its name.
+                (should (equal (list path) (remove harness-sandbox-openshell-program asked))))))
           ;; GNU/Linux: the same programs give bwrap and systemd-run, and
           ;; never MXC, even forced.
           (let ((system-type 'gnu/linux))

@@ -140,6 +140,7 @@ is never used for any other failure.")
 (defconst harness-acp-extension-prefixes
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
+    "sandbox/detect" "sandbox/check"
     "harness/api" "harness/modules" "harness/version" "harness/reload"
     "question/" "project/" "task/" "plugins/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/"

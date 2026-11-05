@@ -4135,7 +4135,8 @@ half `ui-access`, the access view).
   does not let agents ask for it (`sandbox/capabilities` `:grantable`,
   see sandbox; the hint lists what they may); the jail does not enforce
   capabilities for the session's directory (`:enforced` nil, and its
-  `:why` -- bwrap is not the backend, the directory is remote, the
+  `:why` -- bwrap is not the backend (systemd-run, MXC and OpenShell
+  give none), the directory is remote, the
   sandbox policy is `off`, bwrap is setuid or run by root -- or the
   sandbox module is not loaded, which counts as not enforced); the
   session is read-only by its own profile (it must ask for writing
@@ -4145,7 +4146,8 @@ half `ui-access`, the access view).
   asked through `harness-access--confirm`, as for the other attributes:
   "Give the agent's commands CAP_SYS_PTRACE", the reason saying what the
   capability lets a command do (the registry's doc), that the commands
-  run in the bwrap sandbox, which drops every capability, that this one
+  run in the sandbox (named by its backend, `bwrap` today: the only one
+  that can give one), which drops every capability, that this one
   is valid inside the sandbox's own namespaces only (not on the host, not
   on another machine), any scope note of its own, and that it applies
   from the next bash or elisp command on, until the agent or the user
@@ -4284,16 +4286,23 @@ decisions.
 ### sandbox
 
 - `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…) :read-only nil :scratch (…) :capabilities (…))` →
-  command list (bwrap / systemd-run / mxc-exec-mac / plain).
-  `sandbox/status` → `(:backend bwrap|systemd|mxc|none :available (…)
-  :policy …)`.  `harness-sandbox-detect` looks for bwrap and
-  systemd-run on GNU/Linux and for `harness-sandbox-mxc-program` on
-  macOS only; a backend forced off its platform is `none`.  Fails closed
+  command list (bwrap / systemd-run / mxc-exec-mac / the OpenShell
+  wrapper / plain).
+  `sandbox/status` → `(:backend bwrap|systemd|mxc|openshell|none
+  :available (…) :policy … :limits (TEXT…))`, with `:requested openshell`
+  and `:problem TEXT` when OpenShell was asked for and could not be used:
+  `:backend` is then what `auto` picks.  `:limits` says in a line each what
+  the backend in use cannot do of the access model (nil for bwrap).
+  `harness-sandbox-detect` (also a command, for after a gateway is
+  started) looks for bwrap and systemd-run on GNU/Linux and for
+  `harness-sandbox-mxc-program` on macOS only, and for
+  `harness-sandbox-openshell-program` everywhere; a backend forced off
+  its platform is `none`, and `auto` never picks OpenShell.  Fails closed
   when `harness-sandbox-policy` is `required` and no backend exists.
   A confined command has `HARNESS_SANDBOX` set to the backend's name,
-  `bwrap`, `systemd` or `mxc`, so a script can tell it runs confined
-  (`scripts/dev.sh start` warns that an Emacs it starts there ends with
-  the command).
+  `bwrap`, `systemd`, `mxc` or `openshell`, so a script can tell it runs
+  confined (`scripts/dev.sh start` warns that an Emacs it starts there
+  ends with the command).
   Without the sandbox module the bash and elisp tools fail closed for
   `required` too (`harness-tools-shell--wrap`), rather than running the command
   unconfined.
@@ -4341,10 +4350,12 @@ decisions.
     `--cap-add` would be real).  Those two cases are refused rather
     than made uniform with `--unshare-user`, which has not been verified
     for a setuid bwrap.
-  - systemd-run (a `--user` unit can only lower its own capabilities)
-    and MXC (Seatbelt has none) signal `harness-sandbox-unavailable`
+  - systemd-run (a `--user` unit can only lower its own capabilities),
+    MXC (Seatbelt has none) and OpenShell (a non-root workload with
+    none, and no way to add one) signal `harness-sandbox-unavailable`
     for any `:capabilities`, before MXC makes the command's private
-    `$TMPDIR`: the command does not run without what was asked for.
+    `$TMPDIR` or OpenShell's policy file is written: the command does
+    not run without what was asked for.
     Each refusal says why and points to `drop_access` (attribute
     capability, value all), which lets the session's commands run again.
 - The registry `harness-sandbox-capabilities` lists the 41 Linux
@@ -4540,6 +4551,57 @@ decisions.
   and MXC hands the output over only when the command exits, so the
   bash tool's live note shows nothing until then.  MXC needs macOS 15
   or later.
+- NVIDIA OpenShell (`harness-sandbox--openshell-command`; setup in
+  [openshell.md](openshell.md)), asked for with
+  `harness-sandbox-backend`, never picked by `auto`.  It is a runtime,
+  not a wrapper: a gateway makes each sandbox a container from an image,
+  its supervisor enforcing a policy with Landlock and seccomp and letting
+  out only the connections the policy lists.  The wrapped command is
+  `bash -c SCRIPT harness-openshell PROGRAM NAME N ARGS… EXEC…`
+  (`harness-sandbox--openshell-script`): `sandbox create --detach
+  --no-keep --no-auto-providers --label harness=emacs-agent-harness
+  --policy FILE [--from IMAGE] [--driver-config-json JSON] [extra args]
+  -- sleep TTL` (its progress lines swallowed; a failure prints what it
+  said and ends with 125), then `sandbox exec -n NAME --no-tty
+  --no-login-shell --workdir CWD --env K=V… -- COMMAND` (its output,
+  standard error and status are the command's), then `sandbox delete`
+  detached in a session of its own (`setsid`), so the harness's kill of
+  a timed-out command's process group cannot take it too; a TERM runs
+  the same delete, and a sandbox no delete reached ends with its `sleep`,
+  `harness-sandbox--openshell-ttl` (3900 s) after it began.
+  `harness-sandbox--openshell-spec` describes the sandbox from the
+  directories bwrap's arguments are made from: bind mounts
+  (`harness-sandbox--openshell-mounts`: those of
+  `harness-sandbox--mounts`, CWD, a worktree's common git directory with
+  its hooks, config, index and HEAD read-only inside it unless
+  `:read-only`, the `:scratch` directories always writable, and a
+  tmpfs at `harness-sandbox--home`, which `$HOME` names, with the
+  real home's directories shown under it), the Landlock paths, the
+  rules of `harness-sandbox-openshell-network-rules` (none when the
+  session is offline) and the environment (`HARNESS_SANDBOX=openshell`,
+  `HOME`, the git identity, LANG/LANGUAGE/LC_ALL/TZ).  A target the
+  gateway refuses -- the paths OpenShell keeps (`/opt/openshell`,
+  `/etc/openshell`, `/run/openshell`, `/proc`, `/dev`…), the image's own
+  `/usr`, `/lib`, `/bin`, a non-normalized one -- is left out with a line
+  in the log.  The policy file
+  (`harness-sandbox--openshell-policy-text`: `filesystem_policy` with
+  the image's system paths, `harness-sandbox-openshell-image-paths` and
+  the mounts by mode, `landlock: hard_requirement`, `process` with the
+  host uid and gid unless root, `network_policies`) is written under
+  `<state>/openshell/policy-HASH.yaml` and used again only while it holds
+  exactly what it should.  `harness-sandbox--openshell-problem`, run by
+  the detection only when OpenShell is asked for, checks the program,
+  the options (`harness-sandbox--openshell-config-problem`, read from
+  global values only), the help of the three commands for the options
+  passed, and `openshell status -o json`; a problem makes the backend
+  what `auto` picks, with `harness-sandbox--requested` and `--problem`
+  kept for `sandbox/status`.  `harness-sandbox-openshell-check` starts a
+  throwaway sandbox the way a command does and says how it went.  A
+  word of a command over 32 KiB, or a policy over 256 paths, signals
+  `harness-sandbox-unavailable` before anything starts.  The tests run
+  against `test/fixtures/fake-openshell.py`, which checks the policy and
+  the driver config as the gateway does and runs the command in bwrap
+  with the sandbox's mounts and network.
 
 ### agent
 

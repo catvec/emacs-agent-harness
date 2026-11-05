@@ -440,6 +440,100 @@ their own: none of their lists is on the Overview."
       (should-not (string-match-p "ask_user\\|read_file\\|Never ask\\|Offered" (harness-ui-access-test-text)))
       (should-not (string-match-p "\\[All\\]\\|decided by" (harness-ui-access-test-text))))))
 
+(ert-deftest harness-ui-access-sandbox-row-says-what-the-backend-cannot-do ()
+  "The Sandbox row names the backend in use, what it cannot do of the access model,
+and, when OpenShell was asked for and could not be used, which backend that is and why."
+  (harness-ui-access-test-with
+    ;; OpenShell in use: its limits, a line each.
+    (harness-register-method
+     'sandbox/status
+     (lambda () '(:backend openshell :available (openshell) :policy preferred
+                  :limits ("No Linux capability can be given: OpenShell runs commands as a non-root user."
+                           "The network is never open: a command with it on reaches only github.com:443."))))
+    (harness-ui-access-test-open sid)
+    (let ((row (harness-ui-access-test-setting 'sandbox)))
+      (should (string-match-p "\\`Sandbox openshell " row))
+      (should (string-match-p "Limit · No Linux capability can be given: OpenShell runs commands as a non-root user\\." row))
+      (should (string-match-p "Limit · The network is never open: a command with it on reaches only github\\.com:443\\." row))
+      (should-not (string-match-p "asked for" row)))
+    ;; Asked for and unusable: what runs instead, and the reason.
+    (harness-register-method
+     'sandbox/status
+     (lambda () '(:backend bwrap :available (bwrap openshell) :policy preferred :limits nil
+                  :requested openshell
+                  :problem "the gateway fake does not answer: connection refused")))
+    (harness-ui-access-refresh)
+    (harness-ui-access-test-wait-text "OpenShell asked for, not used")
+    (let ((row (harness-ui-access-test-setting 'sandbox)))
+      (should (string-match-p "\\`Sandbox bwrap OpenShell asked for, not used" row))
+      (should (string-match-p "OpenShell cannot be used: the gateway fake does not answer: connection refused" row))
+      (should-not (string-match-p "Limit" row)))
+    ;; A harness that says neither is read as before: no OpenShell, no buttons for it.
+    (harness-register-method 'sandbox/status (lambda () '(:backend bwrap :available (bwrap) :policy preferred)))
+    (harness-ui-access-refresh)
+    (harness-ui-access-test-wait-text "OpenShell asked for, not used" t)
+    (should-not (string-match-p "Limit\\|cannot be used\\|Detect again\\|Test OpenShell"
+                                (harness-ui-access-test-setting 'sandbox)))))
+
+(ert-deftest harness-ui-access-sandbox-buttons-detect-again-and-test-openshell ()
+  "Where OpenShell is installed or was asked for, the Sandbox row has [Detect again],
+which asks the harness to look for the backends again, and [Test OpenShell], which
+starts a throwaway sandbox; each says what came of it, and the view follows."
+  (harness-ui-access-test-with
+    (let ((status '(:backend bwrap :available (bwrap openshell) :policy preferred
+                    :requested openshell :problem "the gateway does not answer"))
+          (checks 0)
+          (messages nil))
+      (harness-register-method 'sandbox/status (lambda () status))
+      ;; The gateway is up by the time the harness looks again.
+      (harness-register-method 'sandbox/detect
+                               (lambda ()
+                                 (setq status '(:backend openshell :available (bwrap openshell) :policy preferred
+                                                :limits ("No Linux capability can be given.")))
+                                 status))
+      (harness-register-method 'sandbox/check
+                               (lambda ()
+                                 (cl-incf checks)
+                                 (harness-resolved (list :ok t :message "OpenShell started a sandbox and ran a command in it"))))
+      (harness-ui-access-test-open sid)
+      (should (equal "[Detect again] [Test OpenShell]"
+                     (let ((row (harness-ui-access-test-setting 'sandbox)))
+                       (and (string-match "\\[Detect again\\] \\[Test OpenShell\\]" row) (match-string 0 row)))))
+      (should (eq #'harness-ui-access-redetect-sandbox (key-binding (kbd "D"))))
+      (should (eq #'harness-ui-access-check-openshell (key-binding (kbd "O"))))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) messages)))))
+        ;; The test: what it says is shown, and nothing else changes.
+        (harness-ui-access-test-click "[Test OpenShell]" (harness-ui-access--find-anchor '(setting . sandbox)))
+        (harness-test-wait (lambda () (member "OpenShell started a sandbox and ran a command in it" messages))
+                           5 "what the test said")
+        (should (= 1 checks))
+        (should (eq 'bwrap (plist-get status :backend)))
+        ;; Detecting again moves to OpenShell, says so, and the row follows.
+        (harness-ui-access-test-click "[Detect again]" (harness-ui-access--find-anchor '(setting . sandbox)))
+        (harness-test-wait (lambda () (member "Sandbox backend: openshell" messages)) 5 "the backend named")
+        (harness-ui-access-test-wait-setting 'sandbox "\\`Sandbox openshell ")
+        (should (string-match-p "Limit · No Linux capability can be given\\."
+                                (harness-ui-access-test-setting 'sandbox)))
+        (should-not (string-match-p "asked for, not used" (harness-ui-access-test-text)))
+        ;; Still unusable: it says why.
+        (setq status '(:backend bwrap :available (bwrap openshell) :policy preferred))
+        (harness-register-method 'sandbox/detect
+                                 (lambda ()
+                                   '(:backend bwrap :available (bwrap openshell) :policy preferred
+                                     :requested openshell :problem "no gateway is registered")))
+        (harness-ui-access-test-click "[Detect again]" (harness-ui-access--find-anchor '(setting . sandbox)))
+        (harness-test-wait (lambda () (member "Sandbox backend: bwrap (OpenShell cannot be used: no gateway is registered)"
+                                              messages))
+                           5 "the problem named")))))
+
+(ert-deftest harness-ui-access-sandbox-buttons-in-a-harness-without-openshell ()
+  "The Sandbox row of a machine that has no OpenShell, and asked for none, has no button for it."
+  (harness-ui-access-test-with
+    (harness-register-method 'sandbox/status (lambda () '(:backend bwrap :available (bwrap systemd) :policy preferred)))
+    (harness-ui-access-test-open sid)
+    (should-not (string-match-p "\\[Detect again\\]\\|\\[Test OpenShell\\]" (harness-ui-access-test-text)))))
+
 (ert-deftest harness-ui-access-choices-change-the-settings ()
   "A choice that is not in effect is a button that takes it, and the view follows:
 the permission mode, whether the session asks you, the network and writing.  The

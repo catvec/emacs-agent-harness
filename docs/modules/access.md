@@ -53,11 +53,12 @@ held by the harness, not by a prompt:
 - the capabilities go to the sandbox, which the `tools/sandbox-options`
   filter at 80 tells (`:capabilities`): bwrap, which drops every
   Linux capability of the commands it runs, keeps those and no other
-  (`--cap-add`), from the next bash or elisp command on.  The jail
-  enforces it, not this module: see "Capabilities" in
-  harness-sandbox.el for what bwrap can and cannot give, and the
-  read-only filter of harness-readonly.el, which takes them off again
-  for a read-only session.
+  (`--cap-add`), from the next bash or elisp command on; the other
+  backends -- systemd-run, MXC, NVIDIA OpenShell -- cannot give one,
+  and say so.  The jail enforces it, not this module: see
+  "Capabilities" in harness-sandbox.el for what each can and cannot
+  give, and the read-only filter of harness-readonly.el, which takes
+  them off again for a read-only session.
 
 A sub-agent or a fork takes its parent's restrictions with it (the
 network, writing, the tools, the directories given up), so a
@@ -82,8 +83,8 @@ directory goes through the very prompt of `request_directory_access`
 (perms' `harness-perms-decide-dir-request`), the rest through
 `harness-perms-confirm`.  `request_directory_access` stays, the
 directory form of the same request.  A capability is asked for only
-where the jail can enforce it: a bwrap sandbox, for a local
-directory, that the user lets agents ask for (see
+where the jail can enforce it: a bwrap sandbox (no other backend can
+give one), for a local directory, that the user lets agents ask for (see
 `harness-sandbox-grantable-capabilities`), in a session that may
 write.  It counts for the commands the sandbox runs on this machine;
 on another one (an ssh command, a remote session) it changes nothing.

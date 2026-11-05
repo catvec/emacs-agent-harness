@@ -147,6 +147,7 @@ A non-comprehensive list of all the different functionality offered by modules s
 - Git worktrees 
 - Permissions
   - Operating system level jails (Cross platform)
+  - NVIDIA OpenShell, a jail backend you ask for: set `harness-sandbox-backend` to `openshell`, which `auto` never picks. Its setup is in [`docs/openshell.md`](./docs/openshell.md)
   - Directory allow listing, including the worktrees of the sub-agents a session started, which it may read
   - Secret file blocking
   - Auto mode

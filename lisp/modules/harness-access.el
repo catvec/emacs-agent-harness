@@ -43,11 +43,12 @@
 ;; - the capabilities go to the sandbox, which the `tools/sandbox-options'
 ;;   filter at 80 tells (`:capabilities'): bwrap, which drops every
 ;;   Linux capability of the commands it runs, keeps those and no other
-;;   (`--cap-add'), from the next bash or elisp command on.  The jail
-;;   enforces it, not this module: see "Capabilities" in
-;;   harness-sandbox.el for what bwrap can and cannot give, and the
-;;   read-only filter of harness-readonly.el, which takes them off again
-;;   for a read-only session.
+;;   (`--cap-add'), from the next bash or elisp command on; the other
+;;   backends -- systemd-run, MXC, NVIDIA OpenShell -- cannot give one,
+;;   and say so.  The jail enforces it, not this module: see
+;;   "Capabilities" in harness-sandbox.el for what each can and cannot
+;;   give, and the read-only filter of harness-readonly.el, which takes
+;;   them off again for a read-only session.
 ;;
 ;; A sub-agent or a fork takes its parent's restrictions with it (the
 ;; network, writing, the tools, the directories given up), so a
@@ -72,8 +73,8 @@
 ;; (perms' `harness-perms-decide-dir-request'), the rest through
 ;; `harness-perms-confirm'.  `request_directory_access' stays, the
 ;; directory form of the same request.  A capability is asked for only
-;; where the jail can enforce it: a bwrap sandbox, for a local
-;; directory, that the user lets agents ask for (see
+;; where the jail can enforce it: a bwrap sandbox (no other backend can
+;; give one), for a local directory, that the user lets agents ask for (see
 ;; `harness-sandbox-grantable-capabilities'), in a session that may
 ;; write.  It counts for the commands the sandbox runs on this machine;
 ;; on another one (an ssh command, a remote session) it changes nothing.
@@ -755,12 +756,22 @@ write: a read-only session's commands get none."
             :hint "Carry on reading; say in your answer what you needed."))
      (t (list :name name :info info)))))
 
+(defun harness-access--backend-name (backend)
+  "Return how the sandbox BACKEND, a symbol or its name, is called in a message."
+  (let ((name (format "%s" (or backend "sandbox"))))
+    (pcase name
+      ("systemd" "systemd-run")
+      ("mxc" "MXC")
+      ("openshell" "OpenShell")
+      (_ name))))
+
 (defun harness-access--capability-reason (name info)
   "Return what the prompt says of capability NAME, given INFO, the jail's answer."
   (let ((doc (cdr (assoc name (plist-get info :docs))))
         (scope (cdr (assoc name (plist-get info :scopes)))))
-    (format "%s lets a command %s.  The agent's bash and elisp commands run in the bwrap sandbox, which drops every capability; this one is valid inside the sandbox's own namespaces only, not on the host and not on another machine.%s  It applies from the next bash or elisp command on, until the agent or you take it away (the access view, or drop_access)."
+    (format "%s lets a command %s.  The agent's bash and elisp commands run in the %s sandbox, which drops every capability; this one is valid inside the sandbox's own namespaces only, not on the host and not on another machine.%s  It applies from the next bash or elisp command on, until the agent or you take it away (the access view, or drop_access)."
             name (or doc "use it")
+            (harness-access--backend-name (plist-get info :backend))
             (if scope (concat "  " scope) ""))))
 
 (defun harness-access-grant-capability (session-id name &optional who)
@@ -1463,15 +1474,21 @@ the tool, the reason, the call id or the call's title) and `:limit'
                       (ignore-errors (harness-call 'sandbox/status))))
          (dir (harness-readonly-dir session))
          (remote (and (stringp dir) (harness-file-remote-p dir) t)))
-    (list :backend (or (plist-get status :backend) 'none)
-          :available (plist-get status :available)
-          :policy (or (and (harness-method-exists-p 'config/get)
-                           (ignore-errors (harness-call 'config/get 'harness-sandbox-policy
-                                                        (plist-get session :cwd))))
-                      (plist-get status :policy))
-          :confined (and (harness-readonly-confined-p dir) t)
-          :remote remote
-          :module (and status t))))
+    (append (list :backend (or (plist-get status :backend) 'none)
+                  :available (plist-get status :available)
+                  :policy (or (and (harness-method-exists-p 'config/get)
+                                   (ignore-errors (harness-call 'config/get 'harness-sandbox-policy
+                                                                (plist-get session :cwd))))
+                              (plist-get status :policy))
+                  :confined (and (harness-readonly-confined-p dir) t)
+                  :remote remote
+                  :module (and status t)
+                  ;; What the backend cannot do of the access model, in lines.
+                  :limits (plist-get status :limits))
+            ;; The backend that was asked for and could not be used, and why.
+            (and (plist-get status :requested)
+                 (list :requested (plist-get status :requested)
+                       :problem (plist-get status :problem))))))
 
 (defconst harness-access--elsewhere "not for this kind of session"
   "Why a tool that belongs to other kinds of session is not offered.
@@ -1595,7 +1612,10 @@ with `:backend'; and `:why', what stands in the way of raising one now
   "Return everything about SESSION-ID's access, for the access view.
 A plist: `:session' (id, name, cwd, host, worktree, kind, status),
 `:sandbox' (`:backend', `:available', `:policy', `:confined' -- whether
-commands in its directory run confined -- `:remote'), `:mode' and
+commands in its directory run confined -- `:remote', `:limits', what the
+backend cannot do of the access model as lines of text, and, when a
+backend was asked for that could not be used, `:requested' and
+`:problem'), `:mode' and
 `:mode-pinned', `:non-interactive' and `:non-interactive-pinned',
 `:network', `:corporate', `:read-only' with `:read-only-profile' (its
 own) and `:read-only-by' (another module's policy), `:profile',

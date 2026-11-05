@@ -18,14 +18,19 @@
 ;;   or take them away; why none can be given when none can is said
 ;;   there) and the sandbox its commands run in -- the backend, the ones
 ;;   this machine has, the policy, whether commands in its directory are
-;;   confined.  Directories are those it may write, those it may only
-;;   read and those it gave up, each with where it comes from and what
-;;   can be done with it: give it up or keep it for reading only, revoke
-;;   a grant, restore one given up; new ones are allowed, for writing or
-;;   for reading only, and the session moves to another working
-;;   directory (`harness-directories', C-c h d, opens the page here).
-;;   Details end it: a line each for the tools, the rules and the
-;;   judgements, with what they hold, each a link to its page.
+;;   confined, what the backend cannot do of all this (OpenShell gives no
+;;   capability and no open network, say), and why a backend that was
+;;   asked for and could not be used is not the one in use; where
+;;   OpenShell is installed or asked for, buttons look for the backends
+;;   again (`D', after starting its gateway) and try a throwaway
+;;   sandbox (`O').  Directories are those it may write, those it may
+;;   only read and those it gave up, each with where it comes from and
+;;   what can be done with it: give it up or keep it for reading only,
+;;   revoke a grant, restore one given up; new ones are allowed, for
+;;   writing or for reading only, and the session moves to another
+;;   working directory (`harness-directories', C-c h d, opens the page
+;;   here).  Details end it: a line each for the tools, the rules and
+;;   the judgements, with what they hold, each a link to its page.
 ;; - Tools: those the session is offered, those it is not and why,
 ;;   and those that belong to other kinds of session.  A tool is turned
 ;;   off for the session, and on again, here.
@@ -383,13 +388,15 @@ strings, the setting's choices or its value and buttons, SEPARATOR
 apart (three spaces by default) and wrapped under each other when the
 window is too narrow for them; a string is a list of one.  NOTE, when
 given, is what to know of what is in effect, dim, wrapped to the view's
-width.  The row carries NAME as its anchor, so point stays on it when
-the view is drawn again after a click."
+width; a list of strings is a note of each, one under another.  The row
+carries NAME as its anchor, so point stays on it when the view is drawn
+again after a click."
   (let ((start (point)))
     (insert "  " (propertize (harness-ui-access--pad label harness-ui-access--label-width) 'face 'harness-dim-face))
     (harness-ui-access--wrap (if (listp control) control (list control))
                              (harness-ui-access--width) (harness-ui-access--indent) (or separator "   "))
-    (when note (harness-ui-access--insert-note note))
+    (dolist (text (if (listp note) note (list note)))
+      (when text (harness-ui-access--insert-note text)))
     (put-text-property start (point) 'harness-ui-access-anchor (cons 'setting name))))
 
 (defun harness-ui-access--choices (&rest choices)
@@ -498,21 +505,54 @@ SANDBOX is the `:sandbox' of `access/describe'."
         ((harness-ui-access--true-p (plist-get sandbox :confined)) "Commands confined")
         (t "Commands unconfined")))
 
+(defun harness-ui-access--backend-label (backend)
+  "Return how the sandbox BACKEND, a string, is called in the view."
+  (pcase backend
+    ("openshell" "OpenShell")
+    ("systemd" "systemd-run")
+    ("mxc" "MXC")
+    (_ backend)))
+
 (defun harness-ui-access--insert-sandbox (d)
   "Insert the sandbox row of the settings of the session described as D.
 It names the backend, and says whether commands in the session's
-directory run confined, which backends this machine has and the policy."
+directory run confined, which backends this machine has and the policy.
+A backend that was asked for and could not be used (OpenShell, with no
+gateway to reach) is named beside the one in use, with why, and what
+the backend in use cannot do of the access model is listed under it."
   (let* ((sandbox (plist-get d :sandbox))
          (backend (or (harness-ui-access--str (plist-get sandbox :backend)) "none"))
          (available (mapcar #'harness-ui-access--str (plist-get sandbox :available)))
-         (policy (harness-ui-access--str (plist-get sandbox :policy))))
+         (policy (harness-ui-access--str (plist-get sandbox :policy)))
+         (requested (harness-ui-access--str (plist-get sandbox :requested)))
+         (problem (harness-ui-access--str (plist-get sandbox :problem)))
+         (limits (let ((limits (plist-get sandbox :limits)))
+                   (delq nil (mapcar #'harness-ui-access--str (and (consp limits) limits))))))
     (harness-ui-access--setting
      'sandbox "Sandbox"
-     (propertize backend 'face (if (equal backend "none") 'harness-ui-access-denied-face 'bold))
-     (string-join (delq nil (list (harness-ui-access--sandbox-state sandbox)
-                                  (and available (format "Available: %s" (string-join available ", ")))
-                                  (and policy (format "Policy: %s" policy))))
-                  " · "))))
+     (delq nil
+           (list (propertize backend 'face (if (equal backend "none") 'harness-ui-access-denied-face 'bold))
+                 (and requested
+                      (propertize (format "%s asked for, not used" (harness-ui-access--backend-label requested))
+                                  'face 'harness-ui-access-waiting-face))
+                 ;; Only where OpenShell is in play: the other backends are found
+                 ;; when the harness starts, and nothing a click does changes that.
+                 (and (or requested (member "openshell" available))
+                      (harness-ui-access--button
+                       "[Detect again]" #'harness-ui-access-redetect-sandbox
+                       "Look for the sandbox backends again, OpenShell's gateway included (D)"))
+                 (and (or requested (member "openshell" available))
+                      (harness-ui-access--button
+                       "[Test OpenShell]" #'harness-ui-access-check-openshell
+                       "Start a throwaway OpenShell sandbox and run a command in it (O)"))))
+     (cons (string-join (delq nil (list (harness-ui-access--sandbox-state sandbox)
+                                        (and available (format "Available: %s" (string-join available ", ")))
+                                        (and policy (format "Policy: %s" policy))))
+                        " · ")
+           (append (and requested
+                        (list (format "%s cannot be used: %s" (harness-ui-access--backend-label requested)
+                                      (or problem "no reason given"))))
+                   (mapcar (lambda (line) (concat "Limit · " line)) limits))))))
 
 (defun harness-ui-access--insert-mode (d)
   "Insert the permission mode row of the settings of the session described as D.
@@ -1408,6 +1448,36 @@ decides what would ask you for permission."
   (interactive)
   (harness-ui-access-set-network (not (harness-ui-access--true-p (plist-get harness-ui-access--describe :network)))))
 
+(defun harness-ui-access-redetect-sandbox ()
+  "Look for the sandbox backends again, and say which one the harness picked.
+Run it after starting an OpenShell gateway that was down: the backend is
+chosen when the harness starts, and again only by this.  It names the
+backend in use, and why OpenShell is not when it was asked for."
+  (interactive)
+  (let ((buffer (current-buffer)))
+    (message "Looking for the sandbox backends...")
+    (harness-ui-call "_harness/sandbox/detect" nil
+                     (lambda (status)
+                       (let ((backend (or (harness-ui-access--str (plist-get status :backend)) "none"))
+                             (problem (harness-ui-access--str (plist-get status :problem))))
+                         (message "Sandbox backend: %s%s" backend
+                                  (if problem (format " (OpenShell cannot be used: %s)" problem) "")))
+                       (when (buffer-live-p buffer) (harness-ui-access-refresh buffer))))))
+
+(defun harness-ui-access-check-openshell ()
+  "Start a throwaway OpenShell sandbox, run a command in it, and say how it went.
+It goes the way every command does, so it finds what the detection
+cannot: a gateway that refuses the bind mounts, an image without bash,
+a kernel without Landlock."
+  (interactive)
+  (let ((buffer (current-buffer)))
+    (message "Starting an OpenShell sandbox...")
+    (harness-ui-call "_harness/sandbox/check" nil
+                     (lambda (result)
+                       (message "%s" (or (harness-ui-access--str (plist-get result :message))
+                                         "OpenShell did not say how it went"))
+                       (when (buffer-live-p buffer) (harness-ui-access-refresh buffer))))))
+
 (defun harness-ui-access-set-read-only (on)
   "Keep this buffer's session from writing when ON, else let it write."
   (harness-ui-call "_harness/access/set-read-only" (list :session-id (harness-ui-access--session) :on (if on t :false))
@@ -1816,6 +1886,8 @@ Past the last button the first is next, as TAB goes round a form."
     (define-key map (kbd "w") #'harness-ui-access-toggle-writing)
     (define-key map (kbd "T") #'harness-ui-access-toggle-tool)
     (define-key map (kbd "C") #'harness-ui-access-toggle-capability)
+    (define-key map (kbd "D") #'harness-ui-access-redetect-sandbox)
+    (define-key map (kbd "O") #'harness-ui-access-check-openshell)
     (define-key map (kbd "?") #'harness-menu)
     map)
   "Keymap of `harness-ui-access-mode'.")

@@ -1937,6 +1937,81 @@ thread open.  A session that is no task's has no review to answer."
         (should-not (plist-get own :is-error))
         (should (file-exists-p (expand-file-name "own.txt" dir)))))))
 
+;; Under NVIDIA OpenShell.  A real one needs a gateway that allows bind
+;; mounts (docs/openshell.md), which a test run has not, so those tests
+;; skip without; the stand-in, test/fixtures/fake-openshell.py, runs the
+;; command in bwrap with what the sandbox's mounts and policy describe,
+;; so the same checks run against what the harness asks OpenShell for.
+
+(defmacro harness-supervisor-test-under-openshell (program &rest body)
+  "Run BODY with the sandbox module asked for OpenShell, whose program is PROGRAM.
+Skips the test when the harness cannot use it."
+  (declare (indent 1))
+  `(let ((harness-sandbox-openshell-program ,program)
+         (harness-sandbox-backend 'openshell))
+     (harness-sandbox-detect)
+     (unless (eq 'openshell (plist-get (harness-call 'sandbox/status) :backend))
+       (ert-skip (format "OpenShell cannot be used here: %s"
+                         (plist-get (harness-call 'sandbox/status) :problem))))
+     ,@body))
+
+(defmacro harness-supervisor-test-with-fake-openshell (&rest body)
+  "Run BODY with the stand-in for openshell the program, and a state directory for it.
+Skips the test without python3 or bwrap."
+  (declare (indent 0))
+  `(let ((fake (expand-file-name "test/fixtures/fake-openshell.py" harness-test-root))
+         (state (harness-test-temp-dir)))
+     (unless (and (file-executable-p fake) (executable-find "python3") (executable-find "bwrap"))
+       (ert-skip "the stand-in for openshell needs python3 and bwrap"))
+     (let ((process-environment (cons (concat "FAKE_OPENSHELL_STATE=" (directory-file-name state))
+                                      process-environment)))
+       (unwind-protect
+           (harness-supervisor-test-under-openshell fake ,@body)
+         (delete-directory state t)))))
+
+(defun harness-supervisor-test--bash-can-look-but-not-touch (what)
+  "Check that a supervising session's command looks but does not touch, in WHAT's sandbox.
+A session that is hands-on writes its directory.  Skips the test when
+no sandbox can be started."
+  (let* ((dir (harness-test-temp-dir))
+         (probe (harness-await (harness-run-command (harness-call 'sandbox/wrap dir '("true"))
+                                                    :cwd dir :timeout 60)
+                               70)))
+    (unless (eql 0 (plist-get probe :exit))
+      (ert-skip (format "%s cannot start here: %s" what (string-trim (plist-get probe :stderr)))))
+    (with-temp-file (expand-file-name "seen.txt" dir) (insert "visible\n"))
+    (let* ((sid (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id))
+           (hands-on (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted"
+                                              :ext '(:supervisor :false))
+                                :id))
+           (look (harness-supervisor-test-run sid "bash" '(:command "cat seen.txt")))
+           (touch (harness-supervisor-test-run sid "bash" '(:command "touch made.txt")))
+           (outside (harness-supervisor-test-run sid "bash" '(:command "touch /usr/made-by-bash")))
+           (own (harness-supervisor-test-run hands-on "bash" '(:command "touch own.txt"))))
+      (should (equal "visible\nexit 0" (plist-get look :content)))
+      (should (plist-get (plist-get look :meta) :sandboxed))
+      (should (plist-get touch :is-error))
+      (should-not (file-exists-p (expand-file-name "made.txt" dir)))
+      (should (plist-get outside :is-error))
+      (should-not (file-exists-p "/usr/made-by-bash"))
+      (should-not (plist-get own :is-error))
+      (should (file-exists-p (expand-file-name "own.txt" dir))))))
+
+(ert-deftest harness-supervisor-bash-under-openshell-cannot-write ()
+  "Under a real OpenShell a supervising session's command can look but not touch."
+  (skip-unless (executable-find "openshell"))
+  (harness-supervisor-test-with-modules (tools-shell sandbox)
+    (harness-supervisor-test-allow-all)
+    (harness-supervisor-test-under-openshell (executable-find "openshell")
+      (harness-supervisor-test--bash-can-look-but-not-touch "OpenShell"))))
+
+(ert-deftest harness-supervisor-bash-under-the-openshell-stand-in-cannot-write ()
+  "In what the harness asks OpenShell for, a supervising session's command can look but not touch."
+  (harness-supervisor-test-with-modules (tools-shell sandbox)
+    (harness-supervisor-test-allow-all)
+    (harness-supervisor-test-with-fake-openshell
+      (harness-supervisor-test--bash-can-look-but-not-touch "the OpenShell stand-in"))))
+
 ;;;; Elisp
 
 ;; elisp is off the allowlist, so a supervising session never runs it.
@@ -2021,6 +2096,65 @@ does both."
                              (plist-get (harness-supervisor-test-elisp hands-on code) :content)))
               (should (file-exists-p (expand-file-name "made.txt" dir)))))
         (delete-process server)))))
+
+(defun harness-supervisor-test--elisp-is-read-only-and-offline (what)
+  "Check that a supervising session's background Emacs is read-only and offline in WHAT's sandbox.
+Run past the permission chain, it reads the working directory, writes
+nothing there and reaches no server, and its result comes back.  OpenShell
+has no open network, so a hands-on session's code is offline too there:
+the one thing that differs from bwrap.  Skips the test when no sandbox
+can be started, or its image has no Emacs."
+  (let* ((dir (harness-test-temp-dir))
+         (probe (harness-await (harness-run-command (harness-call 'sandbox/wrap dir '("true"))
+                                                    :cwd dir :timeout 60)
+                               70))
+         (server (harness-test-http-serve nil))
+         (code (format "(list (string-trim (with-temp-buffer (insert-file-contents \"seen.txt\") (buffer-string)))
+                              (condition-case nil (progn (write-region \"x\" nil \"made.txt\") 'written)
+                                (file-error 'refused))
+                              (condition-case nil
+                                  (progn (delete-process (make-network-process :name \"probe\" :host \"127.0.0.1\"
+                                                                               :service %d))
+                                         'online)
+                                (error 'offline)))"
+                       (process-contact server :service))))
+    (unwind-protect
+        (progn
+          (unless (eql 0 (plist-get probe :exit))
+            (ert-skip (format "%s cannot start here: %s" what (string-trim (plist-get probe :stderr)))))
+          (with-temp-file (expand-file-name "seen.txt" dir) (insert "visible\n"))
+          (let* ((sid (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id))
+                 (hands-on (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted"
+                                                    :ext '(:supervisor :false))
+                                      :id))
+                 (look (harness-supervisor-test-elisp sid code)))
+            (when (string-match-p "no such file or directory\\|command not found\\|exit 127" (plist-get look :content))
+              (ert-skip (format "%s has no Emacs to run the code in: %s" what (plist-get look :content))))
+            (should (plist-get (plist-get look :meta) :sandboxed))
+            (should (equal "=> (\"visible\" refused offline)" (plist-get look :content)))
+            (should-not (file-exists-p (expand-file-name "made.txt" dir)))
+            (should (equal "=> (\"visible\" written offline)"
+                           (plist-get (harness-supervisor-test-elisp hands-on code) :content)))
+            (should (file-exists-p (expand-file-name "made.txt" dir)))))
+      (delete-process server))))
+
+(ert-deftest harness-supervisor-elisp-under-openshell-is-read-only-and-offline ()
+  "Under a real OpenShell a supervising session's background Emacs, run past the
+permission chain, reads the working directory, writes nothing there and
+reaches no server, and its result comes back.  Its image must hold Emacs."
+  (skip-unless (executable-find "openshell"))
+  (harness-supervisor-test-with-modules (tools-shell sandbox)
+    (harness-supervisor-test-allow-all)
+    (harness-supervisor-test-under-openshell (executable-find "openshell")
+      (harness-supervisor-test--elisp-is-read-only-and-offline "OpenShell"))))
+
+(ert-deftest harness-supervisor-elisp-under-the-openshell-stand-in-is-read-only-and-offline ()
+  "In what the harness asks OpenShell for, a supervising session's background Emacs
+is read-only and offline, and the hands-on one offline too: OpenShell has no open network."
+  (harness-supervisor-test-with-modules (tools-shell sandbox)
+    (harness-supervisor-test-allow-all)
+    (harness-supervisor-test-with-fake-openshell
+      (harness-supervisor-test--elisp-is-read-only-and-offline "the OpenShell stand-in"))))
 
 ;;;; The turn must end on a decision
 

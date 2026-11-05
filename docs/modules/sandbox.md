@@ -2,7 +2,7 @@
 
 # sandbox
 
-Kernel sandbox (bwrap / systemd-run / MXC on macOS) for spawned tool processes.
+Kernel sandbox (bwrap / systemd-run / MXC on macOS, or NVIDIA OpenShell on request) for spawned tool processes.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-sandbox.el](../../lisp/modules/harness-sandbox.el)
@@ -19,7 +19,9 @@ boundary.
 
 A backend is picked when the module initialises, in preference
 order: `bwrap` (bubblewrap), `systemd-run --user`, or none; on macOS
-`mxc` (MXC's mxc-exec-mac, below) or none.  The
+`mxc` (MXC's mxc-exec-mac, below) or none.  NVIDIA OpenShell
+(below) is a backend too, but only one you ask for with
+`harness-sandbox-backend`: `auto` never picks it.  The
 `harness-sandbox-policy` setting from the config module decides what
 happens when no backend exists:
 
@@ -52,9 +54,9 @@ hosted providers and most build tools need it; pass `:network nil`
 to cut it, which is only correct for local models.
 
 A confined command has HARNESS_SANDBOX set to the backend's name,
-`bwrap`, `systemd` or `mxc`, so a script can tell it runs confined:
-scripts/dev.sh warns that an Emacs it starts there ends with the
-command.
+`bwrap`, `systemd`, `mxc` or `openshell`, so a script can tell it
+runs confined: scripts/dev.sh warns that an Emacs it starts there
+ends with the command.
 
 On macOS the backend is MXC (Microsoft eXecution Container, see
 `harness-sandbox-mxc-program`): its executor, mxc-exec-mac, confines
@@ -87,6 +89,54 @@ writable but that $TMPDIR.  Unlike bwrap, MXC gives the command no
 PID namespace of its own; /tmp cannot be written there (a command
 uses $TMPDIR); and MXC hands the command's output on only when it
 ends, so the note under a running bash call shows none until then.
+
+NVIDIA OpenShell (https://github.com/NVIDIA/OpenShell, see
+`harness-sandbox-openshell-program`) is a different kind of backend,
+and the one `auto` never picks.  It is no wrapper but a runtime: a
+gateway, a service of yours, makes each sandbox a container from an
+image, in which a supervisor enforces a policy with Landlock and
+seccomp and lets out only the network connections the policy
+allows.  Ask for it with `harness-sandbox-backend` set to
+`openshell`; docs/openshell.md says how to set the gateway up.  When
+it cannot be used -- no openshell program, no gateway that answers
+`openshell status`, a program too old for the options this module
+passes -- the harness falls back to the backend `auto` would pick,
+logs why, and `sandbox/status` says so (`:requested`, `:problem`);
+it falls back to no sandbox only when there is no other.
+
+A command runs in a sandbox made for it alone: openshell's
+`sandbox create` (detached, ephemeral) makes it, `sandbox exec` runs
+the command, whose output, standard error and exit status come back
+as they are, and `sandbox delete` removes it, in the background (a
+sandbox whose deletion fails ends by itself, an hour or so after it
+was made).  The gateway is the one `openshell` uses: the active one,
+or that of $OPENSHELL_GATEWAY.  What the command sees is what the
+access model lists, as OpenShell can say it: the working directory, the
+`:writable` directories and the `:scratch` ones are bind mounts,
+read-write; the `:readable` ones, the skills and a worktree's git
+directory (its hooks, config, index and HEAD read-only inside it) are
+bind mounts too, as bwrap shows them, each at its own path; a tmpfs
+is $HOME, with the directories of the real home shown under it as
+systemd-run does.  The gateway must allow bind mounts
+(docs/openshell.md).  The policy file the sandbox is made with names
+the same directories for Landlock (`filesystem_policy`), the system
+paths of the image and those of `harness-sandbox-openshell-image-paths`,
+the network rules and the host user's own uid and gid; `:read-only`
+makes every directory read-only but /tmp.  A command in the image
+is not a command on this machine: it sees the image's /usr, so the
+tools it runs -- git, and Emacs for the elisp tool -- must be in the
+image (`harness-sandbox-openshell-image`), and
+`harness-sandbox-extra-read-only-dirs` means nothing to it.
+
+What OpenShell cannot say the harness does not pretend.  It gives a
+command no Linux capability, and `:capabilities` signal
+`harness-sandbox-unavailable` as for systemd-run.  Its network is a
+list of the endpoints a policy allows, never open: `:network nil` is
+a policy with none, as empty as bwrap's network namespace, and a
+command with the network on reaches only the hosts of
+`harness-sandbox-openshell-network-rules`.  No argument of a command
+may be longer than 32 KiB, which the gateway refuses.
+`sandbox/status` lists such limits of the backend in use (`:limits`).
 
 Remote working directories (TRAMP) are never wrapped: the sandbox
 binaries and the mounts would have to exist on the remote host, and
@@ -130,10 +180,11 @@ names come from a registry of the capabilities the harness knows
 (`harness-sandbox-capabilities`), so nothing else ever reaches
 bwrap's command line, and only those that
 `harness-sandbox-grantable-capabilities` lists are passed on.  A
-`:read-only` command is given none.  bwrap alone can: systemd-run
-and MXC signal `harness-sandbox-unavailable` for `:capabilities`,
-and so does bwrap when `--cap-add` would hand out real capabilities
-of the host, being setuid or run by root.  See "Capabilities" below.
+`:read-only` command is given none.  bwrap alone can: systemd-run,
+MXC and OpenShell signal `harness-sandbox-unavailable` for
+`:capabilities`, and so does bwrap when `--cap-add` would hand out
+real capabilities of the host, being setuid or run by root.  See
+"Capabilities" below.
 
 Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
 `sandbox/capabilities`, `sandbox/capability-name`.
@@ -144,9 +195,16 @@ Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
 
 - `sandbox/capabilities` (cwd) — Say what the jail does about the Linux capabilities of commands run in CWD.
 - `sandbox/capability-name` (value) — Return the canonical name of the Linux capability VALUE names, or nil.
+- `sandbox/check` — Start a throwaway OpenShell sandbox, run a command in it, say how it went.
 - `sandbox/confined-p` (cwd) — Non-nil when commands run in CWD are confined by a sandbox backend.
-- `sandbox/status` — Return (:backend BACKEND :available (BACKENDS…) :policy POLICY).
+- `sandbox/detect` — Look for the backends again, choose one, and return `sandbox/status`.
+- `sandbox/status` — Return (:backend BACKEND :available (BACKENDS…) :policy POLICY :limits (TEXT…)).
 - `sandbox/wrap` (cwd command &rest opts) — Return COMMAND (a list of strings) wrapped to run confined in CWD.
+
+### Commands
+
+- `harness-sandbox-detect` — Find the available backends and choose one.
+- `harness-sandbox-openshell-check` — Run a command in a throwaway OpenShell sandbox and say whether that worked.
 
 ### Options
 
@@ -154,6 +212,12 @@ Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/confined-p`,
 - `harness-sandbox-extra-read-only-dirs` — Additional directories bound read-only into every sandbox.
 - `harness-sandbox-grantable-capabilities` — The Linux capabilities an agent may ask the user to give its commands.
 - `harness-sandbox-mxc-program` — Name or absolute path of MXC's macOS executor, mxc-exec-mac.
+- `harness-sandbox-openshell-driver` — The compute driver of the gateway, `docker` or `podman`.
+- `harness-sandbox-openshell-extra-args` — Further arguments for `openshell sandbox create`, a list of strings.
+- `harness-sandbox-openshell-image` — The image OpenShell sandboxes are made from, or nil for the gateway's default.
+- `harness-sandbox-openshell-image-paths` — Directories of the OpenShell image a command may read, besides the system ones.
+- `harness-sandbox-openshell-network-rules` — The endpoints a command with the network on may reach in an OpenShell sandbox.
+- `harness-sandbox-openshell-program` — Name or absolute path of NVIDIA OpenShell's command line, openshell.
 
 ## Uses
 

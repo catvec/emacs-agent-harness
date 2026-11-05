@@ -243,8 +243,10 @@ not used, and the BTW keeps its session's model.
 - **Sandbox** (`harness-sandbox-policy`).  `required` makes a command
   fail when it cannot be sandboxed: when no sandbox backend exists
   (bubblewrap or `systemd-run` on GNU/Linux; on macOS the backend is
-  MXC's `mxc-exec-mac`), as before, and now also when the sandbox module
-  is not loaded, where a command used to run unconfined.
+  MXC's `mxc-exec-mac`; NVIDIA OpenShell, which `harness-sandbox-backend`
+  asks for, falls back to those when it cannot be used), as before, and
+  now also when the sandbox module is not loaded, where a command used
+  to run unconfined.
 - **Linux capabilities** (`harness-sandbox-grantable-capabilities`).
   The capabilities an agent may ask the user to give its commands, bwrap
   dropping every one otherwise.  A policy that sets it to nil switches

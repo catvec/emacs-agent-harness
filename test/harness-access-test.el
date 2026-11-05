@@ -793,6 +793,52 @@ it away asks no connection."
         (should-not (plist-get (funcall entry "test_hand_in" off) :profile)))
       (should (member "read_file" (plist-get (plist-get d :tools) :on))))))
 
+(ert-deftest harness-access-describe-says-what-the-sandbox-cannot-do ()
+  "The sandbox of access/describe carries the limits of the backend in use and,
+when OpenShell was asked for and could not be used, which and why; nothing of
+either when the sandbox says nothing."
+  (harness-access-test-with
+    (let ((sid (harness-access-test-session))
+          (limits '("No Linux capability can be given: OpenShell runs commands as a non-root user."
+                    "The network is never open.")))
+      (harness-register-method 'sandbox/status
+                               (lambda () (list :backend 'openshell :available '(openshell) :policy 'auto
+                                                :limits limits)))
+      (let ((sandbox (plist-get (harness-call 'access/describe sid) :sandbox)))
+        (should (eq 'openshell (plist-get sandbox :backend)))
+        (should (equal limits (plist-get sandbox :limits)))
+        (should-not (plist-member sandbox :requested))
+        (should-not (plist-member sandbox :problem)))
+      (harness-register-method 'sandbox/status
+                               (lambda () '(:backend bwrap :available (bwrap openshell) :policy auto :limits nil
+                                            :requested openshell :problem "the gateway does not answer")))
+      (let ((sandbox (plist-get (harness-call 'access/describe sid) :sandbox)))
+        (should (eq 'bwrap (plist-get sandbox :backend)))
+        (should-not (plist-get sandbox :limits))
+        (should (eq 'openshell (plist-get sandbox :requested)))
+        (should (equal "the gateway does not answer" (plist-get sandbox :problem))))
+      ;; An older sandbox module that has no limits to give.
+      (harness-register-method 'sandbox/status (lambda () '(:backend bwrap :available (bwrap) :policy auto)))
+      (let ((sandbox (plist-get (harness-call 'access/describe sid) :sandbox)))
+        (should-not (plist-get sandbox :limits))
+        (should-not (plist-member sandbox :requested))))))
+
+(ert-deftest harness-access-capability-prompt-names-the-sandbox-it-runs-in ()
+  "What the prompt says of the sandbox that drops every capability is the backend's name,
+not always bwrap's."
+  (harness-access-test-with
+    (dolist (case '((bwrap . "run in the bwrap sandbox, which drops every capability")
+                    (systemd . "run in the systemd-run sandbox, which drops every capability")
+                    (mxc . "run in the MXC sandbox, which drops every capability")
+                    (openshell . "run in the OpenShell sandbox, which drops every capability")))
+      (should (string-match-p (regexp-quote (cdr case))
+                              (harness-access--capability-reason
+                               "CAP_SYS_PTRACE" (list :backend (car case) :docs '(("CAP_SYS_PTRACE" . "trace"))))))
+      ;; The jail may say it as text, as it comes over the wire.
+      (should (string-match-p (regexp-quote (cdr case))
+                              (harness-access--capability-reason
+                               "CAP_SYS_PTRACE" (list :backend (symbol-name (car case)))))))))
+
 (ert-deftest harness-access-user-setters ()
   "The access/* setters change the profile for the user and say so."
   (harness-access-test-with

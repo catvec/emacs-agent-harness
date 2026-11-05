@@ -10,7 +10,9 @@
 ;;
 ;; A backend is picked when the module initialises, in preference
 ;; order: `bwrap' (bubblewrap), `systemd-run --user', or none; on macOS
-;; `mxc' (MXC's mxc-exec-mac, below) or none.  The
+;; `mxc' (MXC's mxc-exec-mac, below) or none.  NVIDIA OpenShell
+;; (below) is a backend too, but only one you ask for with
+;; `harness-sandbox-backend': `auto' never picks it.  The
 ;; `harness-sandbox-policy' setting from the config module decides what
 ;; happens when no backend exists:
 ;;
@@ -43,9 +45,9 @@
 ;; to cut it, which is only correct for local models.
 ;;
 ;; A confined command has HARNESS_SANDBOX set to the backend's name,
-;; `bwrap', `systemd' or `mxc', so a script can tell it runs confined:
-;; scripts/dev.sh warns that an Emacs it starts there ends with the
-;; command.
+;; `bwrap', `systemd', `mxc' or `openshell', so a script can tell it
+;; runs confined: scripts/dev.sh warns that an Emacs it starts there
+;; ends with the command.
 ;;
 ;; On macOS the backend is MXC (Microsoft eXecution Container, see
 ;; `harness-sandbox-mxc-program'): its executor, mxc-exec-mac, confines
@@ -78,6 +80,54 @@
 ;; PID namespace of its own; /tmp cannot be written there (a command
 ;; uses $TMPDIR); and MXC hands the command's output on only when it
 ;; ends, so the note under a running bash call shows none until then.
+;;
+;; NVIDIA OpenShell (https://github.com/NVIDIA/OpenShell, see
+;; `harness-sandbox-openshell-program') is a different kind of backend,
+;; and the one `auto' never picks.  It is no wrapper but a runtime: a
+;; gateway, a service of yours, makes each sandbox a container from an
+;; image, in which a supervisor enforces a policy with Landlock and
+;; seccomp and lets out only the network connections the policy
+;; allows.  Ask for it with `harness-sandbox-backend' set to
+;; `openshell'; docs/openshell.md says how to set the gateway up.  When
+;; it cannot be used -- no openshell program, no gateway that answers
+;; `openshell status', a program too old for the options this module
+;; passes -- the harness falls back to the backend `auto' would pick,
+;; logs why, and `sandbox/status' says so (`:requested', `:problem');
+;; it falls back to no sandbox only when there is no other.
+;;
+;; A command runs in a sandbox made for it alone: openshell's
+;; `sandbox create' (detached, ephemeral) makes it, `sandbox exec' runs
+;; the command, whose output, standard error and exit status come back
+;; as they are, and `sandbox delete' removes it, in the background (a
+;; sandbox whose deletion fails ends by itself, an hour or so after it
+;; was made).  The gateway is the one `openshell' uses: the active one,
+;; or that of $OPENSHELL_GATEWAY.  What the command sees is what the
+;; access model lists, as OpenShell can say it: the working directory, the
+;; `:writable' directories and the `:scratch' ones are bind mounts,
+;; read-write; the `:readable' ones, the skills and a worktree's git
+;; directory (its hooks, config, index and HEAD read-only inside it) are
+;; bind mounts too, as bwrap shows them, each at its own path; a tmpfs
+;; is $HOME, with the directories of the real home shown under it as
+;; systemd-run does.  The gateway must allow bind mounts
+;; (docs/openshell.md).  The policy file the sandbox is made with names
+;; the same directories for Landlock (`filesystem_policy'), the system
+;; paths of the image and those of `harness-sandbox-openshell-image-paths',
+;; the network rules and the host user's own uid and gid; `:read-only'
+;; makes every directory read-only but /tmp.  A command in the image
+;; is not a command on this machine: it sees the image's /usr, so the
+;; tools it runs -- git, and Emacs for the elisp tool -- must be in the
+;; image (`harness-sandbox-openshell-image'), and
+;; `harness-sandbox-extra-read-only-dirs' means nothing to it.
+;;
+;; What OpenShell cannot say the harness does not pretend.  It gives a
+;; command no Linux capability, and `:capabilities' signal
+;; `harness-sandbox-unavailable' as for systemd-run.  Its network is a
+;; list of the endpoints a policy allows, never open: `:network nil' is
+;; a policy with none, as empty as bwrap's network namespace, and a
+;; command with the network on reaches only the hosts of
+;; `harness-sandbox-openshell-network-rules'.  No argument of a command
+;; may be longer than 32 KiB, which the gateway refuses.
+;; `sandbox/status' lists such limits of the backend in use (`:limits').
 ;;
 ;; Remote working directories (TRAMP) are never wrapped: the sandbox
 ;; binaries and the mounts would have to exist on the remote host, and
@@ -121,10 +171,11 @@
 ;; (`harness-sandbox-capabilities'), so nothing else ever reaches
 ;; bwrap's command line, and only those that
 ;; `harness-sandbox-grantable-capabilities' lists are passed on.  A
-;; `:read-only' command is given none.  bwrap alone can: systemd-run
-;; and MXC signal `harness-sandbox-unavailable' for `:capabilities',
-;; and so does bwrap when `--cap-add' would hand out real capabilities
-;; of the host, being setuid or run by root.  See "Capabilities" below.
+;; `:read-only' command is given none.  bwrap alone can: systemd-run,
+;; MXC and OpenShell signal `harness-sandbox-unavailable' for
+;; `:capabilities', and so does bwrap when `--cap-add' would hand out
+;; real capabilities of the host, being setuid or run by root.  See
+;; "Capabilities" below.
 ;;
 ;; Methods: `sandbox/wrap', `sandbox/status', `sandbox/confined-p',
 ;; `sandbox/capabilities', `sandbox/capability-name'.
@@ -137,6 +188,7 @@
 (require 'harness-util)
 
 (defvar harness-sandbox-policy)         ; defined by the config module
+(defvar harness-state-directory)        ; defined in harness.el
 
 (define-error 'harness-sandbox-unavailable
   "Sandbox required but no backend is available" 'harness-error)
@@ -145,12 +197,20 @@
   "Which sandbox backend to use.
 `auto' picks the first available of bwrap and systemd-run on GNU/Linux,
 and `mxc' (MXC's mxc-exec-mac, see `harness-sandbox-mxc-program') on
-macOS; a specific symbol forces that backend (and counts as unavailable
-when its executable is missing, or on a system it does not run on:
-`mxc' anywhere but macOS, `bwrap' and `systemd' on macOS); `none'
-disables wrapping regardless of policy detection, subject to
-`harness-sandbox-policy'."
-  :type '(choice (const auto) (const bwrap) (const systemd) (const mxc) (const none))
+macOS; it never picks `openshell'.  A specific symbol forces that
+backend (and counts as unavailable when its executable is missing, or
+on a system it does not run on: `mxc' anywhere but macOS, `bwrap' and
+`systemd' on macOS); `none' disables wrapping regardless of policy
+detection, subject to `harness-sandbox-policy'.
+
+`openshell' runs commands in NVIDIA OpenShell sandboxes (see
+`harness-sandbox-openshell-program'; docs/openshell.md says how to set
+it up).  It needs a gateway that answers `openshell status', and when
+it cannot be used the harness falls back to what `auto' would pick,
+says why in the log and in `sandbox/status', and tries again the next
+time the backend is detected (`harness-sandbox-detect')."
+  :type '(choice (const auto) (const bwrap) (const systemd) (const mxc)
+                 (const :tag "openshell (NVIDIA OpenShell)" openshell) (const none))
   :group 'harness)
 
 (defconst harness-sandbox--bwrap-program "bwrap"
@@ -174,6 +234,111 @@ for on macOS only, when the sandbox module starts (see
   "Additional directories bound read-only into every sandbox.
 Useful for toolchains that live outside /usr, such as /opt or /nix."
   :type '(repeat directory) :group 'harness)
+
+;;;; OpenShell options
+
+;; These are read from their global values only (`default-value'), never
+;; a buffer's or a directory's: a project's .dir-locals.el must not
+;; widen the network, choose the image or add arguments for the sandbox
+;; its own sessions run in.  The gateway is the one `openshell' uses
+;; itself: the active one, or that of $OPENSHELL_GATEWAY, which the
+;; commands this module runs inherit.
+
+(defcustom harness-sandbox-openshell-program "openshell"
+  "Name or absolute path of NVIDIA OpenShell's command line, openshell.
+OpenShell (https://github.com/NVIDIA/OpenShell) runs each command in a
+sandbox of a gateway you run: a container whose supervisor enforces a
+policy with Landlock and seccomp.  This module drives it through this
+program (`openshell sandbox create', `sandbox exec' and `sandbox
+delete'), and only when `harness-sandbox-backend' is `openshell'.
+docs/openshell.md has the setup: the gateway, an image with the tools
+your commands run, and the gateway's permission for bind mounts.  The
+program is looked for when the sandbox module starts (see
+`harness-sandbox-detect')."
+  :type 'string :group 'harness)
+
+(defcustom harness-sandbox-openshell-image nil
+  "The image OpenShell sandboxes are made from, or nil for the gateway's default.
+Any reference `openshell sandbox create --from' takes: an image the
+gateway's container engine has or can pull.  A command runs in it, and
+sees its /usr, not this machine's, so it must hold bash, sleep and the
+tools commands use -- git, and Emacs for the elisp tool.  The gateway's
+default image is a bare Ubuntu."
+  :type '(choice (const :tag "The gateway's default image" nil) string)
+  :risky t :group 'harness)
+
+(defcustom harness-sandbox-openshell-driver 'docker
+  "The compute driver of the gateway, `docker' or `podman'.
+It names the key of the driver config that carries the bind mounts the
+sandbox is made with (`--driver-config-json', see
+`harness-sandbox--openshell-driver-config').  The microVM and
+Kubernetes drivers cannot be used: they take few or no host
+directories."
+  :type '(choice (const docker) (const podman))
+  :risky t :group 'harness)
+
+(defcustom harness-sandbox-openshell-network-rules nil
+  "The endpoints a command with the network on may reach in an OpenShell sandbox.
+OpenShell denies every outbound connection that no rule of its policy
+allows, and has no rule for an open network, so a command with the
+network on reaches exactly what this list names, and nothing when it
+is nil.  An entry is an endpoint, \"HOST:PORT\" or \"HOST:PORT,PORT\", the
+host a name or a wildcard OpenShell takes (\"*.example.com\"), such as
+\"github.com:443\"; they make one rule, which any program may use.  An
+entry (NAME :endpoints (ENDPOINT...) :binaries (PATH...)) is a rule of
+its own, for the programs whose real paths the globs of :binaries name
+\(\"/**\", any, by default).  A session whose network is off gets none of
+them.  An entry that is neither is left out, with a line in the log."
+  :type '(repeat (choice (string :tag "Endpoint HOST:PORT")
+                         (sexp :tag "Rule (NAME :endpoints (ENDPOINT...) :binaries (PATH...))")))
+  :risky t :group 'harness)
+
+(defcustom harness-sandbox-openshell-image-paths nil
+  "Directories of the OpenShell image a command may read, besides the system ones.
+The policy lists what a command may reach and Landlock refuses the
+rest.  The image's system directories (/usr, /lib, /bin, /etc and the
+like) are listed; a toolchain the image keeps elsewhere, Emacs in /opt
+say, only when it is named here.  They are paths of the image, not
+of this machine, and nothing of this machine is shown there for them:
+this is not `harness-sandbox-extra-read-only-dirs', which OpenShell
+ignores, since its image is no copy of this machine's /usr."
+  :type '(repeat directory) :risky t :group 'harness)
+
+(defcustom harness-sandbox-openshell-extra-args nil
+  "Further arguments for `openshell sandbox create', a list of strings.
+For instance (\"--cpu\" \"2\" \"--memory\" \"4Gi\") to size the sandboxes.
+They come before the command, after everything this module passes."
+  :type '(repeat string) :risky t :group 'harness)
+
+(defconst harness-sandbox--openshell-system-paths
+  '(:read-only ("/usr" "/lib" "/lib64" "/bin" "/sbin" "/etc" "/proc" "/var/lib" "/var/log"
+                "/dev/urandom" "/dev/random" "/dev/zero")
+    :read-write ("/tmp" "/dev/null"))
+  "The paths of the sandbox image a command may read and write, as a plist.
+`:read-only' and `:read-write' list absolute paths, which go into the
+policy's `filesystem_policy' beside the directories of the session; a
+path the image lacks is skipped.  OpenShell adds such paths itself only
+when the policy has network rules, so they are listed here.")
+
+(defconst harness-sandbox--openshell-ttl 3900
+  "Seconds an OpenShell sandbox lives at most, whatever happens to its command.
+Its main process is a `sleep' for so long, and OpenShell deletes an
+ephemeral sandbox when that ends: the harness deletes the sandbox
+itself as soon as the command is done, and this is what removes one
+the harness could not.  It must be longer than the longest command (the
+bash tool's limit is 3600 seconds), or a long command loses its sandbox.")
+
+(defconst harness-sandbox--openshell-probe-timeout 10
+  "Seconds `harness-sandbox-detect' waits for each openshell call that checks it.")
+
+(defvar harness-sandbox--openshell-run-as-host-user t
+  "Non-nil runs the commands of an OpenShell sandbox as this user's uid and gid.
+Files a command writes in a bind-mounted directory are then yours, as
+they are under bwrap; left to the image and the driver, the commands
+run as another user, who cannot write what yours do.  It does not
+apply when this Emacs runs as root: OpenShell refuses uid 0.  Nobody
+should have to change it; a rootless Podman that maps users its own
+way may.")
 
 (defconst harness-sandbox--home "/tmp/harness-home"
   "Path used as $HOME inside a bwrap sandbox when the real one's path cannot be.
@@ -201,7 +366,8 @@ toolchains and programs a command runs often live: Homebrew
 \(/Applications, Emacs's own among them).  bwrap shows all of /usr.")
 
 (defvar harness-sandbox--backend nil
-  "Backend chosen at initialisation: `bwrap', `systemd', `mxc' or `none'.")
+  "Backend chosen at initialisation.
+It is `bwrap', `systemd', `mxc', `openshell' or `none'.")
 
 (defvar harness-sandbox--available nil
   "Backends whose executables were found at initialisation.")
@@ -209,14 +375,40 @@ toolchains and programs a command runs often live: Homebrew
 (defvar harness-sandbox--programs nil
   "Alist of backend -> absolute executable path found at initialisation.")
 
+(defvar harness-sandbox--requested nil
+  "The backend that was asked for and could not be used, or nil.
+Only OpenShell can be: the others count as `none' when they are missing,
+as always.  `harness-sandbox--problem' says why.")
+
+(defvar harness-sandbox--problem nil
+  "Why `harness-sandbox--requested' could not be used, as text, or nil.")
+
+(defconst harness-sandbox--auto-backends '(bwrap systemd mxc)
+  "The backends `auto' chooses among, in the order of preference.
+OpenShell is not one: it needs a gateway and an image set up on purpose,
+and what a command sees there is a container, not this machine.")
+
 ;;;; Detection
+
+(defun harness-sandbox--auto-backend ()
+  "Return the backend `auto' picks among those found, or `none'.
+It is the first of `harness-sandbox--auto-backends' that was found."
+  (or (cl-find-if (lambda (backend) (memq backend harness-sandbox--available))
+                  harness-sandbox--auto-backends)
+      'none))
 
 (defun harness-sandbox-detect ()
   "Find the available backends and choose one.
 Return the chosen backend symbol.  Safe to call again: it refreshes
-`harness-sandbox--available' and `harness-sandbox--backend'.  On macOS
-only MXC is looked for (`harness-sandbox-mxc-program'), elsewhere only
-bwrap and systemd-run."
+`harness-sandbox--available' and `harness-sandbox--backend', so it is
+what to run after starting an OpenShell gateway that was down.  On
+macOS only MXC is looked for (`harness-sandbox-mxc-program'),
+elsewhere only bwrap and systemd-run; OpenShell
+\(`harness-sandbox-openshell-program') anywhere, and chosen only when
+`harness-sandbox-backend' asks for it, after a check that it can be
+used (`harness-sandbox--openshell-problem'): without it the backend is
+the one `auto' picks, and `harness-sandbox--problem' says why."
+  (interactive)
   (let* ((darwin (eq system-type 'darwin))
          (bwrap (and (not darwin) (executable-find harness-sandbox--bwrap-program)))
          (systemd (and (not darwin) (executable-find harness-sandbox--systemd-run-program)))
@@ -225,16 +417,29 @@ bwrap and systemd-run."
                    ;; An absolute path, or one from ~, is found as it is.
                    (executable-find (if (file-name-directory harness-sandbox-mxc-program)
                                         (expand-file-name harness-sandbox-mxc-program)
-                                      harness-sandbox-mxc-program)))))
+                                      harness-sandbox-mxc-program))))
+         (openshell (harness-sandbox--openshell-find)))
     (setq harness-sandbox--programs
           (delq nil (list (and bwrap (cons 'bwrap bwrap))
                           (and systemd (cons 'systemd systemd))
-                          (and mxc (cons 'mxc mxc)))))
+                          (and mxc (cons 'mxc mxc))
+                          (and openshell (cons 'openshell openshell)))))
     (setq harness-sandbox--available (mapcar #'car harness-sandbox--programs))
+    (setq harness-sandbox--requested nil
+          harness-sandbox--problem nil)
     (setq harness-sandbox--backend
           (pcase harness-sandbox-backend
-            ('auto (or (car harness-sandbox--available) 'none))
+            ('auto (harness-sandbox--auto-backend))
             ('none 'none)
+            ('openshell
+             (if-let* ((problem (harness-sandbox--openshell-problem openshell)))
+                 (let ((fallback (harness-sandbox--auto-backend)))
+                   (setq harness-sandbox--requested 'openshell
+                         harness-sandbox--problem problem)
+                   (harness-log 'warn "sandbox: OpenShell was asked for, but %s; using %s instead"
+                                problem fallback)
+                   fallback)
+               'openshell))
             (forced (if (memq forced harness-sandbox--available) forced 'none))))
     (harness-log 'info "sandbox: backend %s (available: %s, policy %s)"
                  harness-sandbox--backend
@@ -242,6 +447,11 @@ bwrap and systemd-run."
                      (mapconcat #'symbol-name harness-sandbox--available ", ")
                    "none")
                  (harness-sandbox--policy nil))
+    (when (called-interactively-p 'interactive)
+      (message "Sandbox backend: %s%s" harness-sandbox--backend
+               (if harness-sandbox--problem
+                   (format " (OpenShell cannot be used: %s)" harness-sandbox--problem)
+                 "")))
     harness-sandbox--backend))
 
 (defun harness-sandbox--policy (cwd)
@@ -508,6 +718,8 @@ Only bwrap can, for a local CWD, with a sandbox policy other than
       "the sandbox backend is systemd-run, not bwrap, and a systemd --user unit cannot be given a capability: it can only lower its own")
      ((eq harness-sandbox--backend 'mxc)
       "the sandbox backend is MXC, not bwrap, and macOS's Seatbelt has no Linux capabilities")
+     ((eq harness-sandbox--backend 'openshell)
+      "the sandbox backend is OpenShell, not bwrap, and it runs commands as a non-root user with no Linux capability, with no way to give one")
      (t (format "no sandbox backend can confine its commands (%s), and only bwrap can give a command a capability"
                 (harness-sandbox--missing-programs))))))
 
@@ -1263,17 +1475,656 @@ This only reads the file system: it writes nothing, TMP included."
           (base64-encode-string (if (multibyte-string-p json) (encode-coding-string json 'utf-8-unix) json)
                                 t))))
 
+;;;; OpenShell
+
+;; NVIDIA OpenShell is driven through its command line, which talks to a
+;; gateway.  A command is three calls of it, run by a small bash script
+;; (`harness-sandbox--openshell-script') this module hands back as the
+;; command line: `sandbox create --detach --no-keep' makes a sandbox
+;; from a policy file and the bind mounts of the directories the command
+;; may reach, `sandbox exec' runs the command in it -- and only that
+;; writes to the script's standard output and standard error, which
+;; `sandbox create' would fill with its progress lines -- and `sandbox
+;; delete' removes the sandbox, in the background and out of the process
+;; group the harness kills on a timeout, so that a command killed for
+;; running too long loses its sandbox too.  A sandbox the script could
+;; not delete ends by itself: its main process is a `sleep' of
+;; `harness-sandbox--openshell-ttl' seconds, after which OpenShell
+;; deletes an ephemeral sandbox.
+;;
+;; What OpenShell is told is a description of the command, as MXC's is:
+;; `harness-sandbox--openshell-spec' makes it, from the same directories
+;; bwrap's arguments are made from, and three functions put it where
+;; OpenShell reads it -- the policy file (`filesystem_policy' for
+;; Landlock, `process', `network_policies'), the driver config (the bind
+;; mounts) and the environment of the command.
+
+(defconst harness-sandbox--openshell-script
+  (mapconcat
+   #'identity
+   '("prog=$1 name=$2 nc=$3"
+     "shift 3"
+     "create=(\"${@:1:$nc}\")"
+     "shift \"$nc\""
+     ;; The sandbox goes in the background and in a session of its own,
+     ;; or the kill of the command's process group takes the delete too.
+     ;; From /, not the command's directory: whoever ran the command may
+     ;; remove that the moment this script ends, before the delete starts.
+     "drop() {"
+     "  if command -v setsid >/dev/null 2>&1; then"
+     "    (cd / && exec setsid \"$prog\" sandbox delete \"$name\") </dev/null >/dev/null 2>&1 &"
+     "  else"
+     "    (cd / && trap '' HUP INT TERM && exec \"$prog\" sandbox delete \"$name\") </dev/null >/dev/null 2>&1 &"
+     "  fi"
+     "}"
+     "trap 'drop; exit 143' HUP INT TERM"
+     ;; Its progress lines are not the command's output.
+     "made=$(\"$prog\" sandbox create --name \"$name\" \"${create[@]}\" </dev/null 2>&1)"
+     "status=$?"
+     "if [ \"$status\" -ne 0 ]; then"
+     "  drop"
+     "  { echo \"harness-sandbox: OpenShell could not start a sandbox for this command (openshell exited $status):\""
+     "    printf '%s\\n' \"$made\" | tail -n 40; } >&2"
+     "  exit 125"
+     "fi"
+     "\"$prog\" sandbox exec -n \"$name\" \"$@\""
+     "status=$?"
+     "drop"
+     "exit \"$status\"")
+   "\n")
+  "The bash script that runs a command in a sandbox made for it alone.
+Its arguments are the openshell program, the sandbox's name, the
+number of the arguments of `sandbox create' that follow, those, and
+then the arguments of `sandbox exec' after its `-n NAME'.  It runs
+openshell as the harness's own environment has it, so the gateway is
+the active one, or that of $OPENSHELL_GATEWAY.  Its status is the
+command's, or 125 when no sandbox could be made, 143 when it was told
+to stop.")
+
+(defconst harness-sandbox--openshell-flags
+  '((("sandbox" "create") "--detach" "--no-keep" "--no-tty" "--no-auto-providers" "--policy"
+     "--from" "--label" "--driver-config-json")
+    (("sandbox" "exec") "--name" "--workdir" "--env" "--no-tty" "--no-login-shell")
+    (("sandbox" "delete")))
+  "The commands of openshell this module runs, with the options of each.
+`harness-sandbox--openshell-cli-problem' reads the help of each for
+them: a program without one is too old.")
+
+(defconst harness-sandbox--openshell-control-roots
+  '("/opt/openshell" "/etc/openshell" "/etc/openshell-tls" "/run/openshell"
+    "/run/openshell-sidecar" "/run/netns" "/var/run/netns" "/proc" "/sys" "/dev")
+  "Paths of a sandbox that OpenShell keeps for itself.
+The gateway refuses a bind mount whose target is, holds or lies in one
+of them.")
+
+(defconst harness-sandbox--openshell-image-roots '("/usr" "/lib" "/lib64" "/bin" "/sbin")
+  "System directories of the sandbox image, which no mount may replace.
+A mount of this machine's /usr over the image's would swap its system
+for one the image's own programs were not made for.  A mount below one,
+such as /usr/local/cuda, is fine.")
+
+(defconst harness-sandbox--openshell-max-argument 32768
+  "The longest argument, in bytes, the gateway runs a command with.")
+
+(defconst harness-sandbox--openshell-max-paths 256
+  "The most paths a policy's `filesystem_policy' may list.
+Read-only and read-write ones together.")
+
+(defvar harness-sandbox--openshell-reported nil
+  "Entries of the OpenShell options reported as unusable, so each is reported once.")
+
+(defun harness-sandbox--openshell-find ()
+  "Return the absolute path of the openshell program, or nil."
+  (let ((program harness-sandbox-openshell-program))
+    (and (stringp program) (not (string-empty-p program))
+         ;; An absolute path, or one from ~, is found as it is.
+         (executable-find (if (file-name-directory program)
+                              (expand-file-name program)
+                            program)))))
+
+(defun harness-sandbox--first-lines (text &optional n)
+  "Return the first N (3 by default) non-blank lines of TEXT, joined by spaces."
+  (string-join (seq-take (split-string (or text "") "[\n\r]+" t "[ \t]+") (or n 3)) " "))
+
+(defun harness-sandbox--run-sync (program args timeout)
+  "Run PROGRAM with ARGS, waiting at most TIMEOUT seconds; return (STATUS OUT ERR).
+STATUS is its exit status, OUT what it wrote to standard output and ERR to
+standard error.  It is nil when PROGRAM could not start or did not end in
+time, and ERR then says why.  Its standard input is closed."
+  (let ((out (generate-new-buffer " *harness-sandbox-out*" t))
+        (err (generate-new-buffer " *harness-sandbox-err*" t))
+        proc)
+    (unwind-protect
+        (condition-case failure
+            (progn
+              (setq proc (make-process :name "harness-sandbox-run" :command (cons program args)
+                                       :buffer out :stderr err :connection-type 'pipe
+                                       :noquery t :coding 'utf-8-unix :sentinel #'ignore))
+              (when-let* ((stderr-proc (get-buffer-process err)))
+                (set-process-query-on-exit-flag stderr-proc nil)
+                (set-process-sentinel stderr-proc #'ignore))
+              (process-send-eof proc)
+              (let ((deadline (+ (float-time) timeout)))
+                (while (and (process-live-p proc) (< (float-time) deadline))
+                  (accept-process-output proc 0.05)))
+              (if (process-live-p proc)
+                  (progn (delete-process proc)
+                         (list nil "" (format "did not answer within %s seconds" timeout)))
+                ;; What it wrote last may not have been read yet.
+                (accept-process-output proc 0.05)
+                (when-let* ((stderr-proc (get-buffer-process err)))
+                  (accept-process-output stderr-proc 0.05))
+                (list (process-exit-status proc)
+                      (with-current-buffer out (buffer-string))
+                      (with-current-buffer err (buffer-string)))))
+          (error (list nil "" (error-message-string failure))))
+      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when-let* ((stderr-proc (get-buffer-process err))) (delete-process stderr-proc))
+      (kill-buffer out)
+      (kill-buffer err))))
+
+(defun harness-sandbox--openshell-config-problem ()
+  "Return what is wrong with the OpenShell options, as text, or nil.
+They are read from their global values only."
+  (let ((image (default-value 'harness-sandbox-openshell-image))
+        (driver (default-value 'harness-sandbox-openshell-driver))
+        (paths (default-value 'harness-sandbox-openshell-image-paths))
+        (extra (default-value 'harness-sandbox-openshell-extra-args)))
+    (cond
+     ((and image (not (and (stringp image)
+                           (string-match-p "\\`[A-Za-z0-9][A-Za-z0-9._/:@+-]*\\'" image))))
+      (format "harness-sandbox-openshell-image %S is no image reference" image))
+     ((not (memq driver '(docker podman)))
+      (format "harness-sandbox-openshell-driver %S is neither docker nor podman" driver))
+     ((not (and (proper-list-p paths)
+                (cl-every (lambda (path) (and (stringp path) (string-prefix-p "/" path)
+                                              (not (equal (directory-file-name path) "/"))
+                                              (not (string-match-p "[[:cntrl:]]" path))))
+                          paths)))
+      "harness-sandbox-openshell-image-paths is no list of absolute paths, the root directory apart")
+     ((not (and (proper-list-p extra)
+                (cl-every (lambda (arg) (and (stringp arg) (not (string-search "\0" arg)))) extra)))
+      "harness-sandbox-openshell-extra-args is no list of strings"))))
+
+(defun harness-sandbox--openshell-cli-problem (program)
+  "Return why the openshell PROGRAM is too old for this module, or nil.
+It reads the help of each command the module runs
+\(`harness-sandbox--openshell-flags') for the options it passes."
+  (cl-loop for (command . flags) in harness-sandbox--openshell-flags
+           for result = (harness-sandbox--run-sync
+                         program (append command '("--help"))
+                         harness-sandbox--openshell-probe-timeout)
+           for help = (concat (nth 1 result) (nth 2 result))
+           thereis (cond
+                    ((not (eql 0 (car result)))
+                     (format "`openshell %s --help' failed: %s" (string-join command " ")
+                             (harness-sandbox--first-lines (or (nth 2 result) help))))
+                    (t (when-let* ((missing (cl-find-if-not (lambda (flag) (string-search flag help)) flags)))
+                         (format "this openshell is too old: `openshell %s' has no %s (the harness was written for OpenShell 0.1.5)"
+                                 (string-join command " ") missing))))))
+
+(defun harness-sandbox--openshell-gateway-problem (program)
+  "Return why `openshell status' of PROGRAM shows no usable gateway, or nil."
+  (let* ((result (harness-sandbox--run-sync
+                  program '("status" "-o" "json") harness-sandbox--openshell-probe-timeout))
+         (json (and (eql 0 (car result))
+                    (condition-case nil
+                        (with-temp-buffer
+                          (insert (nth 1 result))
+                          (goto-char (point-min))
+                          (and (search-forward "{" nil t)
+                               (progn (backward-char) (harness-json-parse-buffer))))
+                      (error nil))))
+         (status (and (listp json) (plist-get json :status)))
+         (auth (and (listp json) (plist-get json :authentication))))
+    (cond
+     ((null (car result))
+      (format "`openshell status' %s" (nth 2 result)))
+     ((not (eql 0 (car result)))
+      (format "`openshell status' failed (exit %s): %s" (car result)
+              (harness-sandbox--first-lines (concat (nth 2 result) " " (nth 1 result)))))
+     ((equal status "connected")
+      (when (equal (and (listp auth) (plist-get auth :status)) "failed")
+        (format "the gateway %s does not accept this user: %s"
+                (or (plist-get json :gateway) "") (or (plist-get auth :error) "no reason given"))))
+     ((equal status "not_configured")
+      "no OpenShell gateway is registered (see `openshell gateway add' and `openshell gateway select')")
+     ((member status '("disconnected" "error" "connected_http"))
+      (format "the gateway %s at %s does not answer%s"
+              (or (plist-get json :gateway) "") (or (plist-get json :server) "")
+              (if-let* ((why (plist-get json :error))) (format ": %s" why) "")))
+     (t (format "`openshell status' gave an answer the harness does not understand: %s"
+                (harness-sandbox--first-lines (nth 1 result)))))))
+
+(defun harness-sandbox--openshell-problem (&optional program)
+  "Return why OpenShell cannot run commands, as text, or nil when it can.
+PROGRAM is the openshell executable, found by default.  It checks the
+program, the options, that its command line has what this module
+passes, and that `openshell status' reaches a gateway; it starts no
+sandbox (`harness-sandbox-openshell-check' does)."
+  (let ((program (or program (harness-sandbox--openshell-find))))
+    (cond
+     ((null program)
+      (format "the program %s (harness-sandbox-openshell-program) is not installed or not on the exec path"
+              harness-sandbox-openshell-program))
+     ((harness-sandbox--openshell-config-problem))
+     ((harness-sandbox--openshell-cli-problem program))
+     (t (harness-sandbox--openshell-gateway-problem program)))))
+
+;;;;; The network rules
+
+(defun harness-sandbox--openshell-parse-endpoint (endpoint)
+  "Return (HOST PORT…) for the ENDPOINT \"HOST:PORT[,PORT…]\", or nil."
+  (when (and (stringp endpoint)
+             (string-match "\\`\\([A-Za-z0-9*.-]+\\):\\([0-9]+\\(?:,[0-9]+\\)*\\)\\'" endpoint))
+    ;; Both groups first: `split-string' searches, and so changes them.
+    (let* ((host (match-string 1 endpoint))
+           (ports (mapcar #'string-to-number (split-string (match-string 2 endpoint) ","))))
+      (when (cl-every (lambda (port) (<= 1 port 65535)) ports)
+        (cons host ports)))))
+
+(defun harness-sandbox--openshell-skip (entry why)
+  "Log once that ENTRY of the OpenShell network rules is left out, for WHY."
+  (unless (member entry harness-sandbox--openshell-reported)
+    (push entry harness-sandbox--openshell-reported)
+    (harness-log 'warn "sandbox: %S in harness-sandbox-openshell-network-rules is left out: %s" entry why)))
+
+(defun harness-sandbox--openshell-rules ()
+  "Return the network rules the option names that are well formed.
+Each is (NAME ENDPOINTS BINARIES): NAME the rule's key in the policy,
+ENDPOINTS lists of (HOST PORT…) and BINARIES path globs.  The plain
+endpoints of the option make one rule, any program may use.  An entry
+that is neither is left out, with a line in the log."
+  (let ((value (default-value 'harness-sandbox-openshell-network-rules))
+        plain rules)
+    (dolist (entry (and (proper-list-p value) value))
+      (cond
+       ((stringp entry)
+        (if-let* ((endpoint (harness-sandbox--openshell-parse-endpoint entry)))
+            (push endpoint plain)
+          (harness-sandbox--openshell-skip entry "it is no HOST:PORT")))
+       ((and (consp entry) (or (stringp (car entry)) (and (car entry) (symbolp (car entry))))
+             (proper-list-p (cdr entry)))
+        (let* ((name (format "%s" (car entry)))
+               (endpoints (mapcar #'harness-sandbox--openshell-parse-endpoint
+                                  (let ((list (plist-get (cdr entry) :endpoints)))
+                                    (and (proper-list-p list) list))))
+               (binaries (if (plist-member (cdr entry) :binaries)
+                             (plist-get (cdr entry) :binaries)
+                           '("/**"))))
+          (cond
+           ((not (string-match-p "\\`[A-Za-z][A-Za-z0-9_-]*\\'" name))
+            (harness-sandbox--openshell-skip entry "its name is no plain word"))
+           ((string-prefix-p "_provider_" name)
+            (harness-sandbox--openshell-skip entry "OpenShell keeps names with _provider_ for itself"))
+           ((or (null endpoints) (memq nil endpoints))
+            (harness-sandbox--openshell-skip entry "it has no endpoints, or one that is no HOST:PORT"))
+           ((not (and binaries (proper-list-p binaries)
+                      (cl-every (lambda (path)
+                                  (and (stringp path)
+                                       (string-match-p "\\`/[A-Za-z0-9_./*?@+,=-]*\\'" path)))
+                                binaries)))
+            (harness-sandbox--openshell-skip entry "its :binaries are no absolute path globs"))
+           (t (push (list name endpoints binaries) rules)))))
+       (t (harness-sandbox--openshell-skip entry "it is neither an endpoint nor a rule"))))
+    (append (and plain (list (list "harness_endpoints" (nreverse plain) '("/**"))))
+            (nreverse rules))))
+
+(defun harness-sandbox--openshell-hosts ()
+  "Return the endpoints of the network rules, as \"HOST:PORT[,PORT…]\" strings."
+  (cl-loop for (_name endpoints _binaries) in (harness-sandbox--openshell-rules)
+           append (mapcar (lambda (endpoint)
+                            (format "%s:%s" (car endpoint)
+                                    (mapconcat #'number-to-string (cdr endpoint) ",")))
+                          endpoints)))
+
+;;;;; What the sandbox shows
+
+(defun harness-sandbox--openshell-target-problem (target)
+  "Return why the gateway would refuse TARGET as a mount's target, or nil."
+  (cond
+   ((not (and (stringp target) (string-prefix-p "/" target)
+              (not (string-match-p "[[:cntrl:]]" target))
+              (not (string-match-p "\\(?:\\`\\|/\\)\\.\\.?\\(?:/\\|\\'\\)\\|//" target))))
+    "it is no normalized absolute path")
+   ((equal target "/") "it is the root directory")
+   ((cl-find-if (lambda (root)
+                  (or (harness-path-within-p root target) (harness-path-within-p target root)))
+                harness-sandbox--openshell-control-roots)
+    "OpenShell keeps it, or what is in it, for itself")
+   ((cl-find-if (lambda (root) (harness-path-within-p target root))
+                harness-sandbox--openshell-image-roots)
+    "it would replace the sandbox image's own system directory")))
+
+(defun harness-sandbox--openshell-mounts (cwd readable writable read-only scratch)
+  "Return the mounts of the sandbox of a command in CWD.
+They are lists (TARGET SOURCE MODE).  MODE is `ro' or `rw' for a bind
+mount of SOURCE, and `tmpfs' (SOURCE nil) for the sandbox's $HOME,
+which is a tmpfs: bwrap's covers the home
+directory, and the directories of the real home show under it
+\(`harness-sandbox--mounts').  READABLE, WRITABLE, READ-ONLY and SCRATCH
+are as for `harness-sandbox--bwrap-command', which this follows: those,
+then CWD, a worktree's git directory and the scratch directories, a
+later mount of a target taking the place of an earlier one.  With
+READ-ONLY every bind mount is read-only but the scratch directories'.
+`harness-sandbox-extra-read-only-dirs' is not shown: it names
+directories of this machine's toolchains, which the image has no use for.
+A target the gateway would refuse is left out, with a line in the log."
+  (let* ((cwd (directory-file-name (expand-file-name cwd)))
+         (real-cwd (directory-file-name (file-truename cwd)))
+         (private (and (not (harness-sandbox--home-inside-p cwd)) harness-sandbox--home))
+         (git (harness-sandbox--worktree-git cwd))
+         mounts)
+    (cl-flet ((add (target source mode)
+                (let ((target (and (stringp target) (directory-file-name target))))
+                  (if-let* ((why (harness-sandbox--openshell-target-problem target)))
+                      (harness-log 'warn "sandbox: not showing %s to OpenShell: %s" target why)
+                    (if-let* ((old (assoc target mounts)))
+                        (setcdr old (list source mode))
+                      (push (list target source mode) mounts))))))
+      (pcase-dolist (`(,mode ,source ,target)
+                     (harness-sandbox--mounts readable writable cwd private))
+        (add target source (if (and (eq mode 'rw) (not read-only)) 'rw 'ro)))
+      (dolist (target (delete-dups (list cwd real-cwd)))
+        (add target real-cwd (if read-only 'ro 'rw)))
+      (when git
+        (let ((common (directory-file-name (plist-get git :common))))
+          (add common (directory-file-name (file-truename common)) (if read-only 'ro 'rw))
+          (unless read-only
+            (dolist (path (plist-get git :protected))
+              (add path (directory-file-name (file-truename path)) 'ro)))))
+      (pcase-dolist (`(,source . ,target) (harness-sandbox--scratch-mounts scratch cwd))
+        (add target source 'rw))
+      (when private
+        (add private nil 'tmpfs)))
+    (nreverse mounts)))
+
+(cl-defun harness-sandbox--openshell-spec (cwd &key (network t) writable readable read-only scratch)
+  "Describe the sandbox of a command in CWD, as a plist.
+NETWORK, WRITABLE, READABLE, READ-ONLY and SCRATCH are as for
+`harness-sandbox--bwrap-command'.  The plist is `:cwd', `:mounts'
+\(`harness-sandbox--openshell-mounts'), the paths Landlock allows,
+`:read-only' and `:read-write', the network rules of the policy
+`:rules' (those of `harness-sandbox-openshell-network-rules' when
+NETWORK, else none: a session without the network gets none), and the
+`:env' of the command as (NAME . VALUE) pairs."
+  (let* ((cwd (directory-file-name (expand-file-name cwd)))
+         (mounts (harness-sandbox--openshell-mounts cwd readable writable read-only scratch))
+         (system harness-sandbox--openshell-system-paths)
+         (image-paths (mapcar #'directory-file-name
+                              (default-value 'harness-sandbox-openshell-image-paths)))
+         (git (harness-sandbox--worktree-git cwd))
+         (home (cl-find 'tmpfs mounts :key #'caddr))
+         (paths (lambda (modes)
+                  (cl-loop for (target _source mode) in mounts
+                           when (memq mode modes) collect target)))
+         (shown-ro (funcall paths '(ro)))
+         (shown-rw (funcall paths '(rw tmpfs)))
+         ;; A directory the session shows decides over the system path it is.
+         (system-ro (cl-remove-if (lambda (path) (member path shown-rw))
+                                  (append (plist-get system :read-only) image-paths)))
+         (system-rw (cl-remove-if (lambda (path) (member path shown-ro)) (plist-get system :read-write))))
+    (list :cwd cwd
+          :mounts mounts
+          :read-only (delete-dups (append system-ro shown-ro))
+          :read-write (delete "/" (delete-dups (append system-rw shown-rw)))
+          :rules (and network (harness-sandbox--openshell-rules))
+          :env (append (list (cons "HARNESS_SANDBOX" "openshell")
+                             (cons "HOME" (if home (car home) (or (getenv "HOME") harness-sandbox--home))))
+                       (and git (harness-sandbox--git-env (plist-get git :common)))
+                       ;; The command's language and time zone are its user's.
+                       (cl-loop for name in '("LANG" "LANGUAGE" "LC_ALL" "TZ")
+                                for value = (getenv name)
+                                when (and value (not (string-empty-p value))) collect (cons name value))))))
+
+(defun harness-sandbox--yaml-string (value)
+  "Return the string VALUE as a double-quoted YAML scalar."
+  (concat "\""
+          (replace-regexp-in-string
+           "[\"\\[:cntrl:]]"
+           (lambda (c)
+             (pcase (aref c 0)
+               (?\" "\\\"") (?\\ "\\\\") (?\n "\\n") (?\t "\\t") (?\r "\\r")
+               (ch (format "\\x%02X" ch))))
+           value t t)
+          "\""))
+
+(defun harness-sandbox--openshell-policy-text (spec)
+  "Return the OpenShell policy file, YAML, for the sandbox SPEC describes.
+Landlock gets the directories and system paths of the spec, and must
+enforce them (`hard_requirement': a sandbox that cannot is not started,
+rather than run without the rules); the process runs as the host
+user's uid and gid (`harness-sandbox--openshell-run-as-host-user'), and
+`network_policies' hold the rules of the spec, none for a command that
+is offline.  Everything OpenShell does not list is refused."
+  (let ((q #'harness-sandbox--yaml-string)
+        (uid (user-uid))
+        (gid (group-gid)))
+    (with-temp-buffer
+      (insert "# Written by the Emacs agent harness for `openshell sandbox create --policy'.\n"
+              "# Each command gets the policy of its own directories; nothing to edit here.\n"
+              "version: 1\n"
+              "filesystem_policy:\n"
+              "  include_workdir: false\n"
+              "  read_only:\n")
+      (dolist (path (plist-get spec :read-only)) (insert "    - " (funcall q path) "\n"))
+      (insert "  read_write:\n")
+      (dolist (path (plist-get spec :read-write)) (insert "    - " (funcall q path) "\n"))
+      (insert "landlock:\n"
+              "  compatibility: hard_requirement\n")
+      (when (and harness-sandbox--openshell-run-as-host-user
+                 (integerp uid) (> uid 0) (integerp gid) (> gid 0))
+        (insert "process:\n"
+                (format "  run_as_user: \"%d\"\n  run_as_group: \"%d\"\n" uid gid)))
+      (when-let* ((rules (plist-get spec :rules)))
+        (insert "network_policies:\n")
+        (pcase-dolist (`(,name ,endpoints ,binaries) rules)
+          (insert "  " name ":\n    endpoints:\n")
+          (pcase-dolist (`(,host . ,ports) endpoints)
+            (insert "      - host: " (funcall q host) "\n")
+            (if (cdr ports)
+                (insert "        ports: [" (mapconcat #'number-to-string ports ", ") "]\n")
+              (insert (format "        port: %d\n" (car ports)))))
+          (insert "    binaries:\n")
+          (dolist (path binaries) (insert "      - path: " (funcall q path) "\n"))))
+      (buffer-string))))
+
+(defun harness-sandbox--openshell-driver-config (spec)
+  "Return the `--driver-config-json' of the sandbox SPEC describes, or nil.
+It carries the bind mounts, under the key of the gateway's driver
+\(`harness-sandbox-openshell-driver'), and the tmpfs that is $HOME."
+  (when-let* ((mounts (plist-get spec :mounts)))
+    (harness-json-encode-text
+     (list (intern (concat ":" (symbol-name (default-value 'harness-sandbox-openshell-driver))))
+           (list :mounts
+                 (harness-json-array
+                  (mapcar (lambda (mount)
+                            (pcase-let ((`(,target ,source ,mode) mount))
+                              (if (eq mode 'tmpfs)
+                                  ;; Writable by the command, whoever it runs as.
+                                  (list :type "tmpfs" :target target :mode 511)
+                                (list :type "bind" :source source :target target
+                                      :read_only (if (eq mode 'ro) t :false)))))
+                          mounts)))))))
+
+(defun harness-sandbox--openshell-policy-file (text)
+  "Return the path of a file holding the policy TEXT, written if it is not there.
+The files are named for what is in them and kept in the harness's state
+directory, where only this user writes; one that is there is used again
+only when it holds exactly TEXT.  A file older than a week is deleted."
+  (let* ((dir (expand-file-name "openshell/" harness-state-directory))
+         (file (expand-file-name (format "policy-%s.yaml" (substring (secure-hash 'sha256 (encode-coding-string text 'utf-8-unix)) 0 24))
+                                 dir)))
+    (condition-case err
+        (progn
+          (unless (and (file-regular-p file)
+                       (not (file-symlink-p file))
+                       (equal text (with-temp-buffer
+                                     (let ((coding-system-for-read 'utf-8-unix))
+                                       (insert-file-contents file))
+                                     (buffer-string))))
+            (with-file-modes #o700 (make-directory dir t))
+            (let ((tmp (make-temp-file (expand-file-name "policy-" dir) nil ".tmp"))
+                  (coding-system-for-write 'utf-8-unix))
+              (write-region text nil tmp nil 'silent)
+              (set-file-modes tmp #o600)
+              (rename-file tmp file t))
+            (dolist (old (directory-files dir t "\\`policy-.*\\.yaml\\'"))
+              (when (and (not (equal old file))
+                         (time-less-p (file-attribute-modification-time (file-attributes old))
+                                      (time-subtract nil (* 7 24 60 60))))
+                (ignore-errors (delete-file old)))))
+          file)
+      (file-error
+       (signal 'harness-sandbox-unavailable
+               (list (format "OpenShell needs a policy file it cannot write in %s: %s" dir
+                             (error-message-string err))))))))
+
+(defun harness-sandbox--openshell-exec-error (word why)
+  "Signal `harness-sandbox-unavailable': the command WORD cannot go to OpenShell.
+WHY says what stands in the way."
+  (harness-log 'error "sandbox: OpenShell cannot run %S: %s" word why)
+  (signal 'harness-sandbox-unavailable
+          (list (format "OpenShell cannot run this command: %s" why))))
+
+(cl-defun harness-sandbox--openshell-command (program cwd command &key (network t) writable readable
+                                                     read-only scratch)
+  "Build the command line running COMMAND in CWD in an OpenShell sandbox.
+PROGRAM is the openshell executable; NETWORK, WRITABLE, READABLE,
+READ-ONLY and SCRATCH are as for `harness-sandbox--bwrap-command'.
+The line is bash running `harness-sandbox--openshell-script' with a
+name for the sandbox, the options of its creation -- the policy file of
+`harness-sandbox--openshell-policy-text', the mounts of
+`harness-sandbox--openshell-driver-config' -- and the options of the
+command's `sandbox exec': its directory and its environment, which is
+the sandbox's own besides what the spec sets.  Signals
+`harness-sandbox-unavailable' when an OpenShell option is unusable, or
+a word of COMMAND is longer than the gateway runs.  It writes the
+policy file, and nothing else."
+  (when-let* ((problem (harness-sandbox--openshell-config-problem)))
+    (harness-sandbox--openshell-exec-error (car command) problem))
+  (dolist (word command)
+    (when (> (string-bytes word) harness-sandbox--openshell-max-argument)
+      (harness-sandbox--openshell-exec-error
+       (car command)
+       (format "an argument of %d bytes is longer than the %d bytes the gateway runs a command with; put it in a file and run that"
+               (string-bytes word) harness-sandbox--openshell-max-argument))))
+  (let* ((cwd (directory-file-name (expand-file-name cwd)))
+         (spec (harness-sandbox--openshell-spec cwd :network network :writable writable
+                                                :readable readable :read-only read-only
+                                                :scratch scratch))
+         (listed (+ (length (plist-get spec :read-only)) (length (plist-get spec :read-write))))
+         (policy (progn
+                   (when (> listed harness-sandbox--openshell-max-paths)
+                     (harness-sandbox--openshell-exec-error
+                      (car command)
+                      (format "its policy would list %d paths, and OpenShell takes at most %d: give some directories up"
+                              listed harness-sandbox--openshell-max-paths)))
+                   (harness-sandbox--openshell-policy-file (harness-sandbox--openshell-policy-text spec))))
+         (config (harness-sandbox--openshell-driver-config spec))
+         (image (default-value 'harness-sandbox-openshell-image))
+         (create (append (list "--detach" "--no-keep" "--no-tty" "--no-auto-providers"
+                               "--label" "harness=emacs-agent-harness"
+                               "--policy" policy)
+                         (and image (list "--from" image))
+                         (and config (list "--driver-config-json" config))
+                         (default-value 'harness-sandbox-openshell-extra-args)
+                         (list "--" "sleep" (number-to-string harness-sandbox--openshell-ttl))))
+         (exec (append (list "--no-tty" "--no-login-shell" "--workdir" cwd)
+                       (cl-loop for (name . value) in (plist-get spec :env)
+                                if (and (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*\\'" name)
+                                        (not (string-prefix-p "OPENSHELL_" name))
+                                        (not (string-match-p "[\n\r\0]" value))
+                                        (<= (string-bytes value) harness-sandbox--openshell-max-argument))
+                                append (list "--env" (concat name "=" value))
+                                else do (harness-log 'debug "sandbox: OpenShell cannot pass %s on" name))
+                       (list "--")
+                       command)))
+    (append (list (or (executable-find "bash") "/bin/bash") "-c" harness-sandbox--openshell-script
+                  "harness-openshell" program
+                  (format "harness-%d-%s" (emacs-pid) (harness-short-id 8))
+                  (number-to-string (length create)))
+            create exec)))
+
+;;;;; What the backend cannot do
+
+(defun harness-sandbox--openshell-limits ()
+  "Return what OpenShell cannot do of the harness's access model, as lines of text."
+  (let ((hosts (harness-sandbox--openshell-hosts))
+        (image (default-value 'harness-sandbox-openshell-image)))
+    (list
+     "No Linux capability can be given: OpenShell runs commands as a non-root user with none."
+     (if hosts
+         (format "The network is never open: a command with it on reaches only %s (harness-sandbox-openshell-network-rules); with it off, nothing."
+                 (string-join hosts ", "))
+       "The network is never open: OpenShell refuses every connection no rule allows, and harness-sandbox-openshell-network-rules lists none, so commands are offline even where the session's network is on.")
+     (format "Commands run in %s, with its own /usr, not this machine's: the tools they run, git and Emacs for the elisp tool among them, must be in it."
+             (if image (format "the image %s" image) "the gateway's default image"))
+     "Every command starts a sandbox of its own, which takes a moment."
+     (format "No argument of a command may be longer than %d bytes." harness-sandbox--openshell-max-argument)
+     "Directories show as bind mounts, which the gateway must allow (allow_driver_config and enable_bind_mounts).")))
+
+(defun harness-sandbox--limits (backend)
+  "Return what the sandbox BACKEND cannot do of the access model, as lines of text.
+Nil for a backend that gives it whole."
+  (pcase backend
+    ('openshell (harness-sandbox--openshell-limits))
+    ('systemd '("No Linux capability can be given: a systemd --user unit can only lower its own."))
+    ('mxc '("No Linux capability can be given: Seatbelt has none."
+            "No PID namespace of its own, and /tmp cannot be written (a command uses $TMPDIR)."))
+    (_ nil)))
+
+;;;###autoload
+(defun harness-sandbox-openshell-check ()
+  "Run a command in a throwaway OpenShell sandbox and say whether that worked.
+It goes the way every command does, with the working directory a
+directory of its own, so it finds what `harness-sandbox-detect' does not
+look for: a gateway that refuses the bind mounts, an image that lacks bash
+or sleep, a kernel without Landlock.  Return a promise of (:ok BOOL
+:message TEXT); called interactively it shows the message too."
+  (interactive)
+  (let* ((program (or (harness-sandbox--openshell-find)
+                      (user-error "The program %s is not installed"
+                                  harness-sandbox-openshell-program)))
+         (dir (file-name-as-directory (make-temp-file "harness-openshell-check-" t)))
+         (command (condition-case err
+                      (harness-sandbox--openshell-command
+                       program dir '("sh" "-c" "echo harness-openshell-ok")
+                       :network nil)
+                    (error (delete-directory dir t) (signal (car err) (cdr err)))))
+         (interactive (called-interactively-p 'interactive)))
+    (when interactive (message "Starting an OpenShell sandbox..."))
+    (harness-then
+     (harness-run-command command :cwd dir :timeout 300 :name "harness-openshell-check")
+     (lambda (r)
+       (ignore-errors (delete-directory dir t))
+       (let* ((ok (and (eql 0 (plist-get r :exit))
+                       (string-search "harness-openshell-ok" (plist-get r :stdout))))
+              (message (if ok
+                           "OpenShell started a sandbox and ran a command in it"
+                         (format "OpenShell could not run a command: exit %s: %s"
+                                 (plist-get r :exit)
+                                 (harness-sandbox--first-lines
+                                  (concat (plist-get r :stderr) " " (plist-get r :stdout)) 6)))))
+         (when interactive (message "%s" message))
+         (list :ok (and ok t) :message message))))))
+
 ;;;; Methods
 
 (defun harness-sandbox--missing-programs (&optional list)
   "Say that this system's sandbox programs are missing, for a message.
 GNU/Linux has bwrap and systemd-run, macOS MXC's mxc-exec-mac.  With
-LIST non-nil, only name them, as a list."
-  (let ((darwin (eq system-type 'darwin)))
-    (cond ((and list darwin) "mxc-exec-mac (MXC)")
-          (list "bwrap, systemd-run")
-          (darwin "mxc-exec-mac (MXC) is not available (see `harness-sandbox-mxc-program')")
-          (t "neither bwrap nor systemd-run is available"))))
+LIST non-nil, only name them, as a list; otherwise the message also
+says why OpenShell cannot be used, when it was asked for."
+  (let* ((darwin (eq system-type 'darwin))
+         (text (cond ((and list darwin) "mxc-exec-mac (MXC)")
+                     (list "bwrap, systemd-run")
+                     (darwin "mxc-exec-mac (MXC) is not available (see `harness-sandbox-mxc-program')")
+                     (t "neither bwrap nor systemd-run is available"))))
+    (if (and (not list) harness-sandbox--problem)
+        (format "%s, and OpenShell, which was asked for, cannot be used: %s"
+                text harness-sandbox--problem)
+      text)))
 
 (defun harness-sandbox--refuse-read-only (command why)
   "Signal `harness-sandbox-unavailable': a read-only COMMAND cannot be confined.
@@ -1302,6 +2153,10 @@ which signals an error for one that would show writable what the
 sandbox hides or keeps read-only).  Under MXC, on macOS, the private
 /tmp is its private $TMPDIR, a directory made here for the command,
 which removes it when it ends; see `harness-sandbox--mxc-command'.
+Under OpenShell the mounts are bind mounts of a sandbox made for the
+command (`harness-sandbox--openshell-command'), and the network is the
+rules of `harness-sandbox-openshell-network-rules', or none with
+`:network nil'.
 They ask for no confinement: where COMMAND runs unconfined it reaches
 them anyway.  A remote CWD or the `off' policy return COMMAND
 unchanged.  Signals `harness-sandbox-unavailable' when the policy is
@@ -1315,8 +2170,9 @@ default (see \"Capabilities\" in the commentary).  bwrap adds each with
 `--cap-add' provided it is in `harness-sandbox-capabilities' and listed
 in `harness-sandbox-grantable-capabilities' when COMMAND is wrapped;
 one that is not is left out, with a line in the log.  A `:read-only'
-command gets none, whatever is asked.  systemd-run and MXC cannot give
-any: with names to give they signal `harness-sandbox-unavailable', as
+command gets none, whatever is asked.  systemd-run, MXC and OpenShell
+cannot give any: with names to give they signal
+`harness-sandbox-unavailable', as
 bwrap does when `--cap-add' would be no capability of the sandbox's own
 user namespace (setuid, or run by root).  Where COMMAND runs
 unconfined anyway -- the `off' policy, a remote CWD, no backend -- it
@@ -1359,6 +2215,14 @@ the debug log."
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
                                         :network network :writable writable :readable readable
                                         :read-only read-only :scratch scratch))
+     ((eq harness-sandbox--backend 'openshell)
+      (when capabilities
+        (harness-sandbox--refuse-capabilities
+         command capabilities
+         "OpenShell runs commands as a non-root user with no Linux capability, and has no way to give one"))
+      (harness-sandbox--openshell-command (alist-get 'openshell harness-sandbox--programs) cwd command
+                                          :network network :writable writable :readable readable
+                                          :read-only read-only :scratch scratch))
      ((eq harness-sandbox--backend 'mxc)
       (when capabilities
         (harness-sandbox--refuse-capabilities
@@ -1388,10 +2252,42 @@ the debug log."
       command))))
 
 (harness-defmethod sandbox/status ()
-  "Return (:backend BACKEND :available (BACKENDS…) :policy POLICY)."
-  (list :backend (or harness-sandbox--backend 'none)
-        :available harness-sandbox--available
-        :policy (harness-sandbox--policy nil)))
+  "Return (:backend BACKEND :available (BACKENDS…) :policy POLICY :limits (TEXT…)).
+`:limits' says in a line each what the backend in use cannot do of the
+harness's access model: the Linux capabilities it cannot give, the
+network OpenShell cannot open; nil for a backend that does all of it.
+When OpenShell was asked for (`harness-sandbox-backend') and could not
+be used, the plist also has `:requested' (`openshell') and `:problem',
+why, and `:backend' is what the harness fell back to."
+  (append (list :backend (or harness-sandbox--backend 'none)
+                :available harness-sandbox--available
+                :policy (harness-sandbox--policy nil)
+                :limits (harness-sandbox--limits harness-sandbox--backend))
+          (and harness-sandbox--requested
+               (list :requested harness-sandbox--requested
+                     :problem harness-sandbox--problem))))
+
+(harness-defmethod sandbox/detect ()
+  "Look for the backends again, choose one, and return `sandbox/status'.
+What to call after starting an OpenShell gateway that was down: the
+backend is chosen when the module starts, and again only by this.  It
+waits for the checks of OpenShell, when that is asked for, which take a
+moment when its gateway does not answer.  The access view's [Detect
+again] calls it, for a UI that is no part of this process."
+  (harness-sandbox-detect)
+  (harness-call 'sandbox/status))
+
+(harness-defmethod sandbox/check ()
+  "Start a throwaway OpenShell sandbox, run a command in it, say how it went.
+Return a promise of (:ok BOOL :message TEXT): `harness-sandbox-openshell-check'
+for a UI that is no part of this process, the access view's [Test
+OpenShell].  With no openshell program it answers at once, `:ok' false."
+  (if (harness-sandbox--openshell-find)
+      (harness-sandbox-openshell-check)
+    (harness-resolved
+     (list :ok :false
+           :message (format "The program %s (harness-sandbox-openshell-program) is not installed or not on the exec path"
+                            harness-sandbox-openshell-program)))))
 
 (harness-defmethod sandbox/capabilities (cwd)
   "Say what the jail does about the Linux capabilities of commands run in CWD.
@@ -1430,7 +2326,7 @@ the harness does not know, `ALL' included."
   "Non-nil when commands run in CWD are confined by a sandbox backend."
   (and cwd (not (file-remote-p cwd))
        (not (eq (harness-sandbox--policy cwd) 'off))
-       (memq harness-sandbox--backend '(bwrap systemd mxc))
+       (memq harness-sandbox--backend '(bwrap systemd mxc openshell))
        t))
 
 (harness-defmethod sandbox/confined-p (cwd)
@@ -1444,7 +2340,7 @@ remote: such a command sees what the user sees."
   (harness-sandbox-detect))
 
 (harness-define-module 'sandbox
-  :doc "Kernel sandbox (bwrap / systemd-run / MXC on macOS) for spawned tool processes."
+  :doc "Kernel sandbox (bwrap / systemd-run / MXC on macOS, or NVIDIA OpenShell on request) for spawned tool processes."
   :requires '(config)
   :init #'harness-sandbox--init)
 

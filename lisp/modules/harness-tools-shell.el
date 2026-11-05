@@ -43,9 +43,11 @@
 ;;
 ;;   The filter is also how a session gets the Linux capabilities the user
 ;;   gave its commands: the access module adds `:capabilities' to the
-;;   options, and the sandbox passes them to bwrap (`--cap-add'); a
-;;   command in a remote directory that is given some is refused, like
-;;   any command that needs the sandbox.
+;;   options, and bwrap, the one sandbox backend that can, passes them on
+;;   (`--cap-add'); a command that is given some is refused where the
+;;   sandbox cannot give them (systemd-run, MXC, NVIDIA OpenShell), and
+;;   so is one in a remote directory, like any command that needs the
+;;   sandbox.
 ;;
 ;;   Remote (TRAMP) directories run the command on that host,
 ;;   unwrapped, as the ssh tool does (tools-ssh): through

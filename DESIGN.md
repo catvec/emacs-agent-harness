@@ -279,7 +279,8 @@ If a tool output, file read, ect any type would cause an output of too large of 
 ## Actual Linux Jail
 For users who want to get very serious with it use a real Linux jail. Isolation is kernel-enforced, not policy-enforced. `harness-sandbox` picks a backend at startup and every tool spawn is routed through it.
 
-- Backends, in preference order: `bwrap`, `systemd-run --user`, `none`.
+- Backends, in preference order: `bwrap`, `systemd-run --user`, `none`; MXC on macOS.
+- NVIDIA OpenShell is a backend the user asks for (`harness-sandbox-backend`), never one `auto` picks: a gateway makes each command a container from an image, whose supervisor enforces a policy with Landlock and seccomp, with the session's directories as bind mounts and a network closed unless the user lists endpoints. It says what it cannot do instead of pretending (no Linux capability, no open network, the image's tools rather than the host's) in `sandbox/status` and the access view, and when it cannot be used the harness falls back to the backend `auto` would pick and says why. See [docs/openshell.md](docs/openshell.md).
 - Fail closed if a policy requires confinement and no backend is available; warn loudly rather than silently running unconfined.
 - Filesystem: read-write session cwd; the skills directories read-only (never one that holds HOME); tmpfs, purposely not HOME or any other files to avoid very valuable files like npm credentials being accessible and minimal system or kernel mounts to prevent breakout or other attempts
 - Process: `--unshare-pid --unshare-ipc --unshare-uts --die-with-parent --new-session`.

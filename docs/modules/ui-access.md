@@ -29,14 +29,19 @@ click away rather than all on one screen:
   or take them away; why none can be given when none can is said
   there) and the sandbox its commands run in -- the backend, the ones
   this machine has, the policy, whether commands in its directory are
-  confined.  Directories are those it may write, those it may only
-  read and those it gave up, each with where it comes from and what
-  can be done with it: give it up or keep it for reading only, revoke
-  a grant, restore one given up; new ones are allowed, for writing or
-  for reading only, and the session moves to another working
-  directory (`harness-directories`, C-c h d, opens the page here).
-  Details end it: a line each for the tools, the rules and the
-  judgements, with what they hold, each a link to its page.
+  confined, what the backend cannot do of all this (OpenShell gives no
+  capability and no open network, say), and why a backend that was
+  asked for and could not be used is not the one in use; where
+  OpenShell is installed or asked for, buttons look for the backends
+  again (`D`, after starting its gateway) and try a throwaway
+  sandbox (`O`).  Directories are those it may write, those it may
+  only read and those it gave up, each with where it comes from and
+  what can be done with it: give it up or keep it for reading only,
+  revoke a grant, restore one given up; new ones are allowed, for
+  writing or for reading only, and the session moves to another
+  working directory (`harness-directories`, C-c h d, opens the page
+  here).  Details end it: a line each for the tools, the rules and
+  the judgements, with what they hold, each a link to its page.
 - Tools: those the session is offered, those it is not and why,
   and those that belong to other kinds of session.  A tool is turned
   off for the session, and on again, here.
@@ -68,6 +73,7 @@ window shows when it is shown again.
 - `harness-directories` — Show the directories SESSION-ID may access, in its access view.
 - `harness-ui-access-allow-dir` — Grant this buffer's session DIR to write.
 - `harness-ui-access-allow-read-dir` — Let this buffer's session read DIR, not write it.
+- `harness-ui-access-check-openshell` — Start a throwaway OpenShell sandbox, run a command in it, and say how it went.
 - `harness-ui-access-filter-behavior` — Show the judgements that decided BEHAVIOR: allow, deny, ask, asked; nil for all.
 - `harness-ui-access-filter-by` — Show the judgements BY decided, a name such as user or rule; nil for all.
 - `harness-ui-access-filter-clear` — Show every judgement.
@@ -82,6 +88,7 @@ window shows when it is shown again.
 - `harness-ui-access-previous-call` — Move to the Nth previous judged call.
 - `harness-ui-access-previous-section` — Move to the Nth previous section.
 - `harness-ui-access-quit` — Go back from this page to the Overview, or put the view away from the Overview.
+- `harness-ui-access-redetect-sandbox` — Look for the sandbox backends again, and say which one the harness picked.
 - `harness-ui-access-refresh` — Fetch what BUFFER's session may reach, and its judgements, and draw them.
 - `harness-ui-access-restore-at-point` — Give the session back the directory at point, which it gave up.
 - `harness-ui-access-revoke-capability` — Take the capability NAME away from this buffer's session's commands.
@@ -121,6 +128,8 @@ window shows when it is shown again.
 - `access/set-tool` ([access](access.md))
 - `permission/allow-dir` ([perms](perms.md))
 - `permission/revoke-dir` ([perms](perms.md))
+- `sandbox/check` ([sandbox](sandbox.md))
+- `sandbox/detect` ([sandbox](sandbox.md))
 
 ### Events it hears over ACP
 
