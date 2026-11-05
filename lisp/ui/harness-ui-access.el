@@ -3,8 +3,8 @@
 ;;; Commentary:
 
 ;; `harness-access' (C-c h j) says what a session may reach, in one
-;; place, and changes it.  Clicking the permission mode in a chat's
-;; header line (Ask, Accept Edits, Auto, YOLO) opens it too.  It is
+;; place, and changes it.  Clicking the permission mode on a chat's
+;; settings line (Ask, Accept Edits, Auto, YOLO) opens it too.  It is
 ;; four pages, a buffer each, that share a strip under the title --
 ;; Overview, Tools, Rules, Judgements, also the keys 1 to 4 -- so the
 ;; first page holds what most visits are for and the long lists are a

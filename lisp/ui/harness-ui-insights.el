@@ -413,8 +413,8 @@ Images with a map are measured on the selected frame; see
                      "Messages you wrote; the harness's and other agents' are not counted")
             (funcall cell (harness-ui-insights--duration (plist-get sessions :active-seconds)) "active"
                      "Time sessions were working, without the pauses longer than ten minutes")
-            (funcall cell (harness-format-cost (plist-get totals :cost)) "cost"
-                     "Billed, as the usage dashboard counts it")
+            (funcall cell (harness-ui-cost-string (harness-ui-cost-charges totals)) "cost"
+                     "Billed money, and a share of the plan's quota where a subscription paid")
             (funcall counted (plist-get (plist-get data :tool-totals) :calls) "tool call" "tool calls")
             (if (and done (> done 0)) (funcall counted done "task done" "tasks done") "")
             "\n")))
@@ -472,7 +472,7 @@ TOTAL is the usage at API prices the share meters divide."
   (mapcar (lambda (r)
             (let ((share (if (> total 0) (/ (harness-usage-list-cost r) total) 0)))
               (list (funcall label r)
-                    (harness-format-cost (plist-get r :cost))
+                    (harness-ui-cost-string (harness-ui-cost-charges r))
                     (concat (harness-ui-insights--meter share 'accent (format "%.0f%% of the usage at API prices" (* 100 share)))
                             (propertize (format " %3.0f%%" (* 100 share)) 'face 'harness-dim-face))
                     (harness-ui-insights--number (plist-get r :calls))
@@ -493,8 +493,8 @@ TOTAL is the usage at API prices the share meters divide."
     (harness-ui-insights--heading
      "Usage"
      (format "%s billed%s · %s · %s in, %s out"
-             (harness-format-cost (plist-get totals :cost))
-             (if (> covered 0) (format ", %s covered by a plan" (harness-format-cost covered)) "")
+             (harness-ui-format-billed totals)
+             (if (> covered 0) (format ", %s covered by a plan" (harness-ui-format-covered totals)) "")
              (harness-ui-insights--count (plist-get totals :calls) "model call")
              (harness-format-tokens (plist-get totals :input)) (harness-format-tokens (plist-get totals :output))))
     (if (zerop (or (plist-get totals :calls) 0))
@@ -543,7 +543,7 @@ Only for a report of every project."
                            (harness-ui-insights--duration (plist-get act :active))
                            (harness-ui-insights--meter (/ (or (plist-get act :active) 0) most))
                            (harness-ui-insights--number (plist-get act :messages))
-                           (harness-format-cost (plist-get use :cost)))))
+                           (harness-ui-cost-string (harness-ui-cost-charges use)))))
                  (seq-take rows 10)))))))
 
 (defun harness-ui-insights--kinds-text (sessions)

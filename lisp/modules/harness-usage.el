@@ -70,6 +70,10 @@
 ;; the estimate with real numbers (see "Live usage" below).  That too is
 ;; counted here, in memory; `usage/live-updated' announces the figures
 ;; a few times a second at most.
+;;
+;; Quota exchange rates say what a plan's quota window is worth in
+;; API-priced usage, so a view can show what a session cost as a share of
+;; the plan's windows (see "Quota exchange rates" below).
 
 ;;; Code:
 
@@ -1677,6 +1681,168 @@ harness recorded itself; OUTSIDE, the rest, is what the budget counts."
             (delq nil (append (and (eq period 'month) (harness-usage--extra-sources bounds rows))
                               (list (harness-usage--cost-report-source bounds fetch)))))))
 
+;;;; Quota exchange rates
+
+;; A plan pays for its calls, so a row's cost is 0 and its list cost is what
+;; the call would cost at API prices.  The plan's limits are windows of use
+;; (`provider/quota': "5h" 23% used, "7d" 41%), not dollars, so a session's
+;; share of a window needs a rate between the two.  The harness estimates it
+;; from its own records: the calls a plan covered since a window began, at
+;; list prices, filled the share of the window the provider reports used, so
+;; 100% of the window is worth that many dollars (its capacity).  A share
+;; is then the dollars a plan covered over the capacity.  It is an
+;; estimate: use outside the harness counts against the window too.  The
+;; rates are kept in memory, recomputed shortly after a provider reports
+;; its quota (`usage/quota-rates-updated' when one moved); a window with
+;; too little use to tell keeps the estimate it had.
+
+(defcustom harness-usage-quota-rates-delay 2.0
+  "Seconds after a quota report before the exchange rates are worked out again.
+Working them out reads a week of usage rows, and reports come in bursts.
+Zero or nil does it at once."
+  :type '(choice (const :tag "At once" nil) number) :group 'harness)
+
+(defconst harness-usage--quota-min-used 0.01
+  "Fraction of a quota window that must be used before it gives a rate.")
+
+(defconst harness-usage--quota-min-cost 0.05
+  "Dollars at list prices the harness must have recorded in a window for a rate.")
+
+(defvar harness-usage--quotas (make-hash-table :test 'equal)
+  "Provider id (a string) -> the quota it last reported, `provider/quota' shaped.")
+
+(defvar harness-usage--quota-estimates (make-hash-table :test 'equal)
+  "\"PROVIDER/WINDOW\" -> the last rate with enough use behind it.")
+
+(defvar harness-usage--quota-rates nil
+  "The exchange rates as `usage/quota-rates' returns them.")
+
+(defvar harness-usage--quota-rates-announced nil
+  "The rates `usage/quota-rates-updated' last announced.")
+
+(defvar harness-usage--quota-rates-timer nil
+  "Timer that works the rates out after a burst of quota reports.")
+
+(defun harness-usage--window-length (window)
+  "Return the length in seconds of quota WINDOW, a plist, or nil if not known.
+The 5-hour and 7-day windows of all models and a window of a month are
+known; one scoped to a model (\"7d Opus\") is not, as only that model's
+calls fill it."
+  (let ((name (plist-get window :name))
+        (label (downcase (or (plist-get window :label) ""))))
+    (cond ((plist-get window :model) nil)
+          ((equal name "5h") 18000)
+          ((equal name "7d") 604800)
+          ((string-match-p "month" label) (* 30 86400)))))
+
+(defun harness-usage--rate-for (provider window rows now)
+  "Return the rate of PROVIDER's quota WINDOW from ROWS, or nil.
+ROWS are the usage rows recorded since the window began, as of NOW;
+the plist is what `usage/quota-rates' lists, or nil without enough use
+behind it."
+  (let* ((length (harness-usage--window-length window))
+         (resets (plist-get window :resets))
+         (used (plist-get window :used)))
+    (when (and length (numberp resets) (> resets now) (numberp used)
+               (>= used harness-usage--quota-min-used))
+      (let* ((start (- resets length))
+             (prefix (concat provider ":"))
+             (cost (cl-loop for row in rows
+                            when (and (>= (plist-get row :ts) start)
+                                      (eq (harness-billing-of row) 'subscription)
+                                      (string-prefix-p prefix (or (plist-get row :model) "")))
+                            sum (harness-usage-list-cost row))))
+        (when (>= cost harness-usage--quota-min-cost)
+          (list :provider provider :window (plist-get window :name)
+                :label (plist-get window :label)
+                :capacity (/ cost used) :used (float used) :cost (float cost)
+                :resets (float resets) :length length :measured (float now)))))))
+
+(defun harness-usage--compute-quota-rates ()
+  "Return the exchange rates of every provider that reported a quota.
+A window without enough use behind it gives the estimate it had; the
+list is in order of provider, then of the windows' lengths."
+  (let* ((now (float-time))
+         (starts nil))
+    (maphash (lambda (_ quota)
+               (dolist (w (plist-get quota :windows))
+                 (when-let* ((length (harness-usage--window-length w))
+                             (resets (plist-get w :resets)))
+                   (push (- resets length) starts))))
+             harness-usage--quotas)
+    (let ((rows (and starts (harness-usage--rows :since (apply #'min starts))))
+          (out nil))
+      (maphash
+       (lambda (provider quota)
+         (dolist (w (plist-get quota :windows))
+           (when (harness-usage--window-length w)
+             (let* ((key (format "%s/%s" provider (plist-get w :name)))
+                    (fresh (harness-usage--rate-for provider w rows now)))
+               (when fresh (puthash key fresh harness-usage--quota-estimates))
+               (when-let* ((rate (or fresh (gethash key harness-usage--quota-estimates))))
+                 (push rate out))))))
+       harness-usage--quotas)
+      (sort out (lambda (a b)
+                  (if (equal (plist-get a :provider) (plist-get b :provider))
+                      (< (plist-get a :length) (plist-get b :length))
+                    (string< (plist-get a :provider) (plist-get b :provider))))))))
+
+(defun harness-usage--rates-moved-p (old new)
+  "Non-nil when the rates NEW differ from OLD in what a view shows.
+That is another provider or window, or a capacity more than half a
+percent away: use that grows the window a little moves nothing."
+  (or (/= (length old) (length new))
+      (cl-loop for a in old for b in new
+               thereis (or (not (equal (plist-get a :provider) (plist-get b :provider)))
+                           (not (equal (plist-get a :window) (plist-get b :window)))
+                           (> (abs (- (plist-get a :capacity) (plist-get b :capacity)))
+                              (* 0.005 (plist-get a :capacity)))))))
+
+(defun harness-usage--refresh-quota-rates ()
+  "Work the exchange rates out now; announce them when they moved."
+  (setq harness-usage--quota-rates-timer nil)
+  (let ((rates (condition-case err (harness-usage--compute-quota-rates)
+                 (error (harness-log 'warn "usage: quota rates: %s" (harness-error-message err))
+                        harness-usage--quota-rates))))
+    (setq harness-usage--quota-rates rates)
+    (when (harness-usage--rates-moved-p harness-usage--quota-rates-announced rates)
+      (setq harness-usage--quota-rates-announced rates)
+      (harness-emit 'usage/quota-rates-updated rates))))
+
+(defun harness-usage--schedule-quota-rates ()
+  "Work the rates out soon, once for a burst of quota reports."
+  (if (or (null harness-usage-quota-rates-delay) (<= harness-usage-quota-rates-delay 0))
+      (harness-usage--refresh-quota-rates)
+    (unless (timerp harness-usage--quota-rates-timer)
+      (setq harness-usage--quota-rates-timer
+            (run-at-time harness-usage-quota-rates-delay nil #'harness-usage--refresh-quota-rates)))))
+
+(defun harness-usage--on-quota-rates (provider quota)
+  "Remember PROVIDER's QUOTA and schedule new exchange rates.
+A provider billing per token has no windows, and so no rates."
+  (puthash (format "%s" provider) quota harness-usage--quotas)
+  (harness-usage--schedule-quota-rates))
+
+(defun harness-usage--forget-quota-rates ()
+  "Cancel the pending work of the exchange rates and forget them."
+  (when (timerp harness-usage--quota-rates-timer) (cancel-timer harness-usage--quota-rates-timer))
+  (setq harness-usage--quota-rates-timer nil
+        harness-usage--quota-rates nil
+        harness-usage--quota-rates-announced nil)
+  (clrhash harness-usage--quotas)
+  (clrhash harness-usage--quota-estimates))
+
+(harness-defmethod usage/quota-rates ()
+  "Return what a quota window is worth in API-priced usage, per provider.
+Each rate is (:provider ID :window NAME :label TEXT :capacity USD :used
+FRACTION :cost USD :resets TIME :length SECONDS :measured TIME): the
+plan's calls the harness recorded since the window began, COST dollars
+at API list prices, filled USED of it, so 100% of it is CAPACITY
+dollars.  Only the windows of all models that have enough use behind
+them are listed; the list is in order of provider and window length.
+An estimate: use outside the harness fills the window too."
+  harness-usage--quota-rates)
+
 ;;;; Enforcement
 
 (defun harness-usage--applies-p (budget project &optional session-id)
@@ -1925,6 +2091,8 @@ is on disk, and fetches of reports may be scheduled."
     (harness-usage--forget-reports))
   (harness-on 'session/usage #'harness-usage--on-session-usage)
   (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
+  (harness-on 'provider/quota-updated #'harness-usage--on-quota-rates)
+  (harness-usage--schedule-quota-rates)
   ;; What the holds kept was worked out from budgets and spending: a
   ;; budget changed (or the setting), or a provider reported a bill.
   (harness-on 'usage/budgets-changed #'harness-usage--forget-holds)
@@ -1941,14 +2109,21 @@ is on disk, and fetches of reports may be scheduled."
 (harness-declare-event 'usage/reported-changed
                        "(REPORT) when a provider reports a new amount billed, which budgets over everything count.")
 (harness-declare-event 'usage/rate-updated "(SESSION-ID RATE) after a model call of the session was measured; RATE as `usage/rate' returns it.")
+(harness-declare-event 'usage/quota-rates-updated
+                       "(RATES) when what a plan's quota window is worth in API-priced usage moved; RATES as `usage/quota-rates' returns them.")
 (harness-declare-event 'usage/live-updated
                        "(SESSION-ID LIVE) while the session's turn runs, at most every `harness-usage-live-interval' seconds: its token figures as `usage/live' returns them, which grow as its model streams; LIVE is nil once the turn ended.")
+
+(defun harness-usage--shutdown ()
+  "Forget what providers reported and the exchange rates, and cancel their timers."
+  (harness-usage--forget-reports)
+  (harness-usage--forget-quota-rates))
 
 (harness-define-module 'usage
   :doc "Cost accounting, usage summaries, budgets, output rates and live token counts."
   :requires '(store session provider)
   :init #'harness-usage--init
-  :shutdown #'harness-usage--forget-reports)
+  :shutdown #'harness-usage--shutdown)
 
 (provide 'harness-usage)
 ;;; harness-usage.el ends here

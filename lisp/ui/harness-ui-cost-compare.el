@@ -200,10 +200,15 @@ fetches it on connect, so this is a cold-start case)."
     (propertize text 'help-echo (harness-ui-cost-compare--help row))))
 
 (defun harness-ui-cost-compare--insert (data)
-  "Insert the comparison DATA, as `usage/cost-compare' returned it."
+  "Insert the comparison DATA, as `usage/cost-compare' returned it.
+What was billed goes through the shared cost formatting
+\(`harness-ui-format-billed').  Every other figure here is dollars at API
+prices by nature -- the recorded tokens priced at each model's list
+prices, which is the one scale models and plans share -- and so stays
+money (`harness-format-cost'), never a share of a plan's quota."
   (let* ((totals (plist-get data :recorded))
          (list-cost (float (or (plist-get totals :list-cost) 0))))
-    (insert " " (propertize (format "Recorded: %s billed" (harness-format-cost (plist-get totals :cost)))
+    (insert " " (propertize (format "Recorded: %s billed" (harness-ui-format-billed totals))
                             'face 'harness-usage-heading-face)
             (propertize (format ", %s at API prices, %d calls\n"
                                 (harness-format-cost list-cost) (or (plist-get totals :calls) 0))

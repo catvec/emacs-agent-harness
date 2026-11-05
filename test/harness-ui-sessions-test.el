@@ -41,6 +41,7 @@
 (require 'harness-ui-supervisor)
 
 (defvar harness-ui--sessions)
+(defvar harness-ui--quota-rates)
 
 (defvar harness-ui-sessions-test--tasks nil
   "What the harness answers `_harness/task/list' with: the tasks, or `fail'.")
@@ -4095,6 +4096,25 @@ anchor."
       ;; With no session at point, no answer.
       (with-temp-buffer
         (should-error (harness-ui-sessions-allow) :type 'user-error)))))
+
+(ert-deftest harness-ui-sessions-cost-cell-is-money-or-a-share ()
+  "The Cost column reads as money for a session billed per token, as a share of
+the plan's quota windows for one a subscription pays, whatever the rates."
+  (let ((harness-ui--quota-rates (make-hash-table :test 'equal))
+        (cell (lambda (s) (substring-no-properties
+                           (funcall (plist-get (harness-ui-sessions-column "Cost") :cell) s 0))))
+        (api (list :id "a" :model "demo:scripted" :usage '(:cost 1.2 :list-cost 1.2 :billing "api")))
+        (plan (list :id "p" :model "claude:claude-opus-5-5"
+                    :usage '(:cost 0.0 :list-cost 0.5 :billing "subscription" :plan "max"))))
+    (should (equal "$1.20" (funcall cell api)))
+    (should (equal "Max" (funcall cell plan)))
+    (harness-ui--store-quota-rates
+     '((:provider "claude" :window "5h" :capacity 50.0 :length 18000)
+       (:provider "claude" :window "7d" :capacity 80.0 :length 604800)))
+    (should (equal "$1.20" (funcall cell api)))
+    (should (equal "1% / 0.6%" (funcall cell plan)))
+    ;; Wide enough for a share past ten percent of each window.
+    (should (>= (plist-get (harness-ui-sessions-column "Cost") :width) (string-width "100% / 12%")))))
 
 (provide 'harness-ui-sessions-test)
 ;;; harness-ui-sessions-test.el ends here

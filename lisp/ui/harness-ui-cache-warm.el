@@ -270,6 +270,12 @@ more in hours and minutes, so what is shown changes once a minute."
             ((zerop rest) (format "%dh" hours))
             (t (format "%dh%02dm" hours rest))))))
 
+(defun harness-ui-cache-warm--session ()
+  "Return the plist of the session this buffer shows, or nil.
+Its plan, if one pays, words the costs of a refresh and a resend
+\(`harness-ui-estimate-text')."
+  (and harness-ui-session-id (harness-ui-session harness-ui-session-id)))
+
 (defun harness-ui-cache-warm--describe (state &optional now)
   "Describe STATE, a warm state shown at NOW, for a tooltip.
 It says what is happening and until when, why the cache is kept warm
@@ -309,7 +315,8 @@ warm says why."
      (if (and warming (> refreshes 0)) (format "  %d so far." refreshes) "")
      (if (and (numberp refresh-cost) (numberp resend-cost))
          (format "\nA refresh costs about %s; sending the whole conversation again uncached, about %s."
-                 (harness-format-cost refresh-cost) (harness-format-cost resend-cost))
+                 (harness-ui-estimate-text refresh-cost (harness-ui-cache-warm--session))
+                 (harness-ui-estimate-text resend-cost (harness-ui-cache-warm--session)))
        "")
      "\nmouse-1: keep it warm for a period of your own, or stop")))
 
@@ -550,9 +557,11 @@ the harness cannot go through with says why, in the harness's words."
                                  "the cache lapses before a refresh is due"
                                (format "about %d refresh%s" refreshes (if (= refreshes 1) "" "es")))
                              (and (numberp price) (> refreshes 0)
-                                  (format "~%s at cache-read prices" (harness-format-cost (* refreshes price))))
+                                  (format "%s at cache-read prices"
+                                          (harness-ui-format-estimate (* refreshes price) (harness-ui-cache-warm--session))))
                              (and (numberp resend)
-                                  (format "against ~%s to send it all again uncached" (harness-format-cost resend)))))
+                                  (format "against %s to send it all again uncached"
+                                          (harness-ui-format-estimate resend (harness-ui-cache-warm--session))))))
                  ", ")
                 ;; The harness stops short of the period when more refreshes cost more.
                 (if (and (numberp manual) (numberp until) (< until (- manual 60)))

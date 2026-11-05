@@ -477,6 +477,7 @@ initialize: one it let go of for another closes on purpose."
                     (harness-ui-refresh-models)
                     (harness-ui-refresh-quotas)
                     (harness-ui-refresh-rates)
+                    (harness-ui-refresh-quota-rates)
                     (harness-ui-refresh-live)
                     (run-hooks 'harness-ui-connected-hook))
                   (lambda (e)
@@ -816,6 +817,8 @@ answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
          (harness-ui--store-quota (car args) (cadr args)))
        (when (equal event "usage/rate-updated")
          (harness-ui--store-rate (car args) (cadr args)))
+       (when (equal event "usage/quota-rates-updated")
+         (harness-ui--store-quota-rates (car args)))
        (when (equal event "usage/live-updated")
          (harness-ui--store-live (car args) (cadr args)))
        (prog1 (harness-ui--run-event-functions event args)
@@ -1361,6 +1364,68 @@ REFRESH non-nil asks each for fresh data."
   (when-let* ((provider (harness-ui-session-provider session)))
     (harness-ui-quota provider)))
 
+;;;; Quota exchange rate cache
+
+;; The harness works out what a plan's quota window is worth in
+;; API-priced usage (`usage/quota-rates' in harness-usage.el), so a cost a
+;; plan paid can be shown as a share of its windows
+;; (`harness-ui-cost-charges').  The UI keeps the latest rates of each
+;; provider, fetched on connect and then updated from
+;; `usage/quota-rates-updated' events.
+
+(defvar harness-ui--quota-rates (make-hash-table :test 'equal)
+  "Provider id (a string) -> its quota exchange rates, shortest window first.
+Each rate is a plist as `usage/quota-rates' returns it: (:provider ID
+:window NAME :label TEXT :capacity USD :used FRACTION :cost USD :resets
+TIME :length SECONDS :measured TIME).")
+
+(defvar harness-ui-quota-rate-functions nil
+  "Functions called with no arguments after the cached quota rates changed.")
+
+(defun harness-ui--store-quota-rates (rates)
+  "Cache RATES, the list `usage/quota-rates' returns, as the only rates.
+Run `harness-ui-quota-rate-functions' when they changed."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (rate (if (keywordp (car-safe rates)) (list rates) rates))
+      (when (and (consp rate) (stringp (plist-get rate :provider)) (numberp (plist-get rate :capacity)))
+        (puthash (plist-get rate :provider)
+                 (append (gethash (plist-get rate :provider) table) (list rate))
+                 table)))
+    (maphash (lambda (k v)
+               (puthash k (sort (copy-sequence v)
+                                (lambda (a b) (< (or (plist-get a :length) 0) (or (plist-get b :length) 0))))
+                        table))
+             table)
+    (unless (equal (harness-ui--hash-alist table) (harness-ui--hash-alist harness-ui--quota-rates))
+      (setq harness-ui--quota-rates table)
+      (run-hooks 'harness-ui-quota-rate-functions))))
+
+(defun harness-ui--hash-alist (table)
+  "Return TABLE's entries as an alist sorted by key, to compare tables."
+  (let (out)
+    (maphash (lambda (k v) (push (cons k v) out)) table)
+    (sort out (lambda (a b) (string< (car a) (car b))))))
+
+(defun harness-ui-refresh-quota-rates (&optional callback)
+  "Fetch every provider's quota exchange rates into the cache, then call CALLBACK."
+  (harness-ui-call "_harness/usage/quota-rates" nil
+                   (lambda (rates)
+                     (harness-ui--store-quota-rates rates)
+                     (when callback (funcall callback rates)))
+                   #'ignore))
+
+(defun harness-ui-quota-rates (provider)
+  "Return PROVIDER's cached quota exchange rates, shortest window first, or nil.
+PROVIDER is an id, a string or a symbol."
+  (gethash (format "%s" provider) harness-ui--quota-rates))
+
+(defun harness-ui-quota-capacity (provider window)
+  "Return the USD at API prices that fill WINDOW (\"5h\") of PROVIDER's plan, or nil.
+That is the cached rate of the window (`harness-ui-quota-rates')."
+  (plist-get (cl-find window (harness-ui-quota-rates provider)
+                      :key (lambda (r) (plist-get r :window)) :test #'equal)
+             :capacity))
+
 ;;;; Output rate cache
 
 ;; The harness measures how fast each session's model writes (see
@@ -1569,10 +1634,196 @@ also never older than the hover (as the task board's card titles are,
     (lambda (&rest _)
       (funcall fn (or (and id (harness-ui-session id)) session)))))
 
+;;;; What a cost reads as
+
+;; Every figure of what something cost goes through here, so it reads the
+;; same in the chat, the session list, the task board, the usage pages and
+;; the estimates of an action.  A cost is a list of charges, each an amount
+;; in a unit (`harness-ui-cost-charges'): the unit is money, a currency
+;; with its symbol -- what was billed per token, or as extra usage --, or
+;; the share of a plan's quota windows, in percent -- what a subscription
+;; paid, which is no money.  The share is the dollars a plan covered, at
+;; API prices, over what the window is worth in them: the harness
+;; estimates that (`harness-ui-quota-capacity').  Until it has, the plan
+;; stands for the unit, by name.  `harness-ui-cost-string' words a cost,
+;; and the figures of a session, a total of several or an action's
+;; estimate are made from it.
+
+(defconst harness-ui-money-symbols '(("USD" . "$"))
+  "The symbol of each currency a cost can be in, by its code.")
+
+(defun harness-ui-money-unit (&optional currency)
+  "Return the money unit of CURRENCY, a code such as \"USD\" (the default).
+The plist is (:kind money :currency CODE :symbol SYMBOL)."
+  (let ((code (or currency "USD")))
+    (list :kind 'money :currency code
+          :symbol (or (cdr (assoc code harness-ui-money-symbols)) code))))
+
+(defun harness-ui-format-money (amount &optional unit)
+  "Return AMOUNT in money UNIT (`harness-ui-money-unit'), US dollars by default."
+  (let ((symbol (plist-get (or unit (harness-ui-money-unit)) :symbol)))
+    (if (equal symbol "$")
+        (harness-format-cost amount)
+      (concat symbol (substring (harness-format-cost amount) 1)))))
+
+(defun harness-ui-format-percent (percent)
+  "Return PERCENT as \"0%\", \"<0.1%\", \"0.6%\", \"9.5%\" or \"23%\".
+One decimal below 10, none from there, and a whole figure without \".0\"."
+  (cond ((<= percent 0) "0%")
+        ((< percent 0.1) "<0.1%")
+        ((< percent 9.95) (concat (replace-regexp-in-string "\\.0\\'" "" (format "%.1f" percent)) "%"))
+        (t (format "%d%%" (round percent)))))
+
+(defun harness-ui-cost-provider (thing &optional provider)
+  "Return the id of the provider whose plan pays for THING, a string, or nil.
+THING is a session, whose model says (`harness-ui-session-provider'), or
+a usage plist.  PROVIDER, when given, wins.  A total with no model of its
+own -- a project's row of the usage page -- goes by the first provider,
+by id, that has quota rates."
+  (or (and provider (format "%s" provider))
+      (and (consp thing) (plist-member thing :usage) (harness-ui-session-provider thing))
+      (car (sort (hash-table-keys harness-ui--quota-rates) #'string<))))
+
+(defun harness-ui--cost-session (thing)
+  "Return THING as a session plist: a usage plist is the `:usage' of one."
+  (if (and (consp thing) (plist-member thing :usage)) thing (list :usage thing)))
+
+(defun harness-ui-cost-shares (usd provider)
+  "Return USD at API prices as shares of PROVIDER's quota windows, or nil.
+The value is (WINDOWS . PERCENTS): the names of the windows that have a
+rate (`harness-ui-quota-rates'), shortest first, and USD as a percent of
+each.  Nil when the plan has no rate yet."
+  (when-let* ((rates (and provider (harness-ui-quota-rates provider))))
+    (cons (mapcar (lambda (r) (plist-get r :window)) rates)
+          (mapcar (lambda (r) (* 100.0 (/ usd (plist-get r :capacity)))) rates))))
+
+(defun harness-ui-plan-charge (usd provider &optional plan)
+  "Return the charge of USD at API prices that a plan of PROVIDER paid.
+As shares of its quota windows when they have rates, else the plan itself
+by its name, PLAN, \"Plan\" if unsaid."
+  (if-let* ((shares (harness-ui-cost-shares usd provider)))
+      (list :amounts (cdr shares) :unit (list :kind 'quota :windows (car shares)))
+    (list :amounts nil :unit (list :kind 'plan :name (or plan "Plan")))))
+
+(defun harness-ui-cost-covered (session)
+  "Return the part of SESSION's usage a plan paid, in USD at API prices."
+  (harness-usage-covered (plist-get session :usage)))
+
+(defun harness-ui-cost-planned-p (session)
+  "Non-nil when a plan pays, wholly or in part, for SESSION's calls."
+  (let ((billing (harness-ui-session-billing session)))
+    (or (> (harness-ui-cost-covered session) 0) (memq billing '(subscription extra-usage)))))
+
+(defun harness-ui-cost-plan-name (session)
+  "Return the name of the plan paying for SESSION: \"Max\", or \"Plan\" if unknown."
+  (or (harness-plan-name (or (plist-get (plist-get session :usage) :plan)
+                             (plist-get (harness-ui-session-quota session) :plan)))
+      "Plan"))
+
+(defun harness-ui-cost-charges (thing &optional provider)
+  "Return what THING cost, as a list of charges.
+THING is a session, a total (`harness-ui-sessions-total') or a usage
+plist -- a row of the usage pages --, PROVIDER the provider whose plan
+pays for it when THING does not say (`harness-ui-cost-provider').  A
+charge is (:amounts (N...) :unit UNIT), the amounts in the unit:
+
+- UNIT (:kind money :currency \"USD\" :symbol \"$\"): one amount, in
+  that currency, billed per token or as extra usage;
+- UNIT (:kind quota :windows (\"5h\" \"7d\")): the percent of each
+  window, shortest first, a plan paid;
+- UNIT (:kind plan :name \"Max\"): no amounts, when a plan pays and its
+  windows have no rate yet.
+
+Money comes first.  Billed per token the cost is one money charge, 0
+included; a plan adds its charge after the money it did not cover."
+  (let* ((session (harness-ui--cost-session thing))
+         (cost (float (or (plist-get (plist-get session :usage) :cost) 0)))
+         (planned (harness-ui-cost-planned-p session))
+         (provider (harness-ui-cost-provider session provider)))
+    (if (not planned)
+        (list (list :amounts (list cost) :unit (harness-ui-money-unit)))
+      (append (and (> cost 0) (list (list :amounts (list cost) :unit (harness-ui-money-unit))))
+              (list (harness-ui-plan-charge (harness-ui-cost-covered session) provider
+                                            (harness-ui-cost-plan-name session)))))))
+
+(defun harness-ui-charge-string (charge &optional form)
+  "Return CHARGE as text.  FORM is `long' to name the quota windows.
+Money reads \"$1.20\"; a share \"1% / 0.6%\", and in the long form \"1% /
+0.6% of 5h / 7d quota\"; a plan by its name."
+  (let ((unit (plist-get charge :unit))
+        (amounts (plist-get charge :amounts)))
+    (pcase (plist-get unit :kind)
+      ('money (harness-ui-format-money (car amounts) unit))
+      ('plan (plist-get unit :name))
+      ('quota
+       (let ((amounts (if (cl-every (lambda (a) (<= a 0)) amounts) '(0) amounts)))
+         (concat (mapconcat #'harness-ui-format-percent amounts " / ")
+                 (if (eq form 'long)
+                     (concat " of " (string-join (plist-get unit :windows) " / ") " quota")
+                   "")))))))
+
+(defun harness-ui-cost-string (charges &optional form)
+  "Return CHARGES, a cost (`harness-ui-cost-charges'), as text.
+FORM is `long' to name the quota windows a share is of.  The charges
+join with a plus; a plan by name, as billed beside money, without
+spaces: \"$0.40+Max\"."
+  (let ((out ""))
+    (cl-loop for charge in charges
+             for first = t then nil
+             do (setq out (concat out
+                                  (cond (first "")
+                                        ((eq (plist-get (plist-get charge :unit) :kind) 'plan) "+")
+                                        (t " + "))
+                                  (harness-ui-charge-string charge form))))
+    out))
+
+(defun harness-ui-cost-quota-charge (charges)
+  "Return the charge among CHARGES that a plan paid, or nil."
+  (cl-find-if (lambda (c) (memq (plist-get (plist-get c :unit) :kind) '(quota plan))) charges))
+
+(defun harness-ui-covered-share-p (thing &optional provider)
+  "Non-nil when what a plan paid for THING reads as a share of quota windows.
+That is when its provider has quota rates (`harness-ui-cost-shares').
+THING and PROVIDER are as `harness-ui-cost-charges' takes them."
+  (let ((session (harness-ui--cost-session thing)))
+    (and (harness-ui-quota-rates (or (harness-ui-cost-provider session provider) "")) t)))
+
+(defun harness-ui-format-covered (thing &optional provider form)
+  "Return what a plan paid for THING, a session, total or usage plist.
+Its share of the plan's quota windows (\"1% / 0.6%\", FORM `long' adds
+\"of 5h / 7d quota\") when they have rates, else the dollars at API
+prices (\"$3.25\"), which is all there is to say before.  PROVIDER is as
+`harness-ui-cost-charges' takes it."
+  (let* ((session (harness-ui--cost-session thing))
+         (usd (harness-ui-cost-covered session))
+         (charge (harness-ui-plan-charge usd (harness-ui-cost-provider session provider))))
+    (if (eq (plist-get (plist-get charge :unit) :kind) 'quota)
+        (harness-ui-charge-string charge form)
+      (harness-format-cost usd))))
+
+(defun harness-ui-format-billed (thing)
+  "Return what was billed for THING, a session, total or usage plist, in money.
+Per token and as extra usage: what a plan paid is `harness-ui-format-covered'."
+  (harness-ui-format-money (float (or (plist-get (plist-get (harness-ui--cost-session thing) :usage) :cost) 0))))
+
+(defun harness-ui-quota-share-help (charges)
+  "Return a phrase for the quota share in CHARGES, or nil if there is none.
+\"Share of the plan's quota: 1% of 5h, 0.6% of 7d (estimate)\"."
+  (when-let* ((charge (harness-ui-cost-quota-charge charges))
+              ((eq (plist-get (plist-get charge :unit) :kind) 'quota)))
+    (format "Share of the plan's quota: %s (estimate)"
+            (string-join (cl-mapcar (lambda (a w) (format "%s of %s" (harness-ui-format-percent a) w))
+                                    (if (cl-every (lambda (a) (<= a 0)) (plist-get charge :amounts))
+                                        (make-list (length (plist-get (plist-get charge :unit) :windows)) 0)
+                                      (plist-get charge :amounts))
+                                    (plist-get (plist-get charge :unit) :windows))
+                         ", "))))
+
 (defun harness-ui-spend-help (session &optional subject)
   "Return the tooltip that explains what SESSION cost and who pays for it.
 SUBJECT names what cost it, \"This session\" by default.  One line, so
-showing it in the echo area moves nothing."
+showing it in the echo area moves nothing.  A share of the plan's quota
+leads when there is one."
   (let* ((subject (or subject "This session"))
          (usage (plist-get session :usage))
          (quota (harness-ui-session-quota session))
@@ -1585,6 +1836,7 @@ showing it in the echo area moves nothing."
       (delq nil
             (append
              (list
+              (harness-ui-quota-share-help (harness-ui-cost-charges session))
               (cond ((and (> covered 0) (> cost 0))
                      (format "%s billed%s; %s more at API prices covered by %s."
                              (harness-format-cost cost) (if (eq billing 'extra-usage) " as extra usage" "")
@@ -1604,27 +1856,47 @@ showing it in the echo area moves nothing."
              (list "mouse-1: usage and plan quota")))
       "\n"))))
 
-(defun harness-ui-format-spend (session &optional with-quota subject lazy)
+(defun harness-ui-format-quota-state (session)
+  "Return the plan paying for SESSION and how full its windows are, or nil.
+\"Max · 5h 9% · 7d 57%\": the plan's name, then its headline quota windows
+as the account has used them, each in the colour of how full it is.
+That is the account's state, not SESSION's share of it
+\(`harness-ui-format-spend').  Nil when no plan pays for SESSION."
+  (when (harness-ui-cost-planned-p session)
+    (let ((quota (harness-ui-session-quota session)))
+      (propertize
+       (concat (propertize (harness-ui-cost-plan-name session) 'face 'harness-plan-face)
+               (mapconcat (lambda (w) (concat " · " (harness-ui-format-window w)))
+                          (harness-ui-quota-headline-windows quota) ""))
+       'help-echo (harness-ui-spend-help session)))))
+
+(defun harness-ui-format-spend (session &optional with-quota subject lazy form)
   "Return what SESSION cost, saying when a subscription pays for it.
 Per-token billing shows the cost (\"$1.20\").  When a plan pays, its
-name shows instead (\"Max\"), after any cost billed as extra usage
-\(\"$0.40+Max\").  WITH-QUOTA appends the plan's headline quota windows
-\(\"Max · 5h 9% · 7d 57%\").  The tooltip has the details, where
-SUBJECT names what cost it (see `harness-ui-spend-help').  SESSION may
-stand for several (`harness-ui-sessions-total').  With LAZY the tooltip
-is made when it is asked for (`harness-ui-session-help-function')."
-  (let* ((usage (plist-get session :usage))
-         (billing (harness-ui-session-billing session))
-         (cost (float (or (plist-get usage :cost) 0)))
-         (planned (or (> (harness-usage-covered usage) 0) (memq billing '(subscription extra-usage))))
-         (quota (harness-ui-session-quota session))
-         (name (propertize (or (harness-plan-name (or (plist-get usage :plan) (plist-get quota :plan))) "Plan")
-                           'face 'harness-plan-face))
-         (text (cond ((not planned) (harness-format-cost cost))
-                     ((> cost 0) (concat (harness-format-cost cost) "+" name))
-                     (t name)))
-         (windows (and with-quota planned (harness-ui-quota-headline-windows quota))))
-    (propertize (concat text (if windows (if (plist-get quota :informational) " · Codex" "") "")
+share of the plan's quota windows shows (\"1% / 0.6%\", and with FORM
+`long' \"1% / 0.6% of 5h / 7d quota\") once the harness has worked out
+what they are worth, else its name (\"Max\"); either follows any cost
+billed as extra usage (\"$0.40+Max\").  WITH-QUOTA appends the plan's
+headline quota windows (\"Max · 5h 9% · 7d 57%\").  The tooltip has the
+details, where SUBJECT names what cost it (see `harness-ui-spend-help').
+SESSION may stand for several (`harness-ui-sessions-total').  With LAZY
+the tooltip is made when it is asked for
+\(`harness-ui-session-help-function').  The figure is made by
+`harness-ui-cost-charges' and `harness-ui-cost-string', which every
+view that shows a cost goes through."
+  (let* ((charges (harness-ui-cost-charges session))
+         (planned (harness-ui-cost-planned-p session))
+         (windows (and with-quota planned
+                       (harness-ui-quota-headline-windows (harness-ui-session-quota session))))
+         (text (harness-ui-cost-string charges form)))
+    ;; The plan's name wears its own face, as a share does.
+    (when planned
+      (let ((tail (car (last charges))))
+        (when (memq (plist-get (plist-get tail :unit) :kind) '(plan quota))
+          (let ((start (- (length text) (length (harness-ui-charge-string tail form)))))
+            (setq text (concat (substring text 0 start)
+                               (propertize (substring text start) 'face 'harness-plan-face)))))))
+    (propertize (concat text (if windows (if (plist-get (harness-ui-session-quota session) :informational) " · Codex" "") "")
                         (mapconcat (lambda (w) (concat " · " (harness-ui-format-window w))) windows ""))
                 'help-echo (if lazy
                                (harness-ui-session-help-function
@@ -1632,6 +1904,34 @@ is made when it is asked for (`harness-ui-session-help-function')."
                                             (lambda (s) (harness-ui-spend-help s subject))
                                           #'harness-ui-spend-help))
                              (harness-ui-spend-help session subject)))))
+
+(defun harness-ui-estimate-charges (usd &optional target)
+  "Return USD at API prices, what an action would cost, as charges.
+TARGET is the session or provider id the action is for.  A session a
+subscription pays for (not extra usage, which is billed) reads the
+estimate as a share of its plan's windows when they have rates; any
+other is money."
+  (let* ((session (and (consp target) target))
+         (provider (cond (session (harness-ui-session-provider session))
+                         (target (format "%s" target))))
+         (shares (and (or (null session) (eq (harness-ui-session-billing session) 'subscription))
+                      (harness-ui-cost-shares usd provider))))
+    (if shares
+        (list (list :amounts (cdr shares) :unit (list :kind 'quota :windows (car shares))))
+      (list (list :amounts (list (float usd)) :unit (harness-ui-money-unit))))))
+
+(defun harness-ui-estimate-text (usd &optional target form)
+  "Return USD at API prices, what an action would cost, as text.
+It reads \"$0.310\", or \"0.6%\" where a plan pays.
+TARGET and FORM are as `harness-ui-estimate-charges' and
+`harness-ui-cost-string' take them."
+  (harness-ui-cost-string (harness-ui-estimate-charges usd target) form))
+
+(defun harness-ui-format-estimate (usd &optional target form)
+  "Return USD at API prices as an estimate: \"~$0.31\", or \"~0.6%\".
+TARGET and FORM are as `harness-ui-estimate-charges' and
+`harness-ui-cost-string' take them."
+  (concat "~" (harness-ui-estimate-text usd target form)))
 
 (defun harness-ui-sessions-total (sessions &optional model)
   "Return SESSIONS taken together, as a session for the spend helpers.
@@ -2154,6 +2454,55 @@ asked for (`harness-ui-session-help-function')."
                   'help-echo (if lazy
                                  (harness-ui-session-help-function session #'harness-ui--output-help)
                                (harness-ui-tokens-help tokens))))))
+
+(defun harness-ui-session-total-tokens (session)
+  "Return the tokens SESSION's model calls processed, as a plist.
+It has `:total' and the parts it adds up: `:input' (the prompt that was
+not cached), `:output', `:cache-read' and `:cache-write', from the
+totals of SESSION's `:usage'.  Every call counts, so the figure grows by
+the whole prompt with each one, however much of it the prompt cache
+served; the size of the conversation is the context's
+\(`harness-ui-format-context')."
+  (let* ((usage (plist-get session :usage))
+         (part (lambda (key) (let ((n (plist-get usage key))) (if (numberp n) n 0))))
+         (input (funcall part :input))
+         (output (funcall part :output))
+         (read (funcall part :cache-read))
+         (write (funcall part :cache-write)))
+    (list :total (+ input output read write)
+          :input input :output output :cache-read read :cache-write write)))
+
+(defun harness-ui-total-tokens-help (tokens)
+  "Return the one-line tooltip of total token figures TOKENS.
+TOKENS is what `harness-ui-session-total-tokens' returns: the total,
+then each part there is."
+  (harness-ui-one-line
+   (string-join
+    (cons (format "Total tokens %s" (harness-format-tokens (plist-get tokens :total)))
+          (cl-loop for (key label) in '((:input "input") (:output "output")
+                                        (:cache-read "cache read") (:cache-write "cache write"))
+                   when (> (plist-get tokens key) 0)
+                   collect (format "%s %s" label (harness-format-tokens (plist-get tokens key)))))
+    " \N{U+00B7} ")))
+
+(defun harness-ui--total-tokens-help (session)
+  "Return the tooltip of SESSION's total tokens figure."
+  (harness-ui-total-tokens-help (harness-ui-session-total-tokens session)))
+
+(defun harness-ui-format-total-tokens (session &optional bare lazy)
+  "Return SESSION's total tokens as \"1.2M tokens\", or nil when it used none.
+BARE leaves out the unit.  The total adds up input, output and the
+prompt cache's reads and writes over every call of the session
+\(`harness-ui-session-total-tokens'); the tooltip gives the parts.  With
+LAZY the tooltip is made when it is asked for
+\(`harness-ui-session-help-function')."
+  (let ((tokens (harness-ui-session-total-tokens session)))
+    (when (> (plist-get tokens :total) 0)
+      (propertize (concat (harness-format-tokens (plist-get tokens :total))
+                          (if bare "" " tokens"))
+                  'help-echo (if lazy
+                                 (harness-ui-session-help-function session #'harness-ui--total-tokens-help)
+                               (harness-ui-total-tokens-help tokens))))))
 
 (defun harness-ui-format-model-window (model)
   "Return the context window of catalogue entry MODEL as text: \"200k\".
@@ -2753,14 +3102,43 @@ anywhere runs the action (`harness-ui-action-push')."
      s)
     s))
 
+(defvar harness-ui--action-keymap nil
+  "Keymap of the buttons `harness-ui-string-action' makes, made once.")
+
+(defun harness-ui-string-action (string action)
+  "Return a copy of STRING that runs ACTION when clicked, or on RET at point.
+ACTION is a function of no arguments.  Unlike `harness-ui-action-button'
+the string keeps its own face and tooltip, so a figure that brings both
+-- the cost, the context -- is also a button.  It works as the string of
+an overlay too (`harness-ui-action-push')."
+  (let ((s (copy-sequence string)))
+    (add-text-properties
+     0 (length s)
+     (list 'mouse-face 'highlight 'follow-link t 'pointer 'hand
+           'harness-ui-action action
+           'keymap (or harness-ui--action-keymap
+                       (setq harness-ui--action-keymap (harness-ui-action-map #'harness-ui-action-push))))
+     s)
+    s))
+
 (defun harness-ui-action-push (&optional event)
-  "Run the action of the button at point, or at the position of mouse EVENT."
+  "Run the action of the button at point, or at the position of mouse EVENT.
+A button drawn by the string of an overlay -- a line above the compose
+box -- has no buffer text for point to be on: a click on it finds the
+button in that string, and selects its window without moving point."
   (interactive (list last-input-event))
-  (when (mouse-event-p event) (mouse-set-point event))
-  (let ((action (or (get-text-property (point) 'harness-ui-action)
-                    (and (> (point) (point-min)) (get-text-property (1- (point)) 'harness-ui-action)))))
-    (if action (funcall action) (if (get-text-property (point) 'button) (push-button (point))
-                                  (user-error "No button here")))))
+  (let* ((posn (and (mouse-event-p event) (event-start event)))
+         (string (and posn (posn-string posn)))
+         (shown (and (consp string) (stringp (car string))
+                     (get-text-property (cdr string) 'harness-ui-action (car string)))))
+    (if shown
+        (progn (when (window-live-p (posn-window posn)) (select-window (posn-window posn)))
+               (funcall shown))
+      (when posn (mouse-set-point event))
+      (let ((action (or (get-text-property (point) 'harness-ui-action)
+                        (and (> (point) (point-min)) (get-text-property (1- (point)) 'harness-ui-action)))))
+        (if action (funcall action) (if (get-text-property (point) 'button) (push-button (point))
+                                      (user-error "No button here")))))))
 
 (defun harness-ui-add-session-keys (object id &optional name start end action)
   "Make OBJECT's text from START to END open session ID on a click or RET.
@@ -3580,7 +3958,7 @@ A segment that was dropped, or shortened to its MIN, is in the list with
 its full text and its action, in display order."
   (let (cut)
     (dolist (orig original)
-      (let ((now (cl-find orig items)))
+      (let ((now (cl-find orig items :test #'equal)))
         (when (or (null now)
                   (not (equal (plist-get now :text) (plist-get orig :full))))
           (let* ((full (plist-get orig :full))
@@ -3630,7 +4008,8 @@ WIDTH defaults to the room of the selected window, which is the window
 whose header line is drawn while a `header-line-format' `:eval' form
 runs.  When everything fits this is one measurement, so it can run on
 every redisplay."
-  (let* ((items (cl-loop for s in segments
+  (let* ((width (or width (harness-ui-header-width)))
+         (items (cl-loop for s in segments
                          for i from 0
                          for text = (if (consp s) (car s) s)
                          when (and text (stringp text) (not (string-empty-p text)))
@@ -3638,8 +4017,6 @@ every redisplay."
                                        :priority (if (consp s) (nth 1 s) t)
                                        :min (and (consp s) (nth 2 s))
                                        :action (and (consp s) (nth 3 s)))))
-         (original (copy-sequence items))
-         (width (or width (harness-ui-header-width)))
          (whole (mapconcat (lambda (it) (plist-get it :text)) items ""))
          (total (harness-ui-header-string-width whole)))
     (if (<= total width)
@@ -3650,40 +4027,368 @@ every redisplay."
              (budget (if indicator
                          (- width (harness-ui-header-string-width indicator))
                        width))
-             (droppable (sort (cl-remove-if-not (lambda (it) (numberp (plist-get it :priority)))
-                                                (copy-sequence items))
-                              (lambda (a b) (or (< (plist-get a :priority) (plist-get b :priority))
-                                                (and (= (plist-get a :priority) (plist-get b :priority))
-                                                     (> (plist-get a :index) (plist-get b :index))))))))
+             (fitted-items (harness-ui-fit-items
+                            segments budget #'harness-ui-header-string-width))
+             (fitted (mapconcat (lambda (it) (plist-get it :text))
+                                fitted-items ""))
+             (cut (and overflow (harness-ui--header-overflow-items items fitted-items))))
+        (if cut
+            (progn
+              (setq-local harness-ui--header-overflow cut
+                          harness-ui--header-overflow-title "Header")
+              (concat fitted indicator))
+          (when overflow (setq-local harness-ui--header-overflow nil))
+          fitted)))))
+
+(defun harness-ui-fit-items (segments width measure)
+  "Return the items of SEGMENTS that fit WIDTH, as MEASURE counts it.
+SEGMENTS are as `harness-ui-fit-header' takes them, and room is made the
+same way: the least important go first, the rightmost first among
+equals, a segment with a MIN shortening before it goes.  Each item
+returned is a plist of `:index' (its place in SEGMENTS), `:text' (its
+text, the shortened one when it was), `:full' (its text as it was
+given), `:priority', `:min' and `:action', in order.
+MEASURE is a function of a string returning how wide it shows, in the
+unit WIDTH is in: pixels for a header line, columns for a line of a
+buffer.  What cannot be made to fit is left whole."
+  (let* ((items (cl-loop for s in segments
+                         for i from 0
+                         for text = (if (consp s) (car s) s)
+                         when (and text (stringp text) (not (string-empty-p text)))
+                         collect (list :index i :text text :full text
+                                       :priority (if (consp s) (nth 1 s) t)
+                                       :min (and (consp s) (nth 2 s))
+                                       :action (and (consp s) (nth 3 s)))))
+         (total (funcall measure (mapconcat (lambda (it) (plist-get it :text)) items ""))))
+    (when (> total width)
+      (let ((droppable (sort (cl-remove-if-not (lambda (it) (numberp (plist-get it :priority)))
+                                               (copy-sequence items))
+                             (lambda (a b) (or (< (plist-get a :priority) (plist-get b :priority))
+                                               (and (= (plist-get a :priority) (plist-get b :priority))
+                                                    (> (plist-get a :index) (plist-get b :index))))))))
         ;; The least important segments go first, one at a time, and no
         ;; more of them than the window needs.  One with a shortened form
         ;; takes it first and goes only when it is not enough: a name is
         ;; worth a few columns even when the model and the counts are not.
-        (while (and droppable (> total budget))
+        (while (and droppable (> total width))
           (let ((it (pop droppable)))
             (when-let* ((min (plist-get it :min)))
-              (let ((was (harness-ui-header-string-width (plist-get it :text))))
+              (let ((was (funcall measure (plist-get it :text))))
                 (plist-put it :text min)
-                (cl-decf total (- was (harness-ui-header-string-width min)))))
-            (when (> total budget)
-              (cl-decf total (harness-ui-header-string-width (plist-get it :text)))
+                (cl-decf total (- was (funcall measure min)))))
+            (when (> total width)
+              (cl-decf total (funcall measure (plist-get it :text)))
               (setq items (delq it items)))))
         ;; What may not be dropped, a segment a mode puts in front of the
         ;; session's own, shortens too: nothing else is left to give.
         (dolist (it (reverse items))
-          (when (and (> total budget) (plist-get it :min))
-            (let ((was (harness-ui-header-string-width (plist-get it :text))))
+          (when (and (> total width) (plist-get it :min))
+            (let ((was (funcall measure (plist-get it :text))))
               (plist-put it :text (plist-get it :min))
-              (cl-decf total (- was (harness-ui-header-string-width (plist-get it :text)))))))
-        (let* ((fitted (mapconcat (lambda (it) (plist-get it :text)) items ""))
-               (cut (and overflow (harness-ui--header-overflow-items original items))))
-          (if cut
-              (progn
-                (setq-local harness-ui--header-overflow cut
-                            harness-ui--header-overflow-title "Header")
-                (concat fitted indicator))
-            (when overflow (setq-local harness-ui--header-overflow nil))
-            fitted))))))
+              (cl-decf total (- was (funcall measure (plist-get it :text)))))))))
+    items))
+
+;;;; Settings lines
+
+;; The line above a compose box that holds what the thing being composed
+;; works with: a new task's model, thinking level, permission mode and
+;; whether it waits for you (the task board), or the same of a session
+;; (the chat), after which each host adds what is its own -- the board's
+;; supervisor mode and limit, the chat's token figures, cost and queue.
+;; The two draw one line from one component: `harness-ui-setting-specs'
+;; says what the common settings are (their words, commands and
+;; tooltips), a host turns each spec into the button its buffer needs,
+;; and `harness-ui-settings-line' joins the items and fits them to the
+;; room, dropping the least important first as a header line does.
+
+(defconst harness-ui-setting-priorities
+  '((model . 50) (thinking . 20) (permission . t) (interactive . 40))
+  "How long each common setting stays as a settings line narrows.
+The higher, the later it goes (see `harness-ui-fit-items'): the
+thinking level goes first and the model last of the others, and the
+permission mode, which says what the agent may do, always stays.")
+
+(defun harness-ui-setting-help (noun scope &optional hint)
+  "Return the tooltip of the setting called NOUN, \"Model\", \"Thinking level\".
+With SCOPE, what it is of -- \"new tasks\" -- it reads \"Model of new
+tasks\"; without, the setting is the session's own and the tooltip ends
+with HINT, \"(mouse-1: change)\" by default."
+  (if scope
+      (format "%s of %s" noun scope)
+    (format "%s %s" noun (or hint "(mouse-1: change)"))))
+
+(cl-defun harness-ui-setting-specs (values &key scope only permission-command permission-help)
+  "Return the specs of the settings every settings line has, from VALUES.
+VALUES is a plist with `:model', `:thinking', `:permission-mode' and
+`:non-interactive': a session, or the next task's settings on the task
+board.  A spec is a plist: `:id' (`model', `thinking', `permission' or
+`interactive'), `:label' (what the button says), `:command' (the
+setting command a click runs), `:help' (its tooltip: a string, or a
+function computing one on hover), `:face' (nil for the dim one) and
+`:priority' (`harness-ui-setting-priorities').  They come in that
+order, the permission mode and whether the agent waits for you after the
+model and the thinking level.
+
+SCOPE says what the settings are of in their tooltips, \"new tasks\"
+\(see `harness-ui-setting-help'); nil is the session the line is in.
+ONLY, a list of ids, leaves out the others.  PERMISSION-COMMAND and
+PERMISSION-HELP replace the command and tooltip of the permission mode:
+a chat's opens the jail and permissions view, where the mode is chosen
+with the rest of what the session may reach."
+  (let* ((non-interactive (harness-json-true-p (plist-get values :non-interactive)))
+         (mode (plist-get values :permission-mode))
+         (specs
+          (list
+           (list :id 'model :label (harness-ui-model-label (plist-get values :model))
+                 :command #'harness-set-model :help (harness-ui-setting-help "Model" scope))
+           (list :id 'thinking :label (harness-ui-thinking-label (plist-get values :thinking))
+                 :command #'harness-set-thinking :help (harness-ui-setting-help "Thinking level" scope))
+           (list :id 'permission :label (if mode (harness-ui-permission-mode-label mode) "default mode")
+                 :command (or permission-command #'harness-set-permission-mode)
+                 :help (or permission-help (harness-ui-setting-help "Permission mode" scope)))
+           (list :id 'interactive :label (harness-ui-non-interactive-label non-interactive)
+                 :command #'harness-toggle-non-interactive
+                 :help (if scope
+                           (harness-ui-setting-help "Non-interactive mode" scope)
+                         (concat (harness-ui-non-interactive-help non-interactive)
+                                 (if non-interactive
+                                     " (mouse-1: make it interactive)"
+                                   " (mouse-1: make it non-interactive)")))
+                 :face (and non-interactive 'harness-non-interactive-face)))))
+    (cl-loop for spec in specs
+             when (or (null only) (memq (plist-get spec :id) only))
+             collect (plist-put spec :priority (cdr (assq (plist-get spec :id) harness-ui-setting-priorities))))))
+
+(defun harness-ui-setting-items (specs button)
+  "Return the items of a settings line for SPECS, each made a button by BUTTON.
+BUTTON is the host's function of a spec returning the string that
+stands for it in its buffer.  An item is (TEXT PRIORITY MIN), as
+`harness-ui-settings-line' takes it."
+  (mapcar (lambda (spec) (list (funcall button spec) (plist-get spec :priority)))
+          specs))
+
+(defconst harness-ui-settings--lead "   "
+  "What stands before each item while a settings line shares out its room.")
+
+(defun harness-ui-settings--fit (flat room)
+  "Return the items of FLAT that fit ROOM, as `harness-ui-fit-items' does.
+Each keeps its `:index', `:text' and `:priority'; the lead stands in
+front of it while the room is shared out."
+  (if room
+      (harness-ui-fit-items
+       (mapcar (lambda (it)
+                 (list (concat harness-ui-settings--lead (plist-get it :text))
+                       (plist-get it :priority)
+                       (and (plist-get it :min)
+                            (concat harness-ui-settings--lead (plist-get it :min)))))
+               flat)
+       room #'string-width)
+    (cl-loop for it in flat for i from 0
+             collect (list :index i :text (concat harness-ui-settings--lead (plist-get it :text))))))
+
+(defun harness-ui-settings--join (kept flat)
+  "Return the line of KEPT items of FLAT, their leads replaced by separators."
+  (let ((line "") (previous nil))
+    (dolist (k kept)
+      (let ((it (nth (plist-get k :index) flat)))
+        (setq line (concat line
+                           (cond ((null previous) " ")
+                                 ((eql previous (plist-get it :group))
+                                  (propertize " · " 'face 'harness-dim-face))
+                                 (t harness-ui-settings--lead))
+                           (substring (plist-get k :text) (length harness-ui-settings--lead)))
+              previous (plist-get it :group))))
+    line))
+
+(defun harness-ui-settings--item-action (text)
+  "Return the action the button TEXT runs, or nil."
+  (let ((pos 0) (size (length text)) action)
+    (while (and (< pos size) (null action))
+      (setq action (get-text-property pos 'harness-ui-action text)
+            pos (next-single-property-change pos 'harness-ui-action text size)))
+    action))
+
+(defun harness-ui-settings--item-help (text)
+  "Return the tooltip of the button TEXT, or nil."
+  (let ((pos 0) (size (length text)) help)
+    (while (and (< pos size) (null help))
+      (setq help (get-text-property pos 'help-echo text)
+            pos (next-single-property-change pos 'help-echo text size)))
+    (and (stringp help) help)))
+
+(defun harness-ui-settings--hidden (kept flat)
+  "Return the items of FLAT that KEPT left out, as overflow items."
+  (let ((shown (mapcar (lambda (k) (plist-get k :index)) kept)))
+    ;; `it' is cl-loop's own variable in a conditional clause: name the
+    ;; item anything else, or the clause hides it.
+    (cl-loop for item in flat for i from 0
+             unless (memq i shown)
+             collect (let ((text (plist-get item :text)))
+                       (list :label (string-trim (substring-no-properties text))
+                             :text text
+                             :help (harness-ui-settings--item-help text)
+                             :action (harness-ui-settings--item-action text))))))
+
+(defun harness-ui-settings--hidden-text (item)
+  "Return the text of overflow ITEM, marked as a button for its action.
+The overflow menu of the UI (`harness-ui-overflow-...') runs the action
+of a hidden part from the button properties it reads, as it does for a
+header segment."
+  (let ((text (copy-sequence (or (plist-get item :text) "")))
+        (action (plist-get item :action)))
+    (when action
+      (add-text-properties 0 (length text)
+                           (list 'button t 'action action 'harness-ui-action action)
+                           text))
+    text))
+
+(defvar harness-ui-settings--overflow-map
+  (let ((map (make-sparse-keymap)))
+    (dolist (key '([mouse-1] [mouse-2] [header-line mouse-1] [header-line mouse-2]))
+      (define-key map key #'harness-ui-settings--show-overflow))
+    (define-key map (kbd "RET") #'harness-ui-settings--show-overflow)
+    map)
+  "Keymap of the … that ends a settings line which cut something off.")
+
+(defun harness-ui-settings--overflow-help ()
+  "Return the tooltip of the settings line's overflow control."
+  (if (fboundp 'harness-ui-overflow-show)
+      "More settings did not fit: mouse-1 or C-c C-o shows them"
+    "More settings did not fit: mouse-1 shows them"))
+
+(defun harness-ui-settings--mark-overflow (line hidden)
+  "End LINE in a control for HIDDEN, the settings items it could not show.
+The control carries what the UI's overflow menu reads
+\(`harness-ui-overflow-full', `-shown' and `-title'): once that module
+is loaded its popup and its C-c C-o show the parts in full, with the
+action of each.  Until then `harness-ui-settings--show-overflow' lists
+them.  Return the line, control included."
+  (let* ((control (concat line
+                          (propertize " …"
+                                      'face (if (facep 'harness-ui-overflow-face)
+                                                'harness-ui-overflow-face
+                                              'harness-dim-face)
+                                      'help-echo (harness-ui-settings--overflow-help)
+                                      'mouse-face 'mode-line-highlight
+                                      'pointer 'hand)))
+         (at (1- (length control)))
+         (full (concat control " "
+                       (mapconcat #'harness-ui-settings--hidden-text hidden " · "))))
+    (add-text-properties
+     at (length control)
+     (list 'harness-ui-overflow-full full
+           'harness-ui-overflow-shown at
+           'harness-ui-overflow-title "Settings that did not fit"
+           'harness-ui-overflow-items hidden
+           'harness-ui-settings-overflow-items hidden
+           'keymap harness-ui-settings--overflow-map)
+     control)
+    control))
+
+(defun harness-ui-settings--overflow-at (pos)
+  "Return (TITLE . ITEMS) of the settings line at POS, or nil."
+  (save-excursion
+    (goto-char pos)
+    (let ((end (line-end-position)) (p (line-beginning-position)) found)
+      (while (and (not found) (< p end))
+        (if (get-text-property p 'harness-ui-settings-overflow-items)
+            (setq found p)
+          (setq p (next-single-property-change p 'harness-ui-settings-overflow-items nil end))))
+      (when found
+        (cons (or (get-text-property found 'harness-ui-overflow-title)
+                  "Settings that did not fit")
+              (get-text-property found 'harness-ui-settings-overflow-items))))))
+
+(defun harness-ui-settings--show-hidden (report &optional origin)
+  "Show REPORT, a (TITLE . ITEMS) of settings a narrow line cut, in a popup.
+ORIGIN is the buffer whose line it is, where an item's action runs: a
+setting changes the session or the board of that buffer, not the popup."
+  (let ((buffer (get-buffer-create "*Harness settings*"))
+        (origin (or origin (current-buffer))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (car report) 'face 'harness-label-face) "\n\n")
+        (dolist (item (cdr report))
+          (insert "  ")
+          (let ((start (point)))
+            (insert (or (plist-get item :text) (plist-get item :label) ""))
+            (when-let* ((action (plist-get item :action)))
+              (add-text-properties
+               start (point)
+               (list 'harness-ui-action (lambda () (with-current-buffer origin (funcall action)))
+                     'mouse-face 'highlight
+                     'pointer 'hand
+                     'keymap (harness-ui-action-map #'harness-ui-action-push)
+                     'help-echo "mouse-1: change it")))
+            (insert "\n")))
+        (special-mode)
+        (goto-char (point-min))))
+    (display-buffer buffer)))
+
+(defun harness-ui-settings--show-overflow ()
+  "Show what the settings line cut off, in full, with the action of each.
+A click on the line's … or RET on it runs this; once the overflow
+module is loaded this hands over to `harness-ui-overflow-show', which
+serves every bar the same way."
+  (interactive)
+  (let* ((event (and (mouse-event-p last-input-event) last-input-event))
+         (pos (if event (or (posn-point (event-start event)) (point)) (point))))
+    (if (fboundp 'harness-ui-overflow-show)
+        (harness-ui-overflow-show pos)
+      (let ((report (harness-ui-settings--overflow-at pos)))
+        (unless report (user-error "Nothing is cut off here"))
+        (harness-ui-settings--show-hidden report (current-buffer))))))
+
+(defun harness-ui-settings-line (groups room)
+  "Return the settings line made of GROUPS, fitted to ROOM columns.
+GROUPS is a list of lists of items; an item is a string, or (TEXT
+PRIORITY MIN) as `harness-ui-fit-header' takes a segment, TEXT without
+a separator, and nil is nothing.  Items of a group are joined by a dim
+dot, the groups are apart by a gap, and the line starts with a space.
+In a room too narrow for it all the least important items go first, the
+rightmost first among equals, and one with a MIN shortens before it goes
+\(`harness-ui-fit-items'); the line then ends in a clickable … that
+shows every item it cut, in full and with its action
+\(`harness-ui-settings--show-overflow', and `harness-ui-overflow-show'
+once that module is loaded).  A line that fits has no such control.
+Without ROOM nothing is fitted.  The line has no newline."
+  (let ((flat nil) (group 0))
+    (dolist (items groups)
+      (dolist (item items)
+        (let ((text (if (consp item) (car item) item)))
+          (when (and (stringp text) (not (string-empty-p text)))
+            (push (list :group group :text text
+                        :priority (if (consp item) (nth 1 item) t)
+                        :min (and (consp item) (nth 2 item)))
+                  flat))))
+      (cl-incf group))
+    (setq flat (nreverse flat))
+    (if (null room)
+        (harness-ui-settings--join (harness-ui-settings--fit flat nil) flat)
+      (let* ((kept (harness-ui-settings--fit flat room))
+             (line (harness-ui-settings--join kept flat))
+             (hidden (harness-ui-settings--hidden kept flat)))
+        (cond
+         ((null hidden)
+          (if (> (string-width line) room)
+              (truncate-string-to-width line room nil nil "…")
+            line))
+         ;; No room for a control that says anything: the line is cut.
+         ((<= room 2)
+          (truncate-string-to-width line room nil nil "…"))
+         (t
+          ;; The control takes two columns: fit again, and let it show
+          ;; everything the second fit had to leave out.
+          (let* ((width (- room 2))
+                 (kept (harness-ui-settings--fit flat width))
+                 (line (harness-ui-settings--join kept flat))
+                 (hidden (harness-ui-settings--hidden kept flat)))
+            (when (> (string-width line) width)
+              (setq line (truncate-string-to-width line width)))
+            (if hidden
+                (harness-ui-settings--mark-overflow line hidden)
+              line))))))))
 
 (defun harness-ui-text-height (window from to limit)
   "Return how many pixels the text from FROM to TO takes in WINDOW.

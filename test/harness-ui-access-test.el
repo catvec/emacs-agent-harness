@@ -32,6 +32,8 @@
 (defvar harness-perms-summarize)
 (defvar harness-chat--loading)
 (defvar harness-compose-end)
+(defvar harness-chat--settings-marker)
+(defvar harness-chat--settings-end)
 (declare-function harness-provider-demo--script "harness-provider-demo")
 (declare-function harness-chat-buffer "harness-ui-chat")
 (declare-function harness-chat-push "harness-ui-chat")
@@ -1318,40 +1320,40 @@ fetches once a window shows it.  The page that is shown follows at once."
         (set-buffer overview)
         (harness-ui-access-test-wait-setting 'network "\\`Network ( ) On (x) Off")))))
 
-;;;; Following the permission mode in a chat's header
+;;;; Following the permission mode on a chat's settings line
 
-(defun harness-ui-access-test-header-segment (buffer command)
-  "Return the position in BUFFER's header line of the segment that runs COMMAND, or nil."
-  (let* ((header (with-current-buffer buffer (harness-chat--header most-positive-fixnum)))
-         (map (harness-chat--segment-map command))
-         (pos 0) found)
-    (while (and (not found) (< pos (length header)))
-      (if (eq map (get-text-property pos 'local-map header))
-          (setq found pos)
-        (setq pos (next-single-property-change pos 'local-map header (length header)))))
-    (and found (cons header found))))
+(defun harness-ui-access-test-settings-segment (buffer label)
+  "Return (LINE . POS) of the settings-line button LABEL in BUFFER, or nil.
+LINE is the whole settings line the view builds, with its properties: the
+view need not be drawn in a window for it to exist."
+  (with-current-buffer buffer
+    (harness-test-wait (lambda () (harness-chat--session)) 5 "the chat's session")
+    (let* ((line (harness-chat--settings-line most-positive-fixnum))
+           (pos (and line (string-search label (substring-no-properties line)))))
+      (and pos (functionp (get-text-property pos 'harness-ui-action line))
+           (cons line pos)))))
 
-(ert-deftest harness-ui-access-opens-from-the-permission-mode-in-the-chats-header ()
-  "A click on the permission mode in a chat's header line opens the session's
+(ert-deftest harness-ui-access-opens-from-the-permission-mode-on-the-chats-settings-line ()
+  "A click on the permission mode on a chat's settings line opens the session's
 jail and permissions view, rather than asking which mode to choose; its tooltip
 says what the mode means and where a click goes."
   (harness-ui-access-test-with
     (let* ((chat (harness-chat-buffer sid))
            (window (selected-window))
-           (segment (harness-ui-access-test-header-segment chat #'harness-access)))
+           (segment (harness-ui-access-test-settings-segment chat "Ask")))
       (set-window-buffer window chat)
       (should segment)
-      (let ((header (car segment)) (pos (cdr segment)))
-        (should (equal "Ask" (substring-no-properties header pos (+ pos 3))))
-        (let ((help (funcall (get-text-property pos 'help-echo header) window nil nil)))
+      (let ((line (car segment)) (pos (cdr segment)))
+        (should (equal "Ask" (substring-no-properties line pos (+ pos 3))))
+        (let ((help (funcall (get-text-property pos 'help-echo line) window nil nil)))
           (should (string-match-p "\\`Permission mode: Ask — ask before writes, commands and network" help))
           (should (string-match-p "mouse-1: jail and permissions" help))
           (should (string-match-p "change mode" help))
           (should-not (string-match-p "\n" help)))
-        ;; The click.
+        ;; The click, in the chat's buffer as a mouse-1 there is.
         (should-not (harness-ui-access-test-page-buffer sid 'overview))
-        (funcall (lookup-key (get-text-property pos 'local-map header) [header-line mouse-1])
-                 (list 'mouse-1 (list window 'header-line '(0 . 0) 0))))
+        (with-current-buffer chat
+          (funcall (get-text-property pos 'harness-ui-action line))))
       (let ((view (harness-ui-access-test-page-buffer sid 'overview)))
         (should view)
         (should (get-buffer-window view))
@@ -1365,17 +1367,20 @@ says what the mode means and where a click goes."
         (harness-ui-access-test-wait-setting 'mode "\\`Permission mode ( ) Ask ( ) Accept Edits (x) Auto")
         (harness-test-wait (lambda () (equal "auto" (format "%s" (plist-get (harness-ui-session sid) :permission-mode))))
                            5 "the cached mode")
-        (should (string-search "Auto" (with-current-buffer chat (harness-chat--header most-positive-fixnum))))))))
+        (harness-test-wait (lambda ()
+                             (string-search "Auto" (with-current-buffer chat
+                                                     (harness-chat--settings-line most-positive-fixnum))))
+                           5 "the settings line to say Auto")))))
 
 (ert-deftest harness-ui-access-permission-mode-chooses-where-the-view-is-not-loaded ()
   "Where the access view is not there to open -- its module is off -- a click on
-the permission mode in the header chooses the mode, as it did before the view."
+the permission mode on the settings line chooses the mode, as it did before the view."
   (harness-ui-access-test-with
     (should (eq #'harness-access (harness-chat--permission-command)))
     (cl-letf (((symbol-function 'harness-access) nil))
       (should (eq #'harness-set-permission-mode (harness-chat--permission-command)))
       (let* ((chat (harness-chat-buffer sid))
-             (segment (harness-ui-access-test-header-segment chat #'harness-set-permission-mode)))
+             (segment (harness-ui-access-test-settings-segment chat "Ask")))
         (should segment)
         (should (string-match-p "mouse-1: change mode"
                                 (funcall (get-text-property (cdr segment) 'help-echo (car segment))

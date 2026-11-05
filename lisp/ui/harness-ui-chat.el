@@ -4,8 +4,7 @@
 
 ;; One buffer per session, "*harness: NAME*", laid out top to bottom:
 ;;
-;;   header line   name, model, permission mode, non-interactive (only
-;;                 while it is on), thinking, context, cost, menu, after what
+;;   header line   name, the session it was started from, menu, after what
 ;;                 `harness-chat-header-functions' put in front (a BTW's
 ;;                 buttons); what the buffer shows already, it leaves out
 ;;   transcript    one block per node, rendered incrementally with markers
@@ -24,6 +23,10 @@
 ;;                 them at a time, in one place, and switches between them
 ;;   todos         the session's todo items, one per line, or folded to
 ;;                 the title line, which is how the panel starts
+;;   settings      one line of buttons and figures: model, thinking level,
+;;                 permission mode, interactive or not, the context in
+;;                 use, the tokens in all, the cost, and what other
+;;                 modules add (a task's queue), fitted to the window
 ;;   threads       the review's threads, while C-c T shows them: the view
 ;;                 the report draws, drawn by the module that keeps the
 ;;                 review (`harness-chat-threads-function'), in place of
@@ -377,6 +380,13 @@ The note is drawn under the call's own block (see `harness-chat--note-lines').")
 It is empty and sits at `harness-chat--activity-position': the end of
 the transcript, or the end of what `harness-chat-top-functions' drew
 there.")
+(defvar-local harness-chat--settings-marker nil
+  "Marker: where the settings line starts, above the attachments.
+The tail sets it whenever it is drawn (`harness-chat--render-tail-1').")
+(defvar-local harness-chat--settings-end nil
+  "Marker: where the settings line ends, the start of the attachments.")
+(defvar-local harness-chat--settings-fitted nil
+  "Columns the settings line was last fitted to.")
 
 ;;;; Small helpers
 
@@ -1153,12 +1163,15 @@ region of the screen is a region of (`harness-chat--region-refs')."
          (<= (point) (harness-chat-block-end block)))))
 
 (defun harness-chat--on-window-size (&optional _window)
-  "Have the tables drawn again when a window gives them different room.
+  "Have the tables and the settings line drawn again for a window's new room.
 Runs from `window-size-change-functions'."
   (when (and harness-chat--table-width
              (not (equal (harness-chat--content-width) harness-chat--table-width)))
     (harness-debounce (list 'harness-chat-tables (current-buffer)) 0.2
-                      #'harness-chat--refresh-tables (current-buffer))))
+                      #'harness-chat--refresh-tables (current-buffer)))
+  (unless (eql harness-chat--settings-fitted (harness-chat--settings-room))
+    (harness-debounce (list 'harness-chat-settings (current-buffer)) 0.1
+                      #'harness-chat--refit-settings (current-buffer))))
 
 (defun harness-chat--refresh-tables (buffer)
   "Render again the table-holding blocks of BUFFER at its window's width."
@@ -4044,7 +4057,8 @@ both places."
       (setq changed t))
     (if changed
         (harness-chat--render-tail)
-      (harness-chat--refresh-activity))
+      (harness-chat--refresh-activity)
+      (harness-chat--refresh-settings))
     (force-mode-line-update)))
 
 (defun harness-chat--on-deleted ()
@@ -4750,6 +4764,15 @@ box's words are kept for \[harness-chat-show-compose]."
         (harness-chat--insert-todos)
         (harness-chat--insert-panels)
 
+        ;; The settings line goes here, above the attachments: text of the
+        ;; tail, fitted to the window, and redrawn in place while the
+        ;; figures move (`harness-chat--refresh-settings').
+        (let ((start (point)))
+          (insert (or (harness-chat--settings-line (harness-chat--settings-room)) ""))
+          ;; The start advances with a block appended where it is; the end
+          ;; stays before the attachments drawn there.
+          (setq harness-chat--settings-marker (copy-marker start t)
+                harness-chat--settings-end (copy-marker (point))))
         (setq harness-chat--threads-view-start
               (and harness-chat--threads-view (copy-marker (point))))
         (when harness-chat--threads-view
@@ -4795,7 +4818,9 @@ box's words are kept for \[harness-chat-show-compose]."
       (goto-char (min (+ harness-compose-start offset) (or harness-compose-end (point-max)))))
     ;; The new tail went in where the activity line was: put it back,
     ;; under the queued messages and above the rest.
-    (harness-chat--refresh-activity)))
+    (harness-chat--refresh-activity)
+    ;; And the settings line, above the attachments and the box.
+    (harness-chat--refresh-settings)))
 
 (defvar-local harness-chat-placeholder nil
   "What the empty compose box says when nothing more pressing does.
@@ -5944,6 +5969,18 @@ off its place, and `harness-chat--refresh-activity' puts it back."
   "Return how many lines STRING ends, nil being none."
   (cl-count ?\n (or string "")))
 
+(defun harness-chat--reserved-lines (_window from)
+  "Return the display lines the activity line takes above the box, from FROM.
+The activity line is an overlay string, which `window-text-pixel-size'
+does not count: the compose box's padding and its follow make room for
+it through `harness-compose--reserved-lines-function'.  The settings
+line is text of the tail, counted already."
+  (let ((overlay harness-chat--activity-overlay))
+    (if (and (overlayp overlay) (overlay-buffer overlay)
+             (>= (overlay-start overlay) from))
+        (harness-chat--string-lines (overlay-get overlay 'before-string))
+      0)))
+
 (defun harness-chat--show-activity (line)
   "Make LINE, or nothing when nil, the activity line.
 A line appearing or going, or the recap under it opening and folding,
@@ -5983,6 +6020,191 @@ Changes then arrive as `_harness/activity' updates."
                        (when (buffer-live-p buf)
                          (with-current-buffer buf (harness-chat--on-activity activity))))
                      #'ignore)))
+
+;;;; The settings line
+
+;; What the session works with -- its model, thinking level, permission
+;; mode and whether it waits for you -- stands on one line above the
+;; compose box, as a new task's settings stand above the task board's box
+;; (`harness-ui-tasks--new-settings-line'): both lines are drawn by the
+;; same component (`harness-ui-settings-line'), each setting a button
+;; that runs its command.  Other modules add to it with
+;; `harness-chat-settings-functions' (a task's queue, say).  What the
+;; session has used -- the context in use, the tokens in all, what it
+;; cost -- is information rather than a setting: the header shows it
+;; (`harness-chat--figure-items'), as it shows what names the buffer.
+;;
+;; The line is text of the buffer itself, between
+;; `harness-chat--settings-marker' and `harness-chat--settings-end', so a
+;; setting that changes redraws the line in place and not the tail.  It
+;; is fitted to the narrowest window showing the buffer, the least
+;; important settings going first and a … showing what it cut, and drawn
+;; again when a window changes size.  A click on a button runs its action
+;; (`harness-ui-action-push'); every setting has its key too, in the
+;; harness menu.
+
+(defvar harness-chat-settings-functions nil
+  "Functions adding items to the settings line of a chat, after its settings.
+Each is called without arguments in the chat buffer whenever the line is
+drawn, and returns a list of items -- a string, or (TEXT PRIORITY MIN)
+as `harness-ui-settings-line' takes them -- or nil for none.  The items
+make a group of their own, apart from the settings.
+Make a button of a clickable item with `harness-ui-string-action'.  Add
+to it with a symbol, so a reload redefines it, and call
+`harness-chat-refresh-settings' once what an item shows changed.  A
+function that signals an error adds nothing.")
+
+(defun harness-chat--setting-button (spec)
+  "Return the button standing for setting SPEC of `harness-ui-setting-specs'.
+It wears the dim face, as the task board's settings do, and runs the
+setting's command with this buffer's session."
+  (let ((command (plist-get spec :command)))
+    (harness-ui-action-button (plist-get spec :label)
+                              (lambda () (call-interactively command))
+                              :help (plist-get spec :help)
+                              :face (or (plist-get spec :face) 'harness-dim-face))))
+
+(defun harness-chat--figure-items (session)
+  "Return the header segments of SESSION's figures: context, tokens and cost.
+Each leads with the space that separates it from the one before, as a
+header segment does.  The cost is the shared display with the plan's
+quota windows, its percentages escaped for the header line
+\(`harness-ui-spend-segment'); a narrow header shortens it to the plan's
+name, or its share of the quota, before it goes, as it did before the
+settings line.  The cost goes first, then the tokens, which shorten to
+the number before they go; the context goes last of them (see
+`harness-ui-fit-items').  Each names the command a click runs, for the
+overflow menu too.  They are information, not settings: the header
+carries them, above the compose box's settings line."
+  (let ((context (list (concat "  " (harness-ui-format-context session)) 30
+                       nil #'harness-set-context-limit))
+        (tokens (when-let* ((text (harness-ui-format-total-tokens session)))
+                  (list (concat "  " text) 15
+                        (concat "  " (harness-ui-format-total-tokens session t)))))
+        (cost (list (concat "  " (harness-ui-spend-segment (harness-ui-format-spend session t)))
+                    10
+                    (concat "  " (harness-ui-spend-segment (harness-ui-format-spend session)))
+                    #'harness-ui-show-usage)))
+    (delq nil (list context tokens cost))))
+
+(defun harness-chat--extra-items ()
+  "Return the items `harness-chat-settings-functions' add, in order."
+  (let ((items nil))
+    (run-hook-wrapped 'harness-chat-settings-functions
+                      (lambda (fn)
+                        (condition-case err
+                            (dolist (item (funcall fn)) (push item items))
+                          (error (harness-log 'warn "chat: settings line item %s failed: %s"
+                                              (if (symbolp fn) fn "of a closure")
+                                              (harness-error-short-message err 300))))
+                        nil))
+    (nreverse items)))
+
+(defun harness-chat--settings-room ()
+  "Return how many columns the settings line has.
+The narrowest window showing the buffer decides, so the line fits them
+all, less a column for the continuation glyph of a window without
+fringes; the width it was last fitted to when no window shows it."
+  (let ((windows (harness-chat--windows)))
+    (if windows
+        (max 20 (1- (apply #'min (mapcar #'window-body-width windows))))
+      (or harness-chat--settings-fitted 80))))
+
+(defun harness-chat--settings-line (&optional room)
+  "Return the settings line as things are now, ending in a newline; nil for none.
+Only what changes what the session does stands here -- the model, the
+thinking level, the permission mode, whether it waits for you, and what
+`harness-chat-settings-functions' add (a task's queue, its buttons) --
+not the figures: the context, the tokens and the cost are the header's
+\(`harness-chat--figure-items').  The line is fitted to ROOM columns,
+the window's by default (`harness-chat--settings-room'); what does not
+fit is behind its overflow control where that menu is loaded.  A
+deleted session has none: there is nothing left to set.  Like the
+activity line it is drawn over `default', extended, so the compose box's
+background does not run into it."
+  (unless harness-chat--dead
+    (let* ((session (harness-chat--session))
+           (room (or room (harness-chat--settings-room)))
+           (line (harness-ui-settings-line
+                  (list (harness-ui-setting-items
+                         (harness-ui-setting-specs session
+                                                   :permission-command (harness-chat--permission-command)
+                                                   :permission-help #'harness-chat--permission-help)
+                         #'harness-chat--setting-button)
+                        (harness-chat--extra-items))
+                  room)))
+      (unless (string-empty-p line)
+        (let ((line (concat line "\n")))
+          (add-face-text-property 0 (length line) '(:inherit default :extend t) t line)
+          line)))))
+
+(defun harness-chat--settings-position ()
+  "Return where the settings line goes: above the attachments and the box.
+That is where the tail drew them (`harness-chat--render-tail-1'), else
+the start of the box."
+  (cond ((and (markerp harness-chat--settings-marker) (marker-buffer harness-chat--settings-marker))
+         (marker-position harness-chat--settings-marker))
+        ((and harness-compose-overlay (overlay-buffer harness-compose-overlay))
+         (overlay-start harness-compose-overlay))))
+
+(defun harness-chat--show-settings (line)
+  "Make LINE, or nothing when nil, the settings line.
+The line is text above the attachments, so a figure that changes
+redraws the line in place (`harness-ui-replace-region').  A line
+appearing or going changes the height of the text above the compose
+box: its padding is sized again and the windows that showed the end
+keep showing it, as for the activity line (`harness-chat--show-activity')."
+  (when-let* ((start (harness-chat--settings-position))
+              (end (and (markerp harness-chat--settings-end)
+                        (marker-buffer harness-chat--settings-end)
+                        (marker-position harness-chat--settings-end))))
+    (let* ((new (or line ""))
+           ;; Compare the properties too: what a click runs may change while
+           ;; the words stay the same (the access view's command, say).
+           (old (buffer-substring start end))
+           (_ (remove-text-properties 0 (length old) '(read-only nil) old))
+           (appeared (not (eq (string-empty-p old) (string-empty-p new))))
+           (bottom (and appeared (harness-chat--bottom-windows))))
+      (unless (equal-including-properties old new)
+        (harness-ui-replace-region start end new)
+        (set-marker harness-chat--settings-marker start)
+        (set-marker harness-chat--settings-end (+ start (length new)))
+        (when (> (length new) 0)
+          (put-text-property start (+ start (length new)) 'read-only t))
+        (when appeared
+          (dolist (w (harness-chat--windows)) (harness-compose-repad w))
+          (dolist (w bottom) (harness-chat--pin w)))
+        ;; An activity line at the start of the region is carried to its end
+        ;; by the insert (its overlay advances): put it back in its place.
+        (harness-chat--refresh-activity)))))
+
+(defun harness-chat--refresh-settings ()
+  "Draw the settings line as things are now."
+  (when (and harness-chat--transcript-end (marker-buffer harness-chat--transcript-end)
+             (harness-compose-live-p))
+    (let ((room (harness-chat--settings-room)))
+      (setq harness-chat--settings-fitted room)
+      (harness-chat--show-settings (harness-chat--settings-line room)))))
+
+(defun harness-chat-refresh-settings (&optional session-id)
+  "Draw the settings line of SESSION-ID's chat again; every chat's without one.
+For a module whose items of `harness-chat-settings-functions' show
+something else now."
+  (if session-id
+      (when-let* ((buf (harness-chat--buffer-for session-id)))
+        (with-current-buffer buf (harness-chat--refresh-settings)))
+    (maphash (lambda (_ buf)
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf (harness-chat--refresh-settings))))
+             harness-chat--buffers)))
+
+(defun harness-chat--refit-settings (buffer)
+  "Fit the settings line of BUFFER to its windows again, if their room changed."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (derived-mode-p 'harness-chat-mode)
+        (unless (eql harness-chat--settings-fitted (harness-chat--settings-room))
+          (harness-chat--refresh-settings))))))
 
 ;;;; Header and mode lines
 
@@ -6036,14 +6258,8 @@ on hover, not on every redisplay of the header line."
 (defalias 'harness-chat-show-usage #'harness-ui-show-usage
   "Alias of `harness-ui-show-usage', which the task board shares.")
 
-(defun harness-chat--spend-segment (session)
-  "Return the header segment showing what SESSION cost and who pays for it.
-Per-token billing shows the cost; a subscription shows its plan and
-quota.  Clicking it opens the usage dashboard (`harness-ui-spend-segment')."
-  (harness-ui-spend-segment (harness-ui-format-spend session t)))
-
 (defun harness-chat--permission-command ()
-  "Return the command a click on the permission mode in the header runs.
+  "Return the command a click on the permission mode in the settings line runs.
 The mode -- Ask, Accept Edits, Auto, YOLO -- opens the session's access
 view (`harness-access'): its jail and permissions, where the mode is
 chosen with the rest of what the session may reach.  Where that view is
@@ -6052,10 +6268,10 @@ as it did before the view."
   (if (fboundp 'harness-access) #'harness-access #'harness-set-permission-mode))
 
 (defun harness-chat--permission-help (window _object _pos)
-  "Return the tooltip of the permission mode segment in WINDOW's header line.
+  "Return the tooltip of the permission mode in WINDOW's settings line.
 It names the mode and what it means, where a click goes and the key
 that changes the mode.  A `help-echo' function, so the keys are searched
-on hover, not on every redisplay of the header line."
+on hover, not on every redraw of the line."
   (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
     (let* ((mode (format "%s" (or (plist-get (harness-chat--session) :permission-mode) "ask")))
            (entry (assoc mode harness-ui-permission-modes))
@@ -6068,32 +6284,21 @@ on hover, not on every redisplay of the header line."
           (format "%s · mouse-1: change mode" what))
         t)))))
 
-(defun harness-chat--non-interactive-segment (session)
-  "Return the header segment saying SESSION never waits for the user, or nil.
-It reads \"non-interactive\" while SESSION is, and a click makes it
-interactive again.  An interactive session, the usual kind, has no
-segment: `harness-toggle-non-interactive' (`i' after the harness prefix
-key, or the menu) turns the mode on."
-  (let ((value (plist-get session :non-interactive)))
-    (when (harness-json-true-p value)
-      (harness-chat--segment (harness-ui-non-interactive-label value)
-                             #'harness-toggle-non-interactive
-                             (concat (harness-ui-non-interactive-help value)
-                                     " (mouse-1: make it interactive)")
-                             'harness-non-interactive-face))))
-
 (defun harness-chat--on-quota (_provider _quota)
-  "Redraw the header lines, which show the plan's quota."
-  (force-mode-line-update t))
+  "Draw the settings lines again, which show what a plan covers.
+The header lines too: they are redrawn with every window."
+  (force-mode-line-update t)
+  (harness-chat-refresh-settings))
 
 (defun harness-chat--on-live (id _live)
-  "Redraw the header line of session ID's chat, which shows its context in use.
-It grows while its turn streams, a few times a second at most.  ID
-nil, after every session's figures were fetched again, redraws them all."
+  "Draw the header of session ID again: it shows the context in use.
+It grows while its turn streams, a few times a second at most.  ID nil,
+after every session's figures were fetched again, redraws every header."
   (if (null id)
       (force-mode-line-update t)
     (when-let* ((buf (harness-chat--buffer-for id)))
-      (with-current-buffer buf (force-mode-line-update)))))
+      (with-current-buffer buf
+        (force-mode-line-update)))))
 
 ;;;; The session this one was started from
 
@@ -6196,7 +6401,7 @@ Each is called without arguments in the chat buffer whenever the header
 line is drawn, and returns a string, or (TEXT PRIORITY MIN) as
 `harness-ui-fit-header' takes it, or nil for nothing.  The header shows
 their segments first, in order, then the session's own segments:
-name, model, permission mode and the rest.  A
+name and the session it was started from.  A
 segment with a low PRIORITY makes room before any of the session's own
 do in a narrow window.  Add to it buffer-locally, so only that buffer's
 header changes, and with a symbol, so a reload redefines it.  The BTW
@@ -6246,31 +6451,42 @@ shows its face this way.")
                         nil))
     (nreverse segments)))
 
+(defun harness-chat--fit-header (segments width)
+  "Fit header SEGMENTS to WIDTH, with the overflow control where there is one.
+The overflow menu is a module of its own (`harness-ui-overflow-show'):
+where it is loaded, a header too narrow for all of it ends in its
+clickable …, which shows every segment it left out, in full and with
+the action of each.  Without it, the least important segments are
+dropped as before."
+  (apply #'harness-ui-fit-header segments width
+         (and (fboundp 'harness-ui-overflow-show) (list t))))
+
 (defun harness-chat--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
-It holds what the buffer below does not show and is worth a glance:
-the session's name, the session it was started from, model, permission
-mode, non-interactive mode while it is on, thinking level, context and
-spend.  The status is the mode line's (`harness-chat--mode-line'), the
-todo list the panel's above the compose box, and the output tokens and
-rate the session list's.
+It names the buffer and leads out of it: the session's name, the
+session it was started from, then what the session used -- the context,
+the total tokens and the cost, the plan's quota windows for a
+subscription -- then [menu] and the newer-messages notice.  The model,
+the thinking level, the permission mode and whether it waits for you
+are settings that change what the session does: they stand above the
+compose box (`harness-chat--settings-line'), with a task's queue.  The
+status is the mode line's (`harness-chat--mode-line'), the todo list
+the panel's, and the output rate the session list's.
 
-In a window too narrow for all of it, the spend goes first, then the
-thinking level, the context, the non-interactive mode and the model;
-the name and the session it was started from shorten after those.
-What `harness-chat-header-functions' put in front leads the line and
-makes room as its own priorities say, before any of the session's own
-do; the permission mode, [menu] and the newer-messages notice stay.
-What `harness-chat-header-end-functions' add shows before [menu],
-making room as its priorities say.  What does not fit is behind the
-clickable … that ends the line: a click, RET on it, or C-c C-o
-(`harness-ui-overflow-show') shows every hidden segment in full, with
-the command a click on it would have run.  A header that fits has no ….
-WIDTH is as `harness-ui-fit-header' takes it."
+In a window too narrow for all of it, the name and the session it was
+started from shorten, and where the overflow menu is loaded what did
+not fit is behind the clickable … that ends the line: a click, RET on
+it, or C-c C-o (`harness-ui-overflow-show') shows every hidden segment
+in full, with the command a click on it would have run.  A header that
+fits has no ….  What `harness-chat-header-functions' put in front
+leads the line and makes room as its own priorities say, before any of
+the session's own do; [menu] and the newer-messages notice stay.  What
+`harness-chat-header-end-functions' add shows before [menu], making
+room as its priorities say.  WIDTH is as `harness-ui-fit-header' takes
+it."
   (let* ((s (harness-chat--session))
-         (non-interactive (harness-chat--non-interactive-segment s))
          (name (or (plist-get s :name) "unnamed")))
-    (harness-ui-fit-header
+    (harness-chat--fit-header
      (append
       ;; Other modules' leading segments, each as the fit takes it: a
       ;; string for a BTW's buttons, (TEXT PRIORITY MIN) for a badge
@@ -6283,26 +6499,10 @@ WIDTH is as `harness-ui-fit-header' takes it."
                                                   "Session name (mouse-1: rename)" 'bold))
              #'harness-rename-session)
        ;; Where the session came from, right after its own name.
-       (harness-chat--parent-segment)
-       (list (concat "  " (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
-                                                 "Model (mouse-1: change)" 'harness-dim-face))
-             50 nil #'harness-set-model)
-       (list (concat "  " (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
-                                                 (harness-chat--permission-command)
-                                                 #'harness-chat--permission-help))
-             90 nil (harness-chat--permission-command))
-       (and non-interactive (list (concat "  " non-interactive) 40 nil #'harness-toggle-non-interactive))
-       (list (concat "  " (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
-                                                 #'harness-set-thinking "Thinking level (mouse-1: change)"
-                                                 'harness-dim-face))
-             20 nil #'harness-set-thinking)
-       (list (concat "  " (harness-chat--segment
-                           (harness-ui-format-context s)
-                           #'harness-set-context-limit
-                           (harness-ui-context-limit-help
-                            s (harness-ui-model-context-window (plist-get s :model)))))
-             30 nil #'harness-set-context-limit)
-       (list (concat "  " (harness-chat--spend-segment s)) 10 nil #'harness-ui-show-usage))
+       (harness-chat--parent-segment))
+      ;; What the session used: its context, the tokens of every call and
+      ;; what it cost, information rather than a setting.
+      (harness-chat--figure-items s)
       ;; Other modules' segments, the companion pet's face say.
       (harness-chat--header-end)
       (list
@@ -6318,7 +6518,7 @@ WIDTH is as `harness-ui-fit-header' takes it."
                                                       "Newer content below (mouse-1: jump to it)"
                                                       'harness-status-blocked-face))
                   88 nil #'harness-chat-scroll-to-bottom))))
-     width t)))
+     width)))
 
 (defun harness-chat--mode-line ()
   "Return the mode line text: the session's status and the turn's clock.
@@ -7423,6 +7623,9 @@ the id of a session written in a message is a link to it.
                          :placeholder #'harness-chat--placeholder
                          :redraw #'harness-chat--render-tail
                          :bottom t)
+  ;; The activity and settings lines are overlay strings: make the box
+  ;; leave room for them as if they were text.
+  (setq-local harness-compose--reserved-lines-function #'harness-chat--reserved-lines)
   (setq-local compose-quote-function #'harness-chat--quote-at-point
               harness-quote-target-functions (list #'harness-chat--quote-target)
               harness-quote-handler-function #'harness-chat--quote-reply

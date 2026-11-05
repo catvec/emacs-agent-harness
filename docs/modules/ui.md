@@ -56,6 +56,7 @@ connection tells it.  This file provides:
 - `harness-ui-prompt-functions` — Functions called with (SESSION-ID) after the prompts in flight to it changed.
 - `harness-ui-question-functions` — Functions called with (PARAMS RESPOND) for `_harness/ask_user`.
 - `harness-ui-quota-functions` — Functions called with (PROVIDER QUOTA) after PROVIDER's cached quota changes.
+- `harness-ui-quota-rate-functions` — Functions called with no arguments after the cached quota rates changed.
 - `harness-ui-rate-functions` — Functions called with (SESSION-ID RATE) after a cached output rate changes.
 - `harness-ui-redraw-hook` — Hook run when every UI buffer should redraw (after a reload or reconnect).
 - `harness-ui-sessions-changed-hook` — Hook run after the session cache changes.
@@ -135,6 +136,7 @@ connection tells it.  This file provides:
 - `task/set-all` ([tasks](tasks.md))
 - `tools/list` ([tools](tools.md))
 - `usage/live-all` ([usage](usage.md))
+- `usage/quota-rates` ([usage](usage.md))
 - `usage/rates` ([usage](usage.md))
 
 ### Hooks it adds to

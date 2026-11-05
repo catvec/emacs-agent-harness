@@ -61,19 +61,36 @@
   (let ((info (plist-get r :cowboy)))
     (and (consp info) info)))
 
-(defun harness-ui-cowboy--choice (info way)
+(defun harness-ui-cowboy--cost-text (choice entry session)
+  "Return the cost of CHOICE, as its ENTRY says, worded for SESSION.
+The harness words it in dollars (\"~$0.42\", \"~$0.31 uncached\", \"free\");
+where SESSION is paid for by a plan with quota rates the entry's
+numeric `:cost' is worded as a share of its windows instead
+\(`harness-ui-estimate-text'), the \"free\" of what asks no model kept."
+  (let ((text (harness-ui-carry-text (plist-get entry :cost-text)))
+        (cost (plist-get entry :cost)))
+    (if (and text (numberp cost) (not (equal text "free")))
+        (concat "~" (harness-ui-estimate-text cost session)
+                (if (member choice '("carry-on" "ignore")) " uncached" ""))
+      text)))
+
+(defun harness-ui-cowboy--choice (info way &optional session)
   "Return the choice of WAY for the panel of INFO.
 What INFO says of it -- its label, wording, key, cost, writer and the
 context after it -- wins; what it leaves out is the table's
 \(`harness-carry-ways'), and its cost, writer and context after are
-nil then."
-  (let* ((name (symbol-name way))
+nil then.  WAY is a way's symbol or its name.  SESSION, a session
+plist, words the cost (`harness-ui-cowboy--cost-text')."
+  (let* ((way (harness-carry-way way))
+         (name (and way (symbol-name way)))
          (entry (cl-find name (append (plist-get info :choices) nil)
                          :key (lambda (c) (format "%s" (plist-get c :choice))) :test #'equal))
          (choice (harness-carry-choice way)))
-    (dolist (prop '(:label :what :key :cost-text :by))
+    (dolist (prop '(:label :what :key :by))
       (when-let* ((text (harness-ui-carry-text (plist-get entry prop))))
         (setq choice (plist-put choice prop text))))
+    (when-let* ((text (harness-ui-cowboy--cost-text name entry session)))
+      (setq choice (plist-put choice :cost-text text)))
     (dolist (prop '(:cost :after))
       (when (numberp (plist-get entry prop))
         (setq choice (plist-put choice prop (plist-get entry prop)))))
@@ -166,11 +183,12 @@ while it shows."
                            (format "~%s tokens" (harness-format-tokens context))))))
      " · ")))
 
-(defun harness-ui-cowboy--rows (info)
+(defun harness-ui-cowboy--rows (info &optional session)
   "Return the labelled facts of the panel for INFO.
 Which message waits, and what resending costs.  Where a lapsed cache is
 compared with the price it would have cost cached, a cache a redaction
-dropped is not: none can be had."
+dropped is not: none can be had.  SESSION, a session plist, words the
+costs as a plan's shares where it has rates (`harness-ui-estimate-text')."
   (let* ((preview (harness-ui-carry-text (plist-get info :preview)))
          (carry (plist-get info :carry-on))
          (cached (plist-get info :carry-on-cached))
@@ -180,20 +198,23 @@ dropped is not: none can be had."
           (list (list "Waiting" waiting)
                 (and (not (harness-ui-cowboy--dropped info)) (numberp carry) (numberp cached) (> carry cached)
                      (list "Resend" (format "%s uncached against %s cached"
-                                            (harness-format-cost carry) (harness-format-cost cached))))))))
+                                            (harness-ui-estimate-text carry session)
+                                            (harness-ui-estimate-text cached session))))))))
 
 (defun harness-ui-cowboy--spec (session-id r &optional now)
   "Return the spec of the panel of question record R, of SESSION-ID.
 See `harness-ui-carry-panel-string'.  NOW is the current time by default."
   (let* ((info (harness-ui-cowboy--info r))
          (pid (plist-get r :id))
+         (session (harness-ui-session session-id))
          (now (or now (float-time))))
     (list :id pid
           :icon 'harness-icon-clock :title "Prompt cache cold"
           :detail (harness-ui-cowboy--detail info now)
-          :rows (harness-ui-cowboy--rows info)
+          :rows (harness-ui-cowboy--rows info session)
           :ask "Choose what goes first"
-          :choices (mapcar (lambda (way) (harness-ui-cowboy--choice info way)) (harness-carry-names))
+          :choices (mapcar (lambda (way) (harness-ui-cowboy--choice info way session))
+                            (harness-carry-names))
           :default (plist-get info :default)
           :always t
           :footer (list (and (harness-json-true-p (plist-get info :history))

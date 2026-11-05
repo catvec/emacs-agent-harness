@@ -15,8 +15,7 @@ The chat buffer: transcript, pending panel, queue, attachments and compose box.
 
 One buffer per session, "*harness: NAME*", laid out top to bottom:
 
-  header line   name, model, permission mode, non-interactive (only
-                while it is on), thinking, context, cost, menu, after what
+  header line   name, the session it was started from, menu, after what
                 `harness-chat-header-functions` put in front (a BTW's
                 buttons); what the buffer shows already, it leaves out
   transcript    one block per node, rendered incrementally with markers
@@ -35,6 +34,10 @@ One buffer per session, "*harness: NAME*", laid out top to bottom:
                 them at a time, in one place, and switches between them
   todos         the session's todo items, one per line, or folded to
                 the title line, which is how the panel starts
+  settings      one line of buttons and figures: model, thinking level,
+                permission mode, interactive or not, the context in
+                use, the tokens in all, the cost, and what other
+                modules add (a task's queue), fitted to the window
   threads       the review's threads, while C-c T shows them: the view
                 the report draws, drawn by the module that keeps the
                 review (`harness-chat-threads-function`), in place of
@@ -106,6 +109,7 @@ this file never touches a session struct.
 - `harness-chat-header-functions` — Functions putting segments in front of the chat header line.
 - `harness-chat-panel-functions` — Functions putting a panel of their own below the transcript.
 - `harness-chat-send-functions` — Functions run with the TEXT and ATTACHMENTS of each message sent.
+- `harness-chat-settings-functions` — Functions adding items to the settings line of a chat, after its settings.
 - `harness-chat-tool-body-functions` — Functions giving a tool call block a body of their own.
 - `harness-chat-top-functions` — Functions putting something at the top of the tail, first below the transcript.
 - `harness-thread-ref-functions` — Functions that know what a region of a buffer is from.

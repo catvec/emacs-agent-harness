@@ -33,6 +33,7 @@
 (defvar harness-anthropic-admin-api-key)
 (defvar auth-sources)
 (defvar harness-ui--sessions)
+(defvar harness-ui--quota-rates)
 (defvar harness-ui-tasks--loading)
 (defvar harness-ui-tasks--tasks)
 (defvar harness-compose-start)
@@ -2270,6 +2271,8 @@ change is for: a step's model and thinking level are its own, the rest
 the task's."
   (harness-ui-tasks-test-with
     (with-current-buffer board
+      ;; Wide enough for every setting: that they fit is other tests' business.
+      (cl-letf (((symbol-function 'harness-ui-tasks--width) (lambda () 200)))
       (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the board's settings")
       ;; A git project, where the worktree switch shows; this test's dir is not one.
       (setq harness-ui-tasks--settings (plist-put (copy-sequence harness-ui-tasks--settings) :worktrees t))
@@ -2333,7 +2336,7 @@ the task's."
                          "Model → the same model (for new tasks)")
                        (reverse said)))
         (should (equal "yolo" (plist-get harness-ui-tasks--new :permission-mode)))
-        (should (harness-json-true-p (plist-get harness-ui-tasks--new :non-interactive)))))))
+        (should (harness-json-true-p (plist-get harness-ui-tasks--new :non-interactive))))))))
 
 ;;;; Sending to a session is not composing a task
 
@@ -2959,17 +2962,29 @@ lead to."
         (with-current-buffer board (push-button (nth 2 (harness-ui-tasks-test--limit board))))
         (harness-ui-tasks-test--limit-says board "4 at a time")
         (should (eql 4 harness-tasks-max-running))
-        ;; A narrow board shortens the settings first: the button stays
-        ;; whole, to be clicked, until the settings would be too short.
+        ;; A narrow board drops the least important settings first
+        ;; (`harness-ui-setting-priorities'), and the limit's button stays
+        ;; whole, to be clicked, with the permission mode that always
+        ;; stays; the … that ends the line holds what it cut.  At 44
+        ;; columns the model is still there, the thinking level and the
+        ;; interactive switch are not; at 30, only the mode, the button
+        ;; and the … are left.
         (with-current-buffer board
           (let ((line (harness-ui-tasks--new-settings-line 44)))
-            (should (= 44 (string-width line)))
-            (should (string-suffix-p "…   4 at a time" line))
+            (should (<= (string-width line) 44))
+            (should (string-match-p "4 at a time …\\'" line))
+            (should (string-search "scripted (Demo)" line))
+            (should-not (string-search "default" line))
             (should (eq 'harness-ui-tasks-set-max-running
-                        (get-text-property (1- (length line)) 'harness-task-button line))))
+                        (get-text-property (string-search "4 at a time" line)
+                                           'harness-task-button line))))
           (let ((line (harness-ui-tasks--new-settings-line 30)))
             (should (<= (string-width line) 30))
-            (should-not (string-search "4 at a time" line))))
+            (should-not (string-search "scripted (Demo)" line))
+            (should (string-match-p "4 at a time …\\'" line))
+            (should (eq 'harness-ui-tasks-set-max-running
+                        (get-text-property (string-search "4 at a time" line)
+                                           'harness-task-button line)))))
         ;; Refine and Plan show it too: what they write up takes no
         ;; slot, but the work does once it starts.
         (with-current-buffer board
@@ -6345,6 +6360,162 @@ runs the task, not another write-up."
                                 (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
                                                   (harness-call 'session/nodes sid)))))))))
 
+;;;; The queue on a task's session's settings line
+
+(declare-function harness-chat--settings-line "harness-ui-chat")
+(declare-function harness-ui-tasks--queue-items "harness-ui-tasks")
+(declare-function harness-ui-tasks--queue-status "harness-ui-tasks")
+(declare-function harness-ui-tasks--queue-buttons "harness-ui-tasks")
+(declare-function harness-ui-tasks-session-pause "harness-ui-tasks")
+(declare-function harness-ui-tasks-session-resume "harness-ui-tasks")
+(declare-function harness-ui-tasks-session-start-now "harness-ui-tasks")
+(defvar harness-ui-tasks--session-tasks)
+(defvar harness-ui-tasks--places)
+(defvar harness-ui-session-id)
+
+(defun harness-ui-tasks-test--settings (chat)
+  "The settings line of CHAT, the chat buffer of a session, whole, as text."
+  (with-current-buffer chat
+    (string-trim-right (substring-no-properties (harness-chat--settings-line most-positive-fixnum)) "\n")))
+
+(defun harness-ui-tasks-test--wait-settings (chat regexp)
+  "Wait until CHAT's settings line matches REGEXP."
+  (harness-test-wait (lambda () (string-match-p regexp (harness-ui-tasks-test--settings chat)))
+                     10 (format "the settings line to show %s" regexp)))
+
+(defun harness-ui-tasks-test--push-settings (chat label)
+  "Push the button LABEL on CHAT's settings line, as a click on it does."
+  (with-current-buffer chat
+    (let* ((line (harness-chat--settings-line most-positive-fixnum))
+           (pos (string-search label (substring-no-properties line)))
+           (action (and pos (get-text-property pos 'harness-ui-action line))))
+      (unless action (error "No %s button on the settings line: %s" label (substring-no-properties line)))
+      (funcall action))))
+
+(ert-deftest harness-ui-tasks-session-line-shows-the-queue-and-its-buttons ()
+  "A task's session says where its task stands, with [Pause], [Resume] and [Start now].
+Queued, it is pending with its place in line, [Start now] and [Pause]
+the buttons; paused, it says so and offers [Resume] first; started, it
+is in progress and offers [Pause]; each button does what the card's
+does, and the line follows the task as the harness changes it.  A
+session that is no task's has nothing of it."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'ui-chat)
+    (let ((harness-tasks-max-running 0)
+          (harness-agent--cancel-grace 0.05)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (harness-ui-tasks-test--type-and-submit board "Waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Waiting task")
+      (let* ((id (harness-ui-tasks-test--card-id board "Waiting task"))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             (chat (harness-ui-tasks-test--chat sid)))
+        ;; Queued: its place in line, and what the card offers.
+        (harness-ui-tasks-test--wait-settings chat "Pending #1 · \\[Start now\\] \\[Pause\\]\\'")
+        (with-current-buffer chat
+          (should (string-match-p "Pending #1" (harness-ui-tasks-test--settings chat)))
+          ;; The tooltips say what a push does, in one line.
+          (let* ((line (harness-chat--settings-line most-positive-fixnum))
+                 (pause (string-search "[Pause]" (substring-no-properties line))))
+            (should (string-match-p "back in the queue" (get-text-property pause 'help-echo line)))
+            (should-not (string-match-p "\n" (get-text-property pause 'help-echo line)))))
+        ;; Paused: held in the queue, [Resume] first.
+        (harness-ui-tasks-test--push-settings chat "[Pause]")
+        (harness-ui-tasks-test--wait-settings chat "Pending #1 · paused · \\[Resume\\] \\[Start now\\]\\'")
+        (should (harness-ui-tasks--paused-p (harness-call 'task/get id)))
+        (should-not (string-match-p "\\[Pause\\]" (harness-ui-tasks-test--settings chat)))
+        ;; Resumed: waiting as before.
+        (harness-ui-tasks-test--push-settings chat "[Resume]")
+        (harness-ui-tasks-test--wait-settings chat "Pending #1 · \\[Start now\\] \\[Pause\\]\\'")
+        (should-not (plist-get (harness-call 'task/get id) :hold))
+        ;; Started now, whatever the limit of 0: at work, [Pause] the one button.
+        (harness-ui-tasks-test--push-settings chat "[Start now]")
+        (harness-ui-tasks-test--wait-settings chat "In progress · \\[Pause\\]\\'")
+        (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+        (should-not (string-match-p "Start now\\|Resume" (harness-ui-tasks-test--settings chat)))
+        ;; Paused at work: back in the queue, stopped.
+        (harness-ui-tasks-test--push-settings chat "[Pause]")
+        (harness-ui-tasks-test--wait-settings chat "Pending #1 · paused · \\[Resume\\] \\[Start now\\]\\'")
+        (harness-test-wait (lambda () (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+                           5 "the task to be back in the queue")))
+    ;; A session that is no task's: no queue, and no command to run.
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
+                                         :name "Plain")
+                           :id))
+           (chat (harness-ui-tasks-test--chat sid)))
+      (harness-test-wait (lambda () (gethash sid harness-ui-tasks--session-tasks-asked)) 5 "the lookup")
+      (accept-process-output nil 0.2)
+      (should-not (string-match-p "Pending\\|In progress\\|\\[Pause\\]" (harness-ui-tasks-test--settings chat)))
+      (with-current-buffer chat
+        (should-not (harness-ui-tasks--queue-items))
+        (should-error (harness-ui-tasks-session-pause) :type 'user-error)
+        (should-error (harness-ui-tasks-session-resume) :type 'user-error)
+        (should-error (harness-ui-tasks-session-start-now) :type 'user-error)))))
+
+(defvar harness-ui-tasks--session-tasks-asked)
+
+(ert-deftest harness-ui-tasks-session-queue-items-by-state ()
+  "The words and buttons for a task's state in the queue, and none past it.
+In progress and waiting for you are the board's pause buttons; pending
+says its place, what holds it back and a suspended queue; a task in the
+backlog has its banner, one in review, merging or done nothing at all."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'ui-chat)
+    (let ((task (lambda (&rest props)
+                  (append props '(:id "t-1" :session "s-1" :project "/p" :state "pending"))))
+          (buttons (lambda (task) (mapcar #'substring-no-properties (harness-ui-tasks--queue-buttons task)))))
+      ;; Its place in line was asked for a moment ago: nothing is fetched.
+      (puthash "t-1" (cons 3 (float-time)) harness-ui-tasks--places)
+      (should (equal "Pending #3" (harness-ui-tasks--queue-status (funcall task))))
+      (should (equal '("[Start now]" "[Pause]") (funcall buttons (funcall task))))
+      ;; Held: for quota, with when it resets; for a budget; paused by hand.
+      (should (string-match-p "\\`Pending #3 · quota · resets [0-9]"
+                              (harness-ui-tasks--queue-status
+                               (funcall task :hold (list :kind "quota" :until (+ (float-time) 3600))))))
+      (should (equal "Pending #3 · budget"
+                     (harness-ui-tasks--queue-status (funcall task :hold (list :kind "budget")))))
+      (should (equal '("[Start now]" "[Pause]")
+                     (funcall buttons (funcall task :hold (list :kind "quota")))))
+      (should (equal "Pending #3 · paused" (harness-ui-tasks--queue-status (funcall task :hold (list :kind "paused")))))
+      (should (equal '("[Resume]" "[Start now]") (funcall buttons (funcall task :hold (list :kind "paused")))))
+      ;; The queue of its project suspended.
+      (should (equal "Pending #3 · queue suspended"
+                     (harness-ui-tasks--queue-status (funcall task :queue-suspended t))))
+      (should (equal "Pending #3 · paused · queue suspended"
+                     (harness-ui-tasks--queue-status
+                      (funcall task :queue-suspended t :hold (list :kind "paused")))))
+      ;; At work, and waiting for you at work.
+      (let ((active (funcall task :state "active" :column "active"))
+            (blocked (funcall task :state "active" :column "needs-input")))
+        (should (equal "In progress" (harness-ui-tasks--queue-status active)))
+        (should (equal "Needs input" (harness-ui-tasks--queue-status blocked)))
+        (should (equal '("[Pause]") (funcall buttons active)))
+        (should (equal '("[Pause]") (funcall buttons blocked))))
+      ;; Past the queue: in review, merging, done.
+      (dolist (state '("review" "merging" "done"))
+        (should-not (funcall buttons (funcall task :state state :column state)))))
+    ;; The items are the state, then its buttons, for the settings line of the
+    ;; session the task belongs to; nothing for a backlog task, which has the banner.
+    (let ((chat (get-buffer-create " *queue items*")))
+      (unwind-protect
+          (with-current-buffer chat
+            (setq-local harness-ui-session-id "s-1")
+            (puthash "t-1" (cons 2 (float-time)) harness-ui-tasks--places)
+            (puthash "s-1" (list :id "t-1" :session "s-1" :project "/p" :state "pending")
+                     harness-ui-tasks--session-tasks)
+            (let ((items (harness-ui-tasks--queue-items)))
+              (should (= 2 (length items)))
+              (should (equal "Pending #2" (substring-no-properties (car (nth 0 items)))))
+              (should (equal "[Start now] [Pause]" (substring-no-properties (car (nth 1 items)))))
+              ;; The buttons outlast the state in a narrow window.
+              (should (< (nth 1 (nth 0 items)) (nth 1 (nth 1 items)))))
+            (puthash "s-1" (list :id "t-1" :session "s-1" :project "/p" :state "pending" :backlog t)
+                     harness-ui-tasks--session-tasks)
+            (should-not (harness-ui-tasks--queue-items))
+            (puthash "s-1" (list :id "t-1" :session "s-1" :project "/p" :state "pending" :archived t)
+                     harness-ui-tasks--session-tasks)
+            (should-not (harness-ui-tasks--queue-items)))
+        (kill-buffer chat)))))
+
 ;;;; Ready for review, in the mode line
 
 (defvar harness-ui-tasks--in-review)
@@ -6951,6 +7122,28 @@ and carries on where it stopped when resumed."
         (dolist (id (list first second))
           (harness-test-wait (lambda () (eq 'done (plist-get (harness-call 'task/get id) :state))) 15
                              (format "task %s to finish" id)))))))
+
+(declare-function harness-ui-tasks--cost-figure "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-card-cost-figure-reads-in-the-unit ()
+  "A task card's tooltip words a cost as money, a share of the plan's quota or the plan."
+  (harness-ui-tasks-test-with
+   (let ((harness-ui--quota-rates (make-hash-table :test 'equal))
+        (figure (lambda (s) (harness-ui-tasks--cost-figure s)))
+        (api (list :model "demo:scripted" :usage '(:cost 1.2 :list-cost 1.2 :billing "api")))
+        (plan (list :model "claude:claude-opus-5-5"
+                    :usage '(:cost 0.0 :list-cost 0.5 :billing "subscription" :plan "max")))
+        (extra (list :model "claude:claude-opus-5-5"
+                     :usage '(:cost 0.4 :list-cost 0.9 :billing "extra-usage" :plan "max"))))
+    (should (equal "cost $1.20" (funcall figure api)))
+    (should (equal "Max plan" (funcall figure plan)))
+    (should (equal "$0.400+Max plan" (funcall figure extra)))
+    (harness-ui--store-quota-rates
+     '((:provider "claude" :window "5h" :capacity 50.0 :length 18000)
+       (:provider "claude" :window "7d" :capacity 80.0 :length 604800)))
+    (should (equal "cost $1.20" (funcall figure api)))
+    (should (equal "cost 1% / 0.6% of 5h / 7d quota" (funcall figure plan)))
+    (should (equal "cost $0.400 + 1% / 0.6% of 5h / 7d quota" (funcall figure extra))))))
 
 ;;;; A card opens its task's session
 

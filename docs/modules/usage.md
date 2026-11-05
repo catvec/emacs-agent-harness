@@ -82,6 +82,10 @@ the estimate with real numbers (see "Live usage" below).  That too is
 counted here, in memory; `usage/live-updated` announces the figures
 a few times a second at most.
 
+Quota exchange rates say what a plan's quota window is worth in
+API-priced usage, so a view can show what a session cost as a share of
+the plan's windows (see "Quota exchange rates" below).
+
 ## Provides
 
 ### Methods
@@ -96,6 +100,7 @@ a few times a second at most.
 - `usage/plan-budget` (amount period days &optional now) — Split AMOUNT over the calendar PERIOD (day|week|month) containing NOW.
 - `usage/price` (model-id usage &optional at) — Return the USD cost of USAGE on MODEL-ID.
 - `usage/project-budgets` (project &rest opts) — Return the status of every budget applying to PROJECT, a root.
+- `usage/quota-rates` — Return what a quota window is worth in API-priced usage, per provider.
 - `usage/rate` (session-id) — Return how fast SESSION-ID's model writes, or nil if it was never measured.
 - `usage/rates` — Return the output rate of every measured session, newest first.
 - `usage/record` (row) — Persist usage ROW and return it with `:id` set.
@@ -111,6 +116,7 @@ a few times a second at most.
 - `usage/budget-warning` — (SESSION-ID BUDGET STATUS) when a budget crosses 80% or 100%.
 - `usage/budgets-changed` — (BUDGETS) after a budget is added, replaced or removed.
 - `usage/live-updated` — (SESSION-ID LIVE) while the session's turn runs, at most every `harness-usage-live-interval` seconds: its token figures as `usage/live` returns them, which grow as its model streams; LIVE is nil once the turn ended.
+- `usage/quota-rates-updated` — (RATES) when what a plan's quota window is worth in API-priced usage moved; RATES as `usage/quota-rates` returns them.
 - `usage/rate-updated` — (SESSION-ID RATE) after a model call of the session was measured; RATE as `usage/rate` returns it.
 - `usage/recorded` — (ROW) after a usage row is stored.
 - `usage/reported-changed` — (REPORT) when a provider reports a new amount billed, which budgets over everything count.
@@ -120,6 +126,7 @@ a few times a second at most.
 - `harness-anthropic-admin-api-key` — Anthropic Admin API key, to fetch this month's API cost for a budget.
 - `harness-usage-cost-report-interval` — Seconds before Anthropic's cost report is fetched again for budgets.
 - `harness-usage-live-interval` — Least seconds between two announcements of a session's live token figures.
+- `harness-usage-quota-rates-delay` — Seconds after a quota report before the exchange rates are worked out again.
 - `harness-usage-rate-window` — Seconds of streaming that a session's output rate averages over.
 - `harness-usage-warn-fraction` — Fraction of a budget at which the first warning is issued.
 
@@ -153,6 +160,7 @@ a few times a second at most.
 - `agent/turn-started` → `harness-usage--live-start`
 - `agent/turn-started` → `harness-usage--reset-meter`
 - `config/changed` → `harness-usage--on-config-changed`
+- `provider/quota-updated` → `harness-usage--on-quota-rates`
 - `provider/quota-updated` → `harness-usage--on-quota-updated`
 - `session/deleted` → `harness-usage--live-forget`
 - `session/deleted` → `harness-usage--forget-rate`
@@ -167,6 +175,7 @@ a few times a second at most.
 - `usage/budget-warning`
 - `usage/budgets-changed`
 - `usage/live-updated`
+- `usage/quota-rates-updated`
 - `usage/rate-updated`
 - `usage/recorded`
 - `usage/reported-changed`

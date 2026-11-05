@@ -3351,6 +3351,258 @@ in a graphic Emacs: measuring in pixels has a test of its own."
   (should (= (harness-ui-header-width (selected-window))
              (- (window-pixel-width) (or (window-scroll-bar-width) 0)))))
 
+(ert-deftest harness-ui-fit-items-takes-the-measure-of-its-caller ()
+  "`harness-ui-fit-items' makes room as `harness-ui-fit-header' does, in any unit.
+A line of a buffer is measured in columns, a header line in pixels; each
+item comes back with its index, so a caller can join what stayed."
+  (let ((segments '(" One" (" Two" 5) (" Three" 5 " 3") (" Four" 100))))
+    ;; Columns: everything fits.
+    (should (equal '(0 1 2 3)
+                   (mapcar (lambda (it) (plist-get it :index))
+                           (harness-ui-fit-items segments 200 #'string-width))))
+    ;; Two units a column, and a width as wide: the same items go.
+    (should (equal '(0 1 2 3)
+                   (mapcar (lambda (it) (plist-get it :index))
+                           (harness-ui-fit-items segments 400 (lambda (s) (* 2 (string-width s)))))))
+    ;; The rightmost of the two lowest priorities shortens before it goes.
+    (let ((kept (harness-ui-fit-items segments 16 #'string-width)))
+      (should (equal " One Two 3 Four" (mapconcat (lambda (it) (plist-get it :text)) kept ""))))
+    ;; The same room in units of two a column holds less: all that is
+    ;; left is what cannot go.
+    (let ((kept (harness-ui-fit-items (append segments '((" Pinned" t))) 16
+                                      (lambda (s) (* 2 (string-width s))))))
+      (should (equal '(0 4) (mapcar (lambda (it) (plist-get it :index)) kept))))))
+
+(ert-deftest harness-ui-setting-specs-are-the-settings-every-line-has ()
+  "The model, thinking level, permission mode and interactive switch, as specs.
+One list for the session's settings line and the task board's: the
+words and commands are the same, the tooltips say what the settings are
+of, and a host narrows the list to the settings it shows."
+  (let* ((values '(:model "demo:scripted" :thinking "high" :permission-mode "auto"
+                   :non-interactive :false))
+         (specs (harness-ui-setting-specs values))
+         (spec (lambda (id &optional list) (cl-find id (or list specs) :key (lambda (s) (plist-get s :id))))))
+    (should (equal '(model thinking permission interactive)
+                   (mapcar (lambda (s) (plist-get s :id)) specs)))
+    (should (equal (harness-ui-model-label "demo:scripted") (plist-get (funcall spec 'model) :label)))
+    (should (eq 'harness-set-model (plist-get (funcall spec 'model) :command)))
+    (should (string-search "high" (plist-get (funcall spec 'thinking) :label)))
+    (should (eq 'harness-set-thinking (plist-get (funcall spec 'thinking) :command)))
+    (should (equal "Auto" (plist-get (funcall spec 'permission) :label)))
+    (should (eq 'harness-set-permission-mode (plist-get (funcall spec 'permission) :command)))
+    (should (equal "interactive" (plist-get (funcall spec 'interactive) :label)))
+    (should (eq 'harness-toggle-non-interactive (plist-get (funcall spec 'interactive) :command)))
+    ;; Without a scope the settings are the session's own, and the tooltip
+    ;; says what a click does; the interactive switch says what it means.
+    (should (equal "Model (mouse-1: change)" (plist-get (funcall spec 'model) :help)))
+    (should (string-search "mouse-1: make it non-interactive" (plist-get (funcall spec 'interactive) :help)))
+    ;; Priorities: the permission mode never goes, the thinking level goes first.
+    (should (eq t (plist-get (funcall spec 'permission) :priority)))
+    (should (< (plist-get (funcall spec 'thinking) :priority) (plist-get (funcall spec 'model) :priority)))
+    ;; With a scope they are those of what it names.
+    (let ((scoped (harness-ui-setting-specs values :scope "new tasks")))
+      (should (equal "Model of new tasks" (plist-get (funcall spec 'model scoped) :help)))
+      (should (equal "Thinking level of new tasks" (plist-get (funcall spec 'thinking scoped) :help)))
+      (should (equal "Permission mode of new tasks" (plist-get (funcall spec 'permission scoped) :help)))
+      (should (equal "Non-interactive mode of new tasks" (plist-get (funcall spec 'interactive scoped) :help))))
+    ;; A host narrows the list, and replaces the permission mode's click.
+    (should (equal '(permission interactive)
+                   (mapcar (lambda (s) (plist-get s :id))
+                           (harness-ui-setting-specs values :only '(permission interactive)))))
+    (let ((own (funcall spec 'permission
+                        (harness-ui-setting-specs values :permission-command 'ignore
+                                                  :permission-help "Where it goes"))))
+      (should (eq 'ignore (plist-get own :command)))
+      (should (equal "Where it goes" (plist-get own :help))))
+    ;; No mode known yet, and a session that never waits for the user.
+    (should (equal "default mode"
+                   (plist-get (funcall spec 'permission (harness-ui-setting-specs '(:model "x"))) :label)))
+    (let ((away (funcall spec 'interactive (harness-ui-setting-specs '(:non-interactive t)))))
+      (should (equal "non-interactive" (plist-get away :label)))
+      (should (eq 'harness-non-interactive-face (plist-get away :face)))
+      (should (string-search "mouse-1: make it interactive" (plist-get away :help))))))
+
+(ert-deftest harness-ui-settings-line-joins-and-fits ()
+  "A settings line joins its items by a dot, its groups by a gap, and fits a room.
+The least important items go first, the rightmost first among equals; an
+item with a shortened form shortens before it goes.  What the line had
+to leave out it ends in a clickable … for, which a room with no space
+for it does without."
+  (let* ((groups (lambda ()
+                   (list (list '("Model" 50) '("Think" 20) '("Ask" t) '("interactive" 40))
+                         (list '("37k/200k" 30) '("1.2M tokens" 15 "1.2M") '("$1.20" 10)))))
+         (line (lambda (room) (substring-no-properties (harness-ui-settings-line (funcall groups) room)))))
+    ;; The line starts with a space, an item's dot is dim, the groups are three spaces apart.
+    (should (equal " Model · Think · Ask · interactive   37k/200k · 1.2M tokens · $1.20" (funcall line nil)))
+    (should (equal (funcall line nil) (funcall line 200)))
+    (let ((whole (harness-ui-settings-line (funcall groups) nil)))
+      (should (eq 'harness-dim-face (get-text-property (string-search "·" whole) 'face whole))))
+    ;; The cost goes first, then the tokens shorten, in 60 columns; the
+    ;; … that ends the line says what it cut.
+    (should (equal " Model · Think · Ask · interactive   37k/200k · 1.2M …" (funcall line 60)))
+    ;; Narrower: the tokens go, then the thinking level, the context...
+    (should (equal " Model · Think · Ask · interactive   37k/200k …" (funcall line 50)))
+    (should (equal " Model · Ask · interactive …" (funcall line 40)))
+    (should (equal " Model · Ask · interactive …" (funcall line 30)))
+    ;; ...the model last, before the permission mode, which stays.
+    (should (equal " Ask …" (funcall line 14)))
+    (should (equal " Ask …" (funcall line 6)))
+    ;; Too narrow for anything but the control: the line is cut to it.
+    (should (equal " A …" (funcall line 4)))
+    ;; The first item of the line, or of a group, has no dot in front, whatever
+    ;; went before it.
+    (should (equal " Ask   1.2M …"
+                   (substring-no-properties
+                    (harness-ui-settings-line (list (list '("Ask" t)) (list '("37k" 5) '("1.2M" 8))) 15))))
+    (should (equal " Ask · 3 …" (substring-no-properties
+                                 (harness-ui-settings-line (list (list '("Model" 3) '("Ask" t) '("3" 4))) 15))))
+    ;; Strings are items too, never dropped; nil and empty ones are nothing.
+    (should (equal " a · b" (substring-no-properties (harness-ui-settings-line '(("a" nil "" "b")) 20))))
+    (should (equal "" (harness-ui-settings-line '(nil (nil)) 20)))))
+
+(ert-deftest harness-ui-settings-line-shows-what-it-cut ()
+  "A settings line that had to cut items ends in a … that holds them all.
+The … carries the items the line left out, each with its text, its
+tooltip and its action, and the properties the UI's overflow menu reads
+(`harness-ui-overflow-full', `-shown' and `-title').  A click or
+`harness-ui-settings--show-overflow' shows every one in full, with its
+action where the line has one; a line that fits has no such control."
+  (let* ((here nil)
+         (action (lambda () (interactive) (setq here (current-buffer))))
+         (groups (list (list '("Model" 50) '("Ask" t))
+                       (list (list (propertize "Cost" 'harness-ui-action action
+                                               'help-echo "What it cost")
+                                   10)
+                             (list "1.2M tokens" 15 "1.2M"))))
+         (whole (harness-ui-settings-line groups nil))
+         (line (harness-ui-settings-line groups 20)))
+    (should (string-match-p "…\\'" (substring-no-properties line)))
+    (let* ((at (1- (length line)))
+           (items (get-text-property at 'harness-ui-settings-overflow-items line)))
+      ;; What the line left out, in its order, with the action of each.
+      (should (equal '("Cost" "1.2M tokens") (mapcar (lambda (i) (plist-get i :label)) items)))
+      (should (eq action (plist-get (car items) :action)))
+      (should (equal "What it cost" (plist-get (car items) :help)))
+      ;; The properties the overflow module reads, and its face.
+      (should (get-text-property at 'harness-ui-overflow-full line))
+      (should (eql at (get-text-property at 'harness-ui-overflow-shown line)))
+      (should (equal "Settings that did not fit" (get-text-property at 'harness-ui-overflow-title line)))
+      (should (memq (if (facep 'harness-ui-overflow-face)
+                        'harness-ui-overflow-face
+                      'harness-dim-face)
+                    (ensure-list (get-text-property at 'face line))))
+      ;; It is a control: its tooltip says how to open it, and it has a map.
+      (should (string-match-p "did not fit" (get-text-property at 'help-echo line)))
+      (should (keymapp (get-text-property at 'keymap line))))
+    ;; A click anywhere on the line finds the report; a line that fits
+    ;; has none.
+    (with-temp-buffer
+      (insert line)
+      (let ((report (harness-ui-settings--overflow-at (point-min))))
+        (should report)
+        (should (equal "Settings that did not fit" (car report)))
+        (should (equal '("Cost" "1.2M tokens")
+                       (mapcar (lambda (i) (plist-get i :label)) (cdr report))))))
+    (with-temp-buffer
+      (insert whole)
+      (should-not (harness-ui-settings--overflow-at (point-min))))
+    ;; The list it shows when the overflow module is not loaded, each item
+    ;; in full and a clickable button where it has an action, run in the
+    ;; buffer whose line it was.
+    (with-temp-buffer
+      (insert line)
+      (let ((origin (current-buffer)))
+        (harness-ui-settings--show-hidden (harness-ui-settings--overflow-at (point-min)) origin)
+        (with-current-buffer "*Harness settings*"
+          (should (string-match-p "Settings that did not fit" (buffer-string)))
+          (should (string-match-p "Cost" (buffer-string)))
+          (should (string-match-p "1\\.2M tokens" (buffer-string)))
+          (let ((pos (string-search "Cost" (buffer-string))))
+            (should (functionp (get-text-property pos 'harness-ui-action (buffer-string))))
+            (should (get-text-property pos 'keymap (buffer-string)))
+            (funcall (get-text-property pos 'harness-ui-action (buffer-string)))
+            (should (eq origin here)))
+          (kill-buffer))))
+    ;; With the overflow module loaded the … opens its menu, at the
+    ;; point that was clicked; a line with no control there says so.
+    (let (shown failed)
+      (cl-letf (((symbol-function 'harness-ui-overflow-show)
+                 (lambda (&optional pos) (setq shown pos))))
+        (with-temp-buffer
+          (insert line)
+          (goto-char (point-min))
+          (harness-ui-settings--show-overflow)
+          (should (eql (point-min) shown))))
+      (cl-letf (((symbol-function 'harness-ui-overflow-show) nil))
+        (with-temp-buffer
+          (insert line)
+          (harness-ui-settings--show-overflow)
+          (kill-buffer "*Harness settings*"))
+        (with-temp-buffer
+          (insert (substring-no-properties whole))
+          (condition-case _err (harness-ui-settings--show-overflow)
+            (user-error (setq failed t)))
+          (should failed))))))
+
+(ert-deftest harness-ui-action-push-finds-the-button-in-an-overlay-string ()
+  "A click on a button in the string of an overlay runs its action.
+A line above a compose box is such a string: point cannot be on it, so
+the click finds the button in the string it hit and selects the window,
+leaving point where it was.  A button in the buffer's own text works as
+before."
+  (let ((buffer (generate-new-buffer " *harness action overlay*"))
+        (ran nil))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer buffer)
+          (insert "one\ntwo\n")
+          (goto-char 5)
+          (let* ((ov (make-overlay 1 1))
+                 (string (concat "Model " (harness-ui-action-button "[Go]" (lambda () (push 'string ran))
+                                                                     :help "Go there")
+                                 " " (harness-ui-string-action (propertize "$1" 'face 'bold)
+                                                                (lambda () (push 'figure ran)))))
+                 (go (string-search "[Go]" string))
+                 (figure (string-search "$1" string))
+                 (window (selected-window)))
+            (overlay-put ov 'before-string string)
+            (cl-flet ((click (pos) (list 'mouse-1 (list window 1 '(0 . 0) 0 (cons string pos) 1))))
+              (harness-ui-action-push (click go))
+              (harness-ui-action-push (click figure)))
+            (should (equal '(figure string) ran))
+            (should (= 5 (point)))
+            ;; The figure keeps its own face, and is a button all the same.
+            (should (eq 'bold (get-text-property figure 'face string)))
+            (should (eq 'highlight (get-text-property figure 'mouse-face string)))
+            ;; Text of the buffer: point is on the button, as before.
+            (goto-char (point-max))
+            (insert (harness-ui-action-button "[Text]" (lambda () (push 'text ran))))
+            (goto-char (- (point-max) 2))
+            (harness-ui-action-push)
+            (should (eq 'text (car ran)))))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-ui-total-tokens-add-up-every-call ()
+  "A session's total tokens are its input, output and cache reads and writes.
+The figure reads \"1.2k tokens\" (\"1.2k\" bare) and says nothing while the
+session used none; the tooltip is one line with the parts there are."
+  (let ((session '(:id "s" :usage (:input 100 :output 50 :cache-read 1000 :cache-write 20))))
+    (should (equal '(:total 1170 :input 100 :output 50 :cache-read 1000 :cache-write 20)
+                   (harness-ui-session-total-tokens session)))
+    (should (equal "1.2k tokens" (substring-no-properties (harness-ui-format-total-tokens session))))
+    (should (equal "1.2k" (substring-no-properties (harness-ui-format-total-tokens session t))))
+    (should (equal "Total tokens 1.2k · input 100 · output 50 · cache read 1.0k · cache write 20"
+                   (get-text-property 0 'help-echo (harness-ui-format-total-tokens session))))
+    ;; Parts that are none are left out of the tooltip; a total of none is no figure.
+    (should (equal "Total tokens 150 · input 100 · output 50"
+                   (get-text-property 0 'help-echo
+                                      (harness-ui-format-total-tokens '(:usage (:input 100 :output 50))))))
+    (should-not (harness-ui-format-total-tokens '(:usage (:input 0 :output 0))))
+    (should-not (harness-ui-format-total-tokens '(:id "s")))
+    ;; A tooltip made when it is asked for, as the session list's.
+    (let ((help (get-text-property 0 'help-echo (harness-ui-format-total-tokens session nil t))))
+      (should (functionp help)))))
+
 (ert-deftest harness-ui-icons-are-made-once ()
   "An icon is made once, then reused while it is defined the same way.
 Header and mode lines are drawn on every key typed, and making an icon

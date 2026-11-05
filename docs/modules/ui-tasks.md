@@ -285,6 +285,7 @@ the chevron that folds a card's recap, which only draws the card again.
 ### Hooks
 
 - `harness-chat-panel-functions`
+- `harness-chat-settings-functions`
 - `harness-ui-tasks-action-functions` — Functions adding actions of their own to the menu of a task's card.
 - `harness-ui-tasks-corner-functions` — Functions drawing something at the right of the lines above the compose box.
 - `harness-ui-tasks-header-functions` — Functions returning a segment of a board's header line, or nil.
@@ -345,6 +346,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-session-resume` — Resume this session's paused task: the queue starts it when its turn comes.
 - `harness-ui-tasks-session-retry` — Have this session's task, which stopped part way, work on it again.
 - `harness-ui-tasks-session-start` — Start this session's task now, even with every slot busy.
+- `harness-ui-tasks-session-start-now` — Start this session's queued task at once, the [Start now] of its settings line.
 - `harness-ui-tasks-set-max-running` — Let N of each project's tasks work at once; N nil means no limit.
 - `harness-ui-tasks-show-all` — Show every task of the section at point, however tall it makes the board.
 - `harness-ui-tasks-show-fewer` — Let the section at point fit the window again.
@@ -388,6 +390,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `task/pause` ([tasks](tasks.md))
 - `task/prompt` ([tasks](tasks.md))
 - `task/queue` ([tasks](tasks.md))
+- `task/queue-order` ([tasks](tasks.md))
 - `task/refine` ([tasks](tasks.md))
 - `task/reject` ([tasks](tasks.md))
 - `task/resume` ([tasks](tasks.md))
@@ -412,6 +415,7 @@ the chevron that folds a card's recap, which only draws the card again.
 - `task/deleted` → `harness-ui-tasks--on-session-task-event`
 - `task/deleted` → `harness-ui-tasks--on-event`
 - `task/done` → `harness-ui-tasks--on-session-task-event`
+- `task/queue` → `harness-ui-tasks--on-session-task-event`
 - `task/review` → `harness-ui-tasks--on-session-task-event`
 - `task/review` → `harness-ui-tasks--on-event`
 
@@ -419,6 +423,7 @@ the chevron that folds a card's recap, which only draws the card again.
 
 - `harness-chat-panel-functions` → `harness-ui-tasks--state-panel`
 - `harness-chat-panel-functions` → `harness-ui-tasks--backlog-panel`
+- `harness-chat-settings-functions` → `harness-ui-tasks--queue-items`
 - `harness-ui-connected-hook` → `harness-ui-tasks--fetch-review`
 - `harness-ui-event-functions` → `harness-ui-tasks--on-review-event`
 - `harness-ui-event-functions` → `harness-ui-tasks--on-session-task-event`

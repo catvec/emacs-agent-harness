@@ -590,6 +590,7 @@ user's Emacs ask it (`_harness/emacs/...', answered by
 
 (defvar harness-compose-start)
 (defvar harness-compose-end)
+(defvar harness-compose--reserved-lines-function)
 (declare-function harness-compose-set "harness-ui-compose")
 (declare-function harness-compose-text "harness-ui-compose")
 (declare-function harness-compose-pad-window "harness-ui-compose")
@@ -648,16 +649,24 @@ point, out of the box, rather than scroll."
             (set-window-point window (point))
             ;; Measured without the padding, which is sized again next.
             (harness-compose-repad window)
-            (let ((height (cdr (window-text-pixel-size window (point-min) harness-compose-end))))
+            (let* ((height (cdr (window-text-pixel-size window (point-min) harness-compose-end)))
+                   ;; A host's overlay lines above the box are display too
+                   ;; (`harness-compose--reserved-lines-function').
+                   (reserved (lambda (from)
+                               (* line (if harness-compose--reserved-lines-function
+                                           (funcall harness-compose--reserved-lines-function window from)
+                                         0)))))
               (harness-compose-pad-window window)
-              (if (<= height (- body (* spare line)))
+              (if (<= (+ height (funcall reserved (point-min))) (- body (* spare line)))
                   (should (= (point-min) (window-start window)))
                 ;; Point, at the box's end, is in view: from the window's
-                ;; start to there takes the window, but for SPARE lines.
-                ;; (`pos-visible-in-window-p' says nil in batch.)
+                ;; start to there, overlay lines included, takes the
+                ;; window, but for SPARE lines.  (`pos-visible-in-window-p'
+                ;; says nil in batch.)
                 (should (< (point-min) (window-start window) (point)))
                 (should (= (- body (* spare line))
-                           (cdr (window-text-pixel-size window (window-start window) harness-compose-end))))))))))
+                           (+ (funcall reserved (window-start window))
+                              (cdr (window-text-pixel-size window (window-start window) harness-compose-end)))))))))))
     (should-not forced)))
 
 (defun harness-test-compose-c-a-c-k (buffer)

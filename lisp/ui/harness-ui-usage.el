@@ -272,9 +272,12 @@ PROPS are passed to `svg-node'."
   "Describe what series or table POINT cost, and what a plan paid for."
   (let ((covered (harness-usage-covered point)))
     (if (> covered 0)
-        (format "%s billed, %s covered by plan"
-                (harness-format-cost (plist-get point :cost)) (harness-format-cost covered))
-      (harness-format-cost (plist-get point :cost)))))
+        (format "%s billed, %s covered by plan%s"
+                (harness-ui-format-billed point) (harness-ui-format-covered point)
+                (if (harness-ui-covered-share-p point)
+                    (format " (%s at API prices)" (harness-format-cost covered))
+                  ""))
+      (harness-ui-format-billed point))))
 
 (defun harness-ui-usage--bar-help (point bucket)
   "Return the tooltip of POINT's chart column for BUCKET.
@@ -317,7 +320,9 @@ covered stacked on top in the lighter plan colour."
          (plan (harness-ui-usage--color 'plan))
          (label-every (max 1 (ceiling (* n 44) (max 1 plot-w))))
          (map nil))
-    ;; Gridlines and y labels at 0, 1/2 and the top.
+    ;; Gridlines and y labels at 0, 1/2 and the top.  The axis is dollars
+    ;; at API prices: a column is billed money and what a plan covered
+    ;; stacked together, and prices are the one scale they share.
     (dolist (frac '(0 0.5 1))
       (let ((y (+ top (* plot-h (- 1 frac)))))
         (svg-line svg left y (+ left plot-w) y :stroke-color grid :stroke-width 1 :opacity 0.35)
@@ -441,11 +446,14 @@ The comparison is the `ui-cost-compare' module's (`harness-cost-compare')."
                         " " (propertize label 'face 'harness-dim-face 'help-echo help) "    ")))
         (covered (harness-usage-covered totals)))
     (insert "\n "
-            (funcall cell (harness-format-cost (plist-get totals :cost)) "cost"
+            (funcall cell (harness-ui-format-billed totals) "cost"
                      "Billed: per-token calls and a plan's extra usage")
             (if (> covered 0)
-                (funcall cell (harness-format-cost covered) "covered by plan"
-                         "What a subscription paid for, at API prices; not billed")
+                (funcall cell (harness-ui-format-covered totals) "covered by plan"
+                         (if (harness-ui-covered-share-p totals)
+                             (format "What a subscription paid for: a share of the plan's quota, %s at API prices; not billed"
+                                     (harness-format-cost covered))
+                           "What a subscription paid for, at API prices; not billed"))
               "")
             (funcall cell (harness-format-tokens (plist-get totals :input)) "input")
             (funcall cell (harness-format-tokens (plist-get totals :output)) "output")
@@ -488,11 +496,11 @@ timer in a daemon may otherwise find a terminal frame selected."
           (let ((value (harness-usage-list-cost p))
                 (covered (harness-usage-covered p)))
             (insert (format "  %-8s %8s  " (harness-ui-usage--bucket-label (plist-get p :key) bucket)
-                            (harness-format-cost (plist-get p :cost)))
+                            (harness-ui-format-billed p))
                     (harness-ui-usage--meter-string (if (> max-value 0) (/ value max-value) 0)
                                                     (harness-ui-usage--color 'accent) 200 30)
                     (if (> covered 0)
-                        (propertize (format "  +%s covered by plan" (harness-format-cost covered))
+                        (propertize (format "  +%s covered by plan" (harness-ui-format-covered p))
                                     'face 'harness-dim-face)
                       "")
                     "\n")))
@@ -610,7 +618,6 @@ members' lines :hidden t while it is folded."
   "Insert table LINE with FMT, its share of TOTAL, the value at API prices."
   (let* ((r (plist-get line :row))
          (label (plist-get line :label))
-         (cost (float (or (plist-get r :cost) 0)))
          (covered (harness-usage-covered r))
          (share (if (> total 0) (/ (harness-usage-list-cost r) total) 0))
          (start (point)))
@@ -620,8 +627,8 @@ members' lines :hidden t while it is folded."
                                        'help-echo "RET / mouse-1: open this session"))
                           ((plist-get line :help) (propertize label 'help-echo (plist-get line :help)))
                           (t label))
-                    (harness-format-cost cost)
-                    (if (> covered 0) (harness-format-cost covered) "")
+                    (harness-ui-format-billed r)
+                    (if (> covered 0) (harness-ui-format-covered r) "")
                     (concat (harness-ui-usage--meter-string share (harness-ui-usage--color 'accent) 64 8
                                                             (format "%.0f%% of the period's usage" (* 100 share)))
                             (propertize (format " %3.0f%%" (* 100 share)) 'face 'harness-dim-face))
@@ -646,7 +653,7 @@ every label, folded ones too, so unfolding moves no column."
   (let* ((lines (harness-ui-usage--table-lines summary))
          (total (apply #'+ (mapcar #'harness-usage-list-cost summary)))
          (kw (max 8 (apply #'max 0 (mapcar (lambda (l) (string-width (plist-get l :label))) lines))))
-         (fmt (format " %%-%ds  %%8s  %%8s  %%-14s %%8s %%8s %%9s %%9s %%6s\n" kw))
+         (fmt (format " %%-%ds  %%8s  %%12s  %%-14s %%8s %%8s %%9s %%9s %%6s\n" kw))
          (title (nth 1 (assq harness-ui-usage--group harness-ui-usage--groups))))
     (insert " " (propertize (format "By %s" (downcase title)) 'face 'harness-usage-heading-face))
     (when (cl-some (lambda (l) (plist-get l :fold)) lines)
@@ -895,7 +902,10 @@ own budget has no baseline: a session spends only through the harness."
     (insert (make-string (max 2 (- harness-ui-usage--budget-buttons-width (- (point) start))) ?\s))))
 
 (defun harness-ui-usage--insert-budget (status)
-  "Insert one budget line for STATUS: its name, buttons, meter and figures."
+  "Insert one budget line for STATUS: its name, buttons, meter and figures.
+The figures stay money (`harness-format-cost', here and in the rest of the
+budgets): a budget caps the dollars billed, which what a plan covers
+never counts, so there is no quota share to show in their place."
   (let* ((budget (plist-get status :budget))
          (fraction (float (or (plist-get status :fraction) 0)))
          (color (harness-ui-usage--color (cond ((>= fraction 1) 'danger) ((>= fraction 0.8) 'warning) (t 'accent))))

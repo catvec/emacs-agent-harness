@@ -131,9 +131,9 @@ from it as the header separates its other segments."
 
 (ert-deftest harness-ui-supervisor-segment-yields-before-the-session ()
   "A narrow header drops the badge before any segment of the session's own.
-At a width too small for the badge and the session's own state together,
-the header reads as it would without the mode, so the model, the mode and
-the counts keep the room the badge would have taken."
+At a width too small for the badge and the session's name together, the
+header reads as it would without the mode, so the name and the menu keep
+the room the badge would have taken."
   (harness-ui-supervisor-test-with
     (harness-ui-supervisor-test-session "s1" '(:supervisor t))
     (harness-ui-supervisor-test-chat "s1"
@@ -156,8 +156,8 @@ the counts keep the room the badge would have taken."
           (should (cl-find "supervisor" items
                            :key (lambda (item) (plist-get item :label))
                            :test #'equal)))
-        (should (string-match-p "Scripted (Demo)" (harness-chat--header narrow)))
-        (should (string-match-p "Ask" (harness-chat--header narrow)))))))
+        (should (string-match-p "Work" (harness-chat--header narrow)))
+        (should (string-match-p "\\[menu\\]" (harness-chat--header narrow)))))))
 
 (ert-deftest harness-ui-supervisor-toggle-sends-the-flip ()
   "Toggling a supervising session turns it hands-on, and back again.

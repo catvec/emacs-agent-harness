@@ -23,6 +23,16 @@ Modules to provide the following functionality are shipped with the Emacs agent 
 - Task mode 
 - Btw sessions 
 - Usage, cost, quota tracking
+  - A cost reads in one of two units everywhere it shows -- the session
+    list, the task board, the chat, the usage and Insights pages, the
+    estimates of a cache refresh or a compaction: money (`$1.20`) when
+    calls are billed per token, and the share of the plan's quota
+    windows (`1% / 0.6%`, in full `1% / 0.6% of 5h / 7d quota`) when a
+    subscription pays.  The share is an estimate: the harness divides
+    what the plan covered, at API prices, by what each window is worth
+    in them, worked out from its own records and the use the plan
+    reports; until a window has enough use to tell, the plan's name
+    stands in
 - And more 
 
 See the [Modules](#modules) section for more details.
@@ -122,6 +132,14 @@ You can set the `harness-enabled-modules` variable to `t` in order to load all m
 A non-comprehensive list of all the different functionality offered by modules shipped with the harness:
 
 - Agentic sessions with tool use
+  - One settings line above the compose box -- in a chat and on the task
+    board -- has what changes what the session does: the model, thinking
+    level, permission mode and interactive switch, and, in a task's
+    session, where its task stands in the queue with [Pause], [Resume]
+    and [Start now].  A chat's header line keeps what it used: the
+    context, the total tokens and the cost.  A narrow window drops the
+    least important items first and ends in a clickable `…` that shows
+    every one it cut, in full
   - Image rendering, with images that zoom where they are (`+` `-` or the wheel, `0` fits, `1` at 100%), open larger in an image popout, and view in a window of their own
   - Native image yank (paste) into message support (and drag-and-drop)
   - Native Emacs message editing experience
@@ -154,6 +172,16 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Live access introspection: `session_info` reports the session's permission mode, writable and read-only directories with their sources, network, tools turned off, Linux capabilities and standing allow/deny rules
   - The access view names a sub-agent worktree among a session's directories, with buttons to give it up or make it writable
 - Usage, cost, quota tracking
+  - A cost reads in one of two units everywhere it shows -- the session
+    list, the task board, the chat, the usage and Insights pages, the
+    estimates of a cache refresh or a compaction: money (`$1.20`) when
+    calls are billed per token, and the share of the plan's quota
+    windows (`1% / 0.6%`, in full `1% / 0.6% of 5h / 7d quota`) when a
+    subscription pays.  The share is an estimate: the harness divides
+    what the plan covered, at API prices, by what each window is worth
+    in them, worked out from its own records and the use the plan
+    reports; until a window has enough use to tell, the plan's name
+    stands in
 - Completion providers
   - Claude Code SDK & API
   - ChatGPT

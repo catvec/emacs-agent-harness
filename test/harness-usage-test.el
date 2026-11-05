@@ -1782,5 +1782,153 @@ figures never shrink while it runs."
       (should (= 440 (let ((u (plist-get (harness-call 'session/get id) :usage)))
                        (+ (plist-get u :context) (plist-get u :last-output))))))))
 
+;;;; Quota exchange rates
+
+(defun harness-usage-test-window (name used &optional resets &rest more)
+  "Return a quota window NAME, USED of it, resetting at RESETS (in an hour)."
+  (append (list :name name :label (if (equal name "5h") "Current session (5 hours)" "This week, all models")
+                :used used :resets (or resets (+ (float-time) 3600)))
+          more))
+
+(defun harness-usage-test-rate-row (ago cost &optional billing model)
+  "Record a call AGO seconds back that cost COST at list prices, paid BILLING."
+  (harness-call 'usage/record
+                (list :ts (- (float-time) ago) :session "s" :project "/p/"
+                      :model (or model "claude:claude-opus-5-5") :cost (if (eq billing 'api) cost 0.0)
+                      :list-cost cost :billing (or billing 'subscription))))
+
+(defmacro harness-usage-test-with-rates (&rest body)
+  "Run BODY with the exchange rates forgotten and worked out at once."
+  (declare (indent 0))
+  `(harness-usage-test-with
+     (harness-usage--forget-quota-rates)
+     (let ((harness-usage-quota-rates-delay nil)
+           (events nil))
+       (ignore events)
+       ,@body)))
+
+(ert-deftest harness-usage-quota-rates-from-the-window-and-the-rows ()
+  (harness-usage-test-with-rates
+    (let ((events nil))
+      (harness-on 'usage/quota-rates-updated (lambda (rates) (push rates events)))
+      ;; $10 at list prices in the last hour; $100 in the last three days.
+      (harness-usage-test-rate-row 600 4.0)
+      (harness-usage-test-rate-row 3000 6.0)
+      (harness-usage-test-rate-row (* 3 86400) 90.0)
+      ;; Paid per token, or by another provider: not the plan's.
+      (harness-usage-test-rate-row 100 50.0 'api)
+      (harness-usage-test-rate-row 100 50.0 'subscription "copilot:gpt-5")
+      ;; Both windows: the 5h one is 25% used, the weekly one 10%.
+      (harness-emit 'provider/quota-updated 'claude
+                    (list :billing 'subscription :plan "max"
+                          :windows (list (harness-usage-test-window "5h" 0.25)
+                                         (harness-usage-test-window "7d" 0.10 (+ (float-time) 86400)))))
+      (let ((rates (harness-call 'usage/quota-rates)))
+        (should (equal '("5h" "7d") (mapcar (lambda (r) (plist-get r :window)) rates)))
+        (should (equal '("claude" "claude") (mapcar (lambda (r) (plist-get r :provider)) rates)))
+        (should (< (abs (- 40.0 (plist-get (nth 0 rates) :capacity))) 1e-6))
+        (should (< (abs (- 10.0 (plist-get (nth 0 rates) :cost))) 1e-6))
+        (should (= 18000 (plist-get (nth 0 rates) :length)))
+        ;; All $100 of the plan's calls of the last week, over 10%.
+        (should (< (abs (- 1000.0 (plist-get (nth 1 rates) :capacity))) 1e-6))
+        (should (= 604800 (plist-get (nth 1 rates) :length)))
+        (should (equal "Current session (5 hours)" (plist-get (nth 0 rates) :label))))
+      (should (= 1 (length events)))
+      (should (= 2 (length (car events))))
+      ;; The same report again moves nothing.
+      (harness-emit 'provider/quota-updated 'claude
+                    (list :billing 'subscription
+                          :windows (list (harness-usage-test-window "5h" 0.25)
+                                         (harness-usage-test-window "7d" 0.10 (+ (float-time) 86400)))))
+      (should (= 1 (length events))))))
+
+(ert-deftest harness-usage-quota-rates-one-window-and-model-scopes ()
+  (harness-usage-test-with-rates
+    (harness-usage-test-rate-row 600 5.0)
+    ;; Only the 7d window of all models; "7d Opus" is the Opus calls' alone.
+    (harness-emit 'provider/quota-updated 'claude
+                  (list :billing 'subscription
+                        :windows (list (harness-usage-test-window "7d" 0.5 (+ (float-time) 86400))
+                                       (harness-usage-test-window "7d Opus" 0.5 (+ (float-time) 86400)
+                                                                  :model "Opus"))))
+    (let ((rates (harness-call 'usage/quota-rates)))
+      (should (equal '("7d") (mapcar (lambda (r) (plist-get r :window)) rates)))
+      (should (< (abs (- 10.0 (plist-get (car rates) :capacity))) 1e-6)))
+    ;; A month window is known by its label.
+    (harness-usage-test-rate-row 600 2.0 'subscription "copilot:gpt-5")
+    (harness-emit 'provider/quota-updated 'copilot
+                  (list :billing 'subscription
+                        :windows (list (list :name "premium" :label "Premium requests this month"
+                                             :used 0.5 :resets (+ (float-time) 86400)))))
+    (should (equal '("claude/7d" "copilot/premium")
+                   (mapcar (lambda (r) (format "%s/%s" (plist-get r :provider) (plist-get r :window)))
+                           (harness-call 'usage/quota-rates))))
+    ;; A provider billing per token reports no windows, and has no rate.
+    (harness-emit 'provider/quota-updated 'copilot '(:billing api))
+    (should (equal '("claude/7d")
+                   (mapcar (lambda (r) (format "%s/%s" (plist-get r :provider) (plist-get r :window)))
+                           (harness-call 'usage/quota-rates))))))
+
+(ert-deftest harness-usage-quota-rates-keep-the-last-estimate-without-evidence ()
+  (harness-usage-test-with-rates
+    (harness-usage-test-rate-row 600 10.0)
+    (harness-emit 'provider/quota-updated 'claude
+                  (list :billing 'subscription :windows (list (harness-usage-test-window "5h" 0.20))))
+    (should (< (abs (- 50.0 (plist-get (car (harness-call 'usage/quota-rates)) :capacity))) 1e-6))
+    ;; The window reset: nothing used yet, nothing recorded in it.
+    (harness-emit 'provider/quota-updated 'claude
+                  (list :billing 'subscription :windows (list (harness-usage-test-window "5h" 0.0 (+ (float-time) 18000)))))
+    (should (< (abs (- 50.0 (plist-get (car (harness-call 'usage/quota-rates)) :capacity))) 1e-6))
+    ;; Used but too little recorded: still that estimate.
+    (harness-emit 'provider/quota-updated 'claude
+                  (list :billing 'subscription :windows (list (harness-usage-test-window "5h" 0.05 (+ (float-time) 18000)))))
+    (should (= 1 (length (harness-call 'usage/quota-rates))))
+    (should (< (abs (- 50.0 (plist-get (car (harness-call 'usage/quota-rates)) :capacity))) 1e-6))))
+
+(ert-deftest harness-usage-quota-rates-without-evidence-have-none ()
+  (harness-usage-test-with-rates
+    (harness-emit 'provider/quota-updated 'claude
+                  (list :billing 'subscription :windows (list (harness-usage-test-window "5h" 0.3))))
+    (should-not (harness-call 'usage/quota-rates))
+    ;; Calls paid per token do not make a rate.
+    (harness-usage-test-rate-row 600 10.0 'api)
+    (harness-emit 'provider/quota-updated 'claude
+                  (list :billing 'subscription :windows (list (harness-usage-test-window "5h" 0.31))))
+    (should-not (harness-call 'usage/quota-rates))))
+
+(ert-deftest harness-usage-quota-rates-move-only-when-the-capacity-does ()
+  (harness-usage-test-with-rates
+    (let ((events nil))
+      (harness-on 'usage/quota-rates-updated (lambda (rates) (push rates events)))
+      (harness-usage-test-rate-row 600 10.0)
+      (harness-emit 'provider/quota-updated 'claude
+                    (list :billing 'subscription :windows (list (harness-usage-test-window "5h" 0.2))))
+      (should (= 1 (length events)))
+      ;; A little more use in step with the window: capacity within half a percent.
+      (harness-usage-test-rate-row 100 0.1)
+      (harness-emit 'provider/quota-updated 'claude
+                    (list :billing 'subscription :windows (list (harness-usage-test-window "5h" 0.202))))
+      (should (= 1 (length events)))
+      ;; The window fills faster than the records: another capacity.
+      (harness-emit 'provider/quota-updated 'claude
+                    (list :billing 'subscription :windows (list (harness-usage-test-window "5h" 0.4))))
+      (should (= 2 (length events)))
+      (should (< (abs (- 25.25 (plist-get (car (car events)) :capacity))) 1e-6)))))
+
+(ert-deftest harness-usage-quota-rates-wait-for-a-burst-of-reports ()
+  (harness-usage-test-with-rates
+    (let ((harness-usage-quota-rates-delay 0.05)
+          (events nil))
+      (harness-on 'usage/quota-rates-updated (lambda (rates) (push rates events)))
+      (harness-usage-test-rate-row 600 10.0)
+      (dotimes (_ 3)
+        (harness-emit 'provider/quota-updated 'claude
+                      (list :billing 'subscription :windows (list (harness-usage-test-window "5h" 0.2)))))
+      (should-not events)
+      (should (timerp harness-usage--quota-rates-timer))
+      (harness-test-wait (lambda () events))
+      (should (= 1 (length events)))
+      (should-not harness-usage--quota-rates-timer))))
+
 (provide 'harness-usage-test)
 ;;; harness-usage-test.el ends here

@@ -104,6 +104,7 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-ui-refresh-models "harness-ui")
 (declare-function harness-ui-refresh-quotas "harness-ui")
 (declare-function harness-ui-display-session "harness-ui")
+(declare-function harness-chat--refit-settings "harness-ui-chat")
 (declare-function harness-menu "harness-ui")
 (declare-function harness-chat-toggle-block "harness-ui-chat")
 (declare-function harness-chat-toggle-group "harness-ui-chat")
@@ -3053,6 +3054,56 @@ Return the chat's buffer."
     (harness-media--to-bottom buffer)
     buffer))
 
+(defun harness-media--chat-full (id)
+  "Show the chat of session ID taking the whole frame, at the compose box.
+Return the chat's buffer."
+  (harness-media--reset-layout)
+  (let ((buffer (harness-ui-display-session id 'full)))
+    (harness-media--wait (lambda () (with-current-buffer buffer
+                                      (and (not harness-chat--loading) harness-chat--order)))
+                         20 "the chat to load")
+    (harness-media--settle 0.5)
+    (harness-media--to-bottom buffer)
+    buffer))
+
+(defun harness-media-shot-chat-settings ()
+  "A session's settings line in a wide window: every setting it has.
+The session of the settings task, whose turn is at work: the model, the
+thinking level, the permission mode and the interactive switch, then
+where its task stands in the queue and [Pause], one line above the
+compose box.  The header line above the transcript has what the session
+used: the context, the total tokens and the plan's quota windows.  The
+frame is wide enough for all of it."
+  (harness-media--chat-full (plist-get (harness-media--task (plist-get (plist-get harness-media--world :tasks) :settings)) :session))
+  (harness-media--capture "chat-settings"))
+
+(defun harness-media-shot-chat-settings-narrow ()
+  "The same session's settings line in a narrow window.
+`acme/settings.py' takes the left of the frame; in the 64 columns left
+the line drops its least important settings -- the thinking level, then
+where its task stands -- and keeps the model, the permission mode, the
+interactive switch and [Pause], ending in the … that shows what it cut.
+The header line keeps the context, the tokens and the quota windows."
+  (harness-media--reset-layout)
+  (harness-media--show-file "acme/settings.py" "^API_KEYS")
+  (let* ((id (plist-get (harness-media--task (plist-get (plist-get harness-media--world :tasks) :settings)) :session))
+         (buffer (harness-media--open-chat id 'right))
+         (chat (get-buffer-window buffer)))
+    (window-resize chat (- 64 (window-width chat)) t)
+    (harness-media--settle 0.5)
+    (with-current-buffer buffer (harness-chat--refit-settings buffer))
+    (harness-media--to-bottom buffer)
+    (harness-media--settle 0.5)
+    (harness-media--capture "chat-settings-narrow")))
+
+(defun harness-media-shot-chat-cost ()
+  "A session billed per token: its header line shows dollars.
+The API guide session, on OpenRouter, whose cost is a money amount
+rather than the Claude plan's quota windows; the same figure the
+session list and the board show, above the settings line."
+  (harness-media--chat-full (plist-get harness-media--world :guide))
+  (harness-media--capture "chat-cost"))
+
 (defun harness-media-shot-tasks ()
   "The task board, with a task being written in its compose box."
   (harness-media--view (lambda () (harness-tasks harness-media-project 'full)))
@@ -4630,6 +4681,9 @@ names."
 
 (defconst harness-media-shots
   '(("chat" . harness-media-shot-chat)
+    ("chat-settings" . harness-media-shot-chat-settings)
+    ("chat-settings-narrow" . harness-media-shot-chat-settings-narrow)
+    ("chat-cost" . harness-media-shot-chat-cost)
     ("chat-permission" . harness-media-shot-chat-permission)
     ("chat-question" . harness-media-shot-chat-question)
     ("attachments" . harness-media-shot-attachments)

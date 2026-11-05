@@ -87,13 +87,15 @@ Nil when the catalogue does not price the model that would write it."
   (let ((cost (plist-get (harness-ui-compact--kind estimate kind) :cost)))
     (and (numberp cost) cost)))
 
-(defun harness-ui-compact-cost-text (estimate kind)
+(defun harness-ui-compact-cost-text (estimate kind &optional session)
   "Return what KIND of compaction costs as ESTIMATE says, short: \"~$0.02\".
 A transcript, a fresh start and a cut old context, which ask no model,
-are \"free\"; a kind whose model the catalogue does not price is nil."
+are \"free\"; a kind whose model the catalogue does not price is nil.
+For SESSION, a session plist a plan pays for, the cost reads as a share of
+the plan's quota (\"~0.2%\"; `harness-ui-format-estimate')."
   (let ((cost (harness-ui-compact-cost estimate kind)))
     (cond ((memq kind '(transcript fresh truncate)) "free")
-          (cost (concat "~" (harness-format-cost cost))))))
+          (cost (harness-ui-format-estimate cost session)))))
 
 (defun harness-ui-compact--writer (estimate kind)
   "Return the label of the model that would write KIND, as ESTIMATE says, or nil."
@@ -142,26 +144,28 @@ goes beside it."
                    kept (harness-format-tokens (or (plist-get k :kept-tokens) 0))))))
       (_ ""))))
 
-(defun harness-ui-compact-carry-on-text (estimate)
+(defun harness-ui-compact-carry-on-text (estimate &optional session)
   "Say what the next message costs if the conversation is not compacted.
-ESTIMATE is what `compaction/estimate' returned.  Return nil when it
-knows of no context to send."
+ESTIMATE is what `compaction/estimate' returned, SESSION the session
+plist whose plan words the cost (`harness-ui-estimate-text').  Return nil
+when it knows of no context to send."
   (let ((context (plist-get estimate :context))
         (cost (plist-get estimate :carry-on)))
     (when (and (numberp context) (> context 0))
       (format "the next message sends ~%s tokens %s%s"
               (harness-format-tokens context)
               (if (harness-json-true-p (plist-get estimate :cached)) "from the prompt cache" "uncached")
-              (if (numberp cost) (format ", about %s" (harness-format-cost cost)) "")))))
+              (if (numberp cost) (format ", about %s" (harness-ui-estimate-text cost session)) "")))))
 
 ;;;; Asking
 
-(defun harness-ui-compact--choices (estimate)
-  "Return the `read-multiple-choice' choices for ESTIMATE, cancel last."
+(defun harness-ui-compact--choices (estimate &optional session)
+  "Return the `read-multiple-choice' choices for ESTIMATE, cancel last.
+SESSION is as `harness-ui-compact-cost-text' takes it."
   (append
    (mapcar (lambda (entry)
              (pcase-let* ((`(,kind ,key ,name ,description) entry)
-                          (cost (harness-ui-compact-cost-text estimate kind)))
+                          (cost (harness-ui-compact-cost-text estimate kind session)))
                (list key (if cost (format "%s (%s)" name cost) name) description)))
            harness-ui-compact-kinds)
    (list (list ?q "cancel" "keep the conversation as it is"))))
@@ -170,7 +174,7 @@ knows of no context to send."
   "Return what to show before asking how to compact SESSION, as ESTIMATE says.
 SESSION is the session's plist, as the UI knows it."
   (let ((name (plist-get session :name))
-        (carry (harness-ui-compact-carry-on-text estimate)))
+        (carry (harness-ui-compact-carry-on-text estimate session)))
     (concat
      (propertize "COMPACT THE CONVERSATION" 'face 'bold) "\n\n"
      (harness-ui--handoff-table
@@ -191,7 +195,7 @@ SESSION is the session's plist, as the UI knows it."
                   (list (char-to-string (nth 1 entry))
                         (nth 2 entry)
                         (or (harness-ui-compact--writer estimate kind) "-")
-                        (or (harness-ui-compact-cost-text estimate kind) "?")
+                        (or (harness-ui-compact-cost-text estimate kind session) "?")
                         (harness-ui-compact-describe estimate kind))))
               harness-ui-compact-kinds)
       52)
@@ -202,7 +206,7 @@ SESSION is the session's plist, as the UI knows it."
   "Ask how to compact SESSION, a session plist, saying what ESTIMATE says.
 Return a kind of `harness-ui-compact-kinds', or nil to cancel."
   (let ((answer (read-multiple-choice "Compact the conversation"
-                                      (harness-ui-compact--choices estimate)
+                                      (harness-ui-compact--choices estimate session)
                                       (harness-ui-compact-help session estimate)
                                       "*Harness compaction*")))
     (car (cl-find (car answer) harness-ui-compact-kinds :key #'cadr))))

@@ -25,6 +25,7 @@
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-ui--sessions)
+(defvar harness-ui--quota-rates)
 (defvar harness-ui-default-position)
 (defvar harness-chat--loading)
 (defvar harness-chat--buffers)
@@ -394,6 +395,23 @@ called compact goes to the session as usual.  / completion offers it."
         ;; A skill of that name wins.
         (let ((harness-compose--skills '("compact")))
           (should-not (harness-chat--command "/compact")))))))
+
+(ert-deftest harness-ui-compact-costs-read-as-a-share-for-a-plan ()
+  "A compaction's cost is a share of the plan's quota for a session a subscription pays."
+  (let ((harness-ui--quota-rates (make-hash-table :test 'equal))
+        (e '(:kinds ((:kind "brief" :cost 0.31) (:kind "summary" :cost 0.5)) :carry-on 0.25 :context 60000))
+        (plan (list :model "claude:claude-opus-5-5"
+                    :usage '(:cost 0.0 :list-cost 0.5 :billing "subscription" :plan "max")))
+        (api (list :model "demo:scripted" :usage '(:cost 1.2 :list-cost 1.2 :billing "api"))))
+    (should (equal "~$0.310" (harness-ui-compact-cost-text e 'brief plan)))
+    (harness-ui--store-quota-rates '((:provider "claude" :window "5h" :capacity 50.0 :length 18000)))
+    (should (equal "~0.6%" (harness-ui-compact-cost-text e 'brief plan)))
+    (should (equal "~1%" (harness-ui-compact-cost-text e 'summary plan)))
+    (should (equal "~$0.310" (harness-ui-compact-cost-text e 'brief api)))
+    (should (equal "~$0.310" (harness-ui-compact-cost-text e 'brief)))
+    (should (equal "free" (harness-ui-compact-cost-text e 'transcript plan)))
+    (should (string-match-p ", about 0\\.5%\\'" (harness-ui-compact-carry-on-text e plan)))
+    (should (string-match-p ", about \\$0\\.250\\'" (harness-ui-compact-carry-on-text e api)))))
 
 (provide 'harness-ui-compact-test)
 ;;; harness-ui-compact-test.el ends here

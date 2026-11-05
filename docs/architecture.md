@@ -5156,6 +5156,22 @@ decisions.
     in between together; thinking without text announces every
     interval while it lasts.  `agent/turn-ended` sends the last figures,
     then `usage/live-updated SID nil`: the session's totals count again.
+  - Quota exchange rates: a plan's limits are windows of use (`5h`
+    23% used), not dollars, so what a session cost as a share of a
+    window needs a rate.  `usage/quota-rates` returns, for each window
+    of all models with a known length (`5h`, `7d`, a month) that has
+    enough use behind it (1% used and $0.05 recorded), `(:provider ID
+    :window NAME :label TEXT :capacity USD :used FRACTION :cost USD
+    :resets TIME :length SECONDS :measured TIME)`: the list cost of the
+    calls a subscription paid that the harness recorded since the window
+    began (`:cost`) filled `:used` of it, so 100% is `:capacity`
+    dollars.  A window with too little use keeps the estimate it had.
+    It is an estimate, as use outside the harness fills a window too.
+    The rates are worked out `harness-usage-quota-rates-delay` seconds
+    after a provider reports its quota (`provider/quota-updated`), once
+    for a burst of reports, and announced as `usage/quota-rates-updated
+    RATES` when one moved by more than half a percent, which ACP
+    forwards.
 
 ### insights
 
@@ -12204,8 +12220,8 @@ as one for every host -- and the directory.  A button given a command
 (`harness-ui-access--button`) runs it as its key does
 (`call-interactively`): a click gives a button's action no arguments, so
 a command that reads its arguments, such as `harness-ui-access-allow-dir`,
-could not be the action itself.  The permission mode in a chat's header
-line opens the view (`harness-chat--permission-command`).  A view whose
+could not be the action itself.  The permission mode on a chat's
+settings line opens the view (`harness-chat--permission-command`).  A view whose
 session was deleted says so and fetches nothing more.  The buffers that look for a session's
 chat (the merge, children, tasks and review views) take only a buffer
 in `harness-chat-mode`, so the access view, which has a session id too,
@@ -12635,12 +12651,54 @@ buffer the rest of its transcript or its compose box.  Opening a session
 from any view never resumes it: an inactive session shows its transcript,
 a notice and the compose box, and the first message sent from it resumes
 it (through `agent/prompt`).  The header and mode lines hold only what
-the buffer does not show, and what matters.  The header line shows the
-session's name, model, permission mode, "non-interactive" (in
-`harness-non-interactive-face`) while it is, thinking level, context,
-cost and [menu]; clicking a setting changes it, and "non-interactive"
-makes the session interactive again.  A narrow window drops the cost
-first, then the thinking level, the context and the model.  The mode
+the buffer does not show, and what matters.  The header line names the
+buffer and leads out of it: the session's name (a click renames it),
+where it was started from, what other modules put there (a BTW's
+buttons, the supervisor's badge), what the session used -- the context
+in use, the total tokens and the cost
+(`harness-chat--figure-items') -- the companion's face, [menu] and the
+newer-messages notice.  The figures are information rather than
+settings, and the header keeps them as it always did: a narrow window
+shortens the cost to the plan's name or its share of the quota before
+it drops it, then the tokens, and keeps the context longest
+(`harness-ui-fit-header'); where the overflow module is loaded the
+header ends in its clickable … that shows every one it cut instead of
+losing them outright.  The total tokens
+is what every model call of the session processed -- input, output and
+the prompt cache's reads and writes -- as "1.2M tokens"
+(`harness-ui-format-total-tokens'), its tooltip naming each part
+(`harness-ui-total-tokens-help'); the size of the conversation is the
+context beside it, a button that offers the session's window
+(`harness-set-context-limit'), as the cost is a
+`harness-ui-spend-segment' that opens the usage dashboard.  The cost
+goes through the shared display (see Cost display below).
+
+What changes what the session does stands on the settings line above
+the compose box, which the task board draws with the same component
+(`harness-ui-settings-line', see the task board): the model, the
+thinking level, the permission mode and whether the session waits for
+you, each a button running its session setting command (the permission
+mode's opens the jail and permissions view).  Room is made the way a
+header line makes it: the least important item goes first, the
+rightmost first among equals, and one with a shortened form takes it
+before it goes (`harness-ui-setting-priorities': the thinking level
+goes before the interactive switch and the model; the permission mode
+stays).  A line that had to cut something ends in a clickable … that
+shows every item it left out, in full and with its action, through the
+overflow module's menu where it is loaded
+(`harness-ui-overflow-show'), and a list of them until then
+(`harness-ui-settings--show-overflow').
+
+A task's session adds where its task stands in the queue, after the
+settings, through `harness-chat-settings-functions'
+(`harness-ui-tasks--queue-items'): "In progress", "Needs input", or
+"Pending #3" with what holds it -- "paused", "quota · resets 19:00",
+"budget" -- and "queue suspended", then its buttons: [Pause],
+[Resume] and [Start now], in the order the card gives them, running
+the same `_harness/task/pause', `_resume' and `_start' the board's
+buttons do (`harness-ui-tasks-session-pause', `-resume',
+`-start-now'); a session that is no task's, or whose task is archived,
+in the backlog, in review, merging or done, adds nothing.  The mode
 line has the status: its icon and word, the spinner while a turn runs
 (its tooltip says what the turn does), and the turn's duration while
 the turn runs, not while the session is blocked waiting on the user.
@@ -12693,13 +12751,13 @@ in a cache too (`harness-ui-session-live`), filled with
 before the session's new totals (sessions are pushed after a short
 debounce), so the last figures stand until the cache shows the session
 no longer running and never drop in between.  Every change runs
-`harness-ui-live-functions`: the chat headers redraw (a few times a
-second at most, as the events come) and the session list at most every
-half second, and only when a figure they show reads otherwise; the task
-boards do not, as no card shows a figure (a card's tooltip, made when
-it is asked for, reads the count as it stands).
+`harness-ui-live-functions`: the chats' headers redraw (a few
+times a second at most, as the events come) and the session list at
+most every half second, and only when a figure they show reads
+otherwise; the task boards do not, as no card shows a figure (a card's
+tooltip, made when it is asked for, reads the count as it stands).
 The context figure is a button (`harness-ui-context-limit-map`): in the
-chat header it is a segment as the settings beside it are, and in the
+chat's header it is a segment as the figures beside it are, and in the
 session list a click acts on the session the figure shows.  Mouse-1 on it, or `C-c h e` (`harness-set-context-limit`),
 offers that session's context window limit: the current one, a few
 round sizes under the model's own window (read from its catalogue
@@ -12711,7 +12769,7 @@ window.  The offer names what holds the window: a sub-agent's limit
 The change is a `session/update' of `:context-window-limit' -- a window
 set for the session outright is cleared with it, since it would win
 over the limit (see `harness-ui--apply-context-limit') -- so the
-conversation is neither restarted nor compacted: the header line and
+conversation is neither restarted nor compacted: the settings line and
 the other views show the new window at once, and the new limit takes
 effect at the session's next request.
 Other UI
@@ -12724,7 +12782,12 @@ string or `(TEXT PRIORITY MIN ACTION)` as `harness-ui-fit-header` takes
 it, `harness-chat-header-end-functions` adds segments after the session's
 own, before [menu], each a string or `(TEXT PRIORITY MIN ACTION)` as
 `harness-ui-fit-header` takes it (the companion pet's face, priority 2,
-goes first in a narrow window), and the
+goes first in a narrow window), `harness-chat-settings-functions`
+adds items of its own to the settings line, after the session's settings
+(each a string or `(TEXT PRIORITY MIN)` as `harness-ui-settings-line'
+takes it, made a button with `harness-ui-string-action'; the task board
+puts a task's queue there, `harness-ui-tasks--queue-items`, and calls
+`harness-chat-refresh-settings' when what it shows changes), and the
 buffer-local `harness-chat-placeholder` replaces the empty box's usual
 hint.
 
@@ -12738,8 +12801,8 @@ starts with the state, before the session's own segments, through
 from the window's edge and separated from the session's name as the
 header's other segments are.  The segment is fitted at priority 3, below
 every segment of the session's own, so a window too narrow for the whole
-line drops the badge before it loses the model, the permission mode or
-the rest.  A session with no `:supervisor`
+line drops the badge before it loses the session's name or the rest.
+A session with no `:supervisor`
 (a sub-agent, a side conversation) shows nothing.  A click on the
 segment, and `V` in the harness keys (`C-c h V`,
 `harness-toggle-supervisor`), toggle the mode: they ask for the opposite
@@ -13847,9 +13910,14 @@ minibuffer (a number or `no limit`, the limit now the default; an
 answer that is neither changes nothing) and saves it the same way
 (`harness-ui-tasks-set-max-running`, `harness-tasks-max-running`); the
 harness starts the waiting tasks a higher limit lets through at once.
-On a narrow board the settings before the button shorten first, down to
-`harness-ui-tasks--min-settings-room` columns, so the button stays
-whole.  `config/changed` brings every board the new values.  RET opens the session, and
+The line is the chat's component (`harness-ui-settings-line'): the
+model, thinking level, permission mode and interactive switch are its
+shared specs (`harness-ui-setting-specs'), here as the board's buttons.
+On a narrow board it makes room by priority, as the chat's does: the
+supervisor switch and where the task works go first, then the thinking
+level and the model; the limit's button, the permission mode and the
+interactive switch stay longest, and the button stays whole to be
+clicked.  `config/changed` brings every board the new values.  RET opens the session, and
 `C-c h a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  A click on a
@@ -13964,7 +14032,10 @@ is (`harness-ui-tasks--pausable-p`).  The first action of a paused card is
 [Resume] (`U`, `harness-ui-tasks-resume`, `_harness/task/resume`), then
 [Start now]; a waiting card has Pause in its menu, after the actions that
 keep the two buttons it shows.  A reply to a held task says that it is
-kept for its start.  A task
+kept for its start.  The task's session shows the same state on its
+settings line, with the same three buttons and the same requests (see
+Chat buffer), so the queue is answerable without the board.
+A task
 whose write-up refused it as a duplicate shows it in Requires your
 input, naming the task it duplicates and saying why: `k` drops it, `r`
 writes it up anyway, `m` takes what makes it another task than the one
@@ -14807,15 +14878,41 @@ that signals stops the figures first (`harness-ui-pet--guarding`), so a
 repeating timer does not signal on every tick.  A figure drawn anew is
 at rest.
 
-Cost display: whatever shows what a session cost goes through
-`harness-ui-format-spend`.  That is a price when calls are billed per
-token, and the plan's name (`Max`) when a subscription pays, after any
-extra usage billed (`$0.40+Max`); the tooltip explains it and gives
-the value at API prices.  The chat header adds the plan's 5-hour and
-weekly windows (`Max · 5h 9% · 7d 57%`, coloured as they fill)
+Cost display: whatever shows what something cost goes through one piece
+of logic, `harness-ui-cost-charges`.  A cost is a list of charges, each
+amounts in a unit (`(:amounts (1.2) :unit (:kind money :currency "USD"
+:symbol "$"))`): money, a currency with its symbol, for what was billed
+per token or as extra usage; or the share of the plan's quota windows,
+in percent (`(:amounts (1.0 0.6) :unit (:kind quota :windows ("5h"
+"7d")))`), for what a subscription paid, which is no money; or, while
+the windows have no rate yet, the plan by its name (`(:kind plan :name
+"Max")`).  `harness-ui-cost-string` words charges: `$1.20`, `1% / 0.6%`
+and, in the `long` form, `1% / 0.6% of 5h / 7d quota`; money first,
+then the plan's part (`$0.40 + 1% / 0.6%`, and `$0.40+Max` while the
+plan stands for itself).  Both windows are always shown, shortest
+first; a window scoped to a model (`7d Opus`) is left out.  An amount
+reads `0%`, `<0.1%`, `0.6%`, `9.5%` or `23%`
+(`harness-ui-format-percent`).  `harness-ui-format-spend` is the entry
+point for a session or a total, `harness-ui-format-billed` and
+`harness-ui-format-covered` for the usage rows (the billed money, and
+what a plan paid as a share, else as dollars at API prices),
+`harness-ui-format-estimate` and `harness-ui-estimate-text` for what an
+action will cost (the cache, cold-cache, compaction and cache-warm
+panels), and `harness-ui-format-quota-state` for the plan and how full
+its windows are (`Max · 5h 9% · 7d 57%`), which is the account's state,
+not a share of it.  Budgets and the cost comparison's prices at other
+models stay dollars: a budget caps what is billed, and a comparison is
+priced at API list prices by nature.  The share is the dollars a plan
+covered, at API prices, over what the window is worth in them: the
+harness estimates that capacity (`usage/quota-rates`) and the UI keeps
+it (`harness-ui-quota-capacity`).  The tooltip of a figure explains it
+and gives the value at API prices.
+The task board's header adds the plan's 5-hour and weekly windows
+(`Max · 5h 9% · 7d 57%`, coloured as they fill)
 and opens the usage dashboard.  The dashboard's Plan section shows
 every quota window with its reset time and the plan's extra usage,
-and its chart stacks what a plan covered on top of the billed cost.
+and its chart stacks what a plan covered on top of the billed cost;
+its axis stays dollars at API prices, the one scale both share.
 The UI keeps each provider's QUOTA from `provider/quota` and
 `provider/quota-updated` (`harness-ui-quota`).  The task board's header
 shows its tasks the same way: `harness-ui-sessions-total` takes their
@@ -15076,9 +15173,10 @@ with it or with other BTWs (`session/btw`), or, over a view that sets
 `harness-ui-btw-start-function`, a new conversation the view starts, shown
 in the session's own chat buffer with point in its compose box, so the
 question is written and sent like any message; nothing is read in the
-minibuffer.  The buffer is the full chat: its header line (model,
-permission mode, non-interactive while it is, thinking, context, cost, [menu]),
-keys and menu are a session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
+minibuffer.  The buffer is the full chat: its settings line (model,
+permission mode, non-interactive while it is, thinking, context, tokens,
+cost), header line ([menu]), keys and menu are a session's,
+`harness-ui-btw-minor-mode` only adding a BTW segment in
 front of the header through `harness-chat-header-functions` (what it
 is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep
 it; one over a session starts in that session's permission mode, and

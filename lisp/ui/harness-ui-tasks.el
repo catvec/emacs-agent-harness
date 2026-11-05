@@ -424,7 +424,9 @@ stopped.")
 (defvar harness-ui-btw-start-function)
 (defvar harness-ui-btw-about)
 (defvar harness-chat-panel-functions)
+(defvar harness-chat-settings-functions)
 (defvar harness-chat-placeholder)
+(declare-function harness-chat-refresh-settings "harness-ui-chat" (&optional session-id))
 
 (declare-function harness-btw "harness-ui-btw")
 (declare-function harness-ui-popout-at-point "harness-ui-popout")
@@ -1383,9 +1385,9 @@ while a task waits for quota or a budget."
   "What SESSION says of its work that no row of the board does, as strings.
 The size of its conversation against its context window, the tokens it
 wrote, how fast it wrote them on average, and what they cost -- \"cost
-$1.20\" when it is billed per token, else the plan that pays for it,
-\"Max plan\" (`harness-ui-format-spend').  A figure there is nothing to
-say of is left out."
+$1.20\" when it is billed per token, else its share of the plan's quota
+or the plan that pays for it (`harness-ui-tasks--cost-figure').  A
+figure there is nothing to say of is left out."
   (let ((tokens (harness-ui-session-tokens session)))
     (mapcar #'substring-no-properties
             (delq nil
@@ -1394,10 +1396,18 @@ say of is left out."
                         (harness-ui-format-output session)
                         (harness-ui-format-average-rate session)
                         (and (> (harness-usage-list-cost (plist-get session :usage)) 0)
-                             (let ((spend (substring-no-properties (harness-ui-format-spend session))))
-                               (if (string-match-p "\\`\\$[0-9.]*\\'" spend)
-                                   (concat "cost " spend)
-                                 (concat spend " plan")))))))))
+                             (harness-ui-tasks--cost-figure session)))))))
+
+(defun harness-ui-tasks--cost-figure (session)
+  "Return what SESSION cost, in words: \"cost $1.20\", or what its plan paid.
+Money reads \"cost $1.20\"; a share of the plan's quota \"cost 1% / 0.6% of
+5h / 7d quota\"; a plan with no rate yet by its name, \"Max plan\".  All
+from the unit-aware cost (`harness-ui-cost-charges')."
+  (let* ((charges (harness-ui-cost-charges session))
+         (text (substring-no-properties (harness-ui-cost-string charges 'long))))
+    (if (eq (plist-get (plist-get (car (last charges)) :unit) :kind) 'plan)
+        (concat text " plan")
+      (concat "cost " text))))
 
 (defun harness-ui-tasks--figures (task)
   "Everything TASK's card has to say, as short strings, in words.
@@ -3439,19 +3449,31 @@ write-up in Refine.  Any other setting is the task's, whatever the step
     ('plan-work "for the work of new planned tasks")
     (_ (if (harness-ui-tasks--first-step) "for the work of new tasks" "for new tasks"))))
 
+(defun harness-ui-tasks--spec-button (spec &optional step)
+  "The button of setting SPEC, one of `harness-ui-setting-specs'.
+STEP is the step whose settings it sets, as
+`harness-ui-tasks--setting-button' takes it."
+  (harness-ui-tasks--setting-button (plist-get spec :label) (plist-get spec :command)
+                                    (plist-get spec :help) step))
+
 (defun harness-ui-tasks--step-buttons (values scope &optional step)
   "The model and thinking-level buttons of a step, as VALUES has them.
-They are all a step has of its own.  SCOPE names the step for their
+They are all a step has of its own, and the shared settings line's own
+settings (`harness-ui-setting-specs').  SCOPE names the step for their
 tooltips, as \"the plan of new tasks\".  STEP is the step whose
 settings they set, as `harness-ui-tasks--setting-button' takes it: nil
 for the work."
-  (concat (harness-ui-tasks--setting-button
-           (harness-ui-model-label (plist-get values :model))
-           #'harness-set-model (concat "Model of " scope) step)
-          (propertize " · " 'face 'harness-dim-face)
-          (harness-ui-tasks--setting-button
-           (harness-ui-thinking-label (plist-get values :thinking))
-           #'harness-set-thinking (concat "Thinking level of " scope) step)))
+  (mapconcat (lambda (item) (car item))
+             (harness-ui-setting-items
+              (harness-ui-setting-specs values :scope scope :only '(model thinking))
+              (lambda (spec) (harness-ui-tasks--spec-button spec step)))
+             (propertize " · " 'face 'harness-dim-face)))
+
+(defun harness-ui-tasks--fit-line (line room)
+  "LINE shortened to ROOM columns with an ellipsis; as it is without ROOM."
+  (if (and room (> (string-width line) room))
+      (harness-ui-tasks--fit line room)
+    line))
 
 (defun harness-ui-tasks--step-label (name)
   "NAME, the step a line above the compose box is about, as it leads the line.
@@ -3470,13 +3492,13 @@ until the settings came."
   (let ((step (harness-ui-tasks--first-step)))
     (if (or (null step) (null harness-ui-tasks--settings))
         ""
-      (harness-ui-tasks--fit-settings
+      (harness-ui-tasks--fit-line
        (concat " " (harness-ui-tasks--step-label (symbol-name step))
                (harness-ui-tasks--step-buttons
                 (harness-ui-tasks--step-values step)
                 (if (eq step 'plan) "the plan of new tasks" "the write-up of new tasks")
                 step))
-       "" nil room))))
+       room))))
 
 (defun harness-ui-tasks--work-line (&optional room)
   "The line of a new task's work in Refine and Plan, fitted to ROOM columns.
@@ -3493,17 +3515,12 @@ thinking level, and until the settings came."
     ;; Its buttons bind no step: the setting commands' target is the
     ;; work's (`harness-ui-tasks--setting-target'), as when typed in the box.
     (let ((step (harness-ui-tasks--work-step)))
-      (harness-ui-tasks--fit-settings
+      (harness-ui-tasks--fit-line
        (concat " " (harness-ui-tasks--step-label "work")
                (harness-ui-tasks--step-buttons
                 (harness-ui-tasks--step-values step)
                 (if step "the work of new planned tasks" "the work of new tasks")))
-       "" nil room))))
-
-(defconst harness-ui-tasks--min-settings-room 24
-  "Columns the settings keep before the limit's button is cut off too.
-On a narrow board the settings line shrinks its settings first, so the
-button that says how many tasks work at once stays whole.")
+       room))))
 
 (defun harness-ui-tasks--supervisor-p ()
   "Non-nil when this board offers the supervisor setting.
@@ -3542,59 +3559,61 @@ line per step above this one (`harness-ui-tasks--step-line',
 task, this line starts with them.  It ends with how many tasks work at
 once (`harness-ui-tasks--max-running-button'), which Refine and Plan
 show too: their write-ups take no slot, but the work does once it
-starts.  When ROOM is too narrow for it all, the settings shorten
-first, down to `harness-ui-tasks--min-settings-room' columns, so that
-button stays whole; the line shortens as a whole after that.  Without
-ROOM it is not fitted."
+starts.
+
+The line is drawn by the component the chat's settings line is
+(`harness-ui-settings-line'): the model, thinking level, permission
+mode and interactive switch are its settings
+\(`harness-ui-setting-specs'), here as buttons of this board.  When ROOM
+is too narrow for it all, the least important go first, in the order of
+`harness-ui-setting-priorities': the supervisor switch and where the
+task works, the thinking level, the model; the limit's button, the
+permission mode and the interactive switch stay longest.  Without ROOM
+it is not fitted."
   (let* ((step (harness-ui-tasks--work-step))
          (values harness-ui-tasks--new)
          (s harness-ui-tasks--settings)
-         (main-tree (harness-json-true-p (plist-get values :main-tree)))
-         ;; How many tasks work at once is the harness's, for every
-         ;; project, not the next task's: apart from its settings.
-         (limit t))
+         (main-tree (harness-json-true-p (plist-get values :main-tree))))
     (if (null s)
         ""
-      (harness-ui-tasks--fit-settings
-       (concat
-        " "
-        (mapconcat
-         #'identity
-         (delq nil
-               (list ;; The steps of Refine and Plan have their model and
-                     ;; thinking level on lines of their own; Submit's one
-                     ;; step has them here.
-                     (and (null (harness-ui-tasks--first-step))
-                          (harness-ui-tasks--step-buttons values "new tasks"))
-                     (harness-ui-tasks--setting-button
-                      (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
-                      #'harness-set-permission-mode "Permission mode of new tasks")
-                     (harness-ui-tasks--setting-button
-                      (harness-ui-non-interactive-label (plist-get values :non-interactive))
-                      #'harness-toggle-non-interactive "Non-interactive mode of new tasks")
-                     ;; Supervisor mode is the supervisor module's; a
-                     ;; harness without it has no setting to offer, and
-                     ;; a planned task's work none to take.
-                     (and (harness-ui-tasks--work-supervisor-p step)
-                          (harness-ui-tasks--setting-button
+      (harness-ui-settings-line
+       (list
+        (append
+         ;; The steps of Refine and Plan have their model and thinking
+         ;; level on lines of their own; Submit's one step has them here.
+         (harness-ui-setting-items
+          (harness-ui-setting-specs values :scope "new tasks"
+                                    :only (and (harness-ui-tasks--first-step) '(permission interactive)))
+          #'harness-ui-tasks--spec-button)
+         ;; Supervisor mode is the supervisor module's; a harness without
+         ;; it has no setting to offer, and a planned task's work none to
+         ;; take.
+         (and (harness-ui-tasks--work-supervisor-p step)
+              (list (list (harness-ui-tasks--setting-button
                            (harness-ui-tasks--supervisor-label (plist-get values :supervisor))
                            #'harness-toggle-supervisor
-                           "Supervisor mode of new tasks"))
-                     ;; The next task's priority is beside Submit.  A task
-                     ;; that starts cannot change where it works, so this
-                     ;; one is only about the next task.
-                     (and (harness-json-true-p (plist-get s :worktrees))
-                          (harness-ui-tasks--setting-button
+                           "Supervisor mode of new tasks")
+                          30)))
+         ;; The next task's priority is beside Submit.  A task that starts
+         ;; cannot change where it works, so this one is only about the
+         ;; next task.
+         (and (harness-json-true-p (plist-get s :worktrees))
+              (list (list (harness-ui-tasks--setting-button
                            (if main-tree "main tree" "own worktree")
                            #'harness-ui-tasks-toggle-main-tree
-                           "Where the next task works: its own worktree, or the main tree"))))
-         (propertize " · " 'face 'harness-dim-face)))
-       (concat "   "
-               (and (harness-ui-tasks--queue-suspended-p)
-                    (concat (propertize "queue suspended" 'face 'harness-dim-face)
-                            (propertize " · " 'face 'harness-dim-face)))
-               (harness-ui-tasks--max-running-button))
-       limit room))))
+                           "Where the next task works: its own worktree, or the main tree")
+                          25))))
+        ;; How many tasks work at once is the harness's, for every
+        ;; project, not the next task's: apart from its settings.
+        (list (and (harness-ui-tasks--queue-suspended-p)
+                   (list (propertize "queue suspended" 'face 'harness-dim-face) 70))
+              (list (harness-ui-tasks--max-running-button) 80)))
+       room))))
+
+(defconst harness-ui-tasks--min-settings-room 24
+  "Columns the settings keep before the limit's button is cut off too.
+On a narrow board the settings line shrinks its settings first, so the
+button that says how many tasks work at once stays whole.")
 
 (defun harness-ui-tasks--fit-settings (settings note keep room)
   "SETTINGS then NOTE, fitted to ROOM columns; not fitted without ROOM.
@@ -6247,6 +6266,16 @@ search and the settings are concerned: they are its own."
 (defvar harness-ui-tasks--session-tasks-asked (make-hash-table :test 'equal)
   "Session ids whose task was looked up once.")
 
+(defvar harness-ui-tasks--places (make-hash-table :test 'equal)
+  "Task id -> (PLACE . TIME): its place in line, and when it was asked.
+PLACE is its place in its project's line, nil while the harness has not
+said (see `harness-ui-tasks--place').")
+
+(defconst harness-ui-tasks--place-ttl 15
+  "Seconds a task's place in line is kept before it is asked for again.
+Another task starting or joining the queue moves it, and no event says
+so but the change of that task.")
+
 (defconst harness-ui-tasks--backlog-hints
   '("Message…  sending stops the write-up and starts the task"
     "Message…  sending starts the task"
@@ -6302,14 +6331,26 @@ becomes a task's, or stops being one, is looked up again."
          (if (and task (plist-get task :id))
              (puthash sid task harness-ui-tasks--session-tasks)
            (remhash sid harness-ui-tasks--session-tasks))
+         ;; Its place in line may have changed with it.
+         (remhash (plist-get task :id) harness-ui-tasks--places)
          (harness-ui-tasks--redraw-session sid))))
     ("task/deleted"
      (let ((id (car args)))
+       (remhash id harness-ui-tasks--places)
        (maphash (lambda (sid task)
                   (when (equal id (plist-get task :id))
                     (remhash sid harness-ui-tasks--session-tasks)
                     (harness-ui-tasks--redraw-session sid)))
-                (copy-hash-table harness-ui-tasks--session-tasks))))))
+                (copy-hash-table harness-ui-tasks--session-tasks))))
+    ;; The queue of a project was suspended or resumed: the tasks held
+    ;; by it say so (`:queue-suspended'), and none of them changed.  The
+    ;; sessions of that project's tasks ask for theirs again.
+    ("task/queue"
+     (clrhash harness-ui-tasks--places)
+     (maphash (lambda (sid task)
+                (when (equal (car args) (plist-get task :project))
+                  (harness-ui-tasks--fetch-session-task sid)))
+              (copy-hash-table harness-ui-tasks--session-tasks)))))
 
 (defun harness-ui-tasks--backlog-session-p (task)
   "Non-nil when TASK is a session's task that has not started.
@@ -6659,6 +6700,111 @@ for one with nothing to do from here, and until the task is known."
                 (actions (harness-ui-tasks--session-actions task)))
       (harness-ui-tasks--state-banner task actions))))
 
+;;;; The queue in a session
+;;
+;; A task's session says where its task stands in the queue on the
+;; settings line above its compose box (`harness-chat-settings-functions'):
+;; the state -- in progress, or pending with its place in line, what holds
+;; it back and a suspended queue -- and the card's buttons for it: [Pause]
+;; for a task at work or waiting, [Resume] for a paused one, [Start now]
+;; for one that waits.  They are the board's actions
+;; (`harness-ui-tasks-pause', `harness-ui-tasks-resume',
+;; `harness-ui-tasks-start') run from the session, on its task.  A
+;; backlog task has the banner above (`harness-ui-tasks--backlog-panel'),
+;; and a session that is no task's, or whose task is in review, merging
+;; or done, has no item.
+
+(defun harness-ui-tasks--place (task)
+  "Return TASK's place in its project's line, 1 the next to start, or nil.
+Nil until the harness has said (`task/queue-order'): it is asked, at
+most every `harness-ui-tasks--place-ttl' seconds however often this is
+called, and the settings line of TASK's session is drawn again when the
+answer differs."
+  (let* ((id (plist-get task :id))
+         (known (gethash id harness-ui-tasks--places)))
+    (when (or (null known) (> (- (float-time) (cdr known)) harness-ui-tasks--place-ttl))
+      (puthash id (cons (car known) (float-time)) harness-ui-tasks--places)
+      (harness-ui-call
+       "_harness/task/queue-order" (list :cwd (plist-get task :project))
+       (lambda (order)
+         (let ((place (plist-get (cl-find id order :key (lambda (entry) (plist-get entry :id)) :test #'equal)
+                                 :place)))
+           (puthash id (cons place (float-time)) harness-ui-tasks--places)
+           (unless (equal place (car known))
+             (when-let* ((sid (plist-get task :session)))
+               (when (fboundp 'harness-chat-refresh-settings)
+                 (harness-chat-refresh-settings sid))))))
+       #'ignore))
+    (car known)))
+
+(defun harness-ui-tasks-session-start-now ()
+  "Start this session's task now, even with every slot busy.
+A task waiting in the queue or paused there carries on in this session,
+where it stopped.  This is the [Start now] of the settings line above
+the compose box, and the card's (`harness-ui-tasks-start'); a task in
+the backlog has the banner's (`harness-ui-tasks-session-start')."
+  (interactive)
+  (let ((task (harness-ui-tasks--session-task harness-ui-session-id)))
+    (unless (and task (eq (harness-ui-tasks--column task) 'pending)
+                 (not (harness-ui-tasks--refining-p task)))
+      (user-error "Only a task waiting in the queue can be started now"))
+    (harness-ui-tasks--session-request task "start" "start the task" nil "Starting the task")))
+
+(defun harness-ui-tasks--session-queue-button (label command help)
+  "Return the button LABEL of the settings line, running COMMAND, with HELP."
+  (harness-ui-action-button label (lambda () (call-interactively command)) :help help))
+
+(defun harness-ui-tasks--queue-status (task)
+  "Return the words for TASK's state in the queue: nouns, then what holds it.
+\"In progress\" for a task at work, \"Needs input\" for one that waits for
+you, and for a queued one \"Pending #3\" with its place in line, then
+what holds it back -- \"paused\", \"quota · resets 19:00\", \"budget\"
+\(`harness-ui-tasks--hold-text') -- and \"queue suspended\"."
+  (pcase (harness-ui-tasks--column task)
+    ('pending
+     (let ((place (harness-ui-tasks--place task))
+           (hold (plist-get task :hold)))
+       (string-join
+        (delq nil (list (if place (format "Pending #%d" place) "Pending")
+                        (and hold (harness-ui-tasks--hold-text hold t))
+                        (and (harness-json-true-p (plist-get task :queue-suspended)) "queue suspended")))
+        (concat " " harness-ui-tasks--dot " "))))
+    ('needs-input "Needs input")
+    (_ "In progress")))
+
+(defun harness-ui-tasks--queue-buttons (task)
+  "Return the buttons of the queue for TASK, a list of strings, or nil.
+[Resume] and [Start now] for a paused task, [Start now] and [Pause] for
+one that waits, [Pause] for one at work; none for the rest."
+  (let ((pause (harness-ui-tasks--session-queue-button
+                "[Pause]" #'harness-ui-tasks-session-pause
+                "Pause: back in the queue, held until resumed"))
+        (resume (harness-ui-tasks--session-queue-button
+                 "[Resume]" #'harness-ui-tasks-session-resume
+                 "Resume: the queue starts it when its turn comes"))
+        (start (harness-ui-tasks--session-queue-button
+                "[Start now]" #'harness-ui-tasks-session-start-now
+                "Start now, whatever the limit")))
+    (pcase (harness-ui-tasks--column task)
+      ('pending (if (harness-ui-tasks--paused-p task) (list resume start) (list start pause)))
+      ((or 'active 'needs-input) (and (harness-ui-tasks--pausable-p task) (list pause))))))
+
+(defun harness-ui-tasks--queue-items ()
+  "Return the settings line's items for this session's task in the queue, or nil.
+On `harness-chat-settings-functions'.  Two items: its state, which goes
+before the model does in a narrow window, and its buttons, which stay
+until the model has gone.  Nil for a session that is no task's, one whose
+task is archived, in the backlog, in review, merging or done, and until
+the task is known."
+  (when-let* (((bound-and-true-p harness-ui-session-id))
+              (task (harness-ui-tasks--session-task harness-ui-session-id))
+              ((not (harness-ui-tasks--archived-p task)))
+              ((not (harness-ui-tasks--backlog-session-p task)))
+              ((memq (harness-ui-tasks--column task) '(pending active needs-input)))
+              (buttons (harness-ui-tasks--queue-buttons task)))
+    (list (list (propertize (harness-ui-tasks--queue-status task) 'face 'harness-dim-face) 35)
+          (list (string-join buttons " ") 80))))
+
 ;;;; Ready for review, in the mode line
 
 ;; The mode line notifier (harness-ui-notify.el) counts the tasks ready
@@ -6860,12 +7006,14 @@ it connects and, started while connected, at once
 \(`harness-ui-tasks--fetch-review'); the count comes after the
 notifier's other segments, such as the version page's nag.  A task's
 session shows its backlog banner, or the panel of its state, above
-its compose box."
+its compose box, and where its task stands in the queue, with the
+buttons that move it, in the session's settings line."
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-session-task-event)
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-review-event)
   (add-hook 'harness-chat-panel-functions #'harness-ui-tasks--backlog-panel)
   (add-hook 'harness-chat-panel-functions #'harness-ui-tasks--state-panel)
+  (add-hook 'harness-chat-settings-functions #'harness-ui-tasks--queue-items)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
   (add-hook 'harness-ui-quota-functions #'harness-ui-tasks--on-quota)
@@ -6893,6 +7041,7 @@ of its state."
   (remove-hook 'harness-chat-panel-functions #'harness-ui-tasks--backlog-panel)
   (remove-hook 'harness-chat-panel-functions #'harness-ui-tasks--state-panel)
   (remove-hook 'harness-ui-event-functions #'harness-ui-tasks--on-review-event)
+  (remove-hook 'harness-chat-settings-functions #'harness-ui-tasks--queue-items)
   (remove-hook 'harness-ui-connected-hook #'harness-ui-tasks--fetch-review)
   (remove-hook 'harness-ui-notify-segment-functions #'harness-ui-tasks--notify-segment)
   (clrhash harness-ui-tasks--in-review)

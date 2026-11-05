@@ -607,7 +607,8 @@ there are, and d on it says where to change it."
       (harness-ui--store-quota "claude" (harness-ui-usage-test-max-quota now))
       (let ((text (harness-ui-usage-test-open)))
         (should (string-match-p "\\$1\\.00 cost" text))
-        (should (string-match-p "\\$3\\.25 covered by plan" text))
+        ;; A plan that pays shows its share of the quota windows, not a price.
+        (should (string-match-p "19% / 9\\.6% covered by plan" text))
         (should (string-match-p "covered by plan, at API prices" text))
         (should (string-match-p "Plan +\\[refresh\\]" text))
         (should (string-match-p "Claude Max" text))
@@ -623,7 +624,7 @@ there are, and d on it says where to change it."
         ;; which may cut "harness-test" too when the temp directory is long.
         (should (string-match-p "Cost +Plan +Share" text))
         (should (string-match-p (concat (regexp-quote (harness-truncate-middle (abbreviate-file-name project) 40))
-                                        " +\\$1\\.00 +\\$3\\.25 ")
+                                        " +\\$1\\.00 +19% / 9\\.6% ")
                                 text)))
       ;; Grouped by billing.
       (harness-ui-usage-set-group 'billing)
@@ -1006,6 +1007,191 @@ arguments, so a button must not pass it one."
     (harness-test-wait (lambda () (string-match-p "sessions stop when their provider runs out"
                                                   (harness-ui-usage-test-text)))
                        5 "empty list shown")))
+
+;;;; What a cost reads as: money or a share of the plan's quota
+
+(defun harness-ui-usage-test-rates (&rest windows)
+  "Cache Claude's quota rates: WINDOWS are (NAME CAPACITY LENGTH) entries."
+  (harness-ui--store-quota-rates
+   (mapcar (lambda (w) (list :provider "claude" :window (nth 0 w) :capacity (nth 1 w) :length (nth 2 w)
+                             :used 0.2 :cost 1.0))
+           windows)))
+
+(defconst harness-ui-usage-test-5h '("5h" 50.0 18000))
+(defconst harness-ui-usage-test-7d '("7d" 80.0 604800))
+
+(ert-deftest harness-ui-cost-charges-by-unit ()
+  "A cost is amounts in a unit: money, a share of quota windows, or the plan."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (clrhash harness-ui--quota-rates)
+    (let* ((api (list :model "demo:scripted" :usage '(:cost 1.2 :list-cost 1.2 :billing "api")))
+           (plan (list :model "claude:claude-opus-5-5"
+                       :usage '(:cost 0.0 :list-cost 0.5 :billing "subscription" :plan "max")))
+           (mixed (list :model "claude:claude-opus-5-5"
+                        :usage '(:cost 0.4 :list-cost 0.9 :billing "extra-usage" :plan "max")))
+           (fresh (list :model "claude:claude-opus-5-5" :usage '(:cost 0.0 :billing "subscription" :plan "max")))
+           (text (lambda (s &optional form) (harness-ui-cost-string (harness-ui-cost-charges s) form))))
+      ;; Billed per token: money with its symbol, however the figure is asked for.
+      (should (equal '((:amounts (1.2) :unit (:kind money :currency "USD" :symbol "$")))
+                     (harness-ui-cost-charges api)))
+      (should (equal "$1.20" (funcall text api)))
+      (should (equal "$1.20" (funcall text api 'long)))
+      ;; A plan with no rate yet stands for the unit by its name.
+      (should (equal '((:amounts nil :unit (:kind plan :name "Max"))) (harness-ui-cost-charges plan)))
+      (should (equal "Max" (funcall text plan 'long)))
+      (should (equal "$0.400+Max" (funcall text mixed)))
+      ;; The 5h window alone.
+      (harness-ui-usage-test-rates harness-ui-usage-test-5h)
+      (should (equal "1%" (funcall text plan)))
+      (should (equal "1% of 5h quota" (funcall text plan 'long)))
+      (should (equal '((:amounts (1.0) :unit (:kind quota :windows ("5h")))) (harness-ui-cost-charges plan)))
+      ;; The weekly one alone.
+      (harness-ui-usage-test-rates harness-ui-usage-test-7d)
+      (should (equal "0.6%" (funcall text plan)))
+      (should (equal "0.6% of 7d quota" (funcall text plan 'long)))
+      ;; Both, shortest first whatever order they came in.
+      (harness-ui-usage-test-rates harness-ui-usage-test-7d harness-ui-usage-test-5h)
+      (should (equal "1% / 0.6%" (funcall text plan)))
+      (should (equal "1% / 0.6% of 5h / 7d quota" (funcall text plan 'long)))
+      ;; Extra usage is billed: money first, then the share the plan covered.
+      (should (equal "$0.400 + 1% / 0.6%" (funcall text mixed)))
+      (should (equal '(money quota) (mapcar (lambda (c) (plist-get (plist-get c :unit) :kind))
+                                            (harness-ui-cost-charges mixed))))
+      ;; Nothing used yet: one zero, whichever windows there are.
+      (should (equal "0%" (funcall text fresh)))
+      (should (equal "0% of 5h / 7d quota" (funcall text fresh 'long)))
+      ;; A usage plist, a row of the usage pages, goes by the provider with rates.
+      (should (equal "1% / 0.6%" (harness-ui-cost-string
+                                  (harness-ui-cost-charges '(:cost 0.0 :list-cost 0.5 :billing "subscription")))))
+      (should (equal "1% / 0.6%" (harness-ui-cost-string
+                                  (harness-ui-cost-charges '(:cost 0.0 :list-cost 0.5 :billing "subscription") "claude"))))
+      (should (equal "$2.00" (harness-ui-cost-string (harness-ui-cost-charges '(:cost 2.0 :list-cost 2.0)))))
+      ;; A plan whose provider has no rate is not read with another's.
+      (should (equal "Plan" (harness-ui-cost-string
+                             (harness-ui-cost-charges
+                              (list :model "copilot:gpt-5" :usage '(:cost 0.0 :list-cost 0.5 :billing "subscription"))))))
+      ;; Several sessions together read as one.
+      (should (equal "$1.20" (funcall text (harness-ui-sessions-total (list api)))))
+      (let ((total (harness-ui-sessions-total (list api plan) "claude:claude-opus-5-5")))
+        (should (equal "$1.20 + 1% / 0.6%" (funcall text total)))))))
+
+(ert-deftest harness-ui-format-percent-reads-short ()
+  (should (equal "0%" (harness-ui-format-percent 0)))
+  (should (equal "<0.1%" (harness-ui-format-percent 0.04)))
+  (should (equal "0.1%" (harness-ui-format-percent 0.1)))
+  (should (equal "0.6%" (harness-ui-format-percent 0.625)))
+  (should (equal "1%" (harness-ui-format-percent 1.0)))
+  (should (equal "9.5%" (harness-ui-format-percent 9.5)))
+  (should (equal "10%" (harness-ui-format-percent 9.96)))
+  (should (equal "23%" (harness-ui-format-percent 23.4)))
+  (should (equal "140%" (harness-ui-format-percent 140.0))))
+
+(ert-deftest harness-ui-format-spend-reads-a-share-with-rates ()
+  "With rates a subscription's spend is a share of its windows, with a tooltip saying so."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (clrhash harness-ui--quota-rates)
+    (let* ((now (float-time))
+           (plan (list :model "claude:claude-opus-5-5"
+                       :usage '(:cost 0.0 :list-cost 0.5 :billing "subscription" :plan "max")))
+           (spend (lambda (&rest args) (apply #'harness-ui-format-spend plan args))))
+      (harness-ui--store-quota "claude" (harness-ui-usage-test-max-quota now))
+      (harness-ui-usage-test-rates harness-ui-usage-test-5h harness-ui-usage-test-7d)
+      (should (equal "1% / 0.6%" (substring-no-properties (funcall spend))))
+      (should (equal "1% / 0.6% of 5h / 7d quota" (substring-no-properties (funcall spend nil nil nil 'long))))
+      (should (eq 'harness-plan-face (get-text-property 0 'face (funcall spend))))
+      ;; The account's windows still follow, as they did the plan's name.
+      (should (equal "1% / 0.6% · 5h 9% · 7d 57%" (substring-no-properties (funcall spend t))))
+      (let ((help (get-text-property 0 'help-echo (funcall spend))))
+        (should (string-prefix-p "Share of the plan's quota: 1% of 5h, 0.6% of 7d (estimate)" help))
+        (should (string-match-p "Covered by Claude Max, not billed per token" help))
+        (should (string-match-p "at API prices: \\$0\\.500" help))
+        (should-not (string-match-p "\n" help)))
+      ;; Lazy, the same text.
+      (should (equal (substring-no-properties (funcall spend)) (substring-no-properties (funcall spend nil nil t))))
+      (should (functionp (get-text-property 0 'help-echo (funcall spend nil nil t))))
+      ;; The plan and its windows, without the share.
+      (should (equal "Max · 5h 9% · 7d 57%" (substring-no-properties (harness-ui-format-quota-state plan))))
+      (should (string-match-p "Covered by Claude Max" (get-text-property 0 'help-echo (harness-ui-format-quota-state plan))))
+      (should-not (harness-ui-format-quota-state (list :model "demo:scripted" :usage '(:cost 1.2 :billing "api")))))))
+
+(ert-deftest harness-ui-format-estimate-converts-for-a-subscription ()
+  "What an action will cost reads as money, or as a share where a plan pays."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (clrhash harness-ui--quota-rates)
+    (let ((plan (list :model "claude:claude-opus-5-5" :usage '(:cost 0.0 :list-cost 0.5 :billing "subscription")))
+          (extra (list :model "claude:claude-opus-5-5" :usage '(:cost 0.5 :list-cost 0.5 :billing "extra-usage")))
+          (api (list :model "demo:scripted" :usage '(:cost 1.2 :billing "api"))))
+      ;; No rate yet: money.
+      (should (equal "~$0.310" (harness-ui-format-estimate 0.31 plan)))
+      (harness-ui-usage-test-rates harness-ui-usage-test-5h harness-ui-usage-test-7d)
+      (should (equal "~0.6% / 0.4%" (harness-ui-format-estimate 0.31 plan)))
+      (should (equal "~0.6% / 0.4% of 5h / 7d quota" (harness-ui-format-estimate 0.31 plan 'long)))
+      (should (equal "~0.6% / 0.4%" (harness-ui-format-estimate 0.31 "claude")))
+      ;; Extra usage and per-token billing bill the estimate.
+      (should (equal "~$0.310" (harness-ui-format-estimate 0.31 extra)))
+      (should (equal "~$0.310" (harness-ui-format-estimate 0.31 api)))
+      (should (equal "~$0.310" (harness-ui-format-estimate 0.31 "demo")))
+      (should (equal "~$0.310" (harness-ui-format-estimate 0.31))))))
+
+(ert-deftest harness-ui-quota-rates-follow-the-harness ()
+  "The rates are cached by provider, shortest window first, and kept current by an event."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quota-rates)
+    (let ((changes 0)
+          (rates (list '(:provider "claude" :window "7d" :capacity 80.0 :length 604800)
+                       '(:provider "claude" :window "5h" :capacity 50.0 :length 18000)
+                       '(:provider "copilot" :window "premium" :capacity 12.0 :length 2592000))))
+      (add-hook 'harness-ui-quota-rate-functions (lambda () (cl-incf changes)))
+      (should-not (harness-ui-quota-capacity "claude" "5h"))
+      (harness-ui--dispatch-ui "_harness/event" (list :event "usage/quota-rates-updated" :args (list rates)) nil)
+      (should (equal '("5h" "7d") (mapcar (lambda (r) (plist-get r :window)) (harness-ui-quota-rates 'claude))))
+      (should (= 50.0 (harness-ui-quota-capacity "claude" "5h")))
+      (should (= 12.0 (harness-ui-quota-capacity 'copilot "premium")))
+      (should-not (harness-ui-quota-capacity "claude" "premium"))
+      (should (= 1 changes))
+      ;; The same rates again change nothing; fewer drop the rest.
+      (harness-ui--store-quota-rates rates)
+      (should (= 1 changes))
+      (harness-ui--dispatch-ui "_harness/event" (list :event "usage/quota-rates-updated" :args (list nil)) nil)
+      (should-not (harness-ui-quota-rates "claude"))
+      (should (= 2 changes)))))
+
+(ert-deftest harness-ui-usage-page-shows-what-a-plan-covered-as-a-quota-share ()
+  "From the rows the harness recorded to the page: a rate, then shares of the windows."
+  (harness-ui-usage-test-with
+    (clrhash harness-ui--quotas)
+    (clrhash harness-ui--quota-rates)
+    (let ((harness-usage-quota-rates-delay nil)
+          (now (float-time)))
+      (harness-usage--forget-quota-rates)
+      ;; $3.40 at API prices covered by the plan, $1 billed per token.
+      (harness-ui-usage-test-request
+       "_harness/usage/record"
+       (list :row (list :ts (- now 600) :session "s1" :project "/p/" :model "claude:claude-opus-5-5"
+                        :input 1000 :output 100 :cost 0.0 :list-cost 3.4 :billing "subscription")))
+      (harness-ui-usage-test-record (- now 500) "/p/" "demo:scripted" 1.0)
+      (let ((text (harness-ui-usage-test-open)))
+        (should (string-match-p "\\$3\\.40 covered by plan" text)))
+      ;; The 5h window is 20% used: it is worth $17, so $3.40 is all of it,
+      ;; and the weekly window, 10% used, is worth $34: 10% of it.
+      (harness-emit 'provider/quota-updated 'claude
+                    (list :billing 'subscription :plan "max"
+                          :windows (list (list :name "5h" :used 0.2 :resets (+ now 3600))
+                                         (list :name "7d" :used 0.1 :resets (+ now 86400)))))
+      (harness-test-wait (lambda () (harness-ui-quota-capacity "claude" "5h")) 5 "the rates")
+      (should (< (abs (- 17.0 (harness-ui-quota-capacity "claude" "5h"))) 1e-6))
+      (should (< (abs (- 34.0 (harness-ui-quota-capacity "claude" "7d"))) 1e-6))
+      (harness-ui-usage-set-group 'billing)
+      (harness-test-wait (lambda () (string-match-p "20% / 10% covered by plan" (harness-ui-usage-test-text))) 5
+                         "the totals as shares")
+      (let ((text (harness-ui-usage-test-text)))
+        ;; Billed money stays money, the plan's part is the share.
+        (should (string-match-p "\\$1\\.00 cost" text))
+        (should-not (string-match-p "\\$3\\.40 covered by plan" text))
+        (should (string-match-p "20% / 10%" text))))))
 
 (provide 'harness-ui-usage-test)
 ;;; harness-ui-usage-test.el ends here

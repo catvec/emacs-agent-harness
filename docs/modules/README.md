@@ -325,7 +325,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `task/changed` | [tasks](tasks.md) | [tasks](tasks.md) | [supervisor](supervisor.md), [tools-sessions](tools-sessions.md), [ui-patch-review](ui-patch-review.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md) | yes |
 | `task/deleted` | [tasks](tasks.md) | [tasks](tasks.md) | [patch-review](patch-review.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md) | yes |
 | `task/done` | [tasks](tasks.md) | [tasks](tasks.md) | [pet](pet.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
-| `task/queue` | [tasks](tasks.md) | [tasks](tasks.md) |  | yes |
+| `task/queue` | [tasks](tasks.md) | [tasks](tasks.md) | [ui-tasks](ui-tasks.md) | yes |
 | `task/review` | [tasks](tasks.md) | [tasks](tasks.md) | [patch-review](patch-review.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
 | `todo-sync/done` | [todo-sync](todo-sync.md) | [todo-sync](todo-sync.md) |  |  |
 | `todo-sync/failed` | [todo-sync](todo-sync.md) | [todo-sync](todo-sync.md) |  |  |
@@ -339,6 +339,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `usage/budget-warning` | [usage](usage.md) | [usage](usage.md) | [ui-usage](ui-usage.md) | yes |
 | `usage/budgets-changed` | [usage](usage.md) | [usage](usage.md) | [tasks](tasks.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `usage/live-updated` | [usage](usage.md) | [usage](usage.md) |  | yes |
+| `usage/quota-rates-updated` | [usage](usage.md) | [usage](usage.md) |  | yes |
 | `usage/rate-updated` | [usage](usage.md) | [usage](usage.md) |  | yes |
 | `usage/recorded` | [usage](usage.md) | [usage](usage.md) |  |  |
 | `usage/reported-changed` | [usage](usage.md) | [usage](usage.md) | [ui-usage](ui-usage.md), [usage](usage.md) | yes |
@@ -406,6 +407,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-sticky-compose](ui-sticky-compose.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
 | `harness-chat-panel-functions` | [ui-cache](ui-cache.md), [ui-carry](ui-carry.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-carry](ui-carry.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md) |
 | `harness-chat-send-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md) | [ui-btw](ui-btw.md) |
+| `harness-chat-settings-functions` | [ui-chat](ui-chat.md), [ui-tasks](ui-tasks.md) | [ui-tasks](ui-tasks.md) |
 | `harness-chat-tool-body-functions` | [ui-chat](ui-chat.md) | [ui-report](ui-report.md) |
 | `harness-chat-top-functions` | [ui-chat](ui-chat.md) |  |
 | `harness-corporate-mode-change-hook` | `harness-core.el` | [acp](acp.md), [acp-remote](acp-remote.md), [ui](ui.md) |
@@ -438,6 +440,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-prompt-functions` | [ui](ui.md) | [ui-cache](ui-cache.md) |
 | `harness-ui-question-functions` | [ui](ui.md) | [ui-pending](ui-pending.md) |
 | `harness-ui-quota-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-tasks](ui-tasks.md), [ui-usage](ui-usage.md) |
+| `harness-ui-quota-rate-functions` | [ui](ui.md) |  |
 | `harness-ui-rate-functions` | [ui](ui.md) | [ui-sessions](ui-sessions.md) |
 | `harness-ui-redraw-hook` | [ui](ui.md) | [ui-acp-remote](ui-acp-remote.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-config](ui-config.md), [ui-insights](ui-insights.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-report-compose-functions` | [ui-report](ui-report.md) | [ui-review](ui-review.md) |

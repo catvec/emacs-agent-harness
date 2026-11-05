@@ -331,15 +331,17 @@ before."
   "Return how the line under the heading ends for STATE: a cost, or a period.
 A lapsed cache, or a model's, compares the uncached price with the
 cached one it would have cost.  A cache a redaction dropped cannot be
-had, so it names the uncached price only."
-  (if (harness-ui-cache--dropped state)
-      (if-let* ((uncached (harness-ui-cache--uncached-cost state)))
-          (format ": about %s, at list prices." (harness-format-cost uncached))
-        ".")
-    (if-let* ((cost (harness-ui-cache--cost state)))
-        (format ": about %s instead of %s, at list prices."
-                (harness-format-cost (car cost)) (harness-format-cost (cdr cost)))
-      ".")))
+had, so it names the uncached price only.  The costs read as money, or
+as a share of the session's plan where one pays (`harness-ui-estimate-text')."
+  (let ((session (harness-ui-cache--session)))
+    (if (harness-ui-cache--dropped state)
+        (if-let* ((uncached (harness-ui-cache--uncached-cost state)))
+            (format ": about %s, at list prices." (harness-ui-estimate-text uncached session))
+          ".")
+      (if-let* ((cost (harness-ui-cache--cost state)))
+          (format ": about %s instead of %s, at list prices."
+                  (harness-ui-estimate-text (car cost) session) (harness-ui-estimate-text (cdr cost) session))
+        "."))))
 
 (defun harness-ui-cache--banner (state now &optional offer)
   "Return the cache panel for STATE, drawn at NOW.
@@ -413,7 +415,7 @@ compacted, as nothing of it is cached any more."
   "Return the tooltip of the button compacting as KIND, as ESTIMATE says.
 ESTIMATE is nil while it is asked."
   (let ((entry (assq kind harness-ui-compact-kinds))
-        (cost (harness-ui-compact-cost-text estimate kind)))
+        (cost (harness-ui-compact-cost-text estimate kind (harness-ui-cache--session))))
     (concat (harness-ui-compact-label kind) (if cost (format " (%s)" cost) "") ": "
             (if estimate
                 (harness-ui-compact-describe estimate kind)
@@ -441,7 +443,7 @@ the panel started runs, the line says so instead."
              (mapconcat
               (lambda (entry)
                 (pcase-let* ((`(,kind ,key . ,_) entry)
-                             (cost (harness-ui-compact-cost-text estimate kind)))
+                             (cost (harness-ui-compact-cost-text estimate kind (harness-ui-cache--session))))
                   (define-key map (char-to-string key) (harness-ui-cache--command buffer kind))
                   (concat "  " (harness-chat--kbd (format " %c " key)) " "
                           (harness-chat--button (harness-ui-compact-label kind)

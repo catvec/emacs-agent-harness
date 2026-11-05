@@ -23,6 +23,7 @@
 (defvar harness-provider-demo-script-override)
 (defvar harness-provider-demo--delay)
 (defvar harness-providers)
+(defvar harness-ui--quota-rates)
 (defvar harness-naming-auto)
 (defvar harness-sessions)
 (defvar harness-tools)
@@ -532,6 +533,31 @@ the new conversation, whose first request writes a cache of its own."
             (should-not (plist-get cache :dropped))))
       (remhash 'hosted harness-providers)
       (harness-provider--forget 'hosted))))
+
+(ert-deftest harness-ui-cowboy-costs-read-as-a-share-for-a-plan ()
+  "The harness words the choices' costs in dollars; a plan's session reads them as quota shares."
+  (let* ((harness-ui--quota-rates (make-hash-table :test 'equal))
+         (info '(:carry-on 0.5 :carry-on-cached 0.05
+                 :choices ((:choice "carry-on" :cost 0.5 :cost-text "~$0.500 uncached")
+                           (:choice "brief" :cost 0.31 :cost-text "~$0.310")
+                           (:choice "fresh" :cost-text "free")
+                           (:choice "hold"))))
+         (plan (list :model "claude:claude-opus-5-5"
+                     :usage '(:cost 0.0 :list-cost 0.5 :billing "subscription" :plan "max")))
+         (text (lambda (choice &optional session)
+                 (plist-get (harness-ui-cowboy--choice info choice session) :cost-text))))
+    (should (equal "~$0.500 uncached" (funcall text "carry-on" plan)))
+    (should (equal "~$0.310" (funcall text "brief" plan)))
+    (harness-ui--store-quota-rates '((:provider "claude" :window "5h" :capacity 50.0 :length 18000)))
+    (should (equal "~1% uncached" (funcall text "carry-on" plan)))
+    (should (equal "~0.6%" (funcall text "brief" plan)))
+    (should (equal "free" (funcall text "fresh" plan)))
+    (should-not (funcall text "hold" plan))
+    ;; Not a session a plan pays for: dollars, as the harness worded them.
+    (should (equal "~$0.310" (funcall text "brief")))
+    ;; The panel's Resend row says the same comparison, in the plan's shares.
+    (should (equal "1% uncached against 0.1% cached"
+                   (cadr (assoc "Resend" (harness-ui-cowboy--rows info plan)))))))
 
 (provide 'harness-ui-cowboy-test)
 ;;; harness-ui-cowboy-test.el ends here

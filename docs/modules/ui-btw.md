@@ -27,10 +27,11 @@ A prefix argument asks for another model for that one BTW, from the
 catalogue; the BTW can switch models afterwards like any session.
 It shows up under the session in
 the session list and the conversation tree.  It is shown in its own
-chat buffer, the full chat UI in another place: its header line
-(model, permission mode and the rest, all clickable), keys and
-harness menu are a normal session's, with a BTW segment in front of
-the header and C-c C-k and C-c C-o to close or keep it.  It opens
+chat buffer, the full chat UI in another place: its settings line
+(model, permission mode and the rest, all clickable) and header line
+(with [menu]), keys and harness menu are a normal session's, with a
+BTW segment in front of the header and C-c C-k and C-c C-o to close
+or keep it.  It opens
 blank, with point in its compose box: the box every session has
 (multi-line editing, @file and /skill completion, attachments), where
 C-c C-c asks.  Its first message names it.  Closing the side window

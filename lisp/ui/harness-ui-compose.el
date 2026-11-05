@@ -162,6 +162,15 @@ its project alone.")
 The chat sets them from `harness-chat-commands'.")
 (defvar-local harness-compose--pads nil "Window -> overlay padding the buffer so the box sits at the bottom.")
 (defvar-local harness-compose--pad-at nil "Function returning where the padding goes, or nil for the top.")
+
+(defvar-local harness-compose--reserved-lines-function nil
+  "Function of WINDOW and FROM returning display lines above the box.
+Overlay `before-string's are not part of `window-text-pixel-size', so a
+host that draws lines over the buffer above its box -- a chat's activity
+line -- sets this: the lines of those strings at or after FROM, which
+the box's padding and its follow leave room for as if they were text.
+FROM is where the measurement starts, so a window showing the buffer
+from below one of them counts only those still in view.")
 (defvar-local harness-compose--outside 0
   "Counts the changes to the buffer outside the box, which may move it.
 See `harness-compose--outside-tick'.")
@@ -1014,7 +1023,11 @@ the box's lines alone (`harness-compose--box-height')."
               ;; box on the last line.
               (let* ((line (frame-char-height (window-frame window)))
                      ;; More than BODY for a buffer taller than the window: no padding.
-                     (used (harness-ui-text-height window (point-min) harness-compose-end body))
+                     (used (+ (harness-ui-text-height window (point-min) harness-compose-end body)
+                              (* line (if harness-compose--reserved-lines-function
+                                          (funcall harness-compose--reserved-lines-function
+                                                   window (point-min))
+                                        0))))
                      (lines (/ (- body used (if harness-compose--pad-at 0 line)) line)))
                 (when (> lines 0)
                   ;; An explicit face: bare newlines would take the height of the
@@ -1087,11 +1100,19 @@ commands, rather than scroll."
         (let* ((body (window-body-height window t))
                (line (frame-char-height (window-frame window)))
                (room (- body (if harness-compose--pad-at 0 line)))
+               ;; Lines drawn over the buffer above the box are not in
+               ;; `window-text-pixel-size' either (`harness-compose--reserved-lines-function').
+               (reserved (lambda (from)
+                           (* line (if harness-compose--reserved-lines-function
+                                       (funcall harness-compose--reserved-lines-function window from)
+                                     0))))
                ;; Exact up to ROOM and more than ROOM beyond, so a buffer
                ;; taller than the window never reads as one that fits:
                ;; showing it from its start would push point, and the
                ;; box with it, out of the window on every redraw.
-               (height (lambda (from) (harness-ui-text-height window from harness-compose-end room)))
+               (height (lambda (from)
+                         (+ (funcall reserved from)
+                            (harness-ui-text-height window from harness-compose-end room))))
                (start (window-start window))
                (pt (window-point window))
                (anchor (if harness-compose--pad-at harness-compose-end (point-max))))

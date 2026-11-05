@@ -817,8 +817,12 @@ it is narrow, blinking while the session works."
             (harness-ui-pet-test--check-figure buf)
             (should (string-search (plist-get harness-ui-pet--current :name) (harness-ui-pet-test--figure-text buf)))
             (with-current-buffer buf
+              ;; The settings line stands between the creature and the box.
+              (should (= (line-number-at-pos (marker-position harness-chat--settings-marker))
+                         (1+ (line-number-at-pos (nth 1 (car (last (harness-ui-pet-test--figure-rows buf))))))))
+              ;; The end marker sits at the start of the box's line.
               (should (= (line-number-at-pos harness-compose-start)
-                         (1+ (line-number-at-pos (nth 1 (car (last (harness-ui-pet-test--figure-rows buf)))))))))
+                         (line-number-at-pos (marker-position harness-chat--settings-end))))))
             ;; Not in the header line, unless asked for.
             (let* ((view harness-ui-pet--current)
                    (face (harness-ui-pet-face (plist-get view :species) (plist-get view :eye))))
@@ -956,7 +960,7 @@ it is narrow, blinking while the session works."
                                5 "the figure fitted to the window")
             (harness-ui-pet-test--check-figure buf))
         (kill-buffer buf)
-        (kill-buffer other)))))
+        (kill-buffer other))))
 
 (ert-deftest harness-ui-pet-shows-on-the-board ()
   "Hatched, the whole pet sits at the bottom right of the board, saying
@@ -2996,7 +3000,10 @@ line: it is whole through each, and plays its beats on each."
         (should (memq #'harness-ui-pet--panel (default-value 'harness-chat-top-functions)))
         (should-not (memq #'harness-ui-pet--panel (default-value 'harness-chat-panel-functions)))
         (should (= (top) (transcript-end)))
-        (should (= (line (below)) (line (box))))
+        ;; The settings line comes first, right above the compose box.
+        (should (= (line (below))
+                   (line (marker-position (buffer-local-value 'harness-chat--settings-marker buf)))))
+        (should (= (line (box)) (1+ (line (below)))))
         (should (get-text-property (top) 'harness-chat-top buf))
         (harness-ui-pet-test--check-figure buf)
         ;; The todo list: the figure's rows come right after the transcript,
