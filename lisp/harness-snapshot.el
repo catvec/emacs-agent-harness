@@ -118,6 +118,14 @@ A longer one is `#s(harness-user-truncated \"NAME\" SIZE)'.")
 (defconst harness-snapshot-locals-chars (* 128 1024)
   "Most characters of buffer-local values the copy keeps for one buffer.")
 
+(defconst harness-snapshot-locals-seconds 0.025
+  "Seconds one buffer's local values may take to copy.
+A local value can be large, and copying one is not interrupted: a copy
+that took half a second at a time held the user's Emacs, which is the
+UI.  What the time runs out on is counted in the buffer's `:locals-cut',
+and the manifest says so.  A slice is asked for 25 ms of work
+(`harness-snapshot-slice-seconds'), and one buffer is one step of it.")
+
 (defconst harness-snapshot-locals-count 300
   "Most buffer-local variables the copy keeps for one buffer.")
 
@@ -268,15 +276,16 @@ This reads the structure's definition, as data; it calls no accessor."
   (let ((described (harness-snapshot--describe x)))
     (record 'harness-user-object (car described) (copy-sequence (cdr described)))))
 
-(defun harness-snapshot--copy (value chars)
+(defun harness-snapshot--copy (value chars &optional deadline)
   "Return a plain copy of VALUE that prints in about CHARS characters or fewer.
 The answer is (:ok COPY), or (:big ESTIMATE) when VALUE is more than
-that or more than `harness-snapshot-walk-nodes' pieces, and then the
-walk stops where it was.  A copy shares what VALUE shares and closes
-the circles it has; strings have no text properties; every object that
-is not a number, symbol, string, cons, vector, record, bool-vector or
-hash table is a `harness-user-object'.  Nothing in VALUE is called,
-printed or compared by anything the user wrote."
+that, more than `harness-snapshot-walk-nodes' pieces, or still being
+copied at DEADLINE, a time; then the walk stops where it was.  A copy
+shares what VALUE shares and closes the circles it has; strings have no
+text properties; every object that is not a number, symbol, string,
+cons, vector, record, bool-vector or hash table is a
+`harness-user-object'.  Nothing in VALUE is called, printed or compared
+by anything the user wrote."
   (let ((seen (make-hash-table :test 'eq))
         (nodes 0)
         (size 0)
@@ -286,7 +295,9 @@ printed or compared by anything the user wrote."
           ((spend (n)
              (setq nodes (1+ nodes)
                    size (+ size n))
-             (when (or (> nodes harness-snapshot-walk-nodes) (> size max-size))
+             (when (or (> nodes harness-snapshot-walk-nodes)
+                       (> size max-size)
+                       (and deadline (zerop (% nodes 32)) (> (float-time) deadline)))
                (throw 'harness-snapshot--big (list :big size))))
            (mask ()
              (cl-incf harness-snapshot--masked)
@@ -387,12 +398,13 @@ alone, since printing inside the printer corrupts its output."
         (print-unreadable-function #'harness-snapshot--unreadable))
     (prin1-to-string object)))
 
-(defun harness-snapshot--value (name value chars)
+(defun harness-snapshot--value (name value chars &optional deadline)
   "Return (TEXT . SIZE): VALUE of the variable NAME printed in at most CHARS.
 When it does not fit, TEXT is `#s(harness-user-truncated \"NAME\" SIZE)'
 and SIZE the length VALUE printed to or, when it was given up before it
-was printed, at least that; otherwise SIZE is nil."
-  (let ((copy (harness-snapshot--copy value chars)))
+was printed, at least that; otherwise SIZE is nil.  The copy gives up at
+DEADLINE, a time, when one is given."
+  (let ((copy (harness-snapshot--copy value chars deadline)))
     (if (eq (car copy) :big)
         (cons (harness-snapshot--print (record 'harness-user-truncated name (cadr copy)))
               (cadr copy))
@@ -514,21 +526,29 @@ those named for credentials are left out and named, and at most
 (defun harness-snapshot--locals (buffer)
   "Return (TEXT . CUT): the local variables of BUFFER, printed as pairs.
 TEXT is the inside of a list; CUT is the number of variables kept out of
-it because the buffer has more than the copy holds of them."
-  (let ((out nil) (chars 0) (count 0) (cut 0))
+it because the buffer has more than the copy holds of them, or because
+`harness-snapshot-locals-seconds' ran out.  `buffer-undo-list' is left
+out: it is the editing history, a chat buffer's holds its whole text
+again, and copying it took half a second of the user's Emacs at a time."
+  (let ((out nil) (chars 0) (count 0) (cut 0)
+        (deadline (+ (float-time) harness-snapshot-locals-seconds)))
     (dolist (entry (buffer-local-variables buffer))
       (when (and (consp entry) (symbolp (car entry)))
         (let ((name (symbol-name (car entry))))
           (cond
            ((or (harness-snapshot--withheld-name-p name)
-                (memq (car entry) '(buffer-file-name default-directory major-mode))
+                (memq (car entry) '(buffer-file-name default-directory major-mode
+                                                    buffer-undo-list))
                 (harness-snapshot--alias-p (car entry))))
-           ((or (>= count harness-snapshot-locals-count) (>= chars harness-snapshot-locals-chars))
+           ((or (>= count harness-snapshot-locals-count)
+                (>= chars harness-snapshot-locals-chars)
+                (> (float-time) deadline))
             (cl-incf cut))
            (t
             (let ((pair (concat "(" (harness-snapshot--print (car entry)) " . "
                                 (car (harness-snapshot--value name (cdr entry)
-                                                              harness-snapshot-local-chars))
+                                                              harness-snapshot-local-chars
+                                                              deadline))
                                 ")")))
               (push pair out)
               (cl-incf chars (length pair))

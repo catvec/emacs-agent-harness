@@ -106,9 +106,12 @@ Two ways for a model to run things:
   (lisp/harness-snapshot.el; the `snapshot` request of
   harness-emacs-endpoint.el), puts it in a file in the call's io/
   directory and the child reads it as data before the code runs
-  (`harness-elisp-load-snapshot`).  Such a child runs read-only and
-  offline whatever the session otherwise has, and is refused where no
-  sandbox can give that: the copy is the user's data and must not
+  (`harness-elisp-load-snapshot`).  One copy is taken at a time and
+  kept for a minute, and every session of that Emacs is given the
+  same copy, so several agents do not copy the whole Emacs at once
+  and make it lag; `fresh` takes another.  Such a child runs read-only
+  and offline whatever the session otherwise has, and is refused where
+  no sandbox can give that: the copy is the user's data and must not
   meet an unconfined process.  The code can change its copy and
   nothing else; the user's Emacs is only read, and the child cannot
   reach it.  Credentials are left out of the copy by name
@@ -130,6 +133,7 @@ Two ways for a model to run things:
 ### Methods it calls
 
 - `config/get` ([config](config.md)), when it is loaded
+- `emacs/attached` ([acp](acp.md)), when it is loaded
 - `permission/dirs` ([perms](perms.md)), when it is loaded
 - `sandbox/wrap` ([sandbox](sandbox.md)), when it is loaded
 - `session/tmp-dir` ([session](session.md)), when it is loaded

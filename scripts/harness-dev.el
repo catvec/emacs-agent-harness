@@ -58,6 +58,7 @@ for it.")
 
 (defvar harness-tasks-store-in-repository)
 (defvar harness-enabled-modules)
+(defvar harness-notifications-providers)
 (defvar server-socket-dir)
 
 (defun harness-dev-socket-dir ()
@@ -118,6 +119,12 @@ Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
   ;; into a repository's .git, where the real harness keeps its task
   ;; boards.  Set it to t to try repository stores, in a scratch repository.
   (setq harness-tasks-store-in-repository nil)
+  ;; A development instance is nobody's work: its tasks, prompts and
+  ;; stalls are demonstrations, and a notification about one would reach
+  ;; the user's desktop and phone as if it were their own.  Send none.
+  ;; To try the notification setup in a dev frame, set this back to the
+  ;; providers to try, `(system gotify)' for both.
+  (setq harness-notifications-providers nil)
   ;; A daemon nobody watches must never stop on a question.  So
   ;; directory-local variables that are not safe as they are -- the
   ;; checkout's own .dir-locals.el, which loads its plugin

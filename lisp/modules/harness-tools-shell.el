@@ -96,9 +96,12 @@
 ;;   (lisp/harness-snapshot.el; the `snapshot' request of
 ;;   harness-emacs-endpoint.el), puts it in a file in the call's io/
 ;;   directory and the child reads it as data before the code runs
-;;   (`harness-elisp-load-snapshot').  Such a child runs read-only and
-;;   offline whatever the session otherwise has, and is refused where no
-;;   sandbox can give that: the copy is the user's data and must not
+;;   (`harness-elisp-load-snapshot').  One copy is taken at a time and
+;;   kept for a minute, and every session of that Emacs is given the
+;;   same copy, so several agents do not copy the whole Emacs at once
+;;   and make it lag; `fresh' takes another.  Such a child runs read-only
+;;   and offline whatever the session otherwise has, and is refused where
+;;   no sandbox can give that: the copy is the user's data and must not
 ;;   meet an unconfined process.  The code can change its copy and
 ;;   nothing else; the user's Emacs is only read, and the child cannot
 ;;   reach it.  Credentials are left out of the copy by name
@@ -476,17 +479,45 @@ A copy not whole by then is used as it is, and the result says so.")
 (defconst harness-tools-shell--snapshot-request-seconds 4
   "Seconds the user's Emacs has to answer one slice of the copy.")
 
+(defconst harness-tools-shell--snapshot-min-slice 0.25
+  "Seconds left below which a copy stops rather than asking for one more slice.
+A last slice with a tenth of a second left cannot answer before its
+deadline, and only makes the copy say the Emacs stopped answering.")
+
 (defconst harness-tools-shell--snapshot-ttl 60
-  "Seconds a copy of the user's Emacs is kept for the next call of its session.
+  "Seconds a copy of the user's Emacs is kept for the sessions to share.
 `fresh' asks for a new one.")
 
 (defconst harness-tools-shell--snapshot-load-seconds 20
   "Seconds, besides its timeout, a child has to read the copy.")
 
 (defvar harness-tools-shell--snapshots nil
-  "The copies kept, newest first: (SESSION-ID TIME . SNAPSHOT).
-SNAPSHOT is a plist of `:text', `:partial' (a reason, or nil) and
+  "The copies kept, newest first: (EMACS TIME . SNAPSHOT).
+EMACS names the Emacs the copy was asked of (see
+`harness-tools-shell--snapshot-emacs-key'), so every session of that
+Emacs is given the same copy: taking one per session made several
+agents copy the whole Emacs at once, which kept it busy and made it
+lag.  SNAPSHOT is a plist of `:text', `:partial' (a reason, or nil) and
 `:taken' (a time).")
+
+(defvar harness-tools-shell--snapshot-in-flight nil
+  "The copy of the user's Emacs being taken, as (EMACS . PROMISE), or nil.
+One copy is taken at a time: a fetch already under way is shared rather
+than starting another, which would copy the whole Emacs twice at once.")
+
+(defun harness-tools-shell--snapshot-emacs-key ()
+  "Return a key naming the Emacs `emacs/request' asks, or `any'.
+That is the most recently active Emacs lent to the harness, as
+`emacs/attached' lists them; a copy is shared only by the sessions of
+one Emacs."
+  (let ((emacs (and (harness-method-exists-p 'emacs/attached)
+                    (condition-case nil
+                        (car (harness-call 'emacs/attached))
+                      (error nil)))))
+    (or (and emacs
+             (list (plist-get emacs :host) (plist-get emacs :pid)
+                   (plist-get emacs :version)))
+        'any)))
 
 (defun harness-tools-shell--snapshot-sandbox-options (options)
   "Return OPTIONS, the sandbox options of a call, made read-only and offline.
@@ -509,7 +540,7 @@ Emacs stopped answering, is resolved as it is, marked partial."
              (when (and partial cursor)
                ;; The user's Emacs keeps what the cursor stands for for a minute: let it go.
                (ignore-errors
-                 (harness-then (harness-tools-ask-emacs "snapshot" (list :cursor cursor :release t) 2)
+                 (harness-then (harness-tools-ask-emacs "snapshot" (list :cursor cursor :release t) 2 t)
                                #'ignore #'ignore)))
              (funcall resolve
                       (list :text (apply #'concat (append (reverse chunks)
@@ -517,13 +548,14 @@ Emacs stopped answering, is resolved as it is, marked partial."
                             :partial partial :taken (float-time) :slices slices)))
            (step ()
              (let ((left (- deadline (float-time))))
-               (if (< left 0.1)
+               (if (< left harness-tools-shell--snapshot-min-slice)
                    (finish "the time allowed for taking the copy ran out")
                  (harness-then
                   (harness-tools-ask-emacs
                    "snapshot"
                    (append (and cursor (list :cursor cursor)) (list :maxChars (* 256 1024)))
-                   (min left harness-tools-shell--snapshot-request-seconds))
+                   (min left harness-tools-shell--snapshot-request-seconds)
+                   t)
                   (lambda (answer)
                     (cl-incf slices)
                     (push (or (plist-get answer :chunk) "") chunks)
@@ -538,28 +570,42 @@ Emacs stopped answering, is resolved as it is, marked partial."
                       (funcall reject err))))))))
         (step)))))
 
-(defun harness-tools-shell--snapshot (ctx fresh)
-  "Return a promise of a copy of the user's Emacs for the call under CTX.
-It is the copy kept for CTX's session if that is younger than
+(defun harness-tools-shell--snapshot (fresh)
+  "Return a promise of a copy of the user's Emacs.
+It is the copy kept for that Emacs if it is younger than
 `harness-tools-shell--snapshot-ttl' seconds and FRESH is nil, else a new
-one (`harness-tools-shell--snapshot-fetch'), which is kept.  The plist
-it resolves to has `:cached' besides what the fetch gives."
-  (let* ((key (or (plist-get ctx :session-id) ""))
+one (`harness-tools-shell--snapshot-fetch'), which every session of that
+Emacs shares.  A copy already being taken is shared rather than taken
+again.  The plist it resolves to has `:cached' besides what the fetch
+gives."
+  (let* ((key (harness-tools-shell--snapshot-emacs-key))
          (now (float-time))
          (kept (cl-remove-if (lambda (entry) (> (- now (cadr entry)) harness-tools-shell--snapshot-ttl))
                              harness-tools-shell--snapshots))
          (entry (assoc key kept)))
     (setq harness-tools-shell--snapshots kept)
-    (if (and entry (not fresh))
-        (harness-resolved (append (list :cached t) (cddr entry)))
-      (harness-then
-       (harness-tools-shell--snapshot-fetch)
-       (lambda (snapshot)
-         (setq harness-tools-shell--snapshots
-               (seq-take (cons (cons key (cons (float-time) snapshot))
-                               (assoc-delete-all key harness-tools-shell--snapshots))
-                         3))
-         (append (list :cached nil) snapshot))))))
+    (cond
+     ((and entry (not fresh))
+      (harness-resolved (append (list :cached t) (cddr entry))))
+     ((and harness-tools-shell--snapshot-in-flight
+           (equal (car harness-tools-shell--snapshot-in-flight) key))
+      (harness-then (cdr harness-tools-shell--snapshot-in-flight)
+                    (lambda (snapshot) (append (list :cached nil) snapshot))))
+     (t
+      (let ((fetched (harness-tools-shell--snapshot-fetch)))
+        (setq harness-tools-shell--snapshot-in-flight (cons key fetched))
+        (harness-then
+         fetched
+         (lambda (snapshot)
+           (setq harness-tools-shell--snapshot-in-flight nil
+                 harness-tools-shell--snapshots
+                 (seq-take (cons (cons key (cons (float-time) snapshot))
+                                 (assoc-delete-all key harness-tools-shell--snapshots))
+                           3))
+           (append (list :cached nil) snapshot))
+         (lambda (err)
+           (setq harness-tools-shell--snapshot-in-flight nil)
+           (signal (car err) (cdr err)))))))))
 
 (defun harness-tools-shell--snapshot-note (snapshot)
   "Return what to tell the model about SNAPSHOT, the report of the child, or nil.
@@ -779,7 +825,7 @@ directory."
             (if (not snapshot)
                 (run nil)
               (harness-then
-               (harness-tools-shell--snapshot ctx (plist-get snapshot :fresh))
+               (harness-tools-shell--snapshot (plist-get snapshot :fresh))
                (lambda (copy)
                  (condition-case err
                      (progn
@@ -827,7 +873,7 @@ for the user's Emacs is refused with that explanation."
             :properties (:code (:type "string" :description "One or more Emacs Lisp forms")
                          :timeout (:type "integer" :description "Seconds before the evaluation is stopped. Default 30")
                          :snapshot (:type "boolean" :description "Start from a copy of the user's Emacs (its variables and buffers, credentials left out), read-only and offline. Default false")
-                         :fresh (:type "boolean" :description "With snapshot: take a new copy now instead of the one kept for the last minute. Default false"))
+                         :fresh (:type "boolean" :description "With snapshot: take a new copy now instead of the one every session of this Emacs shares. Default false"))
             :required ("code"))
   :kind 'exec
   :timeout 3700

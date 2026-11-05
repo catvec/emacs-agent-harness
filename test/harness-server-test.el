@@ -708,5 +708,18 @@ summary, and this Emacs goes on meanwhile."
           (should (< (apply #'max gaps) 0.5)))
         (harness-server-test--settle)))))
 
+(ert-deftest harness-server-an-error-line-too-long-for-the-log-is-cut-before-it-is-kept ()
+  "One line of the child's stderr is cut before it reaches the log.
+An `rm' error can name a whole tree in one line of hundreds of
+megabytes; the parent used to build that line whole, a chunk at a time,
+in the Emacs that draws, which stopped drawing."
+  (let ((harness-log-level 'info))
+    (with-current-buffer (get-buffer-create harness-log-buffer-name)
+      (let ((inhibit-read-only t)) (erase-buffer)))
+    (harness-server--log-line (concat "INFO " (make-string 1000000 ?x)))
+    (with-current-buffer harness-log-buffer-name
+      (should (<= (buffer-size) (+ harness--log-entry-chars 32)))
+      (should (string-search "INFO  [server] xxx" (buffer-string))))))
+
 (provide 'harness-server-test)
 ;;; harness-server-test.el ends here

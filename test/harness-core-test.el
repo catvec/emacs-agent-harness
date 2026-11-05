@@ -106,6 +106,28 @@ One that logs does not filter that message again, so it cannot recurse."
     (let ((harness-log-filter-function #'upcase))
       (should (equal "AGAIN" (harness-log 'info "again"))))))
 
+(ert-deftest harness-core-log-cuts-a-huge-entry-and-keeps-the-buffer-small ()
+  "One entry is cut to the entry size, and the buffer keeps its size bound.
+A single `rm' error can name a whole tree: keeping it made the log
+buffer hundreds of megabytes, and every later entry paid for it."
+  (let ((harness-log-level 'info)
+        (harness--log-entry-chars 500)
+        (harness--log-max-chars 2000)
+        (hooked nil))
+    (with-current-buffer (get-buffer-create harness-log-buffer-name)
+      (let ((inhibit-read-only t)) (erase-buffer)))
+    (let ((harness-log-hook (list (lambda (_level msg) (setq hooked msg)))))
+      (let ((msg (harness-log 'error "%s" (make-string 100000 ?x))))
+        (should (= harness--log-entry-chars (length msg)))
+        (should (string-suffix-p "…" msg))
+        (should (equal msg hooked))))
+    ;; Many entries: the buffer is trimmed from the front, and the newest stays.
+    (dotimes (_ 20) (harness-log 'info "%s" (make-string 300 ?y)))
+    (with-current-buffer harness-log-buffer-name
+      (should (<= (buffer-size) harness--log-max-chars))
+      (should (string-suffix-p (concat (make-string 300 ?y) "\n") (buffer-string)))
+      (should (< (count-lines (point-min) (point-max)) 20)))))
+
 (ert-deftest harness-core-async-filter-chain-and-final ()
   (harness-test-reset-bus)
   (harness-add-filter 'test/af (lambda (v next) (run-at-time 0.01 nil next (plist-put v :a t))) 10)

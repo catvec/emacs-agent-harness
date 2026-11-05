@@ -25,6 +25,7 @@
 (defvar harness-sandbox--backend)
 (defvar harness-sandbox-policy)
 (defvar harness-tools-shell--snapshots)
+(defvar harness-tools-shell--snapshot-in-flight)
 (defvar harness-tools-shell--snapshot-ttl)
 (defvar harness-tools-shell--snapshot-seconds)
 (declare-function harness-acp-drop-client "harness-acp")
@@ -49,6 +50,7 @@
   (harness-test-connect-ui-client)
   (harness-add-filter 'permission/decide #'harness-elisp-snapshot-test--allow 10)
   (setq harness-tools-shell--snapshots nil
+        harness-tools-shell--snapshot-in-flight nil
         harness-snapshot--states nil))
 
 (defmacro harness-elisp-snapshot-test--without-methods (names &rest body)
@@ -61,7 +63,11 @@
 
 (defun harness-elisp-snapshot-test--call (&rest input)
   "Execute the elisp tool with INPUT for a session and wait; return the result."
-  (harness-await (harness-call 'tools/execute "s1" (list :id "c1" :name "elisp" :input input)) 60))
+  (harness-elisp-snapshot-test--call-for "s1" input))
+
+(defun harness-elisp-snapshot-test--call-for (session input)
+  "Execute the elisp tool with INPUT for SESSION and wait; return the result."
+  (harness-await (harness-call 'tools/execute session (list :id "c1" :name "elisp" :input input)) 60))
 
 (defmacro harness-elisp-snapshot-test--lending (regexp buffers &rest body)
   "Run BODY with this Emacs lending only the variables matching REGEXP and BUFFERS.
@@ -486,6 +492,54 @@ took, so the user's Emacs is not read again; `fresh' asks for a new one."
                 (harness-elisp-snapshot-test--call :snapshot t :code "1")
                 (should (= 3 begun))))))
       (advice-remove 'harness-snapshot--begin 'harness-elisp-snapshot-test))))
+
+(ert-deftest harness-elisp-snapshot-the-sessions-of-one-emacs-share-one-copy ()
+  "Every session of the user's Emacs uses the copy the first one took.
+A copy per session made several agents copy the whole Emacs at once,
+which kept it busy and made it lag."
+  (harness-elisp-snapshot-test--setup)
+  (let ((begun 0))
+    (advice-add 'harness-snapshot--begin :before (lambda (&rest _) (cl-incf begun)) '((name . harness-elisp-snapshot-test)))
+    (unwind-protect
+        (harness-elisp-snapshot-test--in-dir
+          (harness-elisp-snapshot-test--with-methods
+              (list (cons 'sandbox/wrap #'harness-elisp-snapshot-test--unconfined))
+            (harness-elisp-snapshot-test--lending harness-elisp-snapshot-test--variables nil
+              (harness-elisp-snapshot-test--content
+               (harness-elisp-snapshot-test--call-for "s1" (list :snapshot t :code "1")))
+              (let ((r (harness-elisp-snapshot-test--call-for
+                        "s2" (list :snapshot t :code "harness-elisp-snapshot-test--answer"))))
+                (should (= 1 begun))
+                (should (plist-get (plist-get (plist-get r :meta) :snapshot) :cached))
+                (should (equal "=> 41" (plist-get r :content)))))))
+      (advice-remove 'harness-snapshot--begin 'harness-elisp-snapshot-test))))
+
+(ert-deftest harness-elisp-snapshot-a-copy-being-taken-is-not-taken-again ()
+  "A second session asking while a copy is taken waits for that copy.
+Starting another would copy the whole Emacs twice at the same time."
+  (harness-test-load-module 'tools-shell)
+  (let ((harness-tools-shell--snapshots nil)
+        (harness-tools-shell--snapshot-in-flight nil)
+        (fetches 0)
+        (answer (list :text "(snapshot :version 1)\n" :partial nil :taken 0 :slices 1)))
+    (cl-letf (((symbol-function 'harness-tools-shell--snapshot-emacs-key) (lambda () 'test-emacs))
+              ((symbol-function 'harness-tools-shell--snapshot-fetch)
+               (lambda ()
+                 (cl-incf fetches)
+                 (harness-with-promise (resolve reject)
+                   (run-at-time 0.05 nil (lambda () (funcall resolve answer)))))))
+      (let* ((first (harness-tools-shell--snapshot nil))
+             (second (harness-tools-shell--snapshot nil))
+             (a (harness-await first 5))
+             (b (harness-await second 5)))
+        (should (= 1 fetches))
+        (should (equal (plist-get a :text) (plist-get b :text)))
+        (should-not (plist-get a :cached))
+        (should-not (plist-get b :cached))
+        ;; The copy is kept, so a later ask does not take another.
+        (should (plist-get (harness-await (harness-tools-shell--snapshot nil) 5) :cached))
+        (should (= 1 fetches))))))
+
 
 (ert-deftest harness-elisp-snapshot-a-copy-that-runs-out-of-time-is-used-and-says-so ()
   "When the time for taking the copy runs out the child starts from what

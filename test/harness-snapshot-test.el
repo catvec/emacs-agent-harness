@@ -222,6 +222,41 @@ huge variable cannot keep the user's Emacs busy."
     (setq harness-snapshot-test--big-string nil harness-snapshot-test--big-list nil
           harness-snapshot-test--deep nil)))
 
+(ert-deftest harness-snapshot-a-value-copy-gives-up-at-its-deadline ()
+  "A copy of a value stops at the deadline it was given.
+A buffer's locals are copied one value at a time and cannot be
+interrupted, so the time one may take is what keeps a copy from holding
+the user's Emacs for half a second at a time."
+  (let ((value (cl-loop for i from 1 to 5000 collect i)))
+    ;; Within the piece budget, so it is copied whole.
+    (should (eq :ok (car (harness-snapshot--copy value most-positive-fixnum))))
+    ;; The same value, with no time left: given up rather than walked.
+    (should (eq :big (car (harness-snapshot--copy value most-positive-fixnum (float-time)))))))
+
+(ert-deftest harness-snapshot-a-buffers-locals-are-copied-within-the-time-they-may-take ()
+  "A buffer whose local values are many and large has some of them cut,
+and the copy says how many: it does not spend a second of the user's
+Emacs on one buffer."
+  (let ((buffer (generate-new-buffer "harness-snapshot-test-slow-locals"))
+        (symbols nil))
+    (unwind-protect
+        (progn
+          (dotimes (i 400)
+            (push (intern (format "harness-snapshot-test--local-%d" i)) symbols))
+          (dolist (sym symbols)
+            (set-default sym (cl-loop for j from 1 to 2000 collect (cons j (number-to-string j)))))
+          (with-current-buffer buffer
+            (insert "text")
+            (dolist (sym symbols) (set (make-local-variable sym) (default-value sym)))
+            (let* ((start (float-time))
+                   (locals (harness-snapshot--locals buffer))
+                   (elapsed (- (float-time) start)))
+              (should (< elapsed 0.2))
+              (should (> (cdr locals) 0))
+              (should (< (length (car locals)) harness-snapshot-locals-chars)))))
+      (dolist (sym symbols) (makunbound sym))
+      (kill-buffer buffer))))
+
 ;;;; Slices
 
 (ert-deftest harness-snapshot-a-copy-comes-in-slices-with-a-cursor ()
@@ -500,6 +535,9 @@ more than the limit are copied, the manifest saying how many were not."
               (should (= 17 (plist-get b0 :size)))
               (should (= 33 (alist-get 'fill-column (plist-get b0 :locals))))
               (should (equal '(a b) (alist-get 'harness-snapshot-test--visible (plist-get b0 :locals))))
+              ;; The editing history is not copied: a chat buffer's undo list
+              ;; holds its whole text again, and copying it held the UI.
+              (should-not (assq 'buffer-undo-list (plist-get b0 :locals)))
               ;; A long one is cut round point, and says so.
               (should (= 200 (length (plist-get b1 :text))))
               (should (<= (plist-get b1 :text-from) (plist-get b1 :point) (plist-get b1 :text-to)))

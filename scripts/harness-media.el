@@ -71,6 +71,7 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-process)
 (defvar harness-disabled-modules)
 (defvar harness-enabled-modules)
+(defvar harness-notifications-providers)
 (defvar harness-ui-positions)
 (defvar harness-ui-default-position)
 (defvar harness-ui--position-buffers)
@@ -4818,7 +4819,11 @@ names."
         ;; pin "Tool slots limited to 5 of 18" above every compose box:
         ;; the pictures do not depend on the machine's load.
         harness-disabled-modules '(provider-claude provider-copilot provider-openai provider-bedrock provider-demo
-                                                   recap tool-slots-load))
+                                                   recap tool-slots-load)
+        ;; The demo tasks of the pictures are nobody's work: a
+        ;; notification about one would reach the user's desktop and
+        ;; phone as if it were their own, on every run.
+        harness-notifications-providers nil)
   (harness-media--harness-origins)
   (require 'harness)
   (unless (harness-start) (error "The harness did not start cleanly"))

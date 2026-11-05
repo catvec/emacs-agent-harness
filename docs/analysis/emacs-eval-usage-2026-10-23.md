@@ -268,13 +268,16 @@ several, sometimes a buffer's text beside it.
 The user asked for a compromise: allow read-only, memory-only operations in an
 Emacs Lisp VM, run in the sandbox and initialized with the variable values the
 user's Emacs has.  That is now the `snapshot` input of the `elisp` tool
-(`fresh` renews the copy instead of using the session's).  With it:
+(`fresh` renews the copy instead of using the one the sessions of that
+Emacs share).  With it:
 
 - The harness asks the user's Emacs for the copy through the endpoint's
   `snapshot` request, in slices: each request works for about 25 ms and 256 KB
   and answers `{chunk, next, done}`, so the user's one thread is not held.  The
   harness spends at most 8 s on it; a copy that is not whole by then is used as
-  it is and the result says so.  A copy is kept for the session for 60 s.
+  it is and the result says so.  A copy is taken one at a time and kept
+  for 60 s, and every session of that Emacs shares it: concurrent agents
+  do not copy the whole Emacs at once.
 - The copy holds: the global value of every bound variable, as plain data; and
   every live buffer that is not hidden -- its name, major mode, file,
   `default-directory`, point, modified flag, size, buffer-local values

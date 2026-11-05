@@ -269,6 +269,20 @@ Promises: `harness-make-promise`, `harness-resolve`, `harness-reject`,
 `harness-then`, `harness-all`, `harness-with-promise`, `harness-await`
 (tests only).  Long work returns a promise; never block the main thread.
 
+The log is bounded twice (`harness-log`): one entry is cut to
+`harness--log-entry-chars' (64 KB) before the filter, the hook and the
+buffer see it, and the buffer keeps at most `harness--log-max-chars'
+(4 MB) and `harness--log-max-lines' (5000) lines, trimmed from the
+front.  Both bounds matter.  An `rm' error once put a whole module tree
+in one line of the user's `*harness-log*', and every entry after it
+paid to count the lines of 696 MB; the UI stalled while it logged,
+which is what the unresponsive-UI notice then reported.  The harness
+process writes its log to stderr a line at a time and its parent holds
+what has not ended yet: a line is cut to
+`harness-server--log-line-max' (64 KB) there too, before it is
+matched, copied and logged, so a huge line cannot grow the parent's
+string a chunk at a time either.
+
 Naming: bus methods are `area/verb` symbols and are exactly the ACP
 extension methods (`_harness/area/verb` on the wire).  Events are
 `area/past-tense`.  Files: `lisp/modules/harness-NAME.el` defines
@@ -5576,7 +5590,11 @@ and tools.
   only the user knows whether a long silence is a hang.
 - Notifications go through `notification/send` when the notifications
   module runs, else straight to the UI (`client/request`
-  `_harness/client/notify`), else to the log.
+  `_harness/client/notify`), else to the log.  A development or demo
+  instance sends nothing: `scripts/harness-dev.el` and the media runs
+  (`scripts/harness-media.el`) set `harness-notifications-providers` to
+  nil, so no demo task, prompt or stall reaches the user's desktop or
+  phone as if it were their own work.
 
 ### compaction
 
@@ -10809,8 +10827,12 @@ the recording, and a limit of records after which the trace removes
 itself).  With no Emacs lent -- a
 headless harness, or only clients such as a phone -- the call fails at
 once, saying so and pointing at read_file and the elisp tool; one that
-does not answer in time fails the call, logs, and shows a desktop
-notice, rather than leaving the turn pending.  `write_file`/`edit_file`
+does not answer in time fails the call, logs, and, when the wait was
+at least `harness-tools--ui-notice-min-seconds' (5 s) and the harness
+sends notifications at all, shows a desktop notice, rather than
+leaving the turn pending.  A deadline expected to be missed -- one
+slice of the copy of the user's Emacs, whose partial copy is an answer
+of its own -- is quiet: it reports nothing.  `write_file`/`edit_file`
 emit `tools/file-written PATH`; the UI reverts unmodified buffers
 visiting PATH.
 
@@ -10856,18 +10878,25 @@ of the user's Emacs, asked of the lent Emacs in slices
 (`harness-snapshot-slice`: about 25 ms and 256 KB a request, a cursor
 between them, so the user's thread is never held), written into the
 call's `io/` directory and read by the child as data before its code
-runs (`harness-elisp-load-snapshot`).  It sets the value of every bound
-variable the copy holds and recreates each live buffer, except what the
+runs (`harness-elisp-load-snapshot`).  The copy sets the value of every
+bound variable it holds and recreates each live buffer, except what the
 child needs for itself: where it loads from, what it runs, its printer,
 reader and debugger, and every hook and every variable that holds a
 function, which the child would otherwise call by itself; the user's
-value of each of those is still reachable with `harness-user-value`.
-Its manifest says what the copy left out or cut.  The fetch has a
-budget of a few seconds and a copy that is not whole is used as it is,
-saying so; a copy is kept for the session for a minute.  Such a child
-runs with `:read-only t :network nil`, whatever the session otherwise
-has, and is refused where no sandbox can give that, because the copy is
-the user's data.  Credentials are left out by name
+value of each of those is still reachable with `harness-user-value`.  No
+step may hold the user's thread for long: a buffer's local values are
+copied within `harness-snapshot-locals-seconds', a single value within
+the deadline the buffer's copy was given, and `buffer-undo-list' is
+never copied -- it is the editing history, a chat buffer's holds its
+whole text again, and copying one took half a second of the user's
+Emacs at a time.  Its manifest says what the copy left out or cut.  The
+fetch has a budget of a few seconds and a copy that is not whole is used
+as it is, saying so; one copy is taken at a time and kept for a minute,
+and every session of that Emacs is given the same one (`fresh' takes
+another), so concurrent agents do not copy the whole Emacs at once.
+Such a child runs with `:read-only t :network nil', whatever the session
+otherwise has, and is refused where no sandbox can give that, because
+the copy is the user's data.  Credentials are left out by name
 (`harness-snapshot-withheld-regexp`, `harness-snapshot-withheld-buffers-regexp`),
 and the manifest names them; see docs/trust-model.md.
 

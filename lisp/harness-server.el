@@ -191,10 +191,27 @@ reloaded but some files failed to load or some modules to initialise
      (t (harness-log 'info "server: reloaded %d files" (plist-get result :files))
         (list :files (plist-get result :files))))))
 
+(defconst harness-server--log-line-max (* 64 1024)
+  "Most characters of one log line the parent keeps for the log.
+The child writes its log to stderr a line at a time and the parent holds
+what has not ended yet.  An error can name a whole tree in one line:
+holding all of it made the parent copy hundreds of megabytes a chunk at
+a time, which stopped the UI.  What is past this many characters is
+dropped, and `harness-log' cuts the entry it keeps to the same size.")
+
 (defun harness-server--log-to-stderr (level msg)
   "Write LEVEL and MSG as one stderr line for the parent's log."
   (princ (format "%s %s\n" (upcase (symbol-name level)) (replace-regexp-in-string "\n" "\\\\n" msg))
          #'external-debugging-output))
+
+(defun harness-server--log-line (line)
+  "Log LINE, one line of the child's stderr, cut to `harness-server--log-line-max'."
+  (when (> (length line) harness-server--log-line-max)
+    (setq line (concat (substring line 0 harness-server--log-line-max) "…")))
+  (if (string-match "\\`\\(DEBUG\\|INFO\\|WARN\\|ERROR\\) \\(.*\\)\\'" line)
+      (harness-log (intern (downcase (match-string 1 line)))
+                   "[server] %s" (match-string 2 line))
+    (harness-log 'info "[server] %s" line)))
 
 (defun harness-server-main ()
   "Run the harness process.  Called by `emacs --batch'; never returns.
@@ -389,10 +406,12 @@ ends: a caller that started another meanwhile can tell which one ended."
                                                  (substring line (length harness-server--address-prefix))
                                                  token))))
                                    (t
-                                    (if (string-match "\\`\\(DEBUG\\|INFO\\|WARN\\|ERROR\\) \\(.*\\)\\'" line)
-                                        (harness-log (intern (downcase (match-string 1 line)))
-                                                     "[server] %s" (match-string 2 line))
-                                      (harness-log 'info "[server] %s" line)))))))))))
+                                    (harness-server--log-line line))))
+                                (when (> (length pending) harness-server--log-line-max)
+                                  (setq pending (concat
+                                                 "…"
+                                                 (substring pending (- (length pending)
+                                                                       harness-server--log-line-max)))))))))))
     (harness-server--write-config config)
     (let ((proc (make-process
                  :name "harness-server"

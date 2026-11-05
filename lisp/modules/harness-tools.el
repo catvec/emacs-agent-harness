@@ -66,6 +66,7 @@
 (require 'harness-util)
 
 (defvar harness-state-directory)
+(defvar harness-notifications-providers)
 
 (declare-function harness-module-plugin-p "harness" (name))
 
@@ -93,40 +94,70 @@ leaving the session waiting forever.")
 (defconst harness-tools--ui-notice-interval 300
   "Seconds between desktop notices that the Emacs UI is not answering.")
 
+(defconst harness-tools--ui-notice-min-seconds 5
+  "Seconds a wait must have lasted to be called an unresponsive UI.
+A shorter deadline says the tool gave up quickly, not that the Emacs is
+blocked: a request given the last tenth of a second of a budget fails
+at once, and reporting that as a frozen Emacs only made noise.  The
+copy of the user's Emacs is taken in slices, each given time of its own
+\(`harness-tools-shell--snapshot-fetch'), and a slice that misses its
+deadline is an expected partial answer, not a freeze.")
+
 (defvar harness-tools--ui-notice-at 0
   "When the UI was last reported unresponsive.")
 
 (declare-function harness-notifications-desktop-notify "harness-notifications-desktop" (&rest params))
+
+(defun harness-tools--notifications-enabled-p ()
+  "Non-nil when this harness may show the user a notification.
+`harness-notifications-providers' nil says it may not: the user asked
+for no notifications, or this is an instance whose work is nobody's -- a
+development one `scripts/harness-dev.el' starts, or the demos of
+`scripts/harness-media.el'.  Without the notifications module the value
+is not set, and the desktop notice is still shown."
+  (or (not (boundp 'harness-notifications-providers))
+      harness-notifications-providers))
 
 (defun harness-tools--ui-unresponsive (what seconds)
   "Report that WHAT, the Emacs a tool asked, did not answer within SECONDS.
 Logs the miss, and shows a desktop notification at most every
 `harness-tools--ui-notice-interval' seconds: an Emacs blocked in a
 subprocess call can stay that way for hours, and nothing else would
-say so."
-  (harness-log 'warn "tools: %s did not answer within %ss; it may be blocked" what seconds)
-  (when (> (- (float-time) harness-tools--ui-notice-at) harness-tools--ui-notice-interval)
-    (setq harness-tools--ui-notice-at (float-time))
-    (when (or (fboundp 'harness-notifications-desktop-notify)
-              (require 'harness-notifications-desktop nil t))
-      (ignore-errors
-        (harness-notifications-desktop-notify
-         :title "Harness: the Emacs UI is not responding"
-         :body (format "A tool waited %ss for %s to answer; it may be blocked. See %s."
-                       seconds what harness-log-buffer-name)
-         :urgency 'critical)))))
+say so.  A wait shorter than `harness-tools--ui-notice-min-seconds' is
+not called a blocked UI and notifies nobody, and neither does a harness
+that sends no notifications (`harness-tools--notifications-enabled-p')."
+  (if (< seconds harness-tools--ui-notice-min-seconds)
+      (harness-log 'info "tools: %s did not answer within %s; not reported, the wait was short"
+                   what (harness-format-duration seconds))
+    (harness-log 'warn "tools: %s did not answer within %s; it may be blocked"
+                 what (harness-format-duration seconds))
+    (when (and (harness-tools--notifications-enabled-p)
+               (> (- (float-time) harness-tools--ui-notice-at) harness-tools--ui-notice-interval))
+      (setq harness-tools--ui-notice-at (float-time))
+      (when (or (fboundp 'harness-notifications-desktop-notify)
+                (require 'harness-notifications-desktop nil t))
+        (ignore-errors
+          (harness-notifications-desktop-notify
+           :title "Harness: the Emacs UI is not responding"
+           :body (format "A tool waited %s for %s to answer; it may be blocked. See %s."
+                         (harness-format-duration seconds) what harness-log-buffer-name)
+           :urgency 'critical))))))
 
-(defun harness-tools--with-deadline (promise seconds what)
+(defun harness-tools--with-deadline (promise seconds what &optional quiet)
   "Return a promise settled as PROMISE, or rejected after SECONDS.
 WHAT names the work for the timeout, which is also reported as an
-unresponsive UI (`harness-tools--ui-unresponsive')."
+unresponsive UI (`harness-tools--ui-unresponsive'), unless QUIET is
+non-nil: a deadline that is expected to be missed, such as one slice of
+the copy of the user's Emacs, whose partial copy is an answer of its
+own."
   (let ((result (harness-make-promise))
         (timer nil) (settled nil))
     (setq timer (run-at-time seconds nil
                              (lambda ()
                                (unless settled
                                  (setq settled t)
-                                 (harness-tools--ui-unresponsive what seconds)
+                                 (unless quiet
+                                   (harness-tools--ui-unresponsive what seconds))
                                  (harness-reject result
                                                  (list 'timeout
                                                        (format "%s did not answer within %ss"
@@ -328,7 +359,7 @@ message, rather than Emacs's printed form of the whole error."
         "It failed."
       (concat (upcase (substring text 0 1)) (substring text 1) "."))))
 
-(defun harness-tools-ask-emacs (method params &optional seconds)
+(defun harness-tools-ask-emacs (method params &optional seconds quiet)
   "Ask the Emacs lent to the harness for METHOD with PARAMS; return a promise.
 METHOD names a request of lisp/harness-emacs-endpoint.el, such as
 \"buffers\"; `emacs/request' sends it to the one Emacs a client lent.
@@ -336,13 +367,15 @@ The promise resolves to the answer.  It rejects when no Emacs is
 attached, when it refuses or fails (with its message; see
 `harness-tools-reason'), and when it does not answer within SECONDS
 \(default `harness-tools--emacs-timeout'), which is also reported as an
-unresponsive UI."
+unresponsive UI unless QUIET is non-nil: a slice of a copy may be
+expected to stop short, and is an answer of its own."
   (if (not (harness-method-exists-p 'emacs/request))
       (harness-rejected (list 'harness-error "no Emacs is attached to the harness: it serves no clients"))
     (harness-tools--with-deadline
      (harness-call-async 'emacs/request method params)
      (or seconds harness-tools--emacs-timeout)
-     "the user's Emacs")))
+     "the user's Emacs"
+     quiet)))
 
 (defun harness-tools--clean-content (result)
   "Return RESULT with any raw byte in its `:content' repaired.

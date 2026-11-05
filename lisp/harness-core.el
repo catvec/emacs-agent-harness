@@ -61,6 +61,18 @@ backtrace too."
 (defconst harness--log-max-lines 5000
   "Maximum number of lines kept in the log buffer.")
 
+(defconst harness--log-max-chars (* 4 1024 1024)
+  "Most characters the log buffer keeps; older text is dropped.
+A size, not only a line count, bounds it: one line can hold the whole
+of a `rm' error, and counting the lines of such a buffer on every log
+entry froze Emacs.")
+
+(defconst harness--log-entry-chars (* 64 1024)
+  "Most characters one log entry keeps; the rest is cut.
+An error can carry a whole tree of `rm' errors, which the log must not
+keep: a 600 MB line reached the UI, and every entry after it paid for
+the buffer it made.")
+
 (defconst harness--log-value-limit 200
   "Longest text a log line may quote of one value, in characters.
 A value logged with `%s' can be a whole transcript or request body; it
@@ -83,6 +95,14 @@ cannot recurse.")
 (defvar harness--log-filtering nil
   "Non-nil while `harness-log-filter-function' runs.")
 
+(defun harness--log-short (text)
+  "Return TEXT cut to `harness--log-entry-chars', saying so at its end.
+An error's text can be a whole tree of `rm' errors; keeping it whole
+puts hundreds of megabytes in the log buffer."
+  (if (<= (length text) harness--log-entry-chars)
+      text
+    (concat (substring text 0 (1- harness--log-entry-chars)) "…")))
+
 (defun harness--log-filtered (msg)
   "Return MSG, a formatted log message, as the log filter lets it stand.
 See `harness-log-filter-function'."
@@ -96,16 +116,24 @@ See `harness-log-filter-function'."
 
 (defun harness-log (level fmt &rest args)
   "Log FMT formatted with ARGS at LEVEL (debug, info, warn or error).
-The message goes through `harness-log-filter-function' first."
+The message is cut to `harness--log-entry-chars' and goes through
+`harness-log-filter-function' first.  The buffer keeps at most
+`harness--log-max-chars' characters and `harness--log-max-lines' lines."
   (when (>= (or (alist-get level harness--log-levels) 1)
             (or (alist-get harness-log-level harness--log-levels) 1))
-    (let ((msg (harness--log-filtered (apply #'format-message fmt args))))
+    (let ((msg (harness--log-filtered
+                (harness--log-short (apply #'format-message fmt args)))))
       (with-current-buffer (get-buffer-create harness-log-buffer-name)
         (let ((inhibit-read-only t))
           (goto-char (point-max))
           (insert (format-time-string "%H:%M:%S.%3N ")
                   (format "%-5s " (upcase (symbol-name level)))
                   msg "\n")
+          (let ((excess (- (buffer-size) harness--log-max-chars)))
+            (when (> excess 0)
+              (goto-char (+ (point-min) excess))
+              (forward-line 1)
+              (delete-region (point-min) (point))))
           (when (> (count-lines (point-min) (point-max)) harness--log-max-lines)
             (goto-char (point-min))
             (forward-line (/ harness--log-max-lines 4))

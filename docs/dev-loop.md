@@ -83,6 +83,13 @@ writes into a repository's `.git`, where the real harness keeps a git
 project's task board.  The tests do the same, except those that make
 repositories of their own.
 
+A development daemon sends no notifications: its tasks, prompts and
+stalls are demonstrations, so `harness-notifications-providers` is nil
+there, and neither a desktop notice nor a Gotify push says "Ready for
+review" about a demo.  The media runs (`scripts/media.sh`) do the same.
+To try the notification setup in a dev frame, set
+`harness-notifications-providers` back to `(system gotify)` there.
+
 The harness always runs byte-compiled code: `harness-start` and
 `harness-reload` compile every source file into
 `<state-directory>/elc/` and load the result, refusing the reload if any

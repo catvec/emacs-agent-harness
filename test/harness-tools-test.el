@@ -570,5 +570,68 @@ chain's paths avoid that."
       (ignore-errors (harness-tools-resolve-path "/ssh:u@box.example.invalid:~/x" '(:cwd "/work/proj/"))))
     (should (equal '("/ssh:u@box.example.invalid:") attempts))))
 
+;;;; An Emacs that may be blocked, and an instance that notifies nobody
+
+(defvar harness-notifications-providers)
+
+(defmacro harness-tools-test--with-notices (&rest body)
+  "Run BODY with the desktop notices `harness-tools--ui-unresponsive' shows in `notices'."
+  (declare (indent 0))
+  `(let ((notices nil)
+         (harness-notifications-providers '(system))
+         (harness-tools--ui-notice-at 0))
+     (cl-letf (((symbol-function 'harness-notifications-desktop-notify)
+                (lambda (&rest params) (push params notices) (harness-resolved t))))
+       ,@body
+       notices)))
+
+(ert-deftest harness-tools-a-short-wait-is-not-a-frozen-emacs ()
+  "A deadline of a fraction of a second is a tool giving up, not a freeze.
+The copy of the user's Emacs is taken in slices, the last of which may
+have 0.1s of the time allowed left; a notification about that is noise."
+  (harness-tools-test-with
+    (should-not (harness-tools-test--with-notices
+                  (harness-tools--ui-unresponsive "the user's Emacs" 0.123456789)))))
+
+(ert-deftest harness-tools-a-long-wait-is-reported-with-a-readable-duration ()
+  "A wait long enough to be a blocked UI is reported, its duration in words."
+  (harness-tools-test-with
+    (let ((notice (car (harness-tools-test--with-notices
+                         (harness-tools--ui-unresponsive "the user's Emacs" 15.25)))))
+      (should notice)
+      (should (equal "Harness: the Emacs UI is not responding" (plist-get notice :title)))
+      (let ((body (plist-get notice :body)))
+        (should (string-search "waited 15.2s" body))
+        (should-not (string-search "15.25" body))))))
+
+(ert-deftest harness-tools-an-instance-that-sends-no-notifications-says-nothing ()
+  "With `harness-notifications-providers' nil, no notice about a blocked UI.
+A development or demo instance sends no notifications at all, and a user
+who turned notifications off hears nothing through this back door."
+  (harness-tools-test-with
+    (let ((notices nil)
+          (harness-notifications-providers nil)
+          (harness-tools--ui-notice-at 0))
+      (cl-letf (((symbol-function 'harness-notifications-desktop-notify)
+                 (lambda (&rest params) (push params notices) (harness-resolved t))))
+        (harness-tools--ui-unresponsive "the user's Emacs" 15))
+      (should-not notices))))
+
+(ert-deftest harness-tools-a-quiet-deadline-reports-nothing ()
+  "A deadline expected to be missed does not call the UI unresponsive.
+The slices of the copy of the user's Emacs stop short on purpose."
+  (harness-tools-test-with
+    (let ((reported nil))
+      (cl-letf (((symbol-function 'harness-tools--ui-unresponsive)
+                 (lambda (&rest _) (setq reported t))))
+        (should-error (harness-test-await
+                       (harness-tools--with-deadline (harness-make-promise) 0.01 "a slice" t)
+                       2))
+        (should-not reported)
+        (should-error (harness-test-await
+                       (harness-tools--with-deadline (harness-make-promise) 0.01 "a tool")
+                       2))
+        (should reported)))))
+
 (provide 'harness-tools-test)
 ;;; harness-tools-test.el ends here
