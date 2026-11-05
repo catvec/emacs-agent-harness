@@ -6738,6 +6738,7 @@ fails the request, has none to count."
           (harness-ui-redraw-hook nil)
           (harness-ui-quota-functions nil)
           (harness-chat-panel-functions nil)
+          (harness-chat-settings-functions nil)
           (harness-ui-tasks--timer nil)
           (harness-ui-map (make-sparse-keymap)))
       (cl-letf (((symbol-function 'harness-ui-request)
@@ -6751,15 +6752,17 @@ fails the request, has none to count."
               (should (memq #'harness-ui-tasks--notify-segment harness-ui-notify-segment-functions))
               (should (memq #'harness-ui-tasks--on-review-event harness-ui-event-functions))
               (should (memq #'harness-ui-tasks--fetch-review harness-ui-connected-hook))
-              ;; A task's session shows the banner of the backlog and the panel of its state.
+              ;; A task's session shows the banner of the backlog; where its task
+              ;; stands in the queue is the settings line's.
               (should (memq #'harness-ui-tasks--backlog-panel harness-chat-panel-functions))
-              (should (memq #'harness-ui-tasks--state-panel harness-chat-panel-functions))
+              (should-not (memq 'harness-ui-tasks--state-panel harness-chat-panel-functions))
+              (should (memq #'harness-ui-tasks--queue-items harness-chat-settings-functions))
               (should (equal (concat " harness " (harness-ui-tasks-test--flag 2) " ")
                              (substring-no-properties harness-ui-notify--string)))
               ;; Initialised again, as a reload does: the hooks once each.
               (harness-ui-tasks--init)
               (should (= 1 (cl-count #'harness-ui-tasks--notify-segment harness-ui-notify-segment-functions)))
-              (should (= 1 (cl-count #'harness-ui-tasks--state-panel harness-chat-panel-functions)))
+              (should (= 1 (cl-count #'harness-ui-tasks--queue-items harness-chat-settings-functions)))
               ;; Connecting to a harness without tasks: nothing to count.
               (setq requests nil
                     answer (lambda () (harness-rejected '(harness-error "Unknown method"))))
@@ -6776,7 +6779,7 @@ fails the request, has none to count."
               (should-not (memq #'harness-ui-tasks--on-review-event harness-ui-event-functions))
               (should-not (memq #'harness-ui-tasks--fetch-review harness-ui-connected-hook))
               (should-not (memq #'harness-ui-tasks--backlog-panel harness-chat-panel-functions))
-              (should-not (memq #'harness-ui-tasks--state-panel harness-chat-panel-functions))
+              (should-not (memq #'harness-ui-tasks--queue-items harness-chat-settings-functions))
               (should (zerop (hash-table-count harness-ui-tasks--in-review)))
               (should (equal "" harness-ui-notify--string)))
           (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer)))))))
@@ -7269,24 +7272,16 @@ click on one of the card's buttons pushes the button and opens nothing."
         (should-error (harness-ui-tasks-open) :type 'user-error))
       (should-not opened))))
 
-;;;; The panel of a task's state in its session
+;;;; A task's session commands
 
-;; A task in review has the review banner in its session, a backlog task
-;; its own: every other state gets a panel that names the column and has
-;; the card's actions as buttons, so a task is stopped, retried, merged
-;; again, marked done or archived from its chat as well as from the board.
+;; A task's session runs these from its settings line: [Pause], [Resume]
+;; and [Start now] for its place in the queue, [Start now] and [Queue it]
+;; in the backlog's banner.  The board's commands do the same on a card.
 
 (defvar harness-ui-tasks--session-tasks)
 (defvar harness-ui-tasks--session-tasks-asked)
-(declare-function harness-ui-tasks--state-panel "harness-ui-tasks")
-(declare-function harness-ui-tasks--session-actions "harness-ui-tasks")
 (declare-function harness-ui-tasks-session-pause "harness-ui-tasks")
 (declare-function harness-ui-tasks-session-resume "harness-ui-tasks")
-(declare-function harness-ui-tasks-session-retry "harness-ui-tasks")
-(declare-function harness-ui-tasks-session-merge "harness-ui-tasks")
-(declare-function harness-ui-tasks-session-complete "harness-ui-tasks")
-(declare-function harness-ui-tasks-session-archive "harness-ui-tasks")
-(declare-function harness-ui-tasks-session-cancel "harness-ui-tasks")
 (declare-function harness-ui-tasks-session-start "harness-ui-tasks")
 (declare-function harness-ui-tasks-session-queue "harness-ui-tasks")
 
@@ -7307,137 +7302,6 @@ the harness whose task the session is (`harness-ui-tasks--session-task')."
            (puthash sid t harness-ui-tasks--session-tasks-asked)
            (when (plist-get task :id) (puthash sid task harness-ui-tasks--session-tasks))
            ,@body)))))
-
-(defun harness-ui-tasks-test--panel-text (task)
-  "The text of the panel of TASK's session, or nil for none."
-  (harness-ui-tasks-test-in-session task
-    (when-let* ((panel (harness-ui-tasks--state-panel)))
-      (substring-no-properties panel))))
-
-(defun harness-ui-tasks-test--panel-labels (task)
-  "The labels of the buttons on the panel of TASK's session; nil without a panel."
-  (let ((text (harness-ui-tasks-test--panel-text task)) (pos 0) labels)
-    (while (and text (string-match "\\[\\([^]]+\\)\\]" text pos))
-      (push (match-string 1 text) labels)
-      (setq pos (match-end 0)))
-    (nreverse labels)))
-
-(ert-deftest harness-ui-tasks-state-panel-offers-the-cards-actions ()
-  "A task's session has a button for each action its card has in that state.
-Only those a session can do: the card's Open, Edit, Refine and Reply need
-the board or have the session's own box.  A task in review or in the
-backlog has its banner instead, and no panel; an archived one, which the
-review banner leaves out, can be restored."
-  (let ((cases
-         `((,(harness-ui-tasks-test--waiting "t-1" "Waits" 1 :session "s-1")
-            ("Start now" "Drop" "Pause"))
-           (,(harness-ui-tasks-test--waiting "t-2" "Paused" 2 :session "s-2" :returned 5.0
-                                             :hold (list :kind "paused"))
-            ("Resume" "Start now" "Drop"))
-           ((:id "t-3" :session "s-3" :state "active" :column "active" :prompt "At work")
-            ("Pause" "Stop"))
-           ((:id "t-4" :session "s-4" :state "active" :column "needs-input" :outcome "error"
-             :prompt "Failed")
-            ("Retry" "Pause" "Mark done"))
-           ((:id "t-5" :session "s-5" :state "active" :column "needs-input" :outcome "merge-failed"
-             :prompt "Conflict")
-            ("Retry merge" "Pause" "Mark done"))
-           ((:id "t-6" :session "s-6" :state "active" :column "needs-input" :outcome "cannot-continue"
-             :prompt "Stuck")
-            ("Pause" "Mark done"))
-           ((:id "t-7" :session "s-7" :state "active" :column "merging" :merge-status "queued"
-             :prompt "Merging")
-            ("Stop"))
-           ((:id "t-8" :session "s-8" :state "done" :column "done" :prompt "Finished")
-            ("Archive"))
-           ((:id "t-9" :session "s-9" :state "done" :column "done" :archived t :prompt "Old")
-            ("Unarchive"))
-           ((:id "t-10" :session "s-10" :state "review" :column "review" :archived t
-             :prompt "Old review")
-            ("Unarchive"))
-           ;; The banners of review and of the backlog are theirs.
-           ((:id "t-11" :session "s-11" :state "review" :column "review" :prompt "To review") nil)
-           ((:id "t-12" :session "s-12" :state "pending" :column "backlog" :backlog t
-             :prompt "In the backlog")
-            nil)
-           ((:id "t-13" :session "s-13" :state "refining" :column "backlog" :prompt "Writing it up")
-            nil))))
-    (dolist (case cases)
-      (should (equal (cadr case) (harness-ui-tasks-test--panel-labels (car case)))))))
-
-(ert-deftest harness-ui-tasks-state-panel-is-for-a-tasks-session ()
-  "A session that is no task's has no panel, nor has one the UI knows no task for."
-  (harness-ui-tasks-test-in-session '(:session "s-none")
-    ;; The lookup was made, and found no task.
-    (should-not (gethash "s-none" harness-ui-tasks--session-tasks))
-    (should-not (harness-ui-tasks--state-panel))
-    ;; No session id at all.
-    (setq-local harness-ui-session-id nil)
-    (should-not (harness-ui-tasks--state-panel))))
-
-(ert-deftest harness-ui-tasks-state-panel-says-where-the-task-stands ()
-  "The panel names the column in the board's words, then a little of how the task stands.
-The buttons are on a line of their own under it."
-  (let ((panel (lambda (task)
-                 (let ((text (harness-ui-tasks-test--panel-text task)))
-                   ;; Two lines: the heading, and the buttons.
-                   (should (string-match "\\`[^\n]+\n   \\(\\[[^\n]+\\]\\)\n\\'" text))
-                   (car (split-string text "\n"))))))
-    (should (string-match-p " Pending · waiting for a slot\\'"
-                            (funcall panel (harness-ui-tasks-test--waiting "t-1" "Waits" 1 :session "s-1"))))
-    (should (string-match-p " Pending · paused\\'"
-                            (funcall panel (harness-ui-tasks-test--waiting
-                                            "t-2" "Paused" 2 :session "s-2" :returned 5.0
-                                            :hold (list :kind "paused")))))
-    (should (string-match-p " In progress · starting…\\'"
-                            (funcall panel '(:id "t-3" :session "s-3" :state "active" :column "active"
-                                             :prompt "At work"))))
-    (should (string-match-p " Requires your input · stopped: error — boom\\'"
-                            (funcall panel '(:id "t-4" :session "s-4" :state "active" :column "needs-input"
-                                             :outcome "error" :error "boom" :prompt "Failed"))))
-    (should (string-match-p " Requires your input · could not merge into main: a.el conflicts\\'"
-                            (funcall panel '(:id "t-5" :session "s-5" :state "active" :column "needs-input"
-                                             :outcome "merge-failed" :error "a.el conflicts"
-                                             :prompt "Conflict"))))
-    (should (string-match-p " Merging · queued to merge into main\\'"
-                            (funcall panel '(:id "t-6" :session "s-6" :state "active" :column "merging"
-                                             :merge-status "queued" :prompt "Merging"))))
-    (should (string-match-p " Completed · merged into main · took 5m\\'"
-                            (funcall panel '(:id "t-7" :session "s-7" :state "done" :column "done"
-                                             :merged t :started 1000.0 :finished 1300.0 :prompt "Done"))))
-    (should (string-match-p " Completed · archived\\'"
-                            (funcall panel '(:id "t-8" :session "s-8" :state "done" :column "done"
-                                             :archived t :prompt "Old"))))
-    ;; What its session is doing, when the UI knows it.
-    (harness-ui-tasks-test-in-session '(:id "t-9" :session "s-9" :state "active" :column "active"
-                                        :prompt "At work")
-      (puthash sid (list :id sid :status "running"
-                         :todos (list (list :status "done" :text "Read the code")
-                                      (list :status "in-progress" :text "Write the tests")))
-               harness-ui--sessions)
-      (should (string-match-p " In progress · Write the tests\n"
-                              (substring-no-properties (harness-ui-tasks--state-panel)))))))
-
-(ert-deftest harness-ui-tasks-state-panel-buttons-run-the-session-commands ()
-  "A button of the panel runs its session command, with the tooltip of what it does."
-  (harness-ui-tasks-test-in-session '(:id "t-1" :session "s-1" :state "active" :column "active"
-                                      :prompt "At work")
-    (let* ((panel (harness-ui-tasks--state-panel))
-           (pos (string-search "[Pause]" panel))
-           (ran nil))
-      (should pos)
-      (should (equal "Pause the task: back in the pending queue, held there until resumed"
-                     (get-text-property (1+ pos) 'help-echo panel)))
-      (should (get-text-property (1+ pos) 'button panel))
-      (cl-letf (((symbol-function 'harness-ui-tasks-session-pause) (lambda () (interactive) (setq ran 'pause)))
-                ((symbol-function 'harness-ui-tasks-session-cancel) (lambda () (interactive) (setq ran 'stop))))
-        (with-temp-buffer
-          (insert panel)
-          (push-button (+ (point-min) pos 1))
-          (should (eq 'pause ran))
-          (goto-char (point-min))
-          (push-button (+ (point-min) (string-search "[Stop]" panel) 1))
-          (should (eq 'stop ran)))))))
 
 (ert-deftest harness-ui-tasks-session-commands-ask-the-harness ()
   "Each session command asks for what the board's command of its name asks.
@@ -7461,7 +7325,6 @@ a command that does not apply to the task says why, and asks nothing."
           (backlog '(:id "t-4" :session "s-4" :state "pending" :column "backlog" :backlog t
                      :prompt "In the backlog"))
           (done '(:id "t-5" :session "s-5" :state "done" :column "done" :prompt "Done"))
-          (archived '(:id "t-6" :session "s-6" :state "done" :column "done" :archived t :prompt "Old"))
           (review '(:id "t-7" :session "s-7" :state "review" :column "review" :prompt "To review")))
       (should (equal '((("_harness/task/pause" (:id "t-1"))) . "Paused")
                      (ask active #'harness-ui-tasks-session-pause)))
@@ -7469,29 +7332,11 @@ a command that does not apply to the task says why, and asks nothing."
                      (ask waiting #'harness-ui-tasks-session-pause)))
       (should (equal '((("_harness/task/resume" (:id "t-2"))) . "Resumed")
                      (ask paused #'harness-ui-tasks-session-resume)))
-      (should (equal '((("_harness/task/retry" (:id "t-1"))) . "Retried")
-                     (ask active #'harness-ui-tasks-session-retry)))
-      (should (equal '((("_harness/task/merge" (:id "t-1"))) . "Merge queued")
-                     (ask active #'harness-ui-tasks-session-merge)))
-      (should (equal '((("_harness/task/complete" (:id "t-1"))) . "Completed")
-                     (ask active #'harness-ui-tasks-session-complete)))
-      (should (equal '((("_harness/task/archive" (:id "t-5" :restore nil))) . "Archived")
-                     (ask done #'harness-ui-tasks-session-archive)))
-      (should (equal '((("_harness/task/archive" (:id "t-6" :restore t))) . "Restored")
-                     (ask archived #'harness-ui-tasks-session-archive)))
-      ;; Stopping a task at work asks nothing first; dropping one that waits does.
-      (should (equal '((("_harness/task/cancel" (:id "t-1"))) . "Stopped")
-                     (ask active #'harness-ui-tasks-session-cancel)))
-      (let ((asked nil))
-        (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) nil)))
-          (should (equal '(nil) (list (car (ask waiting #'harness-ui-tasks-session-cancel))))))
-        (should (equal '("Drop pending task “Waits”? ") asked))
-        (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t)))
-          (should (equal '((("_harness/task/cancel" (:id "t-3"))) . "Stopped")
-                         (ask waiting #'harness-ui-tasks-session-cancel)))))
       ;; Starting works on a task in the queue as on one in the backlog, and queueing on the backlog's.
       (should (equal '((("_harness/task/start" (:id "t-3"))) . "Starting the task")
                      (ask waiting #'harness-ui-tasks-session-start)))
+      (should (equal '((("_harness/task/start" (:id "t-3"))) . "Starting the task")
+                     (ask waiting #'harness-ui-tasks-session-start-now)))
       (should (equal '((("_harness/task/start" (:id "t-4"))) . "Starting the task")
                      (ask backlog #'harness-ui-tasks-session-start)))
       (should (equal '((("_harness/task/queue" (:id "t-4"))) . "Queued")
@@ -7501,7 +7346,7 @@ a command that does not apply to the task says why, and asks nothing."
       (should-not (refused active #'harness-ui-tasks-session-resume))
       (should-not (refused done #'harness-ui-tasks-session-start))
       (should-not (refused waiting #'harness-ui-tasks-session-queue))
-      (should-not (refused '(:session "s-none") #'harness-ui-tasks-session-retry))
+      (should-not (refused '(:session "s-none") #'harness-ui-tasks-session-pause))
       (should-not (refused '(:session "s-none") #'harness-ui-tasks-session-start)))))
 
 (ert-deftest harness-ui-tasks-session-command-failure-is-said ()
@@ -7515,55 +7360,29 @@ a command that does not apply to the task says why, and asks nothing."
                 ((symbol-function 'message)
                  (lambda (format-string &rest args)
                    (push (apply #'format format-string args) said))))
-        (harness-ui-tasks-session-pause)
-        (harness-ui-tasks-session-retry))
-      (should (= 2 (length said)))
-      (should (string-match-p "\\`Could not retry the task: .*No slot for it" (car said)))
-      (should (string-match-p "\\`Could not pause the task: .*No slot for it" (cadr said))))))
+        (harness-ui-tasks-session-pause))
+      (should (= 1 (length said)))
+      (should (string-match-p "\\`Could not pause the task: .*No slot for it" (car said))))))
 
-(ert-deftest harness-ui-tasks-live-state-panel-in-a-tasks-session ()
-  "The chat of a queued task pauses, resumes, starts and archives it.
-All the way through, against the harness: the panel follows the task as
-the buttons change it, its heading naming the column and how it stands."
+(ert-deftest harness-ui-tasks-live-session-shows-state-on-the-settings-line-only ()
+  "A task's chat has no status banner above the box: its settings line says it.
+The session of a task waiting for the user's reply shows \"Needs input\"
+and [Pause] on the settings line, and nothing repeats the column above
+the compose box."
   (harness-ui-tasks-test-with
     (harness-test-load-module 'ui-chat)
-    (let* ((harness-tasks-max-running 0)
-           (id (plist-get (harness-call 'task/submit default-directory "wait in the queue") :id))
-           (sid (plist-get (harness-call 'task/get id) :session)))
-      (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
-      (let ((chat (harness-ui-tasks-test--chat sid)))
-        (harness-ui-tasks-test--wait-chat-text chat "Pending · waiting for a slot")
-        (should (string-match-p "\\[Start now\\] \\[Drop\\] \\[Pause\\]"
-                                (harness-ui-tasks-test--chat-text chat)))
-        ;; Paused: held where it is, and Resume comes first.
-        (harness-ui-tasks-test--push-chat-button chat "[Pause]")
-        (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :paused)) 5 "the task to be paused")
-        (harness-ui-tasks-test--wait-chat-text chat "Pending · paused")
-        (should (string-match-p "\\[Resume\\] \\[Start now\\] \\[Drop\\]"
-                                (harness-ui-tasks-test--chat-text chat)))
-        (harness-ui-tasks-test--push-chat-button chat "[Resume]")
-        (harness-test-wait (lambda () (not (plist-get (harness-call 'task/get id) :paused))) 5
-                           "the task to be resumed")
-        (harness-ui-tasks-test--wait-chat-text chat "Pending · waiting for a slot")
-        ;; Started now, whatever the limit: it works and is done.
-        (setq harness-provider-demo-script-override
-              '((:type text :delta "Done.") (:type done :stop-reason end-turn)))
-        (harness-ui-tasks-test--push-chat-button chat "[Start now]")
-        (harness-test-wait (lambda () (eq 'done (plist-get (harness-call 'task/get id) :state))) 10
-                           "the task to be done")
-        (harness-ui-tasks-test--wait-chat-text chat "Completed")
-        (should (string-match-p "\\[Archive\\]" (harness-ui-tasks-test--chat-text chat)))
-        (should-not (string-match-p "\\[Start now\\]" (harness-ui-tasks-test--chat-text chat)))
-        ;; Archived, and restored.
-        (harness-ui-tasks-test--push-chat-button chat "[Archive]")
-        (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :archived)) 5
-                           "the task to be archived")
-        (harness-ui-tasks-test--wait-chat-text chat "\\[Unarchive\\]")
-        (should (string-match-p "Completed · .*archived" (harness-ui-tasks-test--chat-text chat)))
-        (harness-ui-tasks-test--push-chat-button chat "[Unarchive]")
-        (harness-test-wait (lambda () (not (plist-get (harness-call 'task/get id) :archived))) 5
-                           "the task to be restored")
-        (harness-ui-tasks-test--wait-chat-text chat "\\[Archive\\]")))))
+    (let ((harness-tasks-working-phase t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Which parser should I use?")
+             (:type done :stop-reason end-turn))))
+      (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
+      (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*Fix the flaky test")
+      (let* ((item (car (harness-call 'task/list default-directory)))
+             (chat (harness-ui-tasks-test--chat (plist-get item :session))))
+        (harness-ui-tasks-test--wait-settings chat "Needs input · \\[Pause\\]\\'")
+        (let ((text (harness-ui-tasks-test--chat-text chat)))
+          (should-not (string-match-p "Requires your input" text))
+          (should-not (string-match-p "waiting for your reply" text)))))))
 ;;;; Priority order, the Cancelled column
 
 (ert-deftest harness-ui-tasks-review-and-progress-go-by-priority ()

@@ -14060,15 +14060,13 @@ the main checkout's board (`harness-files-main-root`).  A click on a
 card, or RET, opens its task's session in whatever column the task is:
 the session is where a task is handled.  Above its compose box a task in
 review has the review banner, a task waiting in the backlog its own, and
-a task in any other state a panel (`harness-ui-tasks--state-panel`, a
-function of `harness-chat-panel-functions`): the column's name, in the
-board's words, with a little of where the task stands, and a button for
-each action of the task's card that the session can do -- the card's
-list (`harness-ui-tasks--actions`) filtered through
-`harness-ui-tasks--session-commands`, which names for each board command
-the command that runs it from the session (`harness-ui-tasks-session-pause`
-and its kind, each one request of the task's `_harness/task/*` method,
-the answer becoming the session's task at once).  Redraws, after
+every other task's state is on the session's settings line, in the
+board's words, with the buttons that move it through the queue --
+[Start now], [Pause] and [Resume] (`harness-ui-tasks--queue-items',
+`harness-ui-tasks-session-pause' and its kind, each one request of the
+task's `_harness/task/*` method, the answer becoming the session's task
+at once).  The rest of a card's actions and keys stay on the board.
+Redraws, after
 every change and on every tick of the clock, leave point and each
 window where they were: on the same line of the same card (its buttons
 are on the second), on the same button, on the same line above the

@@ -122,17 +122,12 @@ turn has ended.
 A task is handled in its session, whatever its state.  In review it
 has the review banner (harness-ui-review.el: [Verify], [Send back],
 [Keep working], the report and the changes); in the backlog, the
-banner above.  In
-every other state its session has a panel above the compose box: the
-column the task is in, in the board's words, and a button for each
-action its card has there that the session can do -- start it now,
-pause or resume it, drop or stop it, retry it, merge it again, mark
-it done, archive it or restore it (`harness-ui-tasks--state-panel`).
-The actions are the card's (`harness-ui-tasks--actions`), so a state
-the board gives another action gives the session the same; each runs a
-command of the session (`harness-ui-tasks-session-pause` and its kind,
-`harness-ui-tasks--session-commands`) that asks the harness for what
-the board's does.  The board keeps its keys and buttons.
+banner above.  In every other state its session's settings line says
+where the task stands, in the board's words, with the buttons that
+move it through the queue -- [Start now], [Pause] and [Resume] -- and
+nothing else above the compose box: the status is the settings line's,
+as it is for every session, and the board keeps the rest of its card's
+actions and keys.
 
 Priority: a task is low, medium (the default) or high priority, and
 that priority is its session's -- every task has its session from
@@ -337,14 +332,9 @@ the chevron that folds a card's recap, which only draws the card again.
 - `harness-ui-tasks-retry` — Have the task at point, which stopped part way, work on it again.
 - `harness-ui-tasks-return-to-work` — Take the task at point, which waits for your review, back to work.
 - `harness-ui-tasks-search` — Find tasks, sessions and commands from the board, or act on tasks, in words.
-- `harness-ui-tasks-session-archive` — Archive this session's task, or restore it when it is archived.
-- `harness-ui-tasks-session-cancel` — Stop this session's task, or drop it when it is still pending.
-- `harness-ui-tasks-session-complete` — Mark this session's task completed.
-- `harness-ui-tasks-session-merge` — Send the branch of this session's task through the merge queue again.
 - `harness-ui-tasks-session-pause` — Pause this session's task: back in the pending queue, held there until resumed.
 - `harness-ui-tasks-session-queue` — Put this session's backlog task in the pending queue.
 - `harness-ui-tasks-session-resume` — Resume this session's paused task: the queue starts it when its turn comes.
-- `harness-ui-tasks-session-retry` — Have this session's task, which stopped part way, work on it again.
 - `harness-ui-tasks-session-start` — Start this session's task now, even with every slot busy.
 - `harness-ui-tasks-session-start-now` — Start this session's task now, even with every slot busy.
 - `harness-ui-tasks-set-max-running` — Let N of each project's tasks work at once; N nil means no limit.
@@ -421,7 +411,6 @@ the chevron that folds a card's recap, which only draws the card again.
 
 ### Hooks it adds to
 
-- `harness-chat-panel-functions` → `harness-ui-tasks--state-panel`
 - `harness-chat-panel-functions` → `harness-ui-tasks--backlog-panel`
 - `harness-chat-settings-functions` → `harness-ui-tasks--queue-items`
 - `harness-ui-connected-hook` → `harness-ui-tasks--fetch-review`
