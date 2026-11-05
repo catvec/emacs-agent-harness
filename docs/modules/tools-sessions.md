@@ -39,9 +39,12 @@ Sessions:
   session, steers a running one, or queues for the next turn; it can
   wait for the reply.
 - `session_control` cancels a turn, resumes, closes or renames a
-  session, or answers a question it asked with ask_user.  The
-  harness's own question about a cold prompt cache (harness-cowboy.el)
-  is left to the user, as permission requests are.
+  session, or answers a question it asked with ask_user.  Rename is
+  the one action it may take on this session itself (the session_id
+  may be left out for it), as an agent asked to name itself after a
+  ticket does.  The harness's own question about a cold prompt cache
+  (harness-cowboy.el) is left to the user, as permission requests
+  are.
 - `session_settings` reads and changes what a session runs with: its
   model, thinking level, context window limit and budget, on this
   session by default or another one by name.  Every change goes
@@ -113,7 +116,7 @@ closed session: nothing new of its own is coming from it.
 
 ### Tools
 
-- `session_control` — Control another session. action=cancel stops its running turn; resume reopens a closed session; close deactivates it (it can be resumed later); rename sets its name; answer replies to a question it asked with ask_user (question_id may be omitted when there is one). Permission requests, and the harness's question about a cold prompt cache, are left to the user.
+- `session_control` — Control another session, or rename this one. action=cancel stops its running turn; resume reopens a closed session; close deactivates it (it can be resumed later); rename sets the name of the session session_id names, or this session's when session_id is left out; answer replies to a question it asked with ask_user (question_id may be omitted when there is one). Only rename may name this session itself. Permission requests, and the harness's question about a cold prompt cache, are left to the user.
 - `session_history` — Search and read this session's own conversation from before its last compaction (or a handoff from another model): the part your context holds only as a summary, a pointer to a transcript file, or not at all. Use it when you need something from back then -- what was asked, decided, tried, found or changed -- rather than guessing or redoing the work. query finds the messages, thinking, tool calls and results that mention it, newest first, with snippets and node ids; node_id shows one node whole with the nodes around it; with neither, the last nodes before the compaction, oldest first. Page back with before=<node id>. all=true looks through the whole conversation, the part since the compaction included. For other sessions, use session_search and session_read. The line at the end shows how to link a node in your message.
 - `session_list` — List harness sessions with id, status (idle, running, blocked, inactive), kind, name, model, working directory, cost, priority (when it is not the default medium) and what each one waits on. A task's priority is its session's. Defaults to the open sessions of this project; set include_inactive for closed ones and all_projects for every project. Internal sessions, the records of the model calls the harness makes on its own (the permission judge, naming, recaps…), are left out unless kind is internal. Session ids (or a unique prefix, or a unique name) are accepted by the other session_* tools.
 - `session_move` — Move a session to another working directory, and with it to that directory's project: for a session started in one place that works on another. The user is always asked to confirm, in every permission mode, since the session then reaches the new directory instead of the old one (keep_old_directory keeps the old one allowed too). session_id defaults to this session. This session, or another one running a turn, moves when its turn ends; until then its working directory stays the old one, and the new one is allowed for the rest of the turn. A moved session's next turn starts a new provider conversation in the new directory, which gets the transcript. Sessions in worktrees, task sessions and sessions with merges queued cannot move; a non-interactive session cannot ask. Moving a session back to where it works cancels a move it waits to make.

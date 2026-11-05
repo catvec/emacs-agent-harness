@@ -926,6 +926,33 @@ then, once answered, idle."
       (should (eq 'idle (plist-get (harness-call 'session/get other) :status)))
       (should (plist-get (harness-tools-sessions-test-run me "session_control" (list :session_id me :action "cancel")) :is-error)))))
 
+(ert-deftest harness-tools-sessions-control-renames-itself ()
+  "A session renames itself, as an agent told to take a ticket number does.
+The rename names this session by its own id, or with no session_id at
+all; every other action still refuses this session and needs an id."
+  (harness-tools-sessions-test-with
+    (let ((me (harness-tools-sessions-test-session)))
+      (let ((spec (harness-call 'tools/get "session_control")))
+        (should (equal '("action") (plist-get (plist-get spec :schema) :required)))
+        (should (string-match-p "rename sets the name" (plist-get spec :description))))
+      (should (equal "Renamed this session to \"TICKET-42\"."
+                     (harness-tools-sessions-test-ok me "session_control"
+                                                     (list :session_id me :action "rename" :name "TICKET-42"))))
+      (should (equal "TICKET-42" (plist-get (harness-call 'session/get me) :name)))
+      (should (equal "Renamed this session to \"TICKET-43\"."
+                     (harness-tools-sessions-test-ok me "session_control"
+                                                     (list :action "rename" :name "TICKET-43"))))
+      (should (equal "TICKET-43" (plist-get (harness-call 'session/get me) :name)))
+      (let ((r (harness-tools-sessions-test-run me "session_control" (list :action "rename" :name "  "))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "rename needs a name" (plist-get r :content))))
+      (let ((r (harness-tools-sessions-test-run me "session_control" (list :action "cancel"))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "A session id is required" (plist-get r :content))))
+      (let ((r (harness-tools-sessions-test-run me "session_control" (list :session_id me :action "close"))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "cannot close itself" (plist-get r :content)))))))
+
 (ert-deftest harness-tools-sessions-set-non-interactive ()
   "set_non_interactive changes this session, another one, or with all
 every current session and task of every project, as

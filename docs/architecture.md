@@ -9676,7 +9676,7 @@ TRAMP prefixes come from the session host):
 | `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_history` | Session history | query, regexp, node_id, before, limit, max_chars, kinds, all | read (this session's own conversation from before its last compaction or handoff; needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
-| `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta (answer refuses the harness's cold-cache question, left to the user) |
+| `session_control` | Control session | session_id (default: this session, for rename), action (cancel/resume/close/rename/answer), name, question_id, answer | meta (only rename may name the calling session; answer refuses the harness's cold-cache question, left to the user) |
 | `session_settings` | Session settings | action (read/set), session_id (default: this session), model, thinking (a level, or default for the model's own), context_window_limit (tokens: a number or "200k", or model/none for the model's own window), budget (USD, or none to remove it), budget_hard (a hard budget stops the next turn once spent) | meta (weighed per call, `harness-perms--call-kind`: a read is a read, a set asks in ask mode and is judged, as `session_send` is; the read shows the permission mode and non-interactive state, and the tool refuses them, allowed directories, the Linux capabilities of the session's commands, the working directory and the host, naming `set_non_interactive`, `request_escalation` (attribute `capability` for a capability), `request_directory_access`, `drop_access` or `session_move`) |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
@@ -10311,6 +10311,9 @@ lists a session's pending questions.
 The session and task tools (`tools-sessions`) let an agent coordinate the
 rest of the harness.  Sessions are named by id, a unique id prefix or a
 unique name; a session cannot message, control or wait on itself.
+`session_control`'s rename is the exception: it may name the calling
+session, and its `session_id` may be left out for it, so an agent asked
+to take a ticket number in its name can.
 Listing and search default to the current project (worktrees included).
 The internal sessions (`session/internal-start`), the records of the
 harness's own model calls, are left out of `session_list` unless its
@@ -10416,8 +10419,8 @@ too.  A set that asks for what the session already has changes nothing
 and says so, and the permissions are weighed per call: a read is the
 read it is, and only a set goes through the chain as a change to harness
 state (see perms).  It is a tool of its own rather than more actions of
-`session_control`, whose every action is about another session (it
-refuses the calling session itself) and is `meta`.
+`session_control`, whose actions are about another session but for
+rename (which may name the calling session) and are `meta`.
 
 Event watches (`tools-events`) hook a session into the harness's own
 events, as Claude Code's wait for an event does, with a cheap model

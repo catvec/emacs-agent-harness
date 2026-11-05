@@ -28,9 +28,12 @@
 ;;   session, steers a running one, or queues for the next turn; it can
 ;;   wait for the reply.
 ;; - `session_control' cancels a turn, resumes, closes or renames a
-;;   session, or answers a question it asked with ask_user.  The
-;;   harness's own question about a cold prompt cache (harness-cowboy.el)
-;;   is left to the user, as permission requests are.
+;;   session, or answers a question it asked with ask_user.  Rename is
+;;   the one action it may take on this session itself (the session_id
+;;   may be left out for it), as an agent asked to name itself after a
+;;   ticket does.  The harness's own question about a cold prompt cache
+;;   (harness-cowboy.el) is left to the user, as permission requests
+;;   are.
 ;; - `session_settings' reads and changes what a session runs with: its
 ;;   model, thinking level, context window limit and budget, on this
 ;;   session by default or another one by name.  Every change goes
@@ -820,9 +823,20 @@ session (`harness-tools-written'): the receiver reads them in its own."
 
 (defun harness-tools-sessions--control (input ctx)
   "Handler of session_control.
-INPUT is the tool call's input plist and CTX its context."
+INPUT is the tool call's input plist and CTX its context.
+
+Rename is the one action a session may take on itself: an agent asked
+to name itself after a ticket changes its own name this way.  So
+`session_id' is optional for it and names this session when left out;
+every other action is about another session
+\(see `harness-tools-sessions--other')."
   (let* ((action (or (plist-get input :action) ""))
-         (sid (harness-tools-sessions--other (plist-get input :session_id) ctx action)))
+         (ref (plist-get input :session_id))
+         (sid (if (equal action "rename")
+                  (if (harness-string-blank-p ref)
+                      (plist-get ctx :session-id)
+                    (harness-tools-sessions--resolve ref))
+                (harness-tools-sessions--other ref ctx action))))
     (pcase action
       ("cancel"
        (harness-tool-ok (if (harness-call 'agent/cancel sid)
@@ -840,7 +854,10 @@ INPUT is the tool call's input plist and CTX its context."
        (let ((name (string-trim (or (plist-get input :name) ""))))
          (when (string-empty-p name) (signal 'harness-error (list "rename needs a name")))
          (harness-call 'session/update sid :name name)
-         (harness-tool-ok (format "Renamed %s to %S." sid name))))
+         (harness-tool-ok (format "Renamed %s to %S."
+                                  (if (equal sid (plist-get ctx :session-id))
+                                      "this session" sid)
+                                  name))))
       ("answer"
        (unless (harness-method-exists-p 'question/answer)
          (signal 'harness-error (list "Questions are not available")))
@@ -867,17 +884,23 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "session_control"
   :label "Control session"
-  :description "Control another session. action=cancel stops its running turn; resume reopens a closed session; close deactivates it (it can be resumed later); rename sets its name; answer replies to a question it asked with ask_user (question_id may be omitted when there is one). Permission requests, and the harness's question about a cold prompt cache, are left to the user."
+  :description "Control another session, or rename this one. action=cancel stops its running turn; resume reopens a closed session; close deactivates it (it can be resumed later); rename sets the name of the session session_id names, or this session's when session_id is left out; answer replies to a question it asked with ask_user (question_id may be omitted when there is one). Only rename may name this session itself. Permission requests, and the harness's question about a cold prompt cache, are left to the user."
   :schema '(:type "object"
-            :properties (:session_id (:type "string" :description "Session id, unique id prefix or unique name.")
+            :properties (:session_id (:type "string" :description "Session id, unique id prefix or unique name. For rename, default: this session.")
                          :action (:type "string" :enum ("cancel" "resume" "close" "rename" "answer"))
                          :name (:type "string" :description "New name, for rename.")
                          :question_id (:type "string" :description "Question to answer, for answer.")
                          :answer (:type "string" :description "The answer, for answer. A question that allows several options takes the ones picked, one to a line."))
-            :required ("session_id" "action"))
+            :required ("action"))
   :kind 'meta
-  :subject (lambda (input) (string-trim (format "%s %s" (or (plist-get input :action) "")
-                                                (harness-tools-sessions--short (plist-get input :session_id)))))
+  :subject (lambda (input)
+             (let ((action (or (plist-get input :action) ""))
+                   (ref (plist-get input :session_id)))
+               (string-trim (format "%s %s" action
+                                    (if (and (equal action "rename")
+                                             (harness-string-blank-p ref))
+                                        "this session"
+                                      (harness-tools-sessions--short ref))))))
   :handler #'harness-tools-sessions--control)
 
 ;;;; session_settings
@@ -885,15 +908,15 @@ INPUT is the tool call's input plist and CTX its context."
 ;; One tool reads and changes what a session runs with: its model, its
 ;; thinking level, its context window limit and its budget.  It is a
 ;; tool of its own rather than more actions of `session_control'
-;; because every action there is about another session -- it refuses
-;; the calling session itself ("A session cannot cancel itself") -- and
-;; because this tool reads the calling session by default, with `read'
-;; a read-only call: one tool with `action=read|set' keeps the surface
-;; one call for settings, while the permission chain tells the two
-;; apart per call (see `harness-perms--call-kind'), so a read never
-;; asks and a set asks, or is judged, like any other change to harness
-;; state.  The tool is declared `meta' so that a set would ask even
-;; were that classification ever missing.
+;; because nearly every action there is about another session -- only
+;; rename may name the calling session ("A session cannot cancel
+;; itself") -- and because this tool reads the calling session by
+;; default, with `read' a read-only call: one tool with `action=read|set'
+;; keeps the surface one call for settings, while the permission chain
+;; tells the two apart per call (see `harness-perms--call-kind'), so a
+;; read never asks and a set asks, or is judged, like any other change
+;; to harness state.  The tool is declared `meta' so that a set would
+;; ask even were that classification ever missing.
 ;;
 ;; Every change goes through `session/update' with `:silent t' (its own
 ;; hint would say less), so the UI, the header line and ACP clients
