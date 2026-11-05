@@ -29,6 +29,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;cowboy             ; Ask what goes first when a message meets a session whose prompt cache…
  ;;decisions          ; Lasting decisions -- answers that hold beyond their moment -- with…
  ;;fallback           ; Carry on with another provider when one runs out of quota or money.
+ ;;gremlin            ; Opt-in chaos fixtures and the budgeted run that contains them.
  ;;handoff            ; Warn before a lossy switch to a hosted-loop provider, and hand the…
  ;;insights           ; The Insights report: figures and a written summary of the work, for…
  ;;judge              ; Judges: one-off questions to the simple tier of a session's model,…
@@ -57,11 +58,13 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;copilot            ; GitHub Copilot CLI as a hosted-loop completion provider.
  ;;deepseek           ; DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing.
  ;;demo               ; Scripted provider for demos and tests.
+ ;;gremlin            ; A provider that is slow, malformed, hungry or dishonest on purpose.
  ;;openai             ; OpenAI-compatible chat completions provider (OpenAI, OpenRouter, local…
  ;;responses          ; OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT).
  :tools
  ;;compact            ; The compact tool: an agent compacts its own conversation, on a running…
  ;;events             ; watch_events and unwatch_events: a session watches harness events, and…
+ ;;gremlin            ; Slow, hanging, noisy, lying and boundary-testing chaos tools.
  ;;handin             ; The hand_in tool: a task session hands its finished work in and stops.
  ;;notify             ; Notification and Notification providers: agents reach the user through…
  ;;review             ; The review_threads and review_comment tools: a task's agent reads and…
@@ -106,6 +109,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [cowboy](cowboy.md) |  | [session](session.md), [agent](agent.md), [compaction](compaction.md) | Ask what goes first when a message meets a session whose prompt cache went cold. |
 | [decisions](decisions.md) |  | [store](store.md) | Lasting decisions -- answers that hold beyond their moment -- with their undo and redo, from any session. |
 | [fallback](fallback.md) |  | [store](store.md), [session](session.md), [provider](provider.md) | Carry on with another provider when one runs out of quota or money. |
+| [gremlin](gremlin.md) |  |  | Opt-in chaos fixtures and the budgeted run that contains them. |
 | [handoff](handoff.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md) | Warn before a lossy switch to a hosted-loop provider, and hand the conversation over. |
 | [insights](insights.md) |  | [store](store.md) | The Insights report: figures and a written summary of the work, for any provider. |
 | [judge](judge.md) |  |  | Judges: one-off questions to the simple tier of a session's model, read as a decision, with a few lookups that only read (event watches). |
@@ -127,6 +131,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [provider-copilot](provider-copilot.md) |  | [provider](provider.md) | GitHub Copilot CLI as a hosted-loop completion provider. |
 | [provider-deepseek](provider-deepseek.md) |  | [provider](provider.md), [provider-openai](provider-openai.md) | DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing. |
 | [provider-demo](provider-demo.md) |  | [provider](provider.md) | Scripted provider for demos and tests. |
+| [provider-gremlin](provider-gremlin.md) |  | [provider](provider.md), [gremlin](gremlin.md) | A provider that is slow, malformed, hungry or dishonest on purpose. |
 | [provider-openai](provider-openai.md) |  | [provider](provider.md) | OpenAI-compatible chat completions provider (OpenAI, OpenRouter, local servers). |
 | [provider-responses](provider-responses.md) |  | [provider](provider.md), [chatgpt-plan](chatgpt-plan.md) | OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT). |
 | [readonly](readonly.md) | by default | [session](session.md), [tools](tools.md) | Read-only sessions: the sessions a module's policy names (a supervisor, a task's write-up or plan) get only reading tools and read-only, offline bash, enforced by the harness. |
@@ -156,6 +161,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [tools-emacs](tools-emacs.md) | by default | [tools](tools.md) | List buffers, List windows, Read buffer, Open buffer, Insert text, Save buffer, Describe symbol, Find definition, Trace symbol and Emacs messages: bounded tools into the user's Emacs, without evaluation. |
 | [tools-events](tools-events.md) |  | [tools](tools.md), [session](session.md), [agent](agent.md), [tools-sessions](tools-sessions.md) | watch_events and unwatch_events: a session watches harness events, and a cheap model decides which call for it to act. |
 | [tools-fs](tools-fs.md) | by default | [tools](tools.md) | Read file, Write file, Edit file, List directory, Find files, Search files and File info. |
+| [tools-gremlin](tools-gremlin.md) |  | [tools](tools.md), [gremlin](gremlin.md) | Slow, hanging, noisy, lying and boundary-testing chaos tools. |
 | [tools-handin](tools-handin.md) |  | [tools](tools.md), [session](session.md) | The hand_in tool: a task session hands its finished work in and stops. |
 | [tools-notify](tools-notify.md) |  | [tools](tools.md), [notifications](notifications.md) | Notification and Notification providers: agents reach the user through the notifications module. |
 | [tools-plan](tools-plan.md) | by default | [tools](tools.md), [session](session.md) | The Plan tool: record a plan for a complex task, shown to the user. |
@@ -412,6 +418,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-chat-top-functions` | [ui-chat](ui-chat.md) |  |
 | `harness-corporate-mode-change-hook` | `harness-core.el` | [acp](acp.md), [acp-remote](acp-remote.md), [ui](ui.md) |
 | `harness-describe-modules-functions` | `harness-core.el` | [ui](ui.md), `harness.el` |
+| `harness-gremlin-cleanup-hook` | [gremlin](gremlin.md) |  |
 | `harness-log-hook` | `harness-core.el` | `harness-server.el` |
 | `harness-module-init-hook` | `harness-core.el` |  |
 | `harness-plugin-update-hook` | `harness.el` | [ui-version](ui-version.md) |
