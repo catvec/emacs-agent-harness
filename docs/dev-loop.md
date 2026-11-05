@@ -16,10 +16,18 @@ scripts/test.sh [FILE [SELECTOR]]    # ERT, one clean Emacs per suite
 scripts/lint.sh [--checkdoc]         # byte-compile everything out of tree
 ```
 
+The frame is mapped with `no-focus-on-map`, refuses focus
+(`no-accept-focus`) and is lowered; `shot` lowers it again before it
+exports.  Nothing in the dev loop, `open_harness` or a task's capture
+path raises, focuses or deletes a frame, and a test over every
+production source file fails if any of them starts to.
+
 A task's worktree can be driven the same way without leaving the board:
 `[Open harness]` on a card in *Ready for review* starts that loop in
-the worktree's checkout, under a socket and state directory of its own,
-and raises its frame.  The agent's `open_harness` tool does the same
+the worktree's checkout, under a socket and state directory of its own.
+Its frame stays lowered and cannot take focus, and no harness path
+raises or focuses one: a task's captures and key sequences never steal
+the user's focus.  The agent's `open_harness` tool does the same
 and returns the commands above with the socket to use.  It runs the
 checkout's own `scripts/dev.sh` and the Elisp its daemon loads outside the
 sandbox, code the session may have written in its worktree, so it is an
@@ -39,7 +47,7 @@ new one.  **Restart discards unsaved work in the instance**, so use it only
 when that is acceptable; it never restarts the harness that runs the tool
 itself, and requires a readable process table to verify that the old daemon
 stopped.  The equivalent ACP call is `harness-dev/open` with its third
-argument true.
+argument true (its second, the old focus flag, is ignored).
 
 `dev.sh status`, `stop` and `restart` likewise report a probe timeout or a
 refused connection from a live daemon instead of claiming it is not

@@ -878,24 +878,13 @@ or a task opens it when clicked (`harness-ui--notification-clicked')."
    (lambda (shown)
      (list :backend (format "%s" (plist-get shown :backend))))))
 
-(defun harness-ui--raise-for-notification ()
-  "Bring a graphical frame of this Emacs to the front, for a notification click.
-The user just asked to see what the notification is about."
-  (let ((frame (if (display-graphic-p (selected-frame))
-                   (selected-frame)
-                 (cl-find-if #'display-graphic-p (frame-list)))))
-    (when (and frame (frame-live-p frame))
-      (harness-ignore-errors-logged "showing the frame for a notification"
-        (select-frame-set-input-focus frame)))))
-
 (defun harness-ui--notification-clicked (params)
   "Show what the clicked notification PARAMS is about.
 `harness-ui-notification-functions' come first (the task board opens
 on a task, in the task's project); otherwise the notification's session
 opens in its project, switching to the project first as a row of the
-session list does (`harness-ui-visit-session').  The frame it opens in
-comes to the front, as the user just asked for it."
-  (harness-ui--raise-for-notification)
+session list does (`harness-ui-visit-session').  Nothing here raises or
+focuses a frame: the view opens where this Emacs already is."
   (unless (run-hook-with-args-until-success 'harness-ui-notification-functions params)
     (when-let* ((sid (plist-get params :session)))
       (harness-ui-visit-session sid))))
@@ -906,8 +895,8 @@ macOS keeps notifications in its Notification Center after the Emacs
 that showed them restarted, so a click can name one this Emacs never
 showed (`harness-notifications-desktop-unknown-click-function').  The
 sessions waiting for you show as the mode line's notifier shows them
-\(`harness-ui-notify-show-waiting'), else the session list."
-  (harness-ui--raise-for-notification)
+\(`harness-ui-notify-show-waiting'), else the session list.  Nothing
+here raises or focuses a frame."
   (cond ((fboundp 'harness-ui-notify-show-waiting) (harness-ui-notify-show-waiting))
         ((fboundp 'harness-sessions) (call-interactively 'harness-sessions))))
 

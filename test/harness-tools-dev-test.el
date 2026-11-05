@@ -116,9 +116,9 @@ collects the sockets that are."
            (when (timerp harness-tools-dev--check-timer) (cancel-timer harness-tools-dev--check-timer))
            (setq harness-tools-dev--check-timer nil))))))
 
-(defun harness-tools-dev-test--open (dir sid &optional focus)
+(defun harness-tools-dev-test--open (dir sid)
   "Open DIR's harness with the tool, as session SID's agent; return the result."
-  (harness-test-await (harness-tools-dev--open (list :path dir :focus (if focus t :false))
+  (harness-test-await (harness-tools-dev--open (list :path dir)
                                                (list :session-id sid :cwd dir))))
 
 (defun harness-tools-dev-test--check ()
@@ -491,7 +491,10 @@ mode decides it as it decides bash."
            (socket (harness-tools-dev-socket dir)))
       (harness-tools-dev-test--session "old" :cwd dir :status 'running)
       (harness-tools-dev-test--session "new" :cwd dir :status 'running)
-      (should-not (plist-get (harness-tools-dev-test--open dir "old" t) :is-error))
+      ;; The board's method records the instance as the user's; a later
+      ;; agent restart must keep that holder, and the agent's own.
+      (should-not (plist-get (harness-tools-dev-test--open dir "old") :is-error))
+      (harness-test-await (harness-call 'harness-dev/open dir))
       (let ((answer (harness-test-await
                      (harness-tools-dev--open (list :path dir :restart t)
                                               (list :session-id "new" :cwd dir)))))
@@ -564,7 +567,8 @@ mode decides it as it decides bash."
            (gate (harness-make-promise)))
       (harness-tools-dev-test--session "old" :cwd dir :status 'running)
       (harness-tools-dev-test--session "new" :cwd dir :status 'running)
-      (harness-tools-dev-test--open dir "old" t)
+      (harness-tools-dev-test--open dir "old")
+      (harness-test-await (harness-call 'harness-dev/open dir))
       (cl-letf (((symbol-function 'harness-tools-dev--ask-to-exit)
                  (lambda (&rest _) gate)))
         (let* ((stop (harness-call 'harness-dev/stop dir))
@@ -613,27 +617,25 @@ mode decides it as it decides bash."
           (should (equal '("old" "restart" "other")
                          (plist-get (harness-tools-dev--find socket) :sessions))))))))
 
-(ert-deftest harness-tools-dev-restart-preserves-a-new-holder-if-focus-fails ()
-  "A failed focus after startup must not undo the newly recorded holder."
+(ert-deftest harness-tools-dev-restart-keeps-the-old-holder-if-the-start-fails ()
+  "A restart whose start fails keeps the old holder rather than dropping it."
   (harness-tools-dev-test-world
     (let* ((dir (harness-test-harness-checkout))
            (socket (harness-tools-dev-socket dir)))
       (harness-tools-dev-test--session "old" :cwd dir :status 'running)
-      (harness-tools-dev-test--session "new" :cwd dir :status 'running)
       (harness-tools-dev-test--open dir "old")
       (cl-letf (((symbol-function 'harness-tools-dev--probe)
                  (lambda (&rest _) (harness-resolved nil)))
                 ((symbol-function 'harness-tools-dev--run)
-                 (lambda (_dir args &rest _)
-                   (if (equal (car args) "eval")
-                       (harness-rejected '(error "focus failed"))
-                     (harness-resolved '(:exit 0 :stdout "started" :stderr ""))))))
+                 (lambda (&rest _)
+                   (harness-resolved '(:exit 1 :stdout "" :stderr "no start")))))
         (let ((answer (harness-test-await
-                       (harness-tools-dev--open (list :path dir :focus t :restart t)
-                                                (list :session-id "new" :cwd dir)))))
+                       (harness-tools-dev--open (list :path dir :restart t)
+                                                (list :session-id "old" :cwd dir)))))
           (should (plist-get answer :is-error))
-          (should (equal '("old" "new") (plist-get (harness-tools-dev--find socket) :sessions)))
-          (should (plist-get (harness-tools-dev--find socket) :user)))))))
+          (should (string-search "no start" (plist-get answer :content)))
+          (should (equal '("old") (plist-get (harness-tools-dev--find socket) :sessions)))
+          (should-not (plist-get (harness-tools-dev--find socket) :user)))))))
 
 (ert-deftest harness-tools-dev-restart-requires-a-process-table ()
   "A restart cannot succeed when it cannot verify the old daemon stopped."
@@ -766,16 +768,44 @@ A restart of the harness process alone must not stop the instances."
       (should-not (plist-get info :focused))
       (should (= 1 (length (harness-test-dev-invocations dir)))))))
 
-(ert-deftest harness-tools-dev-method-focuses-the-frame ()
-  "With focus the instance's frame is raised through its own dev loop."
+(ert-deftest harness-tools-dev-method-never-focuses-the-frame ()
+  "Even asked to focus, the board's method only starts the dev loop.
+The dev frame is lowered and cannot take focus, so no code path raises
+or focuses a frame."
   (harness-tools-dev-test-with
     (let* ((dir (harness-test-harness-checkout))
            (info (harness-test-await (harness-call 'harness-dev/open dir t))))
-      (should (plist-get info :focused))
+      (should-not (plist-get info :focused))
       (let ((calls (harness-test-dev-invocations dir)))
-        (should (= 2 (length calls)))
+        (should (= 1 (length calls)))
         (should (equal "start" (cdr (assoc "args" (car calls)))))
-        (should (equal "eval (harness-dev-focus)" (cdr (assoc "args" (cadr calls)))))))))
+        (should-not (cl-some (lambda (call)
+                               (string-match-p "focus" (cdr (assoc "args" call))))
+                             calls))))))
+
+(ert-deftest harness-tools-dev-tool-has-no-focus-option ()
+  "The agent's tool cannot ask for a frame to be raised or focused."
+  (harness-tools-dev-test-with
+    (let* ((tool (harness-tool-get harness-tools-dev-tool))
+           (properties (plist-get (harness-tool-schema tool) :properties)))
+      (should (plist-member properties :path))
+      (should (plist-member properties :restart))
+      (should-not (plist-member properties :focus)))))
+
+(ert-deftest harness-tools-dev-tool-never-marks-an-instance-as-the-users ()
+  "The agent's tool never takes the user's lifetime, even with an old focus input."
+  (harness-tools-dev-test-world
+    (let* ((dir (harness-test-harness-checkout))
+           (socket (harness-tools-dev-socket dir)))
+      (harness-tools-dev-test--session "s1" :worktree dir :status 'running)
+      (harness-tools-dev-test--set-task "t1" :session "s1" :worktree dir)
+      (let ((result (harness-test-await
+                     (harness-tools-dev--open (list :path dir :focus t)
+                                              (list :session-id "s1" :cwd dir)))))
+        (should-not (plist-get result :is-error))
+        (should-not (plist-get (harness-tools-dev--find socket) :user))
+        (should-not (string-search "raised and focused" (plist-get result :content)))
+        (should (string-search "cannot take focus" (plist-get result :content)))))))
 
 ;;;; Lifetimes
 
@@ -820,15 +850,14 @@ A restart of the harness process alone must not stop the instances."
       (harness-tools-dev-test--set-task "t1" :outcome 'cancelled)
       (should (equal (harness-tools-dev-test--sockets dir) (harness-tools-dev-test--check))))))
 
-(ert-deftest harness-tools-dev-focused-instance-stays-until-the-task-is-done ()
+(ert-deftest harness-tools-dev-user-instance-stays-until-the-task-is-done ()
   "An instance opened for the user to look at stays through review and merge."
   (harness-tools-dev-test-world
     (let* ((dir (harness-test-harness-checkout))
            (socket (harness-tools-dev-socket dir)))
       (harness-tools-dev-test--session "s1" :worktree dir :status 'running)
       (harness-tools-dev-test--set-task "t1" :session "s1" :worktree dir)
-      (should (string-match-p "stays until the task is done"
-                              (plist-get (harness-tools-dev-test--open dir "s1" t) :content)))
+      (harness-test-await (harness-call 'harness-dev/open dir))
       (let ((entry (harness-tools-dev--find socket)))
         (should (plist-get entry :user))
         (should (equal "t1" (plist-get entry :task))))

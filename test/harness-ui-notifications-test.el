@@ -267,5 +267,28 @@ which opens the session."
       (should (equal "Test notification" (plist-get (plist-get (cadr asked) :notification) :title)))
       (should (equal "Harness notifications: system sent (dbus)" shown)))))
 
+(ert-deftest harness-ui-notifications-click-never-raises-or-focuses-a-frame ()
+  "A click opens what it is about without raising or focusing a frame."
+  (let ((calls nil)
+        (harness-ui-notification-functions nil)
+        (harness-notifications-desktop--actions nil))
+    (cl-letf (((symbol-function 'harness-ui-visit-session)
+               (lambda (&rest _) nil))
+              ((symbol-function 'harness-ui-notify-show-waiting)
+               (lambda () nil))
+              ((symbol-function 'harness-sessions)
+               (lambda () (interactive) nil))
+              ((symbol-function 'raise-frame)
+               (lambda (&rest _) (push 'raise-frame calls)))
+              ((symbol-function 'select-frame-set-input-focus)
+               (lambda (&rest _) (push 'select-frame-set-input-focus calls)))
+              ((symbol-function 'x-focus-frame)
+               (lambda (&rest _) (push 'x-focus-frame calls)))
+              ((symbol-function 'delete-frame)
+               (lambda (&rest _) (push 'delete-frame calls))))
+      (harness-ui--notification-clicked '(:session "s1"))
+      (harness-ui--unknown-notification-clicked))
+    (should-not calls)))
+
 (provide 'harness-ui-notifications-test)
 ;;; harness-ui-notifications-test.el ends here

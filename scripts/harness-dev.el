@@ -5,8 +5,16 @@
 ;; Loaded by scripts/dev.sh into a dedicated `emacs -Q' daemon.  It
 ;; loads the checkout, starts the harness, turns on auto reload, and
 ;; provides the functions the dev loop drives over emacsclient: opening
-;; a frame that never steals focus, sending real key sequences,
+;; a frame that never takes focus, sending real key sequences,
 ;; exporting screenshots, and collecting errors.
+;;
+;; Automation must never steal the user's focus.  The dev frame is
+;; created with `no-focus-on-map' and `no-accept-focus', and lowered;
+;; the helpers below select it only inside Emacs, so captures and
+;; synthetic keys work while the user keeps typing in their own
+;; window.  Nothing here raises or focuses a frame, and nothing can:
+;; the frame refuses focus, and there is no command that would ask for
+;; it.
 ;;
 ;; A daemon the harness opened (the `open_harness' tool, the board's
 ;; Open harness) has HARNESS_DEV_OWNER set to the Emacs that harness
@@ -27,6 +35,12 @@
       confirm-kill-processes nil
       debug-on-error nil
       frame-inhibit-implied-resize t)
+;; Every frame this daemon makes is out of the user's way, not only the
+;; one `harness-dev-frame' creates: a command a task sends as keys must
+;; not bring a frame up focused either.
+(setq default-frame-alist
+      (append '((no-focus-on-map . t) (no-accept-focus . t))
+              default-frame-alist))
 
 (defvar harness-dev-root
   (expand-file-name ".." (file-name-directory (or load-file-name buffer-file-name))))
@@ -122,7 +136,12 @@ Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
   (harness-auto-reload-mode 1))
 
 (defun harness-dev-frame ()
-  "Return the dev frame, creating a GUI frame that does not take focus."
+  "Return the dev frame, creating a GUI frame that cannot take focus.
+The frame is mapped without focus (`no-focus-on-map'), refuses focus
+(`no-accept-focus') and is lowered, so automation never interrupts the
+user or sits in front of their work.  It is selected inside Emacs
+(not focused), so server evals and asynchronous callbacks display
+buffers in it.  Captures and synthetic keys go through it too."
   (unless (and harness-dev-frame (frame-live-p harness-dev-frame))
     (setq harness-dev-frame
           (make-frame `((window-system . x)
@@ -130,18 +149,14 @@ Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
                         (name . "harness-dev")
                         (width . 140) (height . 46)
                         (no-focus-on-map . t)
-                        (no-accept-focus . nil)
+                        (no-accept-focus . t)
                         (minibuffer . t))))
     (with-selected-frame harness-dev-frame
-      (lower-frame harness-dev-frame)
       (switch-to-buffer "*scratch*")))
+  ;; Every use keeps it lowered, even if something raised it meanwhile.
+  (with-selected-frame harness-dev-frame
+    (lower-frame harness-dev-frame))
   harness-dev-frame)
-
-(defun harness-dev-focus ()
-  "Raise and focus the dev frame deliberately."
-  (interactive)
-  (let ((f (harness-dev-frame)))
-    (raise-frame f) (select-frame-set-input-focus f)))
 
 (defun harness-dev-keys (keys)
   "Run KEYS (a `kbd' string) as a real key sequence in the dev frame."
@@ -154,9 +169,12 @@ Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
         (format "%s in %s" keys (buffer-name))))))
 
 (defun harness-dev-shot (path)
-  "Export the dev frame as a PNG to PATH and return PATH."
+  "Export the dev frame as a PNG to PATH and return PATH.
+`harness-dev-frame' lowers it first, so taking a picture never brings
+it to the front."
   (let ((frame (harness-dev-frame)))
-    (with-selected-frame frame (redisplay t))
+    (with-selected-frame frame
+      (redisplay t))
     (let ((data (x-export-frames frame 'png))
           (coding-system-for-write 'binary))
       (with-temp-file path (set-buffer-multibyte nil) (insert data)))

@@ -9692,7 +9692,7 @@ TRAMP prefixes come from the session host):
 | `review_threads` | Review threads | status (open/closed), task (default: the session's own) | meta (tools-review; task sessions only; lists the threads of the task's review with the comments the user sent, by id; needs no approval: `harness-perms--auto-allow-tools`) |
 | `review_comment` | Review comment | thread (an id, or the start of one), body, status (open/closed), file, line, side (new/old), task (default: the session's own) | meta (tools-review; task sessions only; answers a thread, or starts one on the change or on a file and line, and may close or reopen the thread -- the thread of a reply of the user's in a thread started in the chat is named by the marker after it; the comment records the session, this call and the commit the session is at, and the result keeps which thread and comment on the node, for the chat; needs no approval: `harness-perms--auto-allow-tools`) |
 | `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
-| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done), restart (explicitly stop the instance first, discarding unsaved work) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; it runs the checkout's `scripts/dev.sh` and the Elisp that daemon loads outside the sandbox, code the session may have written, so it is an exec call decided by the mode as bash is and is not among the tools that need no approval) |
+| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), restart (explicitly stop the instance first, discarding unsaved work) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; it runs the checkout's `scripts/dev.sh` and the Elisp that daemon loads outside the sandbox, code the session may have written, so it is an exec call decided by the mode as bash is and is not among the tools that need no approval; its frame stays lowered and cannot take focus, so opening it never raises or focuses a frame) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
@@ -9807,9 +9807,11 @@ names, below).  `path` defaults to the session's worktree, else its
 cwd; a directory that is not a checkout
 (`harness.el` and `scripts/dev.sh` side by side) is refused.  The bus
 method `harness-dev/open PATH &optional FOCUS RESTART` does the same for
-the UI (focus raises the frame); Open harness, which the plugin's UI
-half adds to the menu of a task board's review card whose worktree is
-such a checkout (`harness-ui-tasks-action-functions`), calls it.  An
+the UI (FOCUS is accepted and ignored: the dev frame is lowered and
+cannot take focus, so no path raises or focuses a frame); Open harness,
+which the plugin's UI half adds to the menu of a task board's review
+card whose worktree is such a checkout
+(`harness-ui-tasks-action-functions`), calls it.  An
 unresponsive instance is not treated as dead: a probe that times out, or
 whose connection is refused while the daemon is still in the process
 table, reports that the instance may be busy.  Wait and retry; `restart`
@@ -9863,8 +9865,8 @@ stops it.  `tools-dev` records each instance it opens, and who for, in
 `dev-instances.json` in the state directory: `(:socket :path :sessions
 :user :task :opened)`, plus `:adopted` for one the sweep found.
 `:sessions` holds the sessions whose agents opened it.  `:user` marks
-one opened for the user to look at (the board's Open harness, or the
-tool with `focus`), and `:task` is the task it shows: the task of the
+one opened for the user to look at (the board's Open harness), and
+`:task` is the task it shows: the task of the
 session or of a session it descends from, else the task whose worktree
 it runs from.  An instance is needed while one of these holds:
 
@@ -13805,8 +13807,9 @@ task's worktree).  The harness repository's own plugin adds Open
 harness this way (ui-tools-dev, `harness-ui-tools-dev-open-harness`)
 for a card in Ready for review whose worktree is itself a checkout of
 the harness: it starts the worktree's own live development loop in an
-Emacs of its own, frame raised, through `harness-dev/open`, so the
-work can be tried before it is verified.  That instance stops once the
+Emacs of its own, frame lowered and unable to take focus, through
+`harness-dev/open`, so the work can be tried before it is verified
+without stealing the user's focus.  That instance stops once the
 task is done, archived or deleted (see tools-dev).  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw CWD &optional NAME MODEL`): a new `btw` session at

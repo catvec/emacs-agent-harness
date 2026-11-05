@@ -79,9 +79,10 @@
 ;;   talks to, it is until the session is closed, or has been idle for
 ;;   `harness-tools-dev--idle-timeout'.
 ;; - An instance opened for the user to look at -- the board's Open
-;;   harness, or the tool with `focus' -- is needed until the task it
-;;   shows is done, archived or deleted.  Without a task, it is needed
-;;   while the session that opened it is open.
+;;   harness -- is needed until the task it shows is done, archived or
+;;   deleted.  Without a task, it is needed while the session that
+;;   opened it is open.  Its frame stays lowered and cannot take focus,
+;;   as every dev frame does: opening one never raises or focuses it.
 ;; - An instance in the worktree of a task or session is also needed
 ;;   while that task or session is at work.  They share it: the instance
 ;;   belongs to the worktree, whichever agent opened it.
@@ -401,9 +402,7 @@ its file, else by its name."
                     "command: if these commands say it is not running, call open_harness again.  "
                     "Opening it again reuses this instance.%s")
             dir socket (abbreviate-file-name (plist-get info :state))
-            (if (plist-get info :focused)
-                "  Its frame was raised and focused."
-              "  Its frame stays lowered, so it does not steal focus.")
+            "  Its frame stays lowered and cannot take focus, so it never steals yours."
             dir arg arg arg arg arg arg
             (if link
                 (concat "That socket is a link in your temporary directory, so these commands "
@@ -494,16 +493,17 @@ since a worktree may have an older version of that script."
 
 (defun harness-tools-dev-start (dir &optional focus holder restart)
   "Start the Emacs instance running DIR's harness; return a promise.
-DIR must be a local checkout of the harness.  With FOCUS non-nil its
-frame is raised and focused once it is up; otherwise it stays lowered,
-so unattended starts never steal the user's focus.  The promise
-resolves to (:path DIR :socket SOCKET :socket-path FILE :link LINK
-:state STATE :focused BOOL :output STRING); opening a checkout that is
-already open just ensures its frame exists.  SOCKET is the socket's
-name, FILE its file in `harness-tools-dev-socket-dir' (nil when it is
-not there, as when that directory cannot be had), and LINK its link in
-the temporary directory of HOLDER's session (`harness-tools-dev--link'),
-or nil.
+DIR must be a local checkout of the harness.  Starting never raises,
+focuses or deletes a frame: the dev frame is lowered and refuses focus
+\(`no-focus-on-map', `no-accept-focus'), so an instance never steals the
+user's.  The optional FOCUS argument of old callers is accepted and
+ignored.  The promise resolves to (:path DIR :socket SOCKET
+:socket-path FILE :link LINK :state STATE :output STRING); opening a
+checkout that is already open just ensures its frame exists.  SOCKET is
+the socket's name, FILE its file in `harness-tools-dev-socket-dir' (nil
+when it is not there, as when that directory cannot be had), and LINK
+its link in the temporary directory of HOLDER's session
+\(`harness-tools-dev--link'), or nil.
 
 HOLDER says who needs the instance, so that it can be stopped once
 nothing does (see Lifetimes in the Commentary).  It is a plist:
@@ -514,6 +514,7 @@ An instance being stopped is started again only once it has stopped.
 With RESTART, explicitly stop the old instance first, even if it is
 unresponsive.  This loses unsaved work in it; the instance this harness
 runs in is never stopped."
+  (ignore focus)
   (let ((dir (file-name-as-directory (expand-file-name dir))))
     (when (file-remote-p dir)
       (error "Cannot open the harness of a remote directory: %s" (abbreviate-file-name dir)))
@@ -568,7 +569,6 @@ runs in is never stopped."
                                                    (and (file-exists-p path) path))
                                     :link (harness-tools-dev--link socket (plist-get holder :session))
                                     :state (harness-tools-dev-state dir socket)
-                                    :focused (and focus t)
                                     :output (string-trim (plist-get r :stdout)))))
                     ;; Other sessions still have hard links to the old
                     ;; socket.  Repoint them at the replacement as well.
@@ -576,14 +576,11 @@ runs in is never stopped."
                       (unless (equal sid (plist-get holder :session))
                         (harness-tools-dev--link socket sid)))
                     (when holder (harness-tools-dev--record info holder))
-                    (if focus
-                        (harness-then (harness-tools-dev--run dir '("eval" "(harness-dev-focus)"))
-                                      (lambda (_) info))
-                      (harness-resolved info))))))))))
+                    (harness-resolved info)))))))))
        (lambda (info) (funcall settle) info)
        (lambda (err)
-         ;; A later focus failure can happen after the new holder was
-         ;; recorded; do not replace that newer entry with the snapshot.
+         ;; A start that fails before it records a new holder keeps the
+         ;; old one, rather than replacing the snapshot with nothing.
          (when (and entry (not (harness-tools-dev--find socket)))
            (harness-tools-dev--put entry))
          (funcall settle)
@@ -708,11 +705,6 @@ whatever holds the instance already."
       (push sid out)
       (setq sid (plist-get (harness-tools-dev--get-session sid) :parent-id)))
     (nreverse out)))
-
-(defun harness-tools-dev--lineage-task (sid)
-  "Return the id of the task SID works for: its own, else its ancestors'."
-  (cl-some (lambda (id) (plist-get (harness-tools-dev--task-of id) :id))
-           (harness-tools-dev--lineage sid)))
 
 (defun harness-tools-dev--task-at (dir)
   "Return the id of the task whose worktree DIR is, or nil."
@@ -1183,20 +1175,20 @@ running Emacs."
 ;;;; The tool
 
 (defun harness-tools-dev--open (input ctx)
-  "Handler of the `open_harness' tool with INPUT under CTX."
+  "Handler of the `open_harness' tool with INPUT under CTX.
+The tool never raises or focuses a frame: the instance's dev frame is
+lowered and refuses focus.  It also never marks the instance as the
+user's; that is the board's Open harness, which calls
+`harness-dev/open'."
   (let* ((given (plist-get input :path))
          (path (if (and (stringp given) (not (harness-string-blank-p given)))
                    (harness-tools-resolve-path given ctx)
                  (harness-tools-dev--default-dir ctx)))
-         (focus (harness-json-true-p (plist-get input :focus)))
          (restart (harness-json-true-p (plist-get input :restart)))
          (sid (plist-get ctx :session-id))
-         (holder (and sid (list :session sid
-                                :user focus
-                                :task (and focus (or (harness-tools-dev--lineage-task sid)
-                                                     (harness-tools-dev--task-at path)))))))
+         (holder (and sid (list :session sid))))
     (condition-case err
-        (harness-then (harness-tools-dev-start path focus holder restart)
+        (harness-then (harness-tools-dev-start path nil holder restart)
                       (lambda (info)
                         (harness-tool-ok (harness-tools-dev--describe
                                           info (and holder (harness-tools-dev--lifetime holder)))))
@@ -1205,12 +1197,10 @@ running Emacs."
 
 (harness-define-tool harness-tools-dev-tool
   :label "Open harness in Emacs"
-  :description "Start a separate Emacs instance running the harness (this program) from a checkout or task worktree of it, so harness changes can be tried and seen live. The instance gets a socket and state directory of its own, so it does not disturb the harness you run in; opening the same directory again reuses its instance. With restart=true it explicitly stops the old instance first, even if stuck, losing any unsaved work there. Its emacsclient socket is linked into your session's temporary directory, so the commands the result lists reach it from your shell, in the sandbox too. The result lists the commands that drive it through that checkout's scripts/dev.sh: screenshot its frame, send real keys, evaluate Lisp in it, read its messages, reload it, stop it. It stops by itself once nothing needs it: a task's when the task stops working (review, done, or stopped), a sub-agent's when its work is done, a conversation's when it is closed or long idle; with focus=true it is for the user to look at and stays until the task is done. Call the tool again to start it again. Only directories that are checkouts of the harness work (harness.el and scripts/dev.sh side by side); path defaults to the session's worktree, else its working directory."
+  :description "Start a separate Emacs instance running the harness (this program) from a checkout or task worktree of it, so harness changes can be tried and seen live. The instance gets a socket and state directory of its own, so it does not disturb the harness you run in; opening the same directory again reuses its instance. With restart=true it explicitly stops the old instance first, even if stuck, losing any unsaved work there. Its emacsclient socket is linked into your session's temporary directory, so the commands the result lists reach it from your shell, in the sandbox too. The result lists the commands that drive it through that checkout's scripts/dev.sh: screenshot its frame, send real keys, evaluate Lisp in it, read its messages, reload it, stop it. Its frame stays lowered and cannot take focus, so opening an instance never steals yours. It stops by itself once nothing needs it: a task's when the task stops working (review, done, or stopped), a sub-agent's when its work is done, a conversation's when it is closed or long idle. Call the tool again to start it again. Only directories that are checkouts of the harness work (harness.el and scripts/dev.sh side by side); path defaults to the session's worktree, else its working directory."
   :schema '(:type "object"
             :properties (:path (:type "string"
                                 :description "The harness checkout or task worktree to open, absolute or relative to the working directory. Default: the session's worktree, else its working directory.")
-                         :focus (:type "boolean"
-                                 :description "Raise and focus the instance's frame, for the user to look at: it then stays open until the task is done. Default false, so an unattended start does not steal the user's focus.")
                          :restart (:type "boolean"
                                    :description "Explicitly stop the old instance before starting, even if it is unresponsive. Unsaved work there will be lost; the harness you run in cannot be restarted this way. Default false.")))
   :kind 'exec
@@ -1224,15 +1214,17 @@ running Emacs."
 (harness-defmethod harness-dev/open (path &optional focus restart)
   "Start an Emacs instance running the harness of PATH; return a promise.
 The promise resolves to the instance's info plist (see
-`harness-tools-dev-start').  FOCUS raises and focuses its frame.  This
-is what the task board's Open harness calls, from the menu of a card
-waiting for review; the agent uses the `open_harness' tool, which
-shares the same start.  The instance is the user's to look at: it
-stops once the task whose worktree PATH is is done, archived or
-deleted.  RESTART explicitly stops an old instance before starting,
-losing any unsaved work in it."
+`harness-tools-dev-start').  FOCUS is accepted for compatibility and
+ignored: no code path raises or focuses a frame.  This is what the
+task board's Open harness calls, from the menu of a card waiting for
+review; the agent uses the `open_harness' tool, which shares the same
+start.  The instance is the user's to look at: it stops once the task
+whose worktree PATH is is done, archived or deleted.  RESTART
+explicitly stops an old instance before starting, losing any unsaved
+work in it."
+  (ignore focus)
   (let ((dir (file-name-as-directory (expand-file-name path))))
-    (harness-tools-dev-start dir (harness-json-true-p focus)
+    (harness-tools-dev-start dir nil
                              (list :user t :task (harness-tools-dev--task-at dir))
                              (harness-json-true-p restart))))
 

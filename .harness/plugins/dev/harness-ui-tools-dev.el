@@ -13,11 +13,13 @@
 ;; A card waiting for review whose worktree is a checkout of the harness
 ;; -- harness.el and scripts/dev.sh side by side -- has Open harness in
 ;; its menu (`mouse-3'): it opens an Emacs running that worktree's
-;; harness in an instance of its own, its frame raised, so the work can
-;; be tried before it is verified.  The harness's `harness-dev/open'
-;; starts that Emacs, and stops it once the task is done, archived or
-;; deleted.  It is not one of the card's buttons, which the board keeps
-;; for its own actions (`harness-ui-tasks-action-functions').
+;; harness in an instance of its own, so the work can be tried before it
+;; is verified.  Its frame stays lowered and cannot take focus, as no
+;; harness path raises or focuses one; see it from your window manager.
+;; The harness's `harness-dev/open' starts that Emacs, and stops it once
+;; the task is done, archived or deleted.  It is not one of the card's
+;; buttons, which the board keeps for its own actions
+;; (`harness-ui-tasks-action-functions').
 
 ;;; Code:
 
@@ -55,7 +57,9 @@ One of `harness-ui-tasks-action-functions'."
   "Open an Emacs running the harness from the worktree of the task at point.
 The task waits for your review, and its worktree is a checkout of the
 harness; the card's menu (`mouse-3') offers it then.  This is not the
-task's session, which a click on the card's title opens."
+task's session, which a click on the card's title opens.  The
+instance's frame stays lowered and cannot take focus, so opening it
+never steals yours; raise it from your window manager to look at it."
   (interactive)
   (let* ((task (harness-ui-tasks-task-at-point))
          (dir (plist-get task :worktree)))
@@ -64,7 +68,7 @@ task's session, which a click on the card's title opens."
     (unless (harness-ui-tools-dev-open-p task)
       (user-error "This task's worktree is not a checkout of the harness"))
     (harness-ui-tasks-request
-     "_harness/harness-dev/open" (list :path dir :focus t)
+     "_harness/harness-dev/open" (list :path dir)
      "Opening the worktree harness"
      (lambda (info)
        (message "Harness from %s is open in Emacs (socket %s)"

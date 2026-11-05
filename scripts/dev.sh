@@ -15,6 +15,12 @@
 # every feature can be tried; HARNESS_DEV_MODULES=default starts it with
 # the harness's defaults instead, the core only.
 #
+# Automation must never steal the user's focus.  `start' creates the
+# frame lowered, with `no-focus-on-map' and `no-accept-focus': it never
+# takes focus, and nothing here raises or focuses it.  `shot' lowers it
+# again before it exports.  There is no command that would raise it; see
+# it from your window manager, or use `shot'.
+#
 # The daemon's socket is in the checkout, scripts/.dev/run/SOCKET, so a
 # command the harness runs in its sandbox (the bash tool) reaches a
 # daemon the harness started outside it: the sandbox shows the checkout
@@ -141,6 +147,8 @@ case "$cmd" in
       done
       [ "$started" = 1 ] || { echo "daemon failed to start"; cat "$DEVDIR/daemon.log"; exit 1; }
     fi
+    # The frame comes up lowered and unable to take focus; `shot' and
+    # `keys' drive it without raising it.
     if ec --eval '(progn (harness-dev-frame) t)' >/dev/null; then
       echo "daemon $SOCKET up, frame ready"
     else
