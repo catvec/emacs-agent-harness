@@ -15532,6 +15532,15 @@ set draws every surface through the library's own refresh):
   back after, with the window showing it on the line it was; what is gone
   (a thread closed under the filter that hides closed ones) leaves point
   on the same line, at the start of the thread now there.
+- the chat's threads view (`harness-chat-show-threads`, C-c T): the same
+  section in place of the compose box, its heading line ending in the
+  chat's [Compose] button (`harness-chat--threads-view-compose-button`).
+  It draws the threads open and without the buttons each header has
+  elsewhere; one compact line of keys and, while a task at work has
+  replies waiting, one line with [Send replies] and C-c C-c take their
+  place (`harness-ui-patch-review--compose-thread-map`).  The review
+  banner passes NO-THREADS to `--section` while the view shows, so the
+  threads are in one place; a task at work has no banner to begin with.
 - the tree beside Ediff (below).
 
 AFTER AN UPDATE.  `harness-update` reloads the harness in place, and a
@@ -15744,13 +15753,16 @@ a button with its state in the settings line and in Ediff's help:
   (`harness-ui-patch-review--refresh-approvals`).
 
 THE THREADS, a section below the files and not a view of their own: the
-heading is the library's (`change-review-ui-threads-heading`: the three
-filter buttons with their counts, the drafts not sent), with a
-[New thread] button at its end, then the threads
+heading is the library's (`change-review-ui-threads-heading`: the five
+filter buttons with their counts, and the drafts not sent unless the
+view says that elsewhere), with a [New thread] button at its end, then
+the threads
 of the status the buffer's filter lets through
 (`change-review-ui-threads-string`: by file, the change as a whole
 first, each as the threads view draws it, with [Reply] [Close] [Diff]
-and `▸ where`), each file under its own heading.  The filter starts as
+and `▸ where`), each file under its own heading.  A view that offers the
+actions another way draws the threads with no buttons on their headers
+(`:buttons nil`).  The filter starts as
 `harness-ui-patch-review-closed-threads` says, open or all, and is kept
 by the buffer, so the report, the banner and the tree beside Ediff each
 have their own.  The keys are the library's, bound on the text: r, x, o,

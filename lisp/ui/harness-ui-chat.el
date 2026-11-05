@@ -4574,14 +4574,16 @@ takes a task as well as a file (task:ID)."
 ;; under the report and the changes; when the reader works through them,
 ;; the box has what they answer with.  `harness-chat-show-threads'
 ;; (C-c T) puts the threads view a UI draws -- the same view the report
-;; holds, with the same filter and the same keys -- where the compose
-;; box was: the threads are at hand without scrolling past the report
-;; and the files, and the words in the box are kept.  C-c T or
-;; [Compose] brings the box back, with its words and attachments.  It
-;; works in the working phase too, when the task has a review behind it,
-;; so a conversation can be read as threads without the report.  The UI
-;; sets `harness-chat-threads-function'; the chat itself knows no review,
-;; and says so when none is there.
+;; holds, with the same filter and the same keys, its own heading line
+;; where [Compose] brings the box back -- where the compose box was: the
+;; threads are at hand without scrolling past the report and the files,
+;; and the words in the box are kept.  The banner's own copy of the
+;; threads is left out while they show there, so the threads are in one
+;; place.  C-c T or [Compose] brings the box back, with its words and
+;; attachments.  It works in the working phase too, when the task has a
+;; review behind it, so a conversation can be read as threads without
+;; the report.  The UI sets `harness-chat-threads-function'; the chat
+;; itself knows no review, and says so when none is there.
 
 (defvar-local harness-chat--threads-view nil
   "Non-nil when the chat shows the review's threads in place of the box.")
@@ -4591,11 +4593,12 @@ takes a task as well as a file (task:ID)."
 
 (defvar harness-chat-threads-function nil
   "Function that inserts the threads of this session's review, or nil.
-The chat calls it with no arguments, in the chat buffer, where it
-inserts the threads in full, with their filter and their keys, and
-returns non-nil when it did.  A UI that draws the threads of a task's
-review sets it; the chat names no such UI itself, and says the session
-has no threads when none is there.")
+The chat calls it with the [Compose] button, a string, to end its
+heading with, in the chat buffer, where it inserts the threads in full,
+with their filter and their keys, and returns non-nil when it did.  A
+UI that draws the threads of a task's review sets it; the chat names no
+such UI itself, and says the session has no threads when none is
+there.")
 
 (defun harness-chat--threads-view-set (on)
   "Show the threads of the review in place of the compose box when ON.
@@ -4629,26 +4632,18 @@ box's words are kept for \[harness-chat-show-compose]."
   (interactive)
   (harness-chat--threads-view-set (not harness-chat--threads-view)))
 
-(defun harness-chat--threads-view-heading (task)
-  "Return the line that heads the threads view of TASK's review."
-  (concat
-   (propertize "Threads" 'face 'harness-label-face)
-   "  "
-   (propertize (buttonize "[Compose]" (lambda (_) (harness-chat-show-compose))
-                          nil "Back to the compose box")
-               'mouse-face 'highlight)
-   (if task
-       (concat "  " (propertize (harness-ui-task-title task) 'face 'harness-dim-face))
-     "")
-   "\n"))
+(defun harness-chat--threads-view-compose-button ()
+  "Return the button of the threads view that brings the compose box back."
+  (propertize (buttonize "[Compose]" (lambda (_) (harness-chat-show-compose))
+                         nil "Back to the compose box")
+              'mouse-face 'highlight))
 
 (defun harness-chat--insert-threads-view ()
   "Insert the threads of the session's review in place of the compose box."
-  (let ((task (and (fboundp 'harness-ui-review--task)
-                   (harness-ui-review--task harness-ui-session-id))))
-    (insert (harness-chat--threads-view-heading task))
+  (let ((compose (harness-chat--threads-view-compose-button)))
     (unless (and (functionp harness-chat-threads-function)
-                 (funcall harness-chat-threads-function))
+                 (funcall harness-chat-threads-function compose))
+      (insert (propertize "Threads  " 'face 'harness-label-face) compose "\n")
       (insert (propertize "  Threads belong to a task's review.\n"
                           'face 'harness-dim-face 'wrap-prefix "  ")))))
 

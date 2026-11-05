@@ -22,7 +22,11 @@ work it handed in last, which is a conversation with the user rather
 than a review to send feedback on (the chat's C-c T).  What the user
 writes there is a draft as anywhere, and the threads say how many are
 waiting; [Send replies] sends them together (`patch-review/send-replies`),
-as one message to the agent, which answers them in their threads.
+as one message to the agent, which answers them in their threads, and
+so does C-c C-c on the threads the chat shows in place of its box.
+The compose view's threads are drawn without a button on every header
+-- the keys and one line over them do what the buttons did -- and the
+review banner leaves its copy of them out while they show there.
 [Diff] rereads the worktree's current HEAD on each click while the task
 works; historical source links stay at the commit they name.  These
 live views are local, not new hand-ins or baselines for the last review.

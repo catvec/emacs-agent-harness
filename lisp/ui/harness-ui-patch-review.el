@@ -12,7 +12,11 @@
 ;; than a review to send feedback on (the chat's C-c T).  What the user
 ;; writes there is a draft as anywhere, and the threads say how many are
 ;; waiting; [Send replies] sends them together (`patch-review/send-replies'),
-;; as one message to the agent, which answers them in their threads.
+;; as one message to the agent, which answers them in their threads, and
+;; so does C-c C-c on the threads the chat shows in place of its box.
+;; The compose view's threads are drawn without a button on every header
+;; -- the keys and one line over them do what the buttons did -- and the
+;; review banner leaves its copy of them out while they show there.
 ;; [Diff] rereads the worktree's current HEAD on each click while the task
 ;; works; historical source links stay at the commit they name.  These
 ;; live views are local, not new hand-ins or baselines for the last review.
@@ -514,6 +518,7 @@
 (defvar harness-ui-linking-handlers)
 (defvar harness-ui-linking-context-functions)
 (defvar harness-chat-threads-function)
+(defvar harness-chat--threads-view)
 
 (defgroup harness-ui-patch-review nil
   "A task's changes in its session and report: Ediff file by file, comments quoted in the feedback."
@@ -3039,9 +3044,25 @@ again.  The library's commands act on the thread or the comment at point.")
   (define-key map (kbd "E") #'harness-ui-patch-review-expand-all-threads)
   (define-key map (kbd "C") #'harness-ui-patch-review-collapse-all-threads))
 
+(defvar harness-ui-patch-review--compose-thread-map (make-sparse-keymap)
+  "Keys on the threads the chat shows in place of its compose box.
+As `harness-ui-patch-review--thread-map', and C-c C-c sends the replies
+waiting in the threads, as their [Send replies] button does.")
+
+(let ((map harness-ui-patch-review--compose-thread-map))
+  (set-keymap-parent map harness-ui-patch-review--thread-map)
+  (define-key map (kbd "C-c C-c") #'harness-ui-patch-review-send-replies))
+
 (defconst harness-ui-patch-review--thread-hint-detail
   "RET compares the file at the thread's line or shows where a comment was made, r replies, c starts a new thread in the box, S sends the replies of a task at work to the agent, e edits a draft, k deletes one and K a thread of drafts, x closes a thread or opens it again, o follows an agent's comment, f changes which threads show, TAB folds or opens the file's threads or the thread at point, E opens every one and C folds every one."
-  "The full key list the threads show on hover.")
+  "The full key list the threads show on hover.  The threads the chat
+shows in place of its box send the waiting replies with C-c C-c too.")
+
+(defconst harness-ui-patch-review--compose-thread-hint
+  "RET jump · r reply · x close/open · m reviewed · f filter"
+  "The keys the compose view's threads show, in brief.
+`harness-ui-patch-review--thread-hint-detail' is the whole of it, on
+the line's tooltip.")
 
 (defun harness-ui-patch-review--text-width (&optional margin)
   "Return how wide to draw threads in the current buffer, less MARGIN columns.
@@ -3075,17 +3096,21 @@ comment's under its bar, which goes on down the lines."
         (setq pos (1+ end))))
     string))
 
-(defun harness-ui-patch-review--threads-heading (set filter &optional compact fold-buttons)
+(defun harness-ui-patch-review--threads-heading (set filter &optional compact fold-buttons omit-drafts trailing)
   "Return the heading of the threads of SET, its FILTER's buttons.
 COMPACT leaves [New thread] out, as the tree beside Ediff has no box to
 write in.  FOLD-BUTTONS, when given, are drawn after it: the [Expand all]
-and [Collapse all] buttons of the review."
-  (let ((heading (change-review-ui-threads-heading set filter)))
+and [Collapse all] buttons of the review.  OMIT-DRAFTS leaves the count
+of drafts not sent to the line that sends them, as the chat's threads
+view does.  TRAILING, a string, ends the heading line: the chat puts its
+[Compose] button there."
+  (let ((heading (change-review-ui-threads-heading set filter omit-drafts)))
     (propertize (if compact
                     heading
                   (concat (if (string-suffix-p "\n" heading) (substring heading 0 -1) heading)
                           "   " (harness-ui-patch-review--new-thread-button)
                           (if fold-buttons (concat "   " fold-buttons) "")
+                          (if trailing (concat "   " trailing) "")
                           "\n"))
                 'harness-ui-patch-review-threads t 'wrap-prefix "  ")))
 
@@ -3145,7 +3170,7 @@ task waiting for review, or the chat of its session for a task at work."
             (harness-chat-show-compose)))
         buffer)))))
 
-(defun harness-ui-patch-review--threads-section (review &optional compact always-open)
+(defun harness-ui-patch-review--threads-section (review &optional compact always-open trailing)
   "Return the threads of REVIEW as the changes show them, below the files.
 A heading with the library's filter buttons and [New thread], a line of
 what the keys do (not when COMPACT, as in the tree beside Ediff), then
@@ -3155,7 +3180,11 @@ the review's set (`harness-ui-patch-review--view'), so the library's
 commands find the thread or comment at point and its buttons draw the
 section again.  ALWAYS-OPEN draws them whole, with no fold button: the
 threads view the chat puts in place of its box is the threads, not a
-line that hides them.
+line that hides them.  It leaves the buttons off each thread's header
+and its footer -- the keys and the line over them do what they did --
+and says how many replies wait in one line with the way to send them.
+TRAILING, a string, ends the heading line: the chat puts its [Compose]
+button there.
 The report and the banner start the threads of each file and each thread
 folded for the round, but where the user commented (`--file-folded-p',
 `--thread-fold'); COMPACT, the tree beside Ediff, and ALWAYS-OPEN draw
@@ -3178,22 +3207,27 @@ them as they were."
                     (harness-ui-patch-review--fold-button review "threads" ""))
                   (harness-ui-patch-review--threads-heading
                    set filter compact
-                   (unless compact
+                   (unless (or compact always-open)
                      (harness-ui-patch-review--fold-all-buttons
                       (lambda () (harness-ui-patch-review--set-comments-folded review nil))
-                      (lambda () (harness-ui-patch-review--set-comments-folded review t)))))
-                  (if compact ""
-                    (propertize (concat "  " "RET: compare/jump  r: reply  c: new thread  S: send replies  x: close/reopen  f: filter  TAB: fold  E/C: expand/collapse all  (hover for more)\n")
+                      (lambda () (harness-ui-patch-review--set-comments-folded review t))))
+                   always-open trailing)
+                  (when always-open
+                    (when-let* ((note (harness-ui-patch-review--replies-note review t)))
+                      (propertize (concat "  " note "\n") 'wrap-prefix "  ")))
+                  (unless compact
+                    (propertize (concat "  " (if always-open
+                                                 harness-ui-patch-review--compose-thread-hint
+                                               "RET: compare/jump  r: reply  c: new thread  S: send replies  x: close/reopen  f: filter  TAB: fold  E/C: expand/collapse all  (hover for more)")
+                                          "\n")
                                 'help-echo harness-ui-patch-review--thread-hint-detail
                                 'face 'harness-hint-face 'wrap-prefix "  "))
-                  (when always-open
-                    (when-let* ((note (harness-ui-patch-review--replies-note review)))
-                      (propertize (concat "  " note "\n") 'wrap-prefix "  ")))
                   (harness-ui-patch-review--wrap-headers
                    (change-review-ui-threads-string
                     set :filter filter :details change-review-ui--details
                     :width (harness-ui-patch-review--text-width (if compact 2 8))
                     :indent "  "
+                    :buttons (not always-open)
                     :file-fold (and fold-comments
                                     (lambda (file)
                                       (harness-ui-patch-review--file-folded-p review file)))
@@ -3207,7 +3241,9 @@ them as they were."
                              (_ "No threads yet.  c starts a new one."))))))))
     (harness-ui-with-keymap
      (propertize text 'harness-ui-patch-review-task (harness-ui-patch-review--r-id review))
-     harness-ui-patch-review--thread-map)))
+     (if always-open
+         harness-ui-patch-review--compose-thread-map
+       harness-ui-patch-review--thread-map))))
 
 (defun harness-ui-patch-review-thread-return ()
   "Do what RET does on a thread of the changes, or on the file it is under.
@@ -4070,23 +4106,35 @@ its key.  COMPACT uses shorter words."
    'harness-ui-patch-review-task (harness-ui-patch-review--r-id review))
    harness-ui-patch-review--common-map))
 
-(defun harness-ui-patch-review--replies-note (review)
+(defun harness-ui-patch-review--replies-note (review &optional compact)
   "Return the line about the replies waiting in REVIEW, or nil.
 A task at work has no feedback to carry its drafts: they are replies the
 user sends together, and the line says how many wait and offers to send
-them (`harness-ui-patch-review-send-replies')."
+them (`harness-ui-patch-review-send-replies').  COMPACT says it in one
+line, as the chat's threads view has room for: the count, the button and
+the key that sends them."
   (when (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review))
     (let ((drafts (length (and (harness-ui-patch-review--r-set review)
                                (change-review-drafts (harness-ui-patch-review--r-set review))))))
       (when (> drafts 0)
-        (concat
-         (propertize (format "%s waiting: C-c C-c saves one; send them to the agent together when you are done.  "
-                             (harness-ui-patch-review--plural drafts "reply" "replies"))
-                     'face 'change-review-ui-draft-face)
-         (propertize (buttonize "[Send replies]"
-                                (lambda (_) (harness-ui-patch-review-send-replies review))
-                                nil "Send them to the agent as one message")
-                     'mouse-face 'highlight))))))
+        (let ((count (harness-ui-patch-review--plural drafts "reply" "replies")))
+          (if compact
+              (concat
+               (propertize (format "%s waiting  " count) 'face 'change-review-ui-draft-face)
+               (propertize (buttonize "[Send replies]"
+                                      (lambda (_) (harness-ui-patch-review-send-replies review))
+                                      nil "Send them to the agent as one message")
+                           'mouse-face 'highlight)
+               (propertize "   C-c C-c" 'face 'harness-hint-face
+                           'help-echo "Send them to the agent as one message"))
+            (concat
+             (propertize (format "%s waiting: C-c C-c saves one; send them to the agent together when you are done.  "
+                                 count)
+                         'face 'change-review-ui-draft-face)
+             (propertize (buttonize "[Send replies]"
+                                    (lambda (_) (harness-ui-patch-review-send-replies review))
+                                    nil "Send them to the agent as one message")
+                         'mouse-face 'highlight))))))))
 
 (defun harness-ui-patch-review--notes (review)
   "Return the lines that tell what to know about REVIEW, above its files."
@@ -4434,14 +4482,15 @@ Open them all when not.  The change as a whole is a file's threads too."
   (harness-ui-patch-review--set-comments-folded
    (or (harness-ui-patch-review--review-here) (user-error "No review here")) t))
 
-(defun harness-ui-patch-review--section (review counts &optional compact)
+(defun harness-ui-patch-review--section (review counts &optional compact no-threads)
   "Return REVIEW's changes as its report shows them.
 The heading, the settings, what to know, the files -- the tree or a flat
 list -- and under them the threads.  COUNTS are its threads per file.
 COMPACT draws it for the narrow tree beside Ediff: rows that fit, the
-file Ediff compares marked, and no line of keys.  The heading folds the
-files away -- the tree is long, and the report should not be all of it
-once the work is known -- and the threads have a fold of their own.
+file Ediff compares marked, and no line of keys.  NO-THREADS leaves the
+threads out, for a surface that shows them elsewhere.  The heading folds
+the files away -- the tree is long, and the report should not be all of
+it once the work is known -- and the threads have a fold of their own.
 Directories, the threads of each file and each thread start folded for
 the round, but where the user commented (`--ensure-fold-round',
 `--file-start-folded-p', `--thread-start-fold'); the reader's choice is
@@ -4492,8 +4541,9 @@ kept while that round lasts."
                                         'help-echo harness-ui-patch-review--hint-detail
                                         'face 'harness-hint-face 'wrap-prefix "  ")
                             "\n"))))))
-     (if (or (harness-ui-patch-review--r-tip review)
-             (change-review-set-threads (harness-ui-patch-review--r-set review)))
+     (if (and (not no-threads)
+              (or (harness-ui-patch-review--r-tip review)
+                  (change-review-set-threads (harness-ui-patch-review--r-set review))))
          (concat "\n" (harness-ui-patch-review--threads-section review compact))
        ""))))
 
@@ -4626,7 +4676,9 @@ drawn say so in a line, and the report goes on."
 On `harness-ui-review-changes-functions', called in the chat buffer on
 every draw of its tail while TASK waits for review: the tree and the
 threads, so the work is looked over where it is handed in, without
-opening the report.  Nil for a task with no branch of its own; for one
+opening the report.  The threads are left out while the chat shows them
+in place of its compose box, so they are in one place.  Nil for a task
+with no branch of its own; for one
 whose repository is not on this machine, a line saying so.  Changes
 that cannot be drawn say so in a line, and the banner goes on."
   (harness-ui-patch-review--drawing-safely task
@@ -4642,7 +4694,9 @@ that cannot be drawn say so in a line, and the banner goes on."
           (harness-ui-patch-review--ensure-loaded review)
           (harness-ui-patch-review--view
            review (lambda () (harness-ui-patch-review--redraw-chat (current-buffer))))
-          (harness-ui-patch-review--section review (harness-ui-patch-review--counts review)))))))
+          (harness-ui-patch-review--section
+           review (harness-ui-patch-review--counts review)
+           nil (bound-and-true-p harness-chat--threads-view)))))))
 
 ;;;;; Keeping the reader's place in a chat
 
@@ -4773,15 +4827,16 @@ window."
               (with-selected-window window
                 (recenter line)))))))))
 
-(defun harness-ui-patch-review--chat-threads-view ()
+(defun harness-ui-patch-review--chat-threads-view (&optional trailing)
   "Insert this session's review threads, for the chat's C-c T.
 On `harness-chat-threads-function': the threads of the task of the
 chat's session, with their filter and their keys, in place of the
 chat's compose box, whose words and attachments are kept.  A task in
 the working phase has the threads of the review it handed in last, when
 it has one: the view is for a conversation as much as for a review.
-Returns nil when the session is no task's, so the chat says it has no
-threads; a task without a review says why it has none."
+TRAILING, a string, ends the heading line: the chat puts its [Compose]
+button there.  Returns nil when the session is no task's, so the chat
+says it has no threads; a task without a review says why it has none."
   (when-let* ((task (and (fboundp 'harness-ui-review--task)
                          (harness-ui-review--task harness-ui-session-id))))
     (let ((review (or (harness-ui-patch-review--known (plist-get task :id))
@@ -4796,7 +4851,7 @@ threads; a task without a review says why it has none."
         (harness-ui-patch-review--ensure-loaded review)
         (harness-ui-patch-review--view
          review (lambda () (harness-ui-patch-review--redraw-chat (current-buffer))))
-        (insert (harness-ui-patch-review--threads-section review nil t))))
+        (insert (harness-ui-patch-review--threads-section review nil t trailing))))
     t))
 
 ;;;;; Moving between the files

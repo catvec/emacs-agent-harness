@@ -2042,13 +2042,32 @@ threads view draws it, without waiting for a session or a model."
                                                  :email "noah@acme.example"))))
     thread))
 
+(defun harness-media--reply-draft (task-id body)
+  "Add a draft reply of the user's, BODY, to the first thread of TASK-ID's review.
+The task is at work, so the reply waits in the thread for [Send replies]."
+  (let* ((review (harness-media--wait
+                  (lambda () (harness-ui-patch-review--known task-id))
+                  5 "the review to open"))
+         (set (harness-ui-patch-review--r-set review))
+         (thread (harness-media--wait
+                  (lambda () (car (change-review-set-threads set)))
+                  5 "the threads to load")))
+    (when (and thread (null (change-review-drafts set)))
+      (let ((change-review-ui-read-function
+             (lambda (_prompt initial callback &optional _point)
+               (funcall callback (concat initial body)))))
+        (change-review-ui-reply-to-thread set thread))
+      (harness-ui-patch-review--refresh review)
+      (harness-media--settle 0.5))))
+
 (defun harness-media-shot-chat-threads ()
   "The threads of a task at work, in place of its compose box.
 The task handed its work in, then was taken back to work with
 [Keep working]; C-c T shows the review's threads -- the filter, the
-keys, the cards -- where the box was, and [Compose] brings the box back
-with the words it held.  The open thread is one the user made in the
-review, as a review's threads are made."
+keys, the cards, and the replies waiting to be sent -- where the box
+was, and [Compose] brings the box back with the words it held.  The
+open thread is one the user made in the review, as a review's threads
+are made, and the draft under it waits for [Send replies] or C-c C-c."
   (let ((id (plist-get (plist-get harness-media--world :tasks) :slow)))
     (harness-call 'task/return-to-work id)
     (harness-media--wait-task id (lambda (task) (equal (harness-media--column task) "active"))
@@ -2059,6 +2078,7 @@ review, as a review's threads are made."
       (with-current-buffer buffer
         (goto-char (point-max))
         (call-interactively #'harness-chat-show-threads))
+      (harness-media--reply-draft id "Yes: it names the request when the warning is logged.")
       (harness-media--settle 1)
       (harness-media--to-bottom buffer)
       (with-current-buffer buffer
@@ -3928,6 +3948,8 @@ from its checkout again afterwards."
 ;;;; Reviewing a task's changes with threads
 
 (defvar harness-ui-patch-review--reviews)
+(defvar change-review-ui-read-function)
+(declare-function harness-ui-patch-review--known "harness-ui-patch-review")
 (declare-function harness-ui-patch-review--r-files "harness-ui-patch-review")
 (declare-function harness-ui-patch-review--r-set "harness-ui-patch-review")
 (declare-function harness-ui-patch-review--r-tip "harness-ui-patch-review")
@@ -3947,7 +3969,9 @@ from its checkout again afterwards."
 (declare-function change-review-ui-set-fold "change-review-ui")
 (declare-function change-review-ui-flush "change-review-ui")
 (declare-function change-review-set-threads "change-review")
+(declare-function change-review-drafts "change-review")
 (declare-function change-review-open-threads "change-review-ui")
+(declare-function change-review-ui-reply-to-thread "change-review-ui")
 (declare-function change-review-ui-set-filter "change-review-ui")
 (declare-function change-review-ui-show-origin "change-review-ui")
 (declare-function harness-ui-patch-review--approve "harness-ui-patch-review")

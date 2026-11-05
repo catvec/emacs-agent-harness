@@ -481,14 +481,14 @@ A line that fits, and the empty one, is a piece of its own."
   "Return the value of KEY in the plist OPTIONS, DEFAULT when it has none."
   (if (plist-member options key) (plist-get options key) default))
 
-(defun change-review-ui--fit (width build steps &optional keep)
+(defun change-review-ui--fit (width build steps &optional keep initial)
   "Return the first line BUILD draws that is at most WIDTH columns wide.
-BUILD is called with a plist of options, nil at first; each of STEPS, a
-plist of one option, is added to it in turn, the newest winning, while the
-line is too wide.  So the steps say what to give up, the first the least
-missed.  A line that is wider still when they are all taken is cut,
+BUILD is called with a plist of options, INITIAL at first; each of STEPS,
+a plist of one option, is added to it in turn, the newest winning, while
+the line is too wide.  So the steps say what to give up, the first the
+least missed.  A line that is wider still when they are all taken is cut,
 unless KEEP is non-nil: the caller sees that it did not fit."
-  (let* ((options nil)
+  (let* ((options initial)
          (line (funcall build options)))
     (while (and (> (string-width line) width) steps)
       (setq options (append (pop steps) options)
@@ -1176,20 +1176,21 @@ that deletes a thread of drafts and the buttons."
                 ;; A long header wraps under its mark, not at the margin.
                 'wrap-prefix (concat prefix "  "))))
 
-(defun change-review-ui--thread-header (set thread view placement prefix width &optional fold keep)
+(defun change-review-ui--thread-header (set thread view placement prefix width &optional fold keep buttons)
   "Return the first line of THREAD in SET, drawn for VIEW, after PREFIX.
 It is at most WIDTH columns wide: when it would not be, it says less
 \(`change-review-ui--header-steps').  VIEW is `threads' or `diff';
 PLACEMENT says where the thread is now.  FOLD is how the thread is
 folded when it can be folded (`change-review-ui-thread-fold'), nil when
 not.  With KEEP a line that does not fit when it says the least is
-returned as it is, not cut."
+returned as it is, not cut.  BUTTONS nil leaves the buttons of the
+thread out, for a host that shows them another way."
   (change-review-ui--fit
    width
    (lambda (options)
      (change-review-ui--build-thread-header set thread view placement prefix fold options))
    (if (eq fold 'collapsed) change-review-ui--collapsed-header-steps change-review-ui--header-steps)
-   keep))
+   keep (and (null buttons) '(:buttons nil))))
 
 (defconst change-review-ui--footer-steps
   '((:delete nil))
@@ -1230,7 +1231,7 @@ the answer does."
          (own (cl-remove-if (lambda (line) (string-match-p "\\`>+\\(?:[ \t]\\|\\'\\)" line)) lines)))
     (string-join (or own lines) " ")))
 
-(defun change-review-ui--collapsed-line (set thread view placement indent width fold)
+(defun change-review-ui--collapsed-line (set thread view placement indent width fold &optional buttons)
   "Return THREAD of SET as one line: the header, then the first words of its root.
 The line is at most WIDTH columns wide, and no wider than
 `change-review-ui--collapsed-width'.  The header gives up what it can
@@ -1238,14 +1239,15 @@ The line is at most WIDTH columns wide, and no wider than
 `change-review-ui--quote-room' columns, or what they need if that is
 less; when it has given up all it can, the words are the room that is
 left.  FOLD, INDENT, VIEW and PLACEMENT are those of
-`change-review-ui-thread-string'; the words are a button that opens the
-thread when the thread can be folded."
+`change-review-ui-thread-string'; BUTTONS nil leaves the buttons out.
+The words are a button that opens the thread when the thread can be
+folded."
   (let* ((width (min width change-review-ui--collapsed-width))
          (rich (change-review-ui-body-summary set (change-review-thread-root thread)))
          (text (substring-no-properties rich))
          (wanted (min (+ 2 (string-width text)) change-review-ui--quote-room))
          (header (change-review-ui--thread-header set thread view placement indent
-                                                  (- width 2 wanted) fold t))
+                                                  (- width 2 wanted) fold t buttons))
          (room (- width (string-width header) 2 2))
          (words (and (>= room 3) (truncate-string-to-width text room nil nil "…"))))
     (concat (if (> (string-width header) (- width 2 3))
@@ -1375,13 +1377,14 @@ where its room ends."
           fits)))))
 
 (cl-defun change-review-ui-thread-string (set thread &key (view 'threads) placement
-                                              collapsed details width (indent "") fold max-lines)
+                                              collapsed details width (indent "") fold max-lines (buttons t))
   "Return THREAD of SET drawn as text, each line ending in a newline.
 This is the one drawing of a thread, in the threads view and in the
 diff view.  It has a header line -- the thread's mark and short id,
 where it is, how many comments it has, whether it is open or closed,
 and for a thread someone else closed whether it is still to review --
-and buttons, then each comment: the bar, the comment's place in the
+and, unless BUTTONS is nil, buttons; then each comment: the bar, the
+comment's place in the
 thread (\"2/3\", and \"↳ re 1/3\" when it answers another than the one
 before), who wrote it, when, against which revision, whether it is a
 draft, and the text (`change-review-ui-body-lines': as it was typed,
@@ -1391,7 +1394,7 @@ A thread drawn whole ends with a line of its own that has the header's
 buttons again (`change-review-ui-thread-buttons-at-bottom'), so that it
 is answered from its end without going back to its start: [Reply],
 [Close] or [Reopen], [Mark reviewed], [Diff] and [Delete thread], as
-the view has them.
+the view has them.  BUTTONS nil leaves that line out too.
 
 No line is wider than WIDTH, by default the room the buffer's window
 has: a line that would be says less -- how long ago for a date, the
@@ -1428,7 +1431,8 @@ the next `change-review-ui-next-fold' shows."
          (collapsed (or collapsed (eq fold 'collapsed)))
          (fold (and fold (if collapsed 'collapsed fold)))
          (comments (change-review-thread-comments thread))
-         (footer (and (not collapsed)
+         (footer (and buttons
+                      (not collapsed)
                       (change-review-ui--thread-footer set thread view indent width)))
          (limit (and max-lines (eq fold 'expanded)
                      (not (or (eq details t)
@@ -1438,13 +1442,13 @@ the next `change-review-ui-next-fold' shows."
                      (max 3 max-lines)))
          (lines
           (if collapsed
-              (list (change-review-ui--collapsed-line set thread view placement indent width fold))
+              (list (change-review-ui--collapsed-line set thread view placement indent width fold buttons))
             (pcase-let* ((`(,rows . ,left-out)
                           (if limit
                               (change-review-ui--fit-rows set thread indent width details fold (1- limit))
                             (change-review-ui--comment-rows set thread indent width details fold)))
                          (all (cons (concat (change-review-ui--thread-header set thread view placement indent
-                                                                              width fold)
+                                                                              width fold nil buttons)
                                             "\n")
                                     rows))
                          (cut (and limit (> (length all) limit))))
@@ -3229,13 +3233,14 @@ The one for CURRENT, the filter in force, is marked instead."
       (change-review--string (change-review-set-id set))
       "change"))
 
-(defun change-review-ui-threads-heading (set &optional filter)
+(defun change-review-ui-threads-heading (set &optional filter omit-drafts)
   "Return the line that heads the threads of SET, ending in a newline.
 It is \"Threads\" and a button for each status filter -- open, to review,
 reviewed this turn, closed and all, with how many threads each lets
 through -- the one for FILTER, by
 default `change-review-ui--filter', marked as in force; and how many
-drafts are not sent.  A button sets `change-review-ui--filter' in the
+drafts are not sent, unless OMIT-DRAFTS says that somewhere else.  A
+button sets `change-review-ui--filter' in the
 buffer it is pressed in and draws that view again
 \(`change-review-ui-redraw'), so a buffer that embeds the threads
 \(`change-review-ui-threads-string') keeps both."
@@ -3246,7 +3251,7 @@ buffer it is pressed in and draws that view again
      (mapconcat (lambda (spec)
                   (change-review-ui--filter-button set (cdr spec) (car spec) filter))
                 change-review-ui--filters " ")
-     (if (> (plist-get counts :drafts) 0)
+     (if (and (not omit-drafts) (> (plist-get counts :drafts) 0))
          (propertize (format "     %d %s not sent" (plist-get counts :drafts)
                              (if (= 1 (plist-get counts :drafts)) "draft" "drafts"))
                      'face 'change-review-ui-draft-face)
@@ -3311,7 +3316,7 @@ non-nil."
      'change-review-file (or file :change))))
 
 (cl-defun change-review-ui-threads-string (set &key (filter 'open) details width (indent "") empty
-                                               file-fold thread-fold)
+                                               (buttons t) file-fold thread-fold)
   "Return the threads of SET that FILTER lets through, grouped by file, as text.
 This is the body of the threads view, for a buffer that shows it among
 its own text.  The change as a whole comes first, then the files in the
@@ -3328,7 +3333,9 @@ marked reviewed this turn).  DETAILS is the list of the ids of
 the comments that also show where they were made.  WIDTH is the width to
 wrap to, by default that of the window showing the current buffer, and
 INDENT starts every line.  EMPTY is the line to say when the filter
-lets no thread through, by default one that says so.  The head of the
+lets no thread through, by default one that says so.  BUTTONS nil
+leaves the buttons of each thread's header out, for a host that offers
+its actions another way.  The head of the
 threads, their filter buttons, is `change-review-ui-threads-heading'.
 
 FILE-FOLD, when given, is a function of a file (a path, or nil for the
@@ -3363,7 +3370,8 @@ drawn whole, as the threads view draws them."
                           set thread :view 'threads
                           :placement (change-review-placement set thread)
                           :details details :width width :indent (concat indent "  ")
-                          :fold (and thread-fold (funcall thread-fold thread)))
+                          :fold (and thread-fold (funcall thread-fold thread))
+                          :buttons buttons)
                          "\n"))
                threads "")))))
        groups ""))))

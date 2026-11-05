@@ -3797,8 +3797,61 @@ offers [Send replies] where the user wrote them."
           (let ((view (buffer-substring-no-properties
                        (marker-position harness-chat--transcript-end) (point-max))))
             (should (string-match-p "1 reply waiting" view))
-            (should (string-match-p "C-c C-c saves one" view))
-            (should (string-match-p "\\[Send replies\\]" view))))))))
+            (should (string-match-p "C-c C-c" view))
+            (should (string-match-p "\\[Send replies\\]" view))
+            (should-not (string-match-p "C-c C-c saves" view))
+            ;; The count is in the send line alone, not in the heading too.
+            (should-not (string-match-p "draft.*not sent" view))))))))
+
+(ert-deftest harness-ui-patch-review-compose-threads-c-c-c-c-sends-the-drafts ()
+  "C-c C-c in the threads where the compose box was sends the replies waiting.
+[Send replies] does the same, and is still there for a click."
+  (let ((harness-tasks-working-phase t))
+    (harness-ui-patch-review-test-with-task
+      (let* ((chat (harness-ui-patch-review-test--banner board id sid))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (set (harness-ui-patch-review--r-set review))
+             (root (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2)
+                                                             "Why two?" :sent 10.0))
+             (thread (harness-ui-patch-review-test--thread-of review root))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             captured)
+        (harness-call 'task/return-to-work id)
+        (harness-test-wait
+         (lambda () (equal "working" (plist-get (harness-ui-patch-review--r-task review) :phase)))
+         5 "the review to hear the task is at work")
+        (with-current-buffer chat
+          (let ((change-review-ui-read-function
+                 (lambda (_prompt initial callback &optional _point)
+                   (funcall callback (concat initial "Because.")))))
+            (change-review-ui-reply-to-thread set thread)))
+        (with-current-buffer chat
+          (call-interactively #'harness-chat-show-threads))
+        (harness-ui-patch-review-test--wait-text chat "\\[Send replies\\]")
+        (with-current-buffer chat
+          (goto-char (marker-position harness-chat--threads-view-start))
+          (should (eq #'harness-ui-patch-review-send-replies (key-binding (kbd "C-c C-c"))))
+          (search-forward "[Send replies]")
+          (should (button-at (match-beginning 0))))
+        (cl-letf (((symbol-function 'harness-method/agent/prompt)
+                   (lambda (session blocks &optional _opts)
+                     (setq captured (list session blocks))
+                     (harness-resolved nil))))
+          (with-current-buffer chat
+            (execute-kbd-macro (kbd "C-c C-c")))
+          (harness-test-wait (lambda () captured) 5 "C-c C-c to send the reply"))
+        (should (equal sid (car captured)))
+        (let ((blocks (cl-remove-if-not #'harness-thread-block-p (cadr captured))))
+          (should (= 1 (length blocks)))
+          (should (equal (change-review-thread-id thread)
+                         (plist-get (plist-get (car blocks) :thread) :id)))
+          (should (equal "Because." (harness-thread-response (car blocks)))))
+        (harness-test-wait
+         (lambda ()
+           (not (change-review-comment-draft-p
+                 (change-review-thread-last-comment
+                  (change-review-find-thread set (change-review-thread-id thread))))))
+         5 "the reply to be sent")))))
 
 (ert-deftest harness-ui-patch-review-shows-the-threads-in-the-box ()
   "C-c T puts the review's threads, filters and all, where the box was.
@@ -3822,13 +3875,20 @@ view holds the threads only, not the report and the files above them;
         (should (equal "A draft of mine." (harness-compose-text)))
         (let* ((tail (buffer-substring-no-properties
                       (marker-position harness-chat--transcript-end) (point-max)))
-               (view (and (string-match "Threads  \\[Compose\\]" tail)
+               (view (and (string-match "Threads  \\[open 1\\]" tail)
                           (substring tail (match-beginning 0)))))
           (should view)
+          ;; The banner's own copy of the threads is gone while they show here.
+          (should (= 2 (length (split-string tail "Why two?"))))
+          ;; One heading line, its filters and [Compose]; not a second "Threads".
+          (should (string-match-p "\\`Threads  \\[open 1\\].*\\[Compose\\]" view))
+          (should-not (string-search "\nThreads" view))
           ;; The same threads view, with its filter, where the box was.
           (should (string-match-p "Why two?" view))
-          (should (string-match-p "\\[open 1\\]" view))
           (should-not (string-match-p "❯ A draft of mine\\." view))
+          ;; The compose view's threads offer their keys, not a button apiece.
+          (should (string-match-p "RET jump · r reply" view))
+          (should-not (string-match-p "\\[Reply\\]\\|\\[Close\\]\\|\\[Diff\\]" view))
           ;; Not the report and not the files.
           (should-not (string-match-p "Handed in" view))
           (should-not (string-match-p "Changes (" view)))
