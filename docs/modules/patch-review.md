@@ -60,9 +60,13 @@ its threads waits there as drafts, all of them, until they send the
 replies together (`patch-review/send-replies`,
 `harness-patch-review--send-working-replies`): one message to the
 agent, a thread block each, which the agent answers in their threads
-as one turn.  Closing a thread is the user's question answered, not a
-way past the hand-in check: hand_in refuses while one is open
-(`harness-patch-review--hand-in-blocker`).
+as one turn.  A reply that quotes a comment, as C-c > writes it, has
+its quote in the <quote> of the block -- the line that names the
+comment answered and links to it, then its words -- not as the
+Markdown \">\" lines the review keeps for a person to read; a reply
+that quotes nothing has no <quote> tag.  Closing a thread is the
+user's question answered, not a way past the hand-in check: hand_in
+refuses while one is open (`harness-patch-review--hand-in-blocker`).
 
 THE CLOSES.  The agent closes a thread; the user is the one who says
 the point is done.  A thread the agent closed is TO REVIEW until the

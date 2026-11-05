@@ -834,6 +834,10 @@ sent.  A blank draft is no reply and stays behind."
                          (mapcar (lambda (block) (plist-get (plist-get block :thread) :id)) replies)))
           (should (equal (list "Because the loop counts from one." "Because the key is minute.")
                          (mapcar #'harness-thread-response replies)))
+          ;; Neither quotes anything: no <quote> tag is made.
+          (dolist (block replies)
+            (should (string-search "<thread id=" (plist-get block :text)))
+            (should-not (string-search "<quote>" (plist-get block :text))))
           (should (string-search "<thread id=" (plist-get (car blocks) :text))))
         ;; The replies are sent, with the mark of the working phase.
         (let* ((thread (car (harness-patch-review-test--threads id)))
@@ -850,6 +854,77 @@ sent.  A blank draft is no reply and stays behind."
         ;; It was the conversation, not a round of feedback.
         (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
         (should-not (plist-get (harness-call 'task/get id) :feedback))))))
+
+(ert-deftest harness-patch-review-a-quoted-reply-goes-in-a-quote-tag ()
+  "A reply the user wrote under a quote of a comment, as C-c > makes it in
+the review, goes to the agent as a <thread> block whose quote is the
+<quote> tag: the Markdown \">\" lines it has in the review are no thread
+XML.  The quote keeps the line that says whose comment it is, and the
+thread data names that comment, as the review draws it."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--task))
+             (parent (harness-patch-review-test--user-comment
+                      id "Why eighteen?" :location harness-patch-review-test--a18 :sent 10.0))
+             (thread (car parent))
+             (ref (list :kind "comment" :who "comment" :author "Noah"
+                        :thread thread :task id :file "a.el" :side "new" :line 18))
+             (header (harness-thread-ref-header (append ref (list :text "Why eighteen?"))))
+             (body (concat (harness-thread-quote
+                            (list :refs (list (append ref (list :text "Why eighteen?")))))
+                           "\n\nBecause the first pass needs one."))
+             sent)
+        (harness-call 'task/return-to-work id)
+        (should (equal "working" (plist-get (harness-call 'task/get id) :phase)))
+        ;; The reply as the review keeps it: the quote in Markdown, as a
+        ;; comment is, under the line that says whose comment it answers.
+        (harness-call 'patch-review/apply id
+                      (list :op "add-comment" :thread thread
+                            :comment (list :id "c-reply" :thread thread :body body
+                                           :time (float-time) :reply-to (cdr parent)
+                                           :author '(:kind "user" :name "Noah"
+                                                     :email "noah@example.org"))))
+        (should (string-prefix-p (concat "> " header) body))
+        (cl-letf (((symbol-function 'harness-method/agent/prompt)
+                   (lambda (session blocks &optional _opts)
+                     (setq sent (list session blocks))
+                     (harness-resolved nil))))
+          (should (equal (list :sent 1)
+                         (harness-call 'patch-review/send-replies id))))
+        (let* ((block (cl-find-if #'harness-thread-block-p (cadr sent)))
+               (text (plist-get block :text)))
+          ;; The quote is a <quote> tag, and no line of the XML is Markdown.
+          (should (equal (format "<thread id=\"%s\">\n<quote>%s\n\nWhy eighteen?</quote>\nBecause the first pass needs one.\n</thread>"
+                                 thread header)
+                         text))
+          (should-not (string-match-p "^>" text))
+          ;; The agent reads it back as the one <thread> form: the quote in
+          ;; its tag and the words under it.
+          (let ((parsed (car (harness-thread-parse-blocks text))))
+            (should (equal thread (plist-get parsed :id)))
+            (should (string-search "Why eighteen?" (plist-get parsed :quote)))
+            (should (equal "Because the first pass needs one." (plist-get parsed :body))))
+          ;; The thread data names the comment answered, so the reply draws
+          ;; as any reply with a quote does, in the thread it is in.
+          (let ((got (car (harness-thread-refs (plist-get block :thread)))))
+            (should (equal "comment" (harness-thread-ref-kind got)))
+            (should (equal "Noah" (plist-get got :author)))
+            (should (equal thread (plist-get got :thread)))
+            (should (equal id (plist-get got :task)))
+            (should (equal "a.el" (plist-get got :file)))
+            (should (equal "new" (plist-get got :side)))
+            (should (eql 18 (plist-get got :line)))
+            (should (equal "Why eighteen?" (plist-get got :text))))
+          (should (equal "Because the first pass needs one."
+                         (harness-thread-response block))))
+        ;; The review keeps the comment as it was written: Markdown, for a
+        ;; person to read.
+        (let ((reply (car (harness-call 'patch-review/drafts id))))
+          (should-not reply)
+          (should (string-search "Because the first pass needs one."
+                                 (change-review-comment-body
+                                  (cdr (change-review-find-comment
+                                        (harness-patch-review--set-for id) "c-reply"))))))))))
 
 (ert-deftest harness-patch-review-a-task-in-review-sends-no-replies ()
   "A task waiting for review has no send-replies: its drafts go with the

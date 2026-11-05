@@ -4053,6 +4053,55 @@ each reply in its thread, and draws them sent."
         (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
         (should-not (plist-get (harness-call 'task/get id) :feedback))))))
 
+(ert-deftest harness-ui-patch-review-a-quoted-reply-while-working-goes-with-a-quote-tag ()
+  "C-c > on a comment of the review while the task is at work answers it
+with the comment quoted; [Send replies] sends the reply in its thread with
+the quote in a <quote> tag, as thread XML is written, not as the Markdown
+\">\" lines the review draws for a person."
+  (let ((harness-tasks-working-phase t))
+    (harness-ui-patch-review-test-with-task
+      (let* ((popout (harness-ui-patch-review-test--changes board id))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (set (harness-ui-patch-review--r-set review))
+             (root (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                             :sent 10.0))
+             (thread (harness-ui-patch-review-test--thread-of review root))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             captured)
+        (harness-call 'task/return-to-work id)
+        (harness-test-wait
+         (lambda () (equal "working" (plist-get (harness-ui-patch-review--r-task review) :phase)))
+         5 "the review to hear the task is at work")
+        ;; C-c > in the review: the comment quoted, the answer under it.
+        (with-current-buffer popout
+          (let ((change-review-ui-read-function
+                 (lambda (_prompt initial callback &optional _point)
+                   (funcall callback (concat initial "Because.")))))
+            (change-review-ui-reply-to-comment
+             set thread root
+             (harness-thread-quote
+              (list :refs (list (harness-ui-patch-review--comment-ref set thread root)))))))
+        (harness-test-wait (lambda () (= 1 (length (harness-call 'patch-review/drafts id))))
+                           5 "the harness to hear the reply")
+        (should (string-prefix-p "> " (plist-get (car (harness-call 'patch-review/drafts id)) :body)))
+        (cl-letf (((symbol-function 'harness-method/agent/prompt)
+                   (lambda (session blocks &optional _opts)
+                     (setq captured (list session blocks))
+                     (harness-resolved nil))))
+          (with-current-buffer popout
+            (harness-ui-patch-review-send-replies))
+          (harness-test-wait (lambda () captured) 5 "the reply to reach the agent"))
+        (should (equal sid (car captured)))
+        (let* ((block (cl-find-if #'harness-thread-block-p (cadr captured)))
+               (text (plist-get block :text)))
+          (should block)
+          (should (equal (change-review-thread-id thread)
+                         (plist-get (plist-get block :thread) :id)))
+          (should (string-search "<quote>" text))
+          (should-not (string-match-p "^>" text))
+          (should (string-search "Why two?" text))
+          (should (string-search "Because." text)))))))
+
 (ert-deftest harness-ui-patch-review-the-threads-of-a-working-task-offer-to-send ()
   "The threads view of a task at work says how many replies wait, and
 offers [Send replies] where the user wrote them."

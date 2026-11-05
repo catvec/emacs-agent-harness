@@ -50,9 +50,13 @@
 ;; replies together (`patch-review/send-replies',
 ;; `harness-patch-review--send-working-replies'): one message to the
 ;; agent, a thread block each, which the agent answers in their threads
-;; as one turn.  Closing a thread is the user's question answered, not a
-;; way past the hand-in check: hand_in refuses while one is open
-;; (`harness-patch-review--hand-in-blocker').
+;; as one turn.  A reply that quotes a comment, as C-c > writes it, has
+;; its quote in the <quote> of the block -- the line that names the
+;; comment answered and links to it, then its words -- not as the
+;; Markdown \">\" lines the review keeps for a person to read; a reply
+;; that quotes nothing has no <quote> tag.  Closing a thread is the
+;; user's question answered, not a way past the hand-in check: hand_in
+;; refuses while one is open (`harness-patch-review--hand-in-blocker').
 ;;
 ;; THE CLOSES.  The agent closes a thread; the user is the one who says
 ;; the point is done.  A thread the agent closed is TO REVIEW until the
@@ -517,6 +521,34 @@ answer's text, trimmed."
             (setq answer-to end)))))
       (finish))
     (nreverse segments)))
+
+(defun harness-patch-review--split-quote (body)
+  "Return (QUOTE . RESPONSE) for BODY, the text of a comment of a review.
+BODY is Markdown.  When it opens with a block quote -- the lines that
+start with \">\", which `harness-thread-quote' makes of the part of a
+comment a reply answers -- QUOTE is its text, each line with the \">\"
+and the space after it left off, and RESPONSE the words written under
+it, as they are.  With no quote at the start QUOTE is nil and RESPONSE
+is BODY.  A body that is only a quote has no response."
+  (let* ((text (string-trim-left (or body "")))
+         (lines (split-string text "\n"))
+         (quoted nil) (going t))
+    (while (and going lines)
+      (let ((line (car lines)))
+        (cond
+         ((harness-patch-review--quote-line-p line)
+          (let ((bare (string-remove-prefix ">" (string-trim-left line))))
+            (push (string-remove-prefix " " bare) quoted))
+          (setq lines (cdr lines)))
+         ((and quoted (string-blank-p line))
+          ;; A blank line between the parts of one quote is the quote's.
+          (push "" quoted)
+          (setq lines (cdr lines)))
+         (t (setq going nil)))))
+    (setq quoted (string-trim (string-join (nreverse quoted) "\n")))
+    (if (string-empty-p quoted)
+        (cons nil (string-trim (or body "")))
+      (cons quoted (string-trim (string-join lines "\n"))))))
 
 (defun harness-patch-review--call-comment (set call-id)
   "Return (THREAD . COMMENT) for the comment of SET that CALL-ID made, or nil.
@@ -1394,6 +1426,58 @@ were written."
             (eq (change-review-author-kind author) 'user))))
    (change-review-drafts set)))
 
+(defun harness-patch-review--comment-ref (task-id thread comment &optional text)
+  "Return the reference to COMMENT of THREAD in task TASK-ID's review.
+TEXT is what is quoted of it, COMMENT's body by default.  The reference
+names the task and the thread, so the header of the quote links to the
+review, and where COMMENT was made, so the header says that too."
+  (let* ((location (or (change-review-comment-location comment)
+                       (change-review-thread-location thread)))
+         (author (ignore-errors
+                   (change-review-author-label (change-review-comment-author comment)))))
+    (append (list :kind "comment" :who "comment" :author author
+                  :thread (change-review-thread-id thread)
+                  :task task-id
+                  :text (or text (change-review-comment-body comment)))
+            (and location
+                 (append (list :file (change-review-location-file location)
+                               :side (format "%s" (change-review-location-side location))
+                               :line (change-review-location-line location))
+                         (and (change-review-location-end-line location)
+                              (list :end (change-review-location-end-line location))))))))
+
+(defun harness-patch-review--reply-block (task-id thread comment)
+  "Return the thread block of COMMENT, a reply in THREAD of TASK-ID's review.
+The block's text is the <thread> XML the agent reads: the reply's quote
+in a <quote> tag, and the answer under it.  The quote is the Markdown
+block quote the review keeps, with its \">\"s left off; the line it
+opens with, which names the comment answered and links to its thread,
+is the header the thread data makes of that comment, so the block draws
+as any reply with a quote does.  A comment that opens with no quote has
+no <quote> tag, as it quotes nothing."
+  (let* ((split (harness-patch-review--split-quote (change-review-comment-body comment)))
+         (quoted (car split))
+         (response (cdr split))
+         (parent (change-review-comment-parent thread comment))
+         (ref (and quoted parent (harness-patch-review--comment-ref task-id thread parent)))
+         (header (and ref (harness-thread-ref-header ref))))
+    (when ref
+      (if (and header (string-prefix-p (concat header "\n") (concat quoted "\n")))
+          ;; The body opens with the header the reference makes: the tag
+          ;; makes it again, above the words alone.
+          (progn (setq quoted (string-trim (substring quoted (length header))))
+                 (setf (plist-get ref :text) quoted))
+        ;; Words the user wrote, not the quote of the comment: left whole.
+        (setq ref nil)))
+    (harness-thread-block
+     (append (list :id (change-review-thread-id thread))
+             (and quoted
+                  (list :refs (list (or ref
+                                        (list :kind "quote" :label "the quoted text"
+                                              :text quoted)))))
+             (list :response response))
+     response)))
+
 (defun harness-patch-review--send-working-replies (task-id)
   "Send the replies written in the threads of TASK-ID's review to its agent.
 They go as one message, each a thread block, so the agent answers them in
@@ -1418,11 +1502,9 @@ review sends its drafts with the feedback that sends it back."
               (cons (list :type "text"
                           :text "I wrote replies in the threads of the review of your work. Answer each in its thread with a <thread id=\"THREAD_ID\"> block in your message.")
                     (mapcar (lambda (comment)
-                              (let* ((thread (car (change-review-find-comment set (change-review-comment-id comment))))
-                                     (body (change-review-comment-body comment)))
-                                (harness-thread-block
-                                 (list :id (change-review-thread-id thread) :response body)
-                                 body)))
+                              (let ((thread (car (change-review-find-comment
+                                                  set (change-review-comment-id comment)))))
+                                (harness-patch-review--reply-block task-id thread comment)))
                             replies)))
              (promise (harness-call-async 'agent/prompt session blocks)))
         (when (eq (harness-promise-state promise) 'rejected)
