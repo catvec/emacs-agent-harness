@@ -48,7 +48,7 @@
 ;; [Verify], so the work is looked over where it is handed in, with no
 ;; click on [Review Changes] (the banner asks for them through
 ;; `harness-ui-review-changes-functions'); in the report, under the
-;; evidence, above the review banner and its box; and in the tree beside
+;; evidence, above the review banner and its box; and in the column beside
 ;; Ediff (below).  What the task's branch changes against its merge base
 ;; with the branch it was made from -- what merging it brings in, not
 ;; what that branch did since -- or the diff the reviewer chooses instead
@@ -103,8 +103,9 @@
 ;;               at its line, on a comment shows where it was made, o
 ;;               follows an agent's comment to its conversation, c
 ;;               starts a new thread in the box, f changes the filter.
-;;               T goes to the section; where there is none, in Ediff,
-;;               it shows the tree beside it and goes there.
+;;               T goes to the section; in Ediff, where the section is
+;;               not drawn, it goes to the threads below the tree
+;;               instead (the library's view, below).
 ;;   new thread  c, or the heading's [New thread] button, starts a
 ;;               thread that quotes nothing -- one on the change as a
 ;;               whole -- as a card in the compose box, where the
@@ -162,22 +163,31 @@
 ;;               branch, in the frame of the report or the session, the
 ;;               report small at the bottom of it with its feedback box
 ;;               (opened for it from the banner, closed with the Ediff),
-;;               and on the left the TREE of the files, as a file tree
-;;               shows beside an editor (`harness-ui-patch-review-ediff-tree',
-;;               `harness-ui-patch-review-ediff-tree-width'): the
-;;               directories and files with their marks, the file
-;;               compared marked and highlighted, the threads under
-;;               them, in a buffer of its own that Ediff leaves be.  RET
-;;               or a click on a file there compares it in place of the
-;;               one under way, TAB folds a directory, q ends Ediff, and
-;;               t in Ediff hides the tree or shows it again.  The
-;;               control panel keeps Ediff's keys and has more: c
+;;               and on the left a column of two panes, one above the
+;;               other, as if one buffer were split in two
+;;               (`harness-ui-patch-review-ediff-tree',
+;;               `harness-ui-patch-review-ediff-tree-width'): at the top
+;;               the TREE of the files, as a file tree shows beside an
+;;               editor -- the directories and files with their marks,
+;;               the file compared marked and highlighted -- and below it
+;;               the THREADS of the file, in the library's own threads
+;;               view (`change-review-threads-mode', the one the report's
+;;               [Threads] opens), with every key, filter and fold it has
+;;               there: what is set in one holds in the other.  Each pane
+;;               is a buffer of its own that Ediff leaves be; where the
+;;               frame has no room for the second, the threads are drawn
+;;               under the files instead.  RET or a click on a file in the
+;;               tree compares it in place of the one under way, TAB folds
+;;               a directory, q ends Ediff, and t in Ediff hides the
+;;               column or shows it again.  The control panel keeps
+;;               Ediff's keys and has more: c
 ;;               comments on the current difference, r replies to the
 ;;               thread there, TAB folds the threads of the difference
 ;;               (see below), T goes to the threads, e goes to the
 ;;               report's box, a approves the file or takes its approval
 ;;               off, s and u switch the settings, N and P go on to the
-;;               next or previous file,
+;;               next or previous file, M-n and M-p to the next or
+;;               previous thread of it,
 ;;               q comes back to where Ediff began, point on the next
 ;;               file to review.  n is Ediff's next difference, and at
 ;;               the last one says the next difference is the next file
@@ -191,8 +201,24 @@
 ;;               its views draw it: who wrote each comment, when, which
 ;;               revision it was against, its place in the thread, open
 ;;               or closed; r, x, RET and o there are as in the threads
-;;               section.  T goes to the threads; d there comes back to
+;;               section, and so are all the threads view's keys.  T goes
+;;               to the threads pane below the tree; d there comes back to
 ;;               Ediff, at the thread's line.
+;;   thread      M-n and M-p go to the next or previous thread of the
+;;   navigation  file, in the control panel or either version: the
+;;               version the thread is in is selected, at its line, and
+;;               the thread the keys there act on.  The column beside
+;;               Ediff follows: the thread is scrolled into sight in the
+;;               threads below the files, its filter opened to all when
+;;               the thread's status hid it, and the file compared
+;;               brings its threads up as it opens.  The threads of a
+;;               difference selected with Ediff's n show there too, and
+;;               so does the thread the reviewer scrolls past: a version
+;;               scrolled brings the last thread at or above its first
+;;               line into sight, the thread list going through the file
+;;               as the code does.  What was scrolled to is kept for a
+;;               draw of the threads, as long as the thread is still
+;;               there.
 ;;   quote reply C-c > replies to a comment with what you highlight of it
 ;;               quoted, as a mail's reply is, point under the quote.  In
 ;;               the threads list it is the region.  In Ediff's versions a
@@ -549,7 +575,7 @@ shows, as the whole frame is Ediff's then."
 (defcustom harness-ui-patch-review-closed-threads nil
   "Whether the threads below the files start by showing the closed ones too.
 The threads of the changes -- in the report, in the review banner and in
-the tree beside Ediff -- show the open ones at first; the closed ones,
+the column beside Ediff -- show the open ones at first; the closed ones,
 the good ending, only count in the file's row until the filter's buttons
 show them.  Non-nil starts each of them on all the threads.  The
 filter is the buffer's, and \\<harness-ui-patch-review--thread-map>\\[change-review-ui-cycle-filter] changes it there."
@@ -593,18 +619,21 @@ show and in Ediff."
 
 (defcustom harness-ui-patch-review-ediff-tree t
   "Whether Ediff shows the changed files in a tree beside the two versions.
-A window on the left of the frame, as a file tree shows beside the
+A column on the left of the frame, as a file tree shows beside the
 editor: the directories and files with their marks and the file Ediff
-compares marked, and under them the threads.  RET or a click on a file
-compares it in place of the one under way, TAB folds a directory.  The
-tree goes when Ediff ends.  t in Ediff's control panel shows or hides it
+compares marked, and below them the threads of the review, in the
+library's threads view (`change-review-open-threads'), one pane above
+the other.  RET or a click on a file compares it in place of the one
+under way, TAB folds a directory.  The column goes when Ediff ends.  t
+in Ediff's control panel shows or hides the column
 \(`harness-ui-patch-review-toggle-ediff-tree')."
   :type 'boolean)
 
 (defcustom harness-ui-patch-review-ediff-tree-width 46
-  "How many columns wide the tree beside Ediff is, at most.
-In a narrow frame it takes 40% of it at the most, so the two versions
-keep their room."
+  "How many columns wide the column beside Ediff is, at most.
+Both panes take it: the tree at the top, the threads below it.  In a
+narrow frame it takes 40% of it at the most, so the two versions keep
+their room."
   :type 'natnum)
 
 (defcustom harness-ui-patch-review-markdown t
@@ -696,9 +725,11 @@ Ediff was started from, where point goes back to when it ends.  EDIFF is
 the comparison under way: a plist of :index, the buffers :a, :b and
 :control, the :windows to give back as it ends, the first line :start
 the report's window showed, the :box window of the report kept beside it,
-:reached, non-nil once the reviewer was at the last difference, and
+:reached, non-nil once the reviewer was at the last difference,
 :unapproved, non-nil once the reviewer took the file's approval off
-\(leaving does not approve it again).
+\(leaving does not approve it again), and :thread, the id of the thread
+the reviewer is at -- gone to with M-n or M-p, or one selected with a
+difference or scrolled to -- which the tree beside Ediff shows.
 GONE is non-nil once the task went, done or deleted, while its Ediff
 showed.  SNAPSHOTS holds the review as it was at earlier commits of the
 branch, by the commit, each a promise of a copy of this review with the
@@ -2525,6 +2556,8 @@ or on its card on the board."
   (dolist (buffer (harness-ui-patch-review--ediff-buffers review))
     (when (buffer-live-p buffer) (kill-buffer buffer)))
   (harness-ui-patch-review--kill-tree review)
+  (when-let* ((threads (harness-ui-patch-review--threads-pane-buffer review)))
+    (kill-buffer threads))
   (harness-ui-patch-review--unlimit-box (harness-ui-patch-review--r-popout review))
   (setf (harness-ui-patch-review--r-ediff review) nil)
   ;; The Ediffs of the code as earlier commits had it.
@@ -3676,6 +3709,11 @@ the report or the session of the task."
       (harness-ui-patch-review--known
        (get-text-property (line-beginning-position) 'harness-ui-patch-review-task))
       harness-ui-patch-review--review
+      ;; The library's views of the review -- the threads beside Ediff, the
+      ;; diff of an earlier commit -- know the set, not the review.
+      (when (and (boundp 'change-review-ui--set) change-review-ui--set
+                 (harness-ui-patch-review--set-p change-review-ui--set))
+        (harness-ui-patch-review--set-review change-review-ui--set))
       (when (derived-mode-p 'harness-ui-popout-mode)
         (when-let* ((task (and (fboundp 'harness-ui-report-task)
                                (harness-ui-report-task))))
@@ -3703,17 +3741,20 @@ the report and in a version."
   buffer)
 
 (defun harness-ui-patch-review-threads (&optional filter)
-  "Go to the threads of the review at point: a section below its files.
-In the report of a task's changes, in its session's review banner and in
-the tree beside Ediff, point goes to the heading of the threads in the
-same buffer.  From Ediff, in the control panel or in either version, the
-tree is shown beside it (`harness-ui-patch-review-ediff-tree') and point
-goes there.  Without a tree, the library's threads view lists them in a
-buffer of its own (`change-review-open-threads').  FILTER, `open',
-`unreviewed' (the threads the agent closed that you have not reviewed),
-`reviewed' (the threads you marked reviewed this turn), `closed' or
-`all', is the status to show them by, by default the
-buffer's.  \\<change-review-threads-mode-map>\\[change-review-ui-quote-reply] there replies with what you selected of a comment
+  "Go to the threads of the review at point: below its files.
+In the report of a task's changes and in its session's review banner,
+point goes to the heading of the threads in the same buffer.  From Ediff,
+in the control panel or in either version, the threads show in the column
+beside it, in a pane below the tree of the files
+\(`harness-ui-patch-review-ediff-tree' shows that column; the pane is the
+library's threads view), and point goes there -- to the thread the
+reviewer is at, when there is one.  Without the column the library's
+threads view lists them in a buffer of its own
+\(`change-review-open-threads').  FILTER, `open', `unreviewed' (the
+threads the agent closed that you have not reviewed), `reviewed' (the
+threads you marked reviewed this turn), `closed' or `all', is the status
+to show them by, by default the buffer's.
+\\<change-review-threads-mode-map>\\[change-review-ui-quote-reply] there replies with what you selected of a comment
 quoted."
   (interactive)
   (let ((review (or (harness-ui-patch-review--review-here)
@@ -3726,18 +3767,19 @@ quoted."
           (dolist (window (get-buffer-window-list (current-buffer) nil t))
             (set-window-point window pos)
             (with-selected-window window (recenter 1))))
-      (if-let* ((window (and (harness-ui-patch-review--r-ediff review)
-                             harness-ui-patch-review-ediff-tree
-                             (harness-ui-patch-review--keep-tree review))))
+      (if-let* ((ediff (harness-ui-patch-review--r-ediff review))
+                (window (when (and harness-ui-patch-review-ediff-tree
+                                   (harness-ui-patch-review--keep-tree review))
+                          (harness-ui-patch-review--threads-pane-window review))))
           (progn
             (select-window window)
             (with-current-buffer (window-buffer window)
               (when (and filter change-review-ui--redraw-function)
                 (change-review-ui-set-filter filter))
-              (when-let* ((pos (harness-ui-patch-review--threads-position)))
-                (goto-char pos)
-                (set-window-point window pos)
-                (recenter 1))))
+              (let ((id (plist-get ediff :thread)))
+                (unless (and id (harness-ui-patch-review--goto-thread (current-buffer) id))
+                  (goto-char (point-min))
+                  (recenter 1)))))
         (let ((buffer (change-review-open-threads (harness-ui-patch-review--r-set review) filter)))
           ;; The links of its comments to files are the branch's.
           (when (buffer-live-p buffer)
@@ -4555,10 +4597,14 @@ kept while that round lasts."
                                         'help-echo harness-ui-patch-review--hint-detail
                                         'face 'harness-hint-face 'wrap-prefix "  ")
                             "\n"))))))
-     (if (and (not no-threads)
+     ;; COMPACT is the tree above the threads beside Ediff: the threads have
+     ;; a pane of their own there, the library's view, and do not show twice.
+     ;; NO-THREADS is a surface that shows them elsewhere, the chat's view.
+     (if (and (not compact)
+              (not no-threads)
               (or (harness-ui-patch-review--r-tip review)
                   (change-review-set-threads (harness-ui-patch-review--r-set review))))
-         (concat "\n" (harness-ui-patch-review--threads-section review compact))
+         (concat "\n" (harness-ui-patch-review--threads-section review))
        ""))))
 
 ;;;;; The surfaces
@@ -5411,15 +5457,308 @@ for a side the difference has no lines on, a deletion's branch side."
   "Return the threads about FILE of REVIEW placed in the current difference.
 All of them, on any line it spans, in either version: those the
 difference shows."
-  (let ((ranges (harness-ui-patch-review--difference-ranges))
-        (set (harness-ui-patch-review--r-set review)))
+  (let ((ranges (harness-ui-patch-review--difference-ranges)))
     (cl-remove-if-not
      (lambda (thread)
-       (let* ((placement (change-review-placement set thread))
+       (let* ((placement (harness-ui-patch-review--placement review thread))
               (line (plist-get placement :line))
               (range (plist-get ranges (if (eq (plist-get placement :side) 'old) :old :new))))
          (and (integerp line) range (<= (car range) line (cdr range)))))
      (harness-ui-patch-review--file-threads review file))))
+
+;;;;; Going to the threads of the file
+
+;; The reviewer reads a file a thread at a time as well as a difference at
+;; a time: M-n and M-p go from thread to thread, by line, and the tree
+;; beside Ediff follows.  A thread is drawn in the version its line is in
+;; -- the branch's, or the merge base's for a comment on a removed line
+;; -- so going to one selects that version, at its line, and makes the
+;; thread the one its keys act on.  The tree shows the thread below the
+;; files, and follows the reviewer's scrolling too: a version scrolled to
+;; a line brings the last thread at or above it into sight, which is how
+;; the thread list goes through the file as the code does.
+
+(defun harness-ui-patch-review--thread-steps (review file)
+  "Return the threads about FILE of REVIEW as places to step to.
+Each step is (SIDE LINE . THREAD): SIDE is `old' or `new', the version
+the thread is drawn in, and LINE the line it is under there.  A thread
+on the file as a whole, or one whose line is gone, is at the top of the
+branch's version, line 1, where it is drawn.  The steps are in the
+order the threads come in the file: by line, the branch's version's
+before the merge base's under one line."
+  (let (steps)
+    (dolist (thread (harness-ui-patch-review--file-threads review file))
+      (let* ((placement (harness-ui-patch-review--placement review thread))
+             (line (plist-get placement :line))
+             (side (and (integerp line)
+                        (if (eq (plist-get placement :side) 'old) 'old 'new))))
+        (push (if line
+                  (list side line thread)
+                (list 'new 1 thread))
+              steps)))
+    (sort steps
+          (lambda (a b)
+            (let ((line-a (nth 1 a)) (line-b (nth 1 b)))
+              (cond ((/= line-a line-b) (< line-a line-b))
+                    ((eq (nth 0 a) (nth 0 b))
+                     (string< (change-review-thread-id (nth 2 a))
+                              (change-review-thread-id (nth 2 b))))
+                    (t (eq (nth 0 a) 'new))))))))
+
+(defun harness-ui-patch-review--thread-step-buffer (review step)
+  "Return the version buffer of REVIEW's Ediff that shows STEP."
+  (plist-get (harness-ui-patch-review--r-ediff review)
+             (if (eq (nth 0 step) 'old) :a :b)))
+
+(defun harness-ui-patch-review--thread-step-id (step)
+  "Return the id of the thread of STEP, a thread step."
+  (change-review-thread-id (nth 2 step)))
+
+(defun harness-ui-patch-review--thread-step-at (steps line)
+  "Return the steps of STEPS at LINE, a line of a version."
+  (cl-remove-if-not (lambda (step) (eql (nth 1 step) line)) steps))
+
+(defun harness-ui-patch-review--step-in-difference-p (step)
+  "Return non-nil when STEP is one of the threads of the current difference.
+The line of STEP counts in the version it is drawn in: a difference may
+show lines of the two versions at lines apart."
+  (let ((ranges (harness-ui-patch-review--difference-ranges)))
+    (when ranges
+      (let ((range (plist-get ranges (if (eq (nth 0 step) 'old) :old :new))))
+        (and range (<= (car range) (nth 1 step) (cdr range)))))))
+
+(defun harness-ui-patch-review--thread-step-current (review steps)
+  "Return the step of STEPS the reviewer of REVIEW is at, or nil.
+In the control panel that is the thread of the current difference,
+when it is the one the tree was left on.  In a version it is the thread
+of STEPS the tree was left on, while it is in sight or at point, else
+the thread at point."
+  (let* ((state (harness-ui-patch-review--r-ediff review))
+         (id (plist-get state :thread))
+         (found (and id (cl-find id steps :key #'harness-ui-patch-review--thread-step-id
+                                 :test #'equal))))
+    (if (eq (current-buffer) (plist-get state :control))
+        (and found (harness-ui-patch-review--step-in-difference-p found) found)
+      (let* ((window (get-buffer-window (current-buffer) t))
+             (lines (and window (harness-ui-patch-review--window-lines window)))
+             (visible (and window (pos-visible-in-window-p (point) window)))
+             (line (line-number-at-pos))
+             (at (and visible (harness-ui-patch-review--thread-step-at steps line))))
+        (cond
+         ;; Point on a thread is the thread gone to, whatever the tree last showed.
+         (at (or (and found (memq found at)) (car at)))
+         ((and found lines (<= (car lines) (nth 1 found) (cdr lines))) found)
+         ((and found visible (eql (nth 1 found) line)) found))))))
+
+(defun harness-ui-patch-review--difference-bounds ()
+  "Return (FIRST . LAST) of the lines the current difference of this Ediff spans.
+Either version's lines count: the difference shows them together."
+  (let ((ranges (harness-ui-patch-review--difference-ranges)))
+    (when ranges
+      (let ((lines (delq nil (list (car (plist-get ranges :old)) (cdr (plist-get ranges :old))
+                                   (car (plist-get ranges :new)) (cdr (plist-get ranges :new))))))
+        (when lines (cons (apply #'min lines) (apply #'max lines)))))))
+
+(defun harness-ui-patch-review--window-lines (window)
+  "Return (TOP . BOTTOM) of the lines WINDOW shows, or nil."
+  (when (window-live-p window)
+    (with-current-buffer (window-buffer window)
+      (let ((top (line-number-at-pos (window-start window) t))
+            (end (window-end window t)))
+        (and end (cons top (line-number-at-pos (max (point-min) (1- end)) t)))))))
+
+(defun harness-ui-patch-review--thread-boundary (review)
+  "Return the line from which a thread is next in REVIEW's Ediff.
+In the control panel that is the first line of the current difference,
+going forwards, or its last, going backwards; in a version the line at
+point, or the first line the window shows when point is out of sight."
+  (let ((state (harness-ui-patch-review--r-ediff review)))
+    (if (eq (current-buffer) (plist-get state :control))
+        ;; A file Ediff finds no difference in has threads all the same.
+        (or (harness-ui-patch-review--difference-bounds)
+            (cons 1 most-positive-fixnum))
+      (let ((window (get-buffer-window (current-buffer) t)))
+        (if (and window (not (pos-visible-in-window-p (point) window)))
+            (cons (line-number-at-pos (window-start window) t)
+                  (line-number-at-pos (window-start window) t))
+          (cons (line-number-at-pos) (line-number-at-pos)))))))
+
+(defun harness-ui-patch-review--note-thread-step (review step)
+  "Note STEP of REVIEW as the thread the reviewer is at, and show it in the pane."
+  (let ((id (harness-ui-patch-review--thread-step-id step)))
+    (unless (equal id (plist-get (harness-ui-patch-review--r-ediff review) :thread))
+      (setf (harness-ui-patch-review--r-ediff review)
+            (plist-put (harness-ui-patch-review--r-ediff review) :thread id))
+      (harness-ui-patch-review--sync-thread review id))))
+
+(defun harness-ui-patch-review--show-thread-step (review step)
+  "Show STEP, a thread of REVIEW, in Ediff: its version, at its line.
+The version is selected, point on the thread's line, and the thread the
+one its keys act on.  The threads beside Ediff show it below the tree."
+  (let* ((buffer (harness-ui-patch-review--thread-step-buffer review step))
+         (line (nth 1 step))
+         (thread (nth 2 step))
+         (window (and (buffer-live-p buffer) (get-buffer-window buffer t))))
+    (unless (buffer-live-p buffer)
+      (user-error "The version this thread is in is not shown"))
+    (setf (harness-ui-patch-review--r-ediff review)
+          (plist-put (harness-ui-patch-review--r-ediff review)
+                     :thread (change-review-thread-id thread)))
+    (when window (select-window window))
+    (with-current-buffer buffer
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (setq change-review-ui--chosen-thread (change-review-thread-id thread))
+      (when window (recenter 0)))
+    (harness-ui-patch-review--sync-thread review (change-review-thread-id thread))
+    thread))
+
+(defun harness-ui-patch-review--sync-thread (review id)
+  "Show the thread ID of REVIEW in sight in the threads beside its Ediff.
+The view's filter becomes `all' when the thread's status hid it.  A
+threads pane the reviewer is in is not scrolled: their place there is
+theirs."
+  (when-let* ((buffer (harness-ui-patch-review--threads-pane-buffer review))
+              (window (harness-ui-patch-review--threads-pane-window review))
+              ((not (eq window (selected-window)))))
+    (harness-ui-patch-review--goto-thread buffer id)))
+
+(defun harness-ui-patch-review--sync-file-thread (review)
+  "Show in the threads beside Ediff the threads of the file it compares.
+The thread the reviewer is at is shown when it is the file's, else the
+file's first; a file with no thread leaves the view where it is."
+  (let* ((index (plist-get (harness-ui-patch-review--r-ediff review) :index))
+         (file (and (integerp index) (nth index (harness-ui-patch-review--r-files review))))
+         (steps (and file (harness-ui-patch-review--thread-steps review file)))
+         (id (plist-get (harness-ui-patch-review--r-ediff review) :thread))
+         (step (and steps
+                    (or (cl-find id steps :key #'harness-ui-patch-review--thread-step-id
+                                 :test #'equal)
+                        (car steps)))))
+    (when step
+      (harness-ui-patch-review--sync-thread review (harness-ui-patch-review--thread-step-id step)))))
+
+(defun harness-ui-patch-review--sync-difference-thread ()
+  "Show the thread of the current difference in the threads beside Ediff.
+On `ediff-select-hook', in the control panel: Ediff's n goes from
+difference to difference, and a difference with a thread puts it in the
+threads' sight."
+  (when-let* ((review (and (boundp 'harness-ui-patch-review--review)
+                           harness-ui-patch-review--review))
+              (index (and (integerp harness-ui-patch-review--index)
+                          harness-ui-patch-review--index))
+              (state (harness-ui-patch-review--r-ediff review))
+              ((buffer-live-p (plist-get state :control)))
+              (file (nth index (harness-ui-patch-review--r-files review)))
+              (threads (harness-ui-patch-review--difference-threads review file)))
+    (let* ((id (plist-get state :thread))
+           (thread (or (cl-find id threads :key #'change-review-thread-id :test #'equal)
+                       (car threads)))
+           (step (cl-find thread (harness-ui-patch-review--thread-steps review file)
+                          :key (lambda (step) (nth 2 step)) :test #'eq)))
+      (when step (harness-ui-patch-review--note-thread-step review step)))))
+
+(defvar-local harness-ui-patch-review--synced-start nil
+  "In a version Ediff compares, the window start the threads were shown at.
+`harness-ui-patch-review--side-command' keeps the threads beside Ediff
+with the code scrolled, when a command moved the window on rather than a
+redisplay (`window-scroll-functions').")
+
+(defun harness-ui-patch-review--side-command ()
+  "Show in the threads beside Ediff the thread the code scrolled to.
+On `post-command-hook', buffer-locally in the versions Ediff compares: a
+command that moves the window on -- a wheel, a scroll -- has the threads
+follow it, where the redisplay that would say so has not run yet."
+  (when-let* ((window (selected-window))
+              ((eq (window-buffer window) (current-buffer)))
+              (start (window-start window)))
+    (unless (eql start harness-ui-patch-review--synced-start)
+      (setq harness-ui-patch-review--synced-start start)
+      (harness-ui-patch-review--side-scrolled window))))
+
+(defun harness-ui-patch-review--side-scrolled (window &optional _start)
+  "Show in the threads beside Ediff the thread at the top of WINDOW, a version.
+On `window-scroll-functions' and from `harness-ui-patch-review--side-command',
+buffer-locally in the versions Ediff compares: the thread list follows
+the code, the last thread at or above the line the version starts at
+coming into sight."
+  (when (and (window-live-p window) (buffer-live-p (window-buffer window)))
+    (with-current-buffer (window-buffer window)
+      (when-let* ((review (and (boundp 'harness-ui-patch-review--review)
+                               harness-ui-patch-review--review))
+                  (index (and (integerp harness-ui-patch-review--index)
+                              harness-ui-patch-review--index))
+                  (state (harness-ui-patch-review--r-ediff review))
+                  ((or (eq (current-buffer) (plist-get state :a))
+                       (eq (current-buffer) (plist-get state :b))))
+                  (file (nth index (harness-ui-patch-review--r-files review)))
+                  ((harness-ui-patch-review--threads-pane-window review)))
+        (let* ((side (if (eq (current-buffer) (plist-get state :a)) 'old 'new))
+               (line (line-number-at-pos (window-start window) t))
+               (steps (cl-remove-if-not (lambda (step) (eq (nth 0 step) side))
+                                        (harness-ui-patch-review--thread-steps review file)))
+               (passed (cl-remove-if-not (lambda (step) (<= (nth 1 step) line)) steps))
+               (current (plist-get state :thread))
+               (here (and current (cl-find current passed
+                                           :key #'harness-ui-patch-review--thread-step-id
+                                           :test #'equal))))
+          ;; A thread the reviewer went to at the top line is the one in
+          ;; sight there, not the last of several threads on it.
+          (when (and passed (not (and here (eql (nth 1 here) (nth 1 (car (last passed)))))))
+            (harness-ui-patch-review--note-thread-step review (car (last passed)))))))))
+
+(defun harness-ui-patch-review--step-thread (step)
+  "Go STEP threads on -- 1 or -1 -- in the file this Ediff compares.
+Done in the control panel or in either version.  The next thread is the
+one after a thread the reviewer is at, else the first at or after where
+they are; backwards it is the one before, else the last at or before."
+  (let* ((review (harness-ui-patch-review--current))
+         (index (or (and (integerp harness-ui-patch-review--index)
+                         harness-ui-patch-review--index)
+                    (user-error "No file here")))
+         (file (nth index (harness-ui-patch-review--r-files review)))
+         (steps (harness-ui-patch-review--thread-steps review file)))
+    (unless steps
+      (user-error "No threads in %s" (change-review-file-path file)))
+    (let* ((current (harness-ui-patch-review--thread-step-current review steps))
+           (bounds (harness-ui-patch-review--thread-boundary review))
+           (target
+            (cond
+             (current
+              (let ((at (cl-position current steps :test #'eq)))
+                (and at (>= (+ at step) 0) (< (+ at step) (length steps))
+                     (nth (+ at step) steps))))
+             ((> step 0)
+              (cl-find-if (lambda (step) (>= (nth 1 step) (car bounds))) steps))
+             (t
+              (car (last (cl-remove-if-not (lambda (step) (<= (nth 1 step) (cdr bounds)))
+                                           steps)))))))
+      (unless target
+        (user-error (if (> step 0) "No more threads in %s" "No earlier thread in %s")
+                    (change-review-file-path file)))
+      (harness-ui-patch-review--show-thread-step review target))))
+
+(defun harness-ui-patch-review-next-thread (&optional n)
+  "Go to the next thread of the file compared in this Ediff, or the Nth next.
+In the control panel or in either version.  The version the thread is in
+is selected at its line; the threads below the tree beside Ediff show it,
+their filter opened to all when the thread's status hid it."
+  (interactive "p")
+  (let ((n (or n 1)))
+    (if (< n 0)
+        (dotimes (_ (- n)) (harness-ui-patch-review--step-thread -1))
+      (dotimes (_ n) (harness-ui-patch-review--step-thread 1)))))
+
+(defun harness-ui-patch-review-previous-thread (&optional n)
+  "Go to the previous thread of the file in this Ediff, or the Nth previous.
+In the control panel or in either version.  The version the thread is in
+is selected at its line; the threads below the tree beside Ediff show it,
+their filter opened to all when the thread's status hid it."
+  (interactive "p")
+  (let ((n (or n 1)))
+    (if (< n 0)
+        (dotimes (_ (- n)) (harness-ui-patch-review--step-thread 1))
+      (dotimes (_ n) (harness-ui-patch-review--step-thread -1)))))
 
 (defun harness-ui-patch-review-cycle-fold ()
   "Fold the threads of the current difference: one line, conversation, all.
@@ -5503,16 +5842,21 @@ thread, wherever point is."
                     "No thread here")))
     (change-review-ui-delete-thread set (change-review-ui-choose-thread set drafts "Delete"))))
 
-;;;; The tree beside Ediff
+;;;; The column beside Ediff: the tree, and the threads below it
 
 ;; While Ediff compares a file, the changes show on the left of the frame
-;; as a file tree shows beside an editor: the directories and the files
-;; with their marks, the file Ediff compares marked and highlighted, and
-;; under them the threads, in a buffer of their own.  RET or a click on a
-;; file compares it in place of the one under way; TAB folds a directory.
-;; The window is kept as the report's box is, for Ediff to leave be
-;; (`no-delete-other-windows'), and goes when Ediff ends.  It is the
-;; tree's own side window and no other window that shows the buffer
+;; as if one buffer were split in two: a file tree on top, as a file tree
+;; shows beside an editor -- the directories and the files with their
+;; marks, the file Ediff compares marked and highlighted -- and the
+;; threads of the file below it, in the library's threads view
+;; (`change-review-open-threads'), with all its keys, filters and folds.
+;; RET or a click on a file compares it in place of the one under way;
+;; TAB folds a directory.  The windows are kept as the report's box is,
+;; for Ediff to leave be (`no-delete-other-windows'), and go when Ediff
+;; ends; so does the pane when the frame has no room for it, the tree
+;; then drawing the threads under the files
+;; (`harness-ui-patch-review--draw-tree').  The tree is its own side
+;; window and no other window that shows the buffer
 ;; (`harness-ui-patch-review--tree-window'): going on to the next file ends
 ;; the Ediff under way within `save-window-excursion', and a restored window
 ;; configuration has windows again for the killed buffers, which may show
@@ -5537,7 +5881,7 @@ one under way.
 \(a directory: its files).
 \\[harness-ui-patch-review-toggle-skip-approved] switches skipping the approved files, \\[harness-ui-patch-review-toggle-auto-approve] approving the
 files you went through.
-\\[harness-ui-patch-review-threads] goes to the threads under the files.
+\\[harness-ui-patch-review-threads] goes to the threads below the tree.
 \\<harness-ui-patch-review-tree-mode-map>\\[harness-ui-patch-review-ediff-quit] ends Ediff and gives the frame back."
   ;; The tree is a narrow window: its lines wrap, not truncate.
   (setq-local truncate-lines nil
@@ -5573,7 +5917,8 @@ again."
   "Draw the tree beside Ediff of REVIEW again, when it is open.
 Point stays on the row it was on, the window where it was; when the
 reader is elsewhere, in Ediff, the row of the file under comparison is in
-sight."
+sight.  The threads, which the pane below the files shows, are not drawn
+here."
   (let ((buffer (harness-ui-patch-review--r-tree-buffer review)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
@@ -5588,6 +5933,12 @@ sight."
           (erase-buffer)
           (insert (harness-ui-patch-review--section
                    review (harness-ui-patch-review--counts review) t))
+          ;; No room for the pane below in a small frame: the tree draws the
+          ;; threads under the files, as it did before they had one.
+          (when (and (null (harness-ui-patch-review--threads-pane-window review))
+                     (or (harness-ui-patch-review--r-tip review)
+                         (change-review-set-threads (harness-ui-patch-review--r-set review))))
+            (insert "\n" (harness-ui-patch-review--threads-section review t)))
           (set-buffer-modified-p nil)
           (let ((target (or (and anchor (save-excursion (harness-ui-patch-review--goto-anchor anchor)))
                             (when-let* ((index (plist-get (harness-ui-patch-review--r-ediff review) :index)))
@@ -5625,16 +5976,115 @@ the tree once more."
          (cl-find-if (lambda (window) (window-parameter window 'window-side))
                      (get-buffer-window-list buffer nil (selected-frame))))))
 
+(defun harness-ui-patch-review--threads-pane-buffer (review)
+  "Return the threads view buffer of REVIEW, when there is one, or nil.
+It is the library's threads view of the review's set
+\(`change-review-open-threads'), the one the report's [Threads] opens."
+  (let ((set (harness-ui-patch-review--r-set review)))
+    (and set
+         (cl-find-if (lambda (buffer)
+                       (and (buffer-live-p buffer)
+                            (eq 'change-review-threads-mode
+                                (buffer-local-value 'major-mode buffer))
+                            (eq set (buffer-local-value 'change-review-ui--set buffer))))
+                     (buffer-list)))))
+
+(defun harness-ui-patch-review--threads-pane-window (review)
+  "Return the side window of the threads beside REVIEW's Ediff, or nil."
+  (let ((buffer (harness-ui-patch-review--threads-pane-buffer review)))
+    (and (buffer-live-p buffer)
+         (cl-find-if (lambda (window) (window-parameter window 'window-side))
+                     (get-buffer-window-list buffer nil (selected-frame))))))
+
+(defun harness-ui-patch-review--draw-threads-pane ()
+  "Draw the threads in the current buffer, the pane keeping the row it shows.
+The library's drawing keeps point on what it was on and the row of the
+window it was on when the view's own window is the selected one
+\(`change-review-ui--draw-threads'); beside Ediff the selected window is a
+version, so the drawing is done in the pane's window, which stays where
+the reader had it.  A view in no window is drawn as it is."
+  (let ((windows (get-buffer-window-list (current-buffer) nil t)))
+    (if-let* ((window (or (cl-find-if (lambda (window)
+                                        (window-parameter window 'window-side))
+                                      windows)
+                          (car windows))))
+        (with-selected-window window (change-review-ui--draw-threads))
+      (change-review-ui--draw-threads))))
+
+(defun harness-ui-patch-review--threads-pane (review)
+  "Return REVIEW's threads view, made for its pane if there is none.
+The pane is the library's threads view of the review's set
+\(`change-review-open-threads'), shown below the files beside Ediff: all
+its keys are there, its filters and its folds.  The view is the one the
+report opens as well, so what is set in one holds in the other; made
+here, it shows the closed threads too when
+`harness-ui-patch-review-closed-threads' says so."
+  (or (harness-ui-patch-review--threads-pane-buffer review)
+      (save-selected-window
+        (let ((display-buffer-overriding-action
+               ;; Shown where the reader will have it, not popped over the
+               ;; report: the pane's window is made as the view is.
+               `(display-buffer-in-side-window
+                 (side . left) (slot . 0)
+                 (window-width . ,(harness-ui-patch-review--tree-width))
+                 (preserve-size . (t . nil)))))
+          (change-review-open-threads
+           (harness-ui-patch-review--r-set review)
+           (and harness-ui-patch-review-closed-threads 'all))))))
+
+(defun harness-ui-patch-review--keep-threads (review)
+  "Show REVIEW's threads beside Ediff, in a side window below the files.
+Return the window, or nil when the review has no set to show, or the
+frame has no room for a second pane in the column: the tree then draws
+the threads under the files (`harness-ui-patch-review--draw-tree').  The
+pane is the library's threads view, drawn to the width of the column."
+  (when (and (harness-ui-patch-review--r-set review)
+             ;; Two windows need the room of two, mode lines included.
+             (let ((tree (harness-ui-patch-review--tree-window review)))
+               (or (null tree) (>= (window-height tree) (* 2 window-min-height)))))
+    (let* ((buffer (harness-ui-patch-review--threads-pane review))
+           (window (and (buffer-live-p buffer)
+                        (display-buffer-in-side-window
+                         buffer `((side . left) (slot . 0)
+                                  (window-width . ,(harness-ui-patch-review--tree-width))
+                                  (preserve-size . (t . nil)))))))
+      (when (window-live-p window)
+        (set-window-parameter window 'no-delete-other-windows t)
+        (set-window-dedicated-p window t)
+        (with-current-buffer buffer
+          ;; A pane is a partial-width window: its lines wrap, not cut.
+          (setq-local truncate-partial-width-windows nil
+                      ;; Drawn in its window, it keeps the row the reader is on.
+                      change-review-ui--redraw-function
+                      #'harness-ui-patch-review--draw-threads-pane)
+          (change-review-ui-redraw))
+        window))))
+
+(defun harness-ui-patch-review--kill-threads (review)
+  "Take the threads beside REVIEW's Ediff away: their side window.
+The view stays, being the library's threads view of the review, which
+the report opens too; the review drops it when it goes
+\(`harness-ui-patch-review--forget')."
+  (let ((buffer (harness-ui-patch-review--threads-pane-buffer review)))
+    (when (buffer-live-p buffer)
+      (dolist (window (get-buffer-window-list buffer nil t))
+        (when (window-parameter window 'window-side)
+          (let ((ignore-window-parameters t))
+            (ignore-errors (delete-window window))))))))
+
 (defun harness-ui-patch-review--keep-tree (review)
-  "Show the tree beside Ediff of REVIEW on the left of the selected frame.
-Its window is returned: the side window it has
-\(`harness-ui-patch-review--tree-window'), else a new one made for it
-`harness-ui-patch-review-ediff-tree-width' wide; either way it is one
-Ediff leaves be (`no-delete-other-windows').  The tree alone is kept:
-another window showing it is Ediff's like any other, and loses the mark
-and the dedication if it has them from earlier, so that Ediff's layout
-takes it.  Nil when the option `harness-ui-patch-review-ediff-tree' is
-off."
+  "Show the column beside Ediff of REVIEW on the left of the selected frame.
+The files come at the top, in a tree, the threads below them
+\(`harness-ui-patch-review--keep-threads'): one column, as the tree and
+the threads were one buffer, split.  The tree's window is returned: the
+side window it has (`harness-ui-patch-review--tree-window'), else a new
+one made for it `harness-ui-patch-review-ediff-tree-width' wide; either
+way it is one Ediff leaves be (`no-delete-other-windows').  The tree
+alone is kept: another window showing it is Ediff's like any other, and
+loses the mark and the dedication if it has them from earlier, so that
+Ediff's layout takes it.  Nil when the option
+`harness-ui-patch-review-ediff-tree' is off, the threads then shown only
+when they are asked for."
   (when harness-ui-patch-review-ediff-tree
     (let* ((buffer (harness-ui-patch-review--tree-buffer review))
            (window (or (harness-ui-patch-review--tree-window review)
@@ -5649,23 +6099,29 @@ off."
             (set-window-dedicated-p other nil)))
         (set-window-parameter window 'no-delete-other-windows t)
         (set-window-dedicated-p window t)
+        ;; The pane made first, so the tree knows whether it draws the threads.
+        (harness-ui-patch-review--keep-threads review)
         (harness-ui-patch-review--draw-tree review)
         window))))
 
 (defun harness-ui-patch-review--kill-tree (review)
-  "Take the tree beside Ediff of REVIEW away: its window and its buffer."
+  "Take the column beside Ediff of REVIEW away.
+The tree's window and its buffer go, and the pane of the threads below
+them (`harness-ui-patch-review--kill-threads')."
   (let ((buffer (harness-ui-patch-review--r-tree-buffer review)))
     (setf (harness-ui-patch-review--r-tree-buffer review) nil)
     (when (buffer-live-p buffer)
       (dolist (window (get-buffer-window-list buffer nil t))
         (let ((ignore-window-parameters t))
           (ignore-errors (delete-window window))))
-      (kill-buffer buffer))))
+      (kill-buffer buffer)))
+  (harness-ui-patch-review--kill-threads review))
 
 (defun harness-ui-patch-review-toggle-ediff-tree ()
   "Show the tree of the changed files beside Ediff, or hide it.
 In the control panel of an Ediff of a task's change, or in either
-version.  It is `harness-ui-patch-review-ediff-tree', for every Ediff."
+version.  It is `harness-ui-patch-review-ediff-tree', for every Ediff.
+The threads below the tree go and come with it, one column."
   (interactive)
   (let ((review (harness-ui-patch-review--current)))
     (setq harness-ui-patch-review-ediff-tree (not harness-ui-patch-review-ediff-tree))
@@ -5709,8 +6165,9 @@ For the default diff that is the merge base and the branch; the report
 chooses another (\\[harness-ui-patch-review-select-diff]).
 On the changes in a task's report, in its session's review banner and in
 the tree beside Ediff.  In Ediff, c comments on the current difference,
-into the report's box, N and P go on to the next or previous file, and q
-comes back to where Ediff began.  REVIEW and INDEX name the file instead
+into the report's box, N and P go on to the next or previous file, M-n
+and M-p to the next or previous thread of it, and q comes back to where
+Ediff began.  REVIEW and INDEX name the file instead
 of the row at point.  On the row of an earlier comment the version Ediff
 shows has that comment's line in sight; GOTO, \(SIDE . LINE), names a
 line the same way."
@@ -5777,6 +6234,8 @@ threads under a line -- r, x, m, o, RET -- are its.")
   (define-key map (kbd "k") #'harness-ui-patch-review-delete-comment)
   (define-key map (kbd "K") #'harness-ui-patch-review-delete-thread)
   (define-key map (kbd "T") #'harness-ui-patch-review-threads)
+  (define-key map (kbd "M-n") #'harness-ui-patch-review-next-thread)
+  (define-key map (kbd "M-p") #'harness-ui-patch-review-previous-thread)
   (define-key map (kbd "s") #'harness-ui-patch-review-toggle-skip-approved)
   (define-key map (kbd "u") #'harness-ui-patch-review-toggle-auto-approve)
   (define-key map (kbd "t") #'harness-ui-patch-review-toggle-ediff-tree))
@@ -5797,6 +6256,7 @@ feedback box, the words under it the comment.
 \\[harness-ui-patch-review-approve-ediff] approves the file.
 \\[harness-ui-patch-review-edit-comment] edits a draft of yours there, or goes to the feedback box.
 \\[harness-ui-patch-review-delete-comment] deletes a draft of yours there, \\[harness-ui-patch-review-delete-thread] a thread of drafts.
+\\[harness-ui-patch-review-next-thread] and \\[harness-ui-patch-review-previous-thread] go to the next or previous thread of the file.
 \\[harness-ui-patch-review-threads] goes to the threads, beside the files.
 \\[harness-ui-patch-review-toggle-skip-approved] switches skipping the approved files,
 \\[harness-ui-patch-review-toggle-auto-approve] approving the files you went through,
@@ -5961,6 +6421,11 @@ they are, as `harness-ui-patch-review--place-from-texts' gives it)."
       ;; another -- Ediff lays the frame out, a split is toggled, the box
       ;; grows -- they are drawn again.
       (add-hook 'window-size-change-functions #'harness-ui-patch-review--side-resized nil t)
+      ;; The tree beside Ediff follows the code scrolled: the thread at
+      ;; the top of a version is the one in sight there.  A redisplay
+      ;; says so, and a command that scrolled the window before it does.
+      (add-hook 'window-scroll-functions #'harness-ui-patch-review--side-scrolled nil t)
+      (add-hook 'post-command-hook #'harness-ui-patch-review--side-command nil t)
       (harness-ui-patch-review-lines-mode 1)
       (harness-ui-patch-review--decorate review file buffer side placed)
       (set-buffer-modified-p nil)
@@ -6072,6 +6537,8 @@ approving those gone through without a comment, the tree beside Ediff."
          (elsewhere (list (harness-ui-patch-review--help-button "[Fold thread]" #'harness-ui-patch-review-cycle-fold "TAB")
                           (harness-ui-patch-review--help-button "[Next file]" #'harness-ui-patch-review-ediff-next-file "N")
                           (harness-ui-patch-review--help-button "[Previous file]" #'harness-ui-patch-review-ediff-previous-file "P")
+                          (harness-ui-patch-review--help-button "[Next thread]" #'harness-ui-patch-review-next-thread "M-n")
+                          (harness-ui-patch-review--help-button "[Previous thread]" #'harness-ui-patch-review-previous-thread "M-p")
                           (harness-ui-patch-review--help-button "[Back to the report]" #'harness-ui-patch-review-ediff-quit "q")
                           (propertize "? Ediff's keys" 'face 'harness-dim-face)))
          (settings (list (harness-ui-patch-review--setting-button
@@ -6165,8 +6632,10 @@ GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
         (setf (harness-ui-patch-review--r-ediff review)
               (list :index index :a a :b b :windows windows :start start :box box
                     :made-popout made))
-        ;; The tree marks the file under comparison.
+        ;; The tree marks the file under comparison, and the threads shown
+        ;; beside it are the file's.
         (harness-ui-patch-review--draw-tree review)
+        (harness-ui-patch-review--sync-file-thread review)
         (condition-case err
             (progn
               (let ((ediff-window-setup-function (or harness-ui-patch-review-ediff-window-setup
@@ -6215,6 +6684,8 @@ It gets the review's keys and help, and gives the report back as it ends."
     (define-key map "t" #'harness-ui-patch-review-toggle-ediff-tree)
     (define-key map "n" #'harness-ui-patch-review-next-difference)
     (define-key map "]" #'harness-ui-patch-review-next-difference)
+    (define-key map (kbd "M-n") #'harness-ui-patch-review-next-thread)
+    (define-key map (kbd "M-p") #'harness-ui-patch-review-previous-thread)
     (define-key map "N" #'harness-ui-patch-review-ediff-next-file)
     (define-key map "P" #'harness-ui-patch-review-ediff-previous-file)
     (define-key map "q" #'harness-ui-patch-review-ediff-quit)
@@ -6262,14 +6733,16 @@ buffer there.  Nothing happens when the frame went."
         (plist-put (harness-ui-patch-review--r-ediff review) :reached t)))
 
 (defun harness-ui-patch-review--note-difference ()
-  "Note that the reviewer is at the last difference of this Ediff, once they are.
-On `ediff-select-hook', in the control panel of a review's Ediff: the
-file counts as gone through, for approving it as the reviewer leaves it
-\(`harness-ui-patch-review--auto-approve')."
+  "Note where the reviewer is in this Ediff, as a difference is selected.
+On `ediff-select-hook', in the control panel of a review's Ediff.  At
+the last difference the file counts as gone through, for approving it as
+the reviewer leaves it (`harness-ui-patch-review--auto-approve'), and a
+difference with a thread shows it in the tree beside Ediff."
   (when (and harness-ui-patch-review--review
              (integerp ediff-current-difference)
              (>= ediff-current-difference (1- ediff-number-of-differences)))
-    (harness-ui-patch-review--note-reached harness-ui-patch-review--review)))
+    (harness-ui-patch-review--note-reached harness-ui-patch-review--review))
+  (harness-ui-patch-review--sync-difference-thread))
 
 (defun harness-ui-patch-review--ensure-box (review)
   "Open the report of REVIEW's task out of sight, when it is not open.

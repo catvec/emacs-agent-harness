@@ -15641,7 +15641,8 @@ set draws every surface through the library's own refresh):
   place (`harness-ui-patch-review--compose-thread-map`).  The review
   banner passes NO-THREADS to `--section` while the view shows, so the
   threads are in one place; a task at work has no banner to begin with.
-- the tree beside Ediff (below).
+- the column beside Ediff (below): the tree of the files, and the threads
+  in the library's view below it.
 
 AFTER AN UPDATE.  `harness-update` reloads the harness in place, and a
 reload keeps the reviews (`harness-ui-patch-review--reviews`) with
@@ -15864,9 +15865,11 @@ and `▸ where`), each file under its own heading.  A view that offers the
 actions another way draws the threads with no buttons on their headers
 (`:buttons nil`).  The filter starts as
 `harness-ui-patch-review-closed-threads` says, open or all, and is kept
-by the buffer, so the report, the banner and the tree beside Ediff each
-have their own.  The keys are the library's, bound on the text: r, x, o,
-e, k, f, n and p between comments, N and P between threads, d and RET
+by the buffer, so the report, the banner and the tree's threads each have
+their own; the pane's filter is the library's view's own, as it is
+wherever the view is shown.  The keys are the library's, bound on the
+text: r, x, o, e, k, f, n and p between comments, N and P between
+threads, d and RET
 on the header of a thread compare the file in Ediff at the thread's
 line (`change-review-visit`, with the line the harness placed it at), RET
 on a comment shows where it was made, RET on the name of a file compares
@@ -15878,17 +15881,18 @@ the feedback while the task waits for review, to the agent at once while
 it works.  In the chat's threads view the box comes back for it.  T
 (`harness-ui-patch-review-threads`) goes to the heading in
 the buffer it is pressed in; in Ediff, from the control panel or
-either version, it shows the tree beside Ediff and goes there, and
-without one (the option off) opens the library's view in a buffer of its
-own.  Threads on the change as a whole and on files the branch no longer
-changes are in the section too, under their own headings, which the
-block "Other threads" above the files once held.
+either version, it goes to the threads below the tree (the library's
+view, below), and without a column (the option off) opens the library's
+view in a buffer of its own.  Threads on the change as a whole and on
+files the branch no longer changes are in the section too, under their
+own headings, which the block "Other threads" above the files once held.
 
 RET on a file runs `ediff-buffers` on the two blobs, laid out by
 `harness-ui-patch-review-ediff-window-setup`, once it saved the frame's
 window configuration and deleted every other window but the report's
-side window, which stays for its box, and the tree's, which stays beside
-the versions (below); without a box and a tree beside Ediff
+side window, which stays for its box, and the tree's and the threads',
+which stay beside the versions (below); without a box and a column
+beside Ediff
 (`harness-ui-patch-review-ediff-box-height` nil, the tree option off)
 the side windows go too (`ignore-window-parameters`).  Ediff starts in
 the frame of the window the review was started from, which git's
@@ -15912,7 +15916,7 @@ again goes on to it in Ediff -- or says there is no file left to review.
 The control panel's map is a child of Ediff's with c, r, C-c >, x, m (which takes the place of
 Ediff's wide-display toggle: it marks the thread at the current
 difference reviewed, one that waits first), T, TAB, e, a, s,
-u, t, n, N, P and q (under evil, `evil-normalize-keymaps` puts it where
+u, t, n, M-n, M-p, N, P and q (under evil, `evil-normalize-keymaps` puts it where
 evil-collection made Ediff's map overriding) and a brief help of its
 own (`ediff-brief-help-message-function`: where the reviewer is and how
 many files were viewed and approved, the buttons for what the file
@@ -15924,28 +15928,44 @@ review fits the window to the help it draws again
 `ediff-really-quit` with `ediff-keep-variants` bound, so it asks
 nothing, and the review kills the two versions itself.
 
-THE TREE BESIDE EDIFF.  While Ediff compares a file the changes show on
-the left of the frame as a file tree shows beside an editor
+THE COLUMN BESIDE EDIFF.  While Ediff compares a file the changes show on
+the left of the frame as a column, one pane above the other -- as if the
+files and their threads were one buffer, split
 (`harness-ui-patch-review-ediff-tree`, on; its width,
 `harness-ui-patch-review-ediff-tree-width`, 46 columns at most and 40%
-of a narrow frame): a buffer of its own in `harness-ui-patch-review-tree-mode`,
-displayed in a left side window kept as the report's box is
-(`no-delete-other-windows`, so Ediff's own `delete-other-windows` leaves
-it), and a view of the review's set like the other surfaces.  It draws the
-same section in a compact form (`harness-ui-patch-review--section` with
-COMPACT): a heading with how many files were viewed and approved, the
-settings line in short words, rows that fit the window -- the name gives
-way to the lines the file changes and the open threads and drafts on
-it -- the row of the file Ediff compares marked with `▶` and highlighted
-(`harness-ui-patch-review-current-face`), and under the files the
-threads, wrapped to the window.  It draws again as marks and threads
-change, and keeps point on its row where the reader is in it, else
-shows the row of the file under comparison.  RET or a click on a file
+of a narrow frame).  The files are at the top, a buffer of their own in
+`harness-ui-patch-review-tree-mode`, a left side window kept as the
+report's box is (`no-delete-other-windows`, so Ediff's own
+`delete-other-windows` leaves it), and a view of the review's set like
+the other surfaces.  It draws the same section in a compact form
+(`harness-ui-patch-review--section` with COMPACT): a heading with how
+many files were viewed and approved, the settings line in short words,
+rows that fit the window -- the name gives way to the lines the file
+changes and the open threads and drafts on it -- and the row of the file
+Ediff compares marked with `▶` and highlighted
+(`harness-ui-patch-review-current-face`).  It draws again as marks
+change, and keeps point on its row where the reader is in it, else shows
+the row of the file under comparison.  RET or a click on a file
 there starts the Ediff of that file in place of the one under way, the
-windows kept; q ends Ediff; t in the control panel hides the tree or
-shows it again, and ending Ediff kills the buffer.  The window is the
-side window the tree shows in (`harness-ui-patch-review--tree-window`),
-never another window that shows the same buffer, as the report's box is
+windows kept; q ends Ediff; t in the control panel hides the column or
+shows it again, and ending Ediff kills the tree's buffer and takes the
+threads' window away, the view kept for the report.
+
+The threads are below the files, in the library's own threads view of the
+review (`change-review-open-threads'), a left side window under the
+tree (`harness-ui-patch-review--keep-threads'): all its keys are there
+-- the filter buttons, f, n and p between comments, N and P between
+threads, r replies, x closes or opens, m marks reviewed, d shows the
+thread in Ediff, D the code it was written on, TAB where it was made, e
+and k a draft and its thread, I a reply by hand -- and a fold set there
+is the report's.  It is the view the report's [Threads] opens, not a copy
+of it: one view of the set, shown below the tree.  A frame too short for
+two panes of the column, the report's box at the bottom of it, has the
+tree draw the threads under the files as before
+(`harness-ui-patch-review--draw-tree'), rather than lose one pane to the
+other.  The tree's window is the side window it shows in
+(`harness-ui-patch-review--tree-window'), never another window that shows
+the same buffer, as the report's box is
 (below): N and P, and RET on a file of the tree, end the Ediff under way
 within `save-window-excursion`, and when a hook of `ediff-quit-hook` sets
 another window configuration back meanwhile -- Doom Emacs restores the
@@ -15986,8 +16006,35 @@ thread there, C-c > replies with what is selected in a version quoted,
 else with the thread's last comment quoted
 (`harness-ui-patch-review-quote-reply`), x closes or opens it, TAB folds the threads the difference
 spans (`harness-ui-patch-review--difference-threads`: those placed on a
-line it covers, in the version they are in) and T lists all the threads,
-d in that view coming back to Ediff at the thread's line.  The threads are
+line it covers, in the version they are in) and T goes to the threads,
+in their pane below the tree, d there coming back to Ediff at the
+thread's line.
+
+M-n and M-p go to the next or previous thread of the file
+(`harness-ui-patch-review-next-thread',
+`harness-ui-patch-review-previous-thread`), in the control panel or in
+either version: the version the thread is in is selected at its line,
+and `change-review-ui--chosen-thread` makes it the one the keys there
+act on.  The steps are the threads of the file by line
+(`harness-ui-patch-review--thread-steps`), the branch's version's before
+the merge base's under one line, a thread on the file as a whole at the
+top of the branch's version; the thread the reviewer is at is the one
+the threads beside Ediff were left on while they are in sight, else the
+one at point -- in the control panel, the one the current difference shows
+(`harness-ui-patch-review--thread-step-current`).  The threads pane follows: the
+thread is scrolled into sight in the library's view below the tree, its
+filter opened to all when its status hid it
+(`harness-ui-patch-review--sync-thread', through `--goto-thread'), and
+its id is kept in the Ediff's state (`:thread'), so the view opens at it
+when T goes there.  A version scrolled -- by a command
+(`post-command-hook': `harness-ui-patch-review--side-command') or a
+redisplay (`window-scroll-functions':
+`harness-ui-patch-review--side-scrolled') -- brings the last thread at or
+above the line it starts at into sight, so the thread list goes through
+the file as the code does; a difference selected with n shows the thread
+it holds too, and the file's first thread shows when Ediff opens it.
+
+The threads are
 drawn to the room the window that shows the version has: the width of its
 lines and its height, which limits a thread
 (`change-review-ui-current-size`).  A version is built before Ediff has

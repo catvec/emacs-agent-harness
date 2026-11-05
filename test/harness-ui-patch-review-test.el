@@ -332,8 +332,13 @@ main checkout, so it has no branch until BODY gives it one."
          (harness-test-load-module m))
        (clrhash harness-ui--sessions)
        (let ((repo dir)
+             (height (frame-height))
              (harness-ui-connection-address nil))
          (accept-process-output nil 0)
+         ;; Ediff needs the room of its two versions, the report's box and the
+         ;; column beside them: a frame of 24 lines has none for the column's
+         ;; two panes.
+         (set-frame-height nil 44)
          (delete-other-windows)
          (let* ((board (harness-tasks dir))
                 (id (progn (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-tasks--loading board)))
@@ -350,6 +355,7 @@ main checkout, so it has no branch until BODY gives it one."
            (ignore sid repo)
            (unwind-protect
                (progn ,@body)
+             (set-frame-height nil height)
              (maphash (lambda (_id review) (harness-ui-patch-review--forget review))
                       (copy-hash-table harness-ui-patch-review--reviews))
              (clrhash harness-ui-patch-review--reviews)
@@ -1273,11 +1279,15 @@ point on the next one.  The box stays in sight under Ediff."
           (should (eq #'harness-ui-patch-review-edit-comment (key-binding "e")))
           (should (eq #'harness-ui-patch-review-ediff-next-file (key-binding "N")))
           (should (eq #'harness-ui-patch-review-ediff-previous-file (key-binding "P")))
+          (should (eq #'harness-ui-patch-review-next-thread (key-binding (kbd "M-n"))))
+          (should (eq #'harness-ui-patch-review-previous-thread (key-binding (kbd "M-p"))))
           (should (eq #'harness-ui-patch-review-ediff-quit (key-binding "q")))
           ;; Ediff's own keys are still there.
           (should (eq #'harness-ui-patch-review-next-difference (key-binding "n")))
           (should (eq ediff-brief-help-message-function #'harness-ui-patch-review--ediff-help))
           (should (string-search "[Back to the report] q" (harness-ui-patch-review-test--text control)))
+          (should (string-search "[Next thread] M-n" (harness-ui-patch-review-test--text control)))
+          (should (string-search "[Previous thread] M-p" (harness-ui-patch-review-test--text control)))
           ;; The brief help says which file of the six this is; none seen yet.
           (should (string-search "File 1 of 6 · 0 viewed · [Comment]" (harness-ui-patch-review-test--text control)))
           ;; On the first difference: line 2 on the branch.
@@ -1700,6 +1710,166 @@ which revision, the place in the thread."
           (should (string-search "File 1 of 6 · 0 viewed · 3 threads · [Comment]"
                                  (harness-ui-patch-review-test--text control)))
           (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
+(defun harness-ui-patch-review-test--pane-shows (review id)
+  "Check that the threads beside REVIEW's Ediff show the thread ID in their window."
+  (let* ((buffer (harness-ui-patch-review--threads-pane-buffer review))
+         (window (and buffer (get-buffer-window buffer))))
+    (should (buffer-live-p buffer))
+    (should (window-live-p window))
+    (with-current-buffer buffer
+      (let* ((pos (or (harness-ui-patch-review--thread-position id)
+                      (error "The threads do not show the thread %s" id)))
+             (start (window-start window)))
+        (should (<= start pos))
+        (should (>= start (save-excursion (goto-char pos) (line-beginning-position 0))))
+        (should (<= pos (window-end window t)))
+        (should (eq pos (window-point window)))))))
+
+(ert-deftest harness-ui-patch-review-goes-to-the-threads-of-a-file ()
+  "M-n and M-p go from thread to thread, by line, in the file Ediff compares,
+in the control panel and in either version: the version the thread is in is
+selected at its line, and the thread the one its keys act on.  The threads
+beside Ediff follow: the thread is in sight in their pane below the files,
+its filter opened to all when the thread's status hid it.  A version
+scrolled brings the last thread at or above its first line into sight."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (tip (harness-ui-patch-review--r-tip review))
+           (five (harness-ui-patch-review-test--comment-on
+                  review "a.el" '(:new . 5) "Why five?" :revision tip))
+           (ten (harness-ui-patch-review-test--comment-on
+                 review "a.el" '(:new . 10) "Why ten?" :revision tip))
+           (bot (change-review-agent "Claude" :session "sess-9" :tool-call "toolu_7"))
+           (eighteen (harness-ui-patch-review-test--comment-on
+                      review "a.el" '(:new . 18) "This was eighteen."
+                      :author bot :sent (float-time) :revision tip))
+           (ids (mapcar (lambda (comment)
+                          (change-review-thread-id (harness-ui-patch-review-test--thread-of review comment)))
+                        (list five ten eighteen)))
+           (five-id (nth 0 ids))
+           (ten-id (nth 1 ids))
+           (eighteen-id (nth 2 ids)))
+      (ignore popout)
+      (change-review-close (harness-ui-patch-review--r-set review)
+                           (harness-ui-patch-review-test--thread-of review eighteen)
+                           :author bot)
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (buffers (harness-ui-patch-review--ediff-buffers review))
+             (new (nth 2 buffers))
+             (new-window (get-buffer-window new))
+             (threads (harness-ui-patch-review--threads-pane-buffer review))
+             (state (lambda () (harness-ui-patch-review--r-ediff review)))
+             (line (lambda () (with-current-buffer (window-buffer (selected-window))
+                                (line-number-at-pos (point))))))
+        (with-current-buffer control
+          (should (eq #'harness-ui-patch-review-next-thread (key-binding (kbd "M-n"))))
+          (should (eq #'harness-ui-patch-review-previous-thread (key-binding (kbd "M-p")))))
+        (with-current-buffer new
+          (should (eq #'harness-ui-patch-review-next-thread (key-binding (kbd "M-n"))))
+          (should (eq #'harness-ui-patch-review-previous-thread (key-binding (kbd "M-p"))))
+          (should (memq #'harness-ui-patch-review--side-scrolled window-scroll-functions))
+          (should (memq #'harness-ui-patch-review--side-command post-command-hook)))
+        ;; Ediff opened on the file's threads: the first of them is in sight.
+        (harness-ui-patch-review-test--pane-shows review five-id)
+        ;; The first difference has no thread: next goes to the first of the file.
+        (with-current-buffer control
+          (should-not (plist-get (funcall state) :thread))
+          (call-interactively #'harness-ui-patch-review-next-thread))
+        (should (eq new (window-buffer (selected-window))))
+        (should (eql 5 (funcall line)))
+        (should (equal five-id (plist-get (funcall state) :thread)))
+        (should (equal five-id (buffer-local-value 'change-review-ui--chosen-thread new)))
+        (harness-ui-patch-review-test--pane-shows review five-id)
+        ;; The pane has all the keys of the library's threads view.
+        (should (eq 'change-review-threads-mode (buffer-local-value 'major-mode threads)))
+        (with-current-buffer threads
+          (should (eq #'change-review-ui-set-status (key-binding "s")))
+          (should (eq #'change-review-ui-set-filter (key-binding "F")))
+          (should (eq #'change-review-ui-show-source (key-binding "D")))
+          (should (eq #'change-review-ui-import-reply (key-binding "I")))
+          (should (eq #'change-review-ui-send (key-binding (kbd "C-c C-c"))))
+          (should (eq #'change-review-ui-cycle-filter (key-binding "f")))
+          (should (eq #'quit-window (key-binding "q"))))
+        ;; It is the library's view of the review's set: a command of the
+        ;; review finds the review there too, not only where the changes are.
+        (with-current-buffer threads
+          (let ((harness-ui-patch-review--review nil))
+            (should (eq review (harness-ui-patch-review--review-here)))))
+        ;; The closed thread at line 18 is hidden by the pane's filter, opened
+        ;; to all so that it is in sight when next goes to it.
+        (should (eq 'open (buffer-local-value 'change-review-ui--filter threads)))
+        (with-current-buffer new
+          (call-interactively #'harness-ui-patch-review-next-thread))
+        (should (eql 10 (funcall line)))
+        (should (equal ten-id (plist-get (funcall state) :thread)))
+        (harness-ui-patch-review-test--pane-shows review ten-id)
+        (with-current-buffer new
+          (call-interactively #'harness-ui-patch-review-next-thread))
+        (should (eql 18 (funcall line)))
+        (should (equal eighteen-id (plist-get (funcall state) :thread)))
+        (should (eq 'all (buffer-local-value 'change-review-ui--filter threads)))
+        (harness-ui-patch-review-test--pane-shows review eighteen-id)
+        ;; Drawing the view again -- a fold set in the report, say -- leaves
+        ;; the pane where it was, though it is not the selected window.
+        (change-review-ui-set-fold (harness-ui-patch-review--r-set review)
+                                   (harness-ui-patch-review-test--thread-of review ten)
+                                   'expanded)
+        (change-review-ui-flush)
+        (harness-ui-patch-review-test--pane-shows review eighteen-id)
+        ;; At the end it says so; back it goes through them in reverse.
+        (with-current-buffer new
+          (should-error (call-interactively #'harness-ui-patch-review-next-thread) :type 'user-error)
+          (call-interactively #'harness-ui-patch-review-previous-thread))
+        (should (eql 10 (funcall line)))
+        (should (equal ten-id (plist-get (funcall state) :thread)))
+        (with-current-buffer new
+          (call-interactively #'harness-ui-patch-review-previous-thread))
+        (should (eql 5 (funcall line)))
+        (should (equal five-id (plist-get (funcall state) :thread)))
+        (with-current-buffer new
+          (should-error (call-interactively #'harness-ui-patch-review-previous-thread) :type 'user-error))
+        ;; The tree follows a version scrolled: the last thread at or above the
+        ;; first line shown, by line, so the thread list goes through the file.
+        (with-current-buffer new
+          (set-window-start new-window (save-excursion (goto-char (point-min))
+                                                       (forward-line 6)
+                                                       (point)))
+          (harness-ui-patch-review--side-command))
+        (should (equal five-id (plist-get (funcall state) :thread)))
+        (harness-ui-patch-review-test--pane-shows review five-id)
+        (with-current-buffer new
+          (set-window-start new-window (save-excursion (goto-char (point-min))
+                                                       (forward-line 10)
+                                                       (point)))
+          (harness-ui-patch-review--side-command))
+        (should (equal ten-id (plist-get (funcall state) :thread)))
+        (harness-ui-patch-review-test--pane-shows review ten-id)
+        ;; Moving with Ediff's n to a difference with a thread shows it too.
+        (with-current-buffer control
+          (harness-ui-patch-review-next-difference)
+          (should (= 1 ediff-current-difference))
+          (should (equal '(:new . 18) (harness-ui-patch-review--ediff-position))))
+        (should (equal eighteen-id (plist-get (funcall state) :thread)))
+        (with-current-buffer control
+          (call-interactively #'harness-ui-patch-review-ediff-quit))))))
+
+(ert-deftest harness-ui-patch-review-a-difference-has-the-threads-of-its-own-versions ()
+  "A thread counts in the difference when it is on its version's line there.
+The versions' lines can be far apart, so a thread whose line falls between
+them, on a side the difference has no lines on, is another difference's;
+a file Ediff finds no difference in has no thread in one."
+  (cl-letf (((symbol-function 'harness-ui-patch-review--difference-ranges)
+             (lambda () '(:old (10 . 12) :new (20 . 22)))))
+    (should (harness-ui-patch-review--step-in-difference-p (list 'old 10 nil)))
+    (should (harness-ui-patch-review--step-in-difference-p (list 'new 22 nil)))
+    (should-not (harness-ui-patch-review--step-in-difference-p (list 'old 15 nil)))
+    (should-not (harness-ui-patch-review--step-in-difference-p (list 'new 18 nil))))
+  (cl-letf (((symbol-function 'harness-ui-patch-review--difference-ranges)
+             (lambda () nil)))
+    (should-not (harness-ui-patch-review--step-in-difference-p (list 'new 22 nil)))))
 
 ;;;; Comments are Markdown
 
@@ -2403,7 +2573,9 @@ and RET on it act in the report."
         (should (eq popout (current-buffer)))
         (should (string-prefix-p "Threads" (buffer-substring-no-properties (point) (point-max)))))
       (should-not (cl-some (lambda (buffer)
-                             (eq 'change-review-threads-mode (buffer-local-value 'major-mode buffer)))
+                             (and (eq 'change-review-threads-mode
+                                      (buffer-local-value 'major-mode buffer))
+                                  (eq set (buffer-local-value 'change-review-ui--set buffer))))
                            (buffer-list)))
       ;; The library's filter: all shows the closed one too, drawn closed.
       (with-current-buffer popout
@@ -2749,26 +2921,36 @@ whole frame, and e says why it cannot go to the box."
 (defun harness-ui-patch-review-test--only-ediff-and-box (review popout)
   "Check that REVIEW's Ediff has the selected frame but for the report POPOUT.
 The windows are the control panel and the two versions the Ediff
-compares, the tree of the files on the left, and the report's own side
-window, once; those two are the windows Ediff leaves be
-\(`no-delete-other-windows')."
+compares, the column on the left -- the tree of the files above, the
+library's threads view below, one above the other -- and the report's own
+side window, once; the tree, the threads and the report are the windows
+Ediff leaves be (`no-delete-other-windows')."
   (let* ((ediff (harness-ui-patch-review--ediff-buffers review))
          (tree (harness-ui-patch-review--r-tree-buffer review))
+         (threads (harness-ui-patch-review--threads-pane-buffer review))
          (windows (window-list nil 'nomini))
          (report (cl-remove-if-not (lambda (w) (eq popout (window-buffer w))) windows))
-         (tree-window (get-buffer-window tree)))
+         (tree-window (get-buffer-window tree))
+         (threads-window (get-buffer-window threads)))
     (should (= 1 (length report)))
     (should (eq 'bottom (window-parameter (car report) 'window-side)))
     (should (window-parameter (car report) 'no-delete-other-windows))
     (should (window-live-p tree-window))
     (should (eq 'left (window-parameter tree-window 'window-side)))
     (should (window-parameter tree-window 'no-delete-other-windows))
-    ;; The tree shows once: no second window on it, in the versions' place.
+    (should (window-live-p threads-window))
+    (should (eq 'left (window-parameter threads-window 'window-side)))
+    (should (window-parameter threads-window 'no-delete-other-windows))
+    (should (eq 'change-review-threads-mode
+                (buffer-local-value 'major-mode threads)))
+    ;; The tree above the threads: one column, split.
+    (should (< (window-pixel-top tree-window) (window-pixel-top threads-window)))
+    ;; Each shows once: no second window on it, in the versions' place.
     (should (equal (list tree-window) (get-buffer-window-list tree nil (selected-frame))))
-    (should (= 5 (length windows)))
+    (should (= 6 (length windows)))
     (dolist (buffer ediff)
       (should (get-buffer-window buffer)))
-    (dolist (window (remq tree-window (remq (car report) windows)))
+    (dolist (window (remq tree-window (remq threads-window (remq (car report) windows))))
       (should (memq (window-buffer window) ediff))
       (should-not (window-parameter window 'no-delete-other-windows)))))
 
@@ -4178,11 +4360,11 @@ was, with point on the next file to review."
 ;;;; The tree beside Ediff
 
 (ert-deftest harness-ui-patch-review-shows-a-tree-beside-ediff ()
-  "While Ediff compares a file the changes show in a tree on the left of the
-frame: the file compared marked, the marks following, the threads below the
-files in the same buffer.  RET on a file compares it in place of the one under
-way, TAB folds a directory, t in Ediff shows or hides the tree, T goes to the
-threads, and the tree goes when Ediff ends."
+  "While Ediff compares a file the changes show in a column on the left of the
+frame: the files in a tree, the file compared marked, the marks following, and
+below them the threads, in the library's threads view.  RET on a file compares
+it in place of the one under way, TAB folds a directory, t in Ediff shows or
+hides the column, T goes to the threads, and the column goes when Ediff ends."
   (harness-ui-patch-review-test-with-task
     (let* ((popout (harness-ui-patch-review-test--changes board id))
            (review (gethash id harness-ui-patch-review--reviews))
@@ -4203,14 +4385,21 @@ threads, and the tree goes when Ediff ends."
         (should (window-parameter window 'no-delete-other-windows))
         (should (eq 'harness-ui-patch-review-tree-mode (buffer-local-value 'major-mode tree)))
         (harness-ui-patch-review-test--only-ediff-and-box review popout)
-        ;; The files as a tree, the file compared marked, the threads under them.
+        ;; The files as a tree, the file compared marked, its thread count.
         (let ((text (harness-ui-patch-review-test--text tree)))
           (should (string-prefix-p "Changes (6)" text))
           (should (string-match-p "^▶ +D  *b\\.el" text))
           (should (string-match-p "^  ▾ docs/ +\\+1 −0$" text))
-          (should (string-match-p "^Threads  \\[open 1\\]" text))
-          (should (string-match-p "^  ▾ a\\.el +1 thread$" text))
-          (should (string-match-p "^    ┃      Why two\\?$" text)))
+          (should (string-match-p "M a\\.el +\\+2 −2 ●1 ✎1" text))
+          ;; The threads are the pane's below, not the tree's.
+          (should-not (string-search "Threads" text))
+          (should-not (string-search "Why two?" text)))
+        (let ((threads (harness-ui-patch-review--threads-pane-buffer review)))
+          (should (eq 'change-review-threads-mode
+                      (buffer-local-value 'major-mode threads)))
+          (should (string-match-p "^Threads  \\[open 1\\]"
+                                  (harness-ui-patch-review-test--text threads)))
+          (should (string-search "Why two?" (harness-ui-patch-review-test--text threads))))
         (should (funcall current 1))
         (should-not (funcall current 0))
         ;; Its rows have the keys of the changes'.
@@ -4245,22 +4434,25 @@ threads, and the tree goes when Ediff ends."
           (re-search-forward "^  ▸ docs/")
           (beginning-of-line)
           (call-interactively (key-binding (kbd "TAB"))))
-        ;; T, from the control panel: to the threads, in the tree.
+        ;; T, from the control panel: to the threads, in their pane.
         (with-current-buffer control
           (should (eq #'harness-ui-patch-review-toggle-ediff-tree (key-binding "t")))
           (call-interactively (key-binding "T")))
-        (should (eq (get-buffer-window tree) (selected-window)))
-        (with-current-buffer tree
-          (should (string-prefix-p "Threads" (buffer-substring-no-properties (point) (point-max)))))
-        (should-not (cl-some (lambda (buffer)
-                               (eq 'change-review-threads-mode (buffer-local-value 'major-mode buffer)))
-                             (buffer-list)))
-        ;; t hides the tree and shows it again.
+        (should (eq (get-buffer-window (harness-ui-patch-review--threads-pane-buffer review))
+                    (selected-window)))
+        (with-current-buffer (window-buffer (selected-window))
+          (should (eq 'change-review-threads-mode major-mode))
+          (should (string-prefix-p "Review of "
+                                   (buffer-substring-no-properties (point-min) (point-max)))))
+        ;; t hides the column and shows it again, the threads' view kept.
         (select-window (get-buffer-window control))
-        (with-current-buffer control (call-interactively (key-binding "t")))
-        (should-not harness-ui-patch-review-ediff-tree)
-        (should-not (buffer-live-p tree))
-        (should (= 4 (length (window-list nil 'nomini))))
+        (let ((threads (harness-ui-patch-review--threads-pane-buffer review)))
+          (with-current-buffer control (call-interactively (key-binding "t")))
+          (should-not harness-ui-patch-review-ediff-tree)
+          (should-not (buffer-live-p tree))
+          (should (buffer-live-p threads))
+          (should-not (harness-ui-patch-review--threads-pane-window review))
+          (should (= 4 (length (window-list nil 'nomini)))))
         (with-current-buffer control (call-interactively (key-binding "t")))
         (should harness-ui-patch-review-ediff-tree)
         (setq tree (harness-ui-patch-review--r-tree-buffer review))
@@ -4280,22 +4472,48 @@ threads, and the tree goes when Ediff ends."
         (with-current-buffer (harness-ui-patch-review-test--control review 1)
           (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
+(ert-deftest harness-ui-patch-review-draws-the-threads-in-the-tree-without-a-pane ()
+  "The tree draws the threads under the files when the column has no pane for them.
+A frame too short for two side windows keeps the tree alone; the threads are
+then the section it drew before they had a pane, with its filters and keys."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (harness-ui-patch-review-ediff-tree t)
+           (tree nil))
+      (ignore popout)
+      (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?")
+      ;; The column with no room for the pane: the tree is all there is.
+      (cl-letf (((symbol-function 'harness-ui-patch-review--threads-pane-window) #'ignore)
+                ((symbol-function 'harness-ui-patch-review--keep-threads) #'ignore))
+        (harness-ui-patch-review--keep-tree review))
+      (setq tree (harness-ui-patch-review--r-tree-buffer review))
+      (should (buffer-live-p tree))
+      (should-not (harness-ui-patch-review--threads-pane-window review))
+      (let ((text (harness-ui-patch-review-test--text tree)))
+        (should (string-match-p "^Threads  \\[open 1\\]" text))
+        (should (string-search "Why two?" text))))))
+
 (ert-deftest harness-ui-patch-review-tree-beside-ediff-follows-the-threads ()
-  "The tree beside Ediff draws again as the review changes: a comment made in
-Ediff shows among its threads, and T goes to them in the tree, not in a view of
-their own."
+  "The column beside Ediff draws again as the review changes: a comment made
+in Ediff shows among its threads in the pane below the files, the file's count
+in the tree, and T goes to them there, not in a view of their own."
   (harness-ui-patch-review-test-with-task
     (let* ((popout (harness-ui-patch-review-test--changes board id))
            (review (gethash id harness-ui-patch-review--reviews)))
       (ignore popout)
       (harness-ui-patch-review-ediff review 0)
       (let* ((control (harness-ui-patch-review-test--control review 0))
-             (tree (harness-ui-patch-review--r-tree-buffer review)))
-        (should (string-match-p "^Threads  \\[open 0\\]" (harness-ui-patch-review-test--text tree)))
+             (tree (harness-ui-patch-review--r-tree-buffer review))
+             (threads (harness-ui-patch-review--threads-pane-buffer review)))
+        (should threads)
+        (should (string-match-p "^Threads  \\[open 0\\]"
+                                (harness-ui-patch-review-test--text threads)))
         (with-current-buffer control
           (harness-ui-patch-review-test--comment "Why two?"))
-        (harness-ui-patch-review-test--wait-text tree "^    ┃      Why two\\?$")
-        (should (string-match-p "^Threads  \\[open 1\\]" (harness-ui-patch-review-test--text tree)))
+        (harness-ui-patch-review-test--wait-text threads "^  ┃      Why two\\?$")
+        (should (string-match-p "^Threads  \\[open 1\\]"
+                                (harness-ui-patch-review-test--text threads)))
         (should (string-match-p "●1 ✎1" (harness-ui-patch-review-test--text tree)))
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
@@ -6096,6 +6314,9 @@ shown in full, it is no thread to stay in."
                     :author bot :sent (float-time)))
            (inhibit-message t))
       (ignore popout)
+      ;; A short frame, as when this test was made: the versions have fewer
+      ;; rows than the reply drawn under its line has, and scrolling gets past.
+      (set-frame-height nil 24)
       (change-review-ui-show-comment set answer t)
       (harness-ui-patch-review-ediff review 0)
       (let* ((control (harness-ui-patch-review-test--control review 0))

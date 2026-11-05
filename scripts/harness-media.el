@@ -4269,14 +4269,16 @@ and [Verify] and [Send back] are under them."
     (harness-media--capture "review-banner")))
 
 (defun harness-media-shot-review-ediff ()
-  "Ediff on a file of that review: the files as a tree beside it, the threads under their lines, the box under it.
-The tree on the left has the marks of the files and the file compared
-highlighted, the threads below it; the version on the branch shows the
-threads of acme/app.py at the line each is on now, drawn to the width of
-the window: a closed thread is one line, the one the agent closed, and
-the one the reviewer closed is opened to its conversation (TAB); the
-control panel offers to comment, reply, fold a thread and go to the
-threads, and its settings skip the files approved and approve those gone
+  "Ediff on a file of that review: the files as a tree beside it, the threads below them, the box under it.
+The column on the left has the marks of the files, the file compared
+highlighted, in a tree, and below it the compared file's threads in the
+library's own view, its filters and keys with them, scrolled to them; the version on the
+branch shows the threads of acme/app.py at the line each is on now,
+drawn to the width of the window: a closed thread is one line, the one
+the agent closed, and the one the reviewer closed is opened to its
+conversation (TAB); the control panel offers to comment, reply, fold a
+thread, go to the threads, and go to the next or previous thread of the
+file, and its settings skip the files approved and approve those gone
 through."
   (let ((popout (harness-media--review-layout)))
     (ignore popout)
