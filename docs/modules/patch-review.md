@@ -7,7 +7,7 @@ The threads of a task's review: kept in the state directory, delivered with the 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-patch-review.el](../../lisp/modules/harness-patch-review.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
-- **Requires:** [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md)
+- **Requires:** [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md), [thread-reply](thread-reply.md)
 - **Brings along:** [ui-patch-review](ui-patch-review.md) (its UI)
 
 ## About
@@ -108,13 +108,18 @@ the message itself, by the user and the agent alike
 (`harness-thread-parse-blocks`): <thread id="..."><quote>what it
 answers</quote>the reply</thread>, status="closed" to close it.  The
 chat draws it as the card a reply in a thread is, and the transcript
-keeps it as it was written.  The user's is a comment of the review --
-a draft, sent with the feedback that sends the task back, or with the
-other replies of a task at work -- and the agent's, read from its
-final message (`agent/assistant-message`), is its answer in the
-thread.  This is the way an agent answers without the tool, and the
-format its prompt names; a block that names no thread the review has
-stays as the user wrote it, for the agent to read.
+keeps it as it was written.  The thread-reply module reads that form
+(`harness-thread-reply--on-message`,
+`harness-thread-reply--take-tagged-words`, and, for the agent,
+`harness-thread-reply--on-assistant-message`) and hands each reply
+here (`patch-review/user-reply`, `patch-review/comment`): the user's
+is a comment of the review -- a draft, sent with the feedback that
+sends the task back, or with the other replies of a task at work --
+and the agent's is its answer in the thread.  This is the way an agent
+answers without the tool, and the format its prompt names; a block
+that names no thread the review has stays as the user wrote it, for
+the agent to read.  The reply form is the thread-reply module's; the
+threads it is kept in are this one's.
 
 THE OPEN THREADS.  A thread with a sent comment that is still open is
 a question the work has not answered, and the working phase is for
@@ -174,6 +179,7 @@ to say.
 - `patch-review/send-replies` (task-id) — Send the replies the user wrote in the threads of task TASK-ID's review.
 - `patch-review/set-viewed` (task-id kind files on) — Mark FILES viewed in task TASK-ID's review, or approved, or take the mark off.
 - `patch-review/threads-text` (task-id &optional status) — Return the threads of task TASK-ID's review as text for its agent.
+- `patch-review/user-reply` (task-id session-id block &optional draft) — Make BLOCK, a parsed <thread> reply of the user's, a comment of a review.
 - `patch-review/viewed` (task-id) — Return the files viewed, and approved, in task TASK-ID's review.
 - `review/find-thread` (task-id ref) — Return the thread of task TASK-ID's review that REF names, or nil.
 
@@ -215,7 +221,6 @@ to say.
 
 ### Filter chains it joins
 
-- `agent/assistant-message` at 20 → `harness-patch-review--on-assistant-message`
 - `agent/message` at 40 → `harness-patch-review--on-message`
 - `task/feedback-attachments` at 40 → `harness-patch-review--on-feedback-attachments`
 

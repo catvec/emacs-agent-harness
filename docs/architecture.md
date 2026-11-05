@@ -1147,8 +1147,10 @@ paragraph each); the provider is sent the text only
 attachments of the compose box that make them are `(:thread DATA :response
 TEXT)` (`harness-attachments-to-blocks`).
 
-Where a reply is a comment of a review and how the agent answers is the
-patch-review module's (see there).  The chat starts a thread with `C-c >`
+Where a reply is a comment of a review is the patch-review module's; the
+`<thread>` form in the words, and sending a malformed reply back, is the
+thread-reply module's (see patch-review, thread-reply, tools-review).
+The chat starts a thread with `C-c >`
 (`harness-chat-thread-reply`): the transcript says what a region of it is,
 so the command reads that, not the words.  Every block of text is marked
 with its node (`harness-chat-node`), the text of a message with which part
@@ -4676,11 +4678,16 @@ decisions.
   the message (nil leaves it as it was); the tasks module sends a task
   waiting for review back this way when the user wrote the message,
   and opens another session's with a note that it is no review.  The
-  patch-review module runs first (priority 40, the tasks module's is
-  50): a reply in a thread (a text block with the data of a thread, see
-  Threads) becomes a comment in a thread of the task's review, and the
-  message goes on with the thread's id and its marker after each
-  response (`harness-patch-review--on-message`).
+  thread-reply module runs first (priority 35): a <thread> reply typed
+  in the words becomes the thread block of its thread, its comment a
+  draft while the task waits for review
+  (`harness-thread-reply--on-message`).  The patch-review module runs
+  next (priority 40, the tasks module's is 50): a reply in a thread (a
+  text block with the data of a thread, see Threads) becomes a comment
+  in a thread of the task's review, and the message goes on with the
+  thread's id and its marker after each response
+  (`harness-patch-review--on-message`); a block the thread-reply module
+  made has its id already and is left alone.
 - Async filter `agent/stop` (value `(:stop t)`, args the session plist),
   asked when the model stopped on its own (`end-turn`) with no steering
   waiting and the turn not cancelled.  A handler that answers `(:stop nil
@@ -8720,15 +8727,18 @@ TITLE is the session's name, else the prompt's first line without its
 leading `#`, at most 80 characters; PROJECT is `project/name` of the
 task's project.
 
-### patch-review, tools-review
+### patch-review, thread-reply, tools-review
 
 The threads of a task's review, kept where the user's Emacs and the
 task's agent both meet them.  `patch-review` is the harness's half of
 reviewing a task's changes with the library `change-review` (see
 Vendored libraries); its UI half is `ui-patch-review` (see Presentation
 contracts, the review of a task's changes), and `tools-review` gives the
-task's agent two tools.  The module needs `store`, `tasks` and
-`tools-review`.
+task's agent two tools.  The module needs `store`, `tasks`,
+`tools-review` and `thread-reply`.  `thread-reply` is the reply form's:
+the `<thread>` block in a message or in the words that send a task back,
+whose strict syntax it reads, and the correction of a malformed reply;
+`patch-review` keeps what it reads and is what the threads are part of.
 
 - The set.  A task is a change set of the library
   (`harness-patch-review--set`, a `change-review-set` with the task's id
@@ -8841,6 +8851,26 @@ task's agent two tools.  The module needs `store`, `tasks` and
   marker gets no inline-reply note (`harness-agent--inline-reply-p`).  A
   failure leaves the message as it was.  A message taken back with
   [delete] before the model has it leaves the comment it made.
+- The reply written in the words.  A `<thread>` block typed in a message
+  is the thread-reply module's (`harness-thread-reply--on-message`, a
+  filter on `agent/message` at priority 35, before the review's): the
+  user's reply becomes a comment of the thread it names, a draft while
+  the task waits for review, and the block that goes on is a thread block
+  with the thread's id and its marker.  The blocks in the words that send
+  a task back are read the same way
+  (`harness-thread-reply--take-tagged-words`, from
+  `harness-patch-review--additions`), and the agent's final message is
+  its answer in the threads it names
+  (`harness-thread-reply--on-assistant-message`, on
+  `agent/assistant-message`).  The form is strict
+  (`harness-thread-format-example`); a user's block that does not parse is
+  left as prose, and an agent's malformed reply is sent back over it
+  (`harness-thread-reply--repair-stop`, on `agent/stop`), with what is
+  wrong and, when a judge -- a cheap model -- can, a corrected block.  A
+  turn is corrected at most `harness-thread-reply-attempts` times (2 by
+  default), each correction one step more, so a model that cannot write
+  the form is not sent round forever; after the last, a hint says the
+  reply was left as written.
 - The closes.  The agent closes a thread (`review_comment` with the
   status `closed`: a change of status in the thread's history, its author
   the agent); whether the point is done is the user's to say.  A thread

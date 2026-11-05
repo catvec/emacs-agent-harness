@@ -33,7 +33,7 @@ reply that says "fixed" says where.  With no thread it starts one, on
 the change as a whole, or on a file and line of it.
 
 A reply in a thread can also be written in the agent's message itself,
-as a <thread> block (harness-patch-review.el), the format the task's
+as a <thread> block (harness-thread-reply.el), the format the task's
 prompt names: no call is needed to answer.  The tools remain for what
 a block does not say -- listing the threads, starting one on a file
 and line, and closing one without words.

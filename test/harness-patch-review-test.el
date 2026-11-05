@@ -2,7 +2,8 @@
 
 ;;; Commentary:
 
-;; The harness's half of the threads of a review (harness-patch-review.el)
+;; The harness's half of the threads of a review (harness-patch-review.el),
+;; the reply form in a message and its correction (harness-thread-reply.el),
 ;; and the tools the agent answers them with (harness-tools-review.el): a
 ;; task's threads kept in the state directory, the operations a UI sends
 ;; performed once and announced, the version a hand-in makes, the drafts
@@ -17,7 +18,9 @@
 (require 'harness-test-helpers)
 (require 'harness-acp)
 (require 'harness-patch-review)
+(require 'harness-thread-reply)
 (require 'harness-tools-review)
+(require 'harness-judge)
 
 (defvar harness-provider-demo-script-override)
 (defvar harness-provider-demo--delay)
@@ -79,7 +82,7 @@
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent tasks acp
-                          tools-handin tools-review patch-review))
+                          tools-handin tools-review thread-reply patch-review))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
@@ -159,6 +162,12 @@ KEYS: :thread, :location (data), :revision, :sent."
                                          (and (plist-get keys :sent) (list :sent (plist-get keys :sent))))))
     (cons thread comment-id)))
 
+(defun harness-patch-review-test--say (session-id text)
+  "Append TEXT as an assistant message of SESSION-ID; return its node id."
+  (plist-get (harness-call 'session/append session-id
+                           (list :kind 'assistant :content text))
+             :id))
+
 (defconst harness-patch-review-test--a18
   '(:file "a.el" :line 18 :excerpt "@@ -15,4 +15,4 @@\n (setq a15 15)\n (setq a16 16)\n (setq a17 17)\n-(setq a18 18)\n+(setq a18 'eighteen)")
   "The location of a comment on line 18 of a.el, as data.")
@@ -194,7 +203,7 @@ directory, announced, and read back after a restart."
           (should (equal "a.el" (plist-get (plist-get (car (plist-get thread :comments)) :location) :file)))
           (should (equal "Noah" (plist-get (plist-get (car (plist-get thread :comments)) :author) :name))))))))
 
-(ert-deftest harness-patch-review-a-user-thread-block-in-a-message-is-a-reply ()
+(ert-deftest harness-thread-reply-a-user-block-in-a-message-is-a-reply ()
   "A <thread> block the user writes in a message is a reply in that thread.
 It becomes a thread block, the prose around it stays, and the comment is
 a draft until the feedback sends the task back; a block naming no thread
@@ -203,12 +212,11 @@ starts one."
     (let* ((id (harness-patch-review-test--task))
            (made (harness-patch-review-test--user-comment id "Why two?"))
            (thread (car made))
-           (sid (plist-get (harness-call 'task/get id) :session))
-           (blocks (harness-patch-review--on-message
-                    (list (list :type "text"
-                                :text (format "Before.\n\n<thread id=\"%s\">\n<quote>Why two?</quote>\nBecause.\n</thread>\n\nAfter."
-                                             thread)))
-                    sid '(:from nil))))
+           (blocks (harness-patch-review-test--sends
+                    id
+                    (list :type "text"
+                          :text (format "Before.\n\n<thread id=\"%s\">\n<quote>Why two?</quote>\nBecause.\n</thread>\n\nAfter."
+                                        thread)))))
       (should (= 3 (length blocks)))
       (should (equal "Before." (plist-get (car blocks) :text)))
       (should (harness-thread-block-p (cadr blocks)))
@@ -222,10 +230,10 @@ starts one."
         (should-not (plist-get comment :sent))
         (should (equal thread (plist-get (plist-get (cadr blocks) :thread) :id))))
       ;; A block that names no thread starts one, as review_comment would.
-      (let ((new-blocks (harness-patch-review--on-message
-                         (list (list :type "text"
-                                     :text "<thread>\n<quote>The deploy is pending.</quote>\nWatch it.\n</thread>"))
-                         sid '(:from nil))))
+      (let ((new-blocks (harness-patch-review-test--sends
+                         id
+                         (list :type "text"
+                               :text "<thread>\n<quote>The deploy is pending.</quote>\nWatch it.\n</thread>"))))
         (should (harness-thread-block-p (car new-blocks)))
         (let* ((threads (harness-patch-review-test--threads id))
                (new (car (last threads)))
@@ -235,7 +243,7 @@ starts one."
           (should (equal "> The deploy is pending.\n\nWatch it." (plist-get comment :body)))
           (should (equal (plist-get new :id) (plist-get (plist-get (car new-blocks) :thread) :id))))))))
 
-(ert-deftest harness-patch-review-a-thread-block-in-a-message-is-a-comment ()
+(ert-deftest harness-thread-reply-an-agent-block-in-a-message-is-a-comment ()
   "An agent's <thread> block in its message is its comment in that thread.
 The message stays as the agent wrote it -- the chat draws its blocks --
 and a block that says status=\"closed\" closes the thread."
@@ -256,7 +264,7 @@ and a block that says status=\"closed\" closes the thread."
         (should (equal "agent" (plist-get (plist-get answer :author) :kind)))
         (should (equal sid (plist-get (plist-get answer :author) :session))))
       ;; Closing it in the block closes the thread, with the words kept.
-      (harness-patch-review--on-assistant-message
+      (harness-thread-reply--on-assistant-message
        (format "<thread id=\"%s\" status=\"closed\">\n<quote>Why two?</quote>\nDone.\n</thread>" thread)
        sid "n-answer-2")
       (let* ((threads (harness-patch-review-test--threads id))
@@ -1425,12 +1433,13 @@ The reference names the node and QUOTE, by default what the node says."
    response))
 
 (defun harness-patch-review-test--sends (id &rest blocks)
-  "Pass BLOCKS, the user's message to the session of task ID, to the review's filter.
-Return the blocks that go on.  Only this module's filter runs: the task of
-the test waits for review, and the tasks module's reads a message to it as
-the feedback that sends it back."
-  (harness-patch-review--on-message
-   blocks (plist-get (harness-call 'task/get id) :session) '(:from nil)))
+  "Pass BLOCKS, the user's message to the session of task ID, to the filters that read it.
+Return the blocks that go on.  The thread-reply module's filter runs
+first, then the review's; not the tasks module's, which reads a message
+to a task in review as the feedback that sends it back."
+  (let* ((sid (plist-get (harness-call 'task/get id) :session))
+         (blocks (harness-thread-reply--on-message blocks sid '(:from nil))))
+    (harness-patch-review--on-message blocks sid '(:from nil))))
 
 (defun harness-patch-review-test--threads (id)
   "Return the threads of task ID's review, as the harness keeps them."
@@ -1664,7 +1673,7 @@ sent makes no thread."
                        (mapcar (lambda (th) (plist-get th :id))
                                (harness-call 'patch-review/open-threads id))))
         ;; The agent answers and closes it in its message.
-        (harness-patch-review--on-assistant-message
+        (harness-thread-reply--on-assistant-message
          (format "<thread id=\"%s\" status=\"closed\">\n<quote>%s</quote>\nSeconds.\n</thread>" thread words)
          sid "n-answer")
         (should-not (harness-call 'patch-review/open-threads id))
@@ -1920,6 +1929,276 @@ status and who wrote the comment it follows, a line of it."
                                                         :meta)
                                              :parent)
                                   :excerpt)))))))
+
+;;;; A malformed reply in a thread
+
+(ert-deftest harness-thread-reply-sends-a-malformed-reply-back ()
+  "A malformed <thread> block in the agent's last message is answered with a
+message of the harness's, which names what is wrong and shows the block a
+judge suggests.  The answer is `agent/stop''s: (:stop nil :message ...)."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (thread (car (harness-patch-review-test--user-comment id "Why two?")))
+           (fixed (format "<thread id=\"%s\" status=\"closed\">\n<quote>Why two?</quote>\nBecause.\n</thread>"
+                          thread))
+           (judge-args nil)
+           (answer nil))
+      (should (harness-patch-review-test--say
+               sid (format "<thread id=%s>\n<quote>Why two?</quote>\nBecause.\n</thread>" thread)))
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest args)
+                   (setq judge-args args)
+                   (harness-resolved (list :value fixed :text fixed :lookups 0)))))
+        (setq answer (harness-test-await
+                      (harness-thread-reply--repair-answer
+                       (harness-call 'session/get sid)) 15)))
+      (should answer)
+      (should-not (harness-json-true-p (plist-get answer :stop)))
+      (should (equal (harness-sender-system "thread replies") (plist-get answer :from)))
+      (let ((message (plist-get answer :message)))
+        (should (string-match-p "strict <thread> form" message))
+        (should (string-match-p "double quotes" message))
+        (should (string-match-p "A model suggests this corrected block" message))
+        (should (string-match-p (regexp-quote fixed) message)))
+      ;; The judge saw the malformed block and the findings, on the cheap model.
+      (should judge-args)
+      (should (equal "thread reply repair" (plist-get judge-args :label)))
+      (should (string-match-p (format "id=%s" thread) (plist-get judge-args :prompt)))
+      (should (string-match-p "double quotes" (plist-get judge-args :prompt)))
+      (should (eq (plist-get judge-args :session) sid)))))
+
+(ert-deftest harness-thread-reply-leaves-a-strict-reply-alone ()
+  "A strict block, prose, and a session that is no task's get no message, and
+no judge is asked."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (thread (car (harness-patch-review-test--user-comment id "Why two?")))
+           (asked nil))
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest _) (setq asked t) (harness-resolved (list :value nil)))))
+        (harness-patch-review-test--say
+         sid (format "<thread id=\"%s\" status=\"closed\">\n<quote>Why two?</quote>\nDone.\n</thread>" thread))
+        (should-not (harness-test-await
+                     (harness-thread-reply--repair-answer
+                      (harness-call 'session/get sid)) 15))
+        (should-not asked)
+        (harness-patch-review-test--say sid "All done, and no block.")
+        (should-not (harness-test-await
+                     (harness-thread-reply--repair-answer
+                      (harness-call 'session/get sid)) 15))
+        (should-not asked))
+      ;; A session that is no task's has no review threads to repair.
+      (should-not (harness-test-await
+                   (harness-thread-reply--repair-answer '(:id "s-no-task")) 15)))))
+
+(ert-deftest harness-thread-reply-asks-the-judge-for-a-closed-block-only ()
+  "Only a malformed block with its closing tag is put to the judge, and only
+the strict block it answers with is shown to the agent."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (asked 0)
+           (answer nil))
+      (harness-patch-review-test--say sid "<thread id=\"t-1\">\nThe answer, but no closing tag.\n")
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest _) (cl-incf asked) (harness-resolved (list :value nil)))))
+        (setq answer (harness-test-await
+                      (harness-thread-reply--repair-answer
+                       (harness-call 'session/get sid)) 15)))
+      (should (string-match-p "never closed" (plist-get answer :message)))
+      (should-not (string-match-p "A model suggests" (plist-get answer :message)))
+      (should (zerop asked)))
+    ;; No judge, and an answer that is no strict block, leave the message
+    ;; to what the harness found.
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (answer nil))
+      (harness-patch-review-test--say sid "<thread id=t-1>A</thread>")
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest _) (harness-resolved (list :value "<thread id=t-1>A</thread>")))))
+        (setq answer (harness-test-await
+                      (harness-thread-reply--repair-answer
+                       (harness-call 'session/get sid)) 15)))
+      (should (string-match-p "What is wrong" (plist-get answer :message)))
+      (should-not (string-match-p "A model suggests" (plist-get answer :message))))))
+
+(ert-deftest harness-thread-reply-tells-the-agent-a-placeholder-is-no-thread ()
+  "A block that copies the format's THREAD_ID is sent back with what to do,
+without asking a judge that cannot know the thread the agent means."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (asked nil)
+           (answer nil))
+      (harness-patch-review-test--say
+       sid "<thread id=\"THREAD_ID\">\n<quote>Why?</quote>\nBecause.\n</thread>")
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest _) (setq asked t) (harness-resolved (list :value nil)))))
+        (setq answer (harness-test-await
+                      (harness-thread-reply--repair-answer
+                       (harness-call 'session/get sid)) 15)))
+      (should (string-match-p "placeholder THREAD_ID" (plist-get answer :message)))
+      (should-not asked))))
+
+(ert-deftest harness-thread-reply-stops-sending-back-after-the-maximum ()
+  "A turn gets `harness-thread-reply-attempts' corrections, then
+a hint and no more: a model that cannot write the form is not sent round
+forever.  A new turn starts its own count."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (harness-thread-reply-attempts 2)
+           (asked 0))
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest _) (harness-resolved (list :value nil)))))
+        (dotimes (i 2)
+          (harness-patch-review-test--say sid "<thread id=t-bad>A</thread>")
+          (let ((answer (harness-test-await
+                         (harness-thread-reply--repair-answer
+                          (harness-call 'session/get sid)) 15)))
+            (should (plist-get answer :message))
+            (cl-incf asked)))
+        (harness-patch-review-test--say sid "<thread id=t-bad>A</thread>")
+        (should-not (harness-test-await
+                     (harness-thread-reply--repair-answer
+                      (harness-call 'session/get sid)) 15))
+        (should (= 2 asked))
+        (should (= 2 (plist-get (gethash sid harness-thread-reply--repairs) :count)))
+        (should (plist-get (gethash sid harness-thread-reply--repairs) :exhausted))
+        ;; The user is told why the reply stays as written.
+        (let* ((nodes (harness-call 'session/nodes sid))
+               (hint (car (last (cl-remove-if-not (lambda (node) (eq (plist-get node :kind) 'hint))
+                                                  nodes)))))
+          (should hint)
+          (should (string-match-p "malformed" (plist-get hint :content))))
+        ;; The turn ends, and the next turn is sent back again.
+        (harness-thread-reply--on-turn-ended sid 'end-turn)
+        (harness-patch-review-test--say sid "<thread id=t-bad>A</thread>")
+        (should (plist-get (harness-test-await
+                            (harness-thread-reply--repair-answer
+                             (harness-call 'session/get sid)) 15)
+                           :message))))))
+
+(ert-deftest harness-thread-reply-corrections-can-be-turned-off ()
+  "With no attempts the reply is left alone, and not even a hint is added."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (harness-thread-reply-attempts nil))
+      (harness-patch-review-test--say sid "<thread id=t-bad>A</thread>")
+      (should-not (harness-test-await
+                   (harness-thread-reply--repair-answer
+                    (harness-call 'session/get sid)) 15))
+      (should-not (cl-remove-if-not
+                   (lambda (node)
+                     (and (eq (plist-get node :kind) 'hint)
+                          (string-match-p "malformed" (or (plist-get node :content) ""))))
+                   (harness-call 'session/nodes sid))))))
+
+(ert-deftest harness-thread-reply-readable-judge-answer-is-one-strict-block ()
+  "The judge's corrected block is taken only when it is exactly one strict
+block, between <fixed> and </fixed>, and it keeps the thread the agent
+named, or the absence of one."
+  (let ((block "<thread id=\"t-1\">\n<quote>Q</quote>\nA\n</thread>"))
+    (should (equal block (harness-thread-reply--repair-parse
+                          (format "Here it is:\n<fixed>\n%s\n</fixed>\n" block))))
+    (should-not (harness-thread-reply--repair-parse
+                 "<fixed><thread id=t-1>A</thread></fixed>"))
+    (should-not (harness-thread-reply--repair-parse
+                 (format "<fixed>%s\n\n%s</fixed>" block block)))
+    (should-not (harness-thread-reply--repair-parse "No block.")))
+  (should (equal "t-1" (harness-thread-reply--repair-id "<thread id=\"t-1\">")))
+  (should (equal "t-1" (harness-thread-reply--repair-id "<thread id=t-1>A</thread>")))
+  (should-not (harness-thread-reply--repair-id "<thread>A</thread>")))
+
+(ert-deftest harness-thread-reply-a-judge-may-not-change-the-thread-id ()
+  "A corrected block that names another thread is no suggestion: the id the
+agent named stays, and a new thread gets none."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (answer nil))
+      (harness-patch-review-test--say sid "<thread id=t-original>\n<quote>Why?</quote>\nBecause.\n</thread>")
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest _)
+                   (harness-resolved
+                    (list :value "<thread id=\"t-other\">\n<quote>Why?</quote>\nBecause.\n</thread>")))))
+        (setq answer (harness-test-await
+                      (harness-thread-reply--repair-answer
+                       (harness-call 'session/get sid)) 15)))
+      (should (string-match-p "What is wrong" (plist-get answer :message)))
+      (should-not (string-match-p "A model suggests" (plist-get answer :message))))))
+
+(ert-deftest harness-thread-reply-the-stop-filter-carries-the-correction ()
+  "The `agent/stop' filter hands the correction on, and leaves a value that
+is not a model's own stop alone without checking anything."
+  (let* ((value '(:stop t))
+         (answer (list :stop nil :message "Fix it."
+                       :from (harness-sender-system "thread replies")))
+         (seen nil))
+    (cl-letf (((symbol-function 'harness-thread-reply--repair-answer)
+               (lambda (_session) (harness-resolved answer))))
+      (harness-thread-reply--repair-stop value (lambda (v) (setq seen v)) '(:id "s1"))
+      (harness-test-wait (lambda () seen) 2 "the stop filter")
+      (should (equal answer seen))))
+  (let ((seen nil) (checked nil))
+    (cl-letf (((symbol-function 'harness-thread-reply--repair-answer)
+               (lambda (_session) (setq checked t) (harness-resolved nil))))
+      (harness-thread-reply--repair-stop '(:stop nil :message "mine")
+                                                (lambda (v) (setq seen v)) '(:id "s1"))
+      (should-not checked)
+      (should (equal '(:stop nil :message "mine") seen)))))
+
+(ert-deftest harness-thread-reply-a-malformed-reply-is-sent-back-in-the-turn ()
+  "The `agent/stop' chain sends a model that wrote a malformed block back:
+the next request ends with a message of the harness's, from \"thread
+replies\", and the model takes a step more to correct it."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (thread (car (harness-patch-review-test--user-comment id "Why two?")))
+           (fixed (format "<thread id=\"%s\" status=\"closed\">\n<quote>Why two?</quote>\nBecause.\n</thread>"
+                          thread))
+           (requests nil)
+           (turn 0)
+           (judge-asked nil)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (push request requests)
+              (if (= 1 (cl-incf turn))
+                  `((:type text :delta ,(format "<thread id=%s>\n<quote>Why two?</quote>\nBecause.\n</thread>" thread))
+                    (:type done :stop-reason end-turn))
+                '((:type text :delta "Corrected.")
+                  (:type done :stop-reason end-turn))))))
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest _)
+                   (setq judge-asked t)
+                   (harness-resolved (list :value fixed)))))
+        (harness-test-await (harness-call 'agent/prompt sid "Answer the thread.") 20))
+      (should (= 2 (length requests)))
+      (should judge-asked)
+      ;; The correction is a steering message of the harness's in the turn.
+      (let* ((nodes (harness-call 'session/nodes sid))
+             (correction (cl-find-if
+                          (lambda (node)
+                            (and (eq (plist-get node :kind) 'user)
+                                 (harness-json-true-p (plist-get (plist-get node :meta) :steering))))
+                          nodes)))
+        (should correction)
+        (should (equal (harness-sender-system "thread replies")
+                       (harness-node-sender correction)))
+        (should (string-match-p "strict <thread> form" (plist-get correction :content)))
+        (should (string-match-p (regexp-quote fixed) (plist-get correction :content))))
+      ;; The second request read the correction as its last user message.
+      (let* ((second (car requests))
+             (last (car (last (plist-get second :messages)))))
+        (should (eq 'user (plist-get last :role)))
+        (should (string-match-p "strict <thread> form"
+                                (plist-get (car (last (plist-get last :content))) :text))))
+      ;; The turn is over, and its count goes with it.
+      (should-not (gethash sid harness-thread-reply--repairs)))))
 
 (provide 'harness-patch-review-test)
 ;;; harness-patch-review-test.el ends here

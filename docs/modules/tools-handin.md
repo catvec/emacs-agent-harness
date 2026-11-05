@@ -61,8 +61,8 @@ to get past the check.  A module can keep a hand-in from being made
 at all while the work is not done, through
 `harness-tools-handin-block-functions`: each function is called with
 the task before the report is recorded, and the first that returns
-text refuses the hand-in with it.  The thread module adds the check
-that every open thread of the review is answered and closed
+text refuses the hand-in with it.  The review adds the check that
+every open thread of the review is answered and closed
 (`harness-tools-handin-require-closed-threads`, on by default); with
 the module not loaded, or the option off, there is no such check.
 

@@ -917,58 +917,119 @@ is that text as a text block, none when the text is blank, marked
 ;; The id names the thread of a task's review to answer, its absence a
 ;; new thread; status optionally closes or opens it after the comment.
 ;; The quote is what the answer is about, kept above it as a mail keeps
-;; it.  The parsers below read the blocks; the review module that keeps
-;; the threads makes them comments, and the chat draws them as it draws
-;; a reply in a thread (`harness-ui-markdown-thread-function').
+;; it.  The syntax is strict: the tags are lowercase and exact, id and
+;; status are the only attributes and their values are double-quoted,
+;; and the answer is not wrapped in another tag.  The parsers below read
+;; the blocks; `harness-thread-find-malformed' says what is wrong with
+;; what an agent meant as one.  The review module that keeps the threads
+;; makes them comments, and the chat draws them as it draws a reply in a
+;; thread (`harness-ui-markdown-thread-function').
+
+(defconst harness-thread-format-example
+  "<thread id=\"THREAD_ID\">\n<quote>the part of the conversation you answer</quote>\nyour answer\n</thread>"
+  "The strict form of a reply in a thread, as the harness reads it.")
 
 (defconst harness-thread-tag-open-regexp
-  "<thread\\(?:[ \t]+\\([^>]*\\)\\)?>"
+  "<thread\\([^>\n]*\\)>"
   "Regexp matching the opening tag of a reply in a thread.
-Group 1 holds the tag's attributes; the match is case-insensitive when
-the caller lets `case-fold-search' be so.")
+Group 1 holds what follows the tag's name: nothing, or the attributes
+`id' and `status', which `harness-thread--strict-attributes' checks.
+The tag name is matched without case only when the caller lets
+`case-fold-search' be so; a reply's is lowercase.")
 (defconst harness-thread-tag-close-regexp
-  "</thread[ \t]*>"
-  "Regexp matching the closing tag of a reply in a thread.")
+  "</thread>"
+  "Regexp matching the closing tag of a strict reply in a thread.")
 
-(defun harness-thread--tag-attribute (attributes name)
-  "Return the value of NAME in ATTRIBUTES, a tag's, as a string, or nil.
-The value may be in double or single quotes, or bare."
-  (when (and (stringp attributes)
-             (let ((case-fold-search t))
-               (string-match (concat "\\b" (regexp-quote name)
-                                     "\\s-*=\\s-*\\(?:\"\\([^\"]*\\)\"\\|'\\([^']*\\)'\\|\\([^ \t\n/>]+\\)\\)")
-                             attributes)))
-    (or (match-string 1 attributes)
-        (match-string 2 attributes)
-        (match-string 3 attributes))))
+(defun harness-thread--strict-attributes (attributes)
+  "Return (ID . STATUS) when ATTRIBUTES are strict, or nil.
+ATTRIBUTES is what follows `thread' in an opening tag: nothing, or
+attributes separated by one space, `id' with a double-quoted value and
+`status' with \"open\" or \"closed\"."
+  (cond
+   ((or (null attributes) (string-empty-p attributes)) '(nil))
+   ((not (string-match
+          (concat "\\` \\(?:id=\"[^\"\n]*\"\\|status=\"[^\"]*\"\\)"
+                  "\\(?: \\(?:id=\"[^\"\n]*\"\\|status=\"[^\"]*\"\\)\\)*\\'")
+          attributes))
+    nil)
+   (t
+    (let ((pos 0) (seen nil) id status (ok t))
+      (while (and ok (string-match " \\(id\\|status\\)=\"\\([^\"\n]*\\)\"" attributes pos))
+        (let ((name (match-string 1 attributes))
+              (value (match-string 2 attributes)))
+          (cond
+           ((member name seen) (setq ok nil))
+           ((equal name "id")
+            (if (string-match-p "\\`[A-Za-z0-9][A-Za-z0-9_.-]*\\'" value)
+                (setq id value)
+              (setq ok nil)))
+           ((member value '("open" "closed"))
+            (setq status value))
+           (t (setq ok nil)))
+          (when ok (push name seen)))
+        (setq pos (match-end 0)))
+      (and ok (= pos (length attributes)) (cons id status))))))
 
-(defun harness-thread--tag-content (text tag)
-  "Return where the content of TAG in TEXT is, or nil.
-A plist: `:start' and `:end' are the offsets of the content, `:open-start'
-and `:open-end' those of the opening tag, `:close-start' and `:close-end'
-those of the closing one.  The tag name is matched without case, and
-whitespace may end its name."
+(defun harness-thread--wrapper-tag-p (text)
+  "Non-nil when TEXT holds a <reply>, <response> or <answer> tag."
   (let ((case-fold-search t))
-    (when-let* ((open (string-match (concat "<" (regexp-quote tag) "\\s-*>") text))
-                (open-start (match-beginning 0))
-                (start (match-end 0))
-                (close (string-match (concat "</" (regexp-quote tag) "\\s-*>") text start)))
-      (list :start start :end close :open-start open-start :open-end start
-            :close-start close :close-end (match-end 0)))))
+    (string-match-p "<\\(?:reply\\|response\\|answer\\)\\b" text)))
 
-(defun harness-thread--inner-text (text tag)
-  "Return the trimmed content of TAG in TEXT, or nil."
-  (when-let* ((span (harness-thread--tag-content text tag)))
-    (string-trim (substring text (plist-get span :start) (plist-get span :end)))))
+(defun harness-thread--strict-body-p (body)
+  "Non-nil when BODY is a strict answer of a reply in a thread.
+It holds no other reply tag: no <thread>, <quote> and no wrapper such as
+<reply>."
+  (let ((case-fold-search t))
+    (and (not (string-match-p "<\\/?thread\\b" body))
+         (not (string-match-p "<\\/?quote\\b" body))
+         (not (harness-thread--wrapper-tag-p body)))))
 
-(defun harness-thread--strip-wrapper (text)
-  "Return TEXT without a tag that wraps all of it, such as <reply>…</reply>."
-  (let ((text (string-trim text)))
-    (if (and (let ((case-fold-search t))
-               (string-match "\\`<\\([A-Za-z][A-Za-z0-9_-]*\\)\\(?:[ \t][^>]*\\)?>\\(.*\\)</\\1[ \t]*>\\'" text))
-             (> (length (match-string 2 text)) 0))
-        (string-trim (match-string 2 text))
-      text)))
+(defun harness-thread--strict-content (inner)
+  "Return (QUOTE . BODY) for INNER, the strict content of a reply, or nil.
+QUOTE is nil when there is none; BODY is nil when the reply only quotes
+and changes the thread's status."
+  (let ((case-fold-search nil)
+        (content (string-trim inner)))
+    (cond
+     ((string-empty-p content) nil)
+     ((string-prefix-p "<quote>" content)
+      (let ((close (string-match "</quote>" content (length "<quote>"))))
+        (when close
+          (let ((quote (substring content (length "<quote>") close))
+                (rest (substring content (+ close (length "</quote>")))))
+            (when (and (not (string-empty-p (string-trim quote)))
+                       (not (let ((case-fold-search t))
+                              (string-match-p "<\\/?\\(?:quote\\|thread\\)\\b" quote)))
+                       (not (let ((case-fold-search t))
+                              (string-match-p "<\\/?quote\\b" rest))))
+              (let ((body (string-trim rest)))
+                (when (or (string-empty-p body) (harness-thread--strict-body-p body))
+                  (cons (string-trim quote) (unless (string-empty-p body) body)))))))))
+     ((let ((case-fold-search t)) (string-match-p "<\\/?quote\\b" content)) nil)
+     (t (let ((body (string-trim content)))
+          (when (and (not (let ((case-fold-search t))
+                            (string-match-p "\\`<id\\b" body)))
+                     (harness-thread--strict-body-p body))
+            (cons nil body)))))))
+
+(defun harness-thread--parse-block-at (text start)
+  "Return the strict reply in a thread that starts at START in TEXT, or nil."
+  (let* ((case-fold-search nil)
+         (match (string-match "<thread\\([^>\n]*\\)>" text start)))
+    (when (and match (= match start))
+      (let* ((attributes (match-string 1 text))
+             (after (match-end 0))
+             (parsed (harness-thread--strict-attributes attributes)))
+        (when parsed
+          (let ((close (string-match "</thread>" text after)))
+            (when close
+              (let ((close-end (match-end 0)))
+                (when-let* ((content (harness-thread--strict-content
+                                      (substring text after close))))
+                  (list :start start :end close-end
+                        :id (car parsed) :status (cdr parsed)
+                        :quote (car content) :body (cdr content)
+                        :raw (substring text start close-end)))))))))))
 
 (defun harness-thread--in-fenced-code-p (text pos)
   "Non-nil when POS in TEXT is inside a fenced code block.
@@ -979,60 +1040,273 @@ A block an agent writes as an example in a fence is no reply."
       (when (string-match-p "\\`[ \t]*\\(```\\|~~~\\)" line) (cl-incf n)))
     (= 1 (% n 2))))
 
+(defun harness-thread--line-start (text pos)
+  "Return the offset of the start of the line POS is on in TEXT."
+  (if (string-match "\n[^\n]*\\'" (substring text 0 pos))
+      (1+ (match-beginning 0))
+    0))
+
+(defun harness-thread--at-line-start-p (text pos)
+  "Non-nil when only whitespace comes before POS on its line in TEXT."
+  (string-blank-p (substring text (harness-thread--line-start text pos) pos)))
+
+(defun harness-thread--in-code-p (text pos)
+  "Non-nil when POS in TEXT is inside a fenced or inline code span."
+  (or (harness-thread--in-fenced-code-p text pos)
+      (let ((start (harness-thread--line-start text pos)))
+        (= 1 (% (cl-count ?` (substring text start pos)) 2)))))
+
+(defun harness-thread--close-before (text from limit)
+  "Return where the first </thread> after FROM in TEXT ends, before LIMIT.
+LIMIT nil takes any.  Nil when there is none."
+  (let ((case-fold-search t))
+    (when (string-match "</thread[ \t]*>" text from)
+      (when (or (null limit) (< (match-beginning 0) limit))
+        (match-end 0)))))
+
+(defconst harness-thread--open-candidate-regexp
+  "<thread[ \t>]"
+  "Regexp matching what may start an opening thread tag, in any case.")
+
+(defun harness-thread--candidates (text)
+  "Return the regions of TEXT that may be replies in a thread, oldest first.
+Each is (:start START :end END :closed BOOL); a region in code is left
+out.  A region with no closing tag ends at the end of its line, and is
+only a candidate when its opening tag starts the line: a mention in a
+sentence is no reply."
+  (let ((case-fold-search t)
+        (pos 0) out)
+    (while (string-match harness-thread--open-candidate-regexp text pos)
+      (let ((start (match-beginning 0))
+            (end (match-end 0)))
+        (if (harness-thread--in-code-p text start)
+            (setq pos end)
+          (let* ((line-end (or (string-match "\n" text start) (length text)))
+                 (gt (string-match ">" text start line-end))
+                 (after (if gt (1+ gt) line-end))
+                 ;; A closing tag past the next opening one belongs to that
+                 ;; block, not this attempt.
+                 (next-open (and gt (let ((case-fold-search t))
+                                      (string-match harness-thread--open-candidate-regexp text after))))
+                 (close (and gt (harness-thread--close-before text after next-open))))
+            (if close
+                (progn
+                  (push (list :start start :end close :closed t) out)
+                  (setq pos close))
+              (if (harness-thread--at-line-start-p text start)
+                  (progn
+                    (push (list :start start :end line-end :closed nil) out)
+                    (setq pos (if (< line-end (length text)) (1+ line-end) (length text))))
+                (setq pos end)))))))
+    (nreverse out)))
+
+(defun harness-thread--within-spans-p (pos spans)
+  "Non-nil when POS is within one of SPANS, a list of (START . END)."
+  (cl-some (lambda (span) (and (>= pos (car span)) (< pos (cdr span)))) spans))
+
+(defun harness-thread--diagnose-body (body add)
+  "Note in ADD what keeps BODY from being a strict answer of a reply."
+  (when (harness-thread--wrapper-tag-p body)
+    (funcall add "The answer is not wrapped in <reply>, <response> or <answer>; write it after </quote>."))
+  (when (let ((case-fold-search t)) (string-match-p "<\\/?thread\\b" body))
+    (funcall add "A reply in a thread holds no other <thread> tag."))
+  (when (let ((case-fold-search t)) (string-match-p "<\\/?quote\\b" body))
+    (funcall add "A reply in a thread holds one <quote> at most.")))
+
+(defun harness-thread--diagnose (raw closed)
+  "Return the reasons RAW is not a strict reply in a thread, as strings.
+CLOSED says a closing tag was found for it.  The list is never empty."
+  (let* ((problems nil)
+         (case-fold-search nil)
+         (add (lambda (problem)
+                (unless (member problem problems) (push problem problems)))))
+    (let* ((gt (string-match ">" raw))
+           (tag (if gt (substring raw 0 (1+ gt)) raw))
+           (inner (if gt
+                        (let ((close (and closed
+                                          (let ((case-fold-search t))
+                                            (string-match "</thread[ \t]*>" raw (1+ gt))))))
+                          (if close (substring raw (1+ gt) close) (substring raw (1+ gt))))
+                      "")))
+        ;; The opening tag's name and attributes.
+        (cond
+         ((not (string-match "\\`<\\([A-Za-z][A-Za-z0-9_-]*\\)" tag))
+          (funcall add "The opening tag must be <thread ...>."))
+         ((not (equal (match-string 1 tag) "thread"))
+          (funcall add (format "The opening tag is <%s>; thread tags are lowercase: <thread ...>."
+                               (match-string 1 tag)))))
+        (let ((attributes (and (string-match "\\`<thread\\(.*\\)>\\'" tag)
+                               (match-string 1 tag))))
+          (when (string-match-p "\n" tag)
+            (funcall add "The opening tag is on one line: <thread id=\"...\">."))
+          (when (stringp attributes)
+            (cond
+             ((string-match-p "\t" attributes)
+              (funcall add "Attributes are separated by one space, not a tab."))
+             ((string-match-p "  \\| \\'" attributes)
+              (funcall add "Attributes are separated by one space, with no space before >."))
+             ((and (not (string-empty-p attributes))
+                   (not (string-prefix-p " " attributes)))
+              (funcall add "A space separates <thread from its attributes.")))
+            (when (string-match-p "'" attributes)
+              (funcall add "Attribute values are in double quotes, not single quotes."))
+            (let ((pos 0))
+              (while (string-match "\\([A-Za-z][A-Za-z0-9_-]*\\)[ \t]*=[ \t]*\\([^\"' \t\n>]+\\)"
+                                   attributes pos)
+                (funcall add (format "The value of %s must be in double quotes: %s=\"%s\"."
+                                     (match-string 1 attributes) (match-string 1 attributes)
+                                     (match-string 2 attributes)))
+                (setq pos (match-end 0))))
+            (let ((pos 0))
+              (while (string-match "\\([A-Za-z][A-Za-z0-9_-]*\\)[ \t]*=" attributes pos)
+                (unless (member (match-string 1 attributes) '("id" "status"))
+                  (funcall add (format "Only id and status are allowed attributes; %s is not one."
+                                       (match-string 1 attributes))))
+                (setq pos (match-end 0))))
+            (dolist (name '("id" "status"))
+              (let ((pos 0) (count 0))
+                (while (string-match (format "\\b%s\\b[ \t]*=" name) attributes pos)
+                  (cl-incf count)
+                  (setq pos (match-end 0)))
+                (when (> count 1)
+                  (funcall add (format "%s is given more than once." name)))))
+            (when (string-match "status[ \t]*=[ \t]*\"\\([^\"]*\\)\"" attributes)
+              (unless (member (match-string 1 attributes) '("open" "closed"))
+                (funcall add (format "status is \"%s\"; it must be \"open\" or \"closed\"."
+                                     (match-string 1 attributes)))))
+            (when (string-match "id[ \t]*=[ \t]*\"\\([^\"]*\\)\"" attributes)
+              (unless (string-match-p "\\`[A-Za-z0-9][A-Za-z0-9_.-]*\\'"
+                                      (match-string 1 attributes))
+                (funcall add (format "id is \"%s\"; a thread id has no spaces or other punctuation."
+                                     (match-string 1 attributes)))))))
+        (when (let ((case-fold-search t)) (string-match-p "<id\\b" inner))
+          (funcall add "Name the thread in the opening tag, as <thread id=\"THREAD_ID\">, not with an <id> tag."))
+        ;; The quote.
+        (let ((open (string-match "<quote>" inner))
+              (close (string-match "</quote>" inner)))
+          (when (and (let ((case-fold-search t)) (string-match-p "<quote\\b" inner))
+                     (null open))
+            (funcall add "The quote tag is exactly <quote>."))
+          (when (and (let ((case-fold-search t)) (string-match-p "</quote\\b" inner))
+                     (null close))
+            (funcall add "The ending quote tag is exactly </quote>."))
+          (cond
+           ((and open close)
+            (let ((quote (substring inner (+ open (length "<quote>")) close))
+                  (before (substring inner 0 open))
+                  (body (substring inner (+ close (length "</quote>")))))
+              (when (string-match "<quote>" inner (1+ open))
+                (funcall add "A reply in a thread has one <quote>."))
+              (unless (string-empty-p (string-trim before))
+                (funcall add "The <quote> comes first in the block, before the answer."))
+              (when (string-empty-p (string-trim quote))
+                (funcall add "The <quote> is empty; quote the part of the conversation you answer."))
+              (when (let ((case-fold-search t)) (string-match-p "<\\/?thread\\b" quote))
+                (funcall add "The <quote> holds no <thread> tag."))
+              (when (let ((case-fold-search t)) (string-match-p "<\\/?quote\\b" body))
+                (funcall add "A reply in a thread has one <quote>."))
+              (harness-thread--diagnose-body body add)))
+           ((and open (null close))
+            (funcall add "The <quote> is never closed with </quote>."))
+           ((and close (null open))
+            (funcall add "There is a </quote> without a <quote>."))
+           ((and (null open) (null close))
+            (if (and closed (string-empty-p (string-trim inner)))
+                (funcall add "The block says nothing; quote the part you answer or write the answer.")
+              (harness-thread--diagnose-body inner add)))))
+        (unless closed
+          (funcall add "The block is never closed; end it with </thread> after the answer."))
+        (unless problems
+          (funcall add "The block does not match the strict form.")))
+      (nreverse problems)))
+
+(defun harness-thread-find-malformed (text)
+  "Return what is wrong with the reply attempts in TEXT, oldest first.
+Each is a plist (:start START :end END :raw RAW :unclosed BOOL
+:problems (PROBLEM ...)): the offsets of the attempt and its text,
+whether its closing tag is missing, and what keeps it from being a
+strict block (`harness-thread-parse-blocks').  An attempt in code is
+left out; one that parses strictly is no problem unless it copies the
+format's placeholder id, which names no thread."
+  (when (stringp text)
+    (let* ((blocks (harness-thread-parse-blocks text))
+           (valid (mapcar (lambda (block)
+                            (cons (plist-get block :start) (plist-get block :end)))
+                          blocks))
+           (candidates (harness-thread--candidates text))
+           (spans (append valid
+                          (mapcar (lambda (candidate)
+                                    (cons (plist-get candidate :start)
+                                          (plist-get candidate :end)))
+                                  candidates)))
+           (case-fold-search t)
+           (pos 0) out)
+      (dolist (candidate candidates)
+        (let ((start (plist-get candidate :start)))
+          (unless (harness-thread--within-spans-p start valid)
+            (let* ((end (plist-get candidate :end))
+                   (raw (substring text start end)))
+              (push (list :start start :end end :raw raw
+                          :unclosed (not (plist-get candidate :closed))
+                          :problems (harness-thread--diagnose raw (plist-get candidate :closed)))
+                    out)))))
+      ;; A closing tag that no opening pairs with.
+      (while (string-match "</thread[ \t]*>" text pos)
+        (let ((start (match-beginning 0))
+              (end (match-end 0)))
+          (unless (or (harness-thread--in-code-p text start)
+                      (harness-thread--within-spans-p start spans))
+            (push (list :start start :end end
+                        :raw (substring text start end)
+                        :unclosed nil
+                        :problems (list "The closing </thread> has no opening <thread ...>."))
+                  out))
+          (setq pos end)))
+      ;; A strict block that copied the format's placeholder names no thread.
+      (dolist (block blocks)
+        (let ((id (plist-get block :id)))
+          (when (and (stringp id) (equal (downcase id) "thread_id"))
+            (push (list :start (plist-get block :start)
+                        :end (plist-get block :end)
+                        :raw (plist-get block :raw)
+                        :unclosed nil
+                        :problems (list "id is the placeholder THREAD_ID; use the thread id the marker line names, or leave id out for a new thread."))
+                  out))))
+      (sort (nreverse out) (lambda (a b) (< (plist-get a :start) (plist-get b :start)))))))
+
 (defun harness-thread-parse-blocks (text)
-  "Return the <thread> reply blocks of TEXT, oldest first, as plists.
+  "Return the strict <thread> reply blocks of TEXT, oldest first, as plists.
 Each is (:start START :end END :id ID :status STATUS :quote QUOTE
 :body BODY :raw RAW): the offsets of the whole block, the thread's id (or
 nil for a new thread), its status when the tag names one, what the
-<quote> holds, and the words of the reply with the quote left out.  The
-tags may be on lines of their own or run into the text, their names in
-any case, the id in double or single quotes or bare, and the answer may
-be wrapped in <reply> or another tag.  A block in a fenced code block is
-no reply, and one never closed is no block."
+<quote> holds, and the words of the reply with the quote left out.
+
+The form is strict: `<thread' and `</thread>' are lowercase and exact;
+the opening tag has only `id' and `status' attributes, each in double
+quotes, with `status' \"open\" or \"closed\"; the optional `<quote>' and
+`</quote>' are lowercase and exact and come first; and the answer is
+not wrapped in `<reply>' or another tag.  A block in code is no reply,
+and one never closed is no block; `harness-thread-find-malformed' says
+what is wrong with an attempt that is not strict."
   (when (stringp text)
-    (let ((case-fold-search t)
+    (let ((case-fold-search nil)
           (pos 0) blocks)
-      (while (and (< pos (length text))
-                  (string-match harness-thread-tag-open-regexp text pos))
+      (while (string-match "<thread[ \t>]" text pos)
         (let* ((start (match-beginning 0))
-               (block-start (match-end 0))
-               (attributes (match-string 1 text))
-               (close (and (string-match harness-thread-tag-close-regexp text block-start)
-                           (match-beginning 0)))
-               (close-end (and close (match-end 0))))
-          (if (or (null close) (harness-thread--in-fenced-code-p text start))
-              ;; Past the tag, and past the block when there was one.
-              (setq pos (or close-end block-start))
-            (let* ((inner (substring text block-start close))
-                   (quote-span (harness-thread--tag-content inner "quote"))
-                   (quote (and quote-span
-                               (string-trim (substring inner (plist-get quote-span :start)
-                                                       (plist-get quote-span :end)))))
-                   (body (string-trim
-                          (if quote-span
-                              ;; The quote's content is kept apart: its tags
-                              ;; go with it, and not into the answer.
-                              (concat (substring inner 0 (plist-get quote-span :open-start))
-                                      (substring inner (plist-get quote-span :close-end)))
-                            inner)))
-                   (body (harness-thread--strip-wrapper body))
-                   (attribute-id (harness-thread--tag-attribute attributes "id"))
-                   (inner-id (harness-thread--inner-text inner "id"))
-                   (id (or attribute-id inner-id))
-                   (status (harness-thread--tag-attribute attributes "status")))
-              ;; The <id> tag named the thread: it is no part of the words.
-              (when (and inner-id (not attribute-id))
-                (setq body (string-trim
-                            (replace-regexp-in-string
-                             "<id[ \t]*>[^<]*</id[ \t]*>" "" body t t))))
-              (when (or quote (not (string-blank-p body)))
-                (push (list :start start :end close-end
-                            :id id
-                            :status status
-                            :quote quote :body body
-                            :raw (substring text start close-end))
-                      blocks))
-              (setq pos close-end)))))
+               (end (match-end 0))
+               (block (and (not (harness-thread--in-code-p text start))
+                           (harness-thread--parse-block-at text start))))
+          (if block
+              (progn
+                (push block blocks)
+                (setq pos (plist-get block :end)))
+            ;; Past the attempt: a closing tag past the next opening one
+            ;; belongs to that block, not this one.
+            (let* ((gt (string-match ">" text start))
+                   (next-open (and gt (let ((case-fold-search t))
+                                        (string-match "<thread[ \t>]" text (1+ gt)))))
+                   (close (and gt (harness-thread--close-before text (1+ gt) next-open))))
+              (setq pos (if close close end))))))
       (nreverse blocks))))
 
 (defconst harness-thread-marker-regexp

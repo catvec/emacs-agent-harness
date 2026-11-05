@@ -125,42 +125,99 @@ response make the block, as the compose box's attachment does."
                   :quote (plist-get block :quote) :body (plist-get block :body)))
           (harness-thread-parse-blocks text)))
 
-(ert-deftest harness-thread-parses-the-tag-forms-agents-write ()
-  "The <thread> form is read as an agent writes it: tags on lines of their own
-or one line, names in any case, the id quoted either way or bare, the quote
-optional and wrapped in <quote>, the answer wrapped in <reply> or another tag,
-the id a child tag, and the status a tag attribute.  A block never closed, or
-one in a fenced code block, is no reply."
+(ert-deftest harness-thread-parses-the-strict-tag-form ()
+  "The <thread> form is read strictly: lowercase exact tags, id and
+status in double quotes and nothing else in the opening tag, an optional
+<quote> first, and the answer not wrapped in another tag.  The tags may
+be on lines of their own or run into the text, and a block never closed,
+one in code, and a tag a sentence mentions with no closing tag are no
+replies."
   (should (equal '((:id "t-1" :status nil :quote "The build is green." :body "Why?"))
                  (harness-thread-test--tagged
                   "<thread id=\"t-1\">\n<quote>The build is green.</quote>\nWhy?\n</thread>")))
   (should (equal '((:id "t-2" :status nil :quote "Q" :body "A"))
                  (harness-thread-test--tagged
                   "<thread id=\"t-2\"><quote>Q</quote>A</thread>")))
+  ;; Attributes in either order, status closing the thread, and no id
+  ;; for a new thread.
   (should (equal '((:id "t-3" :status "closed" :quote "Q" :body "A"))
                  (harness-thread-test--tagged
-                  "<Thread id='t-3' status=\"closed\"><QUOTE>Q</QUOTE><reply>A</reply></Thread>")))
+                  "<thread status=\"closed\" id=\"t-3\"><quote>Q</quote>A</thread>")))
+  (should (equal '((:id nil :status nil :quote "Q" :body "A"))
+                 (harness-thread-test--tagged
+                  "<thread><quote>Q</quote>A</thread>")))
+  ;; The quote is optional, and so is the answer when there is one.
   (should (equal '((:id "t-4" :status nil :quote nil :body "A line."))
-                 (harness-thread-test--tagged "<thread id=t-4>A line.</thread>")))
-  (should (equal '((:id "t-5" :status nil :quote "Q" :body "A"))
+                 (harness-thread-test--tagged "<thread id=\"t-4\">A line.</thread>")))
+  (should (equal '((:id "t-5" :status "closed" :quote "Q" :body nil))
                  (harness-thread-test--tagged
-                  "<thread><id>t-5</id><quote>Q</quote>A</thread>")))
-  ;; Whitespace inside the tag: the quote's tags still leave the words alone.
-  (should (equal '((:id "t-6" :status nil :quote "Q" :body "A"))
-                 (harness-thread-test--tagged
-                  "<thread id=\"t-6\">\n<quote >Q</quote >\n<reply>A</reply>\n</thread>")))
-  ;; No quote: the answer is the whole block.
-  (should (equal '((:id "t-7" :status nil :quote nil :body "Just this."))
-                 (harness-thread-test--tagged "<thread id=\"t-7\">Just this.</thread>")))
-  ;; Never closed, and a code example, are no replies.
+                  "<thread id=\"t-5\" status=\"closed\"><quote>Q</quote></thread>")))
+  ;; The forms the old parser took are malformed now.
+  (dolist (text (list "<thread id=t-1>A</thread>"
+                      "<thread id='t-1'>A</thread>"
+                      "<Thread id=\"t-1\">A</Thread>"
+                      "<thread><id>t-5</id><quote>Q</quote>A</thread>"
+                      "<thread id=\"t-6\">\n<quote >Q</quote >\n<reply>A</reply>\n</thread>"
+                      "<thread  id=\"t-7\">A</thread>"
+                      "<thread id=\"t-8\" other=\"x\">A</thread>"
+                      "<thread id=\"t-9\" status=\"maybe\">A</thread>"))
+    (should-not (harness-thread-parse-blocks text)))
+  ;; Never closed, and a code example, are no replies; nor is a tag a
+  ;; sentence mentions without closing it.
   (should-not (harness-thread-parse-blocks "<thread id=\"t-8\">\nA question?"))
+  (should-not (harness-thread-parse-blocks "Write a <thread id=\"t-9\"> block."))
   (should-not (harness-thread-parse-blocks
                "As in:\n\n```\n<thread id=\"t-9\"><quote>Q</quote>A</thread>\n```\n"))
+  (should-not (harness-thread-parse-blocks
+               "Inline ` <thread id=\"t-9\"><quote>Q</quote>A </thread> ` too."))
   ;; Two blocks, in order, with the text between them left alone.
   (should (equal '((:id "t-10" :status nil :quote nil :body "One.")
                    (:id "t-11" :status nil :quote nil :body "Two."))
                  (harness-thread-test--tagged
-                  "<thread id=\"t-10\">One.</thread>\nAnd in between.\n<thread id=\"t-11\">Two.</thread>"))))
+                  "<thread id=\"t-10\">One.</thread>\nAnd in between.\n<thread id=\"t-11\">Two.</thread>")))
+  ;; An attempt never closed does not swallow the strict block after it.
+  (should (equal '((:id "t-12" :status nil :quote nil :body "Good."))
+                 (harness-thread-test--tagged
+                  "<thread id=t-broken>\ntext that never closes\n<thread id=\"t-12\">Good.</thread>"))))
+
+(ert-deftest harness-thread-finds-the-malformed-attempts ()
+  "`harness-thread-find-malformed' says what keeps a block from being a
+strict reply: the tag's case, the attributes, the quote's tags, a
+wrapper around the answer, a missing closing tag, or a closing tag
+alone.  A strict block and code are no problems, and a tag mentioned in
+a sentence with no close is none either."
+  (let ((found (harness-thread-find-malformed "<thread id=t-1>A</thread>")))
+    (should (= 1 (length found)))
+    (should (string-match-p "double quotes" (string-join (plist-get (car found) :problems) " "))))
+  (let ((found (harness-thread-find-malformed "<Thread id=\"t-1\">A</Thread>")))
+    (should (string-match-p "lowercase" (string-join (plist-get (car found) :problems) " "))))
+  (let ((found (harness-thread-find-malformed
+                "<thread id=\"t-1\">\n<quote>Q</quote><reply>A</reply>\n</thread>")))
+    (should (string-match-p "wrapped" (string-join (plist-get (car found) :problems) " "))))
+  (let ((found (harness-thread-find-malformed "<thread id=\"t-1\">\nA\n")))
+    (should (plist-get (car found) :unclosed))
+    (should (string-match-p "never closed" (string-join (plist-get (car found) :problems) " "))))
+  (let ((found (harness-thread-find-malformed "A stray </thread> here.")))
+    (should (= 1 (length found)))
+    (should (string-match-p "no opening" (string-join (plist-get (car found) :problems) " "))))
+  ;; A strict block that copies the format's placeholder names no thread.
+  (let ((found (harness-thread-find-malformed
+                "<thread id=\"THREAD_ID\">\n<quote>Q</quote>\nA\n</thread>")))
+    (should (= 1 (length found)))
+    (should (string-match-p "placeholder"
+                            (string-join (plist-get (car found) :problems) " "))))
+  ;; An attempt never closed is one problem, and the block after it stays.
+  (let ((found (harness-thread-find-malformed
+                "<thread id=t-broken>\ntext\n<thread id=\"t-12\">Good.</thread>")))
+    (should (= 1 (length found)))
+    (should (plist-get (car found) :unclosed)))
+  ;; Strict blocks, fenced examples and a sentence's mention are quiet.
+  (should-not (harness-thread-find-malformed
+               "<thread id=\"t-1\">\n<quote>Q</quote>\nA\n</thread>"))
+  (should-not (harness-thread-find-malformed
+               "As in:\n\n```\n<thread id=t-1><quote>Q</quote>A</thread>\n```\n"))
+  (should-not (harness-thread-find-malformed "Write a <thread id=\"t-1\"> block."))
+  (should-not (harness-thread-find-malformed "Inline ` <thread id=t-1>A</thread> ` here.")))
 
 (ert-deftest harness-thread-renders-a-tag-block-as-a-mail-quotes-it ()
   "The text kept of a parsed block is its quote as a block quote, then the answer."

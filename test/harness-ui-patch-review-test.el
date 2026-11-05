@@ -310,6 +310,7 @@ main checkout, so it has no branch until BODY gives it one."
      (setq harness-tasks--loaded t harness-acp--clients nil)
      (harness-test-load-module 'tools-handin)
      (harness-test-load-module 'tools-review)
+     (harness-test-load-module 'thread-reply)
      (harness-test-load-module 'patch-review)
      (clrhash harness-patch-review--sets)
      (let ((harness-provider-demo--delay 0.005)
@@ -6612,10 +6613,12 @@ as in the chat; the one in code is not."
 
 (ert-deftest harness-ui-patch-review-is-known-only-to-its-halves ()
   "No other file of the harness names the review of a task's changes but its
-two halves, the review tools and the ACP lists of what a UI may call and
-hear: what knows no harness is the library, whose own test checks that."
+halves, the reply form's, the review tools and the ACP lists of what a UI
+may call and hear: what knows no harness is the library, whose own test
+checks that."
   (let ((default-directory harness-test-root)
         (known '("harness-ui-patch-review.el" "harness-patch-review.el"
+                 "harness-thread-reply.el"
                  "harness-tools-review.el" "harness-acp.el")))
     (dolist (file (append (list "harness.el")
                           (directory-files "lisp" t "\\.el\\'")

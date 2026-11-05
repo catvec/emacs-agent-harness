@@ -47,6 +47,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;tasks              ; Task mode: one session per task, through review and the merge queue,…
  ;;tasks-notify       ; Notifies you when a task's work waits for your review or a task is…
  ;;tasks-search       ; Search the harness with a cheap model: tasks and actions on them,…
+ ;;thread-reply       ; Replies in a thread written in a message: the strict <thread> form,…
  ;;todo-sync          ; Keep a session's todo list true to its work: every few steps a cheap…
  ;;tool-slots         ; A few slots per machine for the tools that start processes.
  ;;tool-slots-load    ; Fewer tool slots while this machine is loaded.
@@ -113,7 +114,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [merge](merge.md) |  | [session](session.md), [agent](agent.md) | Merge queue: worktree branches merged into the session they were built on, or into the main checkout. |
 | [naming](naming.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Name nameless sessions with a cheap model as soon as their first message is sent. |
 | [notifications](notifications.md) |  |  | Notifications for the user through pluggable providers: desktop (system) and Gotify. |
-| [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent. |
+| [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md), [thread-reply](thread-reply.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent. |
 | [perms](perms.md) | by default | [config](config.md), [tools](tools.md) | Directory jail, directory requests, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls. |
 | [pet](pet.md) |  | [store](store.md), [provider](provider.md) | A companion pet: hatched with random bones, named and voiced by a cheap model, growing with use. |
 | [plugins](plugins.md) |  | [session](session.md) | Projects' plugins: what a project's trusted .dir-locals.el loads, and the plugin modules each session froze. |
@@ -145,6 +146,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [tasks](tasks.md) |  | [store](store.md), [project](project.md), [session](session.md), [agent](agent.md) | Task mode: one session per task, through review and the merge queue, with a limit of tasks at once per project, started by priority. |
 | [tasks-notify](tasks-notify.md) |  | [tasks](tasks.md), [notifications](notifications.md) | Notifies you when a task's work waits for your review or a task is done (and, opt-in, when one needs your input). |
 | [tasks-search](tasks-search.md) |  | [tasks](tasks.md), [provider](provider.md), [session-search](session-search.md) | Search the harness with a cheap model: tasks and actions on them, sessions, commands and an answer in words. |
+| [thread-reply](thread-reply.md) |  | [agent](agent.md), [session](session.md), [tools](tools.md) | Replies in a thread written in a message: the strict <thread> form, read for the review, and a malformed reply sent back until it is right. |
 | [todo-sync](todo-sync.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md) | Keep a session's todo list true to its work: every few steps a cheap model rewrites it. |
 | [tool-slots](tool-slots.md) |  | [tools](tools.md) | A few slots per machine for the tools that start processes. |
 | [tool-slots-load](tool-slots-load.md) |  | [tool-slots](tool-slots.md) | Fewer tool slots while this machine is loaded. |
@@ -243,7 +245,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/stream` | [agent](agent.md) | [agent](agent.md) | [acp](acp.md), [resilience](resilience.md), [usage](usage.md) |  |
 | `agent/tool-call` | [agent](agent.md) | [agent](agent.md) | [resilience](resilience.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md) |  |
 | `agent/tool-result` | [agent](agent.md) | [agent](agent.md) | [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [tools](tools.md) |  |
-| `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [perms](perms.md), [pet](pet.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [seed](seed.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
+| `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [perms](perms.md), [pet](pet.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [seed](seed.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `agent/turn-started` | [agent](agent.md) | [agent](agent.md) | [merge](merge.md), [naming](naming.md), [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-pet](ui-pet.md), [usage](usage.md) | yes |
 | `cache/compacted` | [cache-compact](cache-compact.md) | [cache-compact](cache-compact.md) |  |  |
 | `cache/pre-expire` | [cache](cache.md) | [cache](cache.md) | [cache-compact](cache-compact.md), [cache-warm](cache-warm.md) |  |
@@ -350,15 +352,15 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 
 | Chain | Run by | Joined by (priorities) |
 |---|---|---|
-| `agent/assistant-message` | [agent](agent.md) | [patch-review](patch-review.md) (20) |
+| `agent/assistant-message` | [agent](agent.md) | [thread-reply](thread-reply.md) (20) |
 | `agent/before-turn` | [agent](agent.md), [seed](seed.md) | [cache-compact](cache-compact.md) (11), [cache-warm](cache-warm.md) (1), [compaction](compaction.md) (11, 12, 20), [cowboy](cowboy.md) (15), [fallback](fallback.md) (10), [handoff](handoff.md) (10), [merge](merge.md) (30), [seed](seed.md) (5), [tasks](tasks.md) (2), [usage](usage.md) (30) |
 | `agent/builtin-tools` | [tools](tools.md) | [provider-claude](provider-claude.md) (50), [tools-web](tools-web.md) (50) |
 | `agent/hold` | [agent](agent.md) | [compaction](compaction.md) (50) |
-| `agent/message` | [agent](agent.md) | [cache](cache.md) (90), [patch-review](patch-review.md) (40), [tasks](tasks.md) (50) |
+| `agent/message` | [agent](agent.md) | [cache](cache.md) (90), [patch-review](patch-review.md) (40), [tasks](tasks.md) (50), [thread-reply](thread-reply.md) (35) |
 | `agent/outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50), [tools-events](tools-events.md) (50), [tools-sessions](tools-sessions.md) (50) |
 | `agent/step` | [agent](agent.md) | [compaction](compaction.md) (12, 35), [handoff](handoff.md) (10), [merge](merge.md) (30), [usage](usage.md) (30) |
 | `agent/step-error` | [agent](agent.md) | [fallback](fallback.md) (50), [retry](retry.md) (60) |
-| `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50) |
+| `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50), [thread-reply](thread-reply.md) (60) |
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50) |
 | `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [seed](seed.md) (1000), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40) |
 | `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [tools-review](tools-review.md) (50) |
