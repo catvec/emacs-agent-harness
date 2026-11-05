@@ -9589,8 +9589,8 @@ does one whose worktree is gone from disk."
     (should (eq 'mode-line-highlight (get-text-property 2 'mouse-face seg)))))
 
 (ert-deftest harness-ui-chat-menu-button-names-the-real-keys ()
-  ;; `?' types into the compose box, so the [menu] tooltip tells the menu's
-  ;; keys, and they follow a prefix moved off the default C-c h.
+  ;; `?' types into the compose box, so the [menu] tooltip names the
+  ;; prefix key, and it follows a prefix moved off the default C-c h.
   (harness-ui-chat-test-with
     (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
           (w (selected-window))
@@ -9603,12 +9603,12 @@ does one whose worktree is gone from disk."
                (pos (string-search "[menu]" header))
                (help (get-text-property pos 'help-echo header)))
           (should (functionp help))
-          (should (equal "The harness menu (C-c h ?)" (funcall help w header pos)))
+          (should (equal "The harness menu (C-c h)" (funcall help w header pos)))
           (unwind-protect
               (progn
                 (setopt harness-ui-prefix-key "C-c x")
-                (should (eq 'harness-menu (key-binding (kbd "C-c x ?"))))
-                (should (equal "The harness menu (C-c x ?)" (funcall help w header pos))))
+                (should-not (key-binding (kbd "C-c x ?")))
+                (should (equal "The harness menu (C-c x)" (funcall help w header pos))))
             (setopt harness-ui-prefix-key prefix)))))))
 
 ;; Doom's solaire-mode bakes the buffer's base colour into every image,

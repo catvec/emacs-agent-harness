@@ -5896,12 +5896,13 @@ it would show as a dark box."
 
 (defun harness-chat--menu-help (window _object _pos)
   "Return the tooltip of the [menu] button in WINDOW's header line.
-It names the keys that open the menu there, following
-`harness-ui-prefix-key' and the user's bindings: in a chat buffer `?'
-types into the compose box.  A `help-echo' function, so the keymaps
-are searched on hover, not on every redisplay of the header line."
+It names the keys that open the menu, following `harness-ui-prefix-key':
+in a chat buffer `?' types into the compose box, so the groups open on
+the prefix alone.  A `help-echo' function, so the prefix option is read
+on hover, not on every redisplay of the header line."
   (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
-    (substitute-command-keys "The harness menu (\\[harness-menu])" t)))
+    (format "The harness menu (%s)"
+            (key-description (harness-ui--prefix-keys harness-ui-prefix-key)))))
 
 (defalias 'harness-chat-show-usage #'harness-ui-show-usage
   "Alias of `harness-ui-show-usage', which the task board shares.")
@@ -6171,7 +6172,7 @@ making room as its priorities say.  WIDTH is as
       ;; Other modules' segments, the companion pet's face say.
       (harness-chat--header-end)
       (list
-       (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
+       (list (concat "  " (harness-chat--segment "[menu]" #'harness-groups-menu #'harness-chat--menu-help 'harness-dim-face))
              95)
        ;; The cached flag, never `harness-chat--scrolled-up-p': measuring
        ;; the window (`pos-visible-in-window-p') formats its header line,

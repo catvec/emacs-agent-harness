@@ -11697,7 +11697,15 @@ label (`harness-ui-tool-label`, `harness-ui-tool-title`), window
 positions (`harness-ui-display-session SID &optional POSITION`; presets
 `right`, `left`, `bottom`, `full`, `other`, `fullscreen`; one session
 per position, replacing),
-the global keymap and the transient menu `harness-menu` (with a group for
+the global keymap and the transient menus (the grouped
+`harness-groups-menu`, which the prefix key opens on its own after
+`harness-ui-menu-idle-delay`, as if an event no keyboard sends followed
+it, and which opens each group's commands as a directory does, the
+commands of the opt-in modules included; the flat `harness-menu`,
+which the views that bind it to `?` and the modules that append to it
+keep, and that no key of the prefix offers; and the group menus
+themselves.  A key typed after the prefix runs as it always did.  The
+flat menu has a group for
 the commands of the buffer it is opened from, which each mode lists in
 its `harness-menu-group` property; opened from a side window it gets a
 side window of its own across the bottom of the frame, never in another
@@ -14021,7 +14029,7 @@ shows a plan on the board without searching, which the quick search's
 [Board] uses.
 
 Quick search (`harness-ui-quick-search`, `C-c h /` anywhere but on a
-board, `/` in the `C-c h ?` menu, `harness-quick-search`): a popout
+board, `/` in the sessions group of the menu, `harness-quick-search`): a popout
 (`harness-ui-popout`, KEY `(quick-search)`) at the bottom of the frame,
 opened from any buffer, whose shared compose box takes the line to
 search (`harness-quick-search-box-mode`: `RET` in the box calls

@@ -272,7 +272,11 @@ KEYS default to C-g, which closes the menu."
     (execute-kbd-macro (kbd (or keys "C-g")))))
 
 (ert-deftest harness-ui-grouped-shortcuts-preserve-old-bindings ()
-  (should (eq (lookup-key harness-ui-map (kbd "=")) 'harness-groups-menu))
+  ;; The menus are the prefix's own now: no key of its own opens one.
+  (dolist (key '("=" "?"))
+    (should-not (lookup-key harness-ui-map (kbd key))))
+  (should (eq (lookup-key harness-ui-map (vector harness-ui--groups-menu-key))
+              'harness-groups-menu))
   (dolist (key '("C-s" "C-o" "C-t"))
     (should-not (lookup-key harness-ui-map (kbd key))))
   (let ((harness-ui-map (copy-keymap harness-ui-map)))
@@ -288,7 +292,7 @@ KEYS default to C-g, which closes the menu."
     (should (eq (lookup-key harness-ui-map (kbd "t")) 'harness-tree)))
   (harness-ui-test-with-menu-buffer #'fundamental-mode
     (let ((text (harness-ui-test-menu)))
-      (should (string-match-p "Sessions, settings & tasks" text)))
+      (should-not (string-match-p "All groups\\|All commands" text)))
     (call-interactively #'harness-groups-menu)
     (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
       (should (string-match-p "Tasks…" text))
@@ -314,7 +318,7 @@ KEYS default to C-g, which closes the menu."
           called)
       (cl-letf (((symbol-function 'harness-switch-session)
                  (lambda () (interactive) (setq called (current-buffer)))))
-        (execute-kbd-macro (kbd "C-c h ="))
+        (call-interactively #'harness-groups-menu)
         (should (string-match-p "Command groups" (with-current-buffer transient--buffer-name
                                                    (buffer-string))))
         (execute-kbd-macro (kbd "s"))
@@ -332,7 +336,8 @@ KEYS default to C-g, which closes the menu."
           called)
       (cl-letf (((symbol-function 'harness-ui-tasks-verify)
                  (lambda () (interactive) (setq called (current-buffer)))))
-        (execute-kbd-macro (kbd "C-c h = t"))
+        (call-interactively #'harness-groups-menu)
+        (execute-kbd-macro (kbd "t"))
         (should (string-match-p "Task at point" (with-current-buffer transient--buffer-name
                                                    (buffer-string))))
         (execute-kbd-macro (kbd "v"))
@@ -351,9 +356,94 @@ KEYS default to C-g, which closes the menu."
           called)
       (cl-letf (((symbol-function 'harness-ui-tasks-compose)
                  (lambda () (interactive) (setq called (current-buffer)))))
-        (execute-kbd-macro (kbd "C-c h = t n"))
+        (call-interactively #'harness-groups-menu)
+        (execute-kbd-macro (kbd "t n"))
         (should (eq called source))
         (should-not transient--prefix)))))
+
+(ert-deftest harness-ui-groups-menu-shows-groups-not-every-command ()
+  "The menu C-c h opens lists groups, not every command at once.
+Choosing a group opens only that group's commands; a buffer with
+commands in its `harness-menu-group' gets an entry of its own."
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (unwind-protect
+        (progn
+          ;; Priority is a module the test file does not load: give it one
+          ;; command so the group itself can be checked here.
+          (cl-letf (((symbol-function 'harness-set-priority) (lambda () (interactive))))
+            (call-interactively #'harness-groups-menu)
+            (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+              (should (string-match-p "Command groups" text))
+              (dolist (group '("Sessions…" "Session settings…" "Priority…" "Tasks…"
+                               "Tools…" "Config & remote…"))
+                (should (string-match-p (regexp-quote group) text)))
+              (should-not (string-match-p "This buffer…" text))
+              ;; The flat all-commands list is not offered here.
+              (should-not (string-match-p "All commands" text))
+              (should-not (string-match-p "New session\\|Model\\|Reload harness" text)))
+            (execute-kbd-macro (kbd "C-g"))
+            (should-not transient--prefix)))
+      (ignore-errors (transient-quit-all))))
+  (harness-ui-test-with-menu-buffer #'harness-chat-mode
+    (unwind-protect
+        (progn
+          (call-interactively #'harness-groups-menu)
+          (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+            (should (string-match-p "This buffer…" text)))
+          (execute-kbd-macro (kbd "b"))
+          (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+            (should (string-match-p "Chat" text))
+            (should (string-match-p "C-c C-c +Send" text)))
+          ;; The buffer menu's parent is still open: C-g leaves one
+          ;; level, the second closes the groups menu it came from.
+          (execute-kbd-macro (kbd "C-g C-g"))
+          (should-not transient--prefix))
+      (ignore-errors (transient-quit-all)))))
+
+(ert-deftest harness-ui-groups-menu-drills-into-a-group ()
+  "A group key opens that group's commands, and the next key runs one.
+The top level itself offers no command: c R reloads from the groups
+menu, while the top level has no R of its own."
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (unwind-protect
+        (let ((harness-global-mode t)
+              called)
+          (cl-letf (((symbol-function 'harness-reload)
+                     (lambda () (interactive) (setq called 'reload))))
+            (call-interactively #'harness-groups-menu)
+            (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+              (should (string-match-p "Command groups" text))
+              (should-not (string-match-p "Reload harness" text)))
+            (execute-kbd-macro (kbd "c"))
+            (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+              (should (string-match-p "Configuration" text))
+              (should (string-match-p "Reload harness" text))
+              (should-not (string-match-p "New session" text)))
+            (execute-kbd-macro (kbd "R"))
+            (should (eq called 'reload))
+            (should-not transient--prefix)))
+      (ignore-errors (transient-quit-all)))))
+
+(ert-deftest harness-ui-groups-show-the-modules-commands ()
+  "A module's command is in its group, without a flat list to hold it.
+The modules load after `harness-ui', so their entries appear when the
+command exists and are left out when the module is off."
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness-compact) (lambda () (interactive)))
+                  ((symbol-function 'harness-provider-check) (lambda () (interactive)))
+                  ((symbol-function 'harness-chatgpt-plan-page) (lambda () (interactive)))
+                  ((symbol-function 'harness-redact-secret) (lambda () (interactive))))
+          (dolist (entry '((harness-session-menu "Compact context")
+                           (harness-settings-menu "Check provider & model")
+                           (harness-tools-menu "ChatGPT plan…")
+                           (harness-tools-menu "Redact a secret…")))
+            (call-interactively (car entry))
+            (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+              (should (string-match-p (regexp-quote (cadr entry)) text)))
+            (execute-kbd-macro (kbd "C-g"))
+            (should-not transient--prefix)))
+      (ignore-errors (transient-quit-all)))))
 
 (ert-deftest harness-ui-menu-elsewhere-shows-only-its-own-groups ()
   (harness-ui-test-with-menu-buffer #'fundamental-mode
@@ -365,6 +455,80 @@ KEYS default to C-g, which closes the menu."
       (pcase-dolist (`(,_mode ,title . ,_columns) (harness-ui-test-menu-groups))
         (should-not (string-match-p (concat "^" (regexp-quote title) "$") text))))
     (should-not transient--prefix)))
+
+(ert-deftest harness-ui-groups-menu-opens-on-the-prefix-alone ()
+  "C-c h alone opens the grouped `harness-groups-menu'.
+No key of the prefix opens a menu by hand, and every key under the
+prefix still runs as it did.  The prefix stays a keymap: the idle timer
+puts back an event no keyboard sends to be read after the prefix, so a
+key typed before the timer runs keeps its binding and the menu never
+takes it."
+  (let ((harness-global-mode t))
+    (should (eq harness-ui-map (lookup-key harness-global-mode-map (kbd "C-c h"))))
+    (dolist (key '("=" "?"))
+      (should-not (lookup-key harness-ui-map (kbd key))))
+    ;; The prefix waiting for a key becomes C-c h <event>; a key after it
+    ;; does not.
+    (should (eq harness-ui--groups-menu-key
+                (harness-ui--prefix-menu-event (kbd "C-c h"))))
+    (should-not (harness-ui--prefix-menu-event (kbd "C-c h n")))
+    (should-not (harness-ui--prefix-menu-event (kbd "C-c x")))
+    ;; The event the idle timer queues completes the prefix as the groups menu.
+    (let* ((event (harness-ui--prefix-menu-event (kbd "C-c h")))
+           (unread-command-events (append (kbd "C-c h") (list event))))
+      (should (eq #'harness-groups-menu (key-binding (read-key-sequence nil)))))))
+
+(ert-deftest harness-ui-menu-idle-timer-queues-the-menu-key ()
+  "The idle timer queues the menu's key only while the prefix waits.
+A key typed after the prefix queues nothing, so the menu cannot take it."
+  (let ((harness-global-mode t)
+        (unread-command-events nil))
+    (cl-letf (((symbol-function 'this-command-keys-vector)
+               (lambda () (kbd "C-c h"))))
+      (harness-ui--menu-on-idle))
+    (should (equal (list harness-ui--groups-menu-key) unread-command-events)))
+  (let ((harness-global-mode t)
+        (unread-command-events nil))
+    (cl-letf (((symbol-function 'this-command-keys-vector)
+               (lambda () (kbd "C-c h n"))))
+      (harness-ui--menu-on-idle))
+    (should-not unread-command-events)))
+
+(ert-deftest harness-ui-menu-idle-delay-follows-the-option ()
+  "The mode starts and stops the idle timer with its keys.
+Changing the delay restarts a running timer, and nil stops it."
+  (let ((before harness-ui-menu-idle-delay))
+    (unwind-protect
+        (progn
+          (harness-global-mode 1)
+          (should (timerp harness-ui--menu-idle-timer))
+          (setopt harness-ui-menu-idle-delay 0.5)
+          (should (timerp harness-ui--menu-idle-timer))
+          (setopt harness-ui-menu-idle-delay nil)
+          (should-not harness-ui--menu-idle-timer)
+          (harness-global-mode -1)
+          (should-not harness-ui--menu-idle-timer))
+      (setopt harness-ui-menu-idle-delay before)
+      (harness-global-mode -1))))
+
+(ert-deftest harness-ui-prefix-keys-run-with-the-menu-on-idle ()
+  "A key after C-c h runs its own command, the menu on idle or not.
+The idle menu is a key of the prefix, not a command that replaces it.
+`C-c h R' reloads, for one, and leaves no menu behind; no key of the
+prefix opens a menu by hand."
+  (let ((harness-global-mode t))
+    (dolist (key '("n" "s" "R"))
+      (should (lookup-key harness-global-mode-map (kbd (concat "C-c h " key)))))
+    (dolist (key '("=" "?"))
+      (should-not (lookup-key harness-global-mode-map (kbd (concat "C-c h " key))))))
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    (let ((harness-global-mode t)
+          called)
+      (cl-letf (((symbol-function 'harness-reload)
+                 (lambda () (interactive) (setq called 'reload))))
+        (execute-kbd-macro (kbd "C-c h R"))
+        (should (eq called 'reload))
+        (should-not transient--prefix)))))
 
 (ert-deftest harness-ui-menu-offers-deleting-a-budget ()
   "Deleting a budget is in the menu from any buffer, not only the dashboard,
@@ -1988,11 +2152,19 @@ agenda or Embark for instance."
             (setopt harness-ui-prefix-key "C-c x")
             (should (prefix-p (kbd "C-c x")))
             (should-not (prefix-p (kbd "C-c h")))
+            (let ((harness-global-mode t))
+              (should (eq harness-ui--groups-menu-key
+                        (harness-ui--prefix-menu-event (kbd "C-c x"))))
+              (should-not (harness-ui--prefix-menu-event (kbd "C-c h"))))
             ;; A vector of events, which Customize stored before the option
             ;; took key descriptions.
             (customize-set-variable 'harness-ui-prefix-key [f12])
             (should (prefix-p [f12]))
-            (should-not (prefix-p (kbd "C-c x"))))
+            (should-not (prefix-p (kbd "C-c x")))
+            (let ((harness-global-mode t))
+              (should (eq harness-ui--groups-menu-key
+                        (harness-ui--prefix-menu-event [f12])))
+              (should-not (harness-ui--prefix-menu-event (kbd "C-c x")))))
         (setopt harness-ui-prefix-key before))
       (should (prefix-p (kbd "C-c h")))
       (should-not (prefix-p [f12])))))

@@ -5037,7 +5037,6 @@ The log is a harness view like any other: its own mode
     (define-key map (kbd "c") #'harness-connect-remote)
     (define-key map (kbd "R") #'harness-reload)
     (define-key map (kbd "L") #'harness-show-log)
-    (define-key map (kbd "?") #'harness-menu)
     map)
   "Prefix keymap of the harness UI.  Other UI modules add their commands.")
 
@@ -5117,10 +5116,90 @@ the harness UI loads, that is before `harness-start'."
   :type 'key :group 'harness-ui
   :set #'harness-ui--set-prefix-key)
 
+(defvar harness-ui--menu-idle-timer nil
+  "Idle timer that opens `harness-groups-menu' on `harness-ui-prefix-key' alone.")
+
+(defun harness-ui--set-menu-idle-delay (symbol value)
+  "Set SYMBOL, `harness-ui-menu-idle-delay', to VALUE and restart its timer.
+A timer that is running gets the new delay at once; with the mode off
+there is none, and the next time it is on starts with VALUE."
+  (set-default-toplevel-value symbol value)
+  (cond ((bound-and-true-p harness-global-mode)
+         (harness-ui--start-menu-idle-timer))
+        ((timerp harness-ui--menu-idle-timer)
+         (harness-ui--stop-menu-idle-timer))))
+
+(defcustom harness-ui-menu-idle-delay 0.3
+  "Seconds `harness-ui-prefix-key' waits for a key before its menu opens.
+The grouped `harness-groups-menu' opens on the prefix alone, once the
+prefix has waited this long.  A key typed before then runs its binding
+as usual, so the menu never takes one.  Nil leaves the prefix as it was
+without the menu: it then waits for its keys."
+  :type '(choice (number :tag "Seconds")
+                 (const :tag "Never; the prefix waits for its keys" nil))
+  :group 'harness-ui
+  :set #'harness-ui--set-menu-idle-delay)
+
+(defconst harness-ui--groups-menu-key 'harness-ui-open-groups
+  "Event the idle timer queues to open `harness-groups-menu' after the prefix.
+No keyboard sends it: the pending `read-key-sequence' reads it as the
+key after the prefix, so the menu opens while `harness-ui-map' stays the
+prefix, and no real key is spent on opening it.")
+
+(defun harness-ui--prefix-menu-event (keys)
+  "Return the event that opens the grouped menu for KEYS, or nil.
+KEYS is the keys typed so far, a vector or a string.  When they are
+exactly `harness-ui-prefix-key' and still take `harness-ui-map', the
+prefix waits for a key: `harness-ui--groups-menu-key' is the event to
+read next."
+  (let ((keys (vconcat keys))
+        (prefix (vconcat (harness-ui--prefix-keys harness-ui-prefix-key))))
+    (and harness-ui-menu-idle-delay
+         (equal keys prefix)
+         (eq (key-binding keys) harness-ui-map)
+         harness-ui--groups-menu-key)))
+
+(defun harness-ui--menu-on-idle ()
+  "Open `harness-groups-menu' when `harness-ui-prefix-key' waits for a key.
+Runs from an idle timer: `harness-ui--groups-menu-key' is put back to
+be read as the key after the prefix, so the prefix stays a keymap of
+its own.  A key typed before the timer runs is read as usual, and the
+menu never takes it.  The minibuffer, where the prefix key types text,
+and keyboard macro playback are left alone."
+  (when (and (not (active-minibuffer-window))
+             (not executing-kbd-macro))
+    (when-let* ((event (harness-ui--prefix-menu-event (this-command-keys-vector))))
+      (push event unread-command-events))))
+
+(defun harness-ui--start-menu-idle-timer ()
+  "Start the idle timer that opens the groups menu on the prefix alone."
+  (harness-ui--stop-menu-idle-timer)
+  (when harness-ui-menu-idle-delay
+    (setq harness-ui--menu-idle-timer
+          (run-with-idle-timer harness-ui-menu-idle-delay t
+                               #'harness-ui--menu-on-idle))))
+
+(defun harness-ui--stop-menu-idle-timer ()
+  "Stop the idle timer that opens the groups menu on the prefix alone."
+  (when (timerp harness-ui--menu-idle-timer)
+    (cancel-timer harness-ui--menu-idle-timer))
+  (setq harness-ui--menu-idle-timer nil))
+
 ;;;###autoload
 (define-minor-mode harness-global-mode
-  "Global keybindings for the agent harness."
-  :global t :group 'harness-ui :keymap harness-global-mode-map)
+  "Global keybindings for the agent harness.
+`harness-ui-prefix-key' alone opens `harness-groups-menu' after
+`harness-ui-menu-idle-delay' seconds; a key after it runs as it always
+did."
+  :global t :group 'harness-ui :keymap harness-global-mode-map
+  (if harness-global-mode
+      (harness-ui--start-menu-idle-timer)
+    (harness-ui--stop-menu-idle-timer)))
+
+;; A reload redefines the timer's function: start it again when the mode
+;; is on, as `harness-ui--init' turns it on only the first time.
+(when harness-global-mode
+  (harness-ui--start-menu-idle-timer))
 
 (defun harness-ui--command-available-p (symbol)
   "Non-nil when the command SYMBOL is defined, so the menu may offer it.
@@ -5445,25 +5524,54 @@ leaves the buffer's commands out, never the whole menu."
      harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
     ("R" "Reload harness" harness-reload)
     ("U" "Update harness" harness-update)
-    ("L" "Log" harness-show-log)]
-   ["Groups"
-    ("=" "Sessions, settings & tasks…" harness-groups-menu)]]
+    ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes
   ;; list some in their `harness-menu-group'.
   [:class transient-columns
    :description (lambda () harness-ui--menu-heading)
    :setup-children harness-ui--menu-buffer-children])
 
-;; A plain-key group entry leaves all original one-key shortcuts intact.
-;; These menus are ordinary transients, independent of module declarations.
+;;;; The grouped menu
+
+;; C-c h alone opens `harness-groups-menu'.  Each entry there names a
+;; group of commands, and choosing it opens that group's own menu, as a
+;; directory shows what it holds.  Every command the prefix has is in
+;; one of these groups, including those of the modules that load after
+;; this file: an entry whose command is undefined is left out.  The
+;; flat `harness-menu' above stays for the views that bind it to ? and
+;; for the modules that append to it; the prefix no longer offers it.
+
+(defun harness-ui--any-command-p (&rest symbols)
+  "Non-nil when one of SYMBOLS is a defined command."
+  (cl-some #'harness-ui--command-available-p symbols))
+
+(defun harness-ui--buffer-menu-p ()
+  "Non-nil when this buffer's modes list commands in `harness-menu-group'."
+  (harness-ui--menu-modes))
+
 (transient-define-prefix harness-groups-menu ()
-  "Discover the grouped harness commands."
+  "The harness commands, by group.
+Choosing a group opens its menu, as a directory opens what it holds."
   :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [["Command groups"
     ("s" "Sessions…" harness-session-menu)
     ("o" "Session settings…" harness-settings-menu)
+    ("p" "Priority…" harness-priority-menu
+     :if (lambda () (harness-ui--any-command-p 'harness-priority-raise
+                                               'harness-priority-lower
+                                               'harness-set-priority
+                                               'harness-set-priority-all)))
     ("t" "Tasks…" harness-task-menu
-     :if (lambda () (harness-ui--command-available-p 'harness-task-menu)))]])
+     :if (lambda () (harness-ui--command-available-p 'harness-task-menu)))
+    ("u" "Tools…" harness-tools-menu
+     :if (lambda () (harness-ui--any-command-p 'harness-usage 'harness-insights
+                                               'harness-delete-budget 'harness-worktrees
+                                               'harness-slots 'harness-chatgpt-plan-page
+                                               'harness-redact-secret
+                                               'harness-secrets-list-sources)))
+    ("c" "Config & remote…" harness-config-menu)
+    ("b" "This buffer…" harness-buffer-menu
+     :if (lambda () (harness-ui--buffer-menu-p)))]])
 
 (transient-define-prefix harness-session-menu ()
   "Session commands."
@@ -5473,32 +5581,136 @@ leaves the buffer's commands out, never the whole menu."
     ("s" "Switch" harness-switch-session)
     ("l" "List" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
     ("g" "Search" harness-search-sessions :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))
+    ("/" "Quick search" harness-quick-search
+     :if (lambda () (harness-ui--command-available-p 'harness-quick-search)))
     ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
     ("f" "Fork" harness-fork-session)
+    ("C" "Compact context" harness-compact
+     :if (lambda () (harness-ui--command-available-p 'harness-compact)))
+    ("K" "Keep cache warm" harness-cache-keep-warm
+     :if (lambda () (harness-ui--command-available-p 'harness-cache-keep-warm)))
     ("k" "Cancel turn" harness-cancel-turn)
-    ("d" "Delete" harness-delete-session)]])
+    ("D" "Delete" harness-delete-session)
+    ("b" "BTW side conversation" harness-btw
+     :if (lambda () (harness-ui--command-available-p 'harness-btw)))
+    ("r" "Record audio" harness-record-audio
+     :if (lambda () (harness-ui--command-available-p 'harness-record-audio)))
+    ("F" "Fullscreen overview" harness-fullscreen)
+    (">" "Prompt with the region" harness-prompt-region
+     :if (lambda () (harness-ui--command-available-p 'harness-prompt-region)))
+    ("<" "Reply in a thread to the region" harness-thread-region
+     :if (lambda () (harness-ui--command-available-p 'harness-thread-region)))
+    ("o" "Open latest session" harness-open-latest-session
+     :if (lambda () (harness-ui--command-available-p 'harness-open-latest-session)))
+    ("O" "Open session" harness-open-session
+     :if (lambda () (harness-ui--command-available-p 'harness-open-session)))]])
 
 (transient-define-prefix harness-settings-menu ()
   "Session settings commands."
   :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [["Session settings"
     ("m" "Model" harness-set-model)
-    ("M" "Model for all" harness-set-model-all)
-    ("t" "Thinking" harness-set-thinking)
-    ("T" "Thinking for all" harness-set-thinking-all)
+    ("M" "Model for all sessions" harness-set-model-all)
+    ("!" "Check provider & model" harness-provider-check
+     :if (lambda () (harness-ui--command-available-p 'harness-provider-check)))
+    ("T" "Thinking" harness-set-thinking)
+    ("H" "Thinking for all sessions" harness-set-thinking-all)
     ("p" "Permission mode" harness-set-permission-mode)
     ("e" "Context limit" harness-set-context-limit)
+    ("j" "Jail & permissions" harness-access
+     :if (lambda () (harness-ui--command-available-p 'harness-access)))
+    ("d" "Directory access" harness-directories
+     :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" "Non-interactive" harness-toggle-non-interactive)
-    ("I" "Non-interactive for all" harness-set-non-interactive-all)
-    ("w" "Move session" harness-move-session)]])
+    ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
+    ("v" "Supervisor mode" harness-toggle-supervisor
+     :if (lambda () (harness-ui--command-available-p 'harness-toggle-supervisor)))
+    ("V" "Supervisor mode for all sessions" harness-set-supervisor-all
+     :if (lambda () (harness-ui--command-available-p 'harness-set-supervisor-all)))
+    ("r" "Rename" harness-rename-session)
+    ("W" "Move to another directory" harness-move-session)]])
 
-;; Clear the Control-key group entries installed by older versions on reload.
+(transient-define-prefix harness-priority-menu ()
+  "Session priority commands."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
+  [["Priority"
+    ("+" "Raise priority" harness-priority-raise
+     :if (lambda () (harness-ui--command-available-p 'harness-priority-raise)))
+    ("-" "Lower priority" harness-priority-lower
+     :if (lambda () (harness-ui--command-available-p 'harness-priority-lower)))
+    ("y" "Set priority…" harness-set-priority
+     :if (lambda () (harness-ui--command-available-p 'harness-set-priority)))
+    ("Y" "Priority for all sessions…" harness-set-priority-all
+     :if (lambda () (harness-ui--command-available-p 'harness-set-priority-all)))]])
+
+(transient-define-prefix harness-tools-menu ()
+  "Usage, insight and project tools."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
+  [["Usage & insight"
+    ("u" "Usage & cost" harness-usage
+     :if (lambda () (harness-ui--command-available-p 'harness-usage)))
+    ("A" "Insights" harness-insights
+     :if (lambda () (harness-ui--command-available-p 'harness-insights)))
+    ("B" "Delete budget" harness-delete-budget
+     :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
+    ("h" "ChatGPT plan…" harness-chatgpt-plan-page
+     :if (lambda () (harness-ui--command-available-p 'harness-chatgpt-plan-page)))]
+   ["Projects"
+    ("w" "Worktrees" harness-worktrees
+     :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
+    ("Q" "Task slots" harness-slots
+     :if (lambda () (harness-ui--command-available-p 'harness-slots)))]
+   ["Secrets"
+    ("x" "Redact a secret…" harness-redact-secret
+     :if (lambda () (harness-ui--command-available-p 'harness-redact-secret)))
+    ("E" "Secret sources" harness-secrets-list-sources
+     :if (lambda () (harness-ui--command-available-p 'harness-secrets-list-sources)))]])
+
+(transient-define-prefix harness-config-menu ()
+  "Harness configuration, remote access and upkeep."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
+  [["Configuration"
+    ("S" "Settings" harness-settings
+     :if (lambda () (harness-ui--command-available-p 'harness-settings)))
+    ("O" "Modules" harness-describe-modules)
+    ("X" "Enable a module" harness-enable-module
+     :if (lambda () (harness-ui--command-available-p 'harness-enable-module)))
+    ("N" "Test notifications" harness-test-notifications)
+    ("z" "Companion pet" harness-pet
+     :if (lambda () (harness-ui--command-available-p 'harness-pet)))]
+   ["Remote"
+    ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
+    ("P" "Remote control" harness-remote-control
+     :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
+     :inapt-if harness-corporate-p)]
+   ["Upkeep"
+    ("v" (lambda () (if (fboundp 'harness-ui-version-menu-label) (harness-ui-version-menu-label) "Version"))
+     harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
+    ("R" "Reload harness" harness-reload
+     :if (lambda () (harness-ui--command-available-p 'harness-reload)))
+    ("U" "Update harness" harness-update
+     :if (lambda () (harness-ui--command-available-p 'harness-update)))
+    ("L" "Log" harness-show-log)]])
+
+(transient-define-prefix harness-buffer-menu ()
+  "The commands of the buffer the menu was opened from."
+  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
+  [:class transient-columns
+   :description (lambda () harness-ui--menu-heading)
+   :setup-children harness-ui--menu-buffer-children])
+
+;; Clear the group and menu entries installed by older versions on
+;; reload: `?' and `=' opened a menu by hand before the prefix did.
 (dolist (binding '(("C-s" . harness-session-menu)
                    ("C-o" . harness-settings-menu)
-                   ("C-t" . harness-task-menu)))
+                   ("C-t" . harness-task-menu)
+                   ("=" . harness-groups-menu)
+                   ("?" . harness-menu)))
   (when (eq (lookup-key harness-ui-map (kbd (car binding))) (cdr binding))
     (define-key harness-ui-map (kbd (car binding)) nil t)))
-(define-key harness-ui-map (kbd "=") #'harness-groups-menu)
+;; The idle timer queues this event, which no keyboard sends, so the
+;; prefix opens the menu on its own without a key of its own.
+(define-key harness-ui-map (vector harness-ui--groups-menu-key) #'harness-groups-menu)
 
 ;;;; Module
 

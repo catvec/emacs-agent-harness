@@ -101,6 +101,7 @@ connection tells it.  This file provides:
 - `harness-ui-image-load-delay` — Seconds between drawing the images a view is loading.
 - `harness-ui-image-max-height` — Maximum pixel height of inline images in harness views.
 - `harness-ui-image-max-scale` — How far larger than its own pixels an image inline in a view may show.
+- `harness-ui-menu-idle-delay` — Seconds `harness-ui-prefix-key` waits for a key before its menu opens.
 - `harness-ui-positions` — Named positions a session can be displayed in.
 - `harness-ui-prefix-key` — Prefix key of `harness-ui-map` in `harness-global-mode`.
 - `harness-ui-switch-project-function` — Function switching to a project before a session of it shows, or nil.

@@ -57,7 +57,7 @@ To use Emacs agent harness:
 
    Configure the harness keymap prefix via the `harness-ui-prefix-key` variable (Default: `"C-c h"`).
    
-Now the harness is ready. To get started press `PREFIX =` to see an interactive menu of commands. Or `PREFIX n` to create a new session.
+Now the harness is ready. To get started press `PREFIX` on its own to open the grouped menu: choose a group to see its commands, then a key to run one. `PREFIX n` creates a new session.
    
 # Install
 ## straight.el
