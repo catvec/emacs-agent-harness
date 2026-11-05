@@ -42,10 +42,13 @@
 ;; between their calls) collapse under overlays that isearch opens, so
 ;; every word of the conversation stays searchable; a hand_in call that
 ;; succeeds opens expanded once its result is in, its body the report
-;; the task handed in.  A `review_comment' call with words -- the agent's
-;; answer in a thread of the task's review, to a reply of yours -- is
-;; drawn as the message it is, from the agent, with the call under its
-;; fold (`harness-chat--render-thread-message'); a message of yours holds
+;; the task handed in -- unless something else shows that report already,
+;; the review banner of a task waiting for review, which keeps the call
+;; folded (`harness-chat-hand-in-fold-functions').  A `review_comment'
+;; call with words -- the agent's answer in a thread of the task's
+;; review, to a reply of yours -- is drawn as the message it is, from
+;; the agent, with the call under its fold
+;; (`harness-chat--render-thread-message'); a message of yours holds
 ;; its replies in threads as cards, what each replies to and the words
 ;; under it, with a link to the thread (`harness-chat--render-replies').
 ;; A message with many replies draws the first and the last
@@ -3236,6 +3239,20 @@ draws it, so carrying that over would keep drawing the old image."
         (insert new)
         (delete-region (point) (+ (point) (- next pos)))))))
 
+(defun harness-chat--set-block-collapsed (block collapsed)
+  "Fold or open BLOCK, drawing it as COLLAPSED says.
+The fold's overlay and its button follow, without drawing the block
+again: what a module folds or opens knows its state changed, and the
+reader's place in a long report stays."
+  (let ((collapsed (and collapsed t)))
+    (unless (eq collapsed (and (harness-chat-block-collapsed block) t))
+      (setf (harness-chat-block-collapsed block) collapsed)
+      (when-let* ((fold (harness-chat-block-fold block)))
+        (overlay-put fold 'invisible (and collapsed 'harness-chat-fold))
+        (harness-chat--swap-fold-icon (harness-chat-block-start block)
+                                      (harness-chat-block-end block)
+                                      collapsed)))))
+
 (defun harness-chat-toggle-block (&optional id)
   "Collapse or expand the block ID (default the one at point)."
   (interactive)
@@ -3244,10 +3261,28 @@ draws it, so carrying that over would keep drawing the old image."
     (cond
      ((null block) (user-error "No block here"))
      ((null (harness-chat-block-fold block)) (user-error "This block has nothing to fold"))
-     (t (let ((collapsed (not (harness-chat-block-collapsed block))))
-          (setf (harness-chat-block-collapsed block) collapsed)
-          (overlay-put (harness-chat-block-fold block) 'invisible (and collapsed 'harness-chat-fold))
-          (harness-chat--swap-fold-icon (harness-chat-block-start block) (harness-chat-block-end block) collapsed))))))
+     (t (harness-chat--set-block-collapsed
+         block (not (harness-chat-block-collapsed block)))))))
+
+(defun harness-chat-sync-hand-in-folds ()
+  "Fold or open this buffer's hand_in calls as their reports are shown.
+A successful hand_in call opens expanded, its body the report it handed
+in.  Functions on `harness-chat-hand-in-fold-functions' keep a call
+folded while something else shows that report, as the review banner of a
+task waiting for review does below the transcript; this folds or opens
+the calls in the buffer to what they say now.  A module that knows the
+answer changed calls it."
+  (let (changed)
+    (dolist (id harness-chat--order)
+      (when-let* ((block (gethash id harness-chat--blocks)))
+        (let ((result (harness-chat-block-result block)))
+          (when (and result (harness-chat--hand-in-p block)
+                     (eq 'ok (harness-ui-tool-outcome result)))
+            (let ((folded (harness-chat--hand-in-folded-p block result)))
+              (unless (eq folded (and (harness-chat-block-collapsed block) t))
+                (harness-chat--set-block-collapsed block folded)
+                (setq changed t)))))))
+    changed))
 
 (defun harness-chat--show-all (id)
   "Re-render block ID with its full tool output."
@@ -3382,20 +3417,32 @@ before it draws again, to keep them so."
 (defun harness-chat--hand-in-p (block)
   "Non-nil when BLOCK is a hand_in call.
 Its result carries the report the task handed in, which is worth
-seeing whole: once the hand-in succeeds the call is not folded."
+seeing whole: once the hand-in succeeds the call opens expanded,
+unless something else shows that report already."
   (and (harness-chat-block-p block)
        (equal (harness-chat-block-kind block) "tool-call")
        (equal (plist-get (harness-chat-block-node block) :tool) "hand_in")))
 
+(defun harness-chat--hand-in-folded-p (block result)
+  "Non-nil when hand_in BLOCK, whose RESULT is in, stays folded.
+That is when a function on `harness-chat-hand-in-fold-functions' says
+something else shows the report the call handed in."
+  (and (eq 'ok (harness-ui-tool-outcome result))
+       (run-hook-with-args-until-success
+        'harness-chat-hand-in-fold-functions block result)
+       t))
+
 (defun harness-chat--attach-result (call result)
   "Render RESULT, a tool-result node, in CALL, the block of its call.
 The result's id then finds the call's block, whose call has finished.
-A successful hand_in call opens expanded: its body is the report,
-not raw output."
+A successful hand_in call opens expanded, its body the report, unless
+the module that knows says the report shows elsewhere
+\(`harness-chat-hand-in-fold-functions')."
   (setf (harness-chat-block-result call) result)
   (when (and (harness-chat--hand-in-p call)
              (eq 'ok (harness-ui-tool-outcome result)))
-    (setf (harness-chat-block-collapsed call) nil))
+    (setf (harness-chat-block-collapsed call)
+          (harness-chat--hand-in-folded-p call result)))
   (setq harness-chat--unfinished (delete (harness-chat-block-id call) harness-chat--unfinished))
   (puthash (plist-get result :id) call harness-chat--blocks)
   (harness-chat--rerender call))
@@ -3830,7 +3877,8 @@ both places."
       (setf (harness-chat-block-result block) node)
       (when (and (harness-chat--hand-in-p block)
                  (eq 'ok (harness-ui-tool-outcome node)))
-        (setf (harness-chat-block-collapsed block) nil))
+        (setf (harness-chat-block-collapsed block)
+              (harness-chat--hand-in-folded-p block node)))
       (harness-chat--rerender block)
       (harness-chat--maybe-coalesce (harness-chat-block-id block))
       (harness-chat--refresh-group-of block))
@@ -4470,6 +4518,17 @@ returns a string to show in place of the call's input and output, or nil
 to let the generic rendering show them.  The header, the one-line
 summary, the status and the fold stay the chat's either way.  The report
 module shows the report a hand_in call handed in this way.")
+
+(defvar harness-chat-hand-in-fold-functions nil
+  "Functions that say a hand_in call stays folded.
+Each is called in the chat buffer with the call's BLOCK and its RESULT
+node, once the result is in, and returns non-nil when something else
+shows the report the call handed in: the review banner of a task waiting
+for review shows it below the transcript, and the call above must not
+show it again.  With none, a successful hand_in call opens expanded.
+A module that knows the answer changed calls
+`harness-chat-sync-hand-in-folds', which folds or opens the calls that
+are in the buffer to what the functions now say.")
 
 (defun harness-chat--insert-panels ()
   "Insert what `harness-chat-panel-functions' return, in order.

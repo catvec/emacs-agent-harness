@@ -465,6 +465,40 @@ shows it in full, expanded, between its heading and its buttons."
           (should (memq 'harness-chat-review-face (ensure-list (get-text-property 0 'face prefix))))
           (should (memq 'harness-chat-review-face (ensure-list (get-text-property pos 'face)))))))))
 
+(defun harness-ui-review-test--hand-in-block (buffer)
+  "Return the newest hand_in call block of BUFFER, or nil."
+  (with-current-buffer buffer
+    (car (last (cl-remove-if-not #'harness-chat--hand-in-p
+                                 (mapcar (lambda (id) (gethash id harness-chat--blocks))
+                                         harness-chat--order))))))
+
+(ert-deftest harness-ui-review-hand-in-call-folds-under-the-banner ()
+  "The hand_in call above the banner stays folded while the banner shows its report.
+The work is not read twice; the call opens again, the report with it,
+when the task leaves review."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid)))
+      (harness-ui-review-test--wait-report chat)
+      (with-current-buffer chat
+        (let ((block (harness-ui-review-test--hand-in-block chat)))
+          (should block)
+          (should (harness-chat-block-result block))
+          (should (harness-chat-block-collapsed block))
+          (should (overlay-get (harness-chat-block-fold block) 'invisible))))
+      ;; [Keep working] takes the task out of review; the banner goes and
+      ;; the call opens again, its body the report it handed in.
+      (harness-ui-review-test--push chat "[Keep working]")
+      (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
+                         10 "the task to leave review")
+      (harness-test-wait
+       (lambda ()
+         (with-current-buffer chat
+           (let ((block (harness-ui-review-test--hand-in-block chat)))
+             (and block
+                  (not (harness-chat-block-collapsed block))
+                  (not (overlay-get (harness-chat-block-fold block) 'invisible))))))
+       5 "the hand_in call to open once the banner goes"))))
+
 (ert-deftest harness-ui-review-quotes-the-summary-for-the-feedback ()
   "C-c > on the report's summary quotes it in the box, whole, as written.
 In the session the banner's summary is quoted from point on it; in the

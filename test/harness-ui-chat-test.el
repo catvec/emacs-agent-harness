@@ -10492,5 +10492,56 @@ result meta; the chat rebuilds the report from what the call was given."
             (should (string-search "Keys are compared with" text))
             (should (string-search "See the diff." text))))))))
 
+(ert-deftest harness-ui-chat-hand-in-folds-when-its-report-shows-elsewhere ()
+  "A hand_in call stays folded while something else shows its report.
+A function on `harness-chat-hand-in-fold-functions' says so; once it
+says the report shows nowhere else, the module that knows synchronizes
+and the call opens again, its body the report."
+  (harness-ui-chat-test-with
+    (dolist (m '(ui-compose ui-popout ui-tasks ui-report))
+      (harness-test-load-module m))
+    (harness-define-tool "hand_in" :label "Hand in the finished work" :description "hand in"
+      :kind 'meta
+      :handler (lambda (_input _ctx)
+                 (harness-tool-ok "Handed in." :end-turn t
+                                  :meta (list :report (list :summary "**Done** here."
+                                                            :problem "The parser drops nested quotes."
+                                                            :evidence (list (list :kind "note" :text "A note")))
+                                              :task-id "t-chat"))))
+    (let* ((sid (harness-ui-chat-test-session "hand-in folded"))
+           (buf (harness-ui-chat-test-open sid))
+           (harness-chat-hand-in-fold-functions
+            (list (lambda (_block _result) "the review banner shows it")))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "h1" :name "hand_in"
+                     :input (:problem "The parser drops nested quotes."
+                             :summary "**Done** here." :evidence ("A note")))
+              (:type done :stop-reason end-turn))))
+      (harness-ui-chat-test-prompt buf "hand it in")
+      (with-current-buffer buf
+        (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
+          (should block)
+          (should (harness-chat-block-result block))
+          (should (harness-chat-block-collapsed block))
+          (should (overlay-get (harness-chat-block-fold block) 'invisible))
+          ;; What the fold holds is the report, not the call's raw input.
+          (let* ((fold (harness-chat-block-fold block))
+                 (text (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
+            (should (string-search "Problem" text))
+            (should (string-search "The parser drops nested quotes." text))
+            (should (string-search "A note" text))
+            (should-not (string-search "  input" text)))
+          ;; The report is shown elsewhere no longer: the call opens.
+          (setq harness-chat-hand-in-fold-functions nil)
+          (should (harness-chat-sync-hand-in-folds))
+          (should-not (harness-chat-block-collapsed block))
+          (should-not (overlay-get (harness-chat-block-fold block) 'invisible))
+          ;; Saying so again folds it again.
+          (setq harness-chat-hand-in-fold-functions
+                (list (lambda (_block _result) t)))
+          (should (harness-chat-sync-hand-in-folds))
+          (should (harness-chat-block-collapsed block))
+          (should (overlay-get (harness-chat-block-fold block) 'invisible)))))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

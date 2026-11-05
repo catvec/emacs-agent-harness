@@ -400,6 +400,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-initialize-extras-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-initialized-functions` | [acp](acp.md) | [acp](acp.md) |
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
+| `harness-chat-hand-in-fold-functions` | [ui-chat](ui-chat.md) | [ui-review](ui-review.md) |
 | `harness-chat-header-end-functions` | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md) | [ui-cache-warm](ui-cache-warm.md), [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
 | `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-tool-slots-load](ui-tool-slots-load.md) | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-sticky-compose](ui-sticky-compose.md), [ui-tool-slots-load](ui-tool-slots-load.md) |

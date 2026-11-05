@@ -2023,8 +2023,8 @@ Return the session's chat buffer."
 (defun harness-media-shot-chat ()
   "The first picture: the board in the fullscreen layout, a task beside it.
 The task is in review after it was sent back once: its session shows
-the feedback, the work that answered it, the report handed in again
-and the review banner."
+the feedback, the work that answered it, its hand_in call folded, and
+the report it handed in again in the review banner."
   (harness-media--fullscreen-layout :slow)
   (harness-media--capture "chat"))
 

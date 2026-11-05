@@ -26,6 +26,9 @@
 ;; Inside the session the report is not behind a button either: it is
 ;; shown in full and always expanded, between the heading and the
 ;; buttons (`harness-ui-review--report', `harness-ui-report-string').
+;; The hand_in call above it stays folded while it shows, its body that
+;; same report (`harness-chat-hand-in-fold-functions'): the work is read
+;; once, in the banner, and the call opens again when the banner goes.
 ;; A round whose turn ended without `hand_in' has no report, only what
 ;; the harness recorded for it (`harness-tasks--missing-report'): the
 ;; banner says in a line that nothing was handed in, its last message
@@ -88,6 +91,7 @@
 (defvar harness-ui-session-id)
 (defvar harness-ui-popout-empty-ok-function)
 (defvar harness-compose-redraw-function)
+(declare-function harness-chat-sync-hand-in-folds "harness-ui-chat" ())
 (declare-function harness-ui-report-popout "harness-ui-report" (task))
 (declare-function harness-ui-report-string "harness-ui-report" (task &optional window))
 (declare-function harness-ui-report-task "harness-ui-report" ())
@@ -159,9 +163,14 @@ Another view of the session, such as its access view, is no chat
   (cl-find-if (lambda (buffer) (harness-ui-chat-of-p buffer sid)) (buffer-list)))
 
 (defun harness-ui-review--redraw (sid)
-  "Draw the tail of SID's chat buffer again, when it shows."
+  "Draw the tail of SID's chat buffer again, when it shows.
+The transcript's hand_in calls fold or open with the banner first: a
+call whose report the banner shows is not shown twice, and it opens
+again when the banner goes."
   (when-let* ((buffer (harness-ui-review--chat-buffer sid)))
     (with-current-buffer buffer
+      (when (fboundp 'harness-chat-sync-hand-in-folds)
+        (harness-chat-sync-hand-in-folds))
       (when (functionp harness-compose-redraw-function)
         (funcall harness-compose-redraw-function)))))
 
@@ -495,6 +504,21 @@ The board's Ready for review has it: a panel's own background stays out."
       (add-face-text-property 0 (length s) 'harness-chat-review-face t s)
       s)))
 
+(defun harness-ui-review--hand-in-folded-p (_block result)
+  "Non-nil when this session's banner shows the report RESULT carries.
+That is while the task waits for review and the report recorded on it
+is the very one the call handed in, which it names by its `:call-id':
+the call above the banner stays folded, its report read once below.
+Another round's hand_in call is not the banner's report, and is left as
+the reader had it.  Off `harness-chat-hand-in-fold-functions'; the call
+opens again when the task leaves review."
+  (let* ((task (harness-ui-review--task harness-ui-session-id))
+         (call (plist-get (plist-get (plist-get result :meta) :report) :call-id)))
+    (and call
+         (equal call (plist-get (plist-get task :report) :call-id))
+         (harness-ui-review--reviewing-p task)
+         t)))
+
 (defun harness-ui-review--panel ()
   "Return the review banner when this session's task waits for review.
 On `harness-chat-panel-functions': nil for a session that is no task's,
@@ -571,9 +595,12 @@ holds is long, and its reader keeps their place."
   (add-hook 'harness-chat-panel-functions #'harness-ui-review--panel t))
 
 (defun harness-ui-review--init ()
-  "Add the banner to every chat buffer and to report popouts; follow tasks."
+  "Add the banner to every chat buffer and to report popouts; follow tasks.
+The chat folds a hand_in call while the banner shows its report
+\(`harness-chat-hand-in-fold-functions')."
   (with-eval-after-load 'harness-ui-chat
-    (add-hook 'harness-chat-mode-hook #'harness-ui-review--setup))
+    (add-hook 'harness-chat-mode-hook #'harness-ui-review--setup)
+    (add-hook 'harness-chat-hand-in-fold-functions #'harness-ui-review--hand-in-folded-p))
   (with-eval-after-load 'harness-ui-report
     (add-hook 'harness-ui-report-panel-functions #'harness-ui-review--report-panel)
     (add-hook 'harness-ui-report-compose-functions #'harness-ui-review--report-compose))

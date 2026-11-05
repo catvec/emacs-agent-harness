@@ -53,10 +53,13 @@ compaction summaries and runs of coalescable tools (with the thinking
 between their calls) collapse under overlays that isearch opens, so
 every word of the conversation stays searchable; a hand_in call that
 succeeds opens expanded once its result is in, its body the report
-the task handed in.  A `review_comment` call with words -- the agent's
-answer in a thread of the task's review, to a reply of yours -- is
-drawn as the message it is, from the agent, with the call under its
-fold (`harness-chat--render-thread-message`); a message of yours holds
+the task handed in -- unless something else shows that report already,
+the review banner of a task waiting for review, which keeps the call
+folded (`harness-chat-hand-in-fold-functions`).  A `review_comment`
+call with words -- the agent's answer in a thread of the task's
+review, to a reply of yours -- is drawn as the message it is, from
+the agent, with the call under its fold
+(`harness-chat--render-thread-message`); a message of yours holds
 its replies in threads as cards, what each replies to and the words
 under it, with a link to the thread (`harness-chat--render-replies`).
 A message with many replies draws the first and the last
@@ -98,6 +101,7 @@ this file never touches a session struct.
 
 ### Hooks
 
+- `harness-chat-hand-in-fold-functions` — Functions that say a hand_in call stays folded.
 - `harness-chat-header-end-functions` — Functions adding segments of their own to the chat header line.
 - `harness-chat-header-functions` — Functions putting segments in front of the chat header line.
 - `harness-chat-panel-functions` — Functions putting a panel of their own below the transcript.

@@ -44,7 +44,7 @@ The pictures, by the name `scripts/media.sh` takes:
 
 | Name | Shows | Function |
 |---|---|---|
-| `chat` | The task board in the fullscreen layout, the session of the task in review beside it: the feedback it was sent back with, the fix, the report it handed in again and the review banner, the changes the task made folded to their two sections (`▸ Changes (1)`, `▸ Threads`), as a report read once starts | `harness-media-shot-chat` |
+| `chat` | The task board in the fullscreen layout, the session of the task in review beside it: the feedback it was sent back with, the fix, its hand_in call folded above the review banner, which shows the report it handed in again, the changes the task made folded to their two sections (`▸ Changes (1)`, `▸ Threads`), as a report read once starts | `harness-media-shot-chat` |
 | `chat-permission` | A chat waiting for permission to run `pip install`, a cheap model's summary of the command under it | `harness-media-shot-chat-permission` |
 | `chat-question` | A chat waiting for the answer to a question | `harness-media-shot-chat-question` |
 | `attachments` | A compose box holding a picture and a video, their thumbnails in the chips, and a link still downloading with its progress | `harness-media-shot-attachments` |

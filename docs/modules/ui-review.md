@@ -36,6 +36,9 @@ set of commands and keys, in two places:
 Inside the session the report is not behind a button either: it is
 shown in full and always expanded, between the heading and the
 buttons (`harness-ui-review--report`, `harness-ui-report-string`).
+The hand_in call above it stays folded while it shows, its body that
+same report (`harness-chat-hand-in-fold-functions`): the work is read
+once, in the banner, and the call opens again when the banner goes.
 A round whose turn ended without `hand_in` has no report, only what
 the harness recorded for it (`harness-tasks--missing-report`): the
 banner says in a line that nothing was handed in, its last message
@@ -114,6 +117,7 @@ handed none in.
 
 ### Hooks it adds to
 
+- `harness-chat-hand-in-fold-functions` → `harness-ui-review--hand-in-folded-p`
 - `harness-chat-mode-hook` → `harness-ui-review--setup`
 - `harness-chat-panel-functions` → `harness-ui-review--panel`
 - `harness-ui-event-functions` → `harness-ui-review--on-event`

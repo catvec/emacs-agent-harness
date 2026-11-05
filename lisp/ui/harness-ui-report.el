@@ -20,7 +20,9 @@
 ;;
 ;; Inside the task's session the report is not behind a button: while
 ;; the task waits for review, the review banner shows it in full,
-;; expanded, between its heading and its buttons (`harness-ui-report-string').
+;; expanded, between its heading and its buttons
+;; (`harness-ui-report-string'), and the hand_in call above the banner
+;; stays folded then, so the report is read once.
 ;;
 ;; The report is drawn from the task record the harness holds: the board
 ;; and the chat both pass the record they already have, and a popout
