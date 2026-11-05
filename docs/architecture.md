@@ -31,7 +31,9 @@ module needs something more, add it here first.
                 promises, modules), harness-util (json, ids, paths, the thinking-level
                 order), harness-http (curl, SSE, binary bodies), harness-policy (settings
                 an administrator fixes), harness-slots (pools: at most so many at once),
-                harness-redaction (naming a secret, finding it, taking it out of text)
+                harness-redaction (naming a secret, finding it, taking it out of text),
+                harness-instance (this process's id and secret, and credentials derived
+                from it)
 ```
 
 The core never shows UI and never calls a model.  UI modules never
@@ -3022,9 +3024,13 @@ the CLI can start: the plugin's server is a few lines of bash that
 connect to a loopback listener in the harness and copy bytes both ways
 (`lisp/harness-claude-plugin.el`).  The plugin, `emacs-harness`, is
 written into the state directory and the CLI started with
-`--plugin-dir`; the listener is on 127.0.0.1 and a connection counts
-only once its first line is the token made for that CLI process, which
-the CLI gets, with the port, in its environment.  The CLI's own Bash
+`--plugin-dir`; the listener is on 127.0.0.1, speaks first with a
+challenge naming its instance id and a fresh nonce, and a connection
+counts only once the relay answers with that nonce and the token made
+for that CLI process, which the CLI gets, with the port and the
+instance id, in its environment.  A listener that names another
+instance never sees the token, a replayed answer has the wrong nonce,
+and a second relay for a token already in use is closed.  The CLI's own Bash
 inherits that environment, so the model could read the token and
 connect when the relay is not connected; what it would reach is this
 session's tools, each call decided by the harness as any call is, which
@@ -9720,6 +9726,26 @@ runs a server unconfined then.  The Emacs a client lends is an `:external`
 server the host does not start (see acp).  `mcp/servers` and `mcp/stop` are
 not callable over ACP.
 
+A server the host starts belongs to its harness instance alone.  The
+instance has a random id and a 256-bit secret made at start
+(lisp/harness-instance.el), and the credential a child gets is
+HMAC-SHA256 under that secret for a label naming the server and the
+session, so one server's credential cannot drive another and none
+reveals the instance token.  The host gives the child
+`HARNESS_MCP_INSTANCE` and `HARNESS_MCP_TOKEN` before any variable the
+declaration names, and sends both in `initialize` under
+`_meta["harness/auth"]` (`harness-mcp-auth-meta`).  A server made with
+`:auth` -- the file tools' worker is -- answers JSON-RPC -32001
+(`harness-mcp-error-unauthenticated`) to every request until then and
+runs no tool; `harness-mcp-auth-from-environment` is how a server reads
+the credential it was given.  The sandbox passes the variables to the
+command explicitly (`sandbox/wrap` `:env`), since `systemd-run` does not
+give a unit its caller's environment.  The credential of a running
+connection stays as it is until the process goes; the next one gets a
+new one.  `.harness/plugins` servers that declare no `:auth` are
+unchanged.  See docs/trust-model.md for the threat model and the
+limits.
+
 The one server the harness starts itself is `fs`, declared by tools-fs: an
 `emacs --batch` that loads lisp/harness-mcp-fs.el and serves the seven file
 tools by running the handlers of tools-fs, unchanged.  See tools-fs.
@@ -11444,9 +11470,14 @@ protocol: what an agent can do in this Emacs is the list, whatever a
 message calls itself.
 
 The server writes its address to `<state>/acp-address` and, when
-`harness-acp-token` is set (always, for the harness process), the token
-to `<state>/acp-token` (mode 600); `scripts/harness-acp-stdio`
-authenticates with it on behalf of the editor it bridges.
+`harness-acp-token` is set -- `acp/start` makes a per-instance one,
+derived from the instance token, when it is nil -- the token to
+`<state>/acp-token` (mode 600); `scripts/harness-acp-stdio`
+authenticates with it on behalf of the editor it bridges.  Local TCP
+clients must send it with `authenticate` before any method but
+`initialize`, and a client of another harness instance has another
+token and is refused; an in-process client is this process and needs no
+proof.
 
 Errors follow ACP's codes.  A call before `authenticate` (when a
 client must authenticate) gets -32000, ACP's `auth_required`, which

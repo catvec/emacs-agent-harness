@@ -53,7 +53,25 @@
 ;; ACP connection, in lisp/modules/harness-acp.el) sends and receives.
 ;; They get no sandbox, since the program on the other end is the
 ;; user's own Emacs; what bounds them is the fixed vocabulary of
-;; their tools.
+;; their tools.  An external server is not a listener: it answers only
+;; on the authenticated ACP connection that lent it, so the ACP token
+;; (see harness-acp.el) is its transport's authentication.
+;;
+;; Authentication.  Every server this host starts belongs to this
+;; harness instance and no other: the instance has a random id and a
+;; 256-bit secret (harness-instance.el), and a server's credential is
+;; derived from the secret for its name and scope, so one server's token
+;; cannot drive another.  The host gives the process the id and the
+;; credential in HARNESS_MCP_INSTANCE and HARNESS_MCP_TOKEN, and sends
+;; them back in `initialize' under `_meta' (`harness-mcp-auth-meta');
+;; a server made with `:auth' (the file tools' worker does) answers
+;; every request before that with `harness-mcp-error-unauthenticated'
+;; and runs no tool.  A worker started without the environment refuses
+;; to run at all (lisp/harness-mcp-fs.el).  The variables are set after
+;; a declaration's own `:env', so nothing a declaration says can take
+;; the instance's credential away.  The status of a connection says
+;; `:authenticated'.  See docs/trust-model.md for the threat model and
+;; the limits.
 ;;
 ;; Methods: `mcp/servers' (what runs, for the access view and the
 ;; tests), `mcp/stop'.  Neither can be called over ACP.
@@ -65,6 +83,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-mcp-protocol)
+(require 'harness-instance)
 
 (declare-function harness-tools-shell-sandbox-profile "harness-tools-shell" (ctx cwd &rest options))
 (declare-function harness-tools-shell-wrap-profile "harness-tools-shell" (profile command))
@@ -143,13 +162,27 @@ as a reload does; processes already running keep going until they stop."
 
 (cl-defstruct (harness-mcp--conn (:constructor harness-mcp--conn-create) (:copier nil))
   "A connection to a server: a process the host started, or an attached transport."
-  server key proc send (state 'starting) profile confined
+  server key proc send (state 'starting) profile confined auth
   (pending (make-hash-table :test 'eql)) (progress (make-hash-table :test 'equal))
   (next-id 0) partial (partial-size 0) tools info
   started last-used stderr scope ready-timer)
 
 (defvar harness-mcp--conns (make-hash-table :test 'equal)
   "(SERVER . SCOPE) -> the `harness-mcp--conn' serving it, if any.")
+
+(defun harness-mcp--connection-auth (key)
+  "Return the credential a server started for KEY expects.
+It is derived from this harness instance's secret for KEY, so one
+worker's token cannot drive another, and none reveals the instance
+token.  A connection that is running keeps its own credential until it
+goes; a new process gets a new one.  The credential is given to the
+process in its environment and sent back in `initialize' (see
+`harness-mcp-auth-meta')."
+  (or (when-let* ((conn (gethash key harness-mcp--conns)))
+        (harness-mcp--conn-auth conn))
+      (list :instance harness-instance-id
+            :token (harness-instance-credential
+                    (format "mcp:%s:%s:%s" (car key) (cdr key) (harness-short-id 16))))))
 
 (defvar harness-mcp--queues (make-hash-table :test 'equal)
   "(SERVER . SCOPE) -> the calls waiting for that connection, oldest first.")
@@ -392,6 +425,7 @@ Return the connection, in state `starting'.  Signals why it cannot run,
 such as a policy that requires a sandbox there is none of."
   (let* ((argv (funcall (plist-get entry :wrap)))
          (ctx (plist-get entry :ctx))
+         (auth (or (plist-get entry :auth) (harness-mcp--connection-auth key)))
          (name (format "harness-mcp-%s" (car key)))
          (stderr (generate-new-buffer (format " *%s-stderr*" name) t))
          (cwd (let ((c (plist-get ctx :cwd)))
@@ -399,9 +433,14 @@ such as a policy that requires a sandbox there is none of."
          (conn (harness-mcp--conn-create :server (car key) :key key
                                          :profile (plist-get entry :profile)
                                          :confined (plist-get entry :confined)
+                                         :auth auth
                                          :started (float-time) :last-used (float-time)
                                          :scope (cdr key) :stderr stderr))
-         (process-environment (append (mapcar (lambda (pair) (format "%s=%s" (car pair) (cdr pair)))
+         ;; First, so that nothing a declaration or the user's environment
+         ;; says can take the instance's own variables' place.
+         (process-environment (append (list (concat "HARNESS_MCP_INSTANCE=" (plist-get auth :instance))
+                                            (concat "HARNESS_MCP_TOKEN=" (plist-get auth :token)))
+                                      (mapcar (lambda (pair) (format "%s=%s" (car pair) (cdr pair)))
                                               (plist-get decl :env))
                                       process-environment))
          (default-directory (file-name-as-directory cwd)))
@@ -438,9 +477,11 @@ such as a policy that requires a sandbox there is none of."
   "Send `initialize' on CONN, and become ready when the server has answered."
   (harness-then
    (harness-mcp--request conn "initialize"
-                         (list :protocolVersion harness-mcp-protocol-version
-                               :capabilities :empty
-                               :clientInfo harness-mcp--client-info)
+                         (append (list :protocolVersion harness-mcp-protocol-version
+                                       :capabilities :empty
+                                       :clientInfo harness-mcp--client-info)
+                                 (when-let* ((auth (harness-mcp--conn-auth conn)))
+                                   (list :_meta (harness-mcp-auth-meta auth))))
                          (plist-get decl :init-timeout))
    (lambda (result)
      (unless (eq (harness-mcp--conn-state conn) 'closed)
@@ -537,13 +578,15 @@ such as a policy that requires a sandbox there is none of."
          (condition-case nil (harness-call 'sandbox/confined-p cwd) (error nil))
          t)))
 
-(defun harness-mcp--launch (decl ctx)
+(defun harness-mcp--launch (decl ctx auth)
   "Return (WRAP PROFILE-KEY CONFINED) for the server DECL on a call with CTX.
-WRAP is a function that returns the program to run, wrapped for the
-sandbox; it is only called when a process starts.  PROFILE-KEY is a
-hash of what the process is, which tells a running process from one
-the call needs.  CONFINED says whether the sandbox will apply.  Signals
-why the server may not run."
+AUTH is the credential the server expects (see
+`harness-mcp--connection-auth'), or nil for an external server.  WRAP is
+a function that returns the program to run, wrapped for the sandbox; it
+is only called when a process starts.  PROFILE-KEY is a hash of what the
+process is, which tells a running process from one the call needs.
+CONFINED says whether the sandbox will apply.  Signals why the server
+may not run."
   (let* ((argv (funcall (plist-get decl :command) ctx))
          (cwd (or (plist-get ctx :cwd) default-directory))
          (profile (progn
@@ -552,7 +595,16 @@ why the server may not run."
                     (cond ((plist-get decl :profile) (funcall (plist-get decl :profile) ctx))
                           ((fboundp 'harness-tools-shell-sandbox-profile)
                            (harness-tools-shell-sandbox-profile ctx cwd))
-                          (t (error "The sandbox is not available: the tools-shell module is not loaded"))))))
+                          (t (error "The sandbox is not available: the tools-shell module is not loaded")))))
+         ;; The sandbox passes these on itself: bwrap and MXC see the
+         ;; harness's environment anyway, but systemd-run does not give
+         ;; a unit its caller's, and the worker cannot authenticate
+         ;; without them.
+         (profile (if auth
+                      (plist-put (copy-sequence profile) :env
+                                 (list (cons harness-mcp-auth-instance-variable (plist-get auth :instance))
+                                       (cons harness-mcp-auth-token-variable (plist-get auth :token))))
+                    profile)))
     (list (lambda () (harness-tools-shell-wrap-profile profile argv))
           (secure-hash 'sha1 (prin1-to-string (list argv profile)))
           (harness-mcp--confined-p profile))))
@@ -561,12 +613,13 @@ why the server may not run."
   "Queue METHOD with PARAMS for SERVER on behalf of CTX; return (PROMISE . ENTRY).
 KEY, TIMEOUT and REPORT are as for `harness-mcp-call'."
   (let* ((decl (harness-mcp--decl server))
-         (launch (and (not (plist-get decl :external)) (harness-mcp--launch decl ctx)))
+         (qkey (cons server (harness-mcp--scope-key decl ctx key)))
+         (auth (and (not (plist-get decl :external)) (harness-mcp--connection-auth qkey)))
+         (launch (and (not (plist-get decl :external)) (harness-mcp--launch decl ctx auth)))
          (promise (harness-make-promise))
          (entry (list :promise promise :decl decl :ctx ctx :method method :params params
                       :wrap (nth 0 launch) :profile (nth 1 launch) :confined (nth 2 launch)
-                      :timeout timeout :report report))
-         (qkey (cons server (harness-mcp--scope-key decl ctx key))))
+                      :auth auth :timeout timeout :report report)))
     (puthash qkey (append (gethash qkey harness-mcp--queues) (list entry)) harness-mcp--queues)
     (harness-mcp--pump qkey)
     (cons promise entry)))
@@ -726,7 +779,8 @@ call with a sandbox of its own took (see `harness-mcp-call-tool')."
 (defun harness-mcp-status ()
   "Describe the servers that run: a list of plists, one per connection.
 Each has `:server', `:scope' (the session, or t), `:state', `:pid' (nil
-for an attached transport), `:sandboxed', `:started', `:last-used',
+for an attached transport), `:sandboxed', `:authenticated' (the server
+was given this instance's credential), `:started', `:last-used',
 `:inflight', `:waiting' (calls queued for it) and `:info' (what the
 server said it is)."
   (let (rows)
@@ -735,6 +789,7 @@ server said it is)."
                            :state (harness-mcp--conn-state conn)
                            :pid (and (harness-mcp--conn-proc conn) (process-id (harness-mcp--conn-proc conn)))
                            :sandboxed (and (harness-mcp--conn-confined conn) t)
+                           :authenticated (and (harness-mcp--conn-auth conn) t)
                            :started (harness-mcp--conn-started conn)
                            :last-used (harness-mcp--conn-last-used conn)
                            :inflight (harness-mcp--inflight conn)
@@ -746,7 +801,8 @@ server said it is)."
 
 (harness-defmethod mcp/servers ()
   "Return the MCP servers that run, as `harness-mcp-status' describes them.
-Not callable over ACP."
+An attached Emacs has `:authenticated' nil: its transport is the ACP
+connection, which authenticated instead.  Not callable over ACP."
   (harness-mcp-status))
 
 (harness-defmethod mcp/stop (&optional server scope)

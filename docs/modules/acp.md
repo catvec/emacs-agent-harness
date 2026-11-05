@@ -43,6 +43,18 @@ The module has no requirements.  The server dispatches to whatever
 bus methods exist, so it loads and the client API works even when
 the session or agent modules are absent.
 
+Authentication.  A TCP listener is this harness instance's alone:
+`acp/start` makes a secret for it when `harness-acp-token` is nil,
+derived from the instance's own token (harness-instance.el), and a
+TCP client must call `authenticate` before any method but
+`initialize`; `harness-acp-connect` does it with the token it was
+given.  The token goes out of band: the harness process gets it from
+its parent, and a bridge or editor reads the 0600 `acp-token` file
+beside `acp-address`.  A connection in this very process is local
+and needs no proof.  The MCP server an Emacs lends the harness rides
+this connection, so it is only reachable through an authenticated
+one; see docs/trust-model.md.
+
 ## Provides
 
 ### Methods
@@ -74,7 +86,7 @@ the session or agent modules are absent.
 - `harness-acp-host` — Address the ACP server binds by default.
 - `harness-acp-port` — TCP port of the ACP server.  0 picks an ephemeral port.
 - `harness-acp-receive-slice` — Longest time, in seconds, a client spends on received messages in one go.
-- `harness-acp-token` — Shared secret for TCP clients, or nil for no authentication.
+- `harness-acp-token` — Secret a TCP client must prove to this harness instance, or nil to generate one.
 
 ## Uses
 

@@ -47,11 +47,21 @@
 ;; protocol asks of a tool that fails, and only a call to a tool the
 ;; server does not have is an error of the protocol.
 ;;
+;; Authentication.  A server made with `:auth' -- an object with the
+;; harness instance's id and a credential derived from its secret -- is
+;; that instance's alone.  Its `initialize' must carry the credential in
+;; `params._meta' under `harness/auth'; without it, and for every
+;; request before it, the server answers
+;; `harness-mcp-error-unauthenticated' and runs no tool.  The host puts
+;; the credential there (see `harness-mcp-define-server' and
+;; harness-instance.el), and the file tools' worker refuses to start
+;; without one.
+;;
 ;; What the harness asks of a server is the least that works with any
 ;; MCP client.  A server that wants to say what happened to the
 ;; harness -- a tool that wrote a file -- sends a `notifications/message'
-;; whose `logger' is \"harness\" and whose data is {\"event\": NAME,
-;; \"args\": [...]}; the host passes on only the events the server was
+;; whose `logger' is "harness" and whose data is {"event": NAME,
+;; "args": [...]}; the host passes on only the events the server was
 ;; declared to be allowed to announce (see `harness-mcp-define-server').
 
 ;;; Code:
@@ -60,6 +70,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-instance)
 
 (defconst harness-mcp-protocol-version "2025-06-18"
   "The version of the Model Context Protocol the harness speaks.")
@@ -73,6 +84,10 @@ A client that asks for another gets `harness-mcp-protocol-version'.")
 (defconst harness-mcp-error-method-not-found -32601 "JSON-RPC: no such method.")
 (defconst harness-mcp-error-invalid-params -32602 "JSON-RPC: the parameters do not fit.")
 (defconst harness-mcp-error-internal -32603 "JSON-RPC: the server failed.")
+(defconst harness-mcp-error-unauthenticated -32001
+  "JSON-RPC: the client did not prove it belongs to this harness instance.
+The server answers it, and runs no tool, until `initialize' carries
+the credential it expects under `params._meta'.")
 
 (defconst harness-mcp-result-key :harness/result
   "Where in a result's `_meta' the harness carries what MCP has no field for.
@@ -84,6 +99,20 @@ like -- go there, as an object (see
   "Where in the `_meta' of a tool call the harness puts the call's context.
 The session, the working directory, the host and the like, as an object:
 what a tool's `ctx' holds (see `harness-mcp-call').")
+
+(defconst harness-mcp-auth-instance-variable "HARNESS_MCP_INSTANCE"
+  "Environment variable that names the harness instance a server belongs to.")
+
+(defconst harness-mcp-auth-token-variable "HARNESS_MCP_TOKEN"
+  "Environment variable that carries the credential a server expects.")
+
+(defconst harness-mcp-auth-key :harness/auth
+  "Where in `initialize' params the harness puts its instance credential.
+The value is an object with `instance', the id of the harness process,
+and `token', the secret that proves the client is that process or one
+it started (see harness-instance.el and `harness-mcp-define-server').
+A server made with `:auth' refuses every request until an `initialize'
+carries the credential it expects.")
 
 ;;;; Messages
 
@@ -214,10 +243,49 @@ Commentary.  ANNOTATIONS are MCP's hints about the tool (`readOnlyHint'
 (cl-defstruct (harness-mcp-server (:constructor harness-mcp-make-server) (:copier nil))
   "What a server of the harness answers `initialize' and `tools/list' with.
 NAME, TITLE and VERSION say what it is, INSTRUCTIONS how to use it, and
-TOOLS is a list of `harness-mcp-tool'.  INITIALIZED is set when the
-client said so, CANCELLED holds the ids of requests the client gave up."
-  name title (version "1") instructions tools initialized
+TOOLS is a list of `harness-mcp-tool'.  AUTH, when non-nil, is the
+credential this server expects in `initialize' (`:instance' and
+`:token'; see `harness-mcp-auth-meta'); until it is given, every
+request is refused with `harness-mcp-error-unauthenticated' and no tool
+runs.  AUTHENTICATED is set once a request proved it.  INITIALIZED is
+set when the client said so, CANCELLED holds the ids of requests the
+client gave up."
+  name title (version "1") instructions tools auth authenticated initialized
   (cancelled (make-hash-table :test 'equal)))
+
+(defun harness-mcp-auth-meta (auth)
+  "Return AUTH as the `_meta' entry an `initialize' carries, or nil.
+AUTH is a plist with `:instance' and `:token', as
+`harness-instance-credential' and `harness-instance-id' give them."
+  (and auth
+       (list harness-mcp-auth-key
+             (list :instance (plist-get auth :instance)
+                   :token (plist-get auth :token)))))
+
+(defun harness-mcp-auth-from-params (params)
+  "Return the instance credential PARAMS carries, or nil."
+  (let ((auth (plist-get (plist-get params :_meta) harness-mcp-auth-key)))
+    (and (consp auth) (keywordp (car auth)) auth)))
+
+(defun harness-mcp-auth-valid-p (expected actual)
+  "Non-nil when ACTUAL, a credential a client sent, proves EXPECTED.
+Both are plists with `:instance' and `:token'.  The comparisons take
+as long whether they differ early or late."
+  (and expected actual
+       (harness-instance-equal-p (plist-get expected :instance) (plist-get actual :instance))
+       (harness-instance-equal-p (plist-get expected :token) (plist-get actual :token))))
+
+(defun harness-mcp-auth-from-environment ()
+  "Return the credential a server process was given, or nil.
+A server the harness starts reads `HARNESS_MCP_INSTANCE' and
+`HARNESS_MCP_TOKEN' from the environment the host made for it.  Nil
+means neither was there, or they are not shaped like an instance
+credential: a server that needs one refuses to serve."
+  (let ((instance (getenv harness-mcp-auth-instance-variable))
+        (token (getenv harness-mcp-auth-token-variable)))
+    (and (harness-instance-id-p instance)
+         (harness-instance-token-p token)
+         (list :instance instance :token token))))
 
 (defun harness-mcp-server-tool (server name)
   "Return the tool NAME of SERVER, or nil."
@@ -311,18 +379,38 @@ is a plist: `:notify', a function that sends a message to the client
 is an error of the protocol, and any other notification is dropped."
   (pcase (harness-mcp-message-kind message)
     ('request
-     (let ((id (plist-get message :id))
-           (method (plist-get message :method))
-           (params (plist-get message :params)))
-       (pcase method
-         ("initialize" (harness-mcp-response id (harness-mcp--initialize-result server params)))
-         ("ping" (harness-mcp-response id nil))
-         ("tools/list"
-          (harness-mcp-response
-           id (list :tools (mapcar #'harness-mcp--tool-descriptor (harness-mcp-server-tools server)))))
-         ("tools/call" (harness-mcp--call server params id transport))
-         (_ (harness-mcp-error-response id harness-mcp-error-method-not-found
-                                        (format "Method not found: %s" method))))))
+     (let* ((id (plist-get message :id))
+            (method (plist-get message :method))
+            (params (plist-get message :params))
+            (auth (harness-mcp-server-auth server)))
+       (cond
+        ;; A server made with `:auth' is this harness instance's alone:
+        ;; the first `initialize' has to prove it, and every request
+        ;; before then is refused.  A tool never runs for a client that
+        ;; has not proved it belongs here.
+        ((and auth (equal method "initialize"))
+         (if (harness-mcp-auth-valid-p auth (harness-mcp-auth-from-params params))
+             (progn
+               (setf (harness-mcp-server-authenticated server) t)
+               (harness-mcp-response id (harness-mcp--initialize-result server params)))
+           (setf (harness-mcp-server-authenticated server) nil)
+           (harness-mcp-error-response
+            id harness-mcp-error-unauthenticated
+            "Authentication required: this server belongs to another harness instance")))
+        ((and auth (not (harness-mcp-server-authenticated server)))
+         (harness-mcp-error-response
+          id harness-mcp-error-unauthenticated
+          "Authentication required: initialize with the credential of this harness instance first"))
+        (t
+         (pcase method
+           ("initialize" (harness-mcp-response id (harness-mcp--initialize-result server params)))
+           ("ping" (harness-mcp-response id nil))
+           ("tools/list"
+            (harness-mcp-response
+             id (list :tools (mapcar #'harness-mcp--tool-descriptor (harness-mcp-server-tools server)))))
+           ("tools/call" (harness-mcp--call server params id transport))
+           (_ (harness-mcp-error-response id harness-mcp-error-method-not-found
+                                          (format "Method not found: %s" method))))))))
     ('notification
      (pcase (plist-get message :method)
        ("notifications/initialized" (setf (harness-mcp-server-initialized server) t) nil)

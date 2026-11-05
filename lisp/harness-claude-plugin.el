@@ -29,28 +29,37 @@
 ;; delimited JSON-RPC on its standard input and output.  The harness is a
 ;; running Emacs that cannot be that program, so the plugin's server is a
 ;; few lines of bash that connect to the harness (bash's /dev/tcp, else
-;; nc), say who they are with one line, and then copy bytes both ways.
-;; Nothing else: the protocol is spoken by the harness, which is why the
-;; same code answers the SDK channel and this one.
+;; nc), answer its authentication challenge with one line, and then copy
+;; bytes both ways.  Nothing else: the protocol is spoken by the
+;; harness, which is why the same code answers the SDK channel and this
+;; one.
 ;;
 ;; The listener.  The harness listens on 127.0.0.1, one port for every
 ;; CLI process, for as long as there is one (it starts with the first
-;; bridge and stops with the last), and a connection means nothing until
-;; its first line is a token (`harness-claude-plugin-open') that names a
-;; process the harness started: 256 random bits, made for one CLI
-;; process and passed to it, and through it to the relay, in its
-;; environment (HARNESS_MCP_PORT and HARNESS_MCP_TOKEN) -- never in a
-;; file, never on a command line.  The token binds the connection to that
-;; process's session, so a connection reaches the tools of its own
-;; session and no other; a second connection with a token already in
-;; use, a wrong token, or silence for ten seconds is closed.  Nothing the
-;; listener receives is trusted beyond the token: each line goes to the
-;; process's receiver, the provider, which parses it as it parses the
-;; CLI's own messages.  What the token gives is what the CLI's own tools
-;; already have, the harness's tools of this session, each call decided
-;; by the harness as any call is: the CLI's Bash inherits its
-;; environment, token included, and could connect when the relay is not,
-;; which is no more than the model can do anyway.
+;; bridge and stops with the last).  The listener speaks first: it sends
+;; its instance id (`harness-instance-id') and a fresh nonce.  The relay
+;; checks the id against HARNESS_MCP_INSTANCE, the id of the harness
+;; process that started it, and sends back the nonce and its token
+;; (`HARNESS-MCP-AUTH 1 INSTANCE NONCE TOKEN').  A token is 256 random
+;; bits derived from this instance's secret for one CLI process, made by
+;; `harness-claude-plugin-open', passed to the process and through it to
+;; the relay in its environment (HARNESS_MCP_PORT, HARNESS_MCP_INSTANCE
+;; and HARNESS_MCP_TOKEN) -- never in a file, never on a command line.
+;; The token binds the connection to that process's session, so a
+;; connection reaches the tools of its own session and no other; a
+;; listener whose instance id is not the one the relay was started by
+;; never sees the token, and a wrong instance, a wrong token, a nonce
+;; this connection did not get, a second connection with a token already
+;; in use, or silence for ten seconds is closed.  Nothing the listener
+;; receives is trusted beyond the answer: each line goes to the process's
+;; receiver, the provider, which parses it as it parses the CLI's own
+;; messages.  What the token gives is what the CLI's own tools already
+;; have, the harness's tools of this session, each call decided by the
+;; harness as any call is: the CLI's Bash inherits its environment, token
+;; included, and could connect when the relay is not, which is no more
+;; than the model can do anyway.  A process of the same user that can
+;; read that environment or ptrace the CLI has the CLI's authority
+;; already; docs/trust-model.md says so.
 ;;
 ;; Claude Code decides whether to load the plugin: an organisation can
 ;; forbid `--plugin-dir' (the managed setting disableSideloadFlags, with
@@ -64,6 +73,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-instance)
 
 (defvar harness-state-directory)
 
@@ -96,16 +106,45 @@ loads the new ones.")
   "#!/bin/bash
 # Relays the stdio MCP transport of Claude Code to the running Emacs agent
 # harness, which serves the tools.  Written by the harness
-# (lisp/harness-claude-plugin.el); the harness gives the CLI the port and
-# the token of its session in HARNESS_MCP_PORT and HARNESS_MCP_TOKEN.
+# (lisp/harness-claude-plugin.el); the harness gives the CLI the port, the
+# token of its session and the id of the harness instance in
+# HARNESS_MCP_PORT, HARNESS_MCP_TOKEN and HARNESS_MCP_INSTANCE.
 port=${HARNESS_MCP_PORT:-}
 token=${HARNESS_MCP_TOKEN:-}
-if [ -z \"$port\" ] || [ -z \"$token\" ]; then
-  echo \"harness-mcp-relay: HARNESS_MCP_PORT and HARNESS_MCP_TOKEN are not set; this plugin serves the Claude Code sessions the Emacs agent harness starts\" >&2
+instance=${HARNESS_MCP_INSTANCE:-}
+if [ -z \"$port\" ] || [ -z \"$token\" ] || [ -z \"$instance\" ]; then
+  echo \"harness-mcp-relay: HARNESS_MCP_PORT, HARNESS_MCP_TOKEN and HARNESS_MCP_INSTANCE are not set; this plugin serves the Claude Code sessions the Emacs agent harness starts\" >&2
   exit 1
 fi
+# The harness says who it is before the token is sent: a listener that
+# cannot name this instance is another program, and never gets it.
+handshake() {
+  local input=$1 output=$2 magic version who nonce answer
+  if ! IFS=' ' read -r -t 10 -u \"$input\" magic version who nonce; then
+    echo \"harness-mcp-relay: the harness sent no authentication challenge\" >&2
+    return 1
+  fi
+  if [ \"$magic\" != \"HARNESS-MCP-AUTH\" ] || [ \"$version\" != \"1\" ]; then
+    echo \"harness-mcp-relay: the harness sent no authentication challenge this relay knows\" >&2
+    return 1
+  fi
+  if [ \"$who\" != \"$instance\" ]; then
+    echo \"harness-mcp-relay: the listener is another harness instance ($who), not $instance\" >&2
+    return 1
+  fi
+  printf 'HARNESS-MCP-AUTH 1 %s %s %s\\n' \"$instance\" \"$nonce\" \"$token\" >&\"$output\"
+  if ! IFS=' ' read -r -t 10 -u \"$input\" magic version answer; then
+    echo \"harness-mcp-relay: the harness did not answer this relay's credential\" >&2
+    return 1
+  fi
+  if [ \"$magic\" != \"HARNESS-MCP-AUTH\" ] || [ \"$version\" != \"1\" ] || [ \"$answer\" != \"OK\" ]; then
+    echo \"harness-mcp-relay: the harness refused this relay's credential\" >&2
+    return 1
+  fi
+  return 0
+}
 if { exec 3<>\"/dev/tcp/127.0.0.1/$port\"; } 2>/dev/null; then
-  printf '%s\\n' \"$token\" >&3
+  handshake 3 3 || exit 1
   # The harness's answers to the CLI, in the background (it reads from the
   # connection, not from the /dev/null a background command gets).
   cat <&3 &
@@ -120,15 +159,27 @@ if ! command -v nc >/dev/null 2>&1 || ! nc -z 127.0.0.1 \"$port\" 2>/dev/null; t
   echo \"harness-mcp-relay: cannot reach the harness on 127.0.0.1:$port\" >&2
   exit 1
 fi
-{ printf '%s\\n' \"$token\"; cat; } | nc 127.0.0.1 \"$port\"
+coproc RELAY { nc 127.0.0.1 \"$port\"; }
+handshake \"${RELAY[0]}\" \"${RELAY[1]}\" || { kill \"$RELAY_PID\" 2>/dev/null; exit 1; }
+cat <&\"${RELAY[0]}\" &
+reader=$!
+cat >&\"${RELAY[1]}\"
+kill \"$reader\" 2>/dev/null
+kill \"$RELAY_PID\" 2>/dev/null
+exit 0
 "
   "The relay, a bash script.
-It connects to 127.0.0.1:$HARNESS_MCP_PORT, sends $HARNESS_MCP_TOKEN as
-the first line and then copies standard input to the connection and the
-connection to standard output.  bash's /dev/tcp does it; a bash built
-without it falls back to nc.  It ends when the CLI closes its end, and
-closes the connection with it; it fails at once when the harness cannot
-be reached, rather than leave the CLI waiting for a server that is not
+It connects to 127.0.0.1:$HARNESS_MCP_PORT, where the harness first
+sends a challenge naming its instance id and a nonce, and answers it
+with $HARNESS_MCP_INSTANCE, the nonce and $HARNESS_MCP_TOKEN.  It sends
+the token only to a listener that proved it is the harness instance the
+CLI was started by, and consumes the challenge and the harness's answer,
+so the CLI sees nothing but MCP.  Then it copies standard input to the
+connection and the connection to standard output.  bash's /dev/tcp does
+it; a bash built without it falls back to nc, with the same handshake.
+It ends when the CLI closes its end, and closes the connection with it;
+it fails at once when the harness cannot be reached or refuses the
+credential, rather than leave the CLI waiting for a server that is not
 there.")
 
 (defun harness-claude-plugin--manifest ()
@@ -143,15 +194,17 @@ there.")
 
 (defun harness-claude-plugin--mcp-config ()
   "Return the plugin's .mcp.json as JSON text.
-One stdio server runs the relay with bash.  The port and the token are
-the CLI's own environment variables, which the CLI passes on by
-expanding `${NAME}' in the server's `env' as it loads the plugin."
+One stdio server runs the relay with bash.  The port, the instance id
+and the token are the CLI's own environment variables, which the CLI
+passes on by expanding `${NAME}' in the server's `env' as it loads the
+plugin."
   (concat (harness-json-encode-text
            (list :mcpServers
                  (list (intern (concat ":" harness-claude-plugin-server))
                        (list :command "bash"
                              :args (vector "${CLAUDE_PLUGIN_ROOT}/bin/harness-mcp-relay")
                              :env (list :HARNESS_MCP_PORT "${HARNESS_MCP_PORT}"
+                                        :HARNESS_MCP_INSTANCE "${HARNESS_MCP_INSTANCE}"
                                         :HARNESS_MCP_TOKEN "${HARNESS_MCP_TOKEN}")))))
           "\n"))
 
@@ -217,10 +270,17 @@ cannot be written or is not private to this user."
 A call's arguments are what is sent, a whole file at most; a connection
 that sends more without a newline is closed.")
 
-(defconst harness-claude-plugin--max-greeting 512
+(defconst harness-claude-plugin--max-greeting 1024
   "The longest first line a connection may send, in characters.
-It is a token, 43 characters, and nothing else until it has said who it
-is: more than this without a newline closes the connection.")
+It is the answer to the challenge -- the instance id, the nonce and a
+token -- and nothing else until it has said who it is: more than this
+without a newline closes the connection.")
+
+(defconst harness-claude-plugin--challenge-prefix "HARNESS-MCP-AUTH"
+  "What the listener's challenge and the relay's answer start with.")
+
+(defconst harness-claude-plugin--challenge-version "1"
+  "The version of the challenge protocol this harness speaks.")
 
 (cl-defstruct (harness-claude-plugin-bridge
                (:constructor harness-claude-plugin--make-bridge)
@@ -238,21 +298,70 @@ is: more than this without a newline closes the connection.")
   "Token -> `harness-claude-plugin-bridge', for the processes that may connect.")
 
 (defun harness-claude-plugin--random-token ()
-  "Return a new token: 256 random bits, as text."
-  (let ((bytes (or (condition-case nil
-                       (with-temp-buffer
-                         (set-buffer-multibyte nil)
-                         (insert-file-contents-literally "/dev/urandom" nil 0 32)
-                         (and (= (buffer-size) 32) (buffer-string)))
-                     (error nil))
-                   (secure-hash 'sha256 (format "%s %s %s %s" (random t) (float-time)
-                                                (emacs-pid) (current-time))
-                                nil nil t))))
-    (base64url-encode-string bytes t)))
+  "Return a new bridge token, derived from this harness instance's secret.
+Every CLI process gets one of its own, so a relay reaches the session of
+its own process and no other, and reading one tells nothing of the
+instance token it came from."
+  (harness-instance-credential (format "claude-plugin:%s" (harness-short-id 16))))
 
 (defun harness-claude-plugin--token-p (line)
-  "Non-nil when LINE looks like a token: the characters `base64url' writes."
-  (string-match-p "\\`[A-Za-z0-9_-]\\{20,128\\}\\'" line))
+  "Non-nil when LINE looks like a token: the characters `base64url' writes.
+An instance credential and the older opaque tokens both pass."
+  (and (stringp line)
+       (or (harness-instance-token-p line)
+           (string-match-p "\\`[A-Za-z0-9_-]\\{20,128\\}\\'" line))))
+
+(defun harness-claude-plugin--bridge-for-token (token)
+  "Return the bridge TOKEN names, or nil.
+Every token is compared, in time independent of where the two differ."
+  (when (harness-claude-plugin--token-p token)
+    (let (found)
+      (maphash (lambda (candidate bridge)
+                 (when (harness-instance-equal-p candidate token)
+                   (setq found bridge)))
+               harness-claude-plugin--bridges)
+      found)))
+
+(defun harness-claude-plugin--challenge (client)
+  "Send CLIENT the listener's challenge, a nonce for its answer.
+The listener names this harness instance in the clear, so the relay can
+tell it from another program that took the port, and the nonce makes
+an answer heard before useless in a second connection."
+  (let ((nonce (harness-instance-random-string 16)))
+    (process-put client 'harness-claude-plugin-nonce nonce)
+    (process-send-string
+     client (format "%s %s %s %s\n"
+                    harness-claude-plugin--challenge-prefix
+                    harness-claude-plugin--challenge-version
+                    harness-instance-id nonce))))
+
+(defun harness-claude-plugin--parse-greeting (line)
+  "Return the plist a challenge answer LINE holds, or nil.
+The plist has `:instance', `:nonce' and `:token'."
+  (let ((fields (and (stringp line)
+                     (split-string (string-trim-right line "\r") " " t))))
+    (when (and (= (length fields) 5)
+               (equal (nth 0 fields) harness-claude-plugin--challenge-prefix)
+               (equal (nth 1 fields) harness-claude-plugin--challenge-version))
+      (list :instance (nth 2 fields) :nonce (nth 3 fields) :token (nth 4 fields)))))
+
+(defun harness-claude-plugin--deny (client reason)
+  "Close CLIENT, a connection of the listener, for REASON.
+The relay is told DENIED before the connection goes, when it can still
+read, so its error says what happened rather than only that the harness
+hung up."
+  (harness-log 'warn "claude-plugin: %s; closing it" reason)
+  (when-let* ((timer (process-get client 'harness-claude-plugin-timer)))
+    (cancel-timer timer)
+    (process-put client 'harness-claude-plugin-timer nil))
+  (when (process-live-p client)
+    (ignore-errors
+      (process-send-string client (format "%s %s DENIED\n"
+                                          harness-claude-plugin--challenge-prefix
+                                          harness-claude-plugin--challenge-version)))
+    ;; Let the refusal leave before the socket does.
+    (run-at-time 0.05 nil (lambda () (harness-claude-plugin--drop client))))
+  nil)
 
 (defun harness-claude-plugin--drop (client)
   "Close CLIENT, a connection of the listener."
@@ -263,27 +372,41 @@ is: more than this without a newline closes the connection.")
     (delete-process client)))
 
 (defun harness-claude-plugin--greet (client line)
-  "Bind CLIENT to the bridge whose token is LINE, its first line.
-Return the bridge, or nil (and CLIENT is closed) when LINE names none or
-the bridge has a relay already."
-  (let* ((token (string-trim-right line "\r"))
-         (bridge (and (harness-claude-plugin--token-p token)
-                      (gethash token harness-claude-plugin--bridges))))
+  "Bind CLIENT, which answered the challenge with LINE, to its bridge.
+Return the bridge, or nil (and CLIENT is closed) when the answer is not
+the shape this listener makes, names another harness instance, answers
+a nonce this connection did not get, names no bridge of this instance,
+or names one whose relay is already connected."
+  (let* ((fields (harness-claude-plugin--parse-greeting line))
+         (instance (plist-get fields :instance))
+         (nonce (plist-get fields :nonce))
+         (token (plist-get fields :token))
+         (expected (process-get client 'harness-claude-plugin-nonce))
+         (bridge (and fields (harness-claude-plugin--bridge-for-token token))))
     (cond
+     ((null fields)
+      (harness-claude-plugin--deny client "a connection did not answer the authentication challenge"))
+     ((not (harness-instance-id-p instance))
+      (harness-claude-plugin--deny client "a connection named no harness instance"))
+     ((not (harness-instance-equal-p instance harness-instance-id))
+      (harness-claude-plugin--deny
+       client (format "a connection named another harness instance (%s), not %s"
+                      instance harness-instance-id)))
+     ((not (and (stringp expected) (harness-instance-equal-p expected nonce)))
+      (harness-claude-plugin--deny client "a connection answered a nonce this listener did not send"))
      ((null bridge)
-      (harness-log 'warn "claude-plugin: a connection did not name a session of the harness; closing it")
-      (harness-claude-plugin--drop client)
-      nil)
+      (harness-claude-plugin--deny client "a connection did not name a session of the harness"))
      ((process-live-p (harness-claude-plugin-bridge-conn bridge))
-      (harness-log 'warn "claude-plugin: a second relay for one session; closing it")
-      (harness-claude-plugin--drop client)
-      nil)
+      (harness-claude-plugin--deny client "a second relay for one session"))
      (t
       (when-let* ((timer (process-get client 'harness-claude-plugin-timer)))
         (cancel-timer timer)
         (process-put client 'harness-claude-plugin-timer nil))
       (process-put client 'harness-claude-plugin-bridge bridge)
       (setf (harness-claude-plugin-bridge-conn bridge) client)
+      (process-send-string client (format "%s %s OK\n"
+                                          harness-claude-plugin--challenge-prefix
+                                          harness-claude-plugin--challenge-version))
       bridge))))
 
 (defun harness-claude-plugin--deliver (bridge line)
@@ -295,7 +418,7 @@ the bridge has a relay already."
                           (harness-error-short-message err))))))
 
 (defun harness-claude-plugin--filter (client chunk)
-  "Handle CHUNK, what CLIENT sent: its token first, then JSON-RPC lines."
+  "Handle CHUNK, what CLIENT sent: its challenge answer first, then JSON-RPC lines."
   (let ((pending (concat (or (process-get client 'harness-claude-plugin-pending) "") chunk))
         (bridge (process-get client 'harness-claude-plugin-bridge))
         (start 0)
@@ -333,7 +456,10 @@ the bridge has a relay already."
                                 (harness-error-short-message err)))))))))
 
 (defun harness-claude-plugin--accepted (_server client _message)
-  "Set CLIENT, a new connection of the listener, up to be greeted."
+  "Set CLIENT, a new connection of the listener, up to be greeted.
+The listener speaks first: its challenge names this harness instance and
+a nonce, and CLIENT has to answer both with a bridge's token before any
+MCP line it sends is delivered."
   (set-process-query-on-exit-flag client nil)
   (set-process-coding-system client 'utf-8-unix 'utf-8-unix)
   (set-process-filter client #'harness-claude-plugin--filter)
@@ -342,7 +468,12 @@ the bridge has a relay already."
                (run-at-time harness-claude-plugin--greeting-seconds nil
                             (lambda ()
                               (unless (process-get client 'harness-claude-plugin-bridge)
-                                (harness-claude-plugin--drop client))))))
+                                (harness-claude-plugin--drop client)))))
+  (condition-case err
+      (harness-claude-plugin--challenge client)
+    (error (harness-log 'warn "claude-plugin: could not challenge a connection: %s"
+                        (harness-error-short-message err))
+           (harness-claude-plugin--drop client))))
 
 (defun harness-claude-plugin--listen ()
   "Start listening on a port of 127.0.0.1 unless the listener runs.
@@ -384,8 +515,12 @@ start."
     bridge))
 
 (defun harness-claude-plugin-environment (bridge)
-  "Return the environment entries that point BRIDGE's CLI process at the listener."
+  "Return the environment entries that point BRIDGE's CLI process at the listener.
+They are the port, the token of BRIDGE's process and the id of this
+harness instance.  None is written to a file: the CLI process inherits
+them, and its relay answers the listener's challenge with them."
   (list (format "HARNESS_MCP_PORT=%d" (harness-claude-plugin-port))
+        (concat "HARNESS_MCP_INSTANCE=" harness-instance-id)
         (concat "HARNESS_MCP_TOKEN=" (harness-claude-plugin-bridge-token bridge))))
 
 (defun harness-claude-plugin-connected-p (bridge)

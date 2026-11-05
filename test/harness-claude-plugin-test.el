@@ -34,6 +34,40 @@ What the connection receives collects under the property `got'."
   "Return what CONN has received so far."
   (or (process-get conn 'got) ""))
 
+(defun harness-claude-plugin-test--read-line (conn)
+  "Return the next line CONN received, without its newline, waiting up to 5s.
+A connection that closes with nothing more gets nil."
+  (let ((deadline (+ (float-time) 5)) line)
+    (while (and (not line) (< (float-time) deadline))
+      (let ((text (harness-claude-plugin-test--got conn)))
+        (if-let* ((pos (string-search "\n" text)))
+            (progn (setq line (substring text 0 pos))
+                   (process-put conn 'got (substring text (1+ pos))))
+          (unless (process-live-p conn)
+            (setq deadline 0))
+          (when (process-live-p conn) (accept-process-output nil 0.02)))))
+    line))
+
+(defun harness-claude-plugin-test--challenge (conn)
+  "Read CONN's challenge; return it as a plist, or nil."
+  (when-let* ((line (harness-claude-plugin-test--read-line conn))
+              (fields (split-string line " " t)))
+    (when (and (= (length fields) 4)
+               (equal (nth 0 fields) "HARNESS-MCP-AUTH")
+               (equal (nth 1 fields) "1"))
+      (list :instance (nth 2 fields) :nonce (nth 3 fields)))))
+
+(cl-defun harness-claude-plugin-test--accept (conn &key bridge instance token nonce)
+  "Answer CONN's challenge and return the listener's answer line.
+INSTANCE, NONCE and TOKEN default to this harness's, the challenge's and
+BRIDGE's.  A test that wants a refusal passes its own."
+  (let* ((challenge (and (null nonce) (harness-claude-plugin-test--challenge conn)))
+         (instance (or instance harness-instance-id))
+         (nonce (or nonce (plist-get challenge :nonce)))
+         (token (or token (and bridge (harness-claude-plugin-bridge-token bridge)))))
+    (process-send-string conn (format "HARNESS-MCP-AUTH 1 %s %s %s\n" instance nonce token))
+    (harness-claude-plugin-test--read-line conn)))
+
 (defun harness-claude-plugin-test--collecting-bridge ()
   "Open a bridge that keeps the lines it receives, newest first, in `lines'."
   (let* ((lines nil)
@@ -70,6 +104,7 @@ What the connection receives collects under the property `got'."
       (should (equal (plist-get server :args) '("${CLAUDE_PLUGIN_ROOT}/bin/harness-mcp-relay")))
       ;; The process's own environment carries the port and the token.
       (should (equal (plist-get (plist-get server :env) :HARNESS_MCP_PORT) "${HARNESS_MCP_PORT}"))
+      (should (equal (plist-get (plist-get server :env) :HARNESS_MCP_INSTANCE) "${HARNESS_MCP_INSTANCE}"))
       (should (equal (plist-get (plist-get server :env) :HARNESS_MCP_TOKEN) "${HARNESS_MCP_TOKEN}"))
       ;; No secret is on disk.
       (should-not (string-match-p "HARNESS_MCP_TOKEN=\\|[A-Za-z0-9_-]\\{40\\}"
@@ -119,11 +154,13 @@ What the connection receives collects under the property `got'."
                  (env (harness-claude-plugin-environment bridge))
                  (conn (harness-claude-plugin-test--connect)))
       (should (member (format "HARNESS_MCP_PORT=%d" (harness-claude-plugin-port)) env))
+      (should (member (format "HARNESS_MCP_INSTANCE=%s" harness-instance-id) env))
       (should (cl-some (lambda (e) (string-prefix-p "HARNESS_MCP_TOKEN=" e)) env))
       (should-not (harness-claude-plugin-connected-p bridge))
       (should-not (harness-claude-plugin-send bridge "{}"))
-      (process-send-string conn (concat (harness-claude-plugin-bridge-token bridge) "\n"
-                                        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n"))
+      (should (equal "HARNESS-MCP-AUTH 1 OK"
+                     (harness-claude-plugin-test--accept conn :bridge bridge)))
+      (process-send-string conn "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n")
       (harness-test-wait (lambda () (funcall lines)) 5 "the line to arrive")
       (should (equal (funcall lines) '("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")))
       (should (harness-claude-plugin-connected-p bridge))
@@ -138,7 +175,9 @@ What the connection receives collects under the property `got'."
   (harness-claude-plugin-test--with-state
     (pcase-let* ((`(,bridge . ,lines) (harness-claude-plugin-test--collecting-bridge))
                  (conn (harness-claude-plugin-test--connect)))
-      (process-send-string conn (concat (harness-claude-plugin-bridge-token bridge) "\n{\"a\":"))
+      (should (equal "HARNESS-MCP-AUTH 1 OK"
+                     (harness-claude-plugin-test--accept conn :bridge bridge)))
+      (process-send-string conn "{\"a\":")
       (sleep-for 0.1)
       (process-send-string conn "1}\n{\"b\":2}\n{\"c\":\"é✓\"}\n")
       (harness-test-wait (lambda () (= (length (funcall lines)) 3)) 5 "three lines")
@@ -148,14 +187,88 @@ What the connection receives collects under the property `got'."
   "A connection that names no session of the harness is closed, with nothing delivered."
   (harness-claude-plugin-test--with-state
     (pcase-let* ((`(,_bridge . ,lines) (harness-claude-plugin-test--collecting-bridge))
-                 (conn (harness-claude-plugin-test--connect)))
-      (process-send-string conn "not-a-token-of-this-harness-abcdefghijk\n{\"id\":1}\n")
+                 (conn (harness-claude-plugin-test--connect))
+                 (challenge (harness-claude-plugin-test--challenge conn)))
+      (should challenge)
+      (process-send-string conn
+                           (format "HARNESS-MCP-AUTH 1 %s %s not-a-token-of-this-harness-abcdefghijk\n{\"id\":1}\n"
+                                   harness-instance-id (plist-get challenge :nonce)))
       (harness-test-wait (lambda () (not (process-live-p conn))) 5 "the connection to close")
       (should-not (funcall lines)))
     ;; The token has to look like one before it is looked up.
-    (let ((conn (harness-claude-plugin-test--connect)))
-      (process-send-string conn "short\n")
+    (let* ((conn (harness-claude-plugin-test--connect))
+           (challenge (harness-claude-plugin-test--challenge conn)))
+      (process-send-string conn (format "HARNESS-MCP-AUTH 1 %s %s short\n"
+                                        harness-instance-id (plist-get challenge :nonce)))
       (harness-test-wait (lambda () (not (process-live-p conn))) 5 "the connection to close"))))
+
+(ert-deftest harness-claude-plugin-test-challenge-names-the-instance-and-a-nonce ()
+  "A new connection is told which harness it reached, and gets a fresh nonce."
+  (harness-claude-plugin-test--with-state
+    (harness-claude-plugin-test--collecting-bridge)
+    (let* ((one (harness-claude-plugin-test--connect))
+           (a (harness-claude-plugin-test--challenge one))
+           (two (harness-claude-plugin-test--connect))
+           (b (harness-claude-plugin-test--challenge two)))
+      (unwind-protect
+          (progn
+            (should (equal harness-instance-id (plist-get a :instance)))
+            (should (equal harness-instance-id (plist-get b :instance)))
+            (should (stringp (plist-get a :nonce)))
+            (should (> (length (plist-get a :nonce)) 16))
+            (should-not (equal (plist-get a :nonce) (plist-get b :nonce))))
+        (delete-process one)
+        (delete-process two)))))
+
+(ert-deftest harness-claude-plugin-test-another-instance-is-refused ()
+  "A connection that names another harness instance gets no bridge, whatever its token."
+  (harness-claude-plugin-test--with-state
+    (pcase-let* ((`(,bridge . ,lines) (harness-claude-plugin-test--collecting-bridge))
+                 (conn (harness-claude-plugin-test--connect)))
+      (should (equal "HARNESS-MCP-AUTH 1 DENIED"
+                     (harness-claude-plugin-test--accept
+                      conn :bridge bridge
+                      :instance "hi1_anotherinstanceid000000")))
+      (harness-test-wait (lambda () (not (process-live-p conn))) 5 "the connection to close")
+      (should-not (funcall lines))
+      (should-not (harness-claude-plugin-connected-p bridge)))))
+
+(ert-deftest harness-claude-plugin-test-a-replayed-nonce-is-refused ()
+  "An answer heard on one connection is no answer on another."
+  (harness-claude-plugin-test--with-state
+    (pcase-let* ((`(,bridge . ,lines) (harness-claude-plugin-test--collecting-bridge))
+                 (one (harness-claude-plugin-test--connect))
+                 (first (harness-claude-plugin-test--challenge one))
+                 (two (harness-claude-plugin-test--connect)))
+      (ignore (harness-claude-plugin-test--challenge two))
+      (should (equal "HARNESS-MCP-AUTH 1 DENIED"
+                     (harness-claude-plugin-test--accept
+                      two :bridge bridge :nonce (plist-get first :nonce))))
+      (harness-test-wait (lambda () (not (process-live-p two))) 5 "the second connection to close")
+      (should-not (funcall lines))
+      (should-not (harness-claude-plugin-connected-p bridge))
+      (delete-process one))))
+
+(ert-deftest harness-claude-plugin-test-real-relay-refuses-another-instance ()
+  "The relay sends no token to a listener whose instance id is not its own."
+  (skip-unless (executable-find "bash"))
+  (harness-claude-plugin-test--with-state
+    (pcase-let* ((dir (harness-claude-plugin-write))
+                 (`(,bridge . ,lines) (harness-claude-plugin-test--collecting-bridge))
+                 (env (harness-claude-plugin-environment bridge))
+                 (relay (harness-claude-plugin-test--run-relay
+                         dir (append (list "HARNESS_MCP_INSTANCE=hi1_anotherinstanceid000000") env))))
+      (unwind-protect
+          (progn
+            (harness-test-wait (lambda () (not (process-live-p relay))) 10 "the relay to stop")
+            (should (= 1 (process-exit-status relay)))
+            (accept-process-output nil 0.1)
+            (with-current-buffer (process-get relay 'err-buffer)
+              (should (string-match-p "another harness instance" (buffer-string))))
+            (should-not (funcall lines))
+            (should-not (harness-claude-plugin-connected-p bridge)))
+        (when (process-live-p relay) (delete-process relay))
+        (kill-buffer (process-get relay 'err-buffer))))))
 
 (ert-deftest harness-claude-plugin-test-one-relay-per-bridge ()
   "A second connection with a token in use is closed; one after the first went is not."
@@ -163,10 +276,13 @@ What the connection receives collects under the property `got'."
     (pcase-let* ((`(,bridge . ,lines) (harness-claude-plugin-test--collecting-bridge))
                  (token (harness-claude-plugin-bridge-token bridge))
                  (first (harness-claude-plugin-test--connect)))
-      (process-send-string first (concat token "\n{\"n\":1}\n"))
+      (should (equal "HARNESS-MCP-AUTH 1 OK"
+                     (harness-claude-plugin-test--accept first :bridge bridge)))
+      (process-send-string first "{\"n\":1}\n")
       (harness-test-wait (lambda () (funcall lines)) 5 "the first line")
       (let ((second (harness-claude-plugin-test--connect)))
-        (process-send-string second (concat token "\n{\"n\":2}\n"))
+        (should (equal "HARNESS-MCP-AUTH 1 DENIED"
+                       (harness-claude-plugin-test--accept second :bridge bridge :token token)))
         (harness-test-wait (lambda () (not (process-live-p second))) 5 "the second to close")
         (should (equal (funcall lines) '("{\"n\":1}")))
         (should (process-live-p first)))
@@ -175,7 +291,9 @@ What the connection receives collects under the property `got'."
       (harness-test-wait (lambda () (not (harness-claude-plugin-connected-p bridge))) 5
                          "the bridge to see the relay go")
       (let ((third (harness-claude-plugin-test--connect)))
-        (process-send-string third (concat token "\n{\"n\":3}\n"))
+        (should (equal "HARNESS-MCP-AUTH 1 OK"
+                       (harness-claude-plugin-test--accept third :bridge bridge :token token)))
+        (process-send-string third "{\"n\":3}\n")
         (harness-test-wait (lambda () (equal (car (funcall lines)) "{\"n\":3}")) 5 "the third line")))))
 
 (ert-deftest harness-claude-plugin-test-bridges-are-apart ()
@@ -185,7 +303,9 @@ What the connection receives collects under the property `got'."
                  (`(,two . ,two-lines) (harness-claude-plugin-test--collecting-bridge))
                  (conn (harness-claude-plugin-test--connect)))
       (should-not (equal (harness-claude-plugin-bridge-token one) (harness-claude-plugin-bridge-token two)))
-      (process-send-string conn (concat (harness-claude-plugin-bridge-token two) "\n{\"for\":\"two\"}\n"))
+      (should (equal "HARNESS-MCP-AUTH 1 OK"
+                     (harness-claude-plugin-test--accept conn :bridge two)))
+      (process-send-string conn "{\"for\":\"two\"}\n")
       (harness-test-wait (lambda () (funcall two-lines)) 5 "the line")
       (should (equal (funcall two-lines) '("{\"for\":\"two\"}")))
       (should-not (funcall one-lines))
@@ -205,8 +325,9 @@ What the connection receives collects under the property `got'."
     (let ((harness-claude-plugin--max-line 1000))
       (pcase-let* ((`(,bridge . ,lines) (harness-claude-plugin-test--collecting-bridge))
                    (conn (harness-claude-plugin-test--connect)))
-        (process-send-string conn (concat (harness-claude-plugin-bridge-token bridge) "\n"
-                                          (make-string 3000 ?x)))
+        (should (equal "HARNESS-MCP-AUTH 1 OK"
+                       (harness-claude-plugin-test--accept conn :bridge bridge)))
+        (process-send-string conn (make-string 3000 ?x))
         (harness-test-wait (lambda () (not (process-live-p conn))) 5 "the connection to close")
         (should-not (funcall lines))))))
 
@@ -225,8 +346,9 @@ What the connection receives collects under the property `got'."
            (bridge (harness-claude-plugin-open #'ignore (lambda (_b) (cl-incf closed))))
            (token (harness-claude-plugin-bridge-token bridge))
            (conn (harness-claude-plugin-test--connect)))
-      (process-send-string conn (concat token "\n"))
-      (harness-test-wait (lambda () (harness-claude-plugin-connected-p bridge)) 5 "the relay")
+      (should (equal "HARNESS-MCP-AUTH 1 OK"
+                     (harness-claude-plugin-test--accept conn :bridge bridge :token token)))
+      (should (harness-claude-plugin-connected-p bridge))
       (harness-claude-plugin-close bridge)
       (harness-test-wait (lambda () (not (process-live-p conn))) 5 "the connection to close")
       ;; Closed by the harness, so the bridge's own function is not told.
@@ -238,11 +360,13 @@ What the connection receives collects under the property `got'."
       (let ((next (harness-claude-plugin-open #'ignore)))
         (should (integerp (harness-claude-plugin-port)))
         (let ((again (harness-claude-plugin-test--connect)))
-          (process-send-string again (concat token "\n"))
+          (should (equal "HARNESS-MCP-AUTH 1 DENIED"
+                         (harness-claude-plugin-test--accept again :bridge next :token token)))
           (harness-test-wait (lambda () (not (process-live-p again))) 5 "the old token to be refused"))
         ;; And the new one's own token works.
         (let ((conn (harness-claude-plugin-test--connect)))
-          (process-send-string conn (concat (harness-claude-plugin-bridge-token next) "\n"))
+          (should (equal "HARNESS-MCP-AUTH 1 OK"
+                         (harness-claude-plugin-test--accept conn :bridge next)))
           (harness-test-wait (lambda () (harness-claude-plugin-connected-p next)) 5 "the new relay"))))))
 
 (ert-deftest harness-claude-plugin-test-relay-going-is-reported ()
@@ -251,8 +375,9 @@ What the connection receives collects under the property `got'."
     (let* ((closed nil)
            (bridge (harness-claude-plugin-open #'ignore (lambda (b) (setq closed b))))
            (conn (harness-claude-plugin-test--connect)))
-      (process-send-string conn (concat (harness-claude-plugin-bridge-token bridge) "\n"))
-      (harness-test-wait (lambda () (harness-claude-plugin-connected-p bridge)) 5 "the relay")
+      (should (equal "HARNESS-MCP-AUTH 1 OK"
+                     (harness-claude-plugin-test--accept conn :bridge bridge)))
+      (should (harness-claude-plugin-connected-p bridge))
       (delete-process conn)
       (harness-test-wait (lambda () closed) 5 "the report")
       (should (eq closed bridge)))))
@@ -324,7 +449,8 @@ error under `err'."
             (should (= (process-exit-status relay) 1))
             (accept-process-output nil 0.1)
             (with-current-buffer (process-get relay 'err-buffer)
-              (should (string-match-p "HARNESS_MCP_PORT and HARNESS_MCP_TOKEN" (buffer-string)))))
+              (should (string-match-p "HARNESS_MCP_PORT, HARNESS_MCP_TOKEN and HARNESS_MCP_INSTANCE"
+                                      (buffer-string)))))
         (kill-buffer (process-get relay 'err-buffer))))))
 
 (ert-deftest harness-claude-plugin-test-relay-with-no-listener-fails ()

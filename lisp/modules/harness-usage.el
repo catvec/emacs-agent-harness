@@ -1549,10 +1549,24 @@ of WINDOW already in flight is shared."
               (puthash window promise harness-usage--cost-report-fetches))
             promise)))))
 
+(defconst harness-usage--cost-report-retention (* 40 86400)
+  "How long, in seconds, the cost report of an ended period is kept.
+Counted from the period's end, or from when the report was fetched if
+that is later: a period looked at after it ended keeps its answer, so a
+report is not forgotten the moment it arrives.")
+
 (defun harness-usage--forget-old-cost-reports ()
-  "Drop the cost reports of periods that ended more than 40 days ago."
-  (let ((limit (- (float-time) (* 40 86400))))
-    (maphash (lambda (window _) (when (< (cdr window) limit) (remhash window harness-usage--cost-reports)))
+  "Drop cost reports of periods that ended long ago and were not fetched since.
+A report of an old period that was fetched within
+`harness-usage--cost-report-retention' is kept: a caller asked for that
+period, and throwing the answer away at once would make the request
+pointless.  An entry with no answer, only a failure, is dropped with
+its period."
+  (let ((limit (- (float-time) harness-usage--cost-report-retention)))
+    (maphash (lambda (window entry)
+               (when (and (< (cdr window) limit)
+                          (< (or (plist-get entry :at) 0) limit))
+                 (remhash window harness-usage--cost-reports)))
              harness-usage--cost-reports)))
 
 (defun harness-usage--cost-report-due-p (entry)

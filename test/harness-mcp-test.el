@@ -134,6 +134,20 @@ started is stopped."
         (should (eq 'ready (plist-get (car status) :state)))
         (should (equal "fake" (plist-get (plist-get (car status) :info) :name)))))))
 
+(ert-deftest harness-mcp-every-server-it-starts-gets-this-instances-credential ()
+  "A declaration cannot take the instance's credential away, and the server gets it."
+  (harness-mcp-test-with ()
+    ;; The fake server requires the credential in its environment (see
+    ;; test/fixtures/harness-mcp-fake-server.el), so a call that works
+    ;; proves the host gave it the right one.  A declaration's own values
+    ;; for the variables come after the host's and cannot win.
+    (harness-mcp-test--declare :env '(("HARNESS_MCP_INSTANCE" . "hi1_anotherinstanceid000000")
+                                      ("HARNESS_MCP_TOKEN" . "hc1_not-the-credential")))
+    (should (equal "echo: authenticated" (harness-mcp-test--text 'fake "echo" '(:text "authenticated") ctx)))
+    (let ((status (car (harness-mcp-status))))
+      (should (plist-get status :authenticated))
+      (should (eq 'ready (plist-get status :state))))))
+
 (ert-deftest harness-mcp-a-session-has-a-server-of-its-own ()
   (harness-mcp-test-with ()
     (let* ((other (list :session-id "s2" :cwd dir :call-id "c2"))

@@ -1171,7 +1171,7 @@ there."
                 collect (format "--setenv=%s=%s" var value))))))
 
 (cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable read-only
-                                                   scratch capabilities)
+                                                   scratch capabilities env)
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
 namespace; WRITABLE and READABLE list extra directories or files to
@@ -1238,12 +1238,14 @@ under it too."
      (list "--chdir" cwd
            "--setenv" "HARNESS_SANDBOX" "bwrap")
      (and private (list "--setenv" "HOME" private))
+     (cl-loop for (name . value) in env
+              append (list "--setenv" (format "%s" name) (format "%s" value)))
      (unless network (list "--unshare-net"))
      (list "--")
      command)))
 
 (cl-defun harness-sandbox--systemd-command (program cwd command &key (network t) writable readable read-only
-                                                     scratch)
+                                                     scratch env)
   "Build the systemd-run command line running COMMAND in CWD.
 PROGRAM is the systemd-run executable; NETWORK, WRITABLE, READABLE,
 READ-ONLY and SCRATCH are as for `harness-sandbox--bwrap-command'.
@@ -1297,6 +1299,8 @@ too, so ~/x reaches them."
      (unless (harness-sandbox--home-inside-p cwd)
        (list "--setenv=HOME=/tmp"))
      (list "--setenv=HARNESS_SANDBOX=systemd")
+     (cl-loop for (name . value) in env
+              collect (format "--setenv=%s=%s" name value))
      (list "--")
      command)))
 
@@ -1356,7 +1360,7 @@ temporary directory (see `harness-sandbox--mxc-command').")
   (directory-file-name (file-truename (expand-file-name path))))
 
 (cl-defun harness-sandbox--mxc-command (program cwd command &key (network t) writable readable read-only tmp
-                                                 scratch)
+                                                 scratch extra-env)
   "Build the MXC command line running COMMAND in CWD, on macOS.
 PROGRAM is MXC's executor, mxc-exec-mac, given the whole description
 of the command as base64-encoded JSON (`--config-base64').  NETWORK,
@@ -1456,7 +1460,8 @@ This only reads the file system: it writes nothing, TMP included."
                        ;; As Emacs sets it for a process it starts itself.
                        (list (cons "PWD" cwd)
                              (cons "HARNESS_SANDBOX" "mxc"))
-                       (and git (harness-sandbox--git-env (plist-get git :common))))))
+                       (and git (harness-sandbox--git-env (plist-get git :common)))
+                       extra-env)))
          (net (if network "allow" "deny"))
          (json (harness-json-encode
                 (list :version "1.0.0"
@@ -1839,15 +1844,16 @@ A target the gateway would refuse is left out, with a line in the log."
         (add private nil 'tmpfs)))
     (nreverse mounts)))
 
-(cl-defun harness-sandbox--openshell-spec (cwd &key (network t) writable readable read-only scratch)
+(cl-defun harness-sandbox--openshell-spec (cwd &key (network t) writable readable read-only scratch env)
   "Describe the sandbox of a command in CWD, as a plist.
-NETWORK, WRITABLE, READABLE, READ-ONLY and SCRATCH are as for
+NETWORK, WRITABLE, READABLE, READ-ONLY, SCRATCH and ENV are as for
 `harness-sandbox--bwrap-command'.  The plist is `:cwd', `:mounts'
 \(`harness-sandbox--openshell-mounts'), the paths Landlock allows,
 `:read-only' and `:read-write', the network rules of the policy
 `:rules' (those of `harness-sandbox-openshell-network-rules' when
 NETWORK, else none: a session without the network gets none), and the
-`:env' of the command as (NAME . VALUE) pairs."
+`:env' of the command as (NAME . VALUE) pairs, ENV after the ones the
+spec sets, so it wins over them."
   (let* ((cwd (directory-file-name (expand-file-name cwd)))
          (mounts (harness-sandbox--openshell-mounts cwd readable writable read-only scratch))
          (system harness-sandbox--openshell-system-paths)
@@ -1875,7 +1881,8 @@ NETWORK, else none: a session without the network gets none), and the
                        ;; The command's language and time zone are its user's.
                        (cl-loop for name in '("LANG" "LANGUAGE" "LC_ALL" "TZ")
                                 for value = (getenv name)
-                                when (and value (not (string-empty-p value))) collect (cons name value))))))
+                                when (and value (not (string-empty-p value))) collect (cons name value))
+                       env))))
 
 (defun harness-sandbox--yaml-string (value)
   "Return the string VALUE as a double-quoted YAML scalar."
@@ -1988,10 +1995,10 @@ WHY says what stands in the way."
           (list (format "OpenShell cannot run this command: %s" why))))
 
 (cl-defun harness-sandbox--openshell-command (program cwd command &key (network t) writable readable
-                                                     read-only scratch)
+                                                     read-only scratch env)
   "Build the command line running COMMAND in CWD in an OpenShell sandbox.
 PROGRAM is the openshell executable; NETWORK, WRITABLE, READABLE,
-READ-ONLY and SCRATCH are as for `harness-sandbox--bwrap-command'.
+READ-ONLY, SCRATCH and ENV are as for `harness-sandbox--bwrap-command'.
 The line is bash running `harness-sandbox--openshell-script' with a
 name for the sandbox, the options of its creation -- the policy file of
 `harness-sandbox--openshell-policy-text', the mounts of
@@ -2012,7 +2019,7 @@ policy file, and nothing else."
   (let* ((cwd (directory-file-name (expand-file-name cwd)))
          (spec (harness-sandbox--openshell-spec cwd :network network :writable writable
                                                 :readable readable :read-only read-only
-                                                :scratch scratch))
+                                                :scratch scratch :env env))
          (listed (+ (length (plist-get spec :read-only)) (length (plist-get spec :read-write))))
          (policy (progn
                    (when (> listed harness-sandbox--openshell-max-paths)
@@ -2184,6 +2191,7 @@ the debug log."
          (readable (plist-get opts :readable))
          (read-only (harness-json-true-p (plist-get opts :read-only)))
          (scratch (plist-get opts :scratch))
+         (env (plist-get opts :env))
          ;; A command that changes nothing is given no capability.
          (capabilities (and (not read-only) (plist-get opts :capabilities))))
     (cond
@@ -2204,6 +2212,7 @@ the debug log."
         (harness-sandbox--bwrap-command program cwd command
                                         :network network :writable writable :readable readable
                                         :read-only read-only :scratch scratch
+                                        :env env
                                         :capabilities (and capabilities
                                                            (harness-sandbox--bwrap-capabilities
                                                             command capabilities program)))))
@@ -2214,7 +2223,7 @@ the debug log."
          "systemd-run --user cannot give a unit a capability, it can only lower its own"))
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
                                         :network network :writable writable :readable readable
-                                        :read-only read-only :scratch scratch))
+                                        :read-only read-only :scratch scratch :env env))
      ((eq harness-sandbox--backend 'openshell)
       (when capabilities
         (harness-sandbox--refuse-capabilities
@@ -2222,7 +2231,7 @@ the debug log."
          "OpenShell runs commands as a non-root user with no Linux capability, and has no way to give one"))
       (harness-sandbox--openshell-command (alist-get 'openshell harness-sandbox--programs) cwd command
                                           :network network :writable writable :readable readable
-                                          :read-only read-only :scratch scratch))
+                                          :read-only read-only :scratch scratch :env env))
      ((eq harness-sandbox--backend 'mxc)
       (when capabilities
         (harness-sandbox--refuse-capabilities
@@ -2234,7 +2243,7 @@ the debug log."
             (harness-sandbox--mxc-command (alist-get 'mxc harness-sandbox--programs) cwd command
                                           :network network :writable writable :readable readable
                                           :read-only read-only :tmp tmp
-                                          :scratch scratch)
+                                          :scratch scratch :extra-env env)
           (error (ignore-errors (delete-directory tmp t))
                  (signal (car err) (cdr err))))))
      (read-only

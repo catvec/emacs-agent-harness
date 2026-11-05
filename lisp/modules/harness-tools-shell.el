@@ -241,7 +241,7 @@ restrictions than it meant."
       (error "The handlers of tools/sandbox-options gave %S, not a plist of sandbox options" options))
     options))
 
-(defun harness-tools-shell--wrap-options (writable readable options &optional scratch)
+(defun harness-tools-shell--wrap-options (writable readable options &optional scratch env)
   "Return the `sandbox/wrap' options for the directories WRITABLE and READABLE.
 OPTIONS, the plist of extra ones, go with them, and its own `:writable',
 `:readable' and `:scratch' directories join the lists.  With
@@ -249,7 +249,10 @@ OPTIONS, the plist of extra ones, go with them, and its own `:writable',
 readable, so that the command is shown what its session may touch and
 changes none of it.  The SCRATCH directories, made for the one command
 and deleted after it, go as `:scratch', which the command writes
-whatever OPTIONS say, and only when there are any."
+whatever OPTIONS say, and only when there are any.  ENV is an alist of
+variables the sandbox passes to the command itself, for a backend that
+does not give it its caller's environment; it wins over an `:env' in
+OPTIONS."
   (let ((writable (append writable (plist-get options :writable)))
         (readable (append readable (plist-get options :readable)))
         (scratch (append scratch (plist-get options :scratch))))
@@ -258,6 +261,7 @@ whatever OPTIONS say, and only when there are any."
             writable nil))
     (append (list :writable writable :readable readable)
             (and scratch (list :scratch scratch))
+            (and env (list :env env))
             (cl-loop for (key value) on options by #'cddr
                      unless (memq key '(:writable :readable :scratch)) append (list key value)))))
 
@@ -267,7 +271,7 @@ WHY says what stands in the way."
   (error "A command that needs the sandbox options %S cannot run unconfined, but %s"
          options why))
 
-(defun harness-tools-shell--wrap (cwd command &optional writable readable options scratch)
+(defun harness-tools-shell--wrap (cwd command &optional writable readable options scratch env)
   "Return COMMAND wrapped by the sandbox for CWD when the sandbox module is loaded.
 WRITABLE lists other directories the command may write to, READABLE
 directories it may read, and SCRATCH directories made for this command
@@ -288,14 +292,14 @@ Unwrapped, COMMAND comes back itself, the very list given."
    ((file-remote-p cwd) command)
    ((harness-method-exists-p 'sandbox/wrap)
     (apply #'harness-call 'sandbox/wrap cwd command
-           (harness-tools-shell--wrap-options writable readable options scratch)))
+           (harness-tools-shell--wrap-options writable readable options scratch env)))
    (options
     (harness-tools-shell--refuse-unconfined options "the sandbox module is not loaded"))
    ((harness-tools-shell--sandbox-required-p cwd)
     (error "The sandbox is required (harness-sandbox-policy), but the sandbox module is not loaded"))
    (t command)))
 
-(cl-defun harness-tools-shell-sandbox-profile (ctx cwd &key readable writable scratch)
+(cl-defun harness-tools-shell-sandbox-profile (ctx cwd &key readable writable scratch env)
   "Return the sandbox profile of a process CTX's session runs in CWD, a plist.
 It is what a bash command of the session is shown, as data: `:cwd',
 `:writable' (the session's own temporary directory, its working
@@ -317,6 +321,7 @@ plist of options."
                                                    (cons (harness-tools-shell--tmp-dir ctx) (car dirs)))))
           :readable (delete-dups (append readable (harness-tools-shell--skill-dirs ctx) (cdr dirs)))
           :scratch scratch
+          :env env
           :options options)))
 
 (defun harness-tools-shell-wrap-profile (profile command)
@@ -328,7 +333,8 @@ than leave COMMAND unconfined, and COMMAND comes back itself, the very
 list given, when it runs unwrapped."
   (harness-tools-shell--wrap (plist-get profile :cwd) command
                              (plist-get profile :writable) (plist-get profile :readable)
-                             (plist-get profile :options) (plist-get profile :scratch)))
+                             (plist-get profile :options) (plist-get profile :scratch)
+                             (plist-get profile :env)))
 
 (defun harness-tools-shell--format-output (r timeout)
   "Format the result plist R of `harness-run-command' run with TIMEOUT seconds."

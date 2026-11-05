@@ -32,6 +32,18 @@
 ;; The module has no requirements.  The server dispatches to whatever
 ;; bus methods exist, so it loads and the client API works even when
 ;; the session or agent modules are absent.
+;;
+;; Authentication.  A TCP listener is this harness instance's alone:
+;; `acp/start' makes a secret for it when `harness-acp-token' is nil,
+;; derived from the instance's own token (harness-instance.el), and a
+;; TCP client must call `authenticate' before any method but
+;; `initialize'; `harness-acp-connect' does it with the token it was
+;; given.  The token goes out of band: the harness process gets it from
+;; its parent, and a bridge or editor reads the 0600 `acp-token' file
+;; beside `acp-address'.  A connection in this very process is local
+;; and needs no proof.  The MCP server an Emacs lends the harness rides
+;; this connection, so it is only reachable through an authenticated
+;; one; see docs/trust-model.md.
 
 ;;; Code:
 
@@ -40,6 +52,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+(require 'harness-instance)
 (require 'harness-emacs-endpoint)
 
 (defvar harness-state-directory)
@@ -63,12 +76,18 @@ controls your sessions."
   :type 'boolean :group 'harness)
 
 (defcustom harness-acp-token nil
-  "Shared secret for TCP clients, or nil for no authentication.
-When set, a TCP client must call `authenticate' with {\"token\": …}
-before any other method (except `initialize'); a TCP client made with
+  "Secret a TCP client must prove to this harness instance, or nil to generate one.
+When nil, `acp/start' makes a fresh secret for this harness instance,
+derived from the instance's own token (harness-instance.el), so no two
+instances share one and restarting makes another; it is written to the
+0600 `acp-token' file beside the address that `scripts/harness-acp-stdio'
+reads.  A TCP client must call `authenticate' with {\"token\": …} before
+any other method (except `initialize'); a TCP client made with
 `harness-acp-connect' authenticates automatically with this value.
+Setting a fixed string is possible, and makes every start of this
+harness use the same secret: leave it nil for a per-instance one.
 Local in-process connections never need it."
-  :type '(choice (const :tag "None" nil) string) :group 'harness)
+  :type '(choice (const :tag "Generate one per instance" nil) string) :group 'harness)
 
 (defcustom harness-acp-receive-slice 0.05
   "Longest time, in seconds, a client spends on received messages in one go.
@@ -1360,7 +1379,9 @@ machine: a device elsewhere may not use it (see
      ((let ((answer (run-hook-with-args-until-success 'harness-acp-authenticate-functions
                                                        client method params)))
         (and answer (harness-then (harness-as-promise answer) accept))))
-     ((and (not remote) (stringp token) harness-acp-token (string= token harness-acp-token))
+     ((and (not remote) (stringp token) harness-acp-token
+           ;; As long whether the two differ early or late.
+           (harness-instance-equal-p token harness-acp-token))
       (funcall accept nil))
      ((stringp token) (signal 'acp-error (list harness-acp-error-unauthenticated "Invalid token" nil)))
      (t (signal 'acp-error (list harness-acp-error-unauthenticated
@@ -2011,10 +2032,17 @@ Text that does not parse is answered with a parse error."
 
 (harness-defmethod acp/start (&rest opts)
   "Start the ACP TCP server; OPTS `:host' and `:port' override the defaults.
-Return (:host :port).  Already running: return the current address."
+Return (:host :port).  Already running: return the current address.
+A token is generated for this harness instance when `harness-acp-token'
+is nil, and every TCP client must authenticate with it."
   (or (harness-acp--server-contact)
       (let ((host (or (plist-get opts :host) harness-acp-host))
             (port (or (plist-get opts :port) harness-acp-port)))
+        ;; A TCP listener always has a secret: a nil `harness-acp-token'
+        ;; asks for a fresh one of this instance's, never for none.  A
+        ;; local connection is in this process and needs no proof.
+        (unless (and (stringp harness-acp-token) (not (string-empty-p harness-acp-token)))
+          (setq harness-acp-token (harness-instance-credential "acp")))
         (unless (harness-acp--loopback-p host)
           (cond
            ((harness-corporate-p)

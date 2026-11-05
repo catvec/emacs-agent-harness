@@ -211,6 +211,7 @@ They define the macros modules expand, so a change to one recompiles
 every file (see `harness--compiled-fresh-p').")
 
 (defconst harness--library-files '("lisp/harness-policy.el" "lisp/harness-files.el"
+                                  "lisp/harness-instance.el"
                                   "lisp/harness-links.el" "lisp/harness-carry.el"
                                   "lisp/harness-prompts.el"
                                   "lisp/harness-redaction.el"
@@ -242,6 +243,8 @@ costs, which the cold-cache question, the model switch and the one panel
 that draws both share), harness-redaction (how a
 secret is named and taken out of text, which
 the harness process's modules and the commands of the UI share),
+harness-instance (the identity and secret of this harness process,
+from which the credentials of its MCP transports are derived),
 harness-claude-plugin (the Claude Code plugin through which the Claude
 provider serves tools, and the loopback listener its relay connects to),
 harness-notifications-desktop, harness-revision (which notes, on each

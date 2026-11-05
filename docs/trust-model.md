@@ -57,6 +57,160 @@ containment this page describes holds where a backend runs the command,
 and `sandbox/confined-p` says whether it does; choose `required` where
 it has to hold.
 
+## MCP servers are one harness instance's alone
+
+The harness runs MCP servers for its sessions, and an ACP client can
+also lend it an Emacs as one.  A local process that is not this harness
+instance must not be able to connect to them or drive them: not a
+program scanning loopback ports, not a client that knows the protocol,
+and not another harness instance.  This section is the threat model,
+the mechanism, and what it does not cover.
+
+### What is exposed
+
+| Surface | Transport | Who can reach it |
+|---|---|---|
+| `fs`, the file tools (`lisp/harness-mcp-fs.el`) | standard input and output of an `emacs --batch` child, started in the session's sandbox | only the harness process that started it; there is no listener |
+| `emacs`, the Emacs a client lends (`lisp/harness-emacs-endpoint.el`) | `_harness/emacs/mcp` requests on that client's ACP connection | only an ACP client this harness instance authenticated |
+| the task, review and every other harness tool | the `harness` MCP server: either the Claude Code SDK channel (a pipe to the CLI process) or the Claude Code plugin's loopback listener (`lisp/harness-claude-plugin.el`) | the CLI process the harness started; for the plugin, only a relay that proves the instance and its token |
+| ACP itself (`lisp/modules/harness-acp.el`) | loopback TCP, or WebSocket/TCP for a device (`lisp/modules/harness-acp-remote.el`) | a client with this instance's ACP token, or a signed-in device with a session secret |
+
+There is no MCP-over-HTTP listener, and no MCP server the harness starts
+binds a port.  The only MCP listener is the Claude Code plugin's, and
+the only other listeners are ACP's.
+
+### The adversary
+
+- **Another local process without a credential.**  It may speak MCP,
+  find the plugin's port, or connect to ACP.  It must learn nothing it
+  can use, and no tool may run for it.
+- **Another harness instance.**  It has a secret of its own, and a
+  client of it has a token.  That token must not work against this
+  instance, and this instance's token must not work against it.
+- **A replayed or stale handshake.**  A token heard on one connection,
+  or a token of a process that has gone, must not authenticate another.
+- **A wrong or malicious server.**  The `fs` worker must refuse to run
+  tools for a process that does not hold the instance credential, even
+  if that process can write to its standard input.
+
+Not in scope: a process running as the same user that can read the
+credential (`~/.emacs.d/harness/acp-token`, the CLI's environment, the
+harness's memory) or ptrace the client.  It already has that user's
+authority, so no credential the client must hold can stop it.  Nor is
+root, a malicious model or provider, or a compromised harness process.
+For a device on the network, the ACP remote module's session secrets
+and sign-in are the boundary; the transport is not encrypted, and
+docs/remote-auth.md says to put a VPN or TLS proxy in front.
+
+### The mechanism
+
+This is a per-instance secret delivered out of band, not mutual TLS.
+Emacs has no TLS server, and a client certificate key that a local
+client reads from a file is no harder for a same-user process to copy
+than the token.  The property that matters is the one below.
+
+**The instance.**  Each harness process makes, at start,
+`harness-instance-id` (random, not secret) and `harness-instance-token`
+(256 random bits) in `lisp/harness-instance.el`.  The token is never
+written into the plugin directory, never put on a command line, and
+never sent to a party that has not proved it belongs here.  A
+connection's credential is `harness-instance-credential`, HMAC-SHA256
+under the instance token over a label that names the server and the
+session (or the CLI process).  It reveals nothing about the token, and
+reading one credential gives nothing of another connection.  Strings
+are compared with `harness-instance-equal-p`, which takes as long
+whether they differ in the first character or the last.
+
+**Servers the host starts (`fs`, and any future one).**  The host gives
+the child `HARNESS_MCP_INSTANCE` and `HARNESS_MCP_TOKEN` in its
+environment, before any variable the declaration names, and sends both
+in `initialize` under `_meta["harness/auth"]`
+(`harness-mcp-auth-meta`).  A server made with `:auth` -- the file
+tools' worker is -- answers every request before that, `tools/list` and
+`tools/call` included, with JSON-RPC error -32001
+(`harness-mcp-error-unauthenticated`) and runs no tool.  A worker
+started without the environment says why on standard error and exits;
+it does not serve unauthenticated.  The sandbox passes the variables to
+the process explicitly on every backend (`sandbox/wrap` `:env`), since
+`systemd-run` does not give a unit its caller's environment.  The host
+keeps the credential of a running connection, so a sandbox change or a
+reload does not turn an existing worker into a different one; when the
+process goes, the next one gets a new credential.
+
+**The Emacs a client lends.**  It is an `:external` MCP server: one MCP
+message travels per `_harness/emacs/mcp` request on the ACP connection
+the client already has.  It is not a listener, and it answers only its
+ACP client; the ACP token below is its transport authentication.  A
+client that has not authenticated is not asked for its Emacs, and its
+requests are not served (`harness-acp--emacs-clients`).
+
+**ACP.**  `acp/start` makes a secret for this instance when
+`harness-acp-token` is nil, derived from the instance token, and writes
+it to `acp-token` (mode 0600) beside `acp-address`, which is how
+`scripts/harness-acp-stdio` and an editor bridge find it.  A TCP client
+must call `authenticate` with it before any method except `initialize`,
+and `harness-acp-connect` does so automatically when it has the token.
+An in-process connection is this process and needs no token.  The
+harness process gets its token from the parent that spawned it
+(`harness-server-spawn`), never over the socket.  A client of another
+harness has another token and is refused.
+
+**The Claude Code plugin's listener.**  Each bridge is one CLI
+process, with a token derived from the instance secret for that
+process.  The listener speaks first: it sends
+`HARNESS-MCP-AUTH 1 INSTANCE NONCE`.  The relay checks `INSTANCE`
+against `HARNESS_MCP_INSTANCE`, the id of the harness that started it,
+and answers `HARNESS-MCP-AUTH 1 INSTANCE NONCE TOKEN`.  The listener
+checks the instance, the nonce it made for this connection, and the
+token, comparing all three in constant time, and answers
+`HARNESS-MCP-AUTH 1 OK`; only then does it deliver MCP lines.  A wrong
+instance never sees the token, a replayed answer has the wrong nonce, a
+second relay for a token already in use is closed, and silence for ten
+seconds is closed.  The relay consumes both control lines, so Claude
+Code sees only MCP.  The port, the instance id and the token reach the
+CLI and its relay in the environment -- never in a file, never on a
+command line -- and the token binds the connection to that CLI
+process's session, so one session's relay cannot reach another's tools.
+
+### Configuration
+
+- Nothing has to be turned on: the credentials are made and checked by
+  default.
+- `harness-acp-token` is nil by default, which makes a fresh per-instance
+  secret at each start.  Setting it to a string uses that string instead;
+  every start of the harness then shares one secret, which is weaker.
+  Leave it nil unless a client needs a fixed value.
+- The ACP token is in `acp-token` under `harness-state-directory`
+  (`~/.emacs.d/harness/` by default), mode 0600.  The plugin's files are
+  under `claude-plugin/`, mode 0600 and 0700, and hold no secret.
+- `HARNESS_MCP_INSTANCE` and `HARNESS_MCP_TOKEN` are the harness's own
+  variables for a child process.  Do not set them by hand; a declaration
+  or the user's environment cannot override them.
+- The existing clients keep working: the Claude Code plugin is written
+  with the new relay, the ACP stdio bridge and editor bridges read
+  `acp-token`, the UI gets the token from `harness-server-spawn`, and
+  the mobile app uses the ACP remote session secret as before.
+
+### Checking it
+
+- `test/harness-mcp-auth-test.el`: the instance id and token, the HMAC,
+  the dispatcher's -32001 for no credential, another instance's id, or
+  another token; a real `fs` worker refusing an unauthenticated client
+  and working for the host; a worker with no environment exiting instead
+  of serving.
+- `test/harness-mcp-test.el`: every server the host starts gets the
+  instance credential (the fake server refuses without it), and a
+  declaration cannot override the variables.
+- `test/harness-claude-plugin-test.el`: the challenge names the instance
+  and a fresh nonce, another instance is refused, a replayed nonce is
+  refused, a wrong token, a second relay and silence are closed, and the
+  real relay completes the handshake and carries the CLI's bytes.
+- `test/harness-acp-tcp-test.el`: a listener with no configured token
+  makes one, writes it 0600, refuses a raw client and another instance's
+  token, and accepts its own.
+- `test/harness-sandbox-test.el`: `:env` reaches the command through
+  bwrap and systemd-run.
+
 ## Parsing still exists, as a courtesy
 
 The harness still reads shell command lines in a few places, and none

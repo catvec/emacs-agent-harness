@@ -34,6 +34,15 @@
 ;; copy is for the model.  A file a tool writes is announced as the
 ;; event `tools/file-written', so the user's Emacs reverts the buffers
 ;; that visit it.
+;;
+;; The worker is one harness instance's alone.  The host gives it the
+;; instance id and a credential derived from the instance's secret in
+;; HARNESS_MCP_INSTANCE and HARNESS_MCP_TOKEN, and sends both in
+;; `initialize'; this server refuses `initialize' without them, and
+;; every request before it, with `harness-mcp-error-unauthenticated'
+;; (lisp/harness-mcp-protocol.el).  Started without the environment --
+;; by hand, or by another harness that found the pipe -- it says why on
+;; standard error and exits instead of serving.  See docs/trust-model.md.
 
 ;;; Code:
 
@@ -157,7 +166,18 @@ and this is one."
   "Serve `harness-mcp-fs-server' on standard input and output, and exit.
 The entry point of the process the harness starts in the sandbox: it
 returns when the host closes the input, which is how the host says the
-server should go."
+server should go.  The host gives the process its credential in the
+environment, and this server refuses `initialize', and every request
+before it, without it: a process that finds the pipe but not the
+instance's secret runs no file tool."
+  (let ((auth (harness-mcp-auth-from-environment)))
+    (unless auth
+      (princ (concat "harness-mcp-fs: no " harness-mcp-auth-instance-variable
+                     " and " harness-mcp-auth-token-variable
+                     " in the environment; refusing to serve\n")
+             #'external-debugging-output)
+      (kill-emacs 1))
+    (setf (harness-mcp-server-auth harness-mcp-fs-server) auth))
   (harness-on 'tools/file-written #'harness-mcp-fs--announce-written)
   (harness-mcp-stdio-loop harness-mcp-fs-server)
   (kill-emacs 0))

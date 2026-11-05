@@ -62,7 +62,25 @@ does not start: `:external` servers are given connections with
 ACP connection, in lisp/modules/harness-acp.el) sends and receives.
 They get no sandbox, since the program on the other end is the
 user's own Emacs; what bounds them is the fixed vocabulary of
-their tools.
+their tools.  An external server is not a listener: it answers only
+on the authenticated ACP connection that lent it, so the ACP token
+(see harness-acp.el) is its transport's authentication.
+
+Authentication.  Every server this host starts belongs to this
+harness instance and no other: the instance has a random id and a
+256-bit secret (harness-instance.el), and a server's credential is
+derived from the secret for its name and scope, so one server's token
+cannot drive another.  The host gives the process the id and the
+credential in HARNESS_MCP_INSTANCE and HARNESS_MCP_TOKEN, and sends
+them back in `initialize` under `_meta` (`harness-mcp-auth-meta`);
+a server made with `:auth` (the file tools' worker does) answers
+every request before that with `harness-mcp-error-unauthenticated`
+and runs no tool.  A worker started without the environment refuses
+to run at all (lisp/harness-mcp-fs.el).  The variables are set after
+a declaration's own `:env`, so nothing a declaration says can take
+the instance's credential away.  The status of a connection says
+`:authenticated`.  See docs/trust-model.md for the threat model and
+the limits.
 
 Methods: `mcp/servers` (what runs, for the access view and the
 tests), `mcp/stop`.  Neither can be called over ACP.

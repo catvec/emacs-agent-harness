@@ -75,7 +75,17 @@
                                         promise))))))
 
 (defun harness-mcp-fake-main ()
-  "Serve `harness-mcp-fake--server' on standard input and output."
+  "Serve `harness-mcp-fake--server' on standard input and output.
+The host gives every server it starts a credential in the environment,
+and this one serves only with it: the host's tests then prove that every
+server it starts is authenticated, not only that one of them is."
+  (let ((auth (harness-mcp-auth-from-environment)))
+    (unless auth
+      (princ (concat "harness-mcp-fake: no " harness-mcp-auth-instance-variable
+                     " and " harness-mcp-auth-token-variable " in the environment\n")
+             #'external-debugging-output)
+      (kill-emacs 1))
+    (setf (harness-mcp-server-auth harness-mcp-fake--server) auth))
   (harness-mcp-stdio-loop harness-mcp-fake--server)
   (kill-emacs 0))
 

@@ -437,6 +437,30 @@ it made inside its own directory, stay writable."
         (should (harness-sandbox-test--subseq-p (list "--ro-bind" common common) cmd))
         (should-not (cl-some (lambda (name) (member (funcall admin name) cmd)) '("other" "merged" "foreign")))))))
 
+(ert-deftest harness-sandbox-env-reaches-the-command ()
+  "`:env' is passed on by every backend, for a caller whose child needs it.
+systemd-run does not give a unit its caller's environment, so a
+credential the harness gives one MCP worker has to be set explicitly."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto)
+         (command '("sh" "-c" "true"))
+         (env '(("HARNESS_MCP_INSTANCE" . "hi1_test") ("HARNESS_MCP_TOKEN" . "hc1_test"))))
+    (unwind-protect
+        (progn
+          (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+            (let ((cmd (harness-call 'sandbox/wrap cwd command :env env)))
+              (dolist (pair env)
+                (should (harness-sandbox-test--subseq-p
+                         (list "--setenv" (car pair) (cdr pair)) cmd)))))
+          (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+            (let ((cmd (harness-call 'sandbox/wrap cwd command :env env)))
+              (dolist (pair env)
+                (should (member (format "--setenv=%s=%s" (car pair) (cdr pair)) cmd))))))
+      (harness-sandbox-detect)
+      (delete-directory cwd t))))
+
 (ert-deftest harness-sandbox-systemd-and-mxc-keep-the-registrations-too ()
   "systemd-run binds them read-only, MXC lists them among its read-only paths."
   (harness-sandbox-test-with-worktrees

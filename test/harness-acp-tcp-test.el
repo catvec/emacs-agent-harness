@@ -304,6 +304,8 @@
 
 (ert-deftest harness-acp-tcp-line-framing ()
   (harness-acp-tcp-test-with
+    ;; This test is about the framing; the token has its own tests below.
+    (setq harness-acp-token nil)
     (pcase-let* ((`(,proc . ,lines) (harness-acp-tcp-test-raw-client port))
                  (msg (lambda (id) (format "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"_harness/harness/version\",\"params\":{}}" id))))
       (unwind-protect
@@ -331,6 +333,42 @@
               (should (null (plist-get (nth 3 responses) :id)))
               (should (= -32700 (plist-get (plist-get (nth 3 responses) :error) :code)))
               (should (= 4 (plist-get (nth 4 responses) :id)))))
+        (delete-process proc)))))
+
+(ert-deftest harness-acp-tcp-a-listener-with-no-token-makes-one ()
+  "`acp/start' gives an instance a secret when none is configured, and requires it."
+  (harness-acp-tcp-test-with
+    (should (stringp harness-acp-token))
+    (should (harness-instance-token-p harness-acp-token))
+    ;; It is delivered out of band, in the 0600 file the stdio bridge reads.
+    (should (equal (concat harness-acp-token "\n")
+                   (harness-read-file (expand-file-name "acp-token" harness-state-directory))))
+    (let ((mode (file-modes (expand-file-name "acp-token" harness-state-directory))))
+      (should (zerop (logand #o077 mode))))
+    ;; A raw client that does not authenticate learns nothing.
+    (pcase-let ((`(,proc . ,lines) (harness-acp-tcp-test-raw-client port))
+                 (version "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"_harness/harness/version\",\"params\":{}}"))
+      (unwind-protect
+          (progn
+            (process-send-string proc (concat version "\n"))
+            (harness-test-wait (lambda () (car lines)) 5 "the refusal")
+            (should (= -32000 (plist-get (plist-get (car (car lines)) :error) :code)))
+            ;; Another harness instance's token is no better.
+            (process-send-string
+             proc (format "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"authenticate\",\"params\":{\"token\":\"%s\"}}\n"
+                          (harness-instance-credential "another-acp")))
+            (harness-test-wait (lambda () (= 2 (length (car lines)))) 5 "the wrong-token refusal")
+            (should (= -32000 (plist-get (plist-get (car (car lines)) :error) :code)))
+            ;; This instance's own token works, and then so does the request.
+            (process-send-string
+             proc (format "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"authenticate\",\"params\":{\"token\":\"%s\"}}\n"
+                          harness-acp-token))
+            (harness-test-wait (lambda () (= 3 (length (car lines)))) 5 "the authentication")
+            (should-not (plist-get (car (car lines)) :error))
+            (process-send-string proc (concat version "\n"))
+            (harness-test-wait (lambda () (= 4 (length (car lines)))) 5 "the version")
+            (should (equal harness-version
+                           (plist-get (plist-get (car (car lines)) :result) :version))))
         (delete-process proc)))))
 
 (ert-deftest harness-acp-tcp-slow-client-gets-sends-in-line ()
