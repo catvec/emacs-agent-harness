@@ -4945,6 +4945,129 @@ left out is the branch's tip, or the branch it was made from."
     (should (string-match-p "names 3" (cadr (should-error (funcall parse "a b c") :type 'user-error))))
     (should (string-match-p "dash" (cadr (should-error (funcall parse "a..-b") :type 'user-error))))))
 
+(ert-deftest harness-ui-patch-review-reads-the-revisions-the-picker-offers ()
+  "The diff picker offers the repository's branches, remote branches, tags
+and recent commits, each with the commit it names: an annotated tag is
+known by the commit it points at, not by its tag message."
+  (harness-ui-patch-review-test-with-repo
+    (harness-ui-patch-review-test--git repo "config" "tag.gpgsign" "false")
+    (let* ((tagged (harness-ui-patch-review-test--git repo "rev-parse" "task/fix~1"))
+           (task-tip (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
+      (harness-ui-patch-review-test--git repo "tag" "-a" "v1" "-m" "Tag the earlier commit" tagged)
+      (harness-ui-patch-review-test--git repo "branch" "feature/x" "task/fix")
+      (harness-ui-patch-review-test--git repo "update-ref" "refs/remotes/origin/main" "main")
+      (let* ((read (harness-test-await (harness-ui-patch-review--read-revisions repo)))
+             (entries (plist-get read :entries)))
+        (cl-labels ((entry (name) (cdr (assoc name entries))))
+          ;; HEAD is named by its short commit.
+          (should (equal (harness-ui-patch-review-test--git repo "rev-parse" "--short" "HEAD")
+                         (plist-get read :head)))
+          (should (eq 'branch (plist-get (entry "task/fix") :kind)))
+          (should (eq 'branch (plist-get (entry "feature/x") :kind)))
+          (should (eq 'remote (plist-get (entry "origin/main") :kind)))
+          ;; An annotated tag is its commit: its sha, subject and date.
+          (should (eq 'tag (plist-get (entry "v1") :kind)))
+          (should (equal (substring tagged 0 7) (plist-get (entry "v1") :sha)))
+          (should (equal "The start" (plist-get (entry "v1") :subject)))
+          ;; The newest commits are offered by their short sha.
+          (should (eq 'commit (plist-get (entry (substring task-tip 0 7)) :kind)))
+          (should (equal "Fix it" (plist-get (entry (substring task-tip 0 7)) :subject))))))))
+
+(ert-deftest harness-ui-patch-review-offers-the-task-and-its-base-first ()
+  "The picker lists the task's branch, the branch it was made from and HEAD
+first, each with what it is, then the repository's other revisions; the
+annotations say what each one names."
+  (harness-ui-patch-review-test-with-repo
+    (harness-ui-patch-review-test--git repo "branch" "feature/x" "task/fix")
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (entries (progn (harness-test-await (harness-ui-patch-review--fetch-revisions repo))
+                           (harness-ui-patch-review--revision-entries review)))
+           (annotate (lambda (candidate)
+                       (harness-ui-patch-review--revision-annotation candidate entries))))
+      (should (equal '("task/fix" "main" "HEAD")
+                     (seq-take (mapcar #'car entries) 3)))
+      ;; The task's branch and its base carry their commit and subject.
+      (should (equal (harness-ui-patch-review-test--git repo "rev-parse" "--short" "task/fix")
+                     (plist-get (cdr (assoc "task/fix" entries)) :sha)))
+      (should (equal (harness-ui-patch-review-test--git repo "rev-parse" "--short" "main")
+                     (plist-get (cdr (assoc "main" entries)) :sha)))
+      (should (string-match-p "this task's branch · .* Fix it"
+                              (funcall annotate "task/fix")))
+      (should (string-match-p "the branch it was made from · .* Main goes on"
+                              (funcall annotate "main")))
+      (should (string-match-p "checked out · " (funcall annotate "HEAD")))
+      (should (string-match-p "\\`  branch · " (funcall annotate "feature/x")))
+      ;; The commit of the newest version is among the recent commits.
+      (should (string-match-p "\\`  commit · Fix it"
+                              (funcall annotate
+                                       (substring (harness-ui-patch-review-test--git
+                                                   repo "rev-parse" "task/fix")
+                                                  0 7)))))))
+
+(ert-deftest harness-ui-patch-review-completes-the-two-sides-of-a-range ()
+  "One revision completes among the repository's, and so does the other side
+of a range after `..', `...' or a space: the first side stays as typed.
+What is no revision of the repository is still read as typed."
+  (harness-ui-patch-review-test-with-repo
+    (harness-ui-patch-review-test--git repo "branch" "feature/x" "task/fix")
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           (entries (progn (harness-test-await (harness-ui-patch-review--fetch-revisions repo))
+                           (harness-ui-patch-review--revision-entries review)))
+           (table (harness-ui-patch-review--revision-table (lambda () entries))))
+      ;; A revision completes from all of them.
+      (should (member "task/fix" (funcall table "" nil t)))
+      (should (member "HEAD" (funcall table "" nil t)))
+      ;; The other side of a range completes, with the range kept.
+      (let ((candidates (funcall table "main.." nil t)))
+        (should (member "main..task/fix" candidates))
+        (should (cl-every (lambda (candidate) (string-prefix-p "main.." candidate))
+                          candidates)))
+      (should (member "main...task/fix" (funcall table "main..." nil t)))
+      (should (member "main task/fix" (funcall table "main t" nil t)))
+      ;; The metadata names the category and annotates each revision.
+      (let* ((meta (funcall table "" nil 'metadata))
+             (annotate (cdr (assq 'annotation-function (cdr meta)))))
+        (should (eq 'harness-patch-review-revision
+                    (cdr (assq 'category (cdr meta)))))
+        (should (string-match-p "this task's branch ·" (funcall annotate "task/fix")))
+        (should (string-match-p "checked out ·" (funcall annotate "HEAD")))
+        (should (string-match-p "branch ·" (funcall annotate "task/fix")))
+        (should (string-match-p "branch ·" (funcall annotate "feature/x")))))))
+
+(ert-deftest harness-ui-patch-review-reads-a-diff-from-the-revisions-offered ()
+  "The revisions prompt completes the repository's revisions, starts from
+the diff shown now, and takes any diff that is typed: none of the
+candidates is required."
+  (harness-ui-patch-review-test-with-repo
+    (let* ((review (harness-ui-patch-review-test--review repo))
+           asked)
+      (harness-test-await (harness-ui-patch-review--fetch-revisions repo))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt collection &optional predicate require initial history default &rest _)
+                   (setq asked (list prompt collection predicate require initial history default))
+                   "main...task/fix")))
+        (should (equal "main...task/fix" (harness-ui-patch-review--read-spec review))))
+      (should (string-match-p
+               "Diff revisions (TAB completes branches, tags and commits; A\.\.B, A\.\.\.B, A B, or A against the branch) (default main\.\.task/fix): "
+               (nth 0 asked)))
+      ;; No revision need match what is typed; nothing is prefilled, and RET
+      ;; takes the diff the task is against its base.
+      (should-not (nth 3 asked))
+      (should-not (nth 4 asked))
+      (should (equal "main..task/fix" (nth 6 asked)))
+      (should (member "task/fix" (funcall (nth 1 asked) "" nil t)))
+      ;; A diff of the reviewer's own, no candidate at all, is read.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "HEAD~2...origin/main")))
+        (should (equal "HEAD~2...origin/main" (harness-ui-patch-review--read-spec review))))
+      ;; A diff shown now is where the picker starts, and what RET takes.
+      (setf (harness-ui-patch-review--r-selector review) "task/fix~1..task/fix")
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt _collection &optional _predicate _require initial _history default &rest _)
+                   (setq asked (list initial default))
+                   "task/fix~1..task/fix")))
+        (should (equal "task/fix~1..task/fix" (harness-ui-patch-review--read-spec review))))
+      (should (equal '("task/fix~1..task/fix" "task/fix~1..task/fix") asked)))))
+
 (defun harness-ui-patch-review-test--read (repo selector &optional last-review)
   "Read task/fix of REPO for SELECTOR, with LAST-REVIEW to say its last review."
   (harness-test-await (harness-ui-patch-review--read-branch repo "task/fix" "main" repo selector last-review)))
@@ -5413,18 +5536,25 @@ With no review before this one the choice since it is refused."
        popout "^  Diff   \\[Task branch against main\\]  \\[● Since last review (v1)\\]  \\[Other…\\]$")
       (should (string-match-p "^    M  a\\.el +\\+4 −1$" (funcall text)))
       (should-not (string-search "b.el" (funcall text)))
-      ;; Other…: asks for the revisions, and a click on it again asks again,
-      ;; with what was typed to start from.
-      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "main..task/fix")))
+      ;; Other…: asks for the revisions, completing the repository's, and a
+      ;; click on it again asks again, with what was typed to start from.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "main..task/fix")))
         (harness-ui-patch-review-test--push popout "[Other…]"))
       (harness-ui-patch-review-test--wait-text popout "^▾ Changes (7) ")
       (harness-ui-patch-review-test--wait-text popout "\\[● Other: main\\.\\.task/fix\\]$")
       (should (string-match-p "^    M  keep\\.el " (funcall text)))
-      (let (default)
-        (cl-letf (((symbol-function 'read-string)
-                   (lambda (_prompt &optional _initial _history def &rest _) (setq default def) "task/fix~1")))
+      (let (asked)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt collection &optional pred require initial history def &rest _)
+                     (setq asked (list prompt collection pred require initial history def))
+                     "task/fix~1")))
           (harness-ui-patch-review-test--push popout "[● Other: main..task/fix]"))
-        (should (equal "main..task/fix" default)))
+        ;; The one shown is what the picker starts with, and what RET takes;
+        ;; any revision may still be typed, which require-match nil allows.
+        (should-not (nth 3 asked))
+        (should (equal "main..task/fix" (nth 4 asked)))
+        (should (equal "main..task/fix" (nth 6 asked)))
+        (should (string-match-p "TAB completes branches, tags and commits" (nth 0 asked))))
       (harness-ui-patch-review-test--wait-text popout "\\[● Other: task/fix~1\\]$")
       (harness-ui-patch-review-test--wait-text popout "^▾ Changes (1) ")
       ;; d in the minibuffer: the three, the one shown now the default.
@@ -5444,14 +5574,17 @@ With no review before this one the choice since it is refused."
       (harness-ui-patch-review-test--wait-text popout "^  Diff   \\[● Task branch against main\\]")
       ;; Choosing Other… from the minibuffer asks what to compare.
       (let (prompts)
-        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Other…"))
-                  ((symbol-function 'read-string)
-                   (lambda (prompt &rest _) (push prompt prompts) "main...task/fix")))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt &rest _)
+                     (push prompt prompts)
+                     (if (string-prefix-p "Show the diff" prompt)
+                         "Other…"
+                       "main...task/fix"))))
           (with-current-buffer popout
             (goto-char (point-min))
             (re-search-forward "^▾ Changes (")
             (call-interactively (key-binding "d"))))
-        (should (string-match-p "Diff of revisions (A\\.\\.B, A\\.\\.\\.B, A B, or A against the branch)"
+        (should (string-match-p "Diff revisions (TAB completes branches, tags and commits; A\\.\\.B"
                                 (car prompts))))
       (harness-ui-patch-review-test--wait-text popout "\\[● Other: main\\.\\.\\.task/fix\\]$")
       (harness-test-wait (lambda () (and (not (harness-ui-patch-review--r-loading review))
@@ -5474,8 +5607,10 @@ again with the report open, the report reads the diff chosen."
       (should chat)
       (harness-test-wait (lambda () (harness-ui-review--task sid)) 5 "the session's task")
       (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _) (setq asked t) "Other…"))
-                ((symbol-function 'read-string) (lambda (&rest _) "main..task/fix")))
+                 (lambda (prompt &rest _)
+                   (if (string-prefix-p "Show the diff" prompt)
+                       (progn (setq asked t) "Other…")
+                     "main..task/fix"))))
         ;; Without the prefix: the report opens at the branch against main.
         (with-current-buffer chat
           (call-interactively #'harness-ui-patch-review-open))
@@ -5501,10 +5636,12 @@ again with the report open, the report reads the diff chosen."
       ;; Typed revisions that cannot be right are refused: nothing changes.
       ;; (The choice of typing some is labelled with what was typed.)
       (cl-letf (((symbol-function 'completing-read)
-                 (lambda (_prompt collection &rest _)
-                   (car (cl-remove-if-not (lambda (label) (string-prefix-p "Other" label))
-                                          (all-completions "" collection)))))
-                ((symbol-function 'read-string) (lambda (&rest _) "a b c")))
+                 (lambda (prompt collection &rest _)
+                   (if (string-prefix-p "Show the diff" prompt)
+                       (car (cl-remove-if-not
+                             (lambda (label) (string-prefix-p "Other" label))
+                             (all-completions "" collection)))
+                     "a b c"))))
         (with-current-buffer chat
           (let ((current-prefix-arg '(4)))
             (should-error (call-interactively #'harness-ui-patch-review-open) :type 'user-error))))

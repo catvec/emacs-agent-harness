@@ -311,11 +311,23 @@ of -- three buttons, or d in the report
                              what the agent did since.  Work handed in
                              again with no new commit changed nothing
                              since, and the report says so;
-  other                      any revisions of the repository, typed as
+  other                      any revisions of the repository, as
                              `git diff` takes them: A..B, A...B (from
                              the merge base of A and B), A B, or A
                              alone, against the branch.  An end left
                              out is the branch's tip, a start left out
+                             the branch it was made from.  Choosing it
+                             offers the task's branch, the branch it
+                             was made from, HEAD, the repository's
+                             branches, remote branches and tags, and
+                             its newest commits, each annotated with
+                             the commit it names; the other side of
+                             `..` or `...` completes too.  None of them
+                             is required: what is typed is taken as
+                             `git diff` takes it, so a diff of one's own
+                             -- HEAD~3, a commit not offered -- is as
+                             good as a candidate.  An empty answer is
+                             the diff shown now, else the branch against
                              the branch it was made from.
 
 The files, their counts, Ediff and the threads follow the choice, which

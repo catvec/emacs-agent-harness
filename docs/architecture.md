@@ -15496,7 +15496,8 @@ THE DIFF SHOWN.  The commits compared are the reviewer's choice
 (`harness-ui-patch-review-select-diff`, on d and the buttons of the
 `Diff` line under the heading): the branch against its merge base with
 `:base`, which is where a report starts, the branch against where it was
-at the last review, or revisions typed.  The choice is the review's
+at the last review, or revisions chosen from the repository or typed.
+The choice is the review's
 `selector` -- nil, `since-review` or the string typed -- kept as the
 tree toggle is, so a report closed and opened again shows it; what is
 drawn is the diff `shown-selector` names, the one read last.
@@ -15512,7 +15513,18 @@ report says nothing changed.  `--resolve-spec` reads a string as
 `git diff` takes revisions (`--parse-spec`: A..B, A...B, A B or A; a
 start left out is the branch it was made from, an end left out the
 branch's tip), each resolved to a commit, A...B to the merge base.  The
-whole change of the branch against its merge base is read all the same,
+revisions are not typed blind (`--read-spec`): the task's branch, its
+base and HEAD, then the repository's branches, remote branches, tags and
+newest commits complete in the minibuffer, each annotated with the commit
+it names and when it was made (`--read-revisions` reads them with git in
+the background, `--fetch-revisions` keeps them for a moment).  After
+`..', `...' or a space the other side of the range completes too
+(`--revision-table`, `--revision-completion-prefix`), so `main...`
+offers what the task could be compared from.  Nothing is required: the
+prompt takes the typed string as it is, so any diff `--parse-spec` reads
+is still possible, and an empty answer is the diff shown now, else the
+branch against its base (`--default-spec`).  The whole change of the
+branch against its merge base is read all the same,
 whichever the diff, as the version of the set (`--attach-files` gives the
 version those files, so the library's own views have them) and as where
 a thread on a file the diff shown does not change is placed

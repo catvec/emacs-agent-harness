@@ -301,11 +301,23 @@
 ;;                              what the agent did since.  Work handed in
 ;;                              again with no new commit changed nothing
 ;;                              since, and the report says so;
-;;   other                      any revisions of the repository, typed as
+;;   other                      any revisions of the repository, as
 ;;                              `git diff' takes them: A..B, A...B (from
 ;;                              the merge base of A and B), A B, or A
 ;;                              alone, against the branch.  An end left
 ;;                              out is the branch's tip, a start left out
+;;                              the branch it was made from.  Choosing it
+;;                              offers the task's branch, the branch it
+;;                              was made from, HEAD, the repository's
+;;                              branches, remote branches and tags, and
+;;                              its newest commits, each annotated with
+;;                              the commit it names; the other side of
+;;                              `..' or `...' completes too.  None of them
+;;                              is required: what is typed is taken as
+;;                              `git diff' takes it, so a diff of one's own
+;;                              -- HEAD~3, a commit not offered -- is as
+;;                              good as a candidate.  An empty answer is
+;;                              the diff shown now, else the branch against
 ;;                              the branch it was made from.
 ;;
 ;; The files, their counts, Ediff and the threads follow the choice, which
@@ -1446,6 +1458,313 @@ with a dash, which git would take for an option."
   "Return what to say of REVISION, which names no commit in DIR."
   (format-message "There is no commit `%s' in %s" revision (abbreviate-file-name dir)))
 
+;;;; The revisions the diff picker offers
+
+;; Choosing "Other..." is picking revisions, as Magit's diff range is:
+;; the task's branch and the one it was made from, HEAD, the repository's
+;; branches, remote branches and tags, and its newest commits complete in
+;; the minibuffer, each with the commit it names.  After `..', `...' or a
+;; space the other side of the range completes too, so main... completes
+;; the branches the task could be merged from.  None of it is required:
+;; what is typed may be any diff `harness-ui-patch-review--parse-spec'
+;; takes -- A..B, A...B, A B, A, HEAD~3 -- and is used as it is.
+;;
+;; The repository is read in the background, as everything git does here.
+;; A reading is kept for a moment, so that opening the picker again does
+;; not read it whole; the first time, the task's own branch, its base and
+;; HEAD are offered while git answers, and the rest joins them when it
+;; does.
+
+(defconst harness-ui-patch-review--recent-revisions 20
+  "How many recent commits of the repository the diff picker offers.")
+
+(defconst harness-ui-patch-review--revision-cache-seconds 30
+  "How long, in seconds, the revisions the diff picker offers are kept.")
+
+(defconst harness-ui-patch-review--ref-format
+  (concat "%(refname)\x1f%(objectname:short)\x1f%(*objectname:short)"
+          "\x1f%(committerdate:unix)\x1f%(*committerdate:unix)"
+          "\x1f%(subject)\x1f%(*subject)")
+  "Git for-each-ref format of a ref the diff picker offers.
+A ref's name; its object's short sha, then that of the commit an
+annotated tag points at; the two dates, in seconds; and the two subjects,
+so that a tag is known by the commit it names, not by its tag message.")
+
+(defvar harness-ui-patch-review--revision-cache (make-hash-table :test 'equal)
+  "Repository directory -> the revisions the diff picker offers there.
+A plist: :entries, what `harness-ui-patch-review--read-revisions' gives,
+:fetched when they were read (float seconds), and :promise, the reading
+still under way.")
+
+(defun harness-ui-patch-review--seconds (text)
+  "Return TEXT, seconds since the epoch as git prints them, as a float or nil."
+  (let ((seconds (and (stringp text) (not (string-empty-p text))
+                      (string-to-number text))))
+    (and seconds (> seconds 0) (float seconds))))
+
+(defun harness-ui-patch-review--not-empty (text)
+  "Return TEXT when it is a string that is not empty, else nil."
+  (and (stringp text) (not (string-empty-p text)) text))
+
+(defun harness-ui-patch-review--parse-refs (text)
+  "Return the revision entries in TEXT, a `git for-each-ref' with the ref format.
+Each entry is (NAME :kind KIND :sha SHA :subject TEXT :time SECONDS),
+the commit it names -- an annotated tag's commit, not the tag object --
+and when that commit was made.  Only branches, remote branches and tags
+are read."
+  (delq nil
+        (mapcar
+         (lambda (line)
+           (let ((fields (split-string line "\x1f")))
+             (when (>= (length fields) 7)
+               (let* ((ref (nth 0 fields))
+                      (kind (cond ((string-prefix-p "refs/heads/" ref) 'branch)
+                                  ((string-prefix-p "refs/remotes/" ref) 'remote)
+                                  ((string-prefix-p "refs/tags/" ref) 'tag))))
+                 (when kind
+                   (list (substring ref (if (eq kind 'tag) 10 (if (eq kind 'remote) 13 11)))
+                         :kind kind
+                         :sha (or (harness-ui-patch-review--not-empty (nth 2 fields))
+                                  (nth 1 fields))
+                         :subject (or (harness-ui-patch-review--not-empty (nth 6 fields))
+                                      (nth 5 fields))
+                         :time (or (harness-ui-patch-review--seconds (nth 4 fields))
+                                   (harness-ui-patch-review--seconds (nth 3 fields)))))))))
+         (split-string text "\n" t))))
+
+(defun harness-ui-patch-review--parse-recent-commits (text)
+  "Return the revision entries in TEXT, a `git log --format=%h%x1f%ct%x1f%s'.
+Each is (SHA :kind `commit' :sha SHA :subject TEXT :time SECONDS)."
+  (delq nil
+        (mapcar
+         (lambda (line)
+           (let ((fields (split-string line "\x1f")))
+             (when (and (>= (length fields) 3)
+                        (not (string-empty-p (nth 0 fields))))
+               (list (nth 0 fields)
+                     :kind 'commit
+                     :sha (nth 0 fields)
+                     :subject (nth 2 fields)
+                     :time (harness-ui-patch-review--seconds (nth 1 fields))))))
+         (split-string text "\n" t))))
+
+(defun harness-ui-patch-review--read-revisions (dir)
+  "Return a promise of the revisions DIR offers the diff picker.
+It resolves to a plist: :entries, the branches, remote branches, tags
+and recent commits, in the order the picker offers them, each an entry
+as `harness-ui-patch-review--parse-refs' makes them, and :head, HEAD's
+short commit.  What git cannot read is left out -- an empty repository
+offers no revision -- and what the reviewer types is still taken."
+  (harness-then
+   (harness-all
+    (list
+     (harness-catch
+      (harness-ui-patch-review--git
+       dir "for-each-ref" "--sort=refname"
+       (concat "--format=" harness-ui-patch-review--ref-format)
+       "refs/heads" "refs/remotes" "refs/tags")
+      (lambda (_) ""))
+     (harness-catch
+      (harness-ui-patch-review--git
+       dir "log" "--no-color" "--no-decorate" "-n"
+       (number-to-string harness-ui-patch-review--recent-revisions)
+       "--format=%h\x1f%ct\x1f%s" "--all")
+      (lambda (_) ""))
+     (harness-catch
+      (harness-ui-patch-review--git dir "rev-parse" "--short" "HEAD")
+      (lambda (_) ""))))
+   (lambda (outputs)
+     (let ((seen (make-hash-table :test 'equal))
+           (entries nil)
+           (head (string-trim (harness-ui-patch-review--decode (nth 2 outputs)))))
+       (dolist (entry (append
+                       (harness-ui-patch-review--parse-refs
+                        (harness-ui-patch-review--decode (nth 0 outputs)))
+                       (harness-ui-patch-review--parse-recent-commits
+                        (harness-ui-patch-review--decode (nth 1 outputs)))))
+         (unless (gethash (car entry) seen)
+           (puthash (car entry) t seen)
+           (push entry entries)))
+       (list :entries (nreverse entries)
+             :head (and (not (string-empty-p head)) head))))))
+
+(defun harness-ui-patch-review--fetch-revisions (dir &optional force)
+  "Start reading DIR's revisions for the diff picker, unless they are fresh.
+Return a promise of the reading.  One under way is returned as it is, and
+one read less than `harness-ui-patch-review--revision-cache-seconds' ago
+is not read again unless FORCE.  A failed reading leaves what was read
+before, and is tried again later."
+  (when (and (stringp dir) (file-directory-p dir))
+    (let* ((dir (file-name-as-directory (expand-file-name dir)))
+           (cache (gethash dir harness-ui-patch-review--revision-cache))
+           (fresh (and (plist-get cache :fetched)
+                       (< (- (float-time) (plist-get cache :fetched))
+                          harness-ui-patch-review--revision-cache-seconds))))
+      (cond
+       ((and (not force) (plist-get cache :promise))
+        (plist-get cache :promise))
+       ((and (not force) fresh)
+        (harness-resolved cache))
+       (t
+        (let ((promise (harness-make-promise)))
+          ;; The promise is in the cache before the reading starts, so
+          ;; that a reading that answers at once still updates it.
+          (setf (gethash dir harness-ui-patch-review--revision-cache)
+                (list :entries (plist-get cache :entries)
+                      :head (plist-get cache :head)
+                      :promise promise))
+          (harness-then
+           (harness-ui-patch-review--read-revisions dir)
+           (lambda (read)
+             (when (eq promise
+                       (plist-get (gethash dir harness-ui-patch-review--revision-cache) :promise))
+               (setf (gethash dir harness-ui-patch-review--revision-cache)
+                     (list :entries (plist-get read :entries)
+                           :head (plist-get read :head)
+                           :fetched (float-time))))
+             (harness-resolve promise read))
+           (lambda (err)
+             (harness-log 'debug "patch review: could not read the revisions of %s: %s"
+                          (abbreviate-file-name dir) (harness-error-message err))
+             ;; What was read before stays; it is read again later.
+             (let ((current (gethash dir harness-ui-patch-review--revision-cache)))
+               (when (eq promise (plist-get current :promise))
+                 (setf (gethash dir harness-ui-patch-review--revision-cache)
+                       (list :entries (plist-get current :entries)
+                             :head (plist-get current :head)
+                             :fetched (float-time)))))
+             (harness-resolve promise nil)))
+          promise))))))
+
+(defun harness-ui-patch-review--revision-directory (review)
+  "Return the directory the revisions of REVIEW are read in, or nil."
+  (when-let* ((dir (or (harness-ui-patch-review--r-dir review)
+                       (harness-ui-patch-review--repository
+                        (harness-ui-patch-review--r-task review)))))
+    (file-name-as-directory (expand-file-name dir))))
+
+(defun harness-ui-patch-review--revision-entries (review)
+  "Return what the diff picker offers for REVIEW, in the order it offers it.
+That is the task's branch, the branch it was made from, HEAD, then the
+repository's branches, remote branches, tags and recent commits, each
+with the commit and date it names when they are known.  The repository
+is read in the background; what it has not said yet is left out until it
+is asked again."
+  (let* ((dir (harness-ui-patch-review--revision-directory review))
+         (cache (and dir (progn (harness-ui-patch-review--fetch-revisions dir)
+                                (gethash dir harness-ui-patch-review--revision-cache))))
+         (git (plist-get cache :entries))
+         (head-sha (plist-get cache :head))
+         (by-name (make-hash-table :test 'equal))
+         (seen (make-hash-table :test 'equal))
+         (entries nil))
+    (dolist (entry git) (puthash (car entry) entry by-name))
+    (cl-labels
+        ((add (name kind note &optional detail)
+           (when (and (stringp name) (not (string-empty-p name))
+                      (not (gethash name seen)))
+             (puthash name t seen)
+             (let ((found (or detail (gethash name by-name))))
+               (push (append (list name :kind kind :note note)
+                             (and found
+                                  (list :sha (plist-get (cdr found) :sha)
+                                        :subject (plist-get (cdr found) :subject)
+                                        :time (plist-get (cdr found) :time))))
+                     entries)))))
+      (add (or (harness-ui-patch-review--r-branch review)
+               (plist-get (harness-ui-patch-review--r-task review) :branch))
+           'task "this task's branch")
+      (add (or (harness-ui-patch-review--r-base review)
+               (plist-get (harness-ui-patch-review--r-task review) :base))
+           'base "the branch it was made from")
+      (add "HEAD" 'head "checked out"
+           (and head-sha
+                (cl-find head-sha git
+                         :key (lambda (entry) (plist-get (cdr entry) :sha))
+                         :test #'equal))))
+    (dolist (kind '(branch remote tag commit))
+      (dolist (entry git)
+        (when (and (eq (plist-get (cdr entry) :kind) kind)
+                   (not (gethash (car entry) seen)))
+          (puthash (car entry) t seen)
+          (push entry entries))))
+    (nreverse entries)))
+
+(defun harness-ui-patch-review--revision-completion-prefix (string)
+  "Return the part of STRING before the revision being typed.
+That is everything through the last `..', `...' or space: the first side
+of a range, so the second completes."
+  (let ((start 0) (end 0))
+    (while (string-match "\\(?:\\.\\.\\.?\\|[ \t]+\\)" string start)
+      (setq end (match-end 0)
+            start (match-end 0)))
+    (substring string 0 end)))
+
+(defun harness-ui-patch-review--revision-tail (string)
+  "Return the last revision named in STRING, after any `..', `...' or space."
+  (let ((start 0))
+    (while (string-match "\\(?:\\.\\.\\.?\\|[ \t]+\\)" string start)
+      (setq start (match-end 0)))
+    (substring string start)))
+
+(defun harness-ui-patch-review--revision-completions (entries string)
+  "Return the completions of ENTRIES for STRING, in their order.
+The revision being typed completes, the rest of a range left as it is."
+  (let ((prefix (harness-ui-patch-review--revision-completion-prefix string)))
+    (mapcar (lambda (entry) (concat prefix (car entry))) entries)))
+
+(defun harness-ui-patch-review--revision-note (entry)
+  "Return what ENTRY is, in words for the completion list."
+  (or (plist-get (cdr entry) :note)
+      (pcase (plist-get (cdr entry) :kind)
+        ('branch "branch")
+        ('remote "remote branch")
+        ('tag "tag")
+        ('commit "commit")
+        (_ nil))))
+
+(defun harness-ui-patch-review--revision-annotation (candidate entries)
+  "Return what to say after CANDIDATE, a revision of ENTRIES, or nil.
+It is what the revision is, its short commit, subject and when it was
+made: \"  this task's branch · 1c9e4a0 Fix it · 2h ago\"."
+  (let* ((entry (assoc (harness-ui-patch-review--revision-tail candidate) entries))
+         (kind (plist-get (cdr entry) :kind)))
+    (when entry
+      (let ((bits (delq nil
+                        (list (harness-ui-patch-review--revision-note entry)
+                              (and (not (eq kind 'commit))
+                                   (harness-ui-patch-review--not-empty
+                                    (plist-get (cdr entry) :sha)))
+                              (harness-ui-patch-review--not-empty
+                               (plist-get (cdr entry) :subject))
+                              (and (numberp (plist-get (cdr entry) :time))
+                                   (harness-relative-time
+                                    (plist-get (cdr entry) :time)))))))
+        (when bits (concat "  " (string-join bits " · ")))))))
+
+(defun harness-ui-patch-review--revision-table (entries-function)
+  "Return a completion table over the revisions ENTRIES-FUNCTION returns.
+The text before the revision being typed -- the first side of a range,
+its `..', `...' or space -- is kept, so that the other side completes.
+Metadata annotates each revision with what it is."
+  (lambda (string pred action)
+    (if (eq action 'metadata)
+        `(metadata (category . harness-patch-review-revision)
+                   (annotation-function
+                    . ,(lambda (candidate)
+                         (harness-ui-patch-review--revision-annotation
+                          candidate (funcall entries-function))))
+                   (display-sort-function . identity)
+                   (cycle-sort-function . identity))
+      (complete-with-action
+       action
+       (harness-ui-patch-review--revision-completions
+        (funcall entries-function) string)
+       string pred))))
+
+(add-to-list 'completion-category-defaults
+             '(harness-patch-review-revision (styles basic substring)))
+
 (defconst harness-ui-patch-review--no-earlier-review
   "No earlier review of this task is known to compare with"
   "What is said when the diff since the last review is asked for and there is none.")
@@ -1744,6 +2063,9 @@ next reading, unless KEEP-SELECTION-ERROR.  Return a promise of REVIEW."
          (worktree (let ((wt (plist-get task :worktree)))
                      (and (stringp wt) (not (file-remote-p wt)) (file-directory-p wt) wt)))
          (token (list 'loading)))
+    ;; Read what the diff picker offers while the branch is read, so that
+    ;; choosing another diff finds the revisions there already.
+    (when dir (harness-ui-patch-review--fetch-revisions dir))
     (setf (harness-ui-patch-review--r-loading review) token
           (harness-ui-patch-review--r-error review) nil)
     (unless keep-selection-error
@@ -2207,7 +2529,10 @@ or on its card on the board."
       (error (harness-log 'warn "patch review: could not end Ediff: %S" err)))
     (dolist (buffer (harness-ui-patch-review--ediff-buffers snapshot))
       (when (buffer-live-p buffer) (kill-buffer buffer))))
-  (clrhash (harness-ui-patch-review--r-snapshots review)))
+  (clrhash (harness-ui-patch-review--r-snapshots review))
+  ;; The revisions the picker read for its repository go with it.
+  (when-let* ((dir (harness-ui-patch-review--revision-directory review)))
+    (remhash dir harness-ui-patch-review--revision-cache)))
 
 ;;;; Where the threads are now
 
@@ -3452,20 +3777,52 @@ revisions, which is kept trimmed; one that cannot be right signals a
         ((stringp choice) (harness-ui-patch-review--parse-spec choice) (string-trim choice))
         (t choice)))
 
+(defun harness-ui-patch-review--default-spec (review)
+  "Return the diff the revision picker offers when nothing is typed.
+That is the task branch against the branch it was made from, when the
+two are known and differ; else nil."
+  (let ((base (or (harness-ui-patch-review--r-base review)
+                  (plist-get (harness-ui-patch-review--r-task review) :base)))
+        (branch (or (harness-ui-patch-review--r-branch review)
+                    (plist-get (harness-ui-patch-review--r-task review) :branch))))
+    (and (stringp base) (stringp branch)
+         (not (string-empty-p base)) (not (string-empty-p branch))
+         (not (equal base branch))
+         (format "%s..%s" base branch))))
+
 (defun harness-ui-patch-review--read-spec (review)
   "Read in the minibuffer revisions of REVIEW's repository to show a diff of.
-They are as `harness-ui-patch-review--parse-spec' takes them; the ones
-the report shows are what an empty answer takes."
-  (let ((current (and (stringp (harness-ui-patch-review--r-selector review))
-                      (harness-ui-patch-review--r-selector review))))
-    (read-string (format-prompt "Diff of revisions (A..B, A...B, A B, or A against the branch)" current)
-                 nil 'harness-ui-patch-review--spec-history current)))
+The task's branch and the branch it was made from, HEAD, the
+repository's branches, remote branches, tags and recent commits
+complete, each annotated with the commit it names.  After `..', `...'
+or a space the other side of the range completes too, so that
+\"main...\" offers the branches it could be compared from.  None of the
+candidates is required: any diff `harness-ui-patch-review--parse-spec'
+takes -- A..B, A...B, A B, A, HEAD~3 -- is read as it is typed.  An
+empty answer is the diff shown now, else the branch against the branch
+it was made from."
+  (let* ((current (and (stringp (harness-ui-patch-review--r-selector review))
+                       (harness-ui-patch-review--r-selector review)))
+         (default (or current (harness-ui-patch-review--default-spec review)))
+         (answer (completing-read
+                  (format-prompt
+                   "Diff revisions (TAB completes branches, tags and commits; A..B, A...B, A B, or A against the branch)"
+                   default)
+                  (harness-ui-patch-review--revision-table
+                   (lambda () (harness-ui-patch-review--revision-entries review)))
+                  nil nil current 'harness-ui-patch-review--spec-history default)))
+    (string-trim answer)))
 
 (defun harness-ui-patch-review--read-selector (review)
   "Read in the minibuffer which diff REVIEW's report shows.
 The answer is `base', `since-review' or, for revisions the reviewer
-types, a string.  The three are offered in this order, with the one
-shown now as the default."
+chooses or types, a string.  The three are offered in this order, with
+the one shown now as the default; the last asks with
+`harness-ui-patch-review--read-spec', which completes the repository's
+revisions."
+  ;; Read the revisions while the three are chosen, so the picker has them.
+  (when-let* ((dir (harness-ui-patch-review--revision-directory review)))
+    (harness-ui-patch-review--fetch-revisions dir))
   (let* ((choices (mapcar (lambda (choice)
                             (cons (car (harness-ui-patch-review--choice-text review choice)) choice))
                           '(base since-review other)))
@@ -3489,10 +3846,12 @@ branch it was made from, what merging it brings in, which the report
 starts with; the branch since its last review, what changed since the
 work was last handed in; or any revisions of the repository, as `git
 diff' takes them -- A..B, A...B (from the merge base of A and B), A B, or
-A alone, against the branch -- from a prompt of their own.  The files,
-their counts, Ediff and the threads follow the choice, which a report
-keeps until another is made; one that cannot be read says why and leaves
-the diff shown as it is.
+A alone, against the branch -- from a prompt of their own that completes
+the branches, remote branches, tags and recent commits, either side of a
+range, and takes any diff typed as it is.  The files, their counts, Ediff
+and the threads follow the choice, which a report keeps until another is
+made; one that cannot be read says why and leaves the diff shown as it
+is.
 
 From Lisp SELECTOR is `base', `since-review' or a string of revisions,
 and REVIEW the review whose report it is for, by default the one at
@@ -3840,7 +4199,7 @@ CHOICE is `base', `since-review' or `other'."
      (let ((spec (and (stringp (harness-ui-patch-review--r-selector review))
                       (harness-ui-patch-review--r-selector review))))
        (list (if spec (format "Other: %s" spec) "Other…")
-             "Any revisions of the repository: A..B, A...B (from the merge base), A B, or A for A against the branch")))))
+             "Any revisions of the repository: branches, remote branches, tags and recent commits complete, as do the two sides of A..B and A...B (from the merge base); A B, or A for A against the branch, is taken as typed")))))
 
 (defun harness-ui-patch-review--choice-current (review)
   "Return which of the diffs REVIEW's report can show the reviewer chose."
@@ -3862,7 +4221,8 @@ CHOICE is `base', `since-review' or `other'."
   "Return the line that chooses the diff REVIEW's report shows.
 Three buttons, the one chosen marked: the task's branch against the
 branch it was made from, the branch since its last review, and any
-revisions the reviewer types.  \\<harness-ui-patch-review--heading-map>\
+revisions the reviewer chooses from the repository or types.
+\\<harness-ui-patch-review--heading-map>\\
 \\[harness-ui-patch-review-select-diff] chooses from the keyboard.  The
 line ends in a newline."
   (harness-ui-patch-review--add-keymap
