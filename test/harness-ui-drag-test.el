@@ -364,7 +364,8 @@ the image, and the image is a file there."
                 (let ((pos (text-property-any (point-min) (point-max) 'harness-ui-drag t)))
                   (should pos)
                   (should (eq 'image (car-safe (get-text-property pos 'display))))
-                  (should (equal (concat "image/png; " harness-ui-drag-hint) (get-text-property pos 'help-echo)))
+                  (should (equal (concat "image/png; + - zoom, 0 fits, 1 actual size; " harness-ui-drag-hint)
+                                 (get-text-property pos 'help-echo)))
                   ;; Drawing it asked the harness where such images go.
                   (harness-test-wait (lambda () (stringp (gethash sid harness-ui-drag--session-dirs)))
                                      5 "the session's directory")
@@ -466,7 +467,8 @@ A click on the name still opens it."
         (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
           (let ((s (harness-ui-image-string file "image/png")))
             (should (equal file (get-text-property 0 'harness-ui-drag s)))
-            (should (equal (format "mouse-1 or RET: open %s; %s" file harness-ui-drag-hint)
+            (should (equal (format "mouse-1 or RET: open %s; + - zoom, 0 fits, 1 actual size; %s"
+                           file harness-ui-drag-hint)
                            (get-text-property 0 'help-echo s)))
             (should (lookup-key (get-text-property 0 'keymap s) (kbd "RET")))))))))
 

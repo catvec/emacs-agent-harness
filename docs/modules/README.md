@@ -466,5 +466,6 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `window-configuration-change-hook` |  | [ui-insights](ui-insights.md), [ui-slots](ui-slots.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md) |
 | `window-scroll-functions` |  | [ui-chat](ui-chat.md) |
 | `window-size-change-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-patch-review](ui-patch-review.md), [ui-pet](ui-pet.md), [ui-tasks](ui-tasks.md) |
+| `window-state-change-functions` |  | `image-viewer.el` |
 | `worktree-assume-change-functions` | `worktree-assume.el` | [ui-worktree](ui-worktree.md) |
 

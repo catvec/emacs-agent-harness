@@ -1209,46 +1209,21 @@ here.  Nil when ATT is not media, or the media module is not loaded."
       (_ nil))))
 (defun harness-chat--image-string (source &optional mime)
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
-MIME is a hint for the image type.  It is drawn in
-`harness-ui-image-colors'.  The image can be dragged into another
-application as a file, one held in memory written to the session's
-temporary directory first (`harness-ui-drag-props').  Without image
-support, and for a path on a remote host, which reading here would
-block on, a button opening the file is returned instead.  An image too
-large for Emacs to draw (`harness-ui-image-too-large') is a line saying
-so, a button opening it outside Emacs."
-  (let* ((path (and (stringp source) source))
-         (data (and (consp source) (plist-get source :data)))
-         (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
-         (local (and path (not (file-remote-p path))))
-         (open (and path (lambda () (interactive) (find-file-other-window path))))
-         (w (car (harness-chat--windows)))
-         (frame (and w (window-frame w)))
-         (drawable (and (display-images-p frame) (or data (and local (file-readable-p path)))))
-         (too-large (and drawable (harness-ui-image-too-large source frame)))
-         (img (and drawable (not too-large)
-                   (let ((width (floor (* 0.6 (if w (window-body-width w t) 800)))))
-                     (condition-case nil
-                         (apply #'create-image (if data (base64-decode-string data) path) nil (and data t)
-                                :max-width width :max-height harness-chat--image-max-height
-                                (harness-ui-image-color-props))
-                       (error nil))))))
-    (cond
-     (img (concat (apply #'propertize label 'display img
-                         (harness-ui-drag-props
-                          (list 'pointer 'hand
-                                'help-echo (if open (format "mouse-1 or RET: open %s" path) mime)
-                                'keymap (and open (harness-chat--mouse-map open)))
-                          path))
-                  "\n"))
-     ((and too-large path)
-      (concat (harness-chat--button (harness-ui-image-too-large-label label too-large)
-                                    (harness-ui-open-image-outside path)
-                                    :help (format "Open %s outside Emacs" path))
-              "\n"))
-     (too-large (concat (propertize (harness-ui-image-too-large-label label too-large) 'face 'harness-dim-face) "\n"))
-     (open (concat (harness-chat--button label open :help (format "Open %s" path)) "\n"))
-     (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
+MIME is a hint for the image type.  It takes 60% of the chat window's
+width and `harness-chat--image-max-height' pixels high at most, and
+zooms where it is: + and - (or C-wheel) zoom it, 0 fits it, 1 shows it
+at its own size.  A click or RET opens it larger, in the image popout
+when that module is loaded.  Without image support, and for a path on
+a remote host, which reading here would block on, a button opening the
+file is returned instead.  An image too large for Emacs to draw is a
+line saying so, a button opening it outside Emacs."
+  (let* ((w (car (harness-chat--windows)))
+         (width (floor (* 0.6 (if w (window-body-width w t) 800))))
+         (string (harness-ui-image-string
+                  source mime
+                  :max-width width
+                  :max-height harness-chat--image-max-height)))
+    (if (string-suffix-p "\n" string) string (concat string "\n"))))
 
 (defun harness-chat--file-button (path name size)
   "Return a button line opening PATH, labelled NAME with SIZE bytes."

@@ -186,16 +186,27 @@ a permission's y and n.
   "Return the header line: the title, then a [close] button.
 A popout opened from another one, which closing shows again, has a
 [back] button instead."
-  (let ((parent (harness-ui-popout--parent-buffer (current-buffer))))
-    (concat " " (propertize (harness-ui-popout--title-text) 'face 'harness-label-face)
-            "   "
-            (propertize (if parent "[back]" "[close]")
-                        'face 'harness-dim-face 'mouse-face 'mode-line-highlight
-                        'help-echo (if parent
-                                       (format "Back to %s (q)"
-                                               (with-current-buffer parent (harness-ui-popout--title-text)))
-                                     "Close this popout (q)")
-                        'keymap (harness-ui-mouse-keymap #'harness-ui-popout-quit)))))
+  (let* ((parent (harness-ui-popout--parent-buffer (current-buffer)))
+         ;; Point is not on the image when it first shows, or once a click
+         ;; put it elsewhere: the popout's image is the first in the buffer.
+         (status (let ((at-point (harness-ui-image-status)))
+                   (if (string-empty-p at-point)
+                       (harness-ui-image-status (point-min))
+                     at-point))))
+    ;; The status has a % in it, as a title may: a mode line reads one as
+    ;; the start of a construct, and would drop it with the word after it.
+    (harness-ui-mode-line-escape
+     (concat " " (propertize (harness-ui-popout--title-text) 'face 'harness-label-face)
+             "   "
+             (if (string-empty-p status) ""
+               (concat (propertize status 'face 'harness-dim-face) "   "))
+             (propertize (if parent "[back]" "[close]")
+                         'face 'harness-dim-face 'mouse-face 'mode-line-highlight
+                         'help-echo (if parent
+                                        (format "Back to %s (q)"
+                                                (with-current-buffer parent (harness-ui-popout--title-text)))
+                                      "Close this popout (q)")
+                         'keymap (harness-ui-mouse-keymap #'harness-ui-popout-quit))))))
 
 (defun harness-ui-popout--title-text ()
   "Return the title as text."
@@ -658,11 +669,12 @@ The opener is ui-media's (`harness-ui-media-open'): xdg-open, mpv or open."
 Return the popout's buffer.  The image fills the frame's width or up to
 `harness-ui-popout-image-max-height' of its height: a larger one is
 scaled down, a smaller one up, by `harness-ui-popout-image-max-scale'
-at most.  Emacs's image keys work on it: i + and i - (or C-wheel) zoom
-it and i r turns it; g fits it again.  Under it, its name, its size and
-how large it shows, and [Open externally] for the desktop's viewer.
-Dragging the image drops FILE into another application
-\(`harness-ui-drag-region').
+at most.  It fits the popout and zooms where it is: + and - (or the
+wheel) zoom it, 0 fits it, 1 shows it at 100%, and the header line says
+how it shows.  Under it, its name and size, [Open externally] for the
+desktop's viewer and [View in a window] for a viewer of its own, which
+closes the popout and takes the room it gives back.  Dragging the image
+drops FILE into another application (`harness-ui-drag-region').
 
 PROPS:
   :title TITLE  the header's title, by default the file's name.
@@ -675,13 +687,6 @@ PROPS:
                             (lambda () (harness-ui-popout--insert-image file))
                             :parent (plist-get props :parent)
                             :max-height harness-ui-popout-image-max-height)))
-
-(defun harness-ui-popout--image-size (file)
-  "Return (WIDTH . HEIGHT) of the image FILE, in its own pixels, or nil."
-  (when-let* ((probe (ignore-errors (create-image file nil nil :scale 1))))
-    (prog1 (ignore-errors (image-size probe t))
-      ;; Only measured: it shows scaled, which is another image.
-      (ignore-errors (image-flush probe t)))))
 
 (defun harness-ui-popout--insert-image (file)
   "Insert the image FILE as large as this popout shows it, and a line on it.
@@ -702,35 +707,33 @@ draw, reads as it does there: a line saying so."
 
 (defun harness-ui-popout--draw-image (file)
   "Insert the image FILE as large as this popout shows it, and a line on it.
-A remote file is never read, which would block: it can be opened."
+The image fits the popout, and zooms where it is: its keys are the
+viewer's, the plain wheel included.  A remote file is never read, which
+would block: it can be opened."
   (let* ((local (not (file-remote-p file)))
          (frame (harness-ui-popout--frame))
          (readable (and local (file-readable-p file)))
          (graphic (display-images-p frame))
-         ;; Measured from its header: loading it to measure it would fail.
          (too-large (and readable graphic (harness-ui-image-too-large file frame)))
-         (natural (and readable graphic (not too-large) (harness-ui-popout--image-size file)))
-         (image (and natural
-                     (ignore-errors
-                       ;; Scaled up by the most it may be, then down to
-                       ;; the box, the max sizes being hard limits: it
-                       ;; fills the box either way.  A column to spare:
-                       ;; an image as wide as the window would wrap.
-                       (apply #'create-image file nil nil
-                              :scale (* harness-ui-popout-image-max-scale
-                                        (image-compute-scaling-factor image-scaling-factor))
-                              :max-width (max 1 (- (harness-ui-popout-pixel-width) (frame-char-width)))
-                              :max-height (harness-ui-popout-pixel-height 2)
-                              (harness-ui-image-color-props)))))
-         (shown (and image (ignore-errors (image-size image t))))
+         (natural (and readable (image-viewer-pixel-size file)))
+         (start (point))
+         (image (and readable graphic (not too-large)
+                     (harness-ui-image-insert
+                      file
+                      :label (format "[image %s]" (abbreviate-file-name file))
+                      :max-width (max 1 (- (harness-ui-popout-pixel-width)
+                                           (frame-char-width)))
+                      :max-height (harness-ui-popout-pixel-height 2)
+                      :max-scale harness-ui-popout-image-max-scale
+                      :frame frame
+                      :wheel t
+                      :help-echo (harness-ui-one-line
+                                  (format "%s; + - zoom (or the wheel), 0 fits, 1 shows it at 100%%"
+                                          (abbreviate-file-name file))))))
          (bytes (and readable (harness-file-size file))))
     (cond
      (image
-      ;; `insert-image' gives it Emacs's image keys (`image-map'), and
-      ;; it drags into another application as the file it shows.
-      (let ((start (point)))
-        (insert-image image (format "[image %s]" (abbreviate-file-name file)))
-        (harness-ui-drag-region start (point) file))
+      (harness-ui-drag-region start (point) file)
       (insert "\n"))
      ((not local)
       (insert (propertize "A remote image is not read here: open it to see it.\n" 'face 'harness-dim-face)))
@@ -746,17 +749,24 @@ A remote file is never read, which would block: it can be opened."
     (setq natural (or natural too-large))
     (insert " " (propertize (file-name-nondirectory file) 'face 'bold)
             (propertize (concat (if natural (format "  %d×%d" (car natural) (cdr natural)) "")
-                                (if (and natural shown (/= (car shown) (car natural)))
-                                    (format ", shown at %d%%" (round (* 100.0 (car shown)) (car natural)))
-                                  "")
                                 (if bytes (concat "  ·  " (harness-format-bytes bytes)) ""))
                         'face 'harness-dim-face)
             "   ")
     (harness-ui-button "[Open externally]" (lambda () (harness-ui-popout-open-file file))
                        :help "Open it in the desktop's image viewer")
+    (insert "   ")
+    (harness-ui-button "[View in a window]"
+                       (lambda ()
+                         ;; The viewer takes a window of the main area: the
+                         ;; popout gives the frame back once it shows.  The
+                         ;; key is read here, before the viewer is current.
+                         (let ((key harness-ui-popout-key))
+                           (harness-ui-image-view file t)
+                           (harness-ui-popout-close key)))
+                       :help "View it in another window, with the zoom keys")
     (insert "\n")
     (when image
-      (insert (propertize (concat " i + and i - zoom (or C-wheel), g fits it again"
+      (insert (propertize (concat " + - zoom (or the wheel), 0 fits, 1 shows it at 100%, g fits it again"
                                   (if (harness-ui-drag-available-p) ", drag it into another application" ""))
                           'face 'harness-hint-face)
               "\n"))))

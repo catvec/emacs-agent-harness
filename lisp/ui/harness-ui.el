@@ -38,6 +38,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'image)
 (require 'icons)
 (require 'transient)
 (require 'harness-core)
@@ -48,6 +49,24 @@
 (require 'harness-files)
 (require 'harness-notifications-desktop)
 (require 'harness-ui-drag)
+
+;; image-viewer is in lisp/vendor/image-viewer, which the harness puts on
+;; `load-path' (`harness--setup-load-path').  An older harness reloading
+;; after an update, or a file loaded without harness.el, checks this file
+;; with the `load-path' it has: when the library is not found, look for it
+;; beside the file being compiled or loaded.
+(defvar byte-compile-current-file)
+(eval-and-compile
+  (unless (or (featurep 'image-viewer) (locate-library "image-viewer"))
+    (when-let* ((file (or (and (boundp 'byte-compile-current-file)
+                               (stringp byte-compile-current-file)
+                               byte-compile-current-file)
+                          load-file-name
+                          buffer-file-name))
+                (dir (expand-file-name "../vendor/image-viewer/" (file-name-directory file)))
+                ((file-directory-p dir)))
+      (add-to-list 'load-path dir))))
+(require 'image-viewer)
 
 (defvar harness-directory)
 
@@ -2575,6 +2594,59 @@ under a dark theme."
                  (cons :tag "Other colours" (color :tag "Foreground") (color :tag "Background")))
   :group 'harness-ui)
 
+(defvar harness-ui-image-open-function nil
+  "Function called with the file of an image to show it larger, or nil.
+An image the UI shows opens in another window without one.  A UI
+module that owns images sets it: the image popout, or a viewer of its
+own.")
+
+(defun harness-ui-image-open (file)
+  "Show the image FILE larger.
+A UI module that owns images answers through
+`harness-ui-image-open-function'.  Without one the image popout shows
+it when that module is loaded, else a buffer of `image-viewer-mode'."
+  (cond ((functionp harness-ui-image-open-function)
+         (funcall harness-ui-image-open-function file))
+        ((fboundp 'harness-ui-popout-image) (harness-ui-popout-image file))
+        (t (image-viewer-open file))))
+
+(defun harness-ui-image-view (file &optional other-window)
+  "View the image FILE in a window of its own, with the viewer's keys.
+With OTHER-WINDOW, show it in another window.  This is the full view an
+image popout offers as [View in a window]: the image fits the window
+and stays fitted as the window changes size."
+  (interactive (list (read-file-name "Image file: ") current-prefix-arg))
+  (image-viewer-open file other-window))
+
+(defcustom harness-ui-image-max-scale 1
+  "How far larger than its own pixels an image inline in a view may show.
+A popout image has its own limit, `harness-ui-popout-image-max-scale'."
+  :type 'number
+  :group 'harness-ui)
+
+(defun harness-ui-image-insert (source &rest props)
+  "Insert the image SOURCE at point, with the keys that zoom it.
+Return its image object, or nil when it cannot be shown.  SOURCE is a
+file name or a (:data BASE64) plist.  PROPS are those of
+`image-viewer-insert-image', with these defaults: an image inline in a
+view is enlarged at most `harness-ui-image-max-scale' times, and drawn
+in `harness-ui-image-colors'.  A popout that gives the wheel to the
+image passes `:wheel' non-nil."
+  (apply #'image-viewer-insert-image source
+         (append
+          (list :max-scale (or (plist-get props :max-scale)
+                               harness-ui-image-max-scale)
+                :wheel (plist-get props :wheel))
+          (harness-ui-image-color-props)
+          (cl-loop for (key value) on props by #'cddr
+                   unless (memq key '(:max-scale :wheel :foreground :background))
+                   append (list key value)))))
+
+(defun harness-ui-image-status (&optional pos)
+  "Return how the image at POS shows, for a header line, or \"\".
+POS defaults to point.  It reads like \"62% fit · 1200×800\"."
+  (or (ignore-errors (image-viewer-status-string pos)) ""))
+
 (defcustom harness-ui-image-load-delay 0.05
   "Seconds between drawing the images a view is loading.
 Drawing an image decodes it, which a full-size screenshot takes long
@@ -2877,42 +2949,52 @@ MIME is a hint for the image type.  PROPS may hold `:max-width' and
 most 60% of the width of the window showing the buffer and half its
 height, and never more than `harness-ui-image-max-height', so a short
 window, such as a BTW's, still shows it whole with the lines around
-it.  It is drawn in `harness-ui-image-colors'.  The image can be
-dragged into another application (`harness-ui-drag-props').  Without
-image support, and for a path on a remote host, which reading here
-would block on, a button opening the file is returned instead.  An
-image too large for Emacs to draw (`harness-ui-image-too-large') is a
-line saying so, a button opening it outside Emacs."
+it.  It is drawn in `harness-ui-image-colors'.  The image zooms where
+it is: + and - (or C-wheel) zoom it, 0 fits it, 1 shows it at its own
+size, and a small image is enlarged at most `harness-ui-image-max-scale'
+times to fill the room it has.  It can be dragged into another
+application (`harness-ui-drag-props').  Without image support, and for
+a path on a remote host, which reading here would block on, a button
+opening the file is returned instead.  An image too large for Emacs to draw
+\(`harness-ui-image-too-large') is a line saying so, a button opening
+it outside Emacs."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
+         (source (if (and data mime) (list :data data :mime mime) source))
          (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
          (local (and path (not (file-remote-p path))))
-         (open (and path (lambda () (interactive) (find-file-other-window path))))
+         ;; A file here opens larger; one on another host would block the
+         ;; popout that could not read it, so it opens as any file does.
+         (open (and path (lambda () (interactive)
+                           (if local
+                               (harness-ui-image-open path)
+                             (find-file-other-window path)))))
          ;; The window shows the image, so its frame is the one that
          ;; must draw images, not whichever frame happens to be selected.
          (w (car (get-buffer-window-list nil nil t)))
          (frame (and w (window-frame w)))
          (drawable (and (display-images-p frame) (or data (and local (file-readable-p path)))))
          (too-large (and drawable (harness-ui-image-too-large source frame)))
-         (img (and drawable (not too-large)
-                   (let ((width (or (plist-get props :max-width)
-                                    (floor (* 0.6 (if w (window-body-width w t) 800)))))
-                         (height (or (plist-get props :max-height)
-                                     (min harness-ui-image-max-height
-                                          (if w (/ (window-body-height w t) 2) harness-ui-image-max-height)))))
-                     (condition-case nil
-                         (apply #'create-image (if data (base64-decode-string data) path) nil (and data t)
-                                :max-width (max 1 width) :max-height (max 1 height)
-                                (harness-ui-image-color-props))
-                       (error nil))))))
+         (width (or (plist-get props :max-width)
+                    (floor (* 0.6 (if w (window-body-width w t) 800)))))
+         (height (or (plist-get props :max-height)
+                     (min harness-ui-image-max-height
+                          (if w (/ (window-body-height w t) 2) harness-ui-image-max-height))))
+         (help (if open
+                   (format "mouse-1 or RET: open %s; + - zoom, 0 fits, 1 actual size" path)
+                 (format "%s; + - zoom, 0 fits, 1 actual size" mime)))
+         (shown (and drawable (not too-large)
+                     (apply #'image-viewer-image-string source
+                            :label label
+                            :max-width (max 1 width)
+                            :max-height (max 1 height)
+                            :max-scale harness-ui-image-max-scale
+                            :keymap (and open (harness-ui-action-map open))
+                            :help-echo help
+                            :frame frame
+                            (harness-ui-image-color-props)))))
     (cond
-     (img (concat (apply #'propertize label 'display img
-                         (harness-ui-drag-props
-                          (list 'pointer 'hand
-                                'help-echo (if open (format "mouse-1 or RET: open %s" path) mime)
-                                'keymap (and open (harness-ui-action-map open)))
-                          path))
-                  "\n"))
+     (shown (concat (harness-ui-drag-source shown path) "\n"))
      ((and too-large path)
       (concat (harness-ui-action-button (harness-ui-image-too-large-label label too-large)
                                         (harness-ui-open-image-outside path)
@@ -2986,11 +3068,17 @@ the text around it was edited away -- is dropped without drawing."
              (place (marker-position start)))
         (when (and place (marker-position end)
                    (eq (get-text-property place 'harness-ui-image-loading) entry))
-          (let ((inhibit-read-only t) (buffer-undo-list t))
+          ;; Drawing happens a moment after the view showed, while the user
+          ;; reads or the point was left on the image about to be drawn:
+          ;; keep it where it was, through the text that comes and goes.
+          (let ((inhibit-read-only t) (buffer-undo-list t)
+                (stay (point-marker)))
             (goto-char start)
             (delete-region start end)
             (goto-char start)
-            (funcall (nth 2 entry)))
+            (funcall (nth 2 entry))
+            (goto-char stay)
+            (set-marker stay nil))
           (setq drawn t))))
     drawn))
 

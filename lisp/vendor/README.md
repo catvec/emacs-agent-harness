@@ -11,6 +11,7 @@ out](#splitting-a-library-out)).
 | [compose-quote](compose-quote/README.md) | not split out yet: this directory is its source | -- |
 | [change-review](change-review/README.md) | not split out yet: this directory is its source | -- |
 | [worktree-assume](worktree-assume/README.md) | not split out yet: this directory is its source | -- |
+| [image-viewer](image-viewer/README.md) | not split out yet: this directory is its source | -- |
 
 ## The rule
 

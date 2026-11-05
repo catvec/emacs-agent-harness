@@ -56,7 +56,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `tasks-held` | The task board with three tasks waiting in Pending that something holds back: one paused by hand (`[Resume]` first), one out of quota with when it resets, one over a budget | `harness-media-shot-tasks-held` |
 | `tasks-message` | The task board writing a message to a task's session: the box in its message colours | `harness-media-shot-tasks-message` |
 | `report` | The board with a task's report popped out, at its end: the chart it handed in, the test run it quotes, the review banner and the feedback box | `harness-media-shot-report` |
-| `report-image` | That chart, clicked: shown larger in a popout of its own | `harness-media-shot-report-image` |
+| `report-image` | That chart, clicked: shown larger in a popout of its own, its zoom and size in the header, [View in a window] and the zoom keys under it | `harness-media-shot-report-image` |
 | `sessions` | The session list | `harness-media-shot-sessions` |
 | `popout-permission` | The session list with a session's permission request popped out under it, summary and all, as wide as the `sessions` picture | `harness-media-shot-popout-permission` |
 | `popout-question` | The task board with a task's question popped out under it | `harness-media-shot-popout-question` |

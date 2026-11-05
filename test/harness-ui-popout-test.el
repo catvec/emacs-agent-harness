@@ -395,14 +395,30 @@ shows the other one there again, where it was."
               (harness-ui-popout-close (list 'image file))
               (should (harness-ui-popout-buffer '(test report)))
               (should (get-buffer-window (harness-ui-popout-buffer '(test report)))))
-            ;; With images, one that cannot be decoded says so, and is
-            ;; never read when it is remote.  An image is drawn after the
-            ;; popout shows, so the buffer is drawn out to see it.
+            ;; With images, the image shows, and its keys zoom it.  It is
+            ;; never read when it is remote.  It is drawn after the popout
+            ;; shows, so the buffer is drawn out to see it.
             (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
               (with-current-buffer (harness-ui-popout-image file)
                 (should (string-search "loading…" (buffer-string)))
                 (harness-ui-image-load-flush)
-                (should (string-search "cannot be shown here" (buffer-string))))
+                (should-not (string-search "cannot be shown here" (buffer-string)))
+                ;; Drawing the image a moment later leaves point on it, so
+                ;; its keys work without a click first.
+                (should (= (point) (point-min)))
+                (goto-char (point-min))
+                (should (eq (car-safe (get-text-property (point) 'display)) 'image))
+                (should (eq (lookup-key (get-text-property (point) 'keymap)
+                                        (kbd "+"))
+                            #'image-viewer-zoom-in))
+                (should (string-search "40×20" (buffer-string)))
+                (should (string-search "fit · 40×20"
+                                       (harness-ui-popout--header)))
+                ;; A mode line reads the header: the status's % is doubled,
+                ;; or the construct it would start eats it and the word
+                ;; after it.
+                (should (string-match-p "[0-9]+%% fit · 40×20"
+                                        (harness-ui-popout--header))))
               (let ((text (with-current-buffer (harness-ui-popout-image "/ssh:nowhere.invalid:/tmp/x.png")
                             (buffer-string))))
                 (should (string-search "remote image is not read here" text))))

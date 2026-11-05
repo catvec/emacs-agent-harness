@@ -394,33 +394,38 @@ RET on it, shows the image larger, as the image does
 
 (defun harness-ui-report--draw-image (path label)
   "Draw the image PATH, labelled LABEL, as large as the popout lets it be.
-It takes the popout's width and up to `harness-ui-report-image-max-height';
-clicking it, or RET on it, shows it larger still, in a popout of its
-own, and dragging it drops the file into another application
-\(`harness-ui-drag-source').  Without image support, and for a remote
-file, which reading here would block on, a button opening the file is
-inserted instead; so it is for an image too large for Emacs to draw
-\(`harness-ui-image-too-large'), which says so."
+It takes the popout's width and up to `harness-ui-report-image-max-height',
+and the viewer's keys zoom it where it is; clicking it, or RET on it,
+shows it larger still, in a popout of its own, and dragging it drops
+the file into another application (`harness-ui-drag-source').  Without
+image support, and for a remote file, which reading here would block
+on, a button opening the file is inserted instead; so it is for an
+image too large for Emacs to draw (`harness-ui-image-too-large'), which
+says so."
   (let* ((task harness-ui-report--task)
          (frame (harness-ui-report--image-frame))
          (readable (and (display-images-p frame) (not (file-remote-p path)) (file-readable-p path)))
          (too-large (and readable (harness-ui-image-too-large path frame)))
+         (view (let ((id (plist-get task :id))
+                     (title (harness-ui-report--title task)))
+                 (lambda () (interactive) (harness-ui-report--view-image path id title))))
+         (start (point))
          (image (and readable (not too-large)
-                     (ignore-errors
-                       (apply #'create-image path nil nil
-                              :max-width (harness-ui-report--image-width)
-                              :max-height (harness-ui-report--image-max-height)
-                              (harness-ui-image-color-props))))))
+                     (harness-ui-image-insert
+                      path
+                      :label label
+                      :max-width (harness-ui-report--image-width)
+                      :max-height (harness-ui-report--image-max-height)
+                      :max-scale 1
+                      :frame frame
+                      :keymap (harness-ui-mouse-keymap view)
+                      :help-echo (harness-ui-one-line
+                                  (format "%s; mouse-1 or RET: view it larger; + - zoom, 0 fits"
+                                          (abbreviate-file-name path)))))))
     (if image
-        (let ((view (let ((id (plist-get task :id))
-                          (title (harness-ui-report--title task)))
-                      (lambda () (interactive) (harness-ui-report--view-image path id title)))))
-          (insert (harness-ui-drag-source
-                   (propertize label 'display image 'pointer 'hand
-                               'help-echo (format "%s\nmouse-1 or RET: view it larger" (abbreviate-file-name path))
-                               'keymap (harness-ui-mouse-keymap view))
-                   path)
-                  "\n"))
+        (progn
+          (harness-ui-drag-region start (point) path)
+          (insert "\n"))
       (harness-ui-button (if too-large (harness-ui-image-too-large-label label too-large) label)
                          (lambda () (harness-ui-report--open-file path))
                          :help "Open the image")

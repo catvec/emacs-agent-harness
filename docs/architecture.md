@@ -675,8 +675,10 @@ the review of a task's changes, under Presentation contracts), and
 which reviews emailed patches as well; the third is `worktree-assume`,
 with which a task's worktree stands in for its project, so that the
 project's commands look at its files (see Assuming a task's worktree,
-under Presentation contracts).  lisp/vendor/README.md is the
-guide; the contract is this:
+under Presentation contracts); the fourth is `image-viewer`, with which
+the UI's images are fitted, zoomed and shown in a window of their own
+(see the images of a chat, a report and a popout, under Presentation
+contracts).  lisp/vendor/README.md is the guide; the contract is this:
 
 - A library needs nothing of the harness and never mentions it: no
   `harness` name, no `(require 'harness-...)`, not in a comment or a
@@ -706,8 +708,8 @@ guide; the contract is this:
   assumed (and wherever the library is not loaded at all).
 - A library the harness needs at start is in `harness--library-files`
   (compose-quote is, and the four files of change-review -- the model,
-  the diff, the mail and the UI -- after it, and worktree-assume's one
-  file last): it loads compiled before any module, and
+  the diff, the mail and the UI -- after it, worktree-assume's one file,
+  and image-viewer's one, last): it loads compiled before any module, and
   `harness-reload` checks it compiles and loads it again.  One that is
   only on `load-path` loads from its source on its first `require` and is
   not reloaded.  `harness-auto-reload-mode` watches the directories.
@@ -12094,7 +12096,26 @@ made is the error the panel shows, a connection let go of for another
 (`harness-connect-remote`) has the next drawing ask that one, and an
 image the harness could not give is asked for again once the UI
 connects again (`harness-ui-pending--retry-images`, on
-`harness-ui-connected-hook`).  A permission panel whose one line of input leaves something
+`harness-ui-connected-hook`).
+
+Every image the UI draws also zooms where it is: `+` and `-` (or
+`C-wheel`, and the plain wheel in the image popout) zoom it, `0` puts it
+back where it fits, `1` shows it at its own size, `r` and `R` turn it,
+`H` and `V` flip it, and the state the keys change is a text property of
+the image's text, so a string drawn with `harness-ui-image-string` and
+the buffer it is put in share it.  The fitting and the keys are the
+vendored `image-viewer` (lisp/vendor/image-viewer, see Vendored
+libraries), which measures an image from its header and fits it to the
+pixels a view gives it, so the same drawing works in a chat, a report
+and a popout; `harness-ui-image-insert` is the harness's side of it,
+drawing in the UI's colours.  A click or RET on an image opens it larger
+in the image popout, whose header line says how it shows ("95% fit ·
+1616×665"), and [View in a window] there hands it to a buffer of
+`image-viewer-mode`, which fits it to a window of its own, keeps it
+fitted as that window changes size and walks the images beside it with
+`n` and `p`.
+
+A permission panel whose one line of input leaves something
 out (a value past its width, a further line of one, a line too long)
 ends that line in `[Show all]`, `[Show all N lines]` when values have
 lines it hides, and binds TAB on the panel

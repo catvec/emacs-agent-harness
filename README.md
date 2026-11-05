@@ -122,7 +122,7 @@ You can set the `harness-enabled-modules` variable to `t` in order to load all m
 A non-comprehensive list of all the different functionality offered by modules shipped with the harness:
 
 - Agentic sessions with tool use
-  - Image rendering
+  - Image rendering, with images that zoom where they are (`+` `-` or the wheel, `0` fits, `1` at 100%), open larger in an image popout, and view in a window of their own
   - Native image yank (paste) into message support (and drag-and-drop)
   - Native Emacs message editing experience
   - Auto-session naming
