@@ -72,10 +72,18 @@ the wake-up would reopen it.
 
 ## Provides
 
+### Methods
+
+- `event-watch/list` (session-id) — Return the event watches of SESSION-ID that live, oldest first.
+
 ### Tools
 
 - `unwatch_events` — Stop this session's event watches (watch_events): the one watch_id names, or every one. Says what each saw: the events that matched, how many the classifier decided on, and how many were dropped or coalesced.
 - `watch_events`
+
+### Events
+
+- `event-watch/changed` — (SESSION-ID WATCH-ID) when an event watch is made, sees an event, decides one, or ends.
 
 ### Options
 
@@ -95,6 +103,10 @@ the wake-up would reopen it.
 - `agent/turn-ended` → `harness-tools-events--on-turn-ended` at 90
 - `session/deleted` → `harness-tools-events--on-session-deleted` at 90
 - `task/deleted` → `harness-tools-events--on-task-deleted` at 90
+
+### Events it emits
+
+- `event-watch/changed`
 
 ### Filter chains it joins
 

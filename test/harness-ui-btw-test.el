@@ -66,6 +66,7 @@
 (declare-function harness-ui-request "harness-ui")
 (declare-function harness-ui-btw-close "harness-ui-btw")
 (declare-function harness-ui-btw-promote "harness-ui-btw")
+(declare-function harness-agent-running-p "harness-agent")
 (declare-function harness-chat-buffer "harness-ui-chat")
 (declare-function harness-chat--header "harness-ui-chat")
 (declare-function harness-compose-in-p "harness-ui-compose")
@@ -619,6 +620,80 @@ One holding a draft is kept, closed, with the draft."
           (should (buffer-live-p buffer))
           (should (equal "half a thought" (with-current-buffer buffer (harness-compose-text)))))))))
 
+(defconst harness-ui-btw-test--held
+  '((:type wait :seconds 60)
+    (:type text :delta "Never said.")
+    (:type done :stop-reason end-turn))
+  "A reply that waits a minute before it says a word: a turn the test holds.")
+
+(ert-deftest harness-ui-btw-c-c-c-k-interrupts-the-turn-and-keeps-the-btw ()
+  "C-c C-k cancels a BTW's running turn, as in every session; it does not close it.
+The BTW's window, its buffer's BTW mode and its session are as they were
+once the turn is over.  The keys of a BTW are the chat's, with C-c C-o
+to keep it."
+  (harness-ui-btw-test-with
+    (pcase-let ((`(,_parent . ,parent-window) (harness-ui-btw-test--open-session)))
+      (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
+             (buffer (window-buffer window))
+             (sid (buffer-local-value 'harness-ui-session-id buffer)))
+        (should (harness-ui-btw-test--ready-p window))
+        (with-current-buffer buffer
+          (should (eq 'harness-chat-cancel (key-binding (kbd "C-c C-k"))))
+          (should (eq 'harness-close-session (key-binding (kbd "C-c M-k"))))
+          (should (eq 'harness-ui-btw-promote (key-binding (kbd "C-c C-o")))))
+        (let ((harness-provider-demo-script-override harness-ui-btw-test--held))
+          (harness-ui-btw-test--ask window "a slow question")
+          (harness-test-wait (lambda () (harness-agent-running-p sid)) 5 "the turn to run")
+          (with-selected-window window
+            (call-interactively (key-binding (kbd "C-c C-k")))))
+        (harness-test-wait (lambda () (not (harness-agent-running-p sid))) 10 "the turn to be cancelled")
+        (harness-test-wait (lambda () (equal "idle" (format "%s" (plist-get (harness-ui-session sid) :status))))
+                           5 "the BTW to be idle")
+        ;; Still a BTW, open and shown, over the session it was opened over.
+        (should (window-live-p window))
+        (should (eq buffer (window-buffer window)))
+        (should (buffer-local-value 'harness-ui-btw-minor-mode buffer))
+        (should (gethash sid harness-ui-btw--open))
+        (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+        (should (equal '("a slow question") (harness-ui-btw-test--user-texts sid)))))))
+
+(ert-deftest harness-ui-btw-close-key-closes-it-as-the-button-does ()
+  "C-c M-k, every session's close key, closes a BTW as its [close] button does.
+One nothing was asked in is deleted with its buffer and the window goes back
+to the buffer it was opened over; one that was asked is closed, an idle
+session, and kept."
+  (harness-ui-btw-test-with
+    (pcase-let ((`(,parent . ,parent-window) (harness-ui-btw-test--open-session)))
+      ;; Blank: deleted.
+      (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
+             (buffer (window-buffer window))
+             (sid (buffer-local-value 'harness-ui-session-id buffer)))
+        (should (harness-ui-btw-test--ready-p window))
+        (with-selected-window window
+          (call-interactively (key-binding (kbd "C-c M-k"))))
+        (should-not (window-live-p window))
+        (should (eq parent-window (selected-window)))
+        (harness-ui-btw-test--wait-gone sid buffer)
+        (should (eq 'idle (plist-get (harness-call 'session/get parent) :status))))
+      ;; Asked: closed, and the buffer is a session's from then on.
+      (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
+             (buffer (window-buffer window))
+             (sid (buffer-local-value 'harness-ui-session-id buffer)))
+        (should (harness-ui-btw-test--ready-p window))
+        (harness-ui-btw-test--ask window "what was that?")
+        (harness-ui-btw-test--wait-reply sid)
+        (with-selected-window window
+          (call-interactively (key-binding (kbd "C-c M-k"))))
+        (should-not (window-live-p window))
+        (should (eq parent-window (selected-window)))
+        (harness-test-wait (lambda () (eq 'inactive (plist-get (harness-call 'session/get sid) :status)))
+                           5 "the BTW to be closed")
+        (should (buffer-live-p buffer))
+        (should-not (buffer-local-value 'harness-ui-btw-minor-mode buffer))
+        (should (harness-ui-btw-test--normal-header-p buffer))
+        ;; The session it was opened over is as it was.
+        (should (eq 'idle (plist-get (harness-call 'session/get parent) :status)))))))
+
 (ert-deftest harness-ui-btw-unused-board-btw-is-deleted ()
   "An unused BTW over the board, a fresh session, is deleted on close too."
   (harness-ui-btw-test-with
@@ -689,8 +764,9 @@ From Lisp a question can be asked at once; it names the BTW."
 (ert-deftest harness-ui-btw-replies-to-its-answer-in-a-thread ()
   "C-c > in a BTW starts a reply in a thread to its answer, as in a chat: a card in
 the box, point under it, and the words under the card are the reply.  A BTW is
-no task's session, so it has no review: what C-c C-c sends is the quote and the
-reply, as a mail has them.  A prefix argument changes nothing."
+no task's session, so it has no review: what C-c C-c sends is one <thread>
+block, the quote in <quote> and the words under it.  A prefix argument changes
+nothing."
   (harness-ui-btw-test-with
     (pcase-let ((`(,_parent . ,parent-window) (harness-ui-btw-test--open-session)))
       (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
@@ -702,14 +778,6 @@ reply, as a mail has them.  A prefix argument changes nothing."
         (harness-test-wait (lambda () (string-match-p "Two tasks are in progress"
                                                       (harness-ui-btw-test--buffer-text buffer)))
                            5 "the answer in the BTW")
-        (let* ((node (with-current-buffer buffer
-                       (cl-loop for id in harness-chat--order
-                                for block = (gethash id harness-chat--blocks)
-                                when (and block (string-search
-                                                 "Two tasks are in progress."
-                                                 (harness-chat--message-text block)))
-                                return (harness-chat-block-id block))))
-               (quoted (harness-test-quoted "Two tasks are in progress." node sid)))
         (with-selected-window window
           (should (eq 'harness-chat-thread-reply (key-binding (kbd "C-c >"))))
           ;; A prefix argument changes nothing: a card, and the reply under it.
@@ -726,11 +794,17 @@ reply, as a mail has them.  A prefix argument changes nothing."
           (execute-kbd-macro (kbd "C-c >"))
           (should (equal "\n[reply 1]\n" (harness-compose-text)))
           (should (= (point) harness-compose-end))
-          (execute-kbd-macro "Which two?")
-          (call-interactively (key-binding (kbd "C-c C-c"))))
-        (harness-test-wait (lambda () (= 2 (length (harness-ui-btw-test--user-texts sid)))) 5 "the reply sent")
-        (should (equal (concat quoted "Which two?")
-                       (cadr (harness-ui-btw-test--user-texts sid)))))))))
+          (let ((refs (harness-thread-refs (plist-get (car harness-compose-attachments) :thread))))
+            (should (equal '("Two tasks are in progress.")
+                           (mapcar (lambda (ref) (plist-get ref :text)) refs)))
+            (execute-kbd-macro "Which two?")
+            (call-interactively (key-binding (kbd "C-c C-c")))
+            (harness-test-wait (lambda () (= 2 (length (harness-ui-btw-test--user-texts sid)))) 5 "the reply sent")
+            ;; The model reads the quote with the link to the message it is of.
+            (should (equal (format (concat "<thread>\n<quote>Your earlier message (harness:session/%s/message/%s):"
+                                           "\n\nTwo tasks are in progress.</quote>\nWhich two?\n</thread>")
+                                   sid (plist-get (car refs) :node))
+                           (cadr (harness-ui-btw-test--user-texts sid))))))))))
 
 (defun harness-ui-btw-test--goto-tree-node (id)
   "Move point to the tree row of node ID."

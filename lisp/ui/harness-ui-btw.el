@@ -20,8 +20,11 @@
 ;; chat buffer, the full chat UI in another place: its settings line
 ;; (model, permission mode and the rest, all clickable) and header line
 ;; (with [menu]), keys and harness menu are a normal session's, with a
-;; BTW segment in front of the header and C-c C-k and C-c C-o to close
-;; or keep it.  It opens
+;; BTW segment in front of the header and C-c M-k and C-c C-o to close
+;; or keep it.  C-c M-k is every session's close key
+;; (`harness-close-session'), which closes a BTW as the header's [close]
+;; does; C-c C-k cancels the turn here as it does in any session, and
+;; does not close the BTW.  It opens
 ;; blank, with point in its compose box: the box every session has
 ;; (multi-line editing, @file and /skill completion, attachments), where
 ;; C-c C-c asks.  Its first message names it.  Closing the side window
@@ -267,9 +270,13 @@ It takes the position of the buffer it was opened over."
 
 (defvar harness-ui-btw-minor-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-k") #'harness-ui-btw-close)
     (define-key map (kbd "C-c C-o") #'harness-ui-btw-promote)
     map))
+
+;; C-c C-k closed the BTW once, over the chat's own cancel; it cancels the
+;; turn here too now.  The map is not redefined by a reload, so take it out.
+(when (eq (lookup-key harness-ui-btw-minor-mode-map (kbd "C-c C-k")) 'harness-ui-btw-close)
+  (define-key harness-ui-btw-minor-mode-map (kbd "C-c C-k") nil t))
 
 (defvar harness-ui-btw--close-map (harness-ui-mouse-keymap #'harness-ui-btw-close)
   "Keymap of the [close] button in the header line of a BTW.")
@@ -286,7 +293,7 @@ session's own header line through `harness-chat-header-functions'."
           (propertize (or harness-ui-btw--label "side conversation") 'face 'harness-dim-face)
           "  "
           (propertize "[close]" 'face 'button 'mouse-face 'mode-line-highlight
-                      'help-echo "Close and go back to where it was opened (C-c C-k)"
+                      'help-echo "Close and go back to where it was opened (C-c M-k)"
                       'local-map harness-ui-btw--close-map)
           " "
           (propertize "[keep]" 'face 'button 'mouse-face 'mode-line-highlight
@@ -297,10 +304,12 @@ session's own header line through `harness-chat-header-functions'."
 (define-minor-mode harness-ui-btw-minor-mode
   "Minor mode of a chat buffer shown as a BTW side conversation.
 The buffer stays a chat like any other, with the session's own header
-line, keys and harness menu.  The mode puts the BTW segment in front of
-the header line (what the conversation is about, [close] and [keep]),
-says what to ask in the empty compose box, and adds keys to close the
-BTW and to keep it as a normal session, over the chat's own:
+line, keys and harness menu: \\<harness-chat-mode-map>\\[harness-chat-cancel] cancels the running turn here as in any
+session, and \\[harness-close-session] closes the BTW (`harness-close-session' is
+`harness-ui-btw-close' in a BTW).  The mode puts the BTW segment in front
+of the header line (what the conversation is about, [close] and [keep]),
+says what to ask in the empty compose box, and adds a key to keep the BTW
+as a normal session, over the chat's own:
 
 \\{harness-ui-btw-minor-mode-map}
 Turned off, it leaves the buffer a normal session's."
@@ -315,12 +324,12 @@ Turned off, it leaves the buffer a normal session's."
   (force-mode-line-update)
   (harness-compose-update-placeholder))
 
-;; Its keys in the harness menu.  They beat the chat's own `C-c C-k'
-;; there, in the menu as in the buffer.
+;; Its key in the harness menu.  Closing is every session's key, the
+;; chat's own `C-c M-k' (`harness-close-session'), which the chat's group
+;; lists in a BTW too.
 (put 'harness-ui-btw-minor-mode 'harness-menu-group
      '("BTW"
        ["Side conversation"
-        ("C-c C-k" "Close" harness-ui-btw-close)
         ("C-c C-o" "Keep as session" harness-ui-btw-promote)]))
 
 (defun harness-ui-btw--init ()

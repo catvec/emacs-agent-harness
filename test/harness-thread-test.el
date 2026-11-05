@@ -25,7 +25,8 @@
   "The line that opens the quote of `harness-thread-test--chat'.")
 
 (defconst harness-thread-test--quoted-good
-  (concat "> " harness-thread-test--header "\n>\n> The build is green.\n\nGood.")
+  (concat "<thread>\n<quote>" harness-thread-test--header
+          "\n\nThe build is green.</quote>\nGood.\n</thread>")
   "The text of a reply, \"Good.\", to `harness-thread-test--chat'.")
 
 (defconst harness-thread-test--diff
@@ -33,36 +34,74 @@
     :text "(setq a18 'eighteen)\n(setq a19 19)")
   "A reference to two lines of a diff.")
 
-(ert-deftest harness-thread-quotes-the-references-the-way-a-mail-does ()
-  "The text of a reply is the quote of each reference, with a header that says
-where it is from and links the message, a blank line between two, the
-response, and the thread's marker once the thread is a comment in a review."
+(ert-deftest harness-thread-writes-one-thread-block ()
+  "The text of a reply is one <thread> block, not a mail's quote and a marker.
+The quote of each reference is in <quote>, with the header that says where
+it is from and links the message, a blank line between two; the response
+follows, and the tag carries the thread's id once it has one."
   (let ((data (list :refs (list harness-thread-test--chat) :response "Good.")))
-    (should (equal (concat "> " harness-thread-test--header "\n>\n> The build is green.\n\nGood.")
-                   (harness-thread-text data)))
-    (should (equal (concat "> " harness-thread-test--header
-                           "\n>\n> The build is green.\n\nGood.\n\n[thread t-1a2b: answer with review_comment]")
+    (should (equal harness-thread-test--quoted-good (harness-thread-text data)))
+    (should (equal (concat "<thread id=\"t-1a2b\">\n<quote>" harness-thread-test--header
+                           "\n\nThe build is green.</quote>\nGood.\n</thread>")
                    (harness-thread-text (append data (list :id "t-1a2b"))))))
-  ;; Several references: a quote each, and a multi-line quote line by line.
-  (should (equal (concat "> Your earlier message (harness:message/n-1):\n>\n> One.\n>\n> More.\n\n"
-                         "> Your earlier message (harness:message/n-2):\n>\n> Two.\n\nAll good.")
+  ;; Several references: a quote each, and a multi-line quote as it is.
+  (should (equal (concat "<thread>\n<quote>Your earlier message (harness:message/n-1):\n\nOne.\n\nMore.\n\n"
+                         "Your earlier message (harness:message/n-2):\n\nTwo.</quote>\nAll good.\n</thread>")
                  (harness-thread-text
                   (list :refs (list '(:kind "chat" :node "n-1" :who "agent" :text "One.\n\nMore.")
                                     '(:kind "chat" :node "n-2" :who "agent" :text "Two."))
                         :response "All good."))))
   ;; The user's own message, a diff and a buffer say where they are from.
-  (should (equal "> My earlier message (harness:message/n-3):\n>\n> Check it.\n\nDone."
+  (should (equal (concat "<thread>\n<quote>My earlier message (harness:message/n-3):\n\nCheck it.</quote>\n"
+                         "Done.\n</thread>")
                  (harness-thread-text (list :refs '((:kind "chat" :node "n-3" :who "you" :text "Check it."))
                                             :response "Done."))))
-  (should (equal (concat "> In lisp/a.el, lines 18-19 (after the change, at 01234567):\n>\n"
-                         "> (setq a18 'eighteen)\n> (setq a19 19)\n\nWhy a symbol?")
+  (should (equal (concat "<thread>\n<quote>In lisp/a.el, lines 18-19 (after the change, at 01234567):\n\n"
+                         "(setq a18 'eighteen)\n(setq a19 19)</quote>\nWhy a symbol?\n</thread>")
                  (harness-thread-text (list :refs (list harness-thread-test--diff) :response "Why a symbol?"))))
-  (should (equal "> In notes.txt, line 3:\n>\n> todo\n\nNo."
+  (should (equal (concat "<thread>\n<quote>In notes.txt, line 3:\n\ntodo</quote>\nNo.\n</thread>")
                  (harness-thread-text (list :refs '((:kind "buffer" :name "notes" :file "notes.txt" :line 3 :text "todo"))
                                             :response "No."))))
-  (should (equal "> In a.el, line 7 (before the change):\n>\n> x\n\nWhy?"
+  (should (equal (concat "<thread>\n<quote>In a.el, line 7 (before the change):\n\nx</quote>\nWhy?\n</thread>")
                  (harness-thread-text (list :refs '((:kind "diff" :file "a.el" :side "old" :line 7 :text "x"))
-                                            :response "Why?")))))
+                                            :response "Why?"))))
+  ;; A reply with no quote, as one to a whole message: the tag and the words.
+  (should (equal "<thread>\nGood.\n</thread>"
+                 (harness-thread-text (list :refs nil :response "Good.")))))
+
+(ert-deftest harness-thread-text-for-a-person-is-markdown ()
+  "WITHOUT-LINKS writes the reply for a person, as a mail has it: the quote
+line by line, no link to the message, no <thread> block.  A review comment's
+body and a copy of the quote are read by a person, not by the agent."
+  (let ((data (list :refs (list (append harness-thread-test--chat '(:session "s-1"))
+                                harness-thread-test--diff)
+                    :response "Good.")))
+    (should (equal (concat "> The build is green.\n\n"
+                           "> In lisp/a.el, lines 18-19 (after the change, at 01234567):\n>\n"
+                           "> (setq a18 'eighteen)\n> (setq a19 19)\n\nGood.")
+                   (harness-thread-text data t)))
+    (should-not (string-search "<thread" (harness-thread-text (append data (list :id "t-1")) t)))
+    (should-not (string-search "harness:session" (harness-thread-text data t)))))
+
+(ert-deftest harness-thread-marker-names-the-thread-in-the-tag ()
+  "A reply in a thread starts with the tag that names it, and so does the
+marker line of the feedback that sends a task back: <thread id=\"...\">.
+A tag with no id names a new thread.  The old [thread ...] line is still
+read, so a transcript written before the tag still names its thread, and a
+tag written in a fenced code block is an example: it names nothing."
+  (should (equal "<thread id=\"t-1a2b\">" (harness-thread-marker "t-1a2b")))
+  (should (equal "<thread>" (harness-thread-marker nil)))
+  (should (equal '("t-1a2b") (harness-thread-marker-ids (harness-thread-text
+                                                         (list :refs nil :response "x" :id "t-1a2b")))))
+  (should (equal '("t-1") (harness-thread-marker-ids "Before.\n<thread id=\"t-1\">\nAfter.")))
+  (should (equal '("t-2") (harness-thread-marker-ids "\n[thread t-2: answer with review_comment]\n")))
+  (should (equal '("t-1" "t-2")
+                 (harness-thread-marker-ids
+                  "<thread id=\"t-1\">\n<quote>Q</quote>\nA\n</thread>\n\n[thread t-2: answer with review_comment]")))
+  (should-not (harness-thread-marker-ids "<thread>\n<quote>Q</quote>\nA\n</thread>"))
+  (should-not (harness-thread-marker-ids "```\n<thread id=\"t-3\">\n```"))
+  (should-not (harness-thread-marker-ids "no thread at all"))
+  (should-not (harness-thread-marker-ids nil)))
 
 (ert-deftest harness-thread-quote-links-the-message-it-quotes ()
   "A quote of the chat names the message it is of, with the canonical link.
@@ -75,10 +114,9 @@ the reference does, else it is to a message of the session the reply is sent in.
     (should (equal (list :kind 'message :session "s-1f2e" :message "n-1")
                    (harness-links-parse (harness-thread-ref-link ref))))
     (should (equal "Your earlier message (harness:session/s-1f2e/message/n-1):" (harness-thread-ref-header ref)))
-    ;; In the text, quoted with the words: a reader that takes the quote
-    ;; apart finds it whole.
-    (should (equal (concat "> Your earlier message (harness:session/s-1f2e/message/n-1):\n>\n"
-                           "> The build is green.\n\nGood.")
+    ;; In the text, inside the quote: the agent reads the words again by it.
+    (should (equal (concat "<thread>\n<quote>Your earlier message (harness:session/s-1f2e/message/n-1):\n\n"
+                           "The build is green.</quote>\nGood.\n</thread>")
                    (harness-thread-text (list :refs (list ref) :response "Good.")))))
   (should (equal "harness:message/n-1" (harness-thread-ref-link harness-thread-test--chat)))
   ;; Whose words they are, the model's own or the user's.
@@ -122,9 +160,9 @@ as is a list, and a key without a value is not kept."
   (should-not (harness-thread-block-p '(:type "image" :thread (:refs nil))))
   (should (equal "" (harness-thread-response '(:type "text" :text "words")))))
 
-(ert-deftest harness-thread-text-of-blocks-keeps-the-quotes-on-their-own-lines ()
+(ert-deftest harness-thread-text-of-blocks-parts-the-replies-from-the-words ()
   "The text of a message with replies in threads has them after the words, a
-paragraph apart, so a quote starts a line; a message of plain text is
+paragraph apart, each a block of its own; a message of plain text is
 unchanged and keeps no `:blocks'."
   (let ((reply (harness-thread-block (list :refs (list harness-thread-test--chat)) "Good.")))
     (should (equal (concat "Intro\n\n" harness-thread-test--quoted-good)

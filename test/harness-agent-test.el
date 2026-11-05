@@ -798,33 +798,36 @@ inline and gets no note, and neither does one that quotes nothing."
     (should-not (harness-agent--inline-reply-p (list (list :type "text" :text "status?"))))))
 
 (ert-deftest harness-agent-a-reply-in-a-thread-is-not-answered-inline ()
-  "A reply that is a comment in a thread names the thread to answer in and the
-tool to answer with: its marker, which the model reads as the user wrote
-it, and no note that tells the model to answer inline instead.  The
-plain [thread ID] lines of the review's feedback are no such marker."
+  "A reply that is a comment in a thread names the thread to answer in: its
+<thread> block, which the model reads as the user wrote it, and no note
+that tells the model to answer inline instead.  A <thread> tag that names
+no thread -- one in a fenced code block -- is no such reply."
   (harness-agent-test-with
-    (let ((reply (concat "> The build is green.\n\nGood.\n\n" (harness-thread-marker "t-3f2a1b09"))))
+    (let* ((data (list :refs (list '(:kind "chat" :node "n-1" :who "agent" :text "The build is green."))))
+           (reply (plist-get (harness-thread-block (append data (list :id "t-3f2a1b09")) "Good.") :text)))
       (should-not (harness-agent--inline-reply-p (list (list :type "text" :text reply))))
       (should (equal (list (list :type "text" :text reply))
                      (harness-agent--prepare-content (list (list :type "text" :text reply)) nil)))
-      ;; The review's own [thread ID] lines are no such marker.
+      ;; A new thread, with no id yet, is a reply too: it says so in the tag.
+      (should-not (harness-agent--inline-reply-p
+                   (list (list :type "text" :text (plist-get (harness-thread-block data "Good.") :text)))))
+      ;; A tag written as an example names nothing.
       (should (harness-agent--inline-reply-p
-               (list (list :type "text" :text "> a quoted line\n\nmy comment\n[thread t-1]")))))))
+               (list (list :type "text" :text "> a quoted line\n\nmy comment\n\n```\n<thread id=\"t-1\">\n```")))))))
 
 (ert-deftest harness-agent-sends-a-reply-in-a-thread-as-its-text ()
   "The model reads a reply in a thread as text, without the data the chat draws
-it from; one that is no comment in a review yet is answered inline, the note
-telling the model how; the node keeps the blocks, for the chat to draw."
+it from; it is a <thread> block, so no note tells the model to answer inline;
+the node keeps the blocks, for the chat to draw."
   (harness-agent-test-with
     (let* ((data (list :refs (list '(:kind "chat" :node "n-1" :who "agent" :text "The build is green."))))
            (plain (harness-thread-block data "Good."))
            (made (harness-thread-block (append data (list :id "t-3f2a1b09")) "Good.")))
-      (should (equal (list (list :type "text" :text (plist-get plain :text))
-                           (list :type "text" :text harness-agent--inline-reply-note))
+      (should (equal (list (list :type "text" :text (plist-get plain :text)))
                      (harness-agent--prepare-content (list plain) nil)))
       (should (equal (list (list :type "text" :text (plist-get made :text)))
                      (harness-agent--prepare-content (list made) nil)))
-      (should (string-suffix-p (harness-thread-marker "t-3f2a1b09") (plist-get made :text)))
+      (should (string-prefix-p (harness-thread-marker "t-3f2a1b09") (plist-get made :text)))
       ;; A message with a reply keeps its blocks, one of plain text does not.
       (should-not (harness-agent--only-text-p (list (list :type "text" :text "Intro") plain)))
       (should (harness-agent--only-text-p (list (list :type "text" :text "Intro")))))
@@ -834,8 +837,8 @@ telling the model how; the node keeps the blocks, for the chat to draw."
                    "Good.")))
       (harness-test-await (harness-call 'agent/prompt id (list (list :type "text" :text "Intro") reply)))
       (let ((user (car (harness-call 'session/nodes id))))
-        (should (equal (concat "Intro\n\n> Your earlier message (harness:message/n-1):\n>\n"
-                               "> The build is green.\n\nGood.")
+        (should (equal (concat "Intro\n\n<thread>\n<quote>Your earlier message (harness:message/n-1):\n\n"
+                               "The build is green.</quote>\nGood.\n</thread>")
                        (plist-get user :content)))
         (should (harness-thread-block-p (cadr (plist-get user :blocks))))))))
 

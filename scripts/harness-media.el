@@ -1148,10 +1148,10 @@ task's card (`harness-tasks--missing-report')."
     (string-join (nreverse texts) "\n")))
 
 (defun harness-media--thread-id (text)
-  "Return the first review thread id TEXT names, as the feedback does, or nil."
-  (when (and (stringp text)
-             (string-match "\\[thread \\([A-Za-z0-9][A-Za-z0-9_.-]*\\)\\]" text))
-    (match-string 1 text)))
+  "Return the first review thread id TEXT names, as the feedback does, or nil.
+That is the `<thread id=\"...\">` tag of a reply in a thread; the old
+`[thread ID]` line is read too (`harness-thread-marker-ids')."
+  (car (harness-thread-marker-ids text)))
 
 (defun harness-media--task-slow-again (request)
   "Task: log slow requests, after review: the round answers its thread and hands in.
@@ -1281,8 +1281,9 @@ The handle is the one the approval message names."
     ("Run the project's check suite" . harness-media--notes-child-script)
     ("old build" . harness-media--decisions-script)
     ;; The thread-reply picture: a reply the harness made comments in
-    ;; threads of (its markers name them), and the question before it.
-    ("answer with review_comment" . harness-media--thread-script)
+    ;; threads of (the tags of its <thread> blocks name them), and the
+    ;; question before it.
+    ("<thread id=" . harness-media--thread-script)
     ("Failed webhook deliveries" . harness-media--thread-first-script)
     ("dropped after one try" . harness-media--quote-script)
     ;; The denied call and the user's approval of it.
@@ -2825,7 +2826,7 @@ reply, the second is done.")
 
 (defun harness-media--thread-ids (request)
   "Return the ids of the threads the newest user message of REQUEST names.
-Its marker lines (`harness-thread-marker'), in every text block of the
+Their <thread> tags (`harness-thread-marker'), in every text block of the
 message: the message holds a reply in a thread in each."
   (let (ids)
     (dolist (m (plist-get request :messages))
@@ -2838,9 +2839,9 @@ message: the message holds a reply in a thread in each."
 
 (defun harness-media--thread-script (request)
   "The turn of the thread-reply picture's session after the user's reply.
-The reply's replies are comments in threads, and the marker after each
-names its thread (`harness-thread-marker'): the agent reads the id there
-and answers in the thread, with `review_comment', as a model does."
+The reply's replies are comments in threads, and the tag of each <thread>
+block names its thread (`harness-thread-marker'): the agent reads the id
+there and answers in the thread, with `review_comment', as a model does."
   (cl-loop for id in (harness-media--thread-ids request)
            for (body . status) in harness-media--thread-answers
            collect (harness-media--tool "review_comment" :thread id :body body :status status)))

@@ -94,13 +94,13 @@ user's makes it a reply in that thread, which a close does not keep
 from opening again; lines of a diff put it on those lines, at the
 revision; any other starts a thread on the change as a whole.  The
 block that goes on, and is recorded, has the thread's id, and its text
-ends with the marker (`harness-thread-marker`), which is how the agent
+is one <thread> block (`harness-thread-marker`), which is how the agent
 knows the thread to answer in, and with which tool, and how the chat
 draws a link to it.  A reply that is a thread is no words: the tasks
 module leaves it out of the words a task is sent back with
 (`harness-tasks--words`), so they are not a thread of their own too,
 and the import of rounds and of words by hand, which reads text, skips
-what ends with a marker.  Only a task's session has a review, and only
+what names a thread.  Only a task's session has a review, and only
 an agent that has `review_comment` can answer in it: any other
 session's replies stay plain, answered inline.
 

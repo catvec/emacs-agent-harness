@@ -2928,6 +2928,14 @@ A cool teal of its own: it stands apart from the transcript's blocks and
 the queue under it, and asks for an answer without the alarm of a
 warning colour." :group 'harness-ui)
 
+(defface harness-ui-panel-border-face
+  '((((background light)) :background "#a9e6f2" :extend t)
+    (((background dark)) :background "#0a4e57" :extend t))
+  "The line parting two panels that ask the user for something.
+A shade of the panel's own, a little deeper: two requests stacked above
+the compose box share one background, and without the line they would
+read as one request with two sets of buttons." :group 'harness-ui)
+
 (defface harness-ui-key-face '((t :inherit help-key-binding))
   "Keyboard shortcut hints in panels." :group 'harness-ui)
 
@@ -6169,6 +6177,40 @@ prefix typed before the command says -- `C-x 4 4', `C-x 5 5', `C-x t t'
   (harness-ui-notify "session/cancel" (list :sessionId (or session-id (harness-ui-current-session-id))))
   (message "Cancelling…"))
 
+(defvar harness-ui-btw-minor-mode)
+(declare-function harness-ui-btw-close "harness-ui-btw" ())
+
+;;;###autoload
+(defun harness-close-session (&optional session-id)
+  "Close SESSION-ID, by default the current buffer's session, and put it away.
+Closing is what `x' does in the session list: the session becomes
+inactive, stays listed, and a message sent to it opens it again.  Only
+an idle session closes.  One at work, or waiting for you, is left open
+\(closed, it would go on out of sight) and the echo area says so; the
+window is put away all the same (`harness-ui-bury').  A BTW closes as
+its [close] button does (`harness-ui-btw-close'): one nothing was asked
+in is deleted, and the window goes back to the buffer it was opened over.
+Cancelling the running turn is another key (`harness-cancel-turn')."
+  (interactive)
+  (if (and (null session-id)
+           (bound-and-true-p harness-ui-btw-minor-mode)
+           (fboundp 'harness-ui-btw-close))
+      (harness-ui-btw-close)
+    (let* ((sid (or session-id (harness-ui-current-session-id)))
+           (session (harness-ui-session sid))
+           (status (format "%s" (plist-get session :status)))
+           (label (harness-ui-session-name sid))
+           (shown (and (harness-ui-chat-of-p (current-buffer) sid)
+                       (eq (window-buffer (selected-window)) (current-buffer)))))
+      (cond
+       ((null session))
+       ((equal status "idle")
+        (harness-ui-call "_harness/session/deactivate" (list :id sid)
+                         (lambda (_) (message "Closed %s" label))))
+       ((equal status "inactive") (message "Closed already: %s" label))
+       (t (message "%s, left open: %s" (capitalize status) label)))
+      (when shown (harness-ui-bury)))))
+
 ;;;###autoload
 (defun harness-show-log ()
   "Show the harness log buffer.
@@ -6210,6 +6252,8 @@ The log is a harness view like any other: its own mode
 (define-key harness-ui-map (kbd "I") #'harness-set-non-interactive-all)
 (define-key harness-ui-map (kbd "F") #'harness-fullscreen)
 (define-key harness-ui-map (kbd "W") #'harness-move-session)
+;; x closes the session, as it does in the session list.
+(define-key harness-ui-map (kbd "x") #'harness-close-session)
 ;; X opened a view in a frame read with completion; Emacs's own window
 ;; prefixes do that now (C-x 5 5 C-c h a), so a reload unbinds it.
 (when (eq (lookup-key harness-ui-map (kbd "X")) 'harness-ui-open-view-in-frame)

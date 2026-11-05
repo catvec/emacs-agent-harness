@@ -1476,6 +1476,35 @@ the request's id."
   (search-forward label)
   (call-interactively (key-binding (kbd key))))
 
+(ert-deftest harness-ui-pending-stacked-panels-part-with-a-border ()
+  "Two requests are two panels: each opens with a line of its own.
+The panels share one background, so a request drawn right under another
+would read as one request with two sets of buttons."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync
+       sid (list (harness-ui-pending-test-item 'tool)
+                 (harness-ui-pending-test-item 'jail)))
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending-insert-panels sid))
+        (let ((pos (point-min)) (borders 0))
+          (while (< pos (point-max))
+            (let* ((next (next-single-property-change pos 'face nil (point-max)))
+                   (face (get-text-property pos 'face)))
+              (when (if (listp face)
+                        (memq 'harness-ui-panel-border-face face)
+                      (eq face 'harness-ui-panel-border-face))
+                (cl-incf borders)
+                ;; The line is blank, and it is all its own.
+                (should (equal "\n" (buffer-substring-no-properties pos next))))
+              (setq pos next)))
+          (should (= borders 2)))
+        ;; The line is the panel's, as its title and buttons are.
+        (goto-char (point-min))
+        (search-forward "Permission")
+        (should (equal "tool" (get-text-property (1- (point)) 'harness-ui-pending)))))))
+
 (ert-deftest harness-ui-pending-several-options-draw-as-check-boxes ()
   "A question that allows several options draws its options as check boxes.
 It says none is ticked, offers [Send answer] and says what the words
@@ -1844,20 +1873,23 @@ NOTE is the dim word after it."
   "A call with a ladder says what its lasting answers cover, on the panel.
 Every step is a line, narrowest first, the one they start on picked, with
 the keys of the answers the block is for and buttons that move the pick;
-the facts line of the commands it replaces is gone."
+the facts line of the commands it replaces is gone.  The ladder stands
+over the answers that last, Allow for session, Always allow and Always
+deny; Allow and Deny, which cover the one call, are above it."
   (harness-ui-pending-test-with
     (let ((sid (harness-ui-pending-test-session)))
       (harness-ui-pending-sync sid (list (harness-ui-pending-test-ladder-item)))
       (let ((text (harness-ui-pending-test-rendered sid "ladder")))
         (should (string-search
                  (concat "   command: gcloud compute instances list --project p\n"
+                         "   [Allow] y  [Deny] n  \n"
                          "   Lasting answers (s, a, N) cover:\n"
                          (harness-ui-pending-test-step-line nil "every bash call with this exact command") "\n"
                          (harness-ui-pending-test-step-line nil "every gcloud compute instances call (any arguments)") "\n"
                          (harness-ui-pending-test-step-line t "every gcloud call (any arguments)") "\n"
                          (harness-ui-pending-test-step-line nil "every bash call (any command)") "\n"
                          "   [Narrower] <  [Wider] >\n"
-                         "   [Allow] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N")
+                         "   [Allow for session] s  [Always allow] a  [Always deny] N  \n")
                  text))
         (should-not (string-search "lasting answers:" text)))
       (should (equal "programs" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
@@ -1954,8 +1986,10 @@ and no facts line either."
        sid (list (harness-ui-pending-test-ladder-item "some" '("allow-once" "allow-session" "deny-once"))
                  (harness-ui-pending-test-ladder-item "none" '("allow-once" "deny-once"))))
       (let ((some (harness-ui-pending-test-rendered sid "some")))
-        (should (string-search "   Lasting answers (s) cover:\n" some))
-        (should (string-search "[Allow] y  [Allow for session] s  [Deny] n  \n" some)))
+        (should (string-search (concat "   [Allow] y  [Deny] n  \n"
+                                       "   Lasting answers (s) cover:\n")
+                               some))
+        (should (string-search "   [Narrower] <  [Wider] >\n   [Allow for session] s  \n" some)))
       (with-temp-buffer
         (let ((harness-ui-session-id sid))
           (harness-ui-pending--insert-permission (harness-ui-pending-record sid "some")))
@@ -1966,7 +2000,57 @@ and no facts line either."
       (let ((none (harness-ui-pending-test-rendered sid "none")))
         (should-not (string-search "Lasting answers" none))
         (should-not (string-search "lasting answers" none))
-        (should-not (string-search "every gcloud" none))))))
+        (should-not (string-search "every gcloud" none))
+        ;; Nothing to pick a cover for: Allow and Deny are the one line.
+        (should (string-search "   [Allow] y  [Deny] n  \n" none))))))
+
+(ert-deftest harness-ui-pending-ladder-stands-over-the-lasting-answers-only ()
+  "The covers are for the answers that last, so the panel puts them over those.
+Allow and Deny cover the one call and record nothing: they have a line
+above the ladder.  Allow for session, Always allow and Always deny have
+the line under it, on their keys, whatever stands over them.  A request
+whose answers all last has no line above; a block of patterns, which
+every answer holds for, stands over the one line of all five."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync
+       sid (list (harness-ui-pending-test-ladder-item "ladder")
+                 (harness-ui-pending-test-ladder-item "lasting" '("allow-session" "allow-always" "deny-always"))
+                 (harness-ui-pending-test-item 'jail)))
+      ;; Over the ladder: Allow and Deny alone; under it: the three that last.
+      (let* ((text (harness-ui-pending-test-rendered sid "ladder"))
+             (cover (string-search "Lasting answers (" text))
+             (wider (string-search "[Wider]" text)))
+        (dolist (once '("[Allow] y" "[Deny] n"))
+          (should (< (string-search once text) cover)))
+        (dolist (lasting '("[Allow for session] s" "[Always allow] a" "[Always deny] N"))
+          (should (> (string-search lasting text) wider)))
+        (should-not (string-match-p "\\[Allow\\] y.*\\[\\(?:Allow for session\\|Always\\)" text))
+        (should-not (string-match-p "\\[Deny\\] n.*\\[\\(?:Allow for session\\|Always\\)" text))
+        (should-not (string-match-p "\\[\\(?:Allow for session\\|Always\\)[^\n]*\\[\\(?:Allow\\|Deny\\)\\]" text)))
+      ;; Every answer a button of its own, wherever it stands.
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending--insert-permission (harness-ui-pending-record sid "ladder")))
+        (dolist (label '("[Allow]" "[Deny]" "[Allow for session]" "[Always allow]" "[Always deny]"))
+          (goto-char (point-min))
+          (search-forward label)
+          (should (get-text-property (1- (point)) 'harness-ui-action))
+          (should (get-text-property (1- (point)) 'help-echo))))
+      ;; All the answers last: no line above the ladder.
+      (let ((text (harness-ui-pending-test-rendered sid "lasting")))
+        (should-not (string-search "[Allow] y" text))
+        (should-not (string-search "[Deny] n" text))
+        (should (string-search (concat "   command: gcloud compute instances list --project p\n"
+                                       "   Lasting answers (s, a, N) cover:\n")
+                               text))
+        (should (string-search "   [Allow for session] s  [Always allow] a  [Always deny] N  \n" text)))
+      ;; A pattern is every answer's: the block, then all five on one line.
+      (let ((text (harness-ui-pending-test-rendered sid "jail")))
+        (should (string-search "Answers hold for:" text))
+        (should (< (string-search "Answers hold for:" text) (string-search "[Allow] y" text)))
+        (should (string-search "   [Allow] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N  \n"
+                               text))))))
 
 (ert-deftest harness-ui-pending-records-without-a-ladder-draw-as-before ()
   "A request the harness sent no ladder for says what its answers cover as it always did.

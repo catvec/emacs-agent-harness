@@ -1689,14 +1689,14 @@ change."
                    (harness-ui-chat-test-find buf "non-interactive off")))))))
 
 (ert-deftest harness-ui-chat-header-leads-up-to-the-parent ()
-  "A session started from another says so and leads back up to it.
-A fork, a sub-agent and a BTW name the session they were started from
-right after their own name; the whole segment -- the arrow, the
-relation and the name -- is one target, so clicking it (or
-`harness-up-to-parent') shows the parent: the window that shows the
-parent already is selected when there is one, else the parent opens
-where the child is shown.  A session started from nothing, or whose
-parent is gone, says so instead."
+  "A session started from another has a button that leads back up to it.
+A fork, a sub-agent and a BTW have the up arrow right after their own
+name, and nothing else of the parent: the session's name needs the room.
+Clicking the arrow (or `harness-up-to-parent') shows the parent: the
+window that shows the parent already is selected when there is one, else
+the parent opens where the child is shown.  The tooltip names the
+relation and the parent.  A session started from nothing, or whose
+parent is gone, has no button, and the command says so."
   (harness-ui-chat-test-with
     (let* ((parent (harness-ui-chat-test-session "Planner"))
            (child (plist-get (harness-call 'session/create
@@ -1725,30 +1725,25 @@ parent is gone, says so instead."
             (let* ((header (harness-chat--header most-positive-fixnum))
                    (segment (harness-ui-chat-test-segment header #'harness-up-to-parent)))
               (should segment)
-              ;; The whole segment is one target -- the arrow, the relation
-              ;; and the name -- so a click on the ↑ goes up too.
-              (should (equal "  ↑ sub-agent of Planner" (car segment)))
-              (let ((arrow (string-search "↑" header)))
-                (should arrow)
-                (should (<= (cadr segment) arrow))
-                (should (< arrow (+ (cadr segment) (length (car segment)))))
-                (should (eq (get-text-property arrow 'local-map header)
-                            (get-text-property (cadr segment) 'local-map header))))
+              ;; The arrow alone is the button: no relation, no name.
+              (should (equal "↑" (car segment)))
+              (should (eq (get-text-property (string-search "↑" header) 'local-map header)
+                          (get-text-property (cadr segment) 'local-map header)))
+              (should-not (string-search "Planner" (substring-no-properties header)))
+              (should-not (string-search "sub-agent of" (substring-no-properties header)))
               ;; Right after the session's own name, before [menu]; the
-              ;; model and the rest are on the settings line.
-              (should (string-match-p "Read the parser  ↑ sub-agent of Planner"
-                                      (substring-no-properties header)))
+              ;; separator outside the button.
+              (should (string-match-p "Read the parser  ↑  " (substring-no-properties header)))
+              (should-not (get-text-property (1- (cadr segment)) 'local-map header))
               (should (< (string-search "Read the parser" header) (cadr segment)))
               (should (< (cadr segment) (string-search "[menu]" (substring-no-properties header))))
+              ;; The model and the rest are on the settings line.
               (should-not (string-match-p "scripted (Demo)" (substring-no-properties header)))
-              ;; The name is the shared session link, and its tooltip names
-              ;; the key.
-              (should (eq 'harness-ui-session-link-face
-                          (get-text-property (string-search "Planner" header) 'face header)))
               (should (get-text-property (cadr segment) 'mouse-face header))
-              (should (string-match-p
-                       "started from.*C-c C-u"
-                       (funcall (get-text-property (cadr segment) 'help-echo header) w nil nil)))))
+              ;; The tooltip says how the session relates to its parent,
+              ;; which one that is, and the ways up.
+              (should (equal "Go up: sub-agent of Planner (mouse-1, C-c C-u)"
+                             (funcall (get-text-property (cadr segment) 'help-echo header) w nil nil)))))
           (with-current-buffer plain-buf
             (should-not (harness-chat--parent-segment))
             (let ((header (harness-chat--header most-positive-fixnum)))
@@ -1830,8 +1825,12 @@ stepped over."
           (let* ((header (harness-chat--header most-positive-fixnum))
                  (segment (harness-ui-chat-test-segment header #'harness-up-to-parent)))
             (should segment)
-            (should (equal "  ↑ sub-agent of Planner" (car segment)))
-            (should-not (string-search "Shared context" (substring-no-properties header)))))
+            (should (equal "↑" (car segment)))
+            (should-not (string-search "Shared context" (substring-no-properties header)))
+            ;; The tooltip names the session the button goes to, never the seed.
+            (should (equal "Go up: sub-agent of Planner (mouse-1, C-c C-u)"
+                           (funcall (get-text-property (cadr segment) 'help-echo header)
+                                    nil nil nil)))))
         ;; The command opens the source, never the seed.
         (harness-ui-display-session worker 'right)
         (let ((w (get-buffer-window worker-buf)))
@@ -1849,6 +1848,107 @@ stepped over."
           (should (equal "This session was started from a seed conversation, which is not opened"
                          (error-message-string
                           (should-error (harness-up-to-parent) :type 'user-error)))))))))
+
+;;;; Closing a session
+
+(defconst harness-ui-chat-test--held
+  '((:type wait :seconds 60)
+    (:type text :delta "Never said.")
+    (:type done :stop-reason end-turn))
+  "A reply that waits a minute before it says a word: a turn the test holds.")
+
+(defun harness-ui-chat-test--status (sid)
+  "Return the status of SID as the UI has it, a string."
+  (format "%s" (plist-get (harness-ui-session sid) :status)))
+
+(defmacro harness-ui-chat-test-collecting-messages (var &rest body)
+  "Run BODY with what it `message's pushed onto VAR, newest first."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'message)
+              (lambda (format-string &rest args)
+                (when format-string (push (apply #'format format-string args) ,var))
+                nil)))
+     ,@body))
+
+(ert-deftest harness-ui-chat-close-key-closes-an-idle-session-and-puts-it-away ()
+  "C-c M-k closes the session the chat shows, as the session list's x does.
+The session becomes inactive and stays listed, its window is put away, and
+another session is left alone.  C-c C-k is the chat's cancel, not a close."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Planner"))
+           (other (harness-ui-chat-test-session "Other"))
+           (messages nil))
+      (harness-ui-chat-test-cached sid other)
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (should (eq 'harness-close-session (key-binding (kbd "C-c M-k"))))
+          (should (eq 'harness-chat-cancel (key-binding (kbd "C-c C-k")))))
+        (harness-ui-display-session sid 'right)
+        (let ((window (get-buffer-window buf)))
+          (should (window-live-p window))
+          (should (equal "idle" (harness-ui-chat-test--status sid)))
+          (harness-ui-chat-test-collecting-messages messages
+            (with-selected-window window
+              (call-interactively (key-binding (kbd "C-c M-k"))))
+            (harness-test-wait (lambda () (equal "inactive" (harness-ui-chat-test--status sid)))
+                               5 "the session to be closed")
+            (harness-test-wait (lambda () (member "Closed Planner" messages)) 5 "the echo"))
+          (should-not (get-buffer-window buf))
+          (should (buffer-live-p buf))
+          (should (eq 'inactive (plist-get (harness-call 'session/get sid) :status)))
+          (should (eq 'idle (plist-get (harness-call 'session/get other) :status)))
+          ;; Closed, it is listed still and opens again: its chat says so.
+          (should (harness-ui-session sid))
+          (harness-test-wait (lambda () (buffer-local-value 'harness-chat--inactive buf)) 5
+                             "the chat to say the session is inactive"))))))
+
+(ert-deftest harness-ui-chat-close-key-leaves-a-working-session-open ()
+  "A session at work is not closed: closed, it would go on out of sight.
+The window is put away all the same, the echo area says the session is
+left open, and the turn goes on until it ends or is cancelled."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Planner"))
+           (buf (harness-ui-chat-test-open sid))
+           (messages nil))
+      (harness-ui-display-session sid 'right)
+      (let ((window (get-buffer-window buf))
+            (harness-provider-demo-script-override harness-ui-chat-test--held))
+        (harness-ui-chat-test-type buf "work for a minute")
+        (with-current-buffer buf (harness-chat-send))
+        (harness-test-wait (lambda () (harness-agent-running-p sid)) 5 "the turn to run")
+        (harness-test-wait (lambda () (equal "running" (harness-ui-chat-test--status sid))) 5 "the UI to see it run")
+        (harness-ui-chat-test-collecting-messages messages
+          (with-selected-window window
+            (call-interactively (key-binding (kbd "C-c M-k")))))
+        (should (member "Running, left open: Planner" messages))
+        (should-not (get-buffer-window buf))
+        (should (harness-agent-running-p sid))
+        (should (equal "running" (harness-ui-chat-test--status sid)))
+        (harness-call 'agent/cancel sid)
+        (harness-test-wait (lambda () (not (harness-agent-running-p sid))) 10 "the turn to end")
+        (should-not (eq 'inactive (plist-get (harness-call 'session/get sid) :status)))))))
+
+(ert-deftest harness-ui-chat-close-session-from-lisp-names-its-session ()
+  "`harness-close-session' takes the session to close.
+One closed already says so and changes nothing; a buffer that is not the
+session's chat, the one a command runs from, keeps its window."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Planner"))
+           (other (harness-ui-chat-test-session "Other"))
+           (messages nil))
+      (harness-ui-chat-test-cached sid other)
+      (let ((other-buf (harness-ui-chat-test-open other)))
+        (harness-ui-chat-test-collecting-messages messages
+          ;; From the other session's chat: Planner closes, the chat here stays.
+          (with-current-buffer other-buf (harness-close-session sid))
+          (harness-test-wait (lambda () (equal "inactive" (harness-ui-chat-test--status sid)))
+                             5 "the session to be closed")
+          (harness-test-wait (lambda () (member "Closed Planner" messages)) 5 "the echo")
+          (should (eq 'idle (plist-get (harness-call 'session/get other) :status)))
+          ;; Closed already.
+          (with-current-buffer other-buf (harness-close-session sid))
+          (should (member "Closed already: Planner" messages))
+          (should (eq 'inactive (plist-get (harness-call 'session/get sid) :status))))))))
 
 (ert-deftest harness-ui-chat-open-latest-session-leaves-seeds-out ()
   "`harness-open-latest-session' opens the newest session that is not a seed.
@@ -4556,6 +4656,103 @@ first line ends with a link to it."
             (should (harness-ui-chat-test-face-at (1- pos) 'bold))
             (should (string-match-p "▌  " (format "%s" (get-text-property (1- pos) 'line-prefix))))
             (should-not (string-match-p "▎" (format "%s" (get-text-property (1- pos) 'line-prefix))))))))))
+
+(ert-deftest harness-ui-chat-marks-the-words-replies-quote ()
+  "The words a reply in a thread quotes are underlined in the message they
+are of, and end with a badge that says how many replies there are.  The
+badge is drawn, not text, and its button shows the reply: point goes to
+the card of it."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid
+                    '(:kind assistant :content "The deploy is pending.\nSince noon.\n\nAnd the build is green."))
+      (let* ((buf (harness-ui-chat-test-open sid))
+             (node (harness-ui-chat-test-node-of buf "assistant"))
+             (reply (harness-thread-block
+                     (list :refs (list (list :kind "chat" :node node :who "agent"
+                                             :text "The deploy is pending.\nSince noon.")))
+                     "Since when?")))
+        (harness-call 'session/append sid (list :kind 'user :content (plist-get reply :text)
+                                                :blocks (list reply)))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Since when?")) 5 "the reply")
+        (with-current-buffer buf
+          (let* ((quoted (car (harness-ui-chat-test-blocks buf "assistant")))
+                 (reply-block (car (harness-ui-chat-test-blocks buf "user")))
+                 (marks (lambda ()
+                          (cl-remove-if-not (lambda (o) (overlay-get o 'harness-chat-quote))
+                                            (overlays-in (point-min) (point-max))))))
+            (should (= 1 (length (funcall marks))))
+            (let ((overlay (car (funcall marks))))
+              (should (= (overlay-start overlay)
+                         (harness-ui-chat-test-start buf "The deploy is pending.")))
+              (should (equal "The deploy is pending. Since noon."
+                             (buffer-substring-no-properties (overlay-start overlay)
+                                                             (overlay-end overlay))))
+              (should (memq 'harness-chat-quoted-face
+                            (ensure-list (overlay-get overlay 'face))))
+              (should (string-match-p "↳ 1 reply" (overlay-get overlay 'after-string)))
+              ;; The badge is drawn, not text: what is copied keeps the words alone.
+              (should-not (string-search "reply" (harness-ui-chat-test-block-text quoted))))
+            ;; The block drawn again keeps the mark.
+            (harness-chat--rerender quoted)
+            (should (= 1 (length (funcall marks))))
+            ;; The badge's button shows the reply, point on its card.
+            (let* ((overlay (car (funcall marks)))
+                   (action (lookup-key (overlay-get overlay 'keymap) (kbd "RET"))))
+              (should action)
+              (goto-char (overlay-start overlay))
+              (call-interactively action))
+            (should (equal (cons (harness-chat-block-id reply-block) 0)
+                           (get-text-property (point) 'harness-chat-reply)))))))))
+
+(ert-deftest harness-ui-chat-counts-the-replies-to-what-one-quotes ()
+  "Two replies to the same words count together, on the one mark: \"↳ 2
+replies\"; a reply to other words of the message has a mark of its own.  A
+quote of a message the transcript does not show has no mark."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (marks (lambda ()
+                    (cl-remove-if-not (lambda (o) (overlay-get o 'harness-chat-quote))
+                                      (overlays-in (point-min) (point-max))))))
+      (harness-call 'session/append sid
+                    '(:kind assistant :content "The deploy is pending.\nSince noon.\n\nAnd the build is green."))
+      (let* ((buf (harness-ui-chat-test-open sid))
+             (node (harness-ui-chat-test-node-of buf "assistant")))
+        (cl-flet ((send (response quoted)
+                    (let ((reply (harness-thread-block
+                                  (list :refs (list (list :kind "chat" :node node :who "agent"
+                                                          :text quoted)))
+                                  response)))
+                      (harness-call 'session/append sid
+                                    (list :kind 'user :content (plist-get reply :text)
+                                          :blocks (list reply))))))
+          (send "Why?" "The deploy is pending.\nSince noon.")
+          (send "The build?" "And the build is green.")
+          (send "Really?" "The deploy is pending.\nSince noon.")
+          (harness-test-wait (lambda () (with-current-buffer buf
+                                          (= 3 (length (harness-ui-chat-test-blocks buf "user")))))
+                             5 "the replies")
+          (with-current-buffer buf
+            (let ((overlays (funcall marks)))
+              (should (= 2 (length overlays)))
+              (let ((two (cl-find-if (lambda (o) (string-match-p "↳ 2 replies" (overlay-get o 'after-string)))
+                                     overlays))
+                    (one (cl-find-if (lambda (o) (string-match-p "↳ 1 reply" (overlay-get o 'after-string)))
+                                     overlays)))
+                (should two)
+                (should one)
+                (should (equal "And the build is green."
+                               (buffer-substring-no-properties (overlay-start one) (overlay-end one))))))
+            ;; What is not in the transcript has nothing to mark.
+            (let ((reply (harness-thread-block
+                          (list :refs (list '(:kind "chat" :node "n-gone" :who "agent" :text "Nowhere.")))
+                          "Really?")))
+              (harness-call 'session/append sid (list :kind 'user :content (plist-get reply :text)
+                                                      :blocks (list reply)))
+              (harness-test-wait (lambda () (with-current-buffer buf
+                                              (= 4 (length (harness-ui-chat-test-blocks buf "user")))))
+                                 5 "the last reply")
+              (should (= 2 (length (funcall marks)))))))))))
 
 (ert-deftest harness-ui-chat-a-click-on-a-card-shows-what-it-replies-to ()
   "A card of a reply in a thread, in the transcript, shows the message it replies
@@ -7456,8 +7653,9 @@ about a path outside, though the prompt about the call is newer."
         (should (equal (list sid "d1" '(:option "allow-always" :pattern "~/notes/*.org")) (car recorded)))))))
 
 (ert-deftest harness-ui-chat-permission-covers-are-picked-on-the-panel ()
-  "A call that comes with a ladder of covers lists them above the buttons.
-A click picks a line and `>' a wider one, point stays on the panel, the
+  "A call that comes with a ladder of covers lists them over the answers that last.
+Allow and Deny, which cover the call alone, stand above the list.  A
+click picks a line and `>' a wider one, point stays on the panel, the
 tooltips and the answer follow the pick, C-c . presses the keys from the
 box, and the popout of the same request draws the same block."
   (harness-ui-chat-test-with
@@ -7468,7 +7666,7 @@ box, and the popout of the same request draws the same block."
            (block (lambda (buf)
                     (with-current-buffer buf
                       (let ((start (progn (goto-char (point-min)) (search-forward "   Lasting answers (")))
-                            (end (search-forward "   [Allow] y")))
+                            (end (search-forward "   [Allow for session] s")))
                         (buffer-substring-no-properties start end)))))
            (line (lambda (picked label)
                    (concat "     " (harness-ui-chat-test-radio picked) " " label "\n"))))
@@ -7491,11 +7689,13 @@ box, and the popout of the same request draws the same block."
         (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
         (with-current-buffer buf
           (should (harness-ui-chat-test-find
-                   buf (concat "   Lasting answers (s, a, N) cover:\n"
+                   buf (concat "   [Allow] y  [Deny] n  \n"
+                               "   Lasting answers (s, a, N) cover:\n"
                                (funcall line nil "every bash call with this exact command")
                                (funcall line t "every make call (any arguments)")
                                (funcall line nil "every bash call (any command)")
-                               "   [Narrower] <  [Wider] >\n")))
+                               "   [Narrower] <  [Wider] >\n"
+                               "   [Allow for session] s  [Always allow] a  [Always deny] N  \n")))
           (should-not (harness-ui-chat-test-find buf "lasting answers: every make call"))
           (should (equal "Always allow every make call (any arguments), in every session (a)"
                          (get-text-property (1- (harness-ui-chat-test-find buf "[Always allow]")) 'help-echo)))
@@ -9371,9 +9571,9 @@ the request, not above the list, and not above the compose box."
             (should-not (harness-ui-chat-test-blank-line-before-p harness-compose-start))))))))
 
 (ert-deftest harness-ui-chat-request-todo-separation-many-requests ()
-  "A question and a permission waiting together get one blank line, once.
-Both panels show above the todo list, oldest first, with no blank line
-between them and only the one before the list."
+  "A question and a permission waiting together are panels of their own.
+Both show above the todo list, oldest first, a line of its own parting
+them, and one blank line follows the last before the list."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
@@ -9395,8 +9595,8 @@ between them and only the one before the list."
                 (permission (harness-ui-chat-test-find buf " Permission"))
                 (todos (harness-ui-chat-test-find buf "Todo list")))
             (should (< question permission todos))
-            ;; No blank line between the two panels.
-            (should-not (harness-ui-chat-test-blank-line-before-p permission))
+            ;; A line of its own parts the two panels.
+            (should (harness-ui-chat-test-blank-line-before-p permission))
             ;; One blank line after the last of them, and no more.
             (should (harness-ui-chat-test-blank-line-before-p todos))
             (should-not (harness-ui-chat-test-blank-line-before-p harness-compose-start))))))))
@@ -10869,6 +11069,43 @@ result meta; the chat rebuilds the report from what the call was given."
             (should (string-search "Problem" text))
             (should (string-search "Keys are compared with" text))
             (should (string-search "See the diff." text))))))))
+
+(ert-deftest harness-ui-chat-shows-the-event-watches-of-its-session ()
+  "The chat pins the session's event watches above the compose box: one
+line per live watch, with the kinds it watches and what it has seen.
+The watch_events call registers it, the harness says it changed, and the
+panel asks for it; unwatch_events takes the line away again."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'tools-sessions)
+    (harness-test-load-module 'tools-events)
+    (harness-test-load-module 'ui-watches)
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-test-await
+       (harness-call 'tools/execute sid
+                     (list :id "watch-call" :name "watch_events"
+                           :input (list :events ["session/status"]
+                                        :prompt "Watch the worker."
+                                        :once :false))))
+      (harness-test-wait
+       (lambda ()
+         (with-current-buffer buf
+           (string-search "Event watches  1 live" (buffer-string))))
+       5 "the event-watch panel")
+      (with-current-buffer buf
+        (should (string-search "session/status" (buffer-string)))
+        (should (string-search "this project" (buffer-string)))
+        (should (string-search "0 events" (buffer-string)))
+        (should (string-search "Watch the" (buffer-string))))
+      ;; Stopped, and the line goes.
+      (harness-test-await (harness-call 'tools/execute sid
+                                        (list :id "unwatch-call" :name "unwatch_events"
+                                              :input nil)))
+      (harness-test-wait
+       (lambda ()
+         (with-current-buffer buf
+           (not (string-search "Event watches" (buffer-string)))))
+       5 "the panel to go"))))
 
 (ert-deftest harness-ui-chat-quotes-a-tool-call-group ()
   "C-c > on a group's summary replies to every call folded under it.

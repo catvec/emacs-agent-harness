@@ -38,7 +38,7 @@ The script is chosen from the last user message:
                 without text, then with it, text, a tool call's input,
                 each call's usage -- for the live token count
   a thread      a reply that is a comment in a thread of the task's
-                review, which names the thread with a marker line
+                review, whose <thread> block names the thread
                 (`harness-thread-marker`): review_comment answers it
   anything else echo the prompt back as markdown
 

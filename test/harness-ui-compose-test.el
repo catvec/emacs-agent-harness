@@ -187,10 +187,10 @@ gives a reply in a thread with no references at all."
         (should (equal "Why is the sky blue?" (plist-get (car atts) :response)))
         (should-not (harness-thread-refs (plist-get (car atts) :thread)))
         ;; What goes on to the rest of the harness has no quote either: its
-        ;; block is the words, with the thread they are in.
+        ;; block is one <thread> block of the words, with the thread they are in.
         (let ((block (harness-thread-block (plist-get (car atts) :thread)
                                            (plist-get (car atts) :response))))
-          (should (equal "Why is the sky blue?" (plist-get block :text)))
+          (should (equal "<thread>\nWhy is the sky blue?\n</thread>" (plist-get block :text)))
           (should-not (harness-thread-refs (plist-get block :thread))))))))
 
 (ert-deftest harness-ui-compose-new-thread-has-no-quote-to-show-or-edit ()
@@ -328,8 +328,8 @@ from there as the block of that reply; queued, it is the same block."
       (should (equal (list harness-ui-compose-test--ref) (plist-get (plist-get (plist-get block :_harness) :thread) :refs)))
       (should (harness-thread-block-p read))
       ;; With the link to the message it quotes, which the model reads it by.
-      (should (equal (concat "> Your earlier message (harness:message/n-1):\n>\n"
-                             "> The build is green.\n> The deploy is pending.\n\nWhy?")
+      (should (equal (concat "<thread>\n<quote>Your earlier message (harness:message/n-1):\n\n"
+                             "The build is green.\nThe deploy is pending.</quote>\nWhy?\n</thread>")
                      (plist-get read :text)))
       (should (equal (list read) (harness-agent-attachments-to-blocks atts))))))
 

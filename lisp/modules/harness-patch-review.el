@@ -84,13 +84,13 @@
 ;; from opening again; lines of a diff put it on those lines, at the
 ;; revision; any other starts a thread on the change as a whole.  The
 ;; block that goes on, and is recorded, has the thread's id, and its text
-;; ends with the marker (`harness-thread-marker'), which is how the agent
+;; is one <thread> block (`harness-thread-marker'), which is how the agent
 ;; knows the thread to answer in, and with which tool, and how the chat
 ;; draws a link to it.  A reply that is a thread is no words: the tasks
 ;; module leaves it out of the words a task is sent back with
 ;; (`harness-tasks--words'), so they are not a thread of their own too,
 ;; and the import of rounds and of words by hand, which reads text, skips
-;; what ends with a marker.  Only a task's session has a review, and only
+;; what names a thread.  Only a task's session has a review, and only
 ;; an agent that has `review_comment' can answer in it: any other
 ;; session's replies stay plain, answered inline.
 ;;
@@ -304,8 +304,8 @@ it was imported with and never edited, comes back as an `edit-comment'
 operation when the reply puts a quote above it: the quote an earlier
 import left out.  A reply that is a comment already, made in the chat
 \(`harness-patch-review--register-thread'), is no comment to make: its
-answer ends with its thread's marker (`harness-thread-marker'), which
-the text of a round or of a message keeps."
+text is a <thread> block with its thread's id (`harness-thread-marker'),
+which the text of a round or of a message keeps."
   (let* ((id (change-review-set-id set))
          (author (harness-patch-review--user))
          ;; A reply the chat made a thread of was never feedback to import.
@@ -462,7 +462,7 @@ with the comments of its rounds of feedback."
 ;; references in its comment's meta.
 ;;
 ;; The block that goes on, and is recorded, has the thread's id
-;; (`:thread'), and its text ends with the marker line
+;; (`:thread'), and its text is the <thread> block of the reply
 ;; (`harness-thread-marker'), which tells the agent the thread to answer in,
 ;; with the tool that answers it, and the code that turns typed words into
 ;; threads that this one is made.
@@ -626,7 +626,7 @@ thread's data and `:response' the words under it."
 (defun harness-patch-review--register-blocks (set session-id blocks)
   "Return BLOCKS with each reply in a new thread made a comment of SET.
 SESSION-ID is the session the message is sent in.  A block that goes on
-has its thread's id and ends with the marker of the thread."
+has its thread's id in the tag of its <thread> block."
   (mapcar (lambda (block)
             (if (harness-patch-review--new-thread-p block)
                 (harness-thread-block
@@ -681,7 +681,7 @@ own messages count, in the session of a task whose agent has
 messages and another session's agent's are no replies.  Each block with
 thread data (`harness-thread-block') and no thread yet becomes a comment
 \(`harness-patch-review--register-thread'), and the block that goes on
-has the thread's id and ends with its marker.  It runs before the tasks
+has the thread's id in its tag.  It runs before the tasks
 module reads a message to a task in review as the feedback that sends it
 back, which then carries the markers.  A message the review cannot take
 is left as it was, and so is one that fails.  The <thread> replies typed
@@ -731,11 +731,27 @@ have their thread already are left alone."
 
 (defun harness-patch-review--unregistered (text)
   "Return TEXT, trimmed, without the replies the review keeps already.
-Those are the quotes and answers that end with a marker line
-\(`harness-thread-marker'), threads started in the chat.  What is left,
+Those are the <thread> blocks of the chat -- and the quotes and answers
+that end with a marker line, as replies were written before the block
+\(`harness-thread-marker') -- threads started in the chat.  What is left,
 the words that made none, has the blank lines they leave collapsed.  A
 TEXT with no such reply is returned as it is, trimmed."
   (let ((text (or text "")) (cut nil))
+    ;; A reply whose tag names its thread is the review's; one that names
+    ;; none started a thread the review never made, and stays.
+    (let ((pos 0))
+      (while (string-match harness-thread-marker-regexp text pos)
+        (let ((start (match-beginning 0))
+              (attributes (match-string 1 text)))
+          (setq pos (match-end 0))
+          (when (and attributes
+                     (string-match "\\bid=\"[A-Za-z0-9][A-Za-z0-9_.-]*\"" attributes)
+                     (not (harness-thread--fenced-p text start))
+                     (string-match "</thread>" text pos))
+            (let ((end (match-end 0)))
+              (setq cut t
+                    pos start
+                    text (concat (substring text 0 start) (substring text end))))))))
     (dolist (segment (reverse (harness-patch-review--segments text)))
       (when (harness-thread-marker-ids (plist-get segment :answer))
         (setq cut t
@@ -1222,7 +1238,7 @@ Return a promise of (:seen N :unviewed M :revision COMMIT :tip COMMIT)."
 (defun harness-patch-review--attribution (task set)
   "Return the line before the first quote of the drafts of TASK's review in SET."
   (let ((version (change-review-latest-version set)))
-    (format "My review comments on your branch %s%s%s. Each is quoted from the diff, with my comment under the lines it is about; [thread ...] names the thread it belongs to. These threads are what I want worked on with you, not a check to get to hand_in. Answer a thread with the review_comment tool, giving its id, and close it (status \"closed\") only once what it raises is done: a thread left open is not done, and neither is one closed unanswered or in a batch. I look at every thread you close, so say in your answer what you changed and where."
+    (format "My review comments on your branch %s%s%s. Each is quoted from the diff, with my comment under the lines it is about; the <thread id=\"...\"> line names the thread it belongs to. These threads are what I want worked on with you, not a check to get to hand_in. Answer a thread with the review_comment tool, giving its id, and close it (status \"closed\") only once what it raises is done: a thread left open is not done, and neither is one closed unanswered or in a batch. I look at every thread you close, so say in your answer what you changed and where."
             (or (plist-get task :branch) "")
             (if version (format " (at %s)" (change-review-short-revision (change-review-version-tip version))) "")
             (if (and version (change-review-version-base version))
@@ -1240,7 +1256,7 @@ the threads, also when no comment is on a file and so quotes nothing."
                set drafts
                :attribution (harness-patch-review--attribution task set)
                :history t
-               :markers (lambda (comment) (format "[thread %s]" (change-review-comment-thread comment))))))
+               :markers (lambda (comment) (harness-thread-marker (change-review-comment-thread comment))))))
     (if (string-search attribution text)
         text
       (concat attribution "\n\n" text))))
@@ -1278,7 +1294,7 @@ thread its words are in."
     (when (or drafts words)
       (let ((round (length (plist-get task :feedback))))
         (cons (string-join
-               (delq nil (list (and thread (format "[thread %s]" thread))
+               (delq nil (list (and thread (harness-thread-marker thread))
                                (and drafts (harness-patch-review--render task set drafts))))
                "\n\n")
               (lambda ()

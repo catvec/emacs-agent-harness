@@ -29,7 +29,7 @@
 ;;                 without text, then with it, text, a tool call's input,
 ;;                 each call's usage -- for the live token count
 ;;   a thread      a reply that is a comment in a thread of the task's
-;;                 review, which names the thread with a marker line
+;;                 review, whose <thread> block names the thread
 ;;                 (`harness-thread-marker'): review_comment answers it
 ;;   anything else echo the prompt back as markdown
 ;;
@@ -219,7 +219,7 @@ user wrote."
 
 (defun harness-provider-demo--thread-ids (request)
   "Return the ids of the threads the newest user message of REQUEST names.
-Its marker lines (`harness-thread-marker'), in every text block of the
+Their <thread> tags (`harness-thread-marker'), in every text block of the
 message: a message may hold the replies in several threads, a block each."
   (let (ids)
     (dolist (m (plist-get request :messages))
@@ -399,7 +399,7 @@ one (see the Commentary)."
 
 (defun harness-provider-demo--thread (request)
   "Return the script of an agent answering the threads of REQUEST's newest message.
-The reply is a comment in each thread its marker lines name
+The reply is a comment in each thread whose <thread> tag it names
 \(`harness-thread-marker'): the agent answers each in its thread with
 review_comment, as it is told to, and leaves it open for the user to go on.
 The tool calls end the request each, as a real model's do, and the rest of

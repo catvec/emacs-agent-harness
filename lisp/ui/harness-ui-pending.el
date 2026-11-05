@@ -43,7 +43,17 @@
 ;; (this exact command) to the widest (every call of the tool), and one
 ;; about a path outside the allowed directories lists the patterns around
 ;; its own.  A click on a line, or < and >, picks the one the answers hold
-;; for; the least permissive stays one step away.
+;; for; the least permissive stays one step away.  The covers of a call
+;; are the lasting answers' alone, so they stand directly over those
+;; three buttons, with Allow and Deny, which cover the one call, in a
+;; line above; a path's patterns are every answer's, and stand over the
+;; one line of all five.
+;;
+;; Each panel opens with a line of its own shade
+;; (`harness-ui-panel-border-face'), a shade deeper than the panel's
+;; background: two requests stacked above the compose box share one
+;; background, and without the line they would read as one request with
+;; two sets of buttons.
 ;;
 ;; A permission panel also says what its call would do, in a sentence or
 ;; two a cheap model writes while the request waits (see "What a model
@@ -838,8 +848,10 @@ the request's own; an empty answer goes back to it."
 ;; the narrowest, this exact command or file, to the widest, every call
 ;; of the tool, each a few words naming what it leaves open ("every
 ;; gcloud call (any arguments)"), and the one the answers start on.  The
-;; panel lists them as radio lines.  A click on a line, or < and >, picks
-;; the one the lasting answers hold for, and the answer carries its id.
+;; panel lists them as radio lines, directly over the buttons of the
+;; lasting answers and no others (`harness-ui-pending--insert-permission'):
+;; an Allow or a Deny has no cover to pick.  A click on a line, or < and >,
+;; picks the one the lasting answers hold for, and the answer carries its id.
 ;; A request about a path outside the allowed directories has no ladder
 ;; from the harness: it is answered for a pattern, and its lines are the
 ;; patterns around its own (`harness-ui-pending--pattern-suggestions'),
@@ -1374,12 +1386,48 @@ the panel's keys from there."
   (add-face-text-property start end 'harness-ui-panel-face t)
   (harness-ui-add-keymap start end map))
 
-(defun harness-ui-pending--insert-permission (r)
-  "Insert the panel for permission record R."
+(defun harness-ui-pending--lasting-button-p (button)
+  "Non-nil when BUTTON, a (LABEL KEY OPTION) of a permission panel, lasts.
+Those are Allow for session, Always allow and Always deny, the buttons
+of `harness-ui-pending--lasting-options': each records a rule."
+  (and (member (nth 2 button) harness-ui-pending--lasting-options) t))
+
+(defun harness-ui-pending--insert-panel-border ()
+  "Insert the line that parts this panel from what comes before it.
+A blank line in a face of its own, a shade deeper than the panel's:
+panels share one background, so two requests stacked above the compose
+box would otherwise read as one request with two sets of buttons."
+  (let ((start (point)))
+    (insert "\n")
+    (add-face-text-property start (point) 'harness-ui-panel-border-face)))
+
+(defun harness-ui-pending--insert-answers (r buttons)
+  "Insert BUTTONS, answers of permission record R, on one line.
+Each is a (LABEL KEY OPTION) of `harness-ui-pending-permission-buttons'."
   (let ((pid (plist-get r :id))
-        (session-id (harness-ui-pending--session))
+        (session-id (harness-ui-pending--session)))
+    (insert "   ")
+    (dolist (o buttons)
+      (let ((option (nth 2 o)))
+        (insert (harness-ui-action-button (format "[%s]" (nth 0 o))
+                                          (lambda () (harness-ui-pending-answer-permission session-id pid option))
+                                          :help (format "%s (%s)" (harness-ui-pending-answer-help r option) (nth 1 o)))
+                " " (harness-ui-kbd (nth 1 o)) "  ")))
+    (insert "\n")))
+
+(defun harness-ui-pending--insert-permission (r)
+  "Insert the panel for permission record R.
+The answers are one line of buttons, but for a request with a ladder of
+covers.  The ladder is what the answers that last hold for -- Allow for
+session, Always allow, Always deny -- so it stands directly over those,
+and Allow and Deny, which record nothing and cover the one call, stand
+apart above it: a ladder over all five would offer to widen an Allow.  A
+block of patterns is every answer's, since each of them holds for a
+pattern, so it stays over the one line."
+  (let ((pid (plist-get r :id))
         (start (point))
         (buttons (harness-ui-pending-permission-buttons r)))
+    (harness-ui-pending--insert-panel-border)
     (insert (propertize (concat " " (harness-ui-icon 'harness-icon-blocked) " Permission  ") 'face 'harness-label-face)
             (harness-ui-tool-title-string (plist-get r :tool) (plist-get r :title))
             "\n")
@@ -1391,16 +1439,14 @@ the panel's keys from there."
       (insert (propertize (format "   %s\n" reason) 'face 'harness-hint-face)))
     ;; What a model says the call does, marked as its words.
     (harness-ui-pending--insert-summary r)
-    ;; What the lasting answers cover, and the lines to pick it from.
-    (harness-ui-pending--insert-cover-block r)
-    (insert "   ")
-    (dolist (o buttons)
-      (let ((option (nth 2 o)))
-        (insert (harness-ui-action-button (format "[%s]" (nth 0 o))
-                                          (lambda () (harness-ui-pending-answer-permission session-id pid option))
-                                          :help (format "%s (%s)" (harness-ui-pending-answer-help r option) (nth 1 o)))
-                " " (harness-ui-kbd (nth 1 o)) "  ")))
-    (insert "\n")
+    (if (and (harness-ui-pending--ladder r) (harness-ui-pending--lasting-keys r))
+        (let ((once (cl-remove-if #'harness-ui-pending--lasting-button-p buttons)))
+          (when once (harness-ui-pending--insert-answers r once))
+          ;; What the lasting answers cover, and the lines to pick it from.
+          (harness-ui-pending--insert-cover-block r)
+          (harness-ui-pending--insert-answers r (cl-remove-if-not #'harness-ui-pending--lasting-button-p buttons)))
+      (harness-ui-pending--insert-cover-block r)
+      (harness-ui-pending--insert-answers r buttons))
     ;; The keys above type in the compose box: this is how to press one there.
     (when-let* ((key (and harness-ui-pending-box-hints (nth 1 (car buttons)))))
       (insert "   " (harness-compose-panel-hint key) "\n"))
@@ -1900,6 +1946,7 @@ Options with diagrams get the area showing one of them under them."
   (let ((pid (plist-get r :id))
         (session-id (harness-ui-pending--session))
         (start (point)))
+    (harness-ui-pending--insert-panel-border)
     (insert (propertize (concat " " (harness-ui-icon 'harness-icon-question) " Question") 'face 'harness-label-face)
             "\n"
             (harness-ui-pending--question-text (plist-get r :question))

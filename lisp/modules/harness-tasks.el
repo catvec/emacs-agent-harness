@@ -4078,7 +4078,7 @@ thread of TASK's review, which the module that keeps the review makes: it
 is a filter on `task/feedback-attachments' (value ATTACHMENTS, arg TASK)
 and returns the attachments with the id of the thread in each reply's
 data.  That is done before the round of feedback is kept, so that the
-text the round keeps ends with the marker of each thread
+text the round keeps has the <thread> block of each reply
 \(`harness-thread-marker'), and before a message waits for a slot, so that
 it goes out as the threads it is made of and no more of them.  Without
 such a filter, or when it fails, ATTACHMENTS are as they were."

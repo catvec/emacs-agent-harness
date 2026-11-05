@@ -192,6 +192,42 @@ See `harness-tools-events--send'.")
   "Return how texts name WATCH: its id and the kinds it watches."
   (format "%s (%s)" (harness-tools-events--watch-id watch) (harness-tools-events--kinds-text watch)))
 
+(defun harness-tools-events--view (watch)
+  "Return WATCH as a plist, for a client to show what it watches and has seen."
+  (list :id (harness-tools-events--watch-id watch)
+        :events (harness-tools-events--watch-events watch)
+        :prompt (harness-tools-events--watch-prompt watch)
+        :actions (harness-tools-events--watch-actions watch)
+        :target (harness-tools-events--watch-target watch)
+        :task (harness-tools-events--watch-task watch)
+        :all-projects (and (harness-tools-events--watch-all-projects watch) t)
+        :once (and (harness-tools-events--watch-once watch) t)
+        :timeout (harness-tools-events--watch-timeout watch)
+        :started (harness-tools-events--watch-started watch)
+        :seen (harness-tools-events--watch-seen watch)
+        :classified (harness-tools-events--watch-classified watch)
+        :decisions (harness-tools-events--watch-decisions watch)
+        :dropped (harness-tools-events--watch-dropped-total watch)
+        :coalesced (harness-tools-events--watch-coalesced-total watch)
+        :queued (length (harness-tools-events--watch-queue watch))
+        :busy (and (harness-tools-events--watch-busy watch) t)
+        :last-failure (harness-tools-events--watch-last-failure watch)))
+
+(defun harness-tools-events--changed (watch)
+  "Tell the UI that WATCH changed, so a panel of it can be drawn again."
+  (harness-emit 'event-watch/changed (harness-tools-events--watch-session watch)
+                (harness-tools-events--watch-id watch)))
+
+(harness-defmethod event-watch/list (session-id)
+  "Return the event watches of SESSION-ID that live, oldest first.
+Each is a plist (`harness-tools-events--view'): its id, the kinds of
+event it watches, its prompt and actions, what it narrows them to
+\(:target, :task, :all-projects), whether it ends with its first
+decision (:once) and its timeout, when it started, and how it has
+fared: :seen, :classified, :decisions, :dropped, :coalesced, :queued,
+:busy and :last-failure.  A chat shows them above its compose box."
+  (mapcar #'harness-tools-events--view (harness-tools-events--watches-of session-id)))
+
 ;;;; Records
 
 (defun harness-tools-events--line (value &optional max)
@@ -592,6 +628,7 @@ oldest record is dropped.  Both are counted for the next decision."
         (cl-incf (harness-tools-events--watch-dropped watch))
         (cl-incf (harness-tools-events--watch-dropped-total watch)))
       (setf (harness-tools-events--watch-queue watch) queue)))
+  (harness-tools-events--changed watch)
   (harness-tools-events--pump watch))
 
 (defun harness-tools-events--rate-wait (watch)
@@ -753,7 +790,9 @@ why.  Ignore leaves WATCH watching; any other decision is delivered."
         (setf (harness-tools-events--watch-failures watch) 0)
         (cl-incf (harness-tools-events--watch-classified watch))
         (if (equal (plist-get value :action) "ignore")
-            (harness-tools-events--pump watch)
+            (progn
+              (harness-tools-events--changed watch)
+              (harness-tools-events--pump watch))
           (cl-incf (harness-tools-events--watch-decisions watch))
           (harness-tools-events--deliver watch record value))))))
 
@@ -900,6 +939,7 @@ otherwise.  Return non-nil when WATCH lived."
       (when (and text (memq why '(timeout failed gone)))
         (harness-tools-events--send (harness-tools-events--watch-session watch)
                                     (concat (harness-json-encode-text ended) "\n" text))))
+    (harness-tools-events--changed watch)
     t))
 
 (defun harness-tools-events--time-out (watch)
@@ -1081,6 +1121,7 @@ waits for an event."
                    :started (float-time)
                    :timeout (harness-tools-events--register-timeout input))))
       (puthash id watch harness-tools-events--watches)
+      (harness-tools-events--changed watch)
       (when (harness-tools-events--watch-timeout watch)
         (setf (harness-tools-events--watch-timer watch)
               (run-at-time (harness-tools-events--watch-timeout watch) nil
@@ -1186,6 +1227,9 @@ Idempotent: every subscriber is a named function."
   (harness-add-filter 'agent/outstanding #'harness-tools-events--outstanding))
 
 (harness-tools-events--init)
+
+(harness-declare-event 'event-watch/changed
+  "(SESSION-ID WATCH-ID) when an event watch is made, sees an event, decides one, or ends.")
 
 (harness-define-module 'tools-events
   :doc "watch_events and unwatch_events: a session watches harness events, and a cheap model decides which call for it to act."

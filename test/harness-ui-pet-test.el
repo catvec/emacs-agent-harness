@@ -2992,6 +2992,14 @@ line: it is whole through each, and plays its beats on each."
                 (line-at (pos) (with-current-buffer buf
                                  (save-excursion (goto-char pos)
                                                  (buffer-substring-no-properties (point) (line-end-position)))))
+                (panel-title (pos) (with-current-buffer buf
+                                     (save-excursion
+                                       (goto-char pos)
+                                       (while (and (not (eobp))
+                                                   (string-blank-p
+                                                    (buffer-substring-no-properties (point) (line-end-position))))
+                                         (forward-line 1))
+                                       (buffer-substring-no-properties (point) (line-end-position)))))
                 (transcript-end () (marker-position (buffer-local-value 'harness-chat--transcript-end buf)))
                 (activity () (let ((ov (buffer-local-value 'harness-chat--activity-overlay buf)))
                                (and ov (overlay-buffer ov) (overlay-get ov 'before-string) ov))))
@@ -3020,7 +3028,10 @@ line: it is whole through each, and plays its beats on each."
                             :payload (list :tool "bash" :title "Bash: echo" :kind 'exec :input '(:command "echo"))))
         (harness-test-wait (lambda () (buffer-local-value 'harness-chat--pending buf)) 5 "the request to show")
         (should (= (top) (transcript-end)))
-        (should (string-search "Permission" (line-at (below))))
+        ;; The panel opens with its border line, a blank line of its own; the
+        ;; title is under it.
+        (should (string-blank-p (line-at (below))))
+        (should (string-search "Permission" (panel-title (below))))
         (should (< (find "Permission") (find "Todo list") (box)))
         (harness-ui-pet-test--check-figure buf)
         ;; While the turn runs the activity line stands on the request, right under the figure.
@@ -3053,7 +3064,7 @@ line: it is whole through each, and plays its beats on each."
         ;; The turn over, no line is under it; the request and the list still are.
         (harness-ui-pet-test--set-status buf "idle")
         (should-not (activity))
-        (should (string-search "Permission" (line-at (below))))))))
+        (should (string-search "Permission" (panel-title (below))))))))
 
 
 (defmacro harness-ui-pet-test-with-list (buffer &rest body)

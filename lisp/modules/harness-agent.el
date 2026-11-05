@@ -155,14 +155,14 @@ wrote it (`harness-agent--inline-reply-p').")
 That is a line of the message from \"> \" on with, further down, a line
 of its own: the user's answer under the part it quotes.  A message that
 only quotes -- a region prompt, a selection pasted in -- has no such
-line, and is not answered inline.  Nor is one whose replies are comments
-in threads (`harness-thread-marker'): each names the thread to answer in
-and the tool to answer with, which the note would contradict."
+line, and is not answered inline.  Nor is one whose replies are threads
+\(`harness-thread-marker'): each names the thread to answer in in its
+tag, which the note would contradict."
   (let ((quoted nil))
     (catch 'found
       (dolist (block blocks)
         (when (equal (plist-get block :type) "text")
-          (when (harness-thread-marker-ids (plist-get block :text))
+          (when (harness-thread-tag-p (plist-get block :text))
             (throw 'found nil))))
       (dolist (block blocks)
         (when (equal (plist-get block :type) "text")

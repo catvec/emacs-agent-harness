@@ -256,6 +256,12 @@ gone, so it is struck through." :group 'harness-ui-chat)
   "What a search found, where its session opens at it.
 See `harness-ui-chat-goto-node'." :group 'harness-ui-chat)
 
+(defface harness-chat-quoted-face '((t :underline t))
+  "Face of the words in the transcript a reply in a thread quotes.
+They are underlined where they stand, as a comment on the words of a
+document; the badge at their end says how many replies there are and
+shows them." :group 'harness-ui-chat)
+
 (harness-ui-define-icon harness-chat-icon-plan "plan" "≡" "plan" "A plan.")
 (harness-ui-define-icon harness-chat-icon-compaction "compaction" "⟲" "compact" "A compaction.")
 (harness-ui-define-icon harness-chat-icon-question "question" "?" "?" "A question.")
@@ -387,6 +393,13 @@ the chat's tool calls among its own text, such as the access view
 It is empty and sits at `harness-chat--activity-position': the end of
 the transcript, or the end of what `harness-chat-top-functions' drew
 there.")
+(defvar-local harness-chat--quote-overlays nil
+  "Overlays that mark the text replies in threads quote, in this buffer.")
+(defvar-local harness-chat--quote-replies nil
+  "Node id -> the replies in threads that quote it.
+Each is (REPLY-BLOCK-ID REPLY-INDEX REFERENCE): the block of the reply,
+the number of the reply in it, and the reference to the part of the node
+it quotes (`harness-thread-refs').")
 (defvar-local harness-chat--settings-marker nil
   "Marker: where the settings line starts, above the attachments.
 The tail sets it whenever it is drawn (`harness-chat--render-tail-1').")
@@ -2541,11 +2554,16 @@ given: its words are cut short if they are long (`harness-chat--cut-words')."
                 (first (car lines)))
       (setcar lines (concat first (propertize "  ↳ " 'face 'harness-dim-face)
                             (harness-chat--thread-link id))))
-    (concat (mapconcat (lambda (line) (concat line "\n")) lines "")
-            (propertize (if (and block index)
-                            (harness-chat--cut-words block index response)
-                          response)
-                        'line-prefix rail 'wrap-prefix rail))))
+    (let ((text (concat (mapconcat (lambda (line) (concat line "\n")) lines "")
+                        (propertize (if (and block index)
+                                        (harness-chat--cut-words block index response)
+                                      response)
+                                    'line-prefix rail 'wrap-prefix rail))))
+      ;; The card knows itself, so a mark on what it quotes can show it.
+      (when (and block index)
+        (put-text-property 0 (length text) 'harness-chat-reply
+                           (cons (harness-chat-block-id block) index) text))
+      text)))
 
 (defun harness-chat--render-replies (block &optional face)
   "Return the replies in threads of user BLOCK, drawn, a blank line between two.
@@ -2570,6 +2588,170 @@ all of them once the reader asked for that (`harness-chat--toggle-more')."
         (push (harness-chat--render-reply reply face block index) parts))
       (cl-incf index))
     (mapconcat #'identity (nreverse parts) "\n")))
+
+;;;; What replies in threads quote
+
+;; A reply in a thread quotes part of an earlier message.  The words it
+;; quotes are underlined where they stand in the transcript -- as a
+;; comment is marked on the words of a document -- and end with a badge
+;; that says how many replies there are, "↳ 1 reply", a button that shows
+;; the reply, or the first of them.  Two replies to the same words count
+;; together: the badge has two, and shows both.  Nothing is added to the
+;; text: the marks are overlays, so what is copied, searched and quoted is
+;; the words themselves, and a block drawn again is marked again with it.
+;; A quoted message the transcript no longer shows, one dropped from the
+;; history above a window, has no mark, and a reply to it still says what
+;; it quotes on its card.
+
+(defun harness-chat--quote-probe (line)
+  "Return the words to look for in the transcript for LINE of a quote.
+What Markdown draws is the words: its marks are left out, and a link is
+its text."
+  (let ((text (replace-regexp-in-string "\\[\\([^][]*\\)\\]([^()]*)" "\\1" (or line ""))))
+    (setq text (replace-regexp-in-string "[`*_#>~]" "" text))
+    (string-trim (truncate-string-to-width text 40))))
+
+(defun harness-chat--quote-range (block ref)
+  "Return (FROM . TO), where the words of REF stand in BLOCK, or nil.
+The first line of the quote is looked for in the block's text, and its
+last line when the quote has more than one: where they are is where the
+words are drawn, whatever Markdown made of them.  Nil when the words are
+not found, as for a part of a message cut away by `harness-chat--page'."
+  (let* ((lines (cl-remove-if #'string-blank-p
+                              (split-string (or (plist-get ref :text) "") "\n")))
+         (first (and lines (harness-chat--quote-probe (car lines))))
+         (last (and (cdr lines) (harness-chat--quote-probe (car (last lines)))))
+         (start (marker-position (harness-chat-block-start block)))
+         (end (marker-position (harness-chat-block-end block))))
+    (when (and first (not (string-empty-p first)))
+      (save-excursion
+        (goto-char start)
+        (let ((case-fold-search nil))
+          (when (search-forward first end t)
+            (let ((from (match-beginning 0))
+                  (to (match-end 0)))
+              (when (and last (not (string-empty-p last)) (not (equal last first)))
+                (goto-char to)
+                (when (search-forward last end t)
+                  (setq to (match-end 0))))
+              (cons from to))))))))
+
+(defun harness-chat--merge-quote-ranges (ranges)
+  "Return RANGES, (FROM TO REPLY), one for two that meet or overlap.
+REPLY, (BLOCK-ID . INDEX), is collected into the list of the replies to
+the range they share."
+  (let (merged)
+    (dolist (range (sort ranges
+                         (lambda (a b)
+                           (or (< (nth 0 a) (nth 0 b))
+                               (and (= (nth 0 a) (nth 0 b)) (< (nth 1 a) (nth 1 b)))))))
+      (let ((last (car merged)))
+        (if (and last (<= (nth 0 range) (nth 1 last)))
+            (setcar merged (list (nth 0 last) (max (nth 1 last) (nth 1 range))
+                                 (cons (nth 2 range) (nth 2 last))))
+          (push (list (nth 0 range) (nth 1 range) (list (nth 2 range))) merged))))
+    (nreverse merged)))
+
+(defun harness-chat--quote-badge (count action)
+  "Return the badge that ends the words COUNT replies in threads quote.
+An arrow and the count of the replies, a button ACTION shows."
+  (propertize (format " ↳ %d %s" count (if (= count 1) "reply" "replies"))
+              'face 'harness-dim-face
+              'mouse-face 'highlight
+              'pointer 'hand
+              'help-echo (if (= count 1) "mouse-1, RET: show the reply"
+                           "mouse-1, RET: show the replies")
+              'keymap (harness-chat--mouse-map action)))
+
+(defun harness-chat--reply-start (block-id index)
+  "Return where the card of reply INDEX of BLOCK-ID starts, or nil."
+  (when (and (stringp block-id) index)
+    (when-let* ((block (gethash block-id harness-chat--blocks)))
+      (let ((pos (marker-position (harness-chat-block-start block)))
+            (end (marker-position (harness-chat-block-end block)))
+            (wanted (cons block-id index))
+            found)
+        (while (and (< pos end) (not found))
+          (if (equal (get-text-property pos 'harness-chat-reply) wanted)
+              (setq found pos)
+            (setq pos (next-single-property-change pos 'harness-chat-reply nil end))))
+        found))))
+
+(defun harness-chat--show-quote-reply (replies &optional event)
+  "Show the reply in a thread that quotes the words marked here.
+REPLIES is the list of (BLOCK-ID . INDEX) of the replies that quote
+them, the first of which is shown, point on its card and the card lit.
+A reply whose message is not in the transcript shown here is passed by;
+when none is there, say so."
+  (when (and event (mouse-event-p event)) (mouse-set-point event))
+  (let ((positions (delq nil (mapcar (lambda (reply)
+                                       (harness-chat--reply-start (car reply) (cdr reply)))
+                                     replies))))
+    (unless positions
+      (user-error "The reply is not in the transcript shown here"))
+    (let ((pos (car positions)))
+      (goto-char pos)
+      (pulse-momentary-highlight-region
+       pos (next-single-property-change pos 'harness-chat-reply nil (point-max))))))
+
+(defun harness-chat--index-quotes ()
+  "Work out which node each reply in a thread quotes.
+Fill `harness-chat--quote-replies': node id to a list of
+\(REPLY-BLOCK-ID REPLY-INDEX REFERENCE), and return it."
+  (let ((table (or harness-chat--quote-replies
+                   (setq harness-chat--quote-replies (make-hash-table :test 'equal)))))
+    (clrhash table)
+    (dolist (id harness-chat--order)
+      (when-let* ((block (gethash id harness-chat--blocks)))
+        (when (equal (harness-chat-block-kind block) "user")
+          (let ((index -1))
+            (dolist (reply (harness-chat--thread-blocks (harness-chat-block-node block)))
+              (cl-incf index)
+              (dolist (ref (harness-thread-refs (plist-get reply :thread)))
+                (let ((node (plist-get ref :node)))
+                  (when (and (equal (harness-thread-ref-kind ref) "chat")
+                             (stringp node) (not (string-empty-p node)))
+                    (push (list id index ref) (gethash node table))))))))))
+    table))
+
+(defun harness-chat--refresh-quotes ()
+  "Draw the marks of the words replies in threads quote.
+Each run of words they quote is underlined, and ends with the badge that
+says how many replies it has and shows them."
+  (mapc #'delete-overlay harness-chat--quote-overlays)
+  (setq harness-chat--quote-overlays nil)
+  (when (and harness-chat--quote-replies
+             (> (hash-table-count harness-chat--quote-replies) 0))
+    (maphash
+     (lambda (node entries)
+       (when-let* ((block (gethash node harness-chat--blocks)))
+         (let (ranges)
+           (dolist (entry entries)
+             (when-let* ((range (harness-chat--quote-range block (nth 2 entry))))
+               (push (list (car range) (cdr range) (cons (nth 0 entry) (nth 1 entry))) ranges)))
+           (dolist (range (harness-chat--merge-quote-ranges ranges))
+             (pcase-let ((`(,from ,to ,replies) range))
+               (let* ((action (lambda () (interactive) (harness-chat--show-quote-reply replies)))
+                      (overlay (make-overlay from to nil t nil)))
+                 (overlay-put overlay 'harness-chat-quote t)
+                 (overlay-put overlay 'face 'harness-chat-quoted-face)
+                 (overlay-put overlay 'mouse-face 'highlight)
+                 (overlay-put overlay 'help-echo
+                              (if (= (length replies) 1)
+                                  "Quoted in a reply: mouse-1, RET shows it"
+                                (format "Quoted in %d replies: mouse-1, RET shows them"
+                                        (length replies))))
+                 (overlay-put overlay 'keymap (harness-chat--mouse-map action))
+                 (overlay-put overlay 'after-string
+                              (harness-chat--quote-badge (length replies) action))
+                 (push overlay harness-chat--quote-overlays)))))))
+     harness-chat--quote-replies)))
+
+(defun harness-chat--quotes-changed ()
+  "Look at the replies in threads again, and draw the marks of what they quote."
+  (unless (or harness-chat--batch harness-chat--loading)
+    (harness-chat--index-quotes)
+    (harness-chat--refresh-quotes)))
 
 (defun harness-chat--rerender-media (id)
   "Redraw every chat block whose rendering shows the media ID, if any.
@@ -3450,6 +3632,13 @@ before it draws again, to keep them so."
     ;; The first block replaces the "No messages yet" notice.
     (when (and first (not harness-chat--batch) (not harness-chat--loading))
       (harness-chat--render-top))
+    ;; A message with replies marks what they quote, and a message that
+    ;; has been quoted is marked now that it is drawn.
+    (when (and (not harness-chat--batch) (not harness-chat--loading)
+               (or (harness-chat--thread-blocks (harness-chat-block-node block))
+                   (and harness-chat--quote-replies
+                        (gethash (harness-chat-block-id block) harness-chat--quote-replies))))
+      (harness-chat--quotes-changed))
     block))
 
 (defun harness-chat--rerender (block)
@@ -3467,7 +3656,11 @@ before it draws again, to keep them so."
                                   (1- (marker-position (harness-chat-block-end block)))
                                   (substring text 0 -1))
     (harness-chat--make-fold block)
-    (harness-chat--follow windows)))
+    (harness-chat--follow windows)
+    ;; The words a reply quotes are marked again where they are drawn again.
+    (when (and (not harness-chat--batch) harness-chat--quote-replies
+               (gethash (harness-chat-block-id block) harness-chat--quote-replies))
+      (harness-chat--refresh-quotes))))
 
 (defun harness-chat--hand-in-p (block)
   "Non-nil when BLOCK is a hand_in call.
@@ -3522,7 +3715,8 @@ it.  BLOCK must not be folded into a group."
       (let ((head (harness-chat--head-p (harness-chat--turn-kind newer) (harness-chat--turn-kind older))))
         (unless (eq (not head) (not (harness-chat-block-head newer)))
           (setf (harness-chat-block-head newer) head)
-          (harness-chat--rerender newer))))))
+          (harness-chat--rerender newer))))
+    (harness-chat--quotes-changed)))
 
 (defun harness-chat--append-delta (block delta face)
   "Append streaming DELTA to BLOCK with FACE, cheaply."
@@ -3984,7 +4178,10 @@ both places."
       ;; slot notice's place in it counts its changes.
       (when (or (equal kind "tool-call")
                 (harness-chat--slot-hint-block-p block))
-        (harness-chat--refresh-group-of block)))
+        (harness-chat--refresh-group-of block))
+      ;; A message of yours may have gained or changed its replies.
+      (when (equal kind "user")
+        (harness-chat--quotes-changed)))
      (t
       (let ((windows (harness-chat--bottom-windows)))
         (harness-chat--append-block (harness-chat--new-block node))
@@ -4878,6 +5075,8 @@ own.  The BTW module says what a side conversation is for with it.")
         harness-chat--calls (make-hash-table :test 'equal)
         harness-chat--groups (make-hash-table :test 'equal)
         harness-chat--render-timers (make-hash-table :test 'equal)
+        harness-chat--quote-replies (make-hash-table :test 'equal)
+        harness-chat--quote-overlays nil
         harness-chat--stale nil
         harness-chat--order nil
         harness-chat--compaction-toggle-id nil
@@ -4904,7 +5103,9 @@ own.  The BTW module says what a side conversation is for with it.")
           (harness-chat--redraw-sending)))
     ;; Whatever happened above, the buffer keeps its panel and compose box.
     (harness-chat--render-top)
-    (harness-chat--render-tail)))
+    (harness-chat--render-tail)
+    ;; And the marks of what the replies in the transcript quote.
+    (harness-chat--quotes-changed)))
 
 (defun harness-chat--oldest-id ()
   "Return the id of the oldest rendered node."
@@ -4974,6 +5175,8 @@ page from its top, and land near the top again."
                                     (harness-chat--windows)))
          (bottom (harness-chat--bottom-windows)))
     (harness-chat--prepend-nodes nodes)
+    ;; A quoted message may be on the page just rendered.
+    (harness-chat--quotes-changed)
     ;; The first block, a result alone, may have joined its call on the
     ;; new page: the oldest block still its own takes its place.
     (when-let* ((kept (cl-loop for id in shown
@@ -5025,7 +5228,9 @@ page from its top, and land near the top again."
         (harness-chat--regroup)
         (harness-chat--refresh-heads)
         (harness-chat--reopen-groups open)
-        (harness-chat--render-top)))))
+        (harness-chat--render-top)
+        ;; A block a reply quoted may be one of those dropped.
+        (harness-chat--quotes-changed)))))
 
 (defun harness-chat--prepend-nodes (nodes)
   "Render NODES (oldest first) above the current first block.
@@ -5414,9 +5619,8 @@ connected again still runs its turn, as the redrawn transcript shows."
 
 (defun harness-chat--answer-text (text atts)
   "Return TEXT, the box's words, with the replies in threads of ATTS after them.
-Each is its quote and the words under it, as a mail has them
-\(`harness-thread-text'): the answer to a question is words, which the
-cards of a box are not."
+Each is its <thread> block (`harness-thread-text'): the answer to a
+question is words, which the cards of a box are not."
   (string-join
    (cl-remove-if #'string-empty-p
                  (cons text (cl-loop for att in atts
@@ -6321,24 +6525,25 @@ after every session's figures were fetched again, redraws every header."
 ;; A fork, a sub-agent, a BTW and a session the merge queue started to
 ;; resolve a conflict all record the session they were started from as
 ;; their `:parent-id' (see `session/fork', `session/btw' and
-;; `harness-session-parent-id').  The header line says which session that
-;; is and what the relation is, and clicking it goes up to it: a child
-;; session tells you where it came from and leads back there
-;; (`harness-up-to-parent').  A seed conversation in between is stepped
-;; over rather than named: a fork made through a seed is the seed's
-;; child, and a seed is a prompt cache, not a conversation to open
-;; (`harness-ui-seed-session-p').
+;; `harness-session-parent-id').  The header line has an up arrow for it,
+;; and clicking that goes up to the parent: a child session leads back to
+;; where it came from (`harness-up-to-parent').  The arrow is all the
+;; header spends on it -- the session's own name needs the room -- and
+;; its tooltip says what the relation is and which session that is.  A
+;; seed conversation in between is stepped over rather than named: a
+;; fork made through a seed is the seed's child, and a seed is a prompt
+;; cache, not a conversation to open (`harness-ui-seed-session-p').
 
 (defconst harness-chat--parent-labels
   '((fork . "fork of")
     (subagent . "sub-agent of")
     (btw . "opened over"))
-  "How the header reads the session a child session was started from.
+  "How the tooltip of the parent button reads the parent of a child session.
 The kind of the child names the relation; any other kind with a parent
 is a \"child of\" it.")
 
 (defun harness-chat--parent-label (kind)
-  "Return how the header names the parent of a child session of KIND.
+  "Return how the parent button's tooltip names the parent of a KIND session.
 KIND is the child's `:kind' as the session cache holds it, a symbol or,
 over ACP, a string."
   (or (alist-get (if (stringp kind) (intern kind) kind) harness-chat--parent-labels)
@@ -6373,43 +6578,39 @@ ancestor of its own."
    (plist-get (harness-chat--session) :parent-id)))
 
 (defun harness-chat--parent-help (window _object _pos)
-  "Return the tooltip of the parent segment in WINDOW's header line.
-A `help-echo' function, so the keys are searched on hover, not on every
+  "Return the tooltip of the parent button in WINDOW's header line.
+It names the relation and the parent, which the button leaves out to
+save room (\"Go up: sub-agent of Planner\"), and the ways up.  A
+`help-echo' function, so the keys are searched on hover, not on every
 redisplay of the header line."
   (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
-    (substitute-command-keys
-     "The session this one was started from (mouse-1: go up to it, \\[harness-up-to-parent])" t)))
+    (let ((id (harness-chat--parent-id)))
+      ;; The name goes in after the keys are looked up: it is the
+      ;; session's own text, and `substitute-command-keys' would read
+      ;; any `\\[' or quote in it.
+      (concat (format "Go up: %s %s "
+                      (harness-chat--parent-label (plist-get (harness-chat--session) :kind))
+                      (if id (harness-chat--session-name id) "its parent"))
+              (substitute-command-keys "(mouse-1, \\[harness-up-to-parent])" t)))))
 
 (defun harness-chat--parent-segment ()
   "Return the header segment leading to this session's parent, or nil.
-A fork, a sub-agent and a BTW name the session they were started from,
-and the whole segment -- the arrow, the relation and the name -- opens
-it (`harness-up-to-parent').  A seed conversation in between is not
-named or opened: the segment leads to the nearest ancestor that is not
-a seed (`harness-chat--parent-id').  A session with no such parent, or
-whose parent the harness no longer has, has no segment."
-  (when-let* ((id (harness-chat--parent-id))
-              (parent (harness-ui-session id)))
-    (let* ((label (harness-chat--parent-label (plist-get (harness-chat--session) :kind)))
-           (name (harness-chat--session-name id))
-           (segment (lambda (name)
-                      ;; The name is drawn by the shared session link, so it
-                      ;; wears `harness-ui-session-link-face' as a session
-                      ;; name does everywhere; the segment's own keymap takes
-                      ;; the click, though, running `harness-up-to-parent':
-                      ;; the arrow and the relation are part of the same
-                      ;; target, and a click on a header line is a
-                      ;; `[header-line mouse-1]' the link's own map does not
-                      ;; bind (see `harness-chat--segment').
-                      (harness-chat--segment
-                       (concat "  " (harness-ui-icon 'harness-icon-up) " "
-                               (propertize (concat label " ") 'face 'harness-dim-face)
-                               (harness-ui-session-link id name))
-                       #'harness-up-to-parent #'harness-chat--parent-help))))
-      ;; Shown after the session's own name, which matters more: a narrow
-      ;; window drops this before the name, and shortens it before that.
-      (list (funcall segment name) 65 (funcall segment (harness-truncate-end name 12))
-            #'harness-up-to-parent))))
+A fork, a sub-agent and a BTW record the session they were started
+from.  The segment is the up arrow alone, a button that opens that
+session (`harness-up-to-parent'): the parent's name and the relation
+take room the header needs for the session's own, so they are in the
+tooltip (`harness-chat--parent-help').  A seed conversation in between
+is not named or opened: the button leads to the nearest ancestor that
+is not a seed (`harness-chat--parent-id').  A session with no such
+parent, or whose parent the harness no longer has, has no segment."
+  (when (and (harness-chat--parent-id)
+             (harness-ui-session (harness-chat--parent-id)))
+    ;; The separator stays out of the button, so a click beside the arrow
+    ;; does nothing.  The arrow is tiny, and shown after the session's own
+    ;; name, which matters more: a narrow window drops it before the name.
+    (list (concat "  " (harness-chat--segment (harness-ui-icon 'harness-icon-up)
+                                              #'harness-up-to-parent #'harness-chat--parent-help))
+          65 nil #'harness-up-to-parent)))
 
 (defvar harness-chat-header-functions nil
   "Functions putting segments in front of the chat header line.
@@ -7516,6 +7717,10 @@ a new one."
   (define-key map (kbd "C-c C-q") #'harness-chat-queue)
   (define-key map (kbd "C-c C-c") #'harness-chat-send)
   (define-key map (kbd "C-c C-k") #'harness-chat-cancel)
+  ;; The Meta variant of C-c C-k acts on the whole session, as C-c M-l's
+  ;; link is the session's where C-c C-l's is a message's: C-c C-k cancels
+  ;; the turn, C-c M-k closes the session, a BTW's included.
+  (define-key map (kbd "C-c M-k") #'harness-close-session)
   (define-key map (kbd "C-c C-s") #'harness-chat-search)
   (define-key map (kbd "C-c C-y") #'harness-chat-allow-newest)
   (define-key map (kbd "C-c C-n") #'harness-chat-deny-newest)
@@ -7698,6 +7903,7 @@ the id of a session written in a message is a link to it.
         ("C-c C-k" "Cancel turn" harness-chat-cancel)]
        ["Session"
         ("C-c C-u" "Go to the session this one came from" harness-up-to-parent)
+        ("C-c M-k" "Close session" harness-close-session)
         ("C-c M-l" "Copy a link to this session" harness-chat-copy-session-link)
         ("C-c C-o" "What the bar cut off" harness-ui-overflow-show)]
        ["Transcript"

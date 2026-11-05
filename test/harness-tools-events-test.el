@@ -802,5 +802,47 @@ session ends too, and its own session hears of it."
         (should (equal "gone" (plist-get (harness-tools-events-test--json text) :ended)))
         (should (string-match-p "the session it watched, [^ ]+, was deleted" text))))))
 
+(ert-deftest harness-tools-events-lists-the-watches-of-a-session ()
+  "event-watch/list tells a client what each live watch watches and has
+seen; event-watch/changed names the session when a watch is made, sees an
+event, decides one and ends.  A watch that ended is no longer listed."
+  (harness-tools-events-test-with
+    (let* ((me (harness-tools-events-test--session :name "Boss"))
+           (worker (harness-tools-events-test--session :name "Worker"))
+           (changes nil))
+      (harness-on 'event-watch/changed
+                  (lambda (sid id) (push (list sid id) changes)))
+      (harness-tools-events-test--always (harness-tools-events-test--decide "ignore"))
+      (let ((id (harness-tools-events-test--watch me :events '("session/status")
+                                                   :prompt "Wake me when the worker waits.")))
+        (should (equal (list me id) (car changes)))
+        (pcase-let ((`(,watch) (harness-call 'event-watch/list me)))
+          (should (equal id (plist-get watch :id)))
+          (should (equal '("session/status") (plist-get watch :events)))
+          (should (equal "Wake me when the worker waits." (plist-get watch :prompt)))
+          (should (equal '("wake") (plist-get watch :actions)))
+          (should (plist-get watch :once))
+          (should (plist-get watch :started))
+          (should (= 0 (plist-get watch :seen)))
+          (should (= 0 (plist-get watch :classified)))
+          (should (= 0 (plist-get watch :decisions)))
+          (should (= 0 (plist-get watch :queued))))
+        ;; The event it watches is seen, and classified; the classifier ignores it.
+        (harness-emit 'session/status worker 'blocked)
+        (harness-test-wait
+         (lambda ()
+           (= 1 (plist-get (car (harness-call 'event-watch/list me)) :classified)))
+         5 "the classification")
+        (let ((watch (car (harness-call 'event-watch/list me))))
+          (should (= 1 (plist-get watch :seen)))
+          (should (= 1 (plist-get watch :classified)))
+          (should (= 0 (plist-get watch :decisions)))
+          (should (= 0 (plist-get watch :queued))))
+        ;; Stopped, and no longer listed.
+        (harness-tools-events-test--ok me "unwatch_events" nil)
+        (should-not (harness-call 'event-watch/list me))
+        (should (<= 4 (length changes)))
+        (should (cl-every (lambda (change) (equal (car change) me)) changes))))))
+
 (provide 'harness-tools-events-test)
 ;;; harness-tools-events-test.el ends here

@@ -54,7 +54,17 @@ lists the covers the harness worked out for it, from the narrowest
 (this exact command) to the widest (every call of the tool), and one
 about a path outside the allowed directories lists the patterns around
 its own.  A click on a line, or < and >, picks the one the answers hold
-for; the least permissive stays one step away.
+for; the least permissive stays one step away.  The covers of a call
+are the lasting answers' alone, so they stand directly over those
+three buttons, with Allow and Deny, which cover the one call, in a
+line above; a path's patterns are every answer's, and stand over the
+one line of all five.
+
+Each panel opens with a line of its own shade
+(`harness-ui-panel-border-face`), a shade deeper than the panel's
+background: two requests stacked above the compose box share one
+background, and without the line they would read as one request with
+two sets of buttons.
 
 A permission panel also says what its call would do, in a sentence or
 two a cheap model writes while the request waits (see "What a model

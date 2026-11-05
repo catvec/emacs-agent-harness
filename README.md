@@ -159,7 +159,8 @@ A non-comprehensive list of all the different functionality offered by modules s
     - A sub-agent blocked on you is announced, shown blocked in the session list, and listed first in the sub-agents panel above the parent's compose box, with what it asks and the buttons that answer it
   - Todo
   - Ask question
-  - Threaded replies 
+  - Threaded replies, with the words a reply quotes marked where they stand and a count of the replies
+  - Event watches, the watches a session still has live pinned above its compose box
   - Harness introspection and control
   - Limit number of concurrent tool calls
 - Git worktrees 
@@ -170,6 +171,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Directory allow listing, including the worktrees of the sub-agents a session started, which it may read
   - Secret file blocking
   - Auto mode
+  - A permission panel that parts the lasting answers from Allow and Deny
   - Live access introspection: `session_info` reports the session's permission mode, writable and read-only directories with their sources, network, tools turned off, Linux capabilities and standing allow/deny rules
   - The access view names a sub-agent worktree among a session's directories, with buttons to give it up or make it writable
 - Usage, cost, quota tracking
@@ -201,6 +203,7 @@ A non-comprehensive list of all the different functionality offered by modules s
     project's board is open
 - Insights
 - Btw sessions
+  - Closing a session: `PREFIX x` closes any, `C-c M-k` at the end of a chat's keys; a BTW closes as its `[close]` does
 - Sticky compose box (`ui-sticky-compose`)
   - A chat window scrolled away from its compose box draws a compact copy of it in its mode line while you compose
   - The start and end of the draft, its lines and attachments, and a button that jumps back to the box

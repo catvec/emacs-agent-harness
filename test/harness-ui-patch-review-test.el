@@ -1470,13 +1470,13 @@ longer drafts.  An empty box sends them alone."
       (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text))
             (tip (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")))
         ;; The words are a thread of their own, and the feedback names it.
-        (should (string-prefix-p "Nearly there.\n\n[thread t-" feedback))
+        (should (string-prefix-p "Nearly there.\n\n<thread id=\"t-" feedback))
         (should (string-search (concat "My review comments on your branch task/fix (at "
                                        (substring tip 0 7))
                                feedback))
         (should (string-search "\n> diff --git a/a.el b/a.el\n> @@ -15,4 +15,4 @@\n" feedback))
-        (should (string-search "> +(setq a18 'eighteen)\n\nWhy eighteen?\n[thread t-" feedback))
-        (should (string-search "> diff --git a/new.el b/new.el\n\nNeeds a test\n[thread t-" feedback))
+        (should (string-search "> +(setq a18 'eighteen)\n\nWhy eighteen?\n<thread id=\"t-" feedback))
+        (should (string-search "> diff --git a/new.el b/new.el\n\nNeeds a test\n<thread id=\"t-" feedback))
         (should-not (string-search "b.el" feedback)))
       ;; Sent in the harness's set, and then in the UI's, which hears of it.
       (let ((backend (harness-patch-review--set-for id)))

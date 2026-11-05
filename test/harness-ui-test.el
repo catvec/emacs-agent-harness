@@ -577,14 +577,34 @@ module leaves the entry out, so the menu is unharmed."
       (should-not (string-match-p "Task board" text)))))
 
 (ert-deftest harness-ui-menu-in-a-btw-shows-its-keys-over-the-chats ()
-  "In a BTW, C-c C-k closes it, in the buffer and so in the menu."
+  "In a BTW, C-c C-k cancels the turn as in any session, C-c M-k closes it
+and C-c C-o keeps it, in the buffer and so in the menu."
   (harness-ui-test-with-menu-buffer (lambda () (harness-chat-mode) (harness-ui-btw-minor-mode 1))
+    (should (eq 'harness-chat-cancel (key-binding (kbd "C-c C-k"))))
+    (should (eq 'harness-close-session (key-binding (kbd "C-c M-k"))))
+    (should (eq 'harness-ui-btw-promote (key-binding (kbd "C-c C-o"))))
     (let ((text (harness-ui-test-menu)))
       (should (string-match-p "^Chat .* BTW$" text))
-      (should (string-match-p "C-c C-k +Close" text))
-      (should-not (string-match-p "C-c C-k +Cancel turn" text))
+      (should (string-match-p "C-c C-k +Cancel turn" text))
+      (should (string-match-p "C-c M-k +Close session" text))
+      (should (string-match-p "C-c C-o +Keep as session" text))
+      (should-not (string-match-p "C-c C-k +Close" text))
       (should (string-match-p "C-c C-c +Send" text))
       (should (string-match-p "C-c > +Reply in a thread" text)))))
+
+(ert-deftest harness-ui-menu-closes-a-session-from-a-chat ()
+  "Closing a session is in a chat's menu, and a BTW's, under one key.
+That is C-c M-k, which `C-c h x' and the menu's Sessions group leave to the
+secrets module's Redact a secret; a normal chat and a BTW bind the same
+command to it, and C-c C-k still cancels a turn."
+  (should (eq 'harness-close-session (lookup-key harness-ui-map (kbd "x"))))
+  (harness-ui-test-with-menu-buffer #'harness-chat-mode
+    (should (eq 'harness-close-session (key-binding (kbd "C-c M-k"))))
+    (should (eq 'harness-chat-cancel (key-binding (kbd "C-c C-k"))))
+    (let ((text (harness-ui-test-menu)))
+      (should (string-match-p "C-c M-k +Close session" text))
+      (should (string-match-p "C-c C-k +Cancel turn" text))
+      (should-not (string-match-p "x +Close session" text)))))
 
 (ert-deftest harness-ui-menu-in-review-shows-its-keys-over-the-chats ()
   "While a task's review banner shows, C-c C-v verifies and C-c C-x sends

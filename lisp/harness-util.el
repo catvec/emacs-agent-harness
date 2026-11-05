@@ -899,14 +899,24 @@ is that text as a text block, none when the text is blank, marked
 ;; EXCERPT).  The keys are single words, so they pass through JSON and the
 ;; ACP `_harness' extension as they are.
 ;;
-;; The block's `:text' says it all, as a mail does: the quotes of the
-;; refs, then the response, then, once the thread is a comment in the
-;; review of the task, the thread's marker line -- [thread t-3f2a1b09:
-;; answer with review_comment].  That is what the agent reads: it tells
-;; the agent the thread to answer in, and with which tool.  A UI that
-;; knows threads draws the data -- the card -- instead.  The plain
-;; [thread ID] lines of the feedback that sends a task back are another
-;; thing, and no marker.
+;; The block's `:text' says it all, in the one form the harness reads: a
+;; <thread> block, as a reply written in a message of the user's or of the
+;; agent's.
+;;
+;;   <thread id="t-3f2a1b09">
+;;   <quote>the part of the conversation answered</quote>
+;;   the answer
+;;   </thread>
+;;
+;; The id names the thread of a task's review to answer, its absence a new
+;; thread.  The quote says where the answer is about, the link to the
+;; message it is of among it (`harness-thread-ref-header'), so the agent
+;; may read the words again.  A marker line that names a thread -- the
+;; opening tag alone, `<thread id="t-3f2a1b09">` -- is the same tag: the
+;; feedback that sends a task back puts one after each comment.  A UI that
+;; knows threads draws the data -- the card -- instead.  The old
+;; `[thread ID: answer with review_comment]` marker is read for what was
+;; written before this form; nothing writes it.
 
 ;; A reply may also be written as a little XML-ish block, the same in a
 ;; message of the user's and of the agent's:
@@ -1312,23 +1322,74 @@ what is wrong with an attempt that is not strict."
       (nreverse blocks))))
 
 (defconst harness-thread-marker-regexp
+  "<thread\\(?:[ \t]+\\([^>\n]*\\)\\)?>"
+  "Regexp matching the opening tag of a thread: a reply in one, or a marker.
+Group 1 holds the tag's attributes; `harness-thread-marker-ids' reads the
+id among them.  The name is matched in the case the caller allows.")
+
+(defconst harness-thread-marker-old-regexp
   "^[ \t]*\\[thread \\([A-Za-z0-9][A-Za-z0-9_.-]*\\): answer with review_comment\\][ \t]*$"
-  "Regexp matching the marker line of a reply that is a comment in a thread.
-Group 1 is the thread's id.  See `harness-thread-marker'.")
+  "Regexp matching the marker line a reply in a thread used to end with.
+Group 1 is the thread's id.  Nothing writes it now
+\(`harness-thread-marker'); it is read, so that a transcript or a round of
+feedback written before the <thread> form still names its thread.")
 
 (defun harness-thread-marker (id)
-  "Return the marker line of thread ID, which a reply in that thread ends with."
-  (format "[thread %s: answer with review_comment]" id))
+  "Return the opening tag of thread ID, which a reply in that thread starts with.
+A marker line that names the thread to answer is the tag alone.  Without
+ID, the tag of a new thread, which has none yet."
+  (if (and id (not (string-empty-p (format "%s" id))))
+      (format "<thread id=\"%s\">" id)
+    "<thread>"))
+
+(defun harness-thread--fenced-p (text pos)
+  "Non-nil when POS in TEXT is inside a fenced code block.
+A block written as an example in a fence names no thread."
+  (let ((n 0))
+    (dolist (line (split-string (substring text 0 pos) "\n"))
+      (when (string-match-p "\\`[ \t]*\\(```\\|~~~\\)" line) (cl-incf n)))
+    (= 1 (% n 2))))
+
+(defun harness-thread-tag-p (text)
+  "Non-nil when TEXT holds a <thread> tag outside a fenced code block.
+A message with one is a reply in a thread, whether its tag names the
+thread it answers or starts a new one."
+  (and (stringp text)
+       (let ((pos 0) found)
+         (while (and (not found) (string-search "<thread" text pos)
+                     (string-match harness-thread-marker-regexp text pos))
+           ;; The match data is the fence's once the code is looked at.
+           (let ((start (match-beginning 0))
+                 (end (match-end 0)))
+             (if (harness-thread--fenced-p text start)
+                 (setq pos end)
+               (setq found t))))
+         found)))
 
 (defun harness-thread-marker-ids (text)
-  "Return the ids of the threads TEXT names with marker lines, in order.
-Nil for a TEXT with none, or that is no string."
-  (when (and (stringp text) (string-search "[thread " text))
-    (let ((pos 0) (ids nil))
-      (while (string-match harness-thread-marker-regexp text pos)
-        (push (match-string 1 text) ids)
-        (setq pos (match-end 0)))
-      (nreverse ids))))
+  "Return the ids of the threads TEXT names, in order.
+That is the `<thread id=\"...\">` tag of a reply in a thread, or of a
+marker line that names the thread to answer, and the old `[thread ID:
+answer with review_comment]` line.  Nil for a TEXT with no thread, or
+that is no string.  A tag in a fenced code block names nothing: it is an
+example."
+  (when (and (stringp text)
+             (or (string-search "<thread" text) (string-search "[thread " text)))
+    (let (found)
+      (let ((pos 0))
+        (while (string-match harness-thread-marker-regexp text pos)
+          (let ((start (match-beginning 0))
+                (attributes (match-string 1 text)))
+            (setq pos (match-end 0))
+            (when (and attributes
+                       (not (harness-thread--fenced-p text start))
+                       (string-match "\\bid=\"\\([A-Za-z0-9][A-Za-z0-9_.-]*\\)\"" attributes))
+              (push (cons start (match-string 1 attributes)) found)))))
+      (let ((pos 0))
+        (while (string-match harness-thread-marker-old-regexp text pos)
+          (push (cons (match-beginning 0) (match-string 1 text)) found)
+          (setq pos (match-end 0))))
+      (mapcar #'cdr (cl-sort found #'< :key #'car)))))
 
 (defun harness-thread-block-p (block)
   "Non-nil when BLOCK is a reply in a thread: a text block with thread data."
@@ -1489,6 +1550,45 @@ copied from a card)."
                                "\n\n"))))
              (harness-thread-refs data) "\n\n"))
 
+(defun harness-thread-quote-text (data &optional without-links)
+  "Return the quotes of the thread DATA's references as plain text.
+Each reference is the line that says where it is from
+\(`harness-thread-ref-header') and the words themselves, a blank line
+between two: what the <quote> of a reply in a thread holds
+\(`harness-thread-text'), not the Markdown quote a mail has
+\(`harness-thread-quote').  The links to the messages are kept, unless
+WITHOUT-LINKS, for a reader who is a person."
+  (mapconcat (lambda (ref)
+               (let ((text (plist-get ref :text)))
+                 (string-join (delq nil (list (harness-thread-ref-header ref without-links)
+                                              (and (stringp text) (not (string-blank-p text)) text)))
+                              "\n\n")))
+             (harness-thread-refs data) "\n\n"))
+
+(defun harness-thread-text (data &optional without-links)
+  "Return the text of a reply in the thread DATA: one <thread> block.
+The opening tag carries the thread's id when it has one, so the agent
+knows the thread to answer in; then the quote of each reference in
+<quote>, and the response under it.  The quote has the links to the
+messages it is of, which the model reads, and may read again.  For a
+person, WITHOUT-LINKS writes the reply as the Markdown a mail has
+instead -- the quote line by line and the response under it -- which a
+review comment's body and a copy of the quote need."
+  (let ((response (string-trim (let ((response (plist-get data :response)))
+                                 (if (stringp response) response ""))))
+        (quoted (harness-thread-quote-text data without-links)))
+    (if without-links
+        (string-join (cl-remove-if #'string-empty-p
+                                   (list (harness-thread-quote data t) response))
+                     "\n\n")
+      (string-join
+       (cl-remove-if #'string-empty-p
+                     (delq nil (list (harness-thread-marker (plist-get data :id))
+                                     (unless (string-empty-p quoted) (format "<quote>%s</quote>" quoted))
+                                     (unless (string-empty-p response) response)
+                                     "</thread>")))
+       "\n"))))
+
 (defun harness-thread-render-text (block)
   "Return BLOCK, a parsed <thread> reply, as the text the review keeps.
 The quote as a block quote, then the words, as a mail keeps a reply."
@@ -1498,22 +1598,11 @@ The quote as a block quote, then the words, as a mail keeps a reply."
                    (plist-get block :body)))
    "\n\n"))
 
-(defun harness-thread-text (data &optional without-links)
-  "Return the text of a reply in the thread DATA: quotes, response, marker.
-The marker line follows once the thread has an `:id'.  The quotes have the
-links to the messages they are of, which the model reads; for a person
-WITHOUT-LINKS leaves them out (`harness-thread-quote')."
-  (string-join
-   (cl-remove-if #'string-empty-p
-                 (list (harness-thread-quote data without-links)
-                       (string-trim (let ((response (plist-get data :response))) (if (stringp response) response "")))
-                       (if-let* ((id (plist-get data :id))) (harness-thread-marker id) "")))
-   "\n\n"))
 
 (defun harness-thread-block (data &optional response)
   "Return the text block of a reply in the thread DATA, with the RESPONSE it holds.
 RESPONSE, else DATA's `:response', is what the user wrote under the
-quotes.  The block's `:text' is all of the reply as a mail would have it
+quotes.  The block's `:text' is all of the reply as a `<thread>' block
 \(`harness-thread-text'); `:thread' is DATA to draw it from."
   (let ((data (harness-thread-normalize
                (if response (plist-put (copy-sequence data) :response response) data))))

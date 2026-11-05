@@ -1110,7 +1110,7 @@ reply is a text block that carries it as `:thread`
 (`harness-thread-block`, in `harness-util`):
 
 ```elisp
-(:type "text" :text "> quote…\n\nthe words\n\n[thread t-3f2a1b09: answer with review_comment]"
+(:type "text" :text "<thread id=\"t-3f2a1b09\">\n<quote>quote…</quote>\nthe words\n</thread>"
  :thread (:refs (REF …)                   ; where the reply is from, in order
           :response "the words"           ; what the user wrote under it
           :reply (:thread T :comment C)   ; optional: the thread it follows
@@ -1123,28 +1123,38 @@ words, so the data passes through JSON, ACP and the store as it is
 JSON):
 
 ```elisp
-(:kind "chat" :node ID :who WHO :label L :part P :from N :to M :text EXCERPT)
-    ; a part of a node of a session's transcript.  WHO: agent, plan,
-    ; thread (the agent's answer in a thread), you, report (the hand-in),
-    ; tool or message; :from/:to are offsets in what the node says
+(:kind "chat" :node ID :session SID :who WHO :label L :part P :from N :to M :text EXCERPT)
+    ; a part of a node of a session's transcript.  :session is the one
+    ; it was quoted from; WHO: agent, plan, thread (the agent's answer in
+    ; a thread), you, report (the hand-in), tool or message; :from/:to are
+    ; offsets in what the node says
 (:kind "diff" :file F :side "old"|"new" :line L :end E :revision R :text EXCERPT)
     ; lines of a version of a file in a task's review
 (:kind "buffer" :name NAME :file F :line L :end E :text EXCERPT)
     ; the region of any other buffer
 ```
 
-The block's `:text` is the reply as a mail has it, which is what the
-model reads: the quotes of the refs (`harness-thread-quote`: each a block
-quote, with a line that says where it is from unless the words are the
-agent's own -- "My earlier message:", "In a.el, lines 18-19 (after the
-change, at abc1234):"), the response, and once the thread is a comment of
-a task's review, its marker line (`harness-thread-marker`).  A UI that
-knows threads draws the data -- a card -- instead of the text.  A node
-keeps such a message in `:blocks` (`harness-blocks-only-text-p`;
-`harness-blocks-text` reads the replies after the user's words, a
-paragraph each); the provider is sent the text only
-(`harness-agent--prepare-block`).  ACP carries the data as the
-`_harness.thread` of the text block, whose `text` is the response
+The block's `:text` is the reply in the one form the harness reads, which
+is what the model reads (`harness-thread-text`): one `<thread>` block, its tag naming
+the thread once it is a comment of a task's review
+(`harness-thread-marker`), the quote of the refs in `<quote>` -- each with
+a line that says where it is from: a part of the chat names whose words
+they are and links the message, `Your earlier message
+(harness:session/ID/message/NODE):`, the agent's own words too, so a
+message cut away by a compaction can be read again by it; a diff says "In
+a.el, lines 18-19 (after the change, at abc1234)"; a buffer its name and
+lines -- and the response under it.  The link is
+`harness-thread-ref-link`'s: `harness:session/ID/message/NODE`, the
+session the reference names, else `harness:message/NODE` for a message of
+the session the reply is sent in.  `harness-thread-quote`,
+`harness-thread-text` and `harness-thread-ref-header` take WITHOUT-LINK
+for a reader who is a person -- the comment in a review, the box's "Copy
+the quote" -- as the link is for the model.  A UI that knows threads draws
+the data -- a card -- instead of the text.  A node keeps such a message in
+`:blocks` (`harness-blocks-only-text-p`; `harness-blocks-text` reads the
+replies after the user's words, a paragraph each); the provider is sent
+the text only (`harness-agent--prepare-block`).  ACP carries the data as
+the `_harness.thread` of the text block, whose `text` is the response
 (`harness-acp--block-from-acp`, `harness-compose-attachment-block`).  The
 attachments of the compose box that make them are `(:thread DATA :response
 TEXT)` (`harness-attachments-to-blocks`).
@@ -4773,7 +4783,7 @@ decisions.
   next (priority 40, the tasks module's is 50): a reply in a thread (a
   text block with the data of a thread, see Threads) becomes a comment
   in a thread of the task's review, and the message goes on with the
-  thread's id and its marker after each response
+  thread's id in the tag of its `<thread>` block
   (`harness-patch-review--on-message`); a block the thread-reply module
   made has its id already and is left alone.
 - Async filter `agent/stop` (value `(:stop t)`, args the session plist),
@@ -7335,7 +7345,7 @@ priority).
   (`harness-tasks--register-threads`): a reply in a thread among them (an
   attachment with `:thread`, see Threads) is a comment of the task's
   review by then, and comes back with the thread's id, so the text of
-  the round ends with its marker, and a message kept for a slot
+  the round holds its `<thread>` block, and a message kept for a slot
   (`harness-tasks--hold-back`) is kept as the thread it made.  The
   words a message holds (`harness-tasks--words`) leave out a reply that
   has its thread already.
@@ -8951,7 +8961,7 @@ whose strict syntax it reads, and the correction of a malformed reply;
   itself before the round of feedback is kept
   (`harness-patch-review--on-feedback-attachments`, a filter on
   `task/feedback-attachments` that returns the attachments with the
-  thread's id), so the text of the round has the marker and a message that
+  thread's id), so the text of the round has the block and a message that
   waits for a slot is kept as the thread it made.  Only the user's own messages count (no
   `:from`), in the session of a task whose agent has `review_comment` (the
   filter asks `tools/list`): a session that is no task's has no review, and
@@ -8975,25 +8985,27 @@ whose strict syntax it reads, and the correction of a malformed reply;
   twice makes nothing twice; one put back into the box ([edit]) comes
   without the id and with its comment, and sent again edits that comment.
   The block that goes on, and is recorded in the node, has the thread's
-  id and comment, and its text ends with the marker line
-  `[thread ID: answer with review_comment]` (`harness-thread-marker`, in
-  `harness-util`).  It tells the agent which thread to answer in and with
-  what, whatever the path the message took (the queue, steering, a hosted
-  loop), and it is how the code that reads typed words knows the reply is a
-  thread already: `harness-tasks--words` leaves a registered reply out of
-  the words a task is sent back with, so `harness-patch-review--additions`
-  does not keep them as a thread on the change as a whole too, and the
-  import of the rounds and of the words typed by hand skips what ends with
-  a marker (`harness-patch-review--unregistered`).  A message with a
-  marker gets no inline-reply note (`harness-agent--inline-reply-p`).  A
-  failure leaves the message as it was.  A message taken back with
-  [delete] before the model has it leaves the comment it made.
+  id and comment, and its text is one `<thread>` block whose tag carries
+  that id (`harness-thread-text`, `harness-thread-marker`, in
+  `harness-util`): the quote in `<quote>`, with the link to the message
+  it is of, and the words under it.  The tag tells the agent which thread
+  to answer in and with what, whatever the path the message took (the
+  queue, steering, a hosted loop), and it is how the code that reads
+  typed words knows the reply is a thread already: `harness-tasks--words`
+  leaves a registered reply out of the words a task is sent back with, so
+  `harness-patch-review--additions` does not keep them as a thread on the
+  change as a whole too, and the import of the rounds and of the words
+  typed by hand skips the blocks (`harness-patch-review--unregistered`).
+  A message with such a block gets no inline-reply note
+  (`harness-agent--inline-reply-p`).  A failure leaves the message as it
+  was.  A message taken back with [delete] before the model has it
+  leaves the comment it made.
 - The reply written in the words.  A `<thread>` block typed in a message
   is the thread-reply module's (`harness-thread-reply--on-message`, a
   filter on `agent/message` at priority 35, before the review's): the
   user's reply becomes a comment of the thread it names, a draft while
   the task waits for review, and the block that goes on is a thread block
-  with the thread's id and its marker.  The blocks in the words that send
+  with the thread's id in its tag.  The blocks in the words that send
   a task back are read the same way
   (`harness-thread-reply--take-tagged-words`, from
   `harness-patch-review--additions`), and the agent's final message is
@@ -9092,7 +9104,7 @@ whose strict syntax it reads, and the correction of a malformed reply;
   since the user looks at every thread the agent closes), then each
   comment quoted from the diff as a
   reply on a mailing list quotes it, a reply in a thread after the
-  comments before it, each with its `[thread ID]`
+  comments before it, each with its `<thread id="…">` tag
   (`change-review-mail-render-comments`).  Once the task is sent back it
   marks them sent (`mark-sent`, `:round` in `:meta`), and keeps the
   words the user sent it back with, if any, as a sent comment of a
@@ -9892,7 +9904,7 @@ TRAMP prefixes come from the session host):
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review and cancelled, done a cancelled task too, and a written-up backlog task unless an auto-queued backlog hands it on to the queue), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `review_threads` | Review threads | status (open/closed), task (default: the session's own) | meta (tools-review; task sessions only; lists the threads of the task's review with the comments the user sent, by id; needs no approval: `harness-perms--auto-allow-tools`) |
-| `review_comment` | Review comment | thread (an id, or the start of one), body, status (open/closed), file, line, side (new/old), task (default: the session's own) | meta (tools-review; task sessions only; answers a thread, or starts one on the change or on a file and line, and may close or reopen the thread -- the thread of a reply of the user's in a thread started in the chat is named by the marker after it; the comment records the session, this call and the commit the session is at, and the result keeps which thread and comment on the node, for the chat; needs no approval: `harness-perms--auto-allow-tools`) |
+| `review_comment` | Review comment | thread (an id, or the start of one), body, status (open/closed), file, line, side (new/old), task (default: the session's own) | meta (tools-review; task sessions only; answers a thread, or starts one on the change or on a file and line, and may close or reopen the thread -- the thread of a reply of the user's in a thread started in the chat is named by the tag of the `<thread>` block after it; the comment records the session, this call and the commit the session is at, and the result keeps which thread and comment on the node, for the chat; needs no approval: `harness-perms--auto-allow-tools`) |
 | `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), restart (explicitly stop the instance first, discarding unsaved work) | exec (tools-dev, the harness repository's own plugin: offered only to the sessions whose plugin list names it, as the repository's .dir-locals.el does once the user trusts it; the instance stops by itself once nothing needs it; it runs the checkout's `scripts/dev.sh` and the Elisp that daemon loads outside the sandbox, code the session may have written, so it is an exec call decided by the mode as bash is and is not among the tools that need no approval; its frame stays lowered and cannot take focus, so opening it never raises or focuses a frame) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
@@ -10737,7 +10749,15 @@ meanwhile leaves its task active, and the wake-up carries it on, instead
 of the task going to review just before the wake-up reopens it.  Both
 tools are of kind `read`, in `harness-perms--inspection-tools` and in
 the supervisor's allowlist: a watch only watches the harness and wakes
-no session but its own.
+no session but its own.  `event-watch/list` gives a client the watches a
+session has live (`harness-tools-events--view`: the id, kinds, prompt,
+actions, scope and timeout, and the counts -- seen, classified,
+decisions, dropped, coalesced, queued, busy, last failure), and
+`event-watch/changed` names the session and the watch when one is made,
+sees an event, is decided or ends.  ACP serves the first under the
+`event-watch/` method prefix and forwards the second, which the UI's
+panel of a session's watches asks for again (`harness-ui-watches`, see
+the UI's list of panels).
 
 `notify` (`tools-notify`) sends a notification through
 `notification/send` with `:source "agent"`, `:kind "agent"` and the
@@ -11434,7 +11454,8 @@ Extension methods: any bus method whose name starts with `session/`,
 `project/`, `task/`, `plugins/`, `search/`, `notification/`, `sandbox/status`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `acp/remote-`,
 `pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
-`secrets/`, `commit-msg/`, `patch-review/`, `tool-slots/`, `cache/`, `todo-sync/` (`harness-acp-extension-prefixes`), or with one of
+`secrets/`, `commit-msg/`, `patch-review/`, `tool-slots/`, `cache/`, `todo-sync/`,
+`event-watch/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
 and projects' plugins add to (see Modules of your own; the harness
 repository's plugin adds `harness-dev/`), is callable as `_harness/NAME` with a
@@ -11936,7 +11957,15 @@ step of the ladder, narrowest first, each worded by what it leaves free
 with a dot (`harness-icon-radio-on`; `harness-icon-radio-off` the
 others) and in bold, then `[Narrower] <  [Wider] >`, dim where the pick
 cannot go on.  A ladder of one step is that line alone, without the
-buttons.  The pick is the request's `:picked-cover` while the ladder
+buttons.  The ladder is for the answers that last and stands directly
+over those three buttons, which follow it on a line of their own; Allow
+and Deny, which cover the one call and record nothing, are the line
+above it (`harness-ui-pending--insert-permission`), so no cover is
+offered over an Allow.  A request whose answers all last has no line
+above, and one that offers none draws no ladder and the one line of
+buttons.  The block of patterns above is every answer's, since each
+holds for a pattern, so it stays over the one line of all five.  The
+pick is the request's `:picked-cover` while the ladder
 still has it, else the `:cover` the harness started it on, else the
 narrowest step (`harness-ui-pending--cover-id`); a request that arrives
 again keeps it (`harness-ui-pending--keep-choices`).  The three
@@ -11973,7 +12002,11 @@ ends" for an agent's own request, "Let this call reach ~/notes/**, this
 time" for the jail's.  The session list and the task board answer in
 place with the same [Allow] and [Deny], keys and tooltips
 (`harness-ui-pending-view-actions`), and SPC pops the panel out for the
-others.
+others.  Each panel opens with a line of its own shade
+(`harness-ui-panel-border-face`, a blank line at the top of the panel's
+range): the panels share `harness-ui-panel-face`'s background, so without
+it two requests stacked above the compose box would read as one request
+with two sets of buttons.
 
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting
@@ -12116,7 +12149,20 @@ wrapped are cut with `… 25 more lines  [Show more]`
 (`harness-chat--cut-words`, counted as `change-review-ui-cut-lines`
 counts), the reader's choice kept in the block (`harness-chat-block-more`)
 and so across a redraw; only the drawing is shorter, what a reply
-quotes is all of it.  A click
+quotes is all of it.  The words it quotes are marked where they stand in
+the message they are of: an overlay (`harness-chat--refresh-quotes`)
+underlines them (`harness-chat-quoted-face`) and ends them with a badge,
+`↳ 1 reply`, which shows the reply -- the first, when there are more --
+on a click or `RET`; two runs that meet or overlap are one mark whose
+badge counts the replies together, `↳ 2 replies`.  The badge is an
+`after-string`, and the mark a `face` and a keymap on the overlay, so
+the text keeps the words alone for copying, searching and quoting.  The
+panel is built from the replies the transcript draws
+(`harness-chat--index-quotes`: node -> the replies that quote it, each
+with its index in the block for the card), asked for again when a
+reply arrives (`harness-chat--quotes-changed`) and when a block is drawn
+again (`harness-chat--rerender`), so a message a lazy history drops
+loses its marks and one a page brings in gets them.  A click
 or `RET` on a link opens it (`harness-ui-markdown-open-link`): a URL with
 `browse-url`, anything else as a file in `default-directory` -- the
 session's directory, in a chat -- in another window, at the line a
@@ -13063,8 +13109,8 @@ reads it: it is added to the request the harness builds, never to the
 transcript, which keeps the message as the user wrote it.  A message
 that only quotes, a region prompt say, is not answered inline and gets
 none, and neither does one whose replies are comments in threads of a
-task's review, which carry a marker line each that names the thread to
-answer in and the tool to answer with (`harness-thread-marker`,
+task's review, which carry a `<thread>` block each whose tag names the
+thread to answer in (`harness-thread-marker`,
 `harness-patch-review--on-message`).  These three live in `harness-util`
 (the agent's old names are aliases of them): the chat reads a queued message with them as the agent
 will record it (`harness-queued-message-node`).  Queued
@@ -15222,7 +15268,7 @@ permission mode, non-interactive while it is, thinking, context, tokens,
 cost), header line ([menu]), keys and menu are a session's,
 `harness-ui-btw-minor-mode` only adding a BTW segment in
 front of the header through `harness-chat-header-functions` (what it
-is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep
+is about, [close], [keep]), and `C-c M-k`/`C-c C-o` to close and keep
 it; one over a session starts in that session's permission mode, and
 every one on the BTW model (`harness-btw-model`: by default the cheap
 tier of the provider of the model it would otherwise use) at the BTW
@@ -15299,7 +15345,22 @@ per session, and the `agent/turn-started` and `agent/turn-ended`
 events, so nothing asks a child anything; a seed conversation is left
 out by its `:seed` marker, and a chat draws the panel at most once a
 second, one timer per chat taking the updates of all its children, and
-only when the panel's text differs from the one it drew last); the tool
+only when the panel's text differs from the one it drew last); the event
+watches of a session (`harness-ui-watches`, module `ui-watches`, the UI
+half of tools-events: beside the sub-agents above the compose box, one
+line per watch still live -- the kinds of event it watches, what it
+narrows them to (this session, a session, a task, its project or every
+project), what it has seen (the events that came, the decisions its
+classifier made and the events still waiting) and, dim, its prompt, cut
+to the room the chat's narrowest window leaves so the line never wraps
+-- drawn from `event-watch/list`, which the chat asks over ACP when it
+first draws the panel, and again on every `event-watch/changed` of its
+session (`tools-events` emits one when a watch is made, sees an event,
+decides one or ends, and ACP forwards it), one timer taking the changes
+that come together and another the drawings, and a drawing only when
+the panel's text differs from the one it drew last; a watch that ends
+takes its line away, and a session that watches nothing shows no
+panel); the tool
 slots held back by the machine's load (`harness-ui-tool-slots-load`,
 module `ui-tool-slots-load`, the UI half of tool-slots-load: beside the
 sub-agents above the compose box, one line on a background of its own,

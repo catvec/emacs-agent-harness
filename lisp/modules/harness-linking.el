@@ -74,7 +74,7 @@ The user reads your messages in Emacs, where a link to something in the harness 
 - [text](harness:session/ID/message/NODE) -- a message of that session. NODE is the id in the [assistant n-...] tags of session_read, session_search and session_history.
 - [text](harness:call/last) -- a tool call of this session: last is the newest, #3 the third newest, bash#2 the second newest bash call, or give a node id. For another session's: harness:session/ID/call/NODE.
 - [text](harness:message/last) -- a message of this session: last is your newest, first the first user message, #2, user#1, assistant#2, or a node id.
-- [text](harness:thread/ID) -- a thread of your task's review, the id in [thread ...]; harness:task/TASK/thread/ID for another task's; harness:task/ID is a task.
+- [text](harness:thread/ID) -- a thread of your task's review, the id in its `<thread id=\"...\">` tag; harness:task/TASK/thread/ID for another task's; harness:task/ID is a task.
 Use them to point at evidence (\"all tests pass: [the run](harness:call/bash)\"), at the sessions you report on or ask for something, and at the threads you answer. They work in your messages, in the texts of hand_in, review_comment, ask_user and plan, and in what you send to other sessions. last, #3 and the like mean what they mean when you write them: the harness writes them out as ids. A link that names nothing is left as you wrote it (the result of a call that carries it says so); check the ids. Inside backquotes or a fenced block a link is plain text."
   "The Links section of the system prompt.
 It is added after the Planning section (`harness-linking--system-prompt'),

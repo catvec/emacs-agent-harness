@@ -632,16 +632,16 @@ line saying what the quote is; they are sent once the task is."
         (should (= 1 (length (harness-call 'patch-review/drafts id))))
         (harness-call 'task/reject id "Nearly there.")
         (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
-          ;; The words are a thread of their own, whose id the feedback names.
-          (should (string-prefix-p "Nearly there.\n\n[thread t-" feedback))
+          ;; The words are a thread of their own, whose tag the feedback names.
+          (should (string-prefix-p "Nearly there.\n\n<thread id=\"t-" feedback))
           (should (string-search (concat "My review comments on your branch task/fix (at "
                                          (substring tip 0 7) ") against main (merge base ")
                                  feedback))
-          (should (string-search "[thread" feedback))
+          (should (string-search "<thread id=\"" feedback))
           (should (string-search (concat "> diff --git a/a.el b/a.el\n> @@ -15,4 +15,4 @@\n"
                                          ">  (setq a15 15)\n>  (setq a16 16)\n>  (setq a17 17)\n"
                                          "> -(setq a18 18)\n> +(setq a18 'eighteen)\n\n"
-                                         "Why eighteen?\n[thread " (car first) "]")
+                                         "Why eighteen?\n<thread id=\"" (car first) "\">")
                                  feedback))
           (should (string-search "review_comment" feedback)))
         ;; Sent with the round that kept them.
@@ -692,7 +692,7 @@ not filled into the lines around it, a long line of it is cut with the same
                                          (butlast quote 2) " ")))
         (should (equal '(" >" " > second paragraph") (last quote 2)))
         ;; The answer follows, a line apart, and the thread is named after it.
-        (should (equal '("" "Then say so in a comment." "[thread")
+        (should (equal '("" "Then say so in a comment." "<thread")
                        (let ((after (nthcdr (+ start (length quote)) lines)))
                          (list (car after) (cadr after) (substring (caddr after) 0 7)))))))))
 
@@ -708,7 +708,7 @@ not filled into the lines around it, a long line of it is cut with the same
       (should (= 1 (length (plist-get (harness-call 'patch-review/get id) :threads))))
       (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
         (should (string-prefix-p "My review comments on your branch task/fix" feedback))
-        (should (string-search "A word on the whole\n[thread " feedback))))))
+        (should (string-search "A word on the whole\n<thread id=\"" feedback))))))
 
 (ert-deftest harness-patch-review-the-replies-of-a-working-task-go-together ()
   "In the working phase the user's replies wait as drafts and go together
@@ -791,9 +791,9 @@ feedback that sends it back, and the drafts go with it."
       (harness-patch-review-test--user-comment id "Why eighteen?" :location harness-patch-review-test--a18)
       (harness-call 'agent/prompt sid "  Also this.  ")
       (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
-        (should (string-prefix-p "Also this.\n\n[thread t-" feedback))
+        (should (string-prefix-p "Also this.\n\n<thread id=\"t-" feedback))
         (should (string-search "My review comments on your branch task/fix" feedback))
-        (should (string-search "Why eighteen?\n[thread " feedback)))
+        (should (string-search "Why eighteen?\n<thread id=\"" feedback)))
       (should-not (harness-call 'patch-review/drafts id)))))
 
 (ert-deftest harness-patch-review-sends-nothing-more-than-the-words-without-drafts ()
@@ -802,7 +802,7 @@ feedback that sends it back, and the drafts go with it."
     (let ((id (harness-patch-review-test--task)))
       (harness-call 'task/reject id "Just this.")
       (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
-        (should (string-match-p "\\`Just this\\.\n\n\\[thread t-[^]]+\\]\\'" feedback)))
+        (should (string-match-p "\\`Just this\\.\n\n<thread id=\"t-[^\"]+\">\\'" feedback)))
       ;; Kept as a thread, so the review remembers what the round said.
       (let ((threads (plist-get (harness-call 'patch-review/get id) :threads)))
         (should (equal '("Just this.") (mapcar (lambda (th) (plist-get (car (plist-get th :comments)) :body)) threads)))))))
@@ -1477,9 +1477,8 @@ to a task in review as the feedback that sends it back."
 (ert-deftest harness-patch-review-makes-a-reply-with-thread-data-a-thread ()
   "A reply with the data of a thread is a comment in a new thread of the task's
 review: the user's, sent, with the quote above the response, the references in
-its meta, and, in the block that goes on, the thread's id and a marker after
-the response that names the thread and says how to answer it.  The thread is
-announced to every UI like any other."
+its meta, and, in the block that goes on, the thread's id in the tag of its
+<thread> block.  The thread is announced to every UI like any other."
   (harness-patch-review-test-with
     (let* ((id (harness-patch-review-test--task))
            (agent (harness-patch-review-test--agent-says
@@ -1505,12 +1504,12 @@ announced to every UI like any other."
         (should (plist-get (plist-get comment :meta) :chat))
         (should (equal (plist-get agent :id)
                        (plist-get (car (plist-get (plist-get comment :meta) :refs)) :node)))
-        ;; The blocks that go on know their threads, and end with the markers.
+        ;; The blocks that go on know their threads, and name them in the tag.
         (should (equal (plist-get first :id) (plist-get data :id)))
         (should (equal (plist-get comment :id) (plist-get data :comment)))
-        (should (equal (concat "> Your earlier message (" (harness-links-message-url nil (plist-get agent :id))
-                               "):\n>\n> The build is green.\n\nGood.\n\n"
-                               (harness-thread-marker (plist-get first :id)))
+        (should (equal (concat "<thread id=\"" (plist-get first :id) "\">\n"
+                               "<quote>Your earlier message (" (harness-links-message-url nil (plist-get agent :id))
+                               "):\n\nThe build is green.</quote>\nGood.\n</thread>")
                        (plist-get (car blocks) :text)))
         (should (equal (list (plist-get second :id)) (harness-thread-marker-ids (plist-get (cadr blocks) :text))))
         (should (equal "Good." (harness-thread-response (car blocks)))))
@@ -1537,9 +1536,11 @@ quote of lines the review shows with the thread."
       (should (equal 18 (plist-get location :line)))
       (should (equal 19 (plist-get location :end-line)))
       (should (equal "(setq a18 'eighteen)\n(setq a19 19)" (plist-get location :excerpt)))
-      ;; What the agent reads says where the lines are.
-      (should (string-prefix-p "> In a.el, lines 18-19 (after the change, at abc1234):" (plist-get (car blocks) :text)))
-      (should (string-suffix-p (harness-thread-marker (plist-get thread :id)) (plist-get (car blocks) :text))))))
+      ;; What the agent reads says where the lines are, in the one <thread> block.
+      (should (string-prefix-p (concat "<thread id=\"" (plist-get thread :id) "\">")
+                               (plist-get (car blocks) :text)))
+      (should (string-search "In a.el, lines 18-19 (after the change, at abc1234):" (plist-get (car blocks) :text)))
+      (should (string-suffix-p "</thread>" (plist-get (car blocks) :text))))))
 
 (ert-deftest harness-patch-review-makes-a-thread-of-nothing-it-guesses ()
   "Only a reply with thread data is a thread: words that quote the agent's, even to
@@ -1627,7 +1628,7 @@ another."
     (let* ((id (harness-patch-review-test--task))
            (agent (harness-patch-review-test--agent-says id "Rolled back."))
            (blocks (harness-patch-review-test--sends id (harness-patch-review-test--reply agent "Why?"))))
-      (should (string-search "[thread t-" (plist-get (car blocks) :text)))
+      (should (string-search "<thread id=\"t-" (plist-get (car blocks) :text)))
       (should (equal blocks (apply #'harness-patch-review-test--sends id blocks)))
       (should (= 1 (length (harness-patch-review-test--threads id))))
       ;; Put back, the thread's id gone with the box's token and its comment kept.
@@ -1656,11 +1657,10 @@ The import of the words typed by hand does not make them again either."
            (text (harness-blocks-text blocks))
            (task (harness-call 'task/get id))
            (additions (harness-patch-review--additions task (harness-tasks--words blocks))))
-      ;; The text of the blocks: the note, then the reply with its marker.
-      (should (string-prefix-p (concat "Quick note first.\n\n> Your earlier message ("
-                                       (harness-links-message-url nil (plist-get agent :id))
-                                       "):\n>\n> Rolled back.\n\nWhy?\n\n[thread t-")
-                               text))
+      ;; The text of the blocks: the note, then the <thread> block of the reply.
+      (should (equal (concat "Quick note first.\n\n" (plist-get (cadr blocks) :text)) text))
+      (should (string-search (harness-links-message-url nil (plist-get agent :id))
+                             (plist-get (cadr blocks) :text)))
       ;; The words are the note: the reply is a thread, no words.
       (should (equal "Quick note first." (harness-tasks--words blocks)))
       (should additions)
@@ -1685,21 +1685,21 @@ The import of the words typed by hand does not make them again either."
 
 (ert-deftest harness-patch-review-the-words-of-the-feedback-name-their-thread ()
   "The feedback that sends a task back names the thread its words are in.
-The agent reads the id after [thread ...] in its message, answers it in
-a message of its own, and the thread closes; a message that is never
-sent makes no thread."
+The agent reads the id in the <thread id=\"...\"> tag of its message,
+answers it in a message of its own, and the thread closes; a message
+that is never sent makes no thread."
   (harness-patch-review-test-with
     (let* ((id (harness-patch-review-test--task))
            (sid (plist-get (harness-call 'task/get id) :session))
            (words "Say which unit the threshold is in.")
            (additions (harness-patch-review--additions (harness-call 'task/get id) words)))
       (should additions)
-      (should (string-match "\\`\\[thread \\(t-[A-Za-z0-9]+\\)\\]\\'" (car additions)))
+      (should (string-match "\\`<thread id=\"\\(t-[A-Za-z0-9]+\\)\">\\'" (car additions)))
       (let ((thread (match-string 1 (car additions))))
         ;; The agent's message names the thread, after the words it is in.
         (let ((feedback (harness-tasks--add-to-feedback words additions)))
           (should (string-prefix-p words feedback))
-          (should (string-match-p (regexp-quote (format "[thread %s]" thread)) feedback)))
+          (should (string-match-p (regexp-quote (format "<thread id=\"%s\">" thread)) feedback)))
         ;; Nothing is made until the message is sent.
         (should-not (harness-call 'patch-review/open-threads id))
         (funcall (cdr additions))
@@ -1758,9 +1758,10 @@ in the same thread."
              (threads (harness-patch-review-test--threads id))
              (thread (plist-get (car threads) :id))
              (read (harness-provider-demo--last-user-text (car (last harness-patch-review-test--requests)))))
-        ;; What the agent read: the reply, the marker, and not the note.
+        ;; What the agent read: the reply's <thread> block, and not the note.
         (should (string-search (harness-thread-marker thread) read))
-        (should (string-search "> The deploy is pending." read))
+        (should (string-search "<quote>" read))
+        (should (string-search "The deploy is pending." read))
         (should-not (string-search harness-agent--inline-reply-note read))
         (should (member "review_comment" (mapcar (lambda (spec) (plist-get spec :name))
                                                  (plist-get (car (last harness-patch-review-test--requests)) :tools))))
@@ -1812,11 +1813,11 @@ words are not kept a second time as a thread of their own."
         (should (equal harness-tasks--reject-message (plist-get (car blocks) :text)))
         (should-not (plist-get (car blocks) :thread))
         (should (harness-thread-block-p (cadr blocks)))
-        (should (string-suffix-p (harness-thread-marker (plist-get (car threads) :id)) (plist-get (cadr blocks) :text)))
+        (should (string-prefix-p (harness-thread-marker (plist-get (car threads) :id)) (plist-get (cadr blocks) :text)))
         (should (= 1 (length threads)))
         (should (equal "> Rolled back.\n\nWhy?" (plist-get (car (plist-get (car threads) :comments)) :body)))
         ;; The round keeps what was sent, markers and all.
-        (should (string-search "[thread t-" (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))))))
+        (should (string-search "<thread id=\"t-" (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))))))
 
 (ert-deftest harness-patch-review-the-demo-agent-answers-each-thread-of-a-reply ()
   "The demo provider, which a live harness is tried out with, answers a message
@@ -1873,7 +1874,7 @@ import by hand makes none of the round's reply again."
       ;; The round kept the words as they were sent, quote, answer and the
       ;; marker of the thread: the import by hand makes no second thread
       ;; of the reply.
-      (should (cl-some (lambda (round) (string-search "[thread t-" (plist-get round :text)))
+      (should (cl-some (lambda (round) (string-search "<thread id=\"t-" (plist-get round :text)))
                        (plist-get (harness-call 'task/get id) :feedback)))
       (harness-call 'patch-review/import-manual id)
       (should (= 1 (cl-count-if (lambda (th)
@@ -1902,7 +1903,7 @@ that thread, the agent answering in it, with no second thread made on the way."
              (att (car (plist-get queued :attachments))))
         (should (= 1 (length threads)))
         (should (equal (plist-get (car threads) :id) (plist-get (plist-get att :thread) :id)))
-        (should (string-search "[thread t-" (plist-get (car (plist-get (harness-tasks--get id) :feedback)) :text)))
+        (should (string-search "<thread id=\"t-" (plist-get (car (plist-get (harness-tasks--get id) :feedback)) :text)))
         (should-not harness-patch-review-test--requests))
       ;; It starts: the message goes out with the thread's marker, and the
       ;; agent answers there.

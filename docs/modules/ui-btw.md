@@ -30,8 +30,11 @@ the session list and the conversation tree.  It is shown in its own
 chat buffer, the full chat UI in another place: its settings line
 (model, permission mode and the rest, all clickable) and header line
 (with [menu]), keys and harness menu are a normal session's, with a
-BTW segment in front of the header and C-c C-k and C-c C-o to close
-or keep it.  It opens
+BTW segment in front of the header and C-c M-k and C-c C-o to close
+or keep it.  C-c M-k is every session's close key
+(`harness-close-session`), which closes a BTW as the header's [close]
+does; C-c C-k cancels the turn here as it does in any session, and
+does not close the BTW.  It opens
 blank, with point in its compose box: the box every session has
 (multi-line editing, @file and /skill completion, attachments), where
 C-c C-c asks.  Its first message names it.  Closing the side window
