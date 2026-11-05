@@ -13,7 +13,10 @@
 ;; sees -- and each goes through `harness-small-ask' here instead of
 ;; calling `provider/complete' itself, so that one place decides how such
 ;; a call is made and how it survives a provider that is having a bad
-;; minute.
+;; minute.  The text each one sends is a named prompt in `harness-prompts'
+;; (lisp/harness-prompts.el), where it can be read, audited and overridden
+;; per model; the caller resolves it for the model it asks and passes the
+;; request here unchanged.
 ;;
 ;; Why.  A provider under load -- DeepSeek answering 429, say -- fails a
 ;; small call as readily as it fails a step of a turn, but nothing tried
@@ -55,6 +58,9 @@
 ;; The failure kinds and the wait behind them are the step retry's, so
 ;; that a small call and a step of a turn are tried again alike.
 (require 'harness-retry)
+;; A one-off call names the prompts it sends, and every name must be in
+;; this registry: `harness-prompt-ask' is the way to send one.
+(require 'harness-prompts)
 
 (defconst harness-small-restart-event '(:type restart)
   "The event a caller of `harness-small-ask' gets when a try is thrown away.
@@ -76,7 +82,15 @@ REQUEST is a `provider/complete' request without `:on-event': this
 function adds its own and hands every event to OPTS' `:on-event', a
 function of one event that defaults to ignoring them.  A caller keeps
 the request's own keys -- `:ephemeral', `:job', `:system', `:messages',
-`:max-tokens' and the rest; nothing here changes them.
+`:max-tokens' and the rest; nothing here changes them, and `:prompts'
+is taken out before the provider is sent the request.
+
+A one-off call must name the prompts it sends in `:prompts', a prompt
+name or a list of them from `harness-prompts'.  A request that names
+none, or names one the registry does not have, signals
+`harness-prompt-error': this is the API-level check that keeps a call
+from reaching a model with text nobody registered.  `harness-prompt-ask'
+is the function that supplies the names.
 
 A failure a retry may get past (see `harness-small-retryable-p') is not
 the call's end: the caller is sent `harness-small-restart-event' to
@@ -95,12 +109,20 @@ after the first (`harness-retry-max-attempts' by default, 0 for a caller
 that does its own trying); and `:on-event' as above.  Return a handle
 plist with `:cancel', a function that stops the call and any wait for a
 retry."
+  (let ((prompts (plist-get request :prompts)))
+    (unless prompts
+      (signal 'harness-prompt-error
+              (list "A one-off call must name its prompts; use `harness-prompt-ask'")))
+    (dolist (name prompts)
+      (unless (memq name (harness-prompt-names))
+        (signal 'harness-prompt-error
+                (list (format "No prompt is named %s" name))))))
   (let* ((on-event (or (plist-get opts :on-event) #'ignore))
          (label (or (plist-get opts :label) "small call"))
          (most (if (plist-member opts :retries)
                    (max 0 (or (plist-get opts :retries) 0))
                  (max 0 (or harness-retry-max-attempts 0))))
-         (body (harness-plist-remove request :on-event))
+         (body (harness-plist-remove request :on-event :prompts))
          (tries 0) (handle nil) (timer nil) (cancelled nil))
     (cl-labels
         ((start ()

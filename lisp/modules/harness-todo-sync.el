@@ -73,6 +73,8 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; A todo sync's text is in the prompt registry.
+(require 'harness-prompts)
 ;; The todo list is asked for with one of the harness's own one-off calls
 ;; (`harness-small-ask'), tried again when a provider fails transiently.
 (require 'harness-small)
@@ -144,27 +146,17 @@ conversation.")
   "Characters of the agent's work that a question carries, the newest last.")
 
 (defconst harness-todo-sync--system-prompt
-  "You keep the todo list of a coding agent current, for the engineer who watches the agent work and reads the list to see how far along the work is.  You are shown the engineer's request, the list as it stands (it may be empty) and what the agent has done since the list was last updated.  Write the list as it should read now.
-
-Write one item per line, with its state in brackets before it:
-[x] an item that is finished
-[~] the item the agent is working on right now (at most one)
-[ ] an item still to do
-
-- Write 3 to 10 items, each a short imperative phrase of at most 80 characters about the work to do, never about the tools used.  Put them in the order the work goes.
-- Keep the items of the current list that still hold, in their own words, and mark done only what the agent's work shows done.
-- When the agent changed its approach, or took on work the list does not describe, write a list that fits the work now: keep the finished items that are still true, and drop the ones that no longer apply.
-- Answer with the list alone: no other words, no numbering, no markdown.  Answer UNCHANGED alone when the list is right as it stands, and NONE alone when the work is too small or too unclear to need a list."
-  "System prompt of a request to write a todo list.")
+  (harness-prompt-default 'todo-sync-system)
+  "System prompt of a request to write a todo list.
+The default is the registry's `todo-sync-system'; a model may be sent
+an override of it (`harness-prompt-overrides').")
 
 (defconst harness-todo-sync--ask
-  "Write the todo list as it should read now: the list alone, one item a line, each starting with [x], [~] or [ ]; or UNCHANGED alone, or NONE alone."
+  (harness-prompt-default 'todo-sync-ask)
   "Last line of a question to the dumb agent.")
 
 (defconst harness-todo-sync--fork-ask
-  "[harness] Stop the work for a moment and use no tools.  The engineer keeps a todo list of it.  Write that list as it should read now, from the work so far.
-
-Write one item per line, with its state in brackets before it: [x] finished, [~] the one item in hand, [ ] still to do.  Keep 3 to 10 short imperative items, in the order the work goes, about the work and not the tools.  Keep the items of the current list that still hold, in their words, and mark done only what the work shows done; if you changed your approach, write a list that fits the work now.  Answer with the list alone, no other words and no markdown; or UNCHANGED alone when the current list is right, or NONE alone when the work is too small to need a list."
+  (harness-prompt-default 'todo-sync-fork-ask)
   "The instructions at the end of a question put to the session's own agent.
 The conversation it is asked on holds none of this, and a forked hosted
 conversation ignores the system prompt of the request.")
@@ -433,10 +425,12 @@ how many entries were left out before it."
     (concat (if older (format "[%d earlier entries left out]\n" (length older)) "")
             (string-join kept "\n"))))
 
-(defun harness-todo-sync--prompt (session nodes todos anchor)
+(defun harness-todo-sync--prompt (session nodes todos anchor &optional model)
   "Return the question put to the dumb agent about SESSION.
 NODES is its transcript, TODOS its list and ANCHOR the node it was last
-updated at (see `harness-todo-sync--activity')."
+updated at (see `harness-todo-sync--activity').  MODEL, when given, is
+the model asked; its override of the registry's `todo-sync-ask' is
+used."
   (let* ((texts (harness-todo-sync--user-texts nodes))
          (opening (car texts))
          (latest (and (cdr texts) (car (last texts))))
@@ -452,12 +446,15 @@ updated at (see `harness-todo-sync--activity')."
                  (concat "What the agent did since the list was last updated, oldest first:\n<activity>\n"
                          (if (string-empty-p activity) "(nothing yet)" activity)
                          "\n</activity>")
-                 harness-todo-sync--ask))
+                 (harness-prompt-effective 'todo-sync-ask harness-todo-sync--ask model)))
      "\n\n")))
 
-(defun harness-todo-sync--fork-question (todos)
-  "Return the question put to the session's own agent, about TODOS, its list."
-  (concat "The todo list now:\n" (harness-todo-sync--render todos) "\n\n" harness-todo-sync--fork-ask))
+(defun harness-todo-sync--fork-question (todos &optional model)
+  "Return the question put to the session's own agent, about TODOS, its list.
+MODEL, when given, is the model asked; its override of the registry's
+`todo-sync-fork-ask' is used."
+  (concat "The todo list now:\n" (harness-todo-sync--render todos) "\n\n"
+          (harness-prompt-effective 'todo-sync-fork-ask harness-todo-sync--fork-ask model)))
 
 (defun harness-todo-sync--model (session)
   "Return the model that writes SESSION's todo list.
@@ -532,7 +529,8 @@ when the provider fails, and when the answer takes longer than
       ;; minute -- a rate limit, a connection cut -- is waited out and the
       ;; question asked again, as a step of a turn would be.
       (setq handle
-            (harness-small-ask
+            (harness-prompt-ask
+             (plist-get request :prompts)
              request
              (list :label "todo sync"
                    :on-event
@@ -559,8 +557,10 @@ made for SESSION."
         :session (list :id (plist-get session :id) :cwd (plist-get session :cwd)
                        :host (plist-get session :host))
         :ephemeral t :job "Todo sync" :job-parent (plist-get session :id)
-        :system harness-todo-sync--system-prompt
+        :system (harness-prompt-effective 'todo-sync-system
+                                          harness-todo-sync--system-prompt model)
         :messages (list (list :role 'user :content (list (list :type "text" :text prompt))))
+        :prompts '(todo-sync-system todo-sync-ask)
         :tools nil :no-thinking t :max-tokens harness-todo-sync--max-tokens))
 
 (defun harness-todo-sync--own-request (session state todos)
@@ -569,9 +569,13 @@ STATE is a fork of its provider state, or nil for a provider that is sent
 the conversation at every request.  TODOS is the list as it stands."
   (list :model (plist-get session :model) :session session
         :job "Todo sync" :job-parent (plist-get session :id)
-        :system harness-todo-sync--system-prompt
+        :prompts '(todo-sync-system todo-sync-fork-ask)
+        :system (harness-prompt-effective 'todo-sync-system
+                                          harness-todo-sync--system-prompt
+                                          (plist-get session :model))
         :messages (harness-todo-sync--messages (plist-get session :id)
-                                               (harness-todo-sync--fork-question todos))
+                                               (harness-todo-sync--fork-question
+                                                todos (plist-get session :model)))
         :tools nil :provider-state state :no-thinking t :max-tokens harness-todo-sync--max-tokens))
 
 (defun harness-todo-sync--ask (session todos)
@@ -584,7 +588,9 @@ list, nor UNCHANGED, nor NONE."
          (dumb (lambda (model)
                  (harness-todo-sync--dumb-request
                   session model
-                  (harness-todo-sync--prompt session nodes todos (gethash sid harness-todo-sync--anchor)))))
+                  (harness-todo-sync--prompt session nodes todos
+                                             (gethash sid harness-todo-sync--anchor)
+                                             model))))
          (request
           (if (harness-todo-sync--own-agent-p)
               (harness-then

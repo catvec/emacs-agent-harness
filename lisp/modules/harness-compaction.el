@@ -150,6 +150,8 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; A compaction's text is in the prompt registry.
+(require 'harness-prompts)
 ;; A summary is one of the harness's own one-off calls
 ;; (`harness-small-ask'), tried again when a provider fails transiently.
 (require 'harness-small)
@@ -233,22 +235,13 @@ compacts on its own side (Claude Code, Copilot) is left alone either way."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defconst harness-compaction--system-prompt
-  "You are writing a handoff summary so that a fresh agent can continue this work without access to the conversation above.
-
-Write a thorough, factual summary in Markdown with these sections:
-
-1. Goals: what the user is trying to achieve, in their words where possible.
-2. Decisions: choices made and the reasons behind them.
-3. Files touched: every file read, created or edited, with its full path and what changed in it.
-4. Current state: what works, what is unfinished, and what was being done last.
-5. Open items: remaining tasks, unanswered questions, known problems.
-6. Pending user request: the most recent user message(s) verbatim if they have not been answered yet.
-
-Keep exact identifiers: file paths, function and variable names, commands, error messages, URLs, ids and numbers.  Prefer precise statements over prose.  Do not add commentary about the summary itself."
-  "System prompt for the compaction summariser.")
+  (harness-prompt-default 'compaction-system)
+  "System prompt for the compaction summariser.
+The default is the registry's `compaction-system'; a model may be sent
+an override of it (`harness-prompt-overrides').")
 
 (defconst harness-compaction--request-text
-  "Summarize the conversation above for a fresh agent that will take over from here.  Follow the section list from your instructions and keep every exact identifier."
+  (harness-prompt-default 'compaction-request)
   "Final user message that asks the model for the summary.")
 
 (defconst harness-compaction--max-tokens 4000
@@ -572,7 +565,8 @@ it uncached.  ENDS is `harness-compaction--verbatim-tokens': what the
 first and last messages kept verbatim add to the result."
   (let* ((model (plist-get session :model))
          (cached (and warm (harness-compaction--fork-p session-id model)))
-         (ask (harness-estimate-tokens harness-compaction--request-text))
+         (ask (harness-estimate-tokens
+               (harness-prompt-effective 'compaction-request harness-compaction--request-text model)))
          (output harness-compaction--summary-output))
     (list :kind 'summary :model model :model-label (harness-compaction--model-label model)
           :input (+ context ask) :output output :cached (and cached t)
@@ -599,7 +593,9 @@ model write it."
          (input (+ (harness-estimate-tokens harness-compaction--system-prompt)
                    (harness-compaction--messages-tokens
                     (harness-compaction--narrative-messages messages))
-                   (harness-estimate-tokens harness-compaction--request-text)))
+                   (harness-estimate-tokens
+                    (harness-prompt-effective 'compaction-request
+                                              harness-compaction--request-text model))))
          (output harness-compaction--summary-output))
     (list :kind 'brief :model model :model-label (harness-compaction--model-label model)
           :input input :output output :cached nil
@@ -837,9 +833,13 @@ given the transcript as ordinary messages: it goes inside one."
                                        (plist-get m :content) "\n\n")))
    "\n\n"))
 
-(defun harness-compaction--with-ask (messages)
-  "Return MESSAGES with the summarisation request in its final user message."
-  (let ((ask (list :type "text" :text harness-compaction--request-text))
+(defun harness-compaction--with-ask (messages &optional model)
+  "Return MESSAGES with the summarisation request in its final user message.
+MODEL, when given, is the model asked; its override of the registry's
+`compaction-request' is used."
+  (let ((ask (list :type "text"
+                   :text (harness-prompt-effective 'compaction-request
+                                                   harness-compaction--request-text model)))
         (last (car (last messages))))
     (if (and last (eq (plist-get last :role) 'user))
         (append (butlast messages)
@@ -868,7 +868,19 @@ window could be too large for the provider to take."
          (list (list :role 'user
                      :content (list (list :type "text"
                                           :text (harness-compaction--messages-text contextual)))))
-       contextual))))
+       contextual)
+     model)))
+
+(defun harness-compaction--summary-request (session model state messages)
+  "Return the one-off request that asks MODEL to summarise SESSION.
+STATE is the provider state MODEL gets, as `compaction/compact' has it,
+and MESSAGES the conversation it reads.  The system prompt and the
+request's last line are the registry's, as MODEL's overrides have them."
+  (list :model model :session session
+        :system (harness-prompt-effective 'compaction-system
+                                          harness-compaction--system-prompt model)
+        :messages messages :tools nil :provider-state state
+        :max-tokens harness-compaction--max-tokens))
 
 (defun harness-compaction--messages-tokens (messages)
   "Cheap token estimate for MESSAGES."
@@ -1280,11 +1292,9 @@ the compaction node otherwise, where the model never reads it."
     ;; -- a rate limit, a connection cut -- is waited out and the summary
     ;; asked for again, as a step of a turn would be.  A try that failed
     ;; left no summary behind, so the retry cannot duplicate one.
-    (harness-small-ask
-     (list :model model :session session
-           :system harness-compaction--system-prompt
-           :messages messages :tools nil :provider-state state
-           :max-tokens harness-compaction--max-tokens)
+    (harness-prompt-ask
+     '(compaction-system compaction-request)
+     (harness-compaction--summary-request session model state messages)
      (list :label "compaction"
            :on-event
            (lambda (ev)

@@ -82,7 +82,8 @@ caller's, and goes to `harness-small-ask' as an option instead."
                               ('text (setq text (concat text (or (plist-get ev :delta) ""))))
                               ('done (harness-resolve promise (list :text text :event ev))))))))
     (harness-small-ask
-     (list :model "small-stub:m" :ephemeral t :tools nil :no-thinking t :max-tokens 40)
+     (list :model "small-stub:m" :ephemeral t :tools nil :no-thinking t :max-tokens 40
+           :prompts '(recap-system))
      opts)
     promise))
 
@@ -197,7 +198,8 @@ before a provider sees the request."
     (let ((handle (harness-small-ask
                    (list :model "small-stub:m" :ephemeral t :tools nil
                          :system "Be brief." :messages (list (list :role 'user :content "hi"))
-                         :max-tokens 40 :job "A job" :job-parent "s1")
+                         :max-tokens 40 :job "A job" :job-parent "s1"
+                         :prompts '(recap-system))
                    (list :on-event #'ignore))))
       (should (functionp (plist-get handle :cancel)))
       (harness-test-wait (lambda () harness-small-test--requests) 5 "the request")
@@ -208,7 +210,8 @@ before a provider sees the request."
         (should (equal 40 (plist-get req :max-tokens)))
         (should (functionp (plist-get req :on-event)))
         (should-not (plist-member req :job))
-        (should-not (plist-member req :job-parent))))))
+        (should-not (plist-member req :job-parent))
+        (should-not (plist-member req :prompts))))))
 
 (ert-deftest harness-small-can-be-told-not-to-try-again ()
   "A caller that does its own trying asks for none here (`:retries' nil).
@@ -229,7 +232,8 @@ behind it and ask the provider again."
       (harness-small-test--says
        (harness-small-test--reply nil 'error '(:error "rate limited" :error-kind rate-limit)))
       (let ((handle (harness-small-ask
-                     (list :model "small-stub:m" :ephemeral t)
+                     (list :model "small-stub:m" :ephemeral t
+                           :prompts '(recap-system))
                      (list :on-event #'ignore))))
         (harness-test-wait (lambda () harness-small-test--requests) 5 "the call")
         (funcall (plist-get handle :cancel))
@@ -280,7 +284,7 @@ again, and the answer comes from the second request."
               (harness-small-ask
                (list :model "smalllocal:local-model" :ephemeral t :no-thinking t
                      :system "Say a title." :messages (list (list :role 'user :content "name it"))
-                     :max-tokens 20)
+                     :max-tokens 20 :prompts '(recap-system))
                (list :label "small test"
                      :on-event (lambda (ev)
                                  (pcase (plist-get ev :type)

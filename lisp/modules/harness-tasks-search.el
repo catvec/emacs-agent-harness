@@ -76,6 +76,8 @@
 (require 'harness-util)
 (require 'harness-files)
 (require 'harness-priority)
+;; The search's text is in the prompt registry.
+(require 'harness-prompts)
 ;; The search model is asked with one of the harness's own one-off calls
 ;; (`harness-small-ask'), tried again when a provider fails transiently.
 (require 'harness-small)
@@ -183,48 +185,21 @@ After that it is closed.")
 ;;;; What the model is told
 
 (defconst harness-tasks-search--system
-  "You are the search box of a coding harness in Emacs: AI agent sessions (chats, task sessions, BTW side conversations, sub-agents, forks) working on software projects; a task board per project, each task one agent session working on one change; and the harness's Emacs commands. The engineer types a query: a question about tasks, sessions or commands (\"did I have a task about X?\", \"where did I debug the merge queue?\", \"how do I attach a file?\") or an order to manage tasks. You get one context line saying where the engineer is and what to favour, then the data blocks there are: the board's tasks, sessions, commands. Answer with exactly one line of JSON and nothing else: no prose, markdown or code fence around it. Words for the engineer go inside it, in \"answer\".
-
-{\"show\":[\"TASK-ID\",...],\"sessions\":[\"SESSION-ID\",...],\"commands\":[\"COMMAND\",...],\"do\":[{\"task\":\"TASK-ID\",\"action\":\"ACTION\",\"text\":\"...\"}],\"answer\":\"...\",\"note\":\"...\"}
-
-\"show\" lists the tasks the query is about, best match first, or [] when none fits. A question (\"did I have a task about X?\", \"what is working on Y?\", \"which ones failed?\") shows the tasks that answer it. An order shows the tasks it acts on.
-
-\"sessions\" lists the sessions the query is about, by id or the first 8 characters given, best first: the session to open, the conversation where something was discussed or done.
-
-\"commands\" lists the commands, by name exactly as listed, that do what the query asks or answer \"how do I ...\", best first, at most 5. When the context line says the engineer is on a phone app, the commands are that app's own actions, not Emacs commands: screens to open, settings to change, things to do on the phone, each with the taps that reach it where Emacs commands have keys. Answer \"how do I ...\" from what their descriptions say, in taps and screens, and never with Emacs keys or commands.
-
-\"do\" stays [] unless the query clearly orders a change. Each entry acts on one task. ACTION is one of:
-- archive: take a task off the board (\"get rid of\", \"remove\", \"delete\", \"hide\", \"clean up\"); a task at work is stopped first
-- restore: bring an archived task back
-- stop: stop a task that is working
-- retry: have a task that stopped work again (\"restart\", \"retry\", \"resume\", \"rerun\", \"unstick\"): one that failed with an error, was cancelled or interrupted, or whose merge or write-up failed
-- start: start a pending or backlog task now
-- verify: accept a task waiting for review; its work merges (\"approve\", \"accept\", \"ship\")
-- complete: mark a task done by hand
-- message: send \"text\" to the task's agent: an instruction, a follow-up, a question for it
-- reject: send a task in review back to its agent with \"text\" as the feedback
-- priority: set the task's priority to \"text\": high, medium or low (\"prioritize\", \"urgent\", \"do first\", \"bump\", \"deprioritize\", \"later\"). While the slots are full, waiting tasks start highest priority first. A task says its priority when it is not medium.
-\"text\" is only for message, reject and priority.
-
-\"answer\" answers the query in words, when words answer it: how to do something (\"how do I attach a file?\": the keys or the command, and where), what something is or does, why, or a question about the tasks or sessions a list alone does not answer (\"how many tasks failed?\", \"what is the docs task waiting for?\"). Write Markdown, as short as the question allows: a sentence or two, or a few steps as a list; put keys and command names in `backquotes`. Say only what the data you got says, or what you know of Emacs; never make up keys or commands. In the JSON string a line break is \\n and a quote is \\\". Leave \"answer\" out when the lists answer the query on their own: a search for a task, a session or a command, or an order. Whatever the answer names still goes in \"show\", \"sessions\" and \"commands\", so the engineer can open it.
-
-\"note\" is one short sentence about the lists when you looked beyond the favoured data or answer with what comes nearest (\"No task matched; these sessions mention it.\"); leave it out otherwise. It is never the answer: that goes in \"answer\".
-
-Favour what the context line names; the other lists may hold answers too.
-
-Match loosely: words in any order, abbreviations (mq = merge queue), typos, synonyms; titles, requests, todos, summaries and branches all count. \"Errored\", \"failed\" or \"broken\" tasks are those whose state says error or failed. \"Them\", \"those\" and \"these\" are the tasks shown on the board now. Act only on tasks the query clearly means; when unsure, show them and do nothing.
-
-Most queries need nothing but what you got. When it does not say enough, you may ask once to look further instead of answering, with one JSON object holding any of: {\"grep\":\"TEXT\"} the tasks whose session transcripts mention TEXT; {\"read\":[\"TASK-ID\",...]} the latest transcript of up to 3 tasks; {\"sessions\":\"TEXT\"} every session, not only the tasks', whose transcript or name mentions TEXT; {\"commands\":\"TEXT\"} more commands matching TEXT. \"grep\" and \"sessions\" are full-text searches, best match first: words match in any form and every word must match; \"quoted words\" match as a phrase, word* as a prefix, a OR b either one, and -word leaves out what has it. Then you answer.
-
-Do not give up at once: when the favoured data has nothing for the query, use that one look to search beyond it, sessions and commands, and answer with what comes nearest, saying so in note. Only when that finds nothing either, answer with empty lists."
+  (harness-prompt-default 'search-system)
   "System prompt of a search's model, on the board and anywhere else.
-It never changes, so a model process started ahead for a search
-\(`search/warm') has the settings the search comes with, whatever it
-favours.")
+The default is the registry's `search-system'; a model may be sent an
+override of it (`harness-prompt-overrides').  It never changes with the
+search, so a model process started ahead for a search (`search/warm')
+has the settings the search comes with, whatever it favours.")
 
 (defconst harness-tasks-search--final-text
-  "That is all there is to look at. Now answer the query with one line of JSON: {\"show\":[...],\"sessions\":[...],\"commands\":[...],\"do\":[...],\"answer\":\"...\",\"note\":\"...\"}."
+  (harness-prompt-default 'search-final)
   "What closes the message that hands a search's model what it asked to see.")
+
+(defun harness-tasks-search--closing-text (&optional model)
+  "Return the line that closes a search's message for MODEL.
+It is the registry's `search-final', as MODEL's override has it."
+  (harness-prompt-effective 'search-final harness-tasks-search--final-text model))
 
 ;;;; The board as the model reads it
 
@@ -1283,7 +1258,8 @@ remembered there."
                                                                       (harness-tasks-search--commands-text
                                                                        (plist-get wants :commands) search)))))
                                          "\n\n")
-                            "\n\n" harness-tasks-search--final-text)))))
+                            "\n\n" (harness-tasks-search--closing-text
+                                     (plist-get search :model)))))))
 
 (defun harness-tasks-search--and (parts)
   "PARTS, strings, joined as words list them: \"a\", \"a and b\", \"a, b and c\"."
@@ -1336,7 +1312,8 @@ See `harness-tasks-search-model'."
   "The request a search with MODEL makes under session id SID, without messages."
   (list :model model
         :session (list :id sid :cwd (file-name-as-directory (harness-tasks-search--directory)))
-        :system harness-tasks-search--system
+        :system (harness-prompt-effective 'search-system
+                                          harness-tasks-search--system model)
         :thinking harness-tasks-search-thinking
         :max-tokens harness-tasks-search--max-tokens
         :tools nil))
@@ -1389,7 +1366,8 @@ seconds, and when the provider ends the request with an error."
       ;; minute -- a rate limit, a connection cut -- is waited out and the
       ;; search model asked again, as a step of a turn would be.
       (setq handle
-            (harness-small-ask
+            (harness-prompt-ask
+             '(search-system search-final)
              (append (harness-tasks-search--request (plist-get search :model) (plist-get search :session))
                      (list :messages messages
                            ;; Recorded as an internal session, which

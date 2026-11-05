@@ -54,6 +54,8 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; The text of a title request is in the prompt registry.
+(require 'harness-prompts)
 (require 'harness-small)
 
 (declare-function harness-agent-strip-result-images "harness-agent" (messages))
@@ -81,24 +83,26 @@ forces that model, and nil uses the session's own model."
   "Output budget of a naming request: a title is a handful of words.")
 
 (defconst harness-naming--base-system-prompt
-  "You write short titles for conversations between a software engineer and a coding agent.  A good title says what the conversation is about in 3 to 6 words, like a commit subject or a ticket title."
+  (harness-prompt-default 'naming-system)
   "System prompt for the naming request.
-Modules add to it per session through the `naming/system-prompt' filter.")
+The default is the registry's `naming-system'; a model may be sent an
+override of it (`harness-prompt-overrides').  Modules add to it per
+session through the `naming/system-prompt' filter.")
 
 (defconst harness-naming--request-text
-  "Give the conversation above a title of 3 to 6 words.  Reply with the title only: no quotes, no trailing period, no markdown, no explanation."
+  (harness-prompt-default 'naming-request)
   "User message that asks the model for a title of the whole conversation.")
 
 (defconst harness-naming--opening-text
-  "The engineer opened a conversation with the agent with this message:"
+  (harness-prompt-default 'naming-opening)
   "Line before the opening message in a request that names a session from it.")
 
 (defconst harness-naming--latest-text
-  "Their latest message in it:"
+  (harness-prompt-default 'naming-latest)
   "Line before the latest message, when the conversation has moved on since.")
 
 (defconst harness-naming--opening-request-text
-  "Give the conversation a title of 3 to 6 words.  Do not answer the message or carry it out.  Reply with the title only: no quotes, no trailing period, no markdown, no explanation."
+  (harness-prompt-default 'naming-opening-request)
   "Text that asks the model for a title of a conversation from its messages.")
 
 (defconst harness-naming--message-chars 3000
@@ -137,11 +141,17 @@ trailing period, collapses whitespace and truncates to
 
 ;;;; What the model is asked
 
-(defun harness-naming--system-prompt (session)
+(defun harness-naming--system-prompt (session &optional model)
   "Return the naming system prompt for SESSION after `naming/system-prompt'.
 SESSION is the session named, or what `naming/title' is told of the
-title it asks for: its options, `:task' naming a task's id, say."
-  (harness-run-filter 'naming/system-prompt harness-naming--base-system-prompt session))
+title it asks for: its options, `:task' naming a task's id, say.  MODEL,
+when given, is the model the title is asked of; its override of the
+registry's `naming-system' is used."
+  (harness-run-filter 'naming/system-prompt
+                      (harness-prompt-effective 'naming-system
+                                                harness-naming--base-system-prompt
+                                                (or model (plist-get session :model)))
+                      session))
 
 (defun harness-naming--model (session)
   "Return the model that names SESSION from its first message.
@@ -184,24 +194,32 @@ when that is another (nil otherwise).  Nil when it has no user message."
   "Return TEXT cut to `harness-naming--message-chars', between message tags."
   (format "<message>\n%s\n</message>" (harness-truncate-end text harness-naming--message-chars)))
 
-(defun harness-naming--opening-blocks (opening)
+(defun harness-naming--opening-blocks (opening &optional model)
   "Return the content of a request naming a session from OPENING.
 OPENING is what `harness-naming--opening' returns.  The question comes
-last, in a block of its own."
+last, in a block of its own.  MODEL is the model asked; its overrides
+of the registry's `naming-opening', `naming-latest' and
+`naming-opening-request' are used."
   (list (list :type "text"
-              :text (concat harness-naming--opening-text "\n\n" (harness-naming--quote (car opening))
+              :text (concat (harness-prompt-effective 'naming-opening harness-naming--opening-text model)
+                            "\n\n" (harness-naming--quote (car opening))
                             (if (cdr opening)
-                                (concat "\n\n" harness-naming--latest-text "\n\n"
-                                        (harness-naming--quote (cdr opening)))
+                                (concat "\n\n"
+                                        (harness-prompt-effective 'naming-latest harness-naming--latest-text model)
+                                        "\n\n" (harness-naming--quote (cdr opening)))
                               "")))
-        (list :type "text" :text harness-naming--opening-request-text)))
+        (list :type "text"
+              :text (harness-prompt-effective 'naming-opening-request
+                                              harness-naming--opening-request-text model))))
 
-(defun harness-naming--messages (session-id)
+(defun harness-naming--messages (session-id &optional model)
   "Return the naming messages for SESSION-ID: the transcript plus the question.
 A title is written from the words of the conversation, so the images its
-tool results returned are left out."
+tool results returned are left out.  MODEL is the model asked; its
+override of the registry's `naming-request' is used."
   (let* ((messages (harness-agent-strip-result-images (harness-call 'session/messages session-id)))
-         (ask (list :type "text" :text harness-naming--request-text))
+         (ask (list :type "text"
+                    :text (harness-prompt-effective 'naming-request harness-naming--request-text model)))
          (last (car (last messages))))
     (if (and last (eq (plist-get last :role) 'user))
         (append (butlast messages)
@@ -276,12 +294,13 @@ storing the name unless the session's name is no longer BEFORE."
 A one-off call through `harness-small-ask', so a provider that rate
 limits or cuts the connection has the title asked for again."
   (let ((sid (plist-get session :id)))
-    (harness-small-ask
+    (harness-prompt-ask
+     '(naming-system naming-request)
      (list :model (plist-get session :model) :session session
            ;; Recorded as an internal session made for SESSION.
            :job "Auto-name" :job-parent sid
-           :system (harness-naming--system-prompt session)
-           :messages (harness-naming--messages sid)
+           :system (harness-naming--system-prompt session (plist-get session :model))
+           :messages (harness-naming--messages sid (plist-get session :model))
            :tools nil :provider-state state :max-tokens harness-naming--max-tokens)
      (list :label "naming"
            :on-event (harness-naming--on-event sid (plist-get session :name) promise)))))
@@ -310,12 +329,13 @@ later), when the reply holds no usable title, and when
                                  (finish nil "the model took too long")
                                  (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
       (setq handle
-            (harness-small-ask
+            (harness-prompt-ask
+             '(naming-system naming-opening naming-latest naming-opening-request)
              (list :model model :session session :ephemeral t :system system
                    ;; Recorded as an internal session, made for the
                    ;; session named when it is one.
                    :job "Auto-name" :job-parent (plist-get session :id)
-                   :messages (list (list :role 'user :content (harness-naming--opening-blocks opening)))
+                   :messages (list (list :role 'user :content (harness-naming--opening-blocks opening model)))
                    :tools nil :no-thinking t :max-tokens harness-naming--max-tokens)
              (list :label "naming"
                    :on-event
@@ -345,7 +365,7 @@ state, so the session's conversation never sees it."
                       (signal 'harness-error (list "the session has no message to name it from")))))
     (harness-then (harness-naming--ask (harness-naming--model session)
                                        (list :id sid :cwd (plist-get session :cwd) :host (plist-get session :host))
-                                       (harness-naming--system-prompt session)
+                                       (harness-naming--system-prompt session (harness-naming--model session))
                                        opening)
                   (lambda (name)
                     (condition-case err
@@ -421,7 +441,7 @@ when the request fails, gives no usable title or takes longer than
                                       :cwd (file-name-as-directory
                                             (expand-file-name (or (plist-get opts :cwd) default-directory)))
                                       :host (plist-get opts :host))
-                                (harness-naming--system-prompt opts)
+                                (harness-naming--system-prompt opts model)
                                 (cons (string-trim text) nil))
          ;; The system prompt's filters, say.
          (error (harness-rejected (harness-error-message err))))

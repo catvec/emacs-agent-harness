@@ -46,8 +46,10 @@
 (require 'harness-core)
 (require 'harness-util)
 ;; A judge's question is one of the harness's own one-off calls, so a
-;; provider that fails transiently has it asked again (`harness-small-ask').
+;; provider that fails transiently has it asked again (`harness-small-ask'),
+;; and it names the prompts it sends (`harness-prompt-ask').
 (require 'harness-small)
+(require 'harness-prompts)
 
 (defvar harness-model)
 
@@ -171,7 +173,7 @@ that signals finds nothing, and is logged under LABEL."
 
 (cl-defun harness-judge-ask (&key session model system prompt tools (max-lookups 0)
                                   (max-tokens 200) retry-max-tokens (timeout 30)
-                                  parse label job (suffix "judge"))
+                                  parse label job (suffix "judge") prompts)
   "Ask a judge PROMPT; return a promise of its answer, which never rejects.
 A judge is a one-off question to a cheap model, whose reply PARSE, a
 function of the reply's text, reads.  The answer is
@@ -207,7 +209,9 @@ of a name not among TOOLS, gets an error result and runs nothing.
 LABEL names the judge in the log, as \"event watch w1\" (\"judge\"
 by default).  JOB, a few words, when given, names the judge's
 internal session, in which the request is recorded (see
-`provider/complete''s `:job')."
+`provider/complete''s `:job').  PROMPTS is the prompt name or names the
+request sends, from `harness-prompts'; a judge must name them, as every
+one-off call does (`harness-prompt-ask')."
   (let* ((session (harness-judge--session session))
          (label (or label "judge"))
          (timeout (or timeout 30))
@@ -329,7 +333,8 @@ internal session, in which the request is recorded (see
              ;; a provider that rate limits or cuts the connection has the
              ;; question asked again, and the half reply of the failed try is
              ;; dropped, before the judge reads it as its answer.
-             (let ((h (harness-small-ask
+             (let ((h (harness-prompt-ask
+                       prompts
                        (list :model model
                              ;; One question, alone: no earlier turns,
                              ;; no project instructions.

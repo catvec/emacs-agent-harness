@@ -49,6 +49,8 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; A recap's text is in the prompt registry.
+(require 'harness-prompts)
 ;; A recap is one of the harness's own one-off calls (`harness-small-ask'),
 ;; tried again when a provider fails transiently.
 (require 'harness-small)
@@ -70,11 +72,13 @@
 (defvar harness-tasks-recap-history)
 
 (defconst harness-recap--system-prompt
-  "You write the progress recaps that coding agents' task cards show under their titles.  Write one short sentence, in plain words, saying what the task is doing or has done so far: concrete work and findings, not encouragement, not a question, not a plan.  No markdown, no quotes, no lists, no trailing period is needed."
-  "System prompt of a recap request.")
+  (harness-prompt-default 'recap-system)
+  "System prompt of a recap request.
+The default is the registry's `recap-system'; a model may be sent an
+override of it (`harness-prompt-overrides').")
 
 (defconst harness-recap--ask
-  "Recap this task now, in one short sentence."
+  (harness-prompt-default 'recap-ask)
   "Last line of a recap request.")
 
 (defvar harness-recap--running (make-hash-table :test 'equal)
@@ -177,8 +181,10 @@ session holds."
         (format "Progress: %d turns, %d %s" turns tools
                 (if (= tools 1) "tool call" "tool calls")))))
 
-(defun harness-recap--prompt (task session)
-  "Return the user text of a recap request for TASK and SESSION."
+(defun harness-recap--prompt (task session &optional model)
+  "Return the user text of a recap request for TASK and SESSION.
+MODEL, when given, is the model the recap is asked of; its override of
+the registry's `recap-ask' is used."
   (let* ((prompt (string-trim (or (plist-get task :prompt) "")))
          (prompt (if (> (length prompt) 600) (concat (substring prompt 0 600) "…") prompt))
          (todos (plist-get session :todos))
@@ -196,7 +202,7 @@ session holds."
                  (let ((tail (harness-recap--tail (plist-get session :id))))
                    (and (not (string-blank-p tail))
                         (concat "Recent transcript (oldest first, newest last):\n" tail)))
-                 harness-recap--ask))
+                 (harness-prompt-effective 'recap-ask harness-recap--ask model)))
      "\n\n")))
 
 (defun harness-recap-sanitise (text)
@@ -296,6 +302,30 @@ signal when it could not be stored."
     (harness-emit 'recap/failed sid (or error reason))
     nil))
 
+(defun harness-recap--request (session task model)
+  "Return the recap request for SESSION about TASK, asked of MODEL.
+The system prompt and the last line are the registry's `recap-system'
+and `recap-ask', as MODEL's overrides have them."
+  (append
+   (list :model model
+         :session session
+         ;; Recorded as an internal session made for SESSION.
+         :job "Recap" :job-parent (plist-get session :id)
+         :system (harness-prompt-effective 'recap-system
+                                           harness-recap--system-prompt model)
+         :messages (list (list :role 'user
+                               :content (list (list :type "text"
+                                                    :text (harness-recap--prompt task session model)))))
+         :tools nil
+         :max-tokens harness-tasks-recap-max-tokens
+         ;; A recap is one short line: without a level of the user's,
+         ;; ask for no thinking (a model that thinks by default would
+         ;; spend the whole budget on the reasoning and stop at
+         ;; `max-tokens').
+         :no-thinking (null harness-tasks-recap-thinking))
+   (and harness-tasks-recap-thinking
+        (list :thinking harness-tasks-recap-thinking))))
+
 (defun harness-recap--ask (session task on-done)
   "Ask the model for a recap of SESSION about TASK; call ON-DONE at its end.
 The request is the one a card's recap is: `harness-recap--system-prompt'
@@ -325,28 +355,13 @@ RECAP, or rejects with why there is none."
                            (funcall on-done recap reason error)
                          (error (harness-log 'warn "recap of session %s could not be stored: %S"
                                              (plist-get session :id) err)))))))
-         (request (append
-                   (list :model (harness-recap--model session)
-                         :session session
-                         ;; Recorded as an internal session made for SESSION.
-                         :job "Recap" :job-parent (plist-get session :id)
-                         :system harness-recap--system-prompt
-                         :messages (list (list :role 'user
-                                               :content (list (list :type "text"
-                                                                    :text (harness-recap--prompt task session)))))
-                         :tools nil
-                         :max-tokens harness-tasks-recap-max-tokens
-                         ;; A recap is one short line: without a level of
-                         ;; the user's, ask for no thinking (a model that
-                         ;; thinks by default would spend the whole budget
-                         ;; on the reasoning and stop at `max-tokens').
-                         :no-thinking (null harness-tasks-recap-thinking))
-                   (and harness-tasks-recap-thinking
-                        (list :thinking harness-tasks-recap-thinking)))))
+         (model (harness-recap--model session))
+         (request (harness-recap--request session task model)))
     ;; A one-off call through `harness-small-ask': a provider's bad minute
     ;; -- a rate limit, a connection cut -- is waited out and the recap
     ;; asked for again, as a step of a turn would be.
-    (harness-small-ask
+    (harness-prompt-ask
+     '(recap-system recap-ask)
      request
      (list :label "recap"
            :on-event

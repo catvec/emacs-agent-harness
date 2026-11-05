@@ -216,6 +216,8 @@
 (require 'harness-util)
 (require 'harness-tools)
 (require 'harness-readonly)
+;; The session judge's text is in the prompt registry.
+(require 'harness-prompts)
 ;; The session judge is one of the harness's own one-off calls
 ;; (`harness-small-ask'), tried again when a provider fails transiently.
 (require 'harness-small)
@@ -962,19 +964,16 @@ theirs already."
 ;; a verdict that arrives after it is dropped.
 
 (defconst harness-supervisor--judge-system-prompt
-  (concat "You decide how one session of a coding agent should start, from the engineer's opening message.\n\n"
-          "A SUPERVISING session investigates, writes a plan, and coordinates workers on cheaper models that make "
-          "the changes; it cannot change files itself.  A HANDS-ON session works directly: it reads and changes "
-          "the files itself.\n\n"
-          "Choose HANDS-ON when the session can do or answer the message itself, right away: a question, a "
-          "discussion, a look around, a small or well-specified change in one or two files.\n"
-          "Choose SUPERVISE when the work is large enough to plan and share out: a feature, a refactor, a "
-          "migration, several files or steps, parallel work, or a message that asks for a plan, a review of other "
-          "work, or coordination.\n"
-          "When in doubt, choose SUPERVISE.  The engineer can flip the choice in one keystroke if you read it "
-          "wrong, so do not ask for clarification.\n\n"
-          "Reply with exactly one word: SUPERVISE or HANDS-ON.  No explanation.")
-  "What the session judge is told about its job.")
+  (harness-prompt-default 'session-judge-system)
+  "What the session judge is told about its job.
+The default is the registry's `session-judge-system'; a model may be
+sent an override of it (`harness-prompt-overrides').")
+
+(defun harness-supervisor--judge-system (model)
+  "Return the session judge's system prompt for MODEL.
+It is the registry's `session-judge-system', as MODEL's override has it."
+  (harness-prompt-effective 'session-judge-system
+                            harness-supervisor--judge-system-prompt model))
 
 (defun harness-supervisor--judge-model (session)
   "Return the model the session judge uses for SESSION.
@@ -996,11 +995,13 @@ nil uses the session's model."
 A long write-up is enough to read from its start; the rest is the same
 job.")
 
-(defun harness-supervisor--judge-question (text)
-  "Return the judge's question about TEXT, the session's opening message."
-  (format (concat "The engineer's opening message to the session:\n\n<message>\n%s\n</message>\n\n"
-                  "How should the session start?  Reply with exactly one word: SUPERVISE or HANDS-ON.")
-          (harness-truncate-end (string-trim text) harness-supervisor--judge-message-chars)))
+(defun harness-supervisor--judge-question (text &optional model)
+  "Return the judge's question about TEXT, the session's opening message.
+MODEL's override of the registry's `session-judge-question' is used."
+  (harness-prompt
+   'session-judge-question
+   (list :message (harness-truncate-end (string-trim text) harness-supervisor--judge-message-chars))
+   model))
 
 (defun harness-supervisor--judge-verdict (text)
   "Return the mode the judge's reply TEXT names: t, `:false' or nil.
@@ -1041,17 +1042,18 @@ provider fails, the model gives no usable word, or it takes longer than
                                                  harness-supervisor--judge-timeout))
                              (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
         (setq handle
-              (harness-small-ask
+              (harness-prompt-ask
+               '(session-judge-system session-judge-question)
                (list :model model :ephemeral t
                      :session (list :id (format "%s-judge" (plist-get session :id))
                                     :cwd (plist-get session :cwd)
                                     :host (plist-get session :host))
                      ;; Recorded as an internal session made for SESSION.
                      :job "Session judge" :job-parent (plist-get session :id)
-                     :system harness-supervisor--judge-system-prompt
+                     :system (harness-supervisor--judge-system model)
                      :messages (list (list :role 'user
                                            :content (list (list :type "text"
-                                                                :text (harness-supervisor--judge-question text)))))
+                                                                :text (harness-supervisor--judge-question text model)))))
                      :tools nil :no-thinking t
                      :max-tokens harness-supervisor--judge-max-tokens)
                (list :label "session judge"

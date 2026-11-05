@@ -49,6 +49,8 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-provider)
+;; The checks' text is in the prompt registry.
+(require 'harness-prompts)
 
 (defgroup harness-provider-check nil
   "Live checks of a provider's contract and a model's harness skills."
@@ -109,7 +111,7 @@ unsupported format rather than a bad request.")
   (list :model model
         :session (list :id session-id :cwd default-directory)
         :ephemeral t
-        :system (or system "You are a helpful assistant.")
+        :system (or system (harness-prompt 'provider-check-system nil model))
         :max-tokens 512
         :messages (list (list :role 'user
                               :content (list (list :type "text" :text user))))))
@@ -415,7 +417,8 @@ the cancellation path is exercised.  Every wait is bounded by
     job
     (harness-provider-check--request (harness-provider-check-job-model job)
                                      "provider-check-basic"
-                                     "Reply with a short greeting."))
+                                     (harness-prompt 'provider-check-greeting nil
+                                                     (harness-provider-check-job-model job))))
    (lambda (reply)
      (let ((events (plist-get reply :events)))
        (harness-provider-check--finish-events events)
@@ -445,7 +448,8 @@ the cancellation path is exercised.  Every wait is bounded by
   (let ((request (harness-provider-check--request
                   (harness-provider-check-job-model job)
                   "provider-check-no-thinking"
-                  "Reply with a short greeting.")))
+                  (harness-prompt 'provider-check-greeting nil
+                                  (harness-provider-check-job-model job)))))
     (setf request (plist-put request :no-thinking t))
     (harness-then
      (harness-provider-check--complete job request)
@@ -464,7 +468,8 @@ the cancellation path is exercised.  Every wait is bounded by
       (let ((request (harness-provider-check--request
                       (harness-provider-check-job-model job)
                       "provider-check-thinking"
-                      "Reply with a short greeting.")))
+                      (harness-prompt 'provider-check-greeting nil
+                                      (harness-provider-check-job-model job)))))
         (setf request (plist-put request :thinking level))
         (harness-then
          (harness-provider-check--complete job request)
@@ -492,7 +497,8 @@ the cancellation path is exercised.  Every wait is bounded by
         (harness-provider-check--image-request
          (harness-provider-check-job-model job)
          "provider-check-image"
-         "Here is an image. Reply briefly."))
+         (harness-prompt 'provider-check-image nil
+                         (harness-provider-check-job-model job))))
        (lambda (reply)
          (harness-provider-check--finish-events (plist-get reply :events) t)
          '(pass . "Image block accepted; visual recognition not asserted."))))))
@@ -507,7 +513,7 @@ behavior, not a provider bug."
   (let* ((model (harness-provider-check-job-model job))
          (id (format "provider-check-tool-%x" (random most-positive-fixnum)))
          (marker (format "receipt-%x" (random most-positive-fixnum)))
-         (user "Call check_echo with value 'ping'. Then tell me the tool's receipt.")
+         (user (harness-prompt 'provider-check-tool nil model))
          (request (harness-provider-check--request model id user))
          (tool '(:name "check_echo"
                   :description "Return a receipt for value."
@@ -627,7 +633,8 @@ behavior, not a provider bug."
       (let* ((model (harness-provider-check-job-model job))
              (session-id "provider-check-fork")
              (request (harness-provider-check--request
-                       model session-id "Reply with a short greeting.")))
+                       model session-id
+                       (harness-prompt 'provider-check-greeting nil model))))
         (setf request (plist-put request :ephemeral nil))
         (harness-then
          (harness-provider-check--finally
@@ -681,7 +688,8 @@ behavior, not a provider bug."
     job
     (harness-provider-check--request (harness-provider-check-job-model job)
                                      "provider-check-cancel"
-                                     "Reply with a short greeting.")
+                                     (harness-prompt 'provider-check-greeting nil
+                                                     (harness-provider-check-job-model job)))
     nil t)
    (lambda (reply)
      (let ((events (plist-get reply :events)))
@@ -726,8 +734,10 @@ into the structured note argument rather than dropping it as a label."
          (request (harness-provider-check--request
                    (harness-provider-check-job-model job)
                    "provider-check-instructions"
-                   "Resubmit the task now."
-                   "You are a coding agent resubmitting finished work.")))
+                   (harness-prompt 'provider-check-instructions nil
+                                   (harness-provider-check-job-model job))
+                   (harness-prompt 'provider-check-instructions-system nil
+                                   (harness-provider-check-job-model job)))))
     (setf request (plist-put request :tools
                              (list (harness-provider-check--resubmit-tool
                                     label))))
@@ -759,7 +769,8 @@ into the structured note argument rather than dropping it as a label."
        (harness-provider-check--complete
         job
         (harness-provider-check--image-request
-         model "provider-check-vision" "What is the solid color of this image?"))
+         model "provider-check-vision"
+         (harness-prompt 'provider-check-vision nil model)))
        (lambda (reply)
          (let ((events (plist-get reply :events)))
            (harness-provider-check--expect-text events)

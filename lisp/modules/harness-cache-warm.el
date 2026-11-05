@@ -97,6 +97,8 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-cache)
+;; The refresh's message is in the prompt registry.
+(require 'harness-prompts)
 ;; The refresh is one of the harness's own one-off calls, sent through
 ;; `harness-small-ask', which its caller turns the trying off for.
 (require 'harness-small)
@@ -123,8 +125,14 @@ the time left while it goes on, and a period can be asked for by hand."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defconst harness-cache-warm-message
-  "[harness] This message only keeps the prompt cache warm: reply with just: ok"
-  "The short message that ends the conversation a refresh of an idle session sends.")
+  (harness-prompt-default 'cache-warm-ping)
+  "The short message that ends the conversation a refresh of an idle session sends.
+The default is the registry's `cache-warm-ping'; a model may be sent an
+override of it (`harness-prompt-overrides').")
+
+(defun harness-cache-warm--ping (&optional model)
+  "Return the message that reads a session's cache again, for MODEL."
+  (harness-prompt-effective 'cache-warm-ping harness-cache-warm-message model))
 
 (defconst harness-cache-warm--max-tokens 16
   "Most tokens the answer to a refresh may take: it is never read.")
@@ -473,7 +481,9 @@ tool will start as.  The provider is told it is a refresh.  It carries no
       (let* ((model (plist-get session :model))
              (state (harness-call 'session/provider-state sid model))
              (request (harness-agent-step-request sid state nil))
-             (ping (list :role 'user :content (list (list :type "text" :text harness-cache-warm-message))))
+             (ping (list :role 'user
+                         :content (list (list :type "text"
+                                              :text (harness-cache-warm--ping model)))))
              (messages (if (harness-cache-warm--hosted-p session)
                            (list ping)
                          (append (plist-get request :messages) (list ping)))))
@@ -659,7 +669,8 @@ is sent and `harness-cache-warm--finish' for what comes of it."
       ;; helper's own trying is off, so a provider having a bad minute is
       ;; not waited out twice over.
       (setq handle
-            (harness-small-ask
+            (harness-prompt-ask
+             '(cache-warm-ping)
              (harness-cache-warm--request sid)
              (list :label "cache warm" :retries 0 :on-event #'on-event))))
     promise))

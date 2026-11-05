@@ -106,7 +106,10 @@ timer, as a provider's events come."
 
 (defun harness-judge-test--ask (&rest args)
   "Ask a judge for session s1, which runs on judge:big, with ARGS.
-Return its answer."
+Return its answer.  The judge names the session judge's prompts unless
+ARGS name others."
+  (unless (plist-member args :prompts)
+    (setq args (append args (list :prompts '(session-judge-system session-judge-question)))))
   (harness-test-await
    (apply #'harness-judge-ask :session (list :id "s1" :cwd default-directory :model "judge:big") args)
    10))
@@ -186,7 +189,9 @@ tier is asked with that model itself.  A session may be named by id."
       (should (equal "judge:small" (harness-judge-model "s9")))
       (harness-judge-test--says (harness-judge-test--reply "answer: yes"))
       (should (eq 'yes (plist-get (harness-test-await
-                                   (harness-judge-ask :session "s9" :prompt "?" :parse #'harness-judge-test--parse))
+                                   (harness-judge-ask :session "s9" :prompt "?"
+                                                      :prompts '(session-judge-system session-judge-question)
+                                                      :parse #'harness-judge-test--parse))
                                   :value)))
       (should (equal "s9-judge" (plist-get (plist-get (car harness-judge-test--requests) :session) :id))))))
 
@@ -215,6 +220,7 @@ harness does not have, a request that signals, no model at all."
     (let ((harness-model nil))
       (should (equal '(:value nil :reason "no model could be asked" :text "" :lookups 0)
                      (harness-test-await (harness-judge-ask :session (list :id "s1" :cwd default-directory)
+                                                            :prompts '(session-judge-system session-judge-question)
                                                             :prompt "?")))))
     (should-not harness-judge-test--requests)
     (harness-register-method 'provider/complete (lambda (_request) (error "Broken provider")))

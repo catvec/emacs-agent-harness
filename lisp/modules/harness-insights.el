@@ -81,6 +81,8 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+;; The summary's text is in the prompt registry.
+(require 'harness-prompts)
 ;; The written summary is one of the harness's own one-off calls
 ;; (`harness-small-ask'), tried again when a provider fails transiently.
 (require 'harness-small)
@@ -987,16 +989,10 @@ of the harness's own (see `session/internal-start')."
 ;;;; The written summary
 
 (defconst harness-insights--system-prompt
-  "You write the Insights report of an agent harness: a short, honest reading of how one person has been working with AI coding agents over a period, from the figures and the list of their sessions below.  The figures are exact; do not restate them, interpret them.  Write to the person (\"you\"), plainly and specifically, without flattery or filler, naming projects, tools and tasks where they matter.
-
-Answer with one JSON object and nothing else, no markdown fences:
-{\"summary\": \"two or three sentences on what the period was about and how it went\",
- \"themes\": [\"what the work was about: 2 to 5 items naming projects, features or kinds of work\"],
- \"patterns\": [\"how you work with the agents: 2 to 4 items, such as when you work, chats against tasks, how much you steer\"],
- \"friction\": [\"what went wrong or slowed you down: 0 to 4 items grounded in the figures, such as failing tools, denials, tasks sent back, merge conflicts\"],
- \"suggestions\": [\"concrete things to try next: 2 to 4 items, each one something you can do in the harness or in the projects\"]}
-Each item is one sentence of at most 30 words."
-  "System prompt of the call that writes an Insights summary.")
+  (harness-prompt-default 'insights-system)
+  "System prompt of the call that writes an Insights summary.
+The default is the registry's `insights-system'; a model may be sent an
+override of it (`harness-prompt-overrides').")
 
 (defun harness-insights--model (project)
   "Return the model that writes the summary for PROJECT, or nil.
@@ -1042,6 +1038,23 @@ configured for PROJECT."
                                 :billing billing))))
       (error (harness-log 'warn "insights: recording usage failed: %S" err)))))
 
+(defun harness-insights--request (model text project sid)
+  "Return the one-off request that asks MODEL to write the summary of TEXT.
+PROJECT is what the usage is recorded under; SID is the internal
+session id the call is made under.  The system prompt is the registry's
+`insights-system', as MODEL's override has it."
+  (list :model model
+        :session (list :id sid :cwd (file-name-as-directory (harness-insights--directory)))
+        ;; Recorded as an internal session, which records the usage too.
+        :job "Insights summary" :job-project project
+        :ephemeral t
+        :system (harness-prompt-effective 'insights-system
+                                          harness-insights--system-prompt model)
+        :messages (list (list :role 'user :content (list (list :type "text" :text text))))
+        :tools nil
+        :no-thinking t
+        :max-tokens harness-insights--narrative-max-tokens))
+
 (defun harness-insights--ask (model text project)
   "Ask MODEL to write the summary of TEXT; return a promise of its reply.
 A one-off call (`:ephemeral'), without thinking or tools, under a
@@ -1067,18 +1080,9 @@ ends it with an error."
               ;; bad minute -- a rate limit, a connection cut -- is waited
               ;; out and the summary asked for again.
               (setq handle
-                    (harness-small-ask
-                     (list :model model
-                           :session (list :id sid :cwd (file-name-as-directory (harness-insights--directory)))
-                           ;; Recorded as an internal session, which
-                           ;; records the usage too.
-                           :job "Insights summary" :job-project project
-                           :ephemeral t
-                           :system harness-insights--system-prompt
-                           :messages (list (list :role 'user :content (list (list :type "text" :text text))))
-                           :tools nil
-                           :no-thinking t
-                           :max-tokens harness-insights--narrative-max-tokens)
+                    (harness-prompt-ask
+                     '(insights-system)
+                     (harness-insights--request model text project sid)
                      (list :label "insights"
                            :on-event
                            (lambda (ev)

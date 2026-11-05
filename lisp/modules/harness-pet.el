@@ -86,6 +86,8 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; The pet's text is in the prompt registry.
+(require 'harness-prompts)
 ;; The pet's one-off question goes through `harness-small-ask', which
 ;; tries it again when a provider fails transiently.
 (require 'harness-small)
@@ -709,16 +711,17 @@ See `harness-pet-model'."
                                 :billing billing))))
       (error (harness-log 'warn "pet: recording usage failed: %S" err)))))
 
-(defun harness-pet--ask (model system text max-tokens &optional project)
+(defun harness-pet--ask (model system text max-tokens prompts &optional project)
   "Ask MODEL, told SYSTEM, the user message TEXT; return a promise of the reply.
 The reply holds at most MAX-TOKENS tokens.  The call is a one-off
 \(`:ephemeral'), without extended thinking (`:no-thinking'), under a
 session id of its own that is closed when it ends; its cost is recorded
 under PROJECT, by the internal session that records the call (see
 `session/internal-start'), else here.  It goes through
-`harness-small-ask' like every one-off call the harness makes, so a
+`harness-prompt-ask' like every one-off call the harness makes, so a
 provider having a bad minute -- a rate limit, a connection cut -- is
-waited out and the line asked for again.  It fails after
+waited out and the line asked for again.  PROMPTS names the prompt
+the call sends: `pet-hatch-system' or `pet-say-system'.  It fails after
 `harness-pet--timeout' seconds, and when the provider ends it with an
 error."
   (if (null model)
@@ -737,7 +740,8 @@ error."
                                            (funcall finish nil (list 'error "The model took too long"))
                                            (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
                 (setq handle
-                      (harness-small-ask
+                      (harness-prompt-ask
+                       prompts
                        (list :model model
                              :session (list :id sid :cwd (file-name-as-directory (harness-pet--directory)))
                              ;; Recorded as an internal session, which
@@ -791,15 +795,17 @@ error."
 ;;;; Hatching
 
 (defconst harness-pet--hatch-system
-  "You name newly hatched coding companions: small creatures that live in a programmer's editor and now and then comment on their work. Given a creature's rarity, species, stats and a few inspiration words, invent
-- a name: ONE word of at most 12 letters, memorable and slightly absurd. A pet's name, not a title: no \"the X\", no epithets. Lean on the inspiration words loosely: riff on one, blend two, or borrow their mood. The register: Fennel, Grommet, Tuck, Mothball, Quillon.
-- a personality: ONE short sentence, at most 20 words: a specific, dry quirk in how it watches code -- what it notices, distrusts or keeps score of -- in keeping with its stats. Wry and odd, never cute: nothing cuddly, sweet or affectionate. The register: Distrusts any function longer than its own tail. Counts semicolons and is always one short.
-The rarer the creature, the stranger and more specific; a legendary one is genuinely odd. No two companions are alike.
-Answer with one line of JSON and nothing else: {\"name\":\"...\",\"personality\":\"...\"}"
+  (harness-prompt-default 'pet-hatch-system)
   "System prompt of the call that names a pet.
-Its personality is a dry quirk, not a cute one: it colours every line
-the pet says after (`harness-pet--say-system'), and a cuddly one makes
-for cuddly lines.")
+The default is the registry's `pet-hatch-system'; a model may be sent
+an override of it (`harness-prompt-overrides').  Its personality is a
+dry quirk, not a cute one: it colours every line the pet says after
+\(`harness-pet--say-system'), and a cuddly one makes for cuddly lines.")
+
+(defun harness-pet--hatch-system-for (model)
+  "Return the hatching system prompt for MODEL.
+It is the registry's `pet-hatch-system', as MODEL's override has it."
+  (harness-prompt-effective 'pet-hatch-system harness-pet--hatch-system model))
 
 (defun harness-pet--stats-text (stats)
   "STATS as the model reads them: \"DEBUGGING 62, PATIENCE 30, ...\"."
@@ -883,8 +889,9 @@ ends.  Signals when the pet is turned off (`harness-pet-enabled')."
       (setq harness-pet--hatching
             (harness-then
              (condition-case err
-                 (harness-pet--ask model harness-pet--hatch-system (harness-pet--hatch-text bones)
-                                   harness-pet--hatch-max-tokens)
+                 (harness-pet--ask model (harness-pet--hatch-system-for model)
+                                   (harness-pet--hatch-text bones)
+                                   harness-pet--hatch-max-tokens 'pet-hatch-system)
                (error (harness-rejected err)))
              hatch
              (lambda (err)
@@ -897,17 +904,17 @@ ends.  Signals when the pet is turned off (`harness-pet-enabled')."
 ;;;; Speaking
 
 (defconst harness-pet--say-system
-  "You are a coding companion: %s, a tiny %s %s that lives in a programmer's editor and watches them work with an AI coding agent. %s
-Your stats, out of 100, colour your voice: %s.
-Now and then you say one short line about what is happening, at most 140 characters: in character, about what you actually see. Your register is dry and observant, a colleague at the next desk who notices things: wry, deadpan, playful at most, never cloying. No cutesy or baby talk, no endearments, no gushing, nothing affectionate, physical or sensual: you are a character, not a lap pet. %s Plain text only: no markdown, no emoji, no quotation marks, no advice longer than a line, never the agent's words. When the user speaks to you by name, answer them directly. When nothing is worth saying, answer just: ..."
+  (harness-prompt-default 'pet-say-system)
   "System prompt of the call that has the pet say something.
-Filled with its name, rarity, species, personality and stats, then what
-it may do between asterisks (`harness-pet--actions-text').  Its register
-is a dry observer's, not a cuddly pet's: left to itself, a cheap model
-that is petted writes *nestles closer* or *pleased to be touched*, which
-reads as petplay rather than as charm.  The cuddly gestures it names,
-which helps; the sensual words it does not, as in a trial naming them
-did no better.  `harness-pet--cuddly-regexp' and
+The default is the registry's `pet-say-system'; a model may be sent an
+override of it (`harness-prompt-overrides').  Filled with its name,
+rarity, species, personality and stats, then what it may do between
+asterisks (`harness-pet--actions-text').  Its register is a dry
+observer's, not a cuddly pet's: left to itself, a cheap model that is
+petted writes *nestles closer* or *pleased to be touched*, which reads
+as petplay rather than as charm.  The cuddly gestures it names, which
+helps; the sensual words it does not, as in a trial naming them did no
+better.  `harness-pet--cuddly-regexp' and
 `harness-pet--suggestive-regexp' drop an action that has one of their
 words all the same.")
 
@@ -948,16 +955,24 @@ The pet says them as its own news, cooldown or not, after the line it
 is saying when it is saying one (`harness-pet--wait'); when the model
 has nothing, plainly.")
 
-(defun harness-pet--say-system ()
-  "The system prompt that gives the pet its voice."
+(defun harness-pet--say-system (&optional model)
+  "The system prompt that gives the pet its voice, for MODEL when given.
+The registry's `pet-say-system', with the pet's name, rarity, species,
+personality and stats filled in; MODEL's override of it is used when
+one is set."
   (let ((bones (harness-pet-bones (plist-get harness-pet--pet :seed))))
-    (format harness-pet--say-system
-            (harness-pet--name)
-            (plist-get bones :rarity) (plist-get bones :species)
-            (let ((p (harness-pet--personality)))
-              (if (harness-string-blank-p p) "" (concat "Your personality: " p)))
-            (harness-pet--stats-text (plist-get bones :stats))
-            (if harness-pet-actions (car harness-pet--actions-text) (cdr harness-pet--actions-text)))))
+    (harness-prompt
+     'pet-say-system
+     (list :name (harness-pet--name)
+           :rarity (plist-get bones :rarity)
+           :species (plist-get bones :species)
+           :personality (let ((p (harness-pet--personality)))
+                          (if (harness-string-blank-p p) "" (concat "Your personality: " p)))
+           :stats (harness-pet--stats-text (plist-get bones :stats))
+           :actions (if harness-pet-actions
+                        (car harness-pet--actions-text)
+                      (cdr harness-pet--actions-text)))
+     model)))
 
 (defun harness-pet--say-text (reason context)
   "The message that asks the pet for a line about CONTEXT, for REASON.
@@ -1156,8 +1171,8 @@ the pet to be free goes next (`harness-pet--wait-soon')."
     (harness-pet--changed)
     (harness-then
      (condition-case err
-         (harness-pet--ask model (harness-pet--say-system) (harness-pet--say-text reason context)
-                           harness-pet--say-max-tokens root)
+         (harness-pet--ask model (harness-pet--say-system model) (harness-pet--say-text reason context)
+                           harness-pet--say-max-tokens 'pet-say-system root)
        (error (harness-rejected err)))
      (lambda (reply)
        (setq harness-pet--speaking nil)

@@ -355,6 +355,8 @@
 (require 'harness-priority)
 (require 'harness-slots)
 (require 'harness-readonly)
+;; The ticket-title instruction a naming request gets is in the prompt registry.
+(require 'harness-prompts)
 
 (defcustom harness-tasks-max-running nil
   "Tasks of each project that may work at once; the rest wait as pending.
@@ -486,10 +488,12 @@ provider)."
   :group 'harness)
 
 (defconst harness-tasks--naming-instructions
-  "This conversation is a task the engineer handed to the agent to do unattended, tracked on a task board.  Title it like a ticket on that board: an imperative summary of the work to be done, such as \"Fix login redirect loop\" or \"Add CSV export to reports\"."
+  (harness-prompt-default 'task-naming-instructions)
   "Text added to the naming system prompt of task sessions, or nil for none.
-A task's session name is its title on the board, so by default the
-model titles task sessions like tickets.")
+The default is the registry's `task-naming-instructions'; a model may
+be sent an override of it (`harness-prompt-overrides').  A task's
+session name is its title on the board, so by default the model titles
+task sessions like tickets.")
 
 (defconst harness-tasks--refine-prompt
   "## Task refinement
@@ -1910,12 +1914,17 @@ work takes effect there."
 (defun harness-tasks--naming-prompt (prompt session)
   "Ask for a ticket title when naming a task or its SESSION (PROMPT filter).
 SESSION is the session named, or the options of a task's own request
-\(`naming/title'), which name the task with `:task'."
-  (if (and (not (harness-string-blank-p harness-tasks--naming-instructions))
-           (or (plist-get session :task)
-               (harness-tasks--by-session (plist-get session :id))))
-      (concat prompt "\n\n" harness-tasks--naming-instructions)
-    prompt))
+\(`naming/title'), which name the task with `:task'.  The instruction
+is the registry's `task-naming-instructions', as the model's override
+has it."
+  (let ((instructions (harness-prompt-effective 'task-naming-instructions
+                                                harness-tasks--naming-instructions
+                                                (plist-get session :model))))
+    (if (and (not (harness-string-blank-p instructions))
+             (or (plist-get session :task)
+                 (harness-tasks--by-session (plist-get session :id))))
+        (concat prompt "\n\n" instructions)
+      prompt)))
 
 ;;;; Titles
 ;;

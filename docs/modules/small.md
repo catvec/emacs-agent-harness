@@ -21,7 +21,10 @@ tools, under an id that no turn and no session's conversation ever
 sees -- and each goes through `harness-small-ask` here instead of
 calling `provider/complete` itself, so that one place decides how such
 a call is made and how it survives a provider that is having a bad
-minute.
+minute.  The text each one sends is a named prompt in `harness-prompts`
+(lisp/harness-prompts.el), where it can be read, audited and overridden
+per model; the caller resolves it for the model it asks and passes the
+request here unchanged.
 
 Why.  A provider under load -- DeepSeek answering 429, say -- fails a
 small call as readily as it fails a step of a turn, but nothing tried
