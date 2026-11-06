@@ -124,6 +124,23 @@
         (should (eq 'error (plist-get answer :state)))
         (should (equal "Cannot connect to the Docker daemon" (plist-get answer :detail)))))))
 
+(ert-deftest harness-stacks-one-line ()
+  "A failed compose command keeps its reason, not its progress or escapes."
+  (should (equal "Error response from daemon: pull access denied for kyutai/unmute"
+                 (harness-stacks--one-line
+                  (concat "\u001b[?25l\u001b[0G[+] up 0/1\n"
+                          " Image kyutai/unmute:latest Pulling \n"
+                          " Image kyutai/unmute:latest Error pull access denied\n"
+                          "Error response from daemon: pull access denied for kyutai/unmute\n"))))
+  (should (equal "Cannot connect to the Docker daemon"
+                 (harness-stacks--one-line "Cannot connect to the Docker daemon\n")))
+  (should (equal "last line" (harness-stacks--one-line "first\nlast line\n")))
+  (should (equal "done" (harness-stacks--one-line "\u001b[?25ldone\u001b[0G")))
+  (should-not (harness-stacks--one-line "\u001b[?25l\u001b[0G\n"))
+  (should-not (harness-stacks--one-line ""))
+  (should (equal (concat (make-string 157 ?x) "...")
+                 (harness-stacks--one-line (make-string 200 ?x)))))
+
 (ert-deftest harness-stacks-down ()
   "Stopping a stack runs compose down and records the stopped state."
   (harness-stacks-test--stacks

@@ -12,12 +12,11 @@
 ;;
 ;;   (harness-define-compose-stack 'voice-local
 ;;     :label "Local voice"
-;;     :doc "whisper.cpp and Kyutai Unmute, on loopback."
+;;     :doc "whisper.cpp for speech to text, on loopback."
 ;;     :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
 ;;     :project "voice-local"
 ;;     :network "voice"
 ;;     :endpoints '((whisper 8080) (unmute 8000))
-;;     :profiles '("unmute")
 ;;     :env (lambda () '(("WHISPER_MODEL" . "ggml-base.en.bin"))))
 ;;
 ;; The stack's services publish their ports on loopback with no fixed
@@ -144,11 +143,33 @@ must start, report its state and stop with the rest."
   "Ask again whether the container runtime is usable, on the next question."
   (harness-container-runtime-forget-availability))
 
+(defun harness-stacks--strip-controls (text)
+  "Return TEXT without terminal control sequences or carriage returns.
+Compose writes a spinner and in-place progress when its output is not a
+terminal; none of it belongs in a one-line state."
+  (let ((text (replace-regexp-in-string "\r" "\n" (or text ""))))
+    (replace-regexp-in-string "\033\\[[0-9;?]*[[:alpha:]]" "" text)))
+
+(defun harness-stacks--error-line-p (line)
+  "Non-nil when LINE reads like the reason a command failed."
+  (let ((case-fold-search t))
+    (string-match-p
+     (concat "error\\|failed\\|denied\\|unavailable\\|not found"
+             "\\|cannot\\|no such\\|unknown")
+     line)))
+
 (defun harness-stacks--one-line (text)
-  "Return TEXT as one short line, without a trailing newline."
-  (let ((line (or (and (stringp text) (string-trim text)) "")))
-    (setq line (car (split-string line "\n")))
-    (if (> (length line) 160) (concat (substring line 0 157) "...") line)))
+  "Return TEXT as one short line, without a trailing newline.
+A failed compose command writes progress before the reason, so the last
+line that reads like a failure is kept; when none does, the last
+non-empty line is.  Nil means there was no line to show."
+  (let* ((clean (harness-stacks--strip-controls text))
+         (lines (seq-remove #'string-empty-p
+                            (mapcar #'string-trim (split-string clean "\n"))))
+         (error-line (car (last (seq-filter #'harness-stacks--error-line-p lines))))
+         (line (or error-line (car (last lines)))))
+    (when line
+      (if (> (length line) 160) (concat (substring line 0 157) "...") line))))
 
 (defun harness-stacks--exec (argv &optional env)
   "Run runtime ARGV, with ENV, and return (EXIT-CODE . OUTPUT)."

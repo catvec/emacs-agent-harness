@@ -257,7 +257,9 @@ used to be reported back straight into another redraw."
     (should (equal "voice-local" (plist-get stack :project)))
     (should (equal '(8080) (cdr (assq 'whisper (plist-get stack :endpoints)))))
     (should (equal '(8000) (cdr (assq 'unmute (plist-get stack :endpoints)))))
-    (should (equal '("unmute") (plist-get stack :profiles)))
+    ;; Only whisper.cpp starts: the optional Unmute service has no
+    ;; published image, so enabling its profile made every start fail.
+    (should-not (plist-get stack :profiles))
     (dolist (case '((low . "ggml-tiny.en.bin") (medium . "ggml-base.en.bin")
                     (high . "ggml-small.en.bin")))
       (let ((harness-voice-effort (car case)))
@@ -266,7 +268,7 @@ used to be reported back straight into another redraw."
                                    (funcall (plist-get stack :env))))))))))
 
 (ert-deftest harness-ui-voice-providers-local-stack-urls ()
-  "The local provider reads its endpoints from the running stack."
+  "The local provider reads speech to text from the running stack."
   (skip-unless (featurep 'harness-stacks))
   (let ((harness-voice-unmute-stt-url nil)
         (harness-voice-unmute-tts-url nil)
@@ -274,16 +276,22 @@ used to be reported back straight into another redraw."
     (cl-letf (((symbol-function 'harness-compose-stack-endpoint)
                (lambda (id service path)
                  (push (list id service path) calls)
-                 (format "http://127.0.0.1:32768/%s" path))))
+                 (pcase service
+                   ('whisper (format "http://127.0.0.1:32768/%s" path))
+                   ('unmute (format "http://127.0.0.1:32769/%s" path))))))
       (let ((command (harness-voice-unmute-command)))
-        (should (equal "http://127.0.0.1:32768/v1/audio/transcriptions"
+        (should (equal "http://127.0.0.1:32768/inference"
                        (cadr (member "--stt-url" command))))
-        (should (equal "http://127.0.0.1:32768/v1/audio/speech"
+        (should (equal "http://127.0.0.1:32769/v1/audio/speech"
                        (cadr (member "--tts-url" command))))
-        (should (equal '((voice-local unmute "v1/audio/transcriptions")
+        (should (equal '((voice-local whisper "inference")
                          (voice-local unmute "v1/audio/speech"))
                        (nreverse calls))))
-      (should-not (harness-voice-unmute-need)))
+      (setq calls nil)
+      (should-not (harness-voice-unmute-need))
+      (should (equal '((voice-local whisper "inference")
+                       (voice-local unmute "v1/audio/speech"))
+                     (delete-dups (nreverse calls)))))
     ;; A configured URL works without a stack.
     (let ((harness-voice-unmute-stt-url "http://127.0.0.1:9000/stt")
           (harness-voice-unmute-tts-url "http://127.0.0.1:9000/tts"))
@@ -298,10 +306,33 @@ used to be reported back straight into another redraw."
       (cl-letf (((symbol-function 'harness-compose-stack-endpoint)
                  (lambda (&rest _) nil)))
         (should (equal "Local voice stack · not running" (harness-voice-unmute-need)))
-        (should (equal "Local voice stack unavailable · speech to text"
+        (should (equal "Local voice stack · not running"
+                       (error-message-string
+                        (should-error (harness-voice-unmute-command)
+                                      :type 'user-error))))))
+    ;; Speech to text from whisper.cpp is enough for the stack; text to
+    ;; speech is a service of its own and is named when it is missing.
+    (let ((harness-voice-unmute-stt-url nil)
+          (harness-voice-unmute-tts-url nil))
+      (cl-letf (((symbol-function 'harness-compose-stack-endpoint)
+                 (lambda (_id service _path)
+                   (when (eq service 'whisper)
+                     "http://127.0.0.1:32768/inference"))))
+        (should (equal "Text to speech endpoint unset" (harness-voice-unmute-need)))
+        (should (equal "Text to speech endpoint unset"
                        (error-message-string
                         (should-error (harness-voice-unmute-command)
                                       :type 'user-error))))))))
+
+(ert-deftest harness-ui-voice-providers-stack-result-copy ()
+  "A failed stack start keeps its one-line detail in the echo text."
+  (should (equal "running"
+                 (harness-voice--stack-result '(:state running :detail "1 of 1 service"))))
+  (should (equal "stopped" (harness-voice--stack-result '(:state stopped))))
+  (should (equal "error · pull access denied for kyutai/unmute"
+                 (harness-voice--stack-result
+                  '(:state error :detail "pull access denied for kyutai/unmute"))))
+  (should (equal "error" (harness-voice--stack-result '(:state error)))))
 
 (provide 'harness-ui-voice-providers-test)
 ;;; harness-ui-voice-providers-test.el ends here

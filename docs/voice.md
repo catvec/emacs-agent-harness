@@ -19,7 +19,7 @@ model providers have capabilities of their own:
 | --- | --- | --- |
 | `wav` (the default) | `wav` | Local push-to-talk dictation and spoken replies |
 | `chatgpt` | `live` | GPT-Live over the API, delegating work to this chat |
-| `unmute` | `live` | A local Kyutai Unmute pipeline, or whisper.cpp and Piper behind the same endpoints |
+| `unmute` | `live` | A local pipeline: whisper.cpp for speech to text and an OpenAI-compatible text-to-speech service |
 | `fixture` | `live` | The scripted sidecar: the whole loop without a microphone, key or model |
 | `custom` | `live` | Any sidecar in `harness-voice-live-command` |
 
@@ -140,37 +140,47 @@ to, so the harness agent still runs the workspace.
 
 ### Local pipeline
 
-`unmute` runs `scripts/harness-voice-live-unmute`, a local pipeline around the
-OpenAI-compatible endpoints that [Kyutai Unmute](https://github.com/kyutai-labs/unmute)
-serves. It records with an energy voice detector, posts each utterance to the
-speech-to-text endpoint, delegates the text, and posts the answer to the
-text-to-speech endpoint for playback. No hosted model and no API key are
-involved; audio goes only to the loopback addresses below unless changed.
+`unmute` runs `scripts/harness-voice-live-unmute`, a local pipeline around two
+OpenAI-compatible endpoints: whisper.cpp for speech to text, and a
+text-to-speech server with the same request shape. It records with an energy
+voice detector, posts each utterance to the speech-to-text endpoint, delegates
+the text, and posts the answer to the text-to-speech endpoint for playback. No
+hosted model and no API key are involved; audio goes only to the loopback
+addresses below unless changed.
 
 ```elisp
 (setq harness-voice-provider 'unmute
-      ;; nil: the random loopback ports the voice-local stack publishes
+      ;; nil: the running voice-local stack's whisper.cpp service
       harness-voice-unmute-stt-url nil
+      ;; nil: the optional unmute service; set a Piper endpoint instead
       harness-voice-unmute-tts-url nil
       harness-voice-unmute-voice "unmute"
       harness-voice-unmute-threshold 0.02)
 ```
 
-Both URLs default to nil, which means the running `voice-local` stack: the
-provider reads the published loopback port for each service when it builds its
-command, so a random port never has to be copied by hand. Set either URL to
-point at a service you run yourself.
+Speech to text defaults to the `voice-local` stack: the provider reads the
+random loopback port the stack published for whisper.cpp and posts to its
+`/inference` route, so nothing has to be copied by hand. Set
+`harness-voice-unmute-stt-url` to point at a whisper.cpp server you run
+yourself.
+
+Text to speech is not part of the default start. Kyutai Unmute publishes no
+image (upstream builds it locally and wants a GPU), so the stack starts
+whisper.cpp alone and `harness-voice-unmute-tts-url` must name a local
+OpenAI-compatible TTS, such as a Piper server. The optional `unmute` compose
+service is used when it runs; see the stack's README for building it. Without
+either, the setup list says `Text to speech endpoint unset`.
 
 A whisper.cpp server (see below) and a Piper server with the same request shape
 work too, so the local provider needs no Unmute installation. `arecord` and
 `aplay` are required, as they are for the WAV recorder. The energy detector is
 not acoustic echo cancellation: use headphones when the speaker is open.
 
-The local stack in `scripts/stacks/voice-local/` runs Unmute and whisper.cpp in
-containers on a network of their own, each published on a random loopback port;
-`M-x harness-stacks` starts both ([compose stacks](stacks.md)) on the
-[selected container runtime](container-runtime.md). Unmute wants a GPU, and the
-stack's README covers the CPU-only case. `harness-voice-effort` picks the whisper model the stack loads:
+The local stack in `scripts/stacks/voice-local/` runs whisper.cpp in a
+container on a network of its own, published on a random loopback port;
+`M-x harness-stacks` starts it ([compose stacks](stacks.md)) on the
+[selected container runtime](container-runtime.md). `harness-voice-effort`
+picks the whisper model the stack loads:
 **low** is `ggml-tiny.en.bin`, **medium** (the default) is
 `ggml-base.en.bin`, and **high** is `ggml-small.en.bin`. The setup list has the
 same three buttons. A provider that declares no fragments passes none; the

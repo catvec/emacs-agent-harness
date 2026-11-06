@@ -12,7 +12,7 @@
 ;;
 ;; A provider is a name, a capability, the argv list that runs it and
 ;; what it needs.  The bundled providers are the WAV dictation, ChatGPT
-;; Live (GPT-Live over the API), a local Kyutai Unmute pipeline, the
+;; Live (GPT-Live over the API), a local speech pipeline, the
 ;; scripted fixture and a custom sidecar command.  Programs add their
 ;; own with `harness-define-voice-provider'.
 ;;
@@ -144,8 +144,9 @@ the push-to-talk path rather than sending audio somewhere unexpected."
 A provider is registered with `harness-define-voice-provider'; it
 declares a capability, `wav' or `live', and the command that runs it.
 The bundled providers are `wav' (local push-to-talk dictation), `chatgpt'
-(GPT-Live over the API), `unmute' (a local Kyutai Unmute pipeline),
-`fixture' (the scripted sidecar) and `custom' (`harness-voice-live-command').
+(GPT-Live over the API), `unmute' (a local whisper.cpp and text-to-speech
+pipeline), `fixture' (the scripted sidecar) and `custom'
+(`harness-voice-live-command').
 `M-x harness-voice-select-provider' lists them with their capability and
 what each still needs.  This is client configuration, not a safe
 directory-local option."
@@ -365,6 +366,16 @@ answers at once, and its answer must not start another redraw."
                  #'harness-voice-stack-up))
               "\n"))))
 
+(defun harness-voice--stack-result (state)
+  "Return the one-line echo text for stack STATE.
+A failure keeps its detail, so the cause of a failed start is visible
+in the echo area instead of only the word `error'."
+  (let ((kind (plist-get state :state))
+        (detail (plist-get state :detail)))
+    (if (and (eq kind 'error) detail (not (string-empty-p detail)))
+        (format "%s · %s" kind detail)
+      (format "%s" kind))))
+
 (defun harness-voice-stack-up ()
   "Start the selected provider's local compose stack."
   (interactive)
@@ -376,7 +387,7 @@ answers at once, and its answer must not start another redraw."
                            "Runtime unavailable")))
     (harness-compose-stack-up
      id (lambda (state)
-          (message "Local voice stack · %s" (plist-get state :state))
+          (message "Local voice stack · %s" (harness-voice--stack-result state))
           (harness-voice-setup--refresh)))))
 
 (defun harness-voice-stack-down ()
@@ -387,7 +398,7 @@ answers at once, and its answer must not start another redraw."
       (user-error "Local stack unavailable"))
     (harness-compose-stack-down
      id (lambda (state)
-          (message "Local voice stack · %s" (plist-get state :state))
+          (message "Local voice stack · %s" (harness-voice--stack-result state))
           (harness-voice-setup--refresh)))))
 
 (defun harness-voice-select-effort (effort)
@@ -467,16 +478,18 @@ text is appended to that prompt."
 
 (defcustom harness-voice-unmute-stt-url nil
   "Speech-to-text endpoint the local voice provider posts WAV files to.
-Nil uses the running `voice-local' stack's random loopback port, so no
-fixed port can collide; set it to point at a service you run yourself,
-such as whisper.cpp's `/inference'."
+Nil uses the running `voice-local' stack's whisper.cpp service, whose
+random loopback port needs no copying; set it to point at a service you
+run yourself, such as whisper.cpp's `/inference'."
   :type '(choice (const :tag "The local stack" nil) string)
   :group 'harness-voice)
 
 (defcustom harness-voice-unmute-tts-url nil
   "Text-to-speech endpoint the local voice provider posts replies to.
-Nil uses the running `voice-local' stack's random loopback port; set it
-for a service you run yourself, such as a Piper server with the same
+Nil uses the running `voice-local' stack's optional `unmute' service.
+The bundled stack starts whisper.cpp only, because Unmute has no
+published image and wants a GPU, so set this to a text-to-speech
+service you run yourself, such as a Piper server with the same
 OpenAI-compatible shape."
   :type '(choice (const :tag "The local stack" nil) string)
   :group 'harness-voice)
@@ -504,33 +517,46 @@ Raise it in a noisy room, lower it for a quiet microphone."
           (when harness-voice-chatgpt-instructions
             (list "--instructions" harness-voice-chatgpt-instructions))))
 
-(defun harness-voice-unmute--url (configured service path what)
-  "Return CONFIGURED, or the running stack's URL for SERVICE/PATH.
-WHAT names the missing endpoint in the error, which is one line."
-  (or configured
-      (and (featurep 'harness-stacks)
-           (harness-compose-stack-endpoint 'voice-local service path))
-      (user-error "Local voice stack unavailable · %s" what)))
+(defun harness-voice-unmute--endpoint (service path)
+  "Return the running voice-local stack's URL for SERVICE/PATH, or nil."
+  (and (featurep 'harness-stacks)
+       (harness-compose-stack-endpoint 'voice-local service path)))
+
+(defun harness-voice-unmute--stt-url ()
+  "Return the local provider's speech-to-text URL, or signal.
+The bundled stack's whisper.cpp service answers `/inference'."
+  (or harness-voice-unmute-stt-url
+      (harness-voice-unmute--endpoint 'whisper "inference")
+      (user-error "Local voice stack · not running")))
+
+(defun harness-voice-unmute--tts-url ()
+  "Return the local provider's text-to-speech URL, or signal.
+The optional `unmute' service answers the OpenAI speech route."
+  (or harness-voice-unmute-tts-url
+      (harness-voice-unmute--endpoint 'unmute "v1/audio/speech")
+      (user-error "Text to speech endpoint unset")))
 
 (defun harness-voice-unmute-need ()
-  "Return why the local provider cannot run, or nil."
-  (unless (or harness-voice-unmute-stt-url
-              (and (featurep 'harness-stacks)
-                   (harness-compose-stack-endpoint
-                    'voice-local 'unmute "v1/audio/transcriptions")))
-    "Local voice stack · not running"))
+  "Return why the local provider cannot run, or nil.
+Speech to text comes from the running stack's whisper.cpp service;
+text to speech from `harness-voice-unmute-tts-url' or the optional
+`unmute' service.  The reason is one line, for the setup list."
+  (or (unless (or harness-voice-unmute-stt-url
+                  (harness-voice-unmute--endpoint 'whisper "inference"))
+        "Local voice stack · not running")
+      (unless (or harness-voice-unmute-tts-url
+                  (harness-voice-unmute--endpoint 'unmute "v1/audio/speech"))
+        "Text to speech endpoint unset")))
 
 (defun harness-voice-unmute-command ()
   "Return the argv list running the bundled local pipeline sidecar.
-The endpoints come from the running `voice-local' stack unless their
-defcustoms name a service of your own."
+Speech to text comes from the running `voice-local' stack's whisper.cpp
+service unless `harness-voice-unmute-stt-url' names a service of your
+own; text to speech from `harness-voice-unmute-tts-url' or the stack's
+optional `unmute' service."
   (list "python3" (harness-voice--script "harness-voice-live-unmute")
-        "--stt-url" (harness-voice-unmute--url
-                     harness-voice-unmute-stt-url 'unmute
-                     "v1/audio/transcriptions" "speech to text")
-        "--tts-url" (harness-voice-unmute--url
-                     harness-voice-unmute-tts-url 'unmute
-                     "v1/audio/speech" "text to speech")
+        "--stt-url" (harness-voice-unmute--stt-url)
+        "--tts-url" (harness-voice-unmute--tts-url)
         "--voice" harness-voice-unmute-voice
         "--threshold" (number-to-string harness-voice-unmute-threshold)))
 
@@ -563,7 +589,7 @@ defcustoms name a service of your own."
 (harness-define-voice-provider 'unmute
   :label "Local pipeline"
   :capability 'live
-  :doc "A local Kyutai Unmute or whisper.cpp and Piper pipeline: no hosted model, no key."
+  :doc "Local whisper.cpp and text-to-speech pipeline · no hosted model, no key."
   :command #'harness-voice-unmute-command
   :needs '((executable "arecord") (executable "aplay")
            harness-voice-unmute-need)
@@ -577,14 +603,18 @@ defcustoms name a service of your own."
   :needs '((executable "python3")))
 
 (when (featurep 'harness-stacks)
+  ;; Only whisper.cpp starts with the stack.  Kyutai Unmute has no
+  ;; published image -- upstream builds it locally and wants a GPU -- so
+  ;; its service stays behind the compose profile and the harness does
+  ;; not enable it: a stack that always pulled a missing image could
+  ;; never start.
   (harness-define-compose-stack 'voice-local
     :label "Local voice"
-    :doc "whisper.cpp for speech to text and Kyutai Unmute for the conversation, on loopback."
+    :doc "whisper.cpp for speech to text, on loopback, with optional Unmute."
     :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
     :project "voice-local"
     :network "voice"
     :endpoints '((whisper 8080) (unmute 8000))
-    :profiles '("unmute")
     :env (lambda ()
            (list (cons "WHISPER_MODEL" (harness-voice-whisper-model))))))
 

@@ -22,12 +22,11 @@ so Docker and rootless Podman are the same to a stack.
 
   (harness-define-compose-stack 'voice-local
     :label "Local voice"
-    :doc "whisper.cpp and Kyutai Unmute, on loopback."
+    :doc "whisper.cpp for speech to text, on loopback."
     :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
     :project "voice-local"
     :network "voice"
     :endpoints '((whisper 8080) (unmute 8000))
-    :profiles '("unmute")
     :env (lambda () '(("WHISPER_MODEL" . "ggml-base.en.bin"))))
 
 The stack's services publish their ports on loopback with no fixed

@@ -11,7 +11,7 @@ Podman.
 
 (harness-define-compose-stack 'voice-local
   :label "Local voice"
-  :doc "whisper.cpp and Kyutai Unmute, on loopback."
+  :doc "whisper.cpp for speech to text, on loopback."
   :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
   :project "voice-local"
   :network "voice"
@@ -70,7 +70,7 @@ network counts as success.
 | Service | Image | Port | What |
 | --- | --- | --- | --- |
 | `whisper` | `ghcr.io/ggml-org/whisper.cpp:main` | container 8080, random loopback | whisper-server, its model in a named volume |
-| `unmute` | `kyutai/unmute:latest` (the `unmute` profile) | container 8000, random loopback | Kyutai Unmute: OpenAI-compatible speech to text and text to speech |
+| `unmute` | `kyutai/unmute:latest` (the `unmute` profile, by hand only) | container 8000, random loopback | Kyutai Unmute, built locally; needs a GPU |
 
 ```sh
 docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
@@ -78,16 +78,25 @@ docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local -
 ```
 
 The harness starts it from the voice setup list (**Local voice stack**,
-`[Start]`), or from `M-x harness-stacks`; the stack enables the `unmute`
-profile, so both services start, report their state and stop together. The
-`unmute` voice provider takes its speech-to-text and text-to-speech URLs from
-the running stack, so the random ports are never typed by hand. The model is
-the one `harness-voice-effort` picks: `ggml-tiny.en.bin` at **low**,
-`ggml-base.en.bin` at **medium**, `ggml-small.en.bin` at **high**. The image
-tags are assumptions that the upstream projects may change; override them with
-`HARNESS_WHISPER_IMAGE` and `HARNESS_UNMUTE_IMAGE`, and see the stack's README
-for the CPU-only case and how to point the `unmute` voice provider at
-whisper.cpp alone.
+`[Start]`), or from `M-x harness-stacks`; `[Start]` runs whisper.cpp
+alone. The `unmute` service is opt-in because it has no published
+image: upstream builds `unmute-backend:latest` from its own compose file
+and wants a GPU. The stack therefore starts on a machine with neither.
+Set `HARNESS_UNMUTE_IMAGE` to such a build and start the profile by hand
+if you want it.
+
+The `unmute` voice provider takes its speech-to-text URL from the
+running stack's whisper.cpp service, so the random port is never typed
+by hand, and its text-to-speech URL from
+`harness-voice-unmute-tts-url`, or from a running `unmute` service. Set
+that option to a local OpenAI-compatible text-to-speech server, such as
+Piper, because whisper.cpp only transcribes. The whisper model is the
+one `harness-voice-effort` picks: `ggml-tiny.en.bin` at **low**,
+`ggml-base.en.bin` at **medium**, `ggml-small.en.bin` at **high**. The
+whisper image tag is an assumption that the upstream project may change;
+override it with `HARNESS_WHISPER_IMAGE`, and see the stack's README for
+the CPU-only case and how to point the `unmute` voice provider at
+whisper.cpp and a TTS service of your own.
 
 The stack is a plugin: the voice module requires `harness-stacks` when it is
 there, registers its stack, and shows the state in its setup list. A client

@@ -1,17 +1,20 @@
-# Local voice stack: whisper.cpp for speech to text, Kyutai Unmute for
-# speech to text and text to speech.  The harness's `stacks' module
-# starts it (`M-x harness-stacks'), or run it by hand:
+# Local voice stack: whisper.cpp for speech to text, with an optional
+# Kyutai Unmute service for text to speech.  The harness's `stacks'
+# module starts it (`M-x harness-stacks'), or run it by hand:
 #
 #   docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
 #
 # The stack gets a container network of its own, and each service a
 # random loopback port, so two stacks never fight over 8080.  Only
-# whisper.cpp runs by default; Kyutai Unmute joins it with the `unmute'
-# profile:
+# whisper.cpp runs by default; `[Start]` in the harness runs it alone.
+# Kyutai Unmute publishes no image (upstream builds it locally and wants
+# a GPU), so its service is opt-in: point HARNESS_UNMUTE_IMAGE at a
+# build of your own and name the profile by hand:
 #
 #   docker compose ... --profile unmute up -d
 #
-# The voice provider `unmute' in the harness talks to those two ports.
+# The harness's local voice provider reads the whisper service's random
+# port for speech to text and the unmute service's for text to speech.
 name: ${COMPOSE_PROJECT_NAME:-voice-local}
 
 services:
@@ -31,6 +34,9 @@ services:
       - voice
 
   unmute:
+    # No published image: upstream builds `unmute-backend:latest' from
+    # its compose file, needing a GPU.  Set HARNESS_UNMUTE_IMAGE to such
+    # a build and start this profile by hand.
     image: ${HARNESS_UNMUTE_IMAGE:-kyutai/unmute:latest}
     profiles:
       - unmute

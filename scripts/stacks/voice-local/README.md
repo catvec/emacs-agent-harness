@@ -2,8 +2,8 @@
 
 A docker compose stack for the harness's `unmute` voice provider: speech
 to text with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), and
-[Kyutai Unmute](https://github.com/kyutai-labs/unmute) for the
-OpenAI-compatible speech endpoints the sidecar posts to.
+an optional [Kyutai Unmute](https://github.com/kyutai-labs/unmute)
+service for text to speech.
 
 The harness starts it from `M-x harness-stacks`, or the voice setup
 page; by hand:
@@ -16,30 +16,33 @@ docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local u
 
 | Service | Port | Image | Purpose |
 | --- | --- | --- | --- |
-| `whisper` | container 8080, random loopback | `ghcr.io/ggml-org/whisper.cpp:main` | `/inference` and `/load` for speech to text |
-| `unmute` | container 8000, random loopback | `kyutai/unmute:latest` | `/v1/audio/transcriptions` and `/v1/audio/speech` |
+| `whisper` | container 8080, random loopback | `ghcr.io/ggml-org/whisper.cpp:main` | `/inference` for speech to text |
+| `unmute` | container 8000, random loopback | a local build (the `unmute` profile) | `/v1/audio/speech` for text to speech |
 
 The compose file publishes each port as `"127.0.0.1::8080"`, so the
 runtime picks a free loopback port: two stacks, or anything already on
 8080, never collide. `docker compose ... port SERVICE PORT` prints the
 one this stack got.
 
-By hand, only `whisper` starts by default: Kyutai Unmute is behind the
-`unmute` profile, because it is the heavy service. The harness passes
-the profile, so `[Start]` in `M-x harness-stacks` starts both services
-and `[Stop]` stops both:
+Only `whisper` starts by default, and `[Start]` in the harness runs it
+alone.  Kyutai Unmute has no published image: upstream builds
+`unmute-backend:latest` from its own compose file, needs a GPU and
+serves a websocket protocol rather than the OpenAI audio routes.  The
+`unmute` service is therefore behind the `unmute` profile and starts
+only by hand, with an image of your own:
 
 ```sh
-docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local --profile unmute up -d
+HARNESS_UNMUTE_IMAGE=unmute-backend:latest \
+docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local \
+  --profile unmute up -d
 ```
 
-The voice provider in Emacs does not need Unmute when whisper.cpp runs:
-set `harness-voice-unmute-stt-url` to
-`http://127.0.0.1:8080/inference` and point
-`harness-voice-unmute-tts-url` at any OpenAI-compatible speech endpoint,
-such as a Piper server. With both options nil (the default) the
-provider reads the random loopback ports this stack published for the
-two services, so nothing has to be copied by hand.
+The voice provider does not need it when whisper.cpp runs: set
+`harness-voice-unmute-tts-url` to any OpenAI-compatible text-to-speech
+endpoint, such as a Piper server.  With both options nil the provider
+reads the random loopback port this stack published for speech to text,
+and, when the `unmute` service runs, for text to speech.  Speech to text
+needs no configuration at all.
 
 ## Models and effort
 
@@ -64,12 +67,11 @@ WHISPER_MODEL=ggml-small.en.bin docker compose -f scripts/stacks/voice-local/doc
 
 ## Images
 
-Both images are overridable, so a pinned tag or a local build works
+The whisper image is overridable, so a pinned tag or a local build works
 without editing the file:
 
 ```sh
 HARNESS_WHISPER_IMAGE=ghcr.io/ggml-org/whisper.cpp:main \
-HARNESS_UNMUTE_IMAGE=kyutai/unmute:latest \
 docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
 ```
 
@@ -81,15 +83,14 @@ the entrypoint, not the sidecar: the sidecar only speaks HTTP.
 
 ## GPU and CPU
 
-Kyutai Unmute is built for a GPU; the upstream project documents its
-CUDA and Apple Silicon setups, and its image needs the NVIDIA container
-toolkit (`--gpus all`, or `deploy.resources.reservations.devices` in a
-compose file) to use one. On a CPU-only machine, build Unmute for CPU
-following its README, point `HARNESS_UNMUTE_IMAGE` at that build, or run
-whisper.cpp alone and set `harness-voice-unmute-tts-url` to a CPU
-text-to-speech service: then start only the `whisper` service rather
-than the whole stack. Speech to text on CPU with `ggml-base.en.bin` is real-time
-on a modern laptop; larger models are not.
+whisper.cpp runs on the CPU: speech to text with `ggml-base.en.bin` is
+real-time on a modern laptop, and larger models are not.  Kyutai Unmute
+is the GPU-only part. The upstream project documents its CUDA and Apple
+Silicon setups, and its image needs the NVIDIA container toolkit
+(`--gpus all`, or `deploy.resources.reservations.devices` in a compose
+file) to use one. On a CPU-only machine, leave the `unmute` profile
+alone and point `harness-voice-unmute-tts-url` at a CPU text-to-speech
+service instead.
 
 ## Network
 
@@ -107,7 +108,8 @@ itself inside the container.
 ```sh
 stack="docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local"
 curl -fsS "http://$($stack port whisper 8080)/"          # whisper.cpp answers
-curl -fsS "http://$($stack port unmute 8000)/v1/models"  # Unmute answers, with the profile
+curl -fsS -F file=@samples/jfk.wav -F response_format=text \
+     "http://$($stack port whisper 8080)/inference"      # and transcribes
 $stack ps
 ```
 
