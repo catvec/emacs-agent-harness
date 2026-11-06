@@ -35,6 +35,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Harness connects to your emacs-agent-harness on the local network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Voice mode uses the microphone to speak with the agent.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Attach an image to a message for the agent to see.</string>
 	<key>UIApplicationSceneManifest</key>

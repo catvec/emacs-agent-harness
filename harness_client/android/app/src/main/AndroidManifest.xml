@@ -1,6 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- The client speaks ACP over WebSocket or TCP to a harness on your network. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Voice mode: the microphone, and the audio route a hands-free session
+         uses.  Recording is only started by the voice screen. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
     <application
         android:label="Harness"
         android:usesCleartextTraffic="true"

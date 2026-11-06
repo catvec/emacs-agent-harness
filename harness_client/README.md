@@ -109,6 +109,17 @@ time it opens. It asks again only when the harness does.
   the count on its tab and the notice that sessions need an answer match what
   Emacs shows. A tap on a task that waits opens its conversation, where the
   question it asks is answered.
+- **Talks.** A microphone in the message box opens a voice screen of its own;
+  the conversation stays the session it was, so what is heard is a message in
+  it and what the agent writes is spoken there. Two providers, a setting of
+  the device: *Clip* records one utterance as a WAV and sends it transcribed,
+  or as an ACP `audio` block the model reads; *Live* holds a WebRTC call with
+  a realtime provider (`gpt-live-1`, or a harness voice sidecar) that asks the
+  session and speaks its answer. See [Voice mode](#voice-mode).
+
+  | A clip conversation | The settings of either provider | The way in |
+  |---|---|---|
+  | ![The voice screen listening: the orb, what was said and what the agent answered, and Mute, Interrupt and End](screenshots/voice-listening.png) | ![Voice settings: Clip or Live, the delivery, and the fields of the chosen provider](screenshots/voice-settings.png) | ![A conversation, with the microphone in the message box](screenshots/voice-entry.png) |
 - **Shows the rest of the harness.** The task board (all seven columns, queue
   state and slot use, backlog mode, submit; a finished task's card has the
   words of its summary, without the Markdown it was written in), spend,
@@ -1012,6 +1023,58 @@ and one that grew call by call fold the same way.
 | ![A task's session: runs of calls, an edit and a refused write between them, a failed command counted on its line](screenshots/android-tool-calls.png) | ![An edit: the text it took out and the text it put in](screenshots/android-tool-edit.png) | ![A result on a page of its own](screenshots/android-tool-output.png) |
 | ![The same session in the Apple style](screenshots/ios-tool-calls.png) | ![A command that ran, a run of one opened to its call](screenshots/ios-tool-result.png) | |
 
+## Voice mode
+
+The microphone in the message box (`composer-voice`) opens a screen of its
+own: a dark page with the state of the call in an orb, the status under it, the
+transcript of what has been said, and *Mute*, *Interrupt* and *End*. The
+conversation stays the session it was -- what is heard becomes a message in it,
+and what the agent writes is spoken there with the device's own voice
+(`flutter_tts`). A spoken message may go while a turn runs, because the harness
+holds a message that arrives mid-turn for the turn's next step, which is what a
+correction said out loud is; the message field does not send then. Voice never
+answers a permission request or a question: the status turns to *Approval
+needed*, *Open* shows the conversation, and the answer is given there.
+
+Which provider is used, and how, is a setting of the device, kept in
+`VoiceSettings` (SharedPreferences, `voiceSettings`) and edited in *Voice
+settings* at the top of the screen:
+
+- **Clip** records one utterance at a time as 16 kHz mono PCM16: it starts
+  after 160 ms of speech over an RMS threshold, and the WAV it sends runs from
+  300 ms before that to 850 ms of silence after it (a burst shorter than
+  240 ms is dropped, and one longer than 30 s is cut). *Transcript* posts the
+  clip to a speech endpoint -- multipart WAV, JSON or plain text back -- and
+  sends what it heard as text; *Audio prompt* sends the WAV itself as an ACP
+  `audio` content block, which the harness gives the model as it is. An empty
+  *Speech endpoint* means the harness's own host on port 8080
+  (`http://HOST:8080/inference`), where a local whisper.cpp server serves; an
+  endpoint that takes a model and a token (OpenAI's
+  `/v1/audio/transcriptions`) is asked with them.
+- **Live** holds a WebRTC call open with a realtime provider: microphone with
+  echo cancellation in, the provider's audio out of the renderer, and a data
+  channel (`oai-events` for OpenAI's Realtime API, `harness-voice` for a
+  harness sidecar). OpenAI's `gpt-live-1` is the default: the SDP offer is
+  posted to `/realtime?model=…` with an ephemeral key, which the app gets by
+  exchanging an API key at `/realtime/client_secrets`; a sidecar takes the
+  offer as JSON at its own endpoint. The provider is told to delegate with
+  the `delegate_to_agent` tool: what it asks becomes the session's prompt, and
+  the agent's answer goes back to it as the tool's result, to be spoken. The
+  instructions the call opens with -- backchannels, interruption, how to
+  delegate -- are `liveVoiceInstructions` in `lib/src/voice/live_protocol.dart`.
+
+The platform channels sit behind `VoiceMicrophone`, `VoiceSpeech`,
+`VoiceTranscriber` and `LiveVoiceConnection` (`lib/src/services/voice_*.dart`),
+and `VoiceController` is given a backend factory, so `flutter test` runs the
+whole screen with a scripted provider and never loads a plugin. The devices
+ask for the microphone when the screen starts: `RECORD_AUDIO` on Android,
+`NSMicrophoneUsageDescription` on iOS and macOS, and the audio-input
+entitlement on macOS.
+
+| The live provider | A wide screen |
+|---|---|
+| ![The voice screen on a live provider: Live at the top, the call listening](screenshots/voice-live.png) | ![The voice screen on a wide screen: the orb, the transcript and the controls in one column](screenshots/voice-wide.png) |
+
 ## Markdown
 
 What a person or an agent writes for a person is Markdown, and the app draws it
@@ -1108,6 +1171,21 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   open, and one that is a line long stays on its line; a hint of a line or
   two is whole, a long one, or a long line, is cut
   and opens and cuts again (pictures written where `HARNESS_SHOTS` says)
+- voice mode (`test/voice_audio_test.dart`, `voice_settings_test.dart`,
+  `voice_transcription_test.dart`, `voice_live_protocol_test.dart`,
+  `voice_controller_test.dart`, `voice_clip_backend_test.dart`,
+  `voice_live_backend_test.dart`, `voice_session_test.dart`,
+  `voice_ui_test.dart`, `voice_screenshots_test.dart`): the detector's
+  pre-roll, trailing keep and the WAV it writes; what the device keeps of the
+  settings, and the endpoint a blank one falls back to; the speech endpoint's
+  multipart, model, token, timeout, and an answer that is no transcript; both
+  dialects of a live provider, and delegation to the session; what voice puts
+  on the wire -- a spoken message as a text block, a clip as an `audio` block,
+  a spoken message while a turn runs -- and what it hears back, once; the
+  screen's status, captions, notices and controls, and the settings sheet, with
+  the microphone and the provider scripted so no plugin is loaded; pictures of
+  it on a phone, wide and in either provider's settings, written where
+  `HARNESS_SHOTS` says
 - Markdown (`test/markdown_preview_test.dart`, `markdown_rendering_test.dart`,
   `markdown_screenshots_test.dart`): the report a task was handed in with is
   drawn as Markdown -- the card of the task on the board has the words of the

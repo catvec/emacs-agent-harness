@@ -1,0 +1,386 @@
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'voice_audio.dart';
+import 'voice_backend.dart';
+import 'voice_models.dart';
+import 'voice_settings.dart';
+
+/// The clip provider: listen continuously, cut an utterance at a pause,
+/// transcribe its WAV (or send the WAV itself), and let the agent answer.
+///
+/// This is the half-duplex path.  The microphone is open while the agent
+/// works, so a correction can be started at any time; the agent's reply is
+/// spoken by [VoiceSpeech], and starting to talk while it speaks stops it.
+class ClipVoiceBackend implements VoiceBackend {
+  ClipVoiceBackend({
+    required this.microphone,
+    required this.transcriber,
+    required this.speech,
+    required this.delivery,
+    required this.endpoint,
+    required this.model,
+    required this.token,
+    required this.language,
+    required this.speakReplies,
+    this.harnessAddress = '',
+    this.vadConfig = const VoiceActivityConfig(),
+  });
+
+  final VoiceMicrophone microphone;
+  final VoiceTranscriber transcriber;
+  final VoiceSpeech speech;
+  final ClipDelivery delivery;
+  final String endpoint;
+  final String model;
+  final String token;
+  final String language;
+  final bool speakReplies;
+  final String harnessAddress;
+  final VoiceActivityConfig vadConfig;
+
+  final _events = StreamController<VoiceBackendEvent>.broadcast();
+  final _queue = <VoiceUtterance>[];
+  final _framer = PcmFramer();
+  late final VoiceActivityDetector _vad = VoiceActivityDetector(
+    config: vadConfig,
+  );
+  StreamSubscription<Uint8List>? _microphone;
+  bool _started = false;
+  bool _muted = false;
+  bool _closed = false;
+  bool _speaking = false;
+  bool _transcribing = false;
+  int _generation = 0;
+  int _bargeFrames = 0;
+
+  @override
+  Stream<VoiceBackendEvent> get events => _events.stream;
+
+  @override
+  Future<void> start() async {
+    if (_started || _closed) return;
+    _started = true;
+    _emit(const VoicePhaseEvent(VoicePhase.connecting));
+    try {
+      await microphone.start();
+      await microphone.setMuted(false);
+      _microphone = microphone.frames.listen(
+        _onBytes,
+        onError: (Object error, StackTrace stack) {
+          _fail(
+            VoiceProblem(
+              'Microphone unavailable',
+              detail: _oneLine(error),
+              recoverable: false,
+            ),
+          );
+        },
+      );
+      _emit(const VoicePhaseEvent(VoicePhase.listening));
+    } catch (error) {
+      _fail(
+        VoiceProblem(
+          _microphoneProblem(error),
+          detail: _oneLine(error),
+          recoverable: false,
+        ),
+      );
+    }
+  }
+
+  void _onBytes(Uint8List bytes) {
+    if (_closed) return;
+    for (final frame in _framer.add(bytes)) {
+      final utterances = _vad.addFrame(frame);
+      _emit(VoiceLevelEvent(_vad.level));
+      if (_speaking && _vad.hearsSpeech) {
+        _bargeFrames++;
+        if (_bargeFrames >= 2) {
+          _bargeFrames = 0;
+          _speaking = false;
+          _generation++;
+          unawaited(speech.stop());
+          _emit(const VoicePhaseEvent(VoicePhase.hearing));
+        }
+      } else if (!_vad.hearsSpeech) {
+        _bargeFrames = 0;
+      }
+      for (final utterance in utterances) {
+        _accept(utterance);
+      }
+    }
+  }
+
+  void _accept(VoiceUtterance utterance) {
+    if (utterance.duration < vadConfig.minUtterance) return;
+    if (_speaking) {
+      // The person took the floor: stop the reply, do not cancel the work.
+      _speaking = false;
+      _generation++;
+      unawaited(speech.stop());
+    }
+    _queue.add(utterance);
+    if (!_transcribing) unawaited(_drain());
+  }
+
+  Future<void> _drain() async {
+    if (_transcribing) return;
+    _transcribing = true;
+    try {
+      while (_queue.isNotEmpty && !_closed) {
+        final utterance = _queue.removeAt(0);
+        if (delivery == ClipDelivery.audioPrompt) {
+          _emit(
+            const VoiceCaptionEvent(
+              VoiceSpeaker.you,
+              'Voice message',
+              finalized: true,
+            ),
+          );
+          _emit(VoicePromptEvent(VoicePrompt(audio: utterance.wav)));
+          _emit(const VoicePhaseEvent(VoicePhase.thinking));
+          continue;
+        }
+        _emit(const VoicePhaseEvent(VoicePhase.transcribing));
+        String text;
+        try {
+          text = (await transcriber.transcribe(
+            utterance.wav,
+            endpoint: endpoint,
+            model: model,
+            token: token,
+            language: language,
+          )).trim();
+        } catch (error) {
+          _fail(VoiceProblem('Transcription failed', detail: _oneLine(error)));
+          _emit(const VoicePhaseEvent(VoicePhase.listening));
+          continue;
+        }
+        if (text.isEmpty) {
+          _fail(const VoiceProblem('Empty transcript'));
+          _emit(const VoicePhaseEvent(VoicePhase.listening));
+          continue;
+        }
+        _emit(VoiceCaptionEvent(VoiceSpeaker.you, text, finalized: true));
+        _emit(VoicePromptEvent(VoicePrompt(text: text)));
+        _emit(const VoicePhaseEvent(VoicePhase.thinking));
+      }
+    } finally {
+      _transcribing = false;
+    }
+  }
+
+  @override
+  Future<void> setMuted(bool muted) async {
+    if (_closed || _muted == muted) return;
+    _muted = muted;
+    try {
+      await microphone.setMuted(muted);
+    } catch (error) {
+      _fail(VoiceProblem('Microphone unavailable', detail: _oneLine(error)));
+      return;
+    }
+    if (muted) {
+      _vad.reset();
+      _emit(const VoicePhaseEvent(VoicePhase.muted));
+    } else {
+      _emit(const VoicePhaseEvent(VoicePhase.listening));
+    }
+  }
+
+  @override
+  Future<void> interrupt() async {
+    _generation++;
+    _speaking = false;
+    await speech.stop();
+    if (!_closed && !_muted) {
+      _emit(const VoicePhaseEvent(VoicePhase.interrupted));
+      // The agent may still be working; the next reply is spoken when it
+      // arrives, so the screen goes back to listening rather than staying in
+      // an interrupted state that would hide the microphone.
+      _emit(const VoicePhaseEvent(VoicePhase.listening));
+    }
+  }
+
+  @override
+  Future<void> speak(String text) async {
+    final trimmed = text.trim();
+    if (_closed || !speakReplies || trimmed.isEmpty) return;
+    final generation = ++_generation;
+    _speaking = true;
+    _emit(const VoicePhaseEvent(VoicePhase.speaking));
+    try {
+      await speech.speak(trimmed);
+    } catch (error) {
+      if (generation == _generation) {
+        _fail(VoiceProblem('Speech unavailable', detail: _oneLine(error)));
+      }
+    } finally {
+      if (generation == _generation && !_closed) {
+        _speaking = false;
+        _emit(
+          VoicePhaseEvent(_muted ? VoicePhase.muted : VoicePhase.listening),
+        );
+      }
+    }
+  }
+
+  @override
+  Future<void> stop() async {
+    if (_closed) return;
+    _emit(const VoiceEndedEvent());
+    _closed = true;
+    _generation++;
+    await _microphone?.cancel();
+    _microphone = null;
+    try {
+      await microphone.stop();
+    } catch (_) {
+      // The microphone may already be gone with the app.
+    }
+    try {
+      await speech.stop();
+    } catch (_) {
+      // Likewise the platform's speech engine.
+    }
+    _vad.reset();
+    _queue.clear();
+    await _events.close();
+  }
+
+  void _fail(VoiceProblem problem) {
+    if (_closed) return;
+    _emit(VoiceFailureEvent(problem));
+  }
+
+  void _emit(VoiceBackendEvent event) {
+    if (!_closed) _events.add(event);
+  }
+
+  static String _microphoneProblem(Object error) {
+    final text = '$error'.toLowerCase();
+    if (text.contains('permission') || text.contains('denied')) {
+      return 'Microphone permission denied';
+    }
+    return 'Microphone unavailable';
+  }
+
+  static String _oneLine(Object error) {
+    final line = '$error'.trim().split('\n').first.trim();
+    if (line.isEmpty) return error.runtimeType.toString();
+    return line.length <= 160 ? line : '${line.substring(0, 159)}…';
+  }
+}
+
+/// A WAV clip from a synthetic or recorded source, for a test or for a
+/// caller that already has one.  It never opens a platform channel.
+class MemoryVoiceMicrophone implements VoiceMicrophone {
+  MemoryVoiceMicrophone({this.sampleRate = 16000});
+  final _frames = StreamController<Uint8List>.broadcast();
+  bool _open = false;
+  bool muted = false;
+
+  @override
+  final int sampleRate;
+
+  @override
+  Stream<Uint8List> get frames => _frames.stream;
+
+  bool get isOpen => _open;
+
+  @override
+  Future<void> start() async {
+    _open = true;
+  }
+
+  @override
+  Future<void> setMuted(bool value) async {
+    muted = value;
+  }
+
+  /// Play PCM16 bytes as if the microphone heard them.
+  void hear(Uint8List bytes) {
+    if (_open && !muted && !_frames.isClosed) _frames.add(bytes);
+  }
+
+  @override
+  Future<void> stop() async {
+    _open = false;
+    await _frames.close();
+  }
+}
+
+/// Builds a silent, then noisy PCM16 frame for tests and previews.
+Int16List voiceFrame({
+  required int samples,
+  double amplitude = 0.0,
+  double frequency = 220,
+  int sampleRate = 16000,
+  int phase = 0,
+}) {
+  final frame = Int16List(samples);
+  for (var i = 0; i < samples; i++) {
+    final value = amplitude <= 0
+        ? 0
+        : amplitude *
+              math.sin(2 * math.pi * frequency * (phase + i) / sampleRate);
+    frame[i] = (value.clamp(-1.0, 1.0) * 32767).round();
+  }
+  return frame;
+}
+
+/// A transcriber that answers with a script, for a test or a preview.
+class ScriptedVoiceTranscriber implements VoiceTranscriber {
+  ScriptedVoiceTranscriber(this.answers);
+  final List<String> answers;
+  final List<Uint8List> heard = <Uint8List>[];
+  int _next = 0;
+
+  @override
+  Future<String> transcribe(
+    Uint8List wav, {
+    required String endpoint,
+    required String model,
+    required String token,
+    required String language,
+  }) async {
+    heard.add(wav);
+    if (answers.isEmpty) return '';
+    final answer = answers[_next % answers.length];
+    _next++;
+    return answer;
+  }
+
+  @override
+  Future<void> dispose() async {}
+}
+
+/// A speech engine that records what it was asked to say.
+class RecordingVoiceSpeech implements VoiceSpeech {
+  final List<String> spoken = <String>[];
+  int stops = 0;
+  Completer<void>? _current;
+
+  @override
+  Future<void> speak(String text) async {
+    spoken.add(text);
+    _current = Completer<void>();
+    // A test or a preview can end it; a real engine ends at the end of the
+    // audio.  Returning at once would hide the speaking phase.
+    await _current!.future;
+  }
+
+  void finish() {
+    final current = _current;
+    _current = null;
+    if (current != null && !current.isCompleted) current.complete();
+  }
+
+  @override
+  Future<void> stop() async {
+    stops++;
+    finish();
+  }
+}

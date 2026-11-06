@@ -46,6 +46,13 @@ dependencies:
   # (test/dependency_guard_test.dart fails if the lock file goes below it.)
   shared_preferences_android: ^2.5.2
   flutter_markdown: ^0.7.7+1
+  # Voice mode: PCM capture, spoken replies, and the live WebRTC transport.
+  # Each is behind an interface the tests replace, so `flutter test` never
+  # loads a platform channel.
+  record: ^7.1.2
+  flutter_tts: ^4.2.5
+  flutter_webrtc: ^1.6.3
+  http: ^1.6.0
   intl: ^0.20.3
   image_picker: ^1.2.4
   url_launcher: ^6.3.3

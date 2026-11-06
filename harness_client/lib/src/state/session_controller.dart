@@ -47,6 +47,11 @@ class SessionController extends ChangeNotifier {
   String? error;
   bool loading = true;
   bool promptInFlight = false;
+
+  /// A message the voice screen sent is waiting for its turn to settle.  It
+  /// is separate from [promptInFlight] because a voice message may arrive
+  /// while a typed turn runs: the harness holds it for the turn's next step.
+  bool voicePromptInFlight = false;
   bool cancelling = false;
   bool deleted = false;
   final List<InteractionRequest> interactions = <InteractionRequest>[];
@@ -76,7 +81,12 @@ class SessionController extends ChangeNotifier {
       summary?.isInactive != true &&
       (interactions.isNotEmpty || summary?.isBlocked == true);
 
-  bool get isRunning => promptInFlight || summary?.isRunning == true;
+  bool get isRunning =>
+      promptInFlight || voicePromptInFlight || summary?.isRunning == true;
+
+  /// Whether the harness waits for the person in this conversation: a
+  /// permission or a question.  Voice never answers one.
+  bool get needsAnswer => interactions.isNotEmpty || summary?.isBlocked == true;
 
   /// Whether a message can go out now: there is a connection to take it.
   /// While there is none the composer keeps what was typed.
@@ -330,6 +340,70 @@ class SessionController extends ChangeNotifier {
     } finally {
       promptInFlight = false;
       cancelling = false;
+      transcript.finish();
+      _notify();
+      unawaited(refreshInfo());
+      unawaited(_refreshActivity());
+    }
+  }
+
+  /// Send what the voice screen heard.  [text] is a transcript; [audio] is a
+  /// WAV clip sent as an ACP audio content block instead.
+  ///
+  /// Unlike [send], this may run while a turn is in flight: the harness holds
+  /// a message that arrives during a turn for the turn's next step, which is
+  /// what a spoken correction is.  It never answers a pending permission or
+  /// question; those still wait for the person on screen.
+  Future<void> sendVoice({String? text, Uint8List? audio}) async {
+    final trimmed = text?.trim() ?? '';
+    if (trimmed.isEmpty && audio == null) return;
+    if (!canSend) {
+      error = 'Not connected to the harness: the message was not sent.';
+      _notify();
+      return;
+    }
+    error = null;
+    voicePromptInFlight = true;
+    final echo = transcript.addLocalUser(
+      trimmed.isEmpty ? '(voice message)' : trimmed,
+    );
+    _notify();
+    final blocks = <Map<String, Object?>>[
+      if (trimmed.isNotEmpty) textBlock(trimmed),
+      if (audio != null)
+        <String, Object?>{
+          'type': 'audio',
+          'mimeType': 'audio/wav',
+          'data': base64Encode(audio),
+        },
+    ];
+    try {
+      final result = await api.prompt(sessionId, blocks);
+      final stop = asString(result['stopReason']);
+      if (stop == 'refusal' || stop == 'max_tokens') {
+        error = switch (stop) {
+          'max_tokens' => 'The turn stopped at the model’s output limit.',
+          _ => 'The agent refused the prompt.',
+        };
+      }
+      final details = asMap(result['_harness']);
+      final reason = asString(details['reason']);
+      if (reason != null && reason != 'end-turn' && reason != 'cancelled') {
+        error = 'The turn ended: $reason';
+      }
+    } on AcpException catch (failure) {
+      if (failure.isTransport) {
+        transcript.removeLocalEcho(echo);
+        error = trimmed.isEmpty
+            ? 'The connection was lost before the voice message was sent.'
+            : 'The connection was lost before this was sent.';
+      } else {
+        error = _friendlyError(failure);
+      }
+    } catch (failure) {
+      error = '$failure';
+    } finally {
+      voicePromptInFlight = false;
       transcript.finish();
       _notify();
       unawaited(refreshInfo());

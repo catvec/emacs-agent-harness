@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../voice/voice_settings.dart';
 
 enum PreviewPlatform { system, material, cupertino }
 
@@ -90,6 +93,7 @@ class SettingsController extends ChangeNotifier {
   String _address = '';
   String _token = '';
   NewTaskChoices _newTaskChoices = const NewTaskChoices();
+  VoiceSettings _voiceSettings = const VoiceSettings();
   bool _loaded = false;
   Object? _loadError;
 
@@ -101,6 +105,9 @@ class SettingsController extends ChangeNotifier {
 
   /// Likewise for [newTaskChoices].
   bool _choicesChanged = false;
+
+  /// Likewise for [voiceSettings].
+  bool _voiceChanged = false;
 
   /// The writes the platform store did not take, by key, with why in words
   /// for a person.  A key leaves when it is written well after all, so one
@@ -128,6 +135,11 @@ class SettingsController extends ChangeNotifier {
   /// device's, whichever harness it is signed in to, and signing out does not
   /// forget it.
   NewTaskChoices get newTaskChoices => _newTaskChoices;
+
+  /// How the voice screen is set: its provider, endpoints and voice.  It is
+  /// the device's, whichever harness it talks to, and signing out does not
+  /// forget it.
+  VoiceSettings get voiceSettings => _voiceSettings;
 
   /// Whether the app connects again by itself when it opens.  It does, unless
   /// the person left the harness on purpose ("Disconnect"): that is
@@ -281,6 +293,12 @@ class SettingsController extends ChangeNotifier {
           mainTree: prefs.getBool('newTaskMainTree') ?? false,
         );
       });
+      read('voiceSettings', () {
+        if (_voiceChanged) return;
+        final raw = prefs.getString('voiceSettings');
+        if (raw == null || raw.isEmpty) return;
+        _voiceSettings = VoiceSettings.fromJson(jsonDecode(raw));
+      });
     }
     _loaded = true;
     if (!_ready.isCompleted) _ready.complete();
@@ -329,6 +347,19 @@ class SettingsController extends ChangeNotifier {
       await _setBool('newTaskPlan', held.plan);
       await _setBool('newTaskMainTree', held.mainTree);
     });
+  }
+
+  /// Keep [settings] as the voice screen's setup.  Endpoints and a token are
+  /// written once, when the setup sheet saves them, rather than on every
+  /// keystroke; a phone that dies mid-edit keeps its last saved setup.
+  Future<void> setVoiceSettings(VoiceSettings settings) {
+    if (settings == _voiceSettings) return Future.value();
+    _voiceChanged = true;
+    _voiceSettings = settings;
+    notifyListeners();
+    return _enqueue(
+      () => _setString('voiceSettings', jsonEncode(_voiceSettings.toJson())),
+    );
   }
 
   /// Turn remembering the harness on or off.  Off forgets what was kept; on

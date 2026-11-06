@@ -12,6 +12,8 @@ import '../../state/app_controller.dart';
 import '../../state/drafts.dart';
 import '../../state/interaction.dart';
 import '../../state/session_controller.dart';
+import '../../services/voice_runtime.dart';
+import '../../voice/voice_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../adaptive/platform_style.dart';
@@ -25,16 +27,22 @@ import '../widgets/message_composer.dart';
 import '../widgets/quota_widgets.dart';
 import '../widgets/task_bar.dart';
 import '../widgets/transcript_view.dart';
+import 'voice_screen.dart';
 
 class SessionScreen extends StatefulWidget {
   const SessionScreen({
     super.key,
     required this.sessionId,
     this.embedded = false,
+    this.voiceBackendFactory,
   });
 
   final String sessionId;
   final bool embedded;
+
+  /// What voice mode opens its microphone and provider with.  The app leaves
+  /// it null and builds the real ones; a test hands it a scripted backend.
+  final VoiceBackendFactory? voiceBackendFactory;
 
   @override
   State<SessionScreen> createState() => _SessionScreenState();
@@ -49,6 +57,10 @@ class _SessionScreenState extends State<SessionScreen> {
   /// The focus of the message box, for what asks for something to be typed
   /// in it: a task's *Send back* is feedback, written there.
   final _composerFocus = FocusNode();
+
+  /// The voice screen is a route of its own; a second tap while it opens must
+  /// not stack another one.
+  bool _voiceOpen = false;
 
   @override
   void didChangeDependencies() {
@@ -129,6 +141,28 @@ class _SessionScreenState extends State<SessionScreen> {
       } else {
         Navigator.of(context).pop();
       }
+    }
+  }
+
+  Future<void> _openVoice() async {
+    if (_voiceOpen || !_controller.canSend || _controller.loading) return;
+    _voiceOpen = true;
+    final bridge = SessionVoiceBridge(_controller);
+    final controller = VoiceController(
+      settings: _app.settings.voiceSettings,
+      bridge: bridge,
+      harnessAddress: _app.address ?? _app.settings.address,
+      backendFactory:
+          widget.voiceBackendFactory ??
+          (settings, address) => createVoiceBackend(settings, address, bridge),
+      onSettingsChanged: _app.settings.setVoiceSettings,
+    );
+    try {
+      await Navigator.of(context).push(
+        harnessRoute(context, (context) => VoiceScreen(controller: controller)),
+      );
+    } finally {
+      _voiceOpen = false;
     }
   }
 
@@ -519,6 +553,11 @@ class _SessionScreenState extends State<SessionScreen> {
             running: controller.promptInFlight,
             cancelling: controller.cancelling,
             canAttach: _app.capability?.promptImages == true,
+            canVoice:
+                controller.canSend &&
+                interaction == null &&
+                !controller.loading,
+            onVoice: _openVoice,
             awaitingAnswer: interaction != null,
             // Typing goes on while the connection is out; sending waits for it.
             offline: !controller.canSend,

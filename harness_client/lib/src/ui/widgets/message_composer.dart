@@ -19,6 +19,8 @@ class MessageComposer extends StatefulWidget {
     required this.cancelling,
     required this.canAttach,
     this.enabled = true,
+    this.canVoice = false,
+    this.onVoice,
     this.awaitingAnswer = false,
     this.offline = false,
     this.drafts,
@@ -37,6 +39,11 @@ class MessageComposer extends StatefulWidget {
   final bool cancelling;
   final bool canAttach;
   final bool enabled;
+
+  /// Whether the screen offers the voice mode: a session that can take a
+  /// message, with no question waiting to be answered on screen first.
+  final bool canVoice;
+  final VoidCallback? onVoice;
   final bool awaitingAnswer;
 
   /// There is no connection to the harness at the moment: what is typed is
@@ -348,6 +355,19 @@ class _MessageComposerState extends State<MessageComposer> {
                       ),
                     ),
                   ),
+                  if (widget.canVoice)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6, bottom: 2),
+                      child: _RoundActionButton(
+                        key: const Key('composer-voice'),
+                        icon: CupertinoIcons.mic,
+                        materialIcon: Icons.mic_rounded,
+                        color: theme.colorScheme.surfaceContainerHigh,
+                        foreground: theme.colorScheme.onSurfaceVariant,
+                        label: 'Voice mode',
+                        onTap: widget.enabled ? widget.onVoice : null,
+                      ),
+                    ),
                   const SizedBox(width: 6),
                   if (widget.running)
                     _RoundActionButton(

@@ -301,7 +301,11 @@ class HarnessPrimaryButton extends StatelessWidget {
               : CupertinoTheme.of(context).primaryColor,
           onPressed: busy ? null : onPressed,
           child: DefaultTextStyle(
-            style: const TextStyle(
+            style: TextStyle(
+              fontFamily: CupertinoTheme.of(context)
+                  .textTheme
+                  .textStyle
+                  .fontFamily,
               color: CupertinoColors.white,
               fontSize: 15,
               fontWeight: FontWeight.w600,
@@ -315,12 +319,18 @@ class HarnessPrimaryButton extends StatelessWidget {
       width: expand ? double.infinity : null,
       child: FilledButton(
         onPressed: busy ? null : onPressed,
-        style: destructive
-            ? FilledButton.styleFrom(
-                backgroundColor: Theme.of(context).colorScheme.error,
-                foregroundColor: Theme.of(context).colorScheme.onError,
-              )
-            : null,
+        style: FilledButton.styleFrom(
+          textStyle: TextStyle(
+            fontFamily: Theme.of(context).textTheme.labelLarge?.fontFamily,
+            fontWeight: FontWeight.w600,
+          ),
+          backgroundColor: destructive
+              ? Theme.of(context).colorScheme.error
+              : null,
+          foregroundColor: destructive
+              ? Theme.of(context).colorScheme.onError
+              : null,
+        ),
         child: child,
       ),
     );
@@ -370,6 +380,10 @@ class HarnessSecondaryButton extends StatelessWidget {
           onPressed: onPressed,
           child: DefaultTextStyle(
             style: TextStyle(
+              fontFamily: CupertinoTheme.of(context)
+                  .textTheme
+                  .textStyle
+                  .fontFamily,
               color: color,
               fontSize: 15,
               fontWeight: FontWeight.w600,
@@ -383,15 +397,21 @@ class HarnessSecondaryButton extends StatelessWidget {
       width: expand ? double.infinity : null,
       child: OutlinedButton(
         onPressed: onPressed,
-        style: destructive
-            ? OutlinedButton.styleFrom(
-                foregroundColor: Theme.of(context).colorScheme.error,
-                side: BorderSide(
+        style: OutlinedButton.styleFrom(
+          textStyle: TextStyle(
+            fontFamily: Theme.of(context).textTheme.labelLarge?.fontFamily,
+            fontWeight: FontWeight.w600,
+          ),
+          foregroundColor: destructive
+              ? Theme.of(context).colorScheme.error
+              : null,
+          side: destructive
+              ? BorderSide(
                   color: Theme.of(context).colorScheme.error
                       .withValues(alpha: 0.4),
-                ),
-              )
-            : null,
+                )
+              : null,
+        ),
         child: text,
       ),
     );
@@ -625,7 +645,11 @@ class HarnessSegmented<T extends Object> extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
               child: Text(
                 option.$2,
-                style: const TextStyle(
+                style: TextStyle(
+                  fontFamily: CupertinoTheme.of(context)
+                      .textTheme
+                      .textStyle
+                      .fontFamily,
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
                 ),
@@ -646,8 +670,12 @@ class HarnessSegmented<T extends Object> extends StatelessWidget {
       },
       style: ButtonStyle(
         visualDensity: VisualDensity.compact,
-        textStyle: const WidgetStatePropertyAll(
-          TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        textStyle: WidgetStatePropertyAll(
+          TextStyle(
+            fontFamily: Theme.of(context).textTheme.labelLarge?.fontFamily,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ),
     );
