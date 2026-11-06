@@ -182,12 +182,34 @@ data a client may read instead of the text and META the result's
           (and structured (list :structuredContent structured))
           (and meta (list :_meta meta))))
 
+(defun harness-mcp--result-content (result)
+  "Return the content of RESULT, a CallToolResult, as a list of blocks.
+A content value that is not a proper list or vector of blocks -- a
+string, a number, `:false' -- is read as one text block, as a broken or
+hostile server may send it; the harness must not refuse the whole
+result over it."
+  (let ((content (and (listp result) (plist-get result :content))))
+    (cond ((null content) nil)
+          ((and (listp content) (proper-list-p content)) content)
+          ((vectorp content) (append content nil))
+          ((stringp content) (list (harness-mcp-text-content content)))
+          (t (list (harness-mcp-text-content (format "%s" content)))))))
+
 (defun harness-mcp-result-text (result)
   "Return the text of the CallToolResult RESULT: its text blocks, joined.
-Other kinds of block are left out."
-  (mapconcat (lambda (block) (or (plist-get block :text) ""))
-             (cl-remove-if-not (lambda (block) (equal (plist-get block :type) "text"))
-                               (plist-get result :content))
+Other kinds of block are left out.  A content value of an unexpected
+shape is read as text rather than refused (see
+`harness-mcp--result-content')."
+  (mapconcat (lambda (block)
+               (if (stringp block)
+                   block
+                 (let ((text (plist-get block :text)))
+                   (if (stringp text) text ""))))
+             (cl-remove-if-not
+              (lambda (block)
+                (or (stringp block)
+                    (and (consp block) (equal (plist-get block :type) "text"))))
+              (harness-mcp--result-content result))
              "\n"))
 
 (defun harness-mcp-result-error-p (result)
@@ -198,36 +220,61 @@ Other kinds of block are left out."
   "Return the data of the CallToolResult RESULT, or nil when it has none."
   (plist-get result :structuredContent))
 
+(defun harness-mcp--tool-result-p (value)
+  "Non-nil when VALUE looks like a harness tool RESULT, a keyword plist.
+A proper list of pairs with keyword keys; a JSON array that happens to
+start with `:false' or another keyword is not one."
+  (and (consp value) (proper-list-p value) (keywordp (car value))
+       (cl-evenp (length value))
+       (cl-every #'keywordp (cl-loop for key in value by #'cddr collect key))))
+
 (defun harness-mcp-tool-result-to-call-result (result)
   "Return the CallToolResult for RESULT, a harness tool result.
 The text goes where MCP puts it; everything else the result holds
 \(attachments, images, the call's `:meta' ...) is kept in the result's
 `_meta' under `harness/result', and comes back with
-`harness-mcp-call-result-to-tool-result'."
-  (let ((extras (harness-plist-remove result :content :is-error)))
-    (harness-mcp-call-result (plist-get result :content)
-                             :is-error (plist-get result :is-error)
-                             :meta (and extras (list harness-mcp-result-key extras)))))
+`harness-mcp-call-result-to-tool-result'.  A RESULT that is not a tool
+result -- a string, a number, a list that is no plist -- becomes text,
+so a handler's odd return cannot break the protocol."
+  (if (not (or (null result) (harness-mcp--tool-result-p result)))
+      (harness-mcp-call-result (if (stringp result) result (format "%s" result)))
+    (let* ((content (plist-get result :content))
+           (text (cond ((stringp content) content)
+                       ((null content) "")
+                       (t (format "%s" content))))
+           (extras (harness-plist-remove result :content :is-error)))
+      (harness-mcp-call-result text
+                               :is-error (plist-get result :is-error)
+                               :meta (and extras (list harness-mcp-result-key extras))))))
 
 (defun harness-mcp-call-result-to-tool-result (result)
   "Return the harness tool result for RESULT, a CallToolResult.
 The inverse of `harness-mcp-tool-result-to-call-result'.  A result
 that does not come from a harness server has its text, and the data
 it sent as `:structured'; a block that is no text is said in the text
-as omitted, since a tool's output is text for the model."
-  (let* ((blocks (plist-get result :content))
-         (others (cl-remove-if (lambda (b) (equal (plist-get b :type) "text")) blocks))
+as omitted, since a tool's output is text for the model.  A malformed
+result -- content of the wrong type, `_meta' that is no plist -- is
+read as far as it can be, never refused whole."
+  (let* ((blocks (harness-mcp--result-content result))
+         (others (cl-remove-if (lambda (block)
+                                 (and (consp block)
+                                      (equal (plist-get block :type) "text")))
+                               blocks))
          (text (harness-mcp-result-text result))
-         (extras (plist-get (plist-get result :_meta) harness-mcp-result-key))
-         (structured (plist-get result :structuredContent)))
+         (meta (and (listp result) (plist-get result :_meta)))
+         (extras (and (listp meta) (proper-list-p meta)
+                      (plist-get meta harness-mcp-result-key)))
+         (extras (and (harness-mcp--tool-result-p extras) extras))
+         (structured (and (listp result) (plist-get result :structuredContent))))
     (append (list :content (if others
                                (concat text (if (string-empty-p text) "" "\n")
                                        (format "[%d non-text block%s omitted]"
                                                (length others) (if (cdr others) "s" "")))
                              text)
                   :is-error (harness-mcp-result-error-p result))
-            (and (consp extras) (keywordp (car extras)) extras)
-            (and structured (not (plist-member extras :structured)) (list :structured structured)))))
+            (and extras extras)
+            (and structured (not (plist-member extras :structured))
+                 (list :structured structured)))))
 
 ;;;; A server
 
@@ -325,16 +372,18 @@ credential: a server that needs one refuses to serve."
   (harness-mcp-call-result (format "Tool failed: %s" (harness-error-message err)) :is-error t))
 
 (defun harness-mcp--handler-result (value)
-  "Return the CallToolResult for VALUE, what a handler returned."
+  "Return the CallToolResult for VALUE, what a handler returned.
+A VALUE that is no proper plist is reported as text, never refused."
   (cond ((stringp value) (harness-mcp-call-result value))
         ((null value) (harness-mcp-call-result ""))
-        ((and (consp value) (plist-member value :content)
+        ((and (harness-mcp--tool-result-p value) (plist-member value :content)
               (let ((content (plist-get value :content)))
                 ;; A harness tool RESULT has its text in `:content'; a
                 ;; CallToolResult has a list of blocks.
                 (or (listp content) (vectorp content))))
          value)
-        ((and (consp value) (plist-member value :content)) (harness-mcp-tool-result-to-call-result value))
+        ((and (harness-mcp--tool-result-p value) (plist-member value :content))
+         (harness-mcp-tool-result-to-call-result value))
         (t (harness-mcp-call-result (format "%S" value)))))
 
 (defun harness-mcp--call (server params id transport)
@@ -363,7 +412,11 @@ a promise."
              (value (condition-case err
                         (funcall (harness-mcp-tool-handler tool) arguments context)
                       (error (harness-mcp--failure-result err))))
-             (finish (lambda (v) (harness-mcp-response id (harness-mcp--handler-result v)))))
+             (finish (lambda (v)
+                       (condition-case err
+                           (harness-mcp-response id (harness-mcp--handler-result v))
+                         (error (harness-mcp-response
+                                 id (harness-mcp--failure-result err)))))))
         (if (harness-promise-p value)
             (harness-then value finish
                           (lambda (err) (funcall finish (harness-mcp--failure-result err))))
