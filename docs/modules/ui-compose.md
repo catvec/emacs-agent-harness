@@ -8,7 +8,7 @@ The compose box shared by chat buffers and the task board.
 - **Source:** [lisp/ui/harness-ui-compose.el](../../lisp/ui/harness-ui-compose.el)
 - **Loaded:** by default
 - **Requires:** [ui](ui.md)
-- **Required by:** [ui-carry](ui-carry.md), [ui-pending](ui-pending.md), [ui-popout](ui-popout.md), [ui-sticky-compose](ui-sticky-compose.md)
+- **Required by:** [ui-carry](ui-carry.md), [ui-pending](ui-pending.md), [ui-popout](ui-popout.md), [ui-sticky-compose](ui-sticky-compose.md), [ui-voice](ui-voice.md)
 
 ## About
 
@@ -111,6 +111,7 @@ prompt blocks with `harness-compose-attachment-block`.
 
 ### Hooks
 
+- `harness-compose-controls-functions` — Functions returning read-only control lines above a compose box.
 - `harness-quote-target-functions` — Functions that say what C-c > quotes at point, or in a region.
 
 ### Commands

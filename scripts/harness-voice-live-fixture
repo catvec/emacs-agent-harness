@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""A scripted live voice sidecar for the harness.
+
+It speaks the JSON-lines sidecar protocol used by ui-voice without a
+microphone, speaker, speech model or network.  Use it to try the live
+controls, to show them in documentation, or as the starting point for a
+real GPT-Live or local pipeline adapter.
+
+Usage:
+    harness-voice-live-fixture [--demo]
+
+The harness starts this process and writes one JSON object per line on
+stdin.  This process writes one JSON object per line on stdout and
+diagnostics on stderr.  With --demo it also simulates a user asking for
+work, so the whole delegation round trip is visible.  Without --demo it
+only answers the harness's lifecycle commands.
+"""
+
+import json
+import sys
+import time
+
+
+def send(event, **fields):
+    """Write one protocol event and flush it."""
+    message = {"event": event}
+    message.update(fields)
+    sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def log(text):
+    """Write a diagnostic line where it cannot corrupt the protocol."""
+    sys.stderr.write(text + "\n")
+    sys.stderr.flush()
+
+
+def demo_delegation():
+    """Ask the harness for a small piece of work, as a voice user would."""
+    utterance = "Add a docstring to the parse function in file.py."
+    send("hearing")
+    send("user_delta", text=utterance, final=True)
+    send("transcribing")
+    send("delegation", id="fixture-1", text=utterance)
+
+
+def main(argv):
+    demo = "--demo" in argv[1:]
+    log("fixture ready" + (" (demo)" if demo else ""))
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError as error:
+            log("invalid JSON from harness: %s" % error)
+            continue
+        if not isinstance(event, dict):
+            log("protocol event is not an object")
+            continue
+        kind = event.get("event")
+        if kind == "start":
+            send("ready", provider="fixture")
+            send("listening")
+            if demo:
+                demo_delegation()
+        elif kind == "mute":
+            log("microphone %s" % ("muted" if event.get("on") else "open"))
+        elif kind == "interrupt":
+            send("interrupted")
+            send("listening")
+        elif kind == "commentary":
+            send("speaking")
+            time.sleep(0.3)
+            send("listening")
+        elif kind == "delegate_result":
+            if demo:
+                if event.get("error"):
+                    send("assistant_delta", text="That did not work.", final=True)
+                else:
+                    send("assistant_delta", text="The docstring is in place.", final=True)
+                send("listening")
+        elif kind == "stop":
+            send("closed", reason="fixture stopped")
+            return 0
+        else:
+            log("ignored %s" % kind)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except KeyboardInterrupt:
+        sys.exit(0)

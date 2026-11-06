@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""A GPT-Live sidecar for the harness's live voice provider.
+
+Emacs runs this script as the ``chatgpt`` voice provider.  The script
+owns the microphone, the speaker and one GPT-Live WebSocket session;
+Emacs owns the conversation, the tools and every permission decision.
+
+GPT-Live hears continuously and speaks while the harness agent works,
+which is what the WAV provider cannot do.  Work is delegated with
+client delegation: when GPT-Live asks for the backend, this script
+sends Emacs a ``delegation`` carrying the transcript since the previous
+one, and Emacs turns it into a normal prompt in the current chat.  The
+answer comes back as ``delegate_result`` and is spoken as commentary;
+tool calls, questions and approvals stay on screen in Emacs.
+
+    scripts/harness-voice-live-gpt [--model gpt-live-1] [--voice marin]
+                                   [--instructions TEXT] [--url URL]
+                                   [--api-key-env OPENAI_API_KEY]
+                                   [--self-test]
+
+``OPENAI_API_KEY`` must hold a project API key; keep it in the
+environment, never in an Emacs option.  Audio is PCM16 mono at 24 kHz,
+taken from ``arecord`` and played with ``aplay``.
+"""
+
+import argparse
+import base64
+import json
+import os
+import queue
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from harness_voice_sidecar import (  # noqa: E402
+    GPT_RATE, PROTOCOL, FakeConnection, FakeEvents, NullAudio, Player, Recorder,
+    Sidecar, WebSocket, log, self_test_failed, self_test_ok,
+)
+
+DEFAULT_URL = "wss://api.openai.com/v1/live/sessions"
+DEFAULT_MODEL = "gpt-live-1"
+DEFAULT_VOICE = "marin"
+DEFAULT_INSTRUCTIONS = (
+    "You are the voice of a coding agent. Speak briefly and naturally, one "
+    "or two sentences at a time. Delegate every request that needs files, "
+    "commands, tools or the project to the backend with the delegation "
+    "mechanism, and say only that you are on it while it works. Never claim "
+    "to have run a command or changed a file. Never ask for or accept a "
+    "permission decision: the screen handles approvals."
+)
+
+
+class ConnectionReader:
+    """Read the WebSocket on a thread so audio never blocks events."""
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.events = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="live-reader", daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def _run(self):
+        while True:
+            try:
+                message = self.connection.recv()
+            except Exception as error:  # noqa: BLE001 - reported to Emacs
+                self.events.put(("error", "%s: %s" % (type(error).__name__, error)))
+                return
+            if message is None:
+                self.events.put(("closed", None))
+                return
+            self.events.put(("message", message))
+
+    def get(self, timeout=0.02):
+        try:
+            return self.events.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+
+class GptSidecar(Sidecar):
+    """The GPT-Live half of the live voice provider."""
+
+    provider = "chatgpt"
+
+    def __init__(self, args, events=None, connection=None, player=None, recorder=None):
+        super().__init__(events=events, player=player or Player(GPT_RATE), rate=GPT_RATE)
+        self.args = args
+        self.connection = connection if connection is not None else WebSocket(
+            args.url,
+            headers={"Authorization": "Bearer %s" % os.environ.get(args.api_key_env, "")})
+        self.recorder = recorder or Recorder(GPT_RATE)
+        self.reader = None
+        self.started = False
+        self.pending_audio = b""
+        self.transcript = ""
+        self.delegated = 0
+        self.hearing = False
+        self.session_id = None
+        self.finished = False
+        self.key_override = None
+
+    # -- lifecycle ---------------------------------------------------
+
+    def on_start(self):
+        key = self.key_override or os.environ.get(self.args.api_key_env, "")
+        if not key:
+            self.fail("ChatGPT Live key missing · %s" % self.args.api_key_env)
+            return
+        reason = self.recorder.available()
+        if reason:
+            self.fail(reason)
+            return
+        try:
+            self.connection.connect()
+        except Exception as error:  # noqa: BLE001 - reported to Emacs
+            self.fail("ChatGPT Live connection failed · %s" % error)
+            return
+        self.connection.send_json({
+            "type": "session.start",
+            "event_id": "event_start",
+            "session": {
+                "model": self.args.model,
+                "instructions": self.args.instructions,
+                "audio": {
+                    "format": {"type": "audio/pcm", "rate": GPT_RATE},
+                    "output": {"voice": self.args.voice},
+                },
+            },
+        })
+        self.reader = ConnectionReader(self.connection).start()
+
+    def fail(self, message):
+        """Report a failure that ends the session."""
+        self.events.send("error", message=message)
+        self.finished = True
+        if self.loop is not None:
+            self.loop.stop(1)
+
+    def on_stop(self):
+        self.recorder.close()
+        if self.reader is not None and not self.finished:
+            try:
+                self.connection.send_json({"type": "session.close", "event_id": "event_close"})
+            except Exception:  # noqa: BLE001 - closing anyway
+                pass
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not self.finished:
+                item = self.reader.get(0.1)
+                if item and item[0] == "message":
+                    self.on_server_message(item[1])
+        try:
+            self.connection.close()
+        except Exception:  # noqa: BLE001 - closing
+            pass
+
+    def on_mute(self, muted):
+        log("microphone %s" % ("muted" if muted else "open"))
+
+    # -- audio -------------------------------------------------------
+
+    def on_tick(self):
+        self.tick_playback()
+        if self.reader is not None:
+            while True:
+                item = self.reader.get(0)
+                if item is None:
+                    break
+                kind, payload = item
+                if kind == "message":
+                    self.on_server_message(payload)
+                elif kind == "error":
+                    self.events.send("error", message="ChatGPT Live connection lost · %s" % payload)
+                    self.working = False
+                else:
+                    self.finished = True
+                    self.finish("session closed")
+        if not self.started or self.muted or self.finished:
+            return
+        chunk = self.recorder.read(1200)  # 50 ms at 24 kHz
+        if not chunk:
+            return
+        if len(chunk) % 2:
+            chunk = chunk[:-1]
+        try:
+            self.connection.send_json({
+                "type": "session.input_audio.append",
+                "audio": base64.b64encode(chunk).decode("ascii"),
+            })
+        except Exception as error:  # noqa: BLE001 - reported to Emacs
+            self.events.send("error", message="ChatGPT Live send failed · %s" % error)
+
+    # -- server events -----------------------------------------------
+
+    def on_server_message(self, message):
+        """Handle one GPT-Live event."""
+        try:
+            event = json.loads(message)
+        except ValueError:
+            log("GPT-Live sent invalid JSON")
+            return
+        kind = event.get("type")
+        if kind == "session.started":
+            self.started = True
+            self.session_id = (event.get("session") or {}).get("id")
+            self.events.send("listening")
+        elif kind == "session.input_transcript.delta":
+            self.on_user_delta(event.get("delta") or "")
+        elif kind == "session.input_transcript.done":
+            if self.transcript:
+                self.events.send("user_delta", text=self.transcript, final=True)
+        elif kind == "session.output_transcript.delta":
+            text = event.get("delta") or ""
+            if text:
+                self.events.send("assistant_delta", text=text)
+        elif kind == "session.output_audio.delta":
+            self.on_audio_delta(event.get("delta") or "")
+        elif kind == "session.delegation.created":
+            self.on_delegation(event)
+        elif kind in ("session.interrupted", "session.output_audio.clear"):
+            self.interrupt()
+        elif kind == "session.closed":
+            self.finished = True
+            self.finish("session closed")
+        elif kind == "error":
+            self.events.send("error", message="ChatGPT Live error · %s" % (
+                (event.get("error") or {}).get("message") or event.get("message") or "unknown"))
+        else:
+            log("GPT-Live event %s" % kind)
+
+    def on_user_delta(self, text):
+        if not text:
+            return
+        if not self.hearing:
+            self.hearing = True
+            self.events.send("hearing")
+        self.transcript += text
+        self.events.send("user_delta", text=text)
+
+    def on_audio_delta(self, delta):
+        if not delta:
+            return
+        try:
+            pcm = base64.b64decode(delta)
+        except (ValueError, TypeError):
+            log("GPT-Live sent audio that is not base64")
+            return
+        self.play(pcm)
+
+    def on_delegation(self, event):
+        """Send the spoken transcript since the last delegation to Emacs."""
+        text = self.transcript.strip()
+        self.transcript = ""
+        if not text:
+            return
+        self.delegated += 1
+        self.hearing = False
+        self.events.send("transcribing")
+        self.delegation(text, delegation_id=event.get("delegation_id") or ("chatgpt-%d" % self.delegated))
+
+    # -- Emacs to GPT-Live -------------------------------------------
+
+    def on_commentary(self, text):
+        self.steer("session.commentary.append", text)
+
+    def on_thinking(self, text):
+        self.steer("session.thinking.append", text)
+
+    def steer(self, kind, text):
+        if not text or not self.started:
+            return
+        try:
+            self.connection.send_json({"type": kind, "text": text})
+        except Exception as error:  # noqa: BLE001 - reported to Emacs
+            self.events.send("error", message="ChatGPT Live send failed · %s" % error)
+
+    def on_result(self, delegation_id, text, error):
+        if error:
+            self.steer("session.thinking.append", "The backend could not finish: %s" % error)
+            return
+        self.steer("session.commentary.append", text)
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="GPT-Live sidecar for the harness")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--voice", default=DEFAULT_VOICE)
+    parser.add_argument("--instructions", default=DEFAULT_INSTRUCTIONS)
+    parser.add_argument("--url", default=DEFAULT_URL)
+    parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
+    parser.add_argument("--self-test", action="store_true")
+    return parser.parse_args(argv[1:])
+
+
+def self_test_socket():
+    """Echo one text frame through a local WebSocket server.
+
+    This is the only check of the framing that runs anywhere: it proves
+    the handshake, the client masking and a round trip without reaching
+    the network or the Live service.
+    """
+    import hashlib
+    import socket as socket_module
+    import threading
+
+    server = socket_module.socket()
+    server.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    failure = []
+
+    def serve():
+        try:
+            connection, _ = server.accept()
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    failure.append("no handshake")
+                    return
+                request += chunk
+            key = ""
+            for line in request.decode("latin-1").split("\r\n"):
+                if line.lower().startswith("sec-websocket-key:"):
+                    key = line.split(":", 1)[1].strip()
+            accept = base64.b64encode(hashlib.sha1(
+                (key + WebSocket.GUID).encode("ascii")).digest()).decode("ascii")
+            connection.sendall((
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode("ascii"))
+            header = connection.recv(2)
+            length = header[1] & 0x7F
+            if length == 126:
+                length = int.from_bytes(connection.recv(2), "big")
+            mask = connection.recv(4)
+            payload = connection.recv(length)
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+            # Echo as one unmasked text frame.
+            connection.sendall(bytes([0x81, len(payload)]) + payload)
+            connection.close()
+        except Exception as error:  # noqa: BLE001 - reported below
+            failure.append("%s: %s" % (type(error).__name__, error))
+        finally:
+            server.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    client = WebSocket("ws://127.0.0.1:%d/echo" % port)
+    try:
+        client.connect()
+        client.send_text("hello voice")
+        answer = client.recv(timeout=5)
+    finally:
+        client.close()
+        thread.join(timeout=5)
+    if failure:
+        return "websocket: %s" % failure[0]
+    if answer != "hello voice":
+        return "websocket echo: %r" % answer
+    return None
+
+
+def self_test(args):
+    """Run the mapping against a fake connection and silent audio."""
+    events = FakeEvents()
+    sidecar = GptSidecar(args, events=events, connection=FakeConnection(),
+                         player=NullAudio(), recorder=NullAudio())
+    sidecar.key_override = "self-test"
+    # The harness's start: ready and listening, and a session.start.
+    sidecar.start_session({"event": "start", "protocol": PROTOCOL, "context": "ctx"})
+    sent = sidecar.connection.sent
+    if not sent or sent[0].get("type") != "session.start":
+        return self_test_failed("no session.start")
+    session = sent[0]["session"]
+    if session.get("model") != DEFAULT_MODEL:
+        return self_test_failed("wrong model")
+    if session.get("delegation") is not None:
+        return self_test_failed("delegation must stay client-side")
+    if session["audio"]["format"] != {"type": "audio/pcm", "rate": GPT_RATE}:
+        return self_test_failed("wrong audio format")
+    # A started session, then speech and a delegation.
+    sidecar.on_server_message(json.dumps({"type": "session.started", "session": {"id": "s-1"}}))
+    sidecar.on_server_message(json.dumps(
+        {"type": "session.input_transcript.delta", "delta": "add a docstring"}))
+    sidecar.on_server_message(json.dumps(
+        {"type": "session.delegation.created", "delegation_id": "dg-1"}))
+    delegations = [e for e in events.sent if e.get("event") == "delegation"]
+    if not delegations or delegations[0].get("text") != "add a docstring":
+        return self_test_failed("delegation text")
+    if delegations[0].get("id") != "dg-1":
+        return self_test_failed("delegation id")
+    # A spoken reply is played, and the answer goes back to GPT-Live.
+    audio = base64.b64encode(b"\x01\x00" * 480).decode("ascii")
+    sidecar.on_server_message(json.dumps({"type": "session.output_audio.delta", "delta": audio}))
+    if sidecar.player.played != b"\x01\x00" * 480:
+        return self_test_failed("audio playback")
+    sidecar.handle({"event": "delegate_result", "id": "dg-1", "text": "It is in place."})
+    appended = [e for e in sidecar.connection.sent if e.get("type") == "session.commentary.append"]
+    if not appended or appended[0].get("text") != "It is in place.":
+        return self_test_failed("commentary append")
+    captions = [e for e in events.sent if e.get("event") == "assistant_delta"]
+    if not captions or captions[-1].get("text") != "It is in place.":
+        return self_test_failed("assistant caption")
+    # Interrupt stops playback without cancelling the backend.
+    sidecar.handle({"event": "interrupt"})
+    kinds = [e.get("event") for e in events.sent]
+    if "interrupted" not in kinds:
+        return self_test_failed("interrupt event")
+    problem = self_test_socket()
+    if problem:
+        return self_test_failed(problem)
+    return self_test_ok("harness-voice-live-gpt")
+
+
+def main(argv):
+    args = parse_args(argv)
+    if args.self_test:
+        return self_test(args)
+    sidecar = GptSidecar(args)
+    loop = None
+    try:
+        from harness_voice_sidecar import Loop
+        loop = Loop(sidecar.events)
+        sidecar.loop = loop
+        return loop.run(sidecar.handle, sidecar.on_tick)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        sidecar.recorder.close()
+        sidecar.player.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

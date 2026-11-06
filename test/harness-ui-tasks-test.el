@@ -1232,6 +1232,29 @@ go through the command loop."
               (delete-window side)
               (set-window-buffer window board))))))))
 
+(ert-deftest harness-ui-tasks-tail-refit-preserves-compose-controls ()
+  "A partial tail redraw leaves extension controls and the editable draft alone."
+  (harness-ui-tasks-test-with
+    (let ((harness-compose-controls-functions (list (lambda () "[Voice]"))))
+      (with-current-buffer board
+        (harness-ui-tasks--render-tail)
+        (goto-char harness-compose-end)
+        (insert "an editable request")
+        (let ((generation harness-compose-generation)
+              (offset (- (point) harness-compose-start)))
+          (dotimes (_ 2)
+            (harness-ui-tasks--refit-tail)
+            (should (equal "an editable request" (harness-compose-text)))
+            (should (= generation harness-compose-generation))
+            (should (= offset (- (point) harness-compose-start)))
+            (should (equal "[Voice]\n"
+                           (buffer-substring-no-properties harness-compose-controls-start
+                                                           (overlay-start harness-compose-overlay))))
+            (should (get-text-property harness-compose-controls-start 'read-only)))
+          ;; A normal edit still belongs in the box, not on a read-only tail line.
+          (insert " plus dictation")
+          (should (equal "an editable request plus dictation" (harness-compose-text))))))))
+
 (ert-deftest harness-ui-tasks-box-stays-at-the-bottom ()
   "A box grown past the window keeps its last line on the window's last line."
   (harness-ui-tasks-test-with

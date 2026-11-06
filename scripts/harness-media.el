@@ -135,6 +135,9 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-ui-tasks-search "harness-ui-tasks")
 (declare-function harness-ui-tasks-compose-quit "harness-ui-tasks")
 (declare-function harness-quick-search "harness-ui-quick-search")
+(declare-function harness-voice "harness-ui-voice")
+(declare-function harness-voice-mode "harness-ui-voice")
+(defvar harness-voice--owner)
 (declare-function harness-quick-search-box-submit "harness-ui-quick-search")
 (declare-function harness-ui-popout-close "harness-ui-popout")
 (declare-function harness-ui-report-popout "harness-ui-report")
@@ -3379,6 +3382,34 @@ popout closes after the picture."
       (harness-media--capture "quick-search")
       (harness-ui-popout-close '(quick-search) t))))
 
+(defun harness-media-shot-voice ()
+  "Quick voice chat from a source file, with a scripted editable request.
+No microphone or speech service is used for the documentation picture."
+  (harness-media--reset-layout)
+  (harness-media--show-file "acme/ratelimit.py" "^    def take")
+  (let ((previous harness-voice--owner)
+        (listed nil))
+    (harness-ui-refresh-sessions (lambda (_) (setq listed t)))
+    (harness-media--wait (lambda () listed) 10 "voice context sessions")
+    (harness-voice)
+    (let ((buffer (harness-media--wait
+                   (lambda () (and (buffer-live-p harness-voice--owner)
+                                   (not (eq previous harness-voice--owner))
+                                   (not (buffer-local-value 'harness-chat--loading harness-voice--owner))
+                                   harness-voice--owner))
+                   20 "the quick voice chat")))
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (goto-char harness-compose-end)
+              (insert "Add a comment to TokenBucket.take about its refill and retry behavior."))
+            (window-resize (get-buffer-window buffer) (- 20 (window-body-height (get-buffer-window buffer))))
+            (harness-media--settle 0.5)
+            (harness-media--to-bottom buffer)
+            (harness-media--capture "voice"))
+        (with-current-buffer buffer (harness-voice-mode -1))
+        (harness-call 'session/delete (buffer-local-value 'harness-ui-session-id buffer))))))
+
 (defun harness-media-shot-sessions ()
   "The session list, in a frame wide enough for its last column, the project.
 Its columns take about 156 of `harness-media-columns'; the first
@@ -4734,6 +4765,7 @@ names."
     ;; Sessions of their own too, made and deleted for the picture.
     ("chat-queue" . harness-media-shot-chat-queue)
     ("prompt-region" . harness-media-shot-prompt-region)
+    ("voice" . harness-media-shot-voice)
     ;; After every picture of usage: its session's usage would count there.
     ("chat-cowboy" . harness-media-shot-chat-cowboy)
     ;; Last: an "Always deny" and an "always" cold-cache answer, both

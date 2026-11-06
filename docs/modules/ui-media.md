@@ -8,6 +8,7 @@ Audio playback and recording, video thumbnails, clipboard images.
 - **Source:** [lisp/ui/harness-ui-media.el](../../lisp/ui/harness-ui-media.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [ui](ui.md)
+- **Required by:** [ui-voice](ui-voice.md)
 
 ## About
 
@@ -42,6 +43,7 @@ between chunks but cannot be stopped mid-file.
 
 ### Hooks
 
+- `harness-ui-media-recording-blocked-p-functions` — Predicates returning non-nil while another UI feature owns the microphone.
 - `harness-ui-media-rerender-functions` — Functions called with a media ID (a path) whose rendering changed.
 
 ### Commands

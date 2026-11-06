@@ -1388,6 +1388,41 @@ start and its file's name, and a wide window shows every name whole."
         (sleep-for 0.4)
         (should (= draws harness-ui-compose-test--draws))))))
 
+(ert-deftest harness-ui-compose-controls-refit-without-attachments ()
+  "Extension controls fit the narrowest window, with text and point preserved."
+  (harness-ui-compose-test-with
+    (let ((harness-compose-controls-functions
+           (list (lambda ()
+                   (harness-ui-settings-line
+                    '(("Voice ready · Microphone off" "[Dictate]" "[Interrupt]" "[Hold to talk]"))
+                    (/ (harness-compose--room) (frame-char-width)))))))
+      (harness-compose-set "an editable request")
+      (harness-compose-redraw)
+      (goto-char (+ harness-compose-start 3))
+      (let ((draws harness-ui-compose-test--draws)
+            (generation harness-compose-generation)
+            (window (selected-window))
+            (side (split-window (selected-window) 40 'right)))
+        (unwind-protect
+            (progn
+              (set-window-buffer side (current-buffer))
+              (should-not harness-compose-attachments)
+              (harness-compose--on-resize side)
+              (harness-test-wait (lambda () (> harness-ui-compose-test--draws draws)) 2 "fitted controls")
+              (should (equal "an editable request" (harness-compose-text)))
+              (should (= generation harness-compose-generation))
+              (should (= 3 (- (point) harness-compose-start)))
+              (should (< (string-width (buffer-substring-no-properties
+                                        harness-compose-controls-start (overlay-start harness-compose-overlay)))
+                         (min (window-body-width side) (window-body-width window))))
+              (should (= (marker-position harness-compose-controls-start)
+                         (save-excursion (goto-char harness-compose-controls-start) (pos-bol))))
+              (setq draws harness-ui-compose-test--draws)
+              (harness-compose--on-resize side)
+              (sleep-for 0.3)
+              (should (= draws harness-ui-compose-test--draws)))
+          (delete-window side))))))
+
 (ert-deftest harness-ui-compose-long-names-shorten-in-the-middle ()
   "A name too long keeps its start and its end, a path its file's name."
   (should (equal "notes.txt" (harness-compose--shorten "notes.txt" 9)))

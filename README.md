@@ -244,6 +244,17 @@ A non-comprehensive list of all the different functionality offered by modules s
 - Insights
 - Btw sessions
   - Closing a session: `PREFIX x` closes any, `C-c M-k` at the end of a chat's keys; a BTW closes as its `[close]` does
+- [Voice dictation and spoken replies](docs/voice.md) (`ui-voice`, optional)
+  - WAV push-to-talk with local/configurable transcription and synthesis, editable compose text, quick voice chat and explicit interruption
+  - Providers with a `wav` or `live` capability: WAV dictation, ChatGPT Live over the API, a local Kyutai Unmute pipeline, the scripted fixture or a custom sidecar
+  - Live voice keeps the audio path in a JSON-lines sidecar and delegates to the chat, with an animated stage line, a styled transcript, mute, playback interruption and separate work cancellation
+  - Effort levels (low, medium, high) pick the local whisper model and the provider's own fragments
+  - [Realtime voice research](docs/voice-realtime.md): GPT-Live, backchannels, delegation, the sidecar protocol and open-source pipelines
+- [Compose stacks](docs/stacks.md) (`stacks`, optional) on a [container runtime](docs/container-runtime.md) (`container-runtime`, optional)
+  - Docker over its socket or rootless Podman, chosen automatically or by hand; a stack never calls either directly
+  - A module or plugin declares the services it needs; the harness starts and stops the stack and joins its network to the harness server's
+  - Each stack has its own network and publishes random loopback ports, so 8080 never collides
+  - Bundled `voice-local` stack: whisper.cpp and Kyutai Unmute, with the local provider reading their published ports
 - Sticky compose box (`ui-sticky-compose`)
   - A chat window scrolled away from its compose box draws a compact copy of it in its mode line while you compose
   - The start and end of the draft, its lines and attachments, and a button that jumps back to the box

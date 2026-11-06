@@ -4056,7 +4056,10 @@ and point on those lines stays there."
           (list-end (marker-position harness-ui-tasks--list-end))
           (places (harness-ui-tasks--places)))
       (save-excursion
-        (delete-region list-end (overlay-start harness-compose-overlay))
+        (delete-region list-end (or (and (markerp harness-compose-controls-start)
+                                         (eq (marker-buffer harness-compose-controls-start) (current-buffer))
+                                         (marker-position harness-compose-controls-start))
+                                    (overlay-start harness-compose-overlay)))
         (goto-char list-end)
         (harness-ui-tasks--insert-tail-head)
         (put-text-property list-end (point) 'read-only t))

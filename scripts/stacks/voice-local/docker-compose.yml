@@ -1,0 +1,58 @@
+# Local voice stack: whisper.cpp for speech to text, Kyutai Unmute for
+# speech to text and text to speech.  The harness's `stacks' module
+# starts it (`M-x harness-stacks'), or run it by hand:
+#
+#   docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
+#
+# The stack gets a container network of its own, and each service a
+# random loopback port, so two stacks never fight over 8080.  Only
+# whisper.cpp runs by default; Kyutai Unmute joins it with the `unmute'
+# profile:
+#
+#   docker compose ... --profile unmute up -d
+#
+# The voice provider `unmute' in the harness talks to those two ports.
+name: ${COMPOSE_PROJECT_NAME:-voice-local}
+
+services:
+  whisper:
+    image: ${HARNESS_WHISPER_IMAGE:-ghcr.io/ggml-org/whisper.cpp:main}
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-ggml-base.en.bin}
+    volumes:
+      - whisper-models:/models
+      - ./whisper-entrypoint.sh:/entrypoint.sh:ro
+    ports:
+      # An empty host port lets the runtime pick a free one.
+      - "127.0.0.1::8080"
+    restart: unless-stopped
+    networks:
+      - voice
+
+  unmute:
+    image: ${HARNESS_UNMUTE_IMAGE:-kyutai/unmute:latest}
+    profiles:
+      - unmute
+    depends_on:
+      - whisper
+    environment:
+      STT_URL: http://whisper:8080/inference
+      HOST: 0.0.0.0
+      PORT: "8000"
+    ports:
+      - "127.0.0.1::8000"
+    # Kyutai Unmute wants a GPU by default; see the README for a CPU-only
+    # run, which is slower but needs nothing but docker.
+    restart: unless-stopped
+    networks:
+      - voice
+
+volumes:
+  whisper-models:
+
+networks:
+  voice:
+    # Compose would name this voice-local_voice anyway; naming it here
+    # keeps the network the harness joins stable across project names.
+    name: ${COMPOSE_PROJECT_NAME:-voice-local}_voice

@@ -690,6 +690,9 @@ anything else a file button."
 
 ;;;; Recording
 
+(defvar harness-ui-media-recording-blocked-p-functions nil
+  "Predicates returning non-nil while another UI feature owns the microphone.")
+
 (defvar harness-ui-media--recorder nil "The recorder process while recording.")
 (defvar harness-ui-media--recording-file nil "Path of the WAV being recorded.")
 (defvar harness-ui-media--recording-started nil "Float time the recording began.")
@@ -822,6 +825,8 @@ The finished WAV is handed to `harness-ui-media-attach-function'."
   (if (process-live-p harness-ui-media--recorder)
       (progn (message "Stopping recording…")
              (interrupt-process harness-ui-media--recorder))
+    (when (run-hook-with-args-until-success 'harness-ui-media-recording-blocked-p-functions)
+      (user-error "Microphone unavailable · Voice active"))
     (let* ((file (expand-file-name (format-time-string "rec-%Y%m%d-%H%M%S.wav") (harness-ui-media--dir "recordings")))
            (cmd (harness-ui-media--recorder-command file)))
       (unless cmd (user-error "No recorder found: install pipewire (pw-record), alsa-utils (arecord) or ffmpeg"))

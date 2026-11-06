@@ -136,10 +136,16 @@
 (defvar-local harness-compose-start nil "Marker: first character of the compose box.")
 (defvar-local harness-compose-end nil "Marker: after the last character of the compose box.")
 (defvar-local harness-compose-overlay nil "Overlay over the prompt and the box.")
+(defvar-local harness-compose-controls-start nil
+  "Marker before the optional read-only controls above this compose box.")
 (defvar-local harness-compose-attachments nil "Attachments for the next message.")
 (defvar-local harness-compose--placeholder nil "Overlay showing the placeholder.")
 (defvar-local harness-compose--indent nil "Overlay lining the box's lines up after the prompt.")
 (defvar-local harness-compose--text "" "The box's text, kept across redraws.")
+(defvar-local harness-compose-generation 0
+  "Generation of this draft, incremented by `harness-compose-set'.
+Asynchronous input can distinguish a replaced or submitted draft from a
+redraw, even when both drafts hold the same text.")
 (defvar-local harness-compose--files nil
   "Project files for @ completion, relative to the root they are listed in.
 When the box has several roots (`harness-compose--file-roots') these are
@@ -187,6 +193,8 @@ The box may be out of sight then: its windows follow it again.")
 (defvar-local harness-compose--popup-timer nil "Timer asking the completion UI to show the token's completions.")
 (defvar-local harness-compose--fit-room nil
   "Pixels the attachment lines were last fitted to (`harness-compose--room').")
+(defvar-local harness-compose--controls-fit-room nil
+  "Pixels the optional controls were last fitted to, or nil without controls.")
 (defvar-local harness-compose--face 'harness-compose-face
   "Face the box's background is drawn in, set by `harness-compose-insert'.")
 (defvar-local harness-compose--accent nil
@@ -251,6 +259,11 @@ the box with its project alone (`harness-compose-project-function').")
   (funcall harness-compose-project-function))
 
 ;;;; Setup and drawing
+
+(defvar harness-compose-controls-functions nil
+  "Functions returning read-only control lines above a compose box.
+Called without arguments in the host buffer on each draw.  Each returns
+a string, already fitted to the window, or nil.")
 
 (defvar harness-compose-map (make-sparse-keymap)
   "Keys of the compose box.  Host major modes use it as their keymap's parent.")
@@ -436,21 +449,27 @@ frame's."
 Its images and faces count, and so does the buffer's face remapping."
   (string-pixel-width string (current-buffer)))
 
+(defun harness-compose--refit-needed-p ()
+  "Non-nil when attachments or optional controls no longer fit the windows."
+  (let ((room (harness-compose--room)))
+    (or (and harness-compose-attachments (not (eql harness-compose--fit-room room)))
+        (and harness-compose--controls-fit-room (not (eql harness-compose--controls-fit-room room))))))
+
 (defun harness-compose--on-resize (_window)
-  "Have the attachment lines fitted again once the windows settle.
+  "Have attachments and optional controls fitted once the windows settle.
 A window showing the buffer appeared or changed size: when that changes
 the room the lines have (`harness-compose--room'), the host draws them
 again, once the resizing has stopped.  Runs from
 `window-size-change-functions'."
-  (when (and harness-compose-attachments (not (eql harness-compose--fit-room (harness-compose--room))))
-    ;; Later than a host's own refit (the board's), which makes this one moot.
+  (when (harness-compose--refit-needed-p)
+    ;; Later than a host's own refit (the board's), which may make this moot.
     (harness-debounce (list 'harness-compose-refit (current-buffer)) 0.2 #'harness-compose--refit (current-buffer))))
 
 (defun harness-compose--refit (buffer)
-  "Draw BUFFER's attachments again unless they fit its windows already."
+  "Draw BUFFER's attachments and controls unless they fit its windows already."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when (and harness-compose-attachments (not (eql harness-compose--fit-room (harness-compose--room))))
+      (when (harness-compose--refit-needed-p)
         (harness-compose-redraw)))))
 
 (defconst harness-compose--min-name 10
@@ -530,9 +549,19 @@ attachments show as chips (`harness-compose--show-tokens')."
         harness-compose--thread-rails nil
         harness-compose--area-hints nil)
   (when text
+    ;; Explicit text starts another draft, even when both boxes are empty.
+    (cl-incf harness-compose-generation)
     ;; New text: the attachments whose tokens were deleted go for good.
     (setq harness-compose--text text
           harness-compose--detached nil))
+  (let ((start (point)))
+    (setq harness-compose--controls-fit-room nil)
+    (dolist (fn harness-compose-controls-functions)
+      (when-let* ((line (funcall fn)))
+        (setq harness-compose--controls-fit-room (harness-compose--room))
+        (insert (propertize (concat line "\n") 'read-only t 'rear-nonsticky t))))
+    ;; Partial tail redraws stop here, preserving controls and the draft.
+    (setq harness-compose-controls-start (copy-marker start)))
   (let* ((background (or face 'harness-compose-face))
          (accent (and accent (list accent background)))
          (prompt (if accent (concat (harness-compose-bar (car accent) background) "❯ ") "❯ "))
@@ -571,7 +600,10 @@ attachments show as chips (`harness-compose--show-tokens')."
     (setq harness-compose--placeholder (make-overlay (1- (point)) (point)))
     (harness-compose-update-placeholder)
     (harness-compose--show-tokens)
-    (harness-compose--line-up-quote-wraps)))
+    (harness-compose--line-up-quote-wraps)
+    ;; Advance only after construction: the prompt and draft belong after
+    ;; this marker, but a host's later tail-head insertion belongs before it.
+    (set-marker-insertion-type harness-compose-controls-start t)))
 
 (defun harness-compose-hide ()
   "Take the box off the buffer, keeping the words and the attachments.
@@ -593,8 +625,11 @@ less a draft for being out of sight."
         harness-compose--area-hints nil)
   (when harness-compose-start (set-marker harness-compose-start nil))
   (when harness-compose-end (set-marker harness-compose-end nil))
+  (when harness-compose-controls-start (set-marker harness-compose-controls-start nil))
   (setq harness-compose-start nil
-        harness-compose-end nil))
+        harness-compose-end nil
+        harness-compose-controls-start nil
+        harness-compose--controls-fit-room nil))
 
 (defun harness-compose-update-placeholder ()
   "Show the placeholder while the box is empty.
@@ -1254,6 +1289,7 @@ commands, rather than scroll."
   "Replace the box's contents with TEXT.
 The attachments whose tokens were deleted from the old text cannot come
 back."
+  (cl-incf harness-compose-generation)
   (setq harness-compose--text text
         harness-compose--detached nil
         harness-compose--area nil

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Transcribe one WAV with an already running whisper.cpp whisper-server.
+
+The default endpoint is local.  Only --url changes it; environment proxy
+settings and HTTP redirects cannot send the recording somewhere else.
+The successful result is plain UTF-8 text on stdout, suitable for
+harness-voice-transcribe-command.  Errors go to stderr with a nonzero exit.
+No model downloads, persistent audio copies, or third-party Python packages.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import secrets
+import socket
+import sys
+from http.client import HTTPException
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+DEFAULT_URL = "http://127.0.0.1:8080/inference"
+MAX_AUDIO_BYTES = 32 * 1024 * 1024
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+class TranscriptionError(Exception):
+    """A failed transcription, safe to report without a traceback."""
+
+
+class NoRedirect(HTTPRedirectHandler):
+    """Never resend a microphone recording to a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def endpoint(value):
+    """Validate an explicit HTTP(S) endpoint, excluding embedded credentials."""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("invalid endpoint URL") from exc
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+        or (port is not None and port == 0)
+    ):
+        raise argparse.ArgumentTypeError(
+            "endpoint requires HTTP(S), a host, and no credentials or fragment"
+        )
+    return value
+
+
+def positive_timeout(value):
+    """Parse a finite positive request timeout in seconds."""
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout requires positive seconds") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("timeout requires positive seconds")
+    return seconds
+
+
+def read_audio(path):
+    """Read a bounded, regular WAV file without copying it to another path."""
+    try:
+        if not path.is_file():
+            raise TranscriptionError("WAV input requires a regular file")
+        with path.open("rb") as source:
+            audio = source.read(MAX_AUDIO_BYTES + 1)
+    except OSError as exc:
+        raise TranscriptionError("WAV input unavailable") from exc
+    if len(audio) > MAX_AUDIO_BYTES:
+        raise TranscriptionError("WAV input exceeds 32 MiB")
+    if len(audio) <= 44 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
+        raise TranscriptionError("WAV input invalid or empty")
+    return audio
+
+
+def multipart(audio, language):
+    """Return (BODY, CONTENT-TYPE) for whisper-server's /inference fields."""
+    boundary = "harness-voice-" + secrets.token_hex(16)
+    delimiter = ("--" + boundary + "\r\n").encode("ascii")
+    parts = []
+    for name, value in (("response_format", "json"), ("language", language)):
+        parts.extend(
+            [
+                delimiter,
+                ('Content-Disposition: form-data; name="' + name + '"\r\n\r\n').encode(
+                    "ascii"
+                ),
+                value.encode("utf-8"),
+                b"\r\n",
+            ]
+        )
+    parts.extend(
+        [
+            delimiter,
+            # The original file name and path are unnecessary to the server.
+            b'Content-Disposition: form-data; name="file"; filename="recording.wav"\r\n',
+            b"Content-Type: audio/wav\r\n\r\n",
+            audio,
+            b"\r\n",
+            ("--" + boundary + "--\r\n").encode("ascii"),
+        ]
+    )
+    return b"".join(parts), "multipart/form-data; boundary=" + boundary
+
+
+def transcribe(path, url=DEFAULT_URL, language="auto", timeout=30.0):
+    """Upload PATH once and return the response's nonempty JSON text field."""
+    body, content_type = multipart(read_audio(path), language)
+    request = Request(
+        url,
+        data=body,
+        headers={"Content-Type": content_type, "Accept": "application/json"},
+        method="POST",
+    )
+    # Bypass environment proxies even for --url.  The endpoint is the user's
+    # explicit transport choice, not a destination for a proxy to reinterpret.
+    opener = build_opener(ProxyHandler({}), NoRedirect())
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            payload = response.read(MAX_RESPONSE_BYTES + 1)
+    except HTTPError as exc:
+        code = exc.code
+        exc.close()
+        raise TranscriptionError("transcription endpoint HTTP " + str(code)) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise TranscriptionError("transcription endpoint timeout") from exc
+    except (URLError, OSError, ValueError, HTTPException) as exc:
+        raise TranscriptionError("transcription endpoint unavailable") from exc
+    if len(payload) > MAX_RESPONSE_BYTES:
+        raise TranscriptionError("transcription response exceeds 4 MiB")
+    try:
+        result = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise TranscriptionError("transcription response invalid JSON") from exc
+    text = result.get("text") if isinstance(result, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise TranscriptionError("transcription response without text")
+    return text.strip()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("wav", type=Path, help="recorded WAV file (at most 32 MiB)")
+    parser.add_argument(
+        "--url", type=endpoint, default=DEFAULT_URL, help="endpoint URL (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--language", default="auto", help="whisper language code or auto (default: %(default)s)"
+    )
+    parser.add_argument(
+        "--timeout", type=positive_timeout, default=30.0, help="request timeout in seconds (default: %(default)s)"
+    )
+    args = parser.parse_args(argv)
+    try:
+        text = transcribe(args.wav, args.url, args.language, args.timeout)
+    except TranscriptionError as exc:
+        print("harness-voice-stt: " + str(exc), file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    # Do not depend on the locale of the Emacs process running this command.
+    sys.stdout.buffer.write((text + "\n").encode("utf-8"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
