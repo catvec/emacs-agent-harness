@@ -119,8 +119,14 @@ FACE overrides the button face."
                                action help))
 
 (defun harness-ui-media--graphic-p ()
-  "Non-nil when images can be shown on the selected frame."
-  (and (display-graphic-p) (image-type-available-p 'svg)))
+  "Non-nil when images can be shown where the current buffer is.
+That is the frame its window is on, which may be another than the
+selected one -- a review redrawn in its own frame as a media rendering
+changes, say -- else the selected frame."
+  (let ((frame (if-let* ((window (get-buffer-window nil t)))
+                   (window-frame window)
+                 (selected-frame))))
+    (and (display-graphic-p frame) (image-type-available-p 'svg))))
 
 (defun harness-ui-media--format-time (seconds)
   "Format SECONDS as m:ss."
@@ -550,12 +556,14 @@ was made or not."
               (and (> w 0) (> h 0) (cons w h))))))
     (error nil)))
 
-(defun harness-ui-media--poster-size (thumb)
+(defun harness-ui-media--poster-size (thumb &optional max-width)
   "Return (WIDTH . HEIGHT), in pixels, of the poster showing THUMB.
 THUMB, a PNG file or nil, keeps its shape and fits in
 `harness-ui-media--thumbnail-width' by three quarters of that; without
-one the poster is 16:9."
-  (let* ((max-w harness-ui-media--thumbnail-width)
+one the poster is 16:9.  MAX-WIDTH further limits the poster's width,
+for a comment with less room than a chat message."
+  (let* ((max-w (if max-width (max 1 (min max-width harness-ui-media--thumbnail-width))
+                  harness-ui-media--thumbnail-width))
          (max-h (round (* 0.75 max-w)))
          (size (and thumb (harness-ui-media--png-size thumb))))
     (if (null size)
@@ -625,7 +633,7 @@ read, which would block: it has no thumbnail and no duration."
          (action (and path (lambda () (harness-ui-media-toggle-video path))))
          (help (format "%s %s: mouse-1 or RET" (if proc "Stop" "Play") name))
          (poster (and action (harness-ui-media--graphic-p)
-                      (let ((dims (harness-ui-media--poster-size ready)))
+                      (let ((dims (harness-ui-media--poster-size ready (plist-get attachment :max-width))))
                         (harness-ui-media--poster-image ready (car dims) (cdr dims) proc duration making)))))
     (concat
      (if poster
@@ -666,8 +674,9 @@ read, which would block: it has no thumbnail and no duration."
 ;;;###autoload
 (defun harness-ui-media-render-attachment (attachment)
   "Return a propertized string showing the non-image ATTACHMENT.
-ATTACHMENT is (:path :size :mime :name).  Audio gets a player, video a
-thumbnail with an [open] button, anything else a file button."
+ATTACHMENT is (:path :size :mime :name), optionally :max-width in pixels
+for a video poster.  Audio gets a player, video a poster and Play button,
+anything else a file button."
   (let* ((mime (harness-ui-media--mime attachment))
          (s (cond ((string-prefix-p "audio/" mime) (harness-ui-media--render-audio attachment))
                   ((string-prefix-p "video/" mime) (harness-ui-media--render-video attachment))

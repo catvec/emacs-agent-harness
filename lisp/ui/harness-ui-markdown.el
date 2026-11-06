@@ -7,6 +7,9 @@
 ;; code blocks fontified by the language's major mode, lists with
 ;; hanging indentation (continuation lines wrap under the item text),
 ;; block quotes, links as buttons, horizontal rules and simple tables.
+;; An image, `![alt](target)', that names a local image file is drawn
+;; as the picture, and one that names a local video as the player the
+;; media module shows; any other stays the link its alt text makes.
 ;; The renderer is pure: `harness-ui-markdown-render' returns a string
 ;; the caller inserts, so it can be used for streaming re-renders.
 ;;
@@ -23,8 +26,12 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'mailcap)
 (require 'harness-links)
 (require 'harness-util)
+
+(declare-function harness-ui-image-string "harness-ui" (source &optional mime &rest props))
+(declare-function harness-ui-media-render-attachment "harness-ui-media" (attachment))
 
 (defgroup harness-ui-markdown nil
   "Markdown rendering for the harness."
@@ -217,6 +224,120 @@ or \":12\" suffix names."
         (goto-char (point-min))
         (forward-line (1- line)))))))
 
+;;;; Images and videos
+
+(defcustom harness-ui-markdown-media t
+  "Whether Markdown images that name local media are drawn.
+An image, `![alt](target)', whose TARGET is a file of this machine that
+is a picture shows the picture, and one that is a video shows the media
+module's player, poster and all.  A target that is no local media, or
+no media at all, stays a link named by its alt text.  The renderer
+draws the media of a view that has the UI modules loaded; a terminal,
+which shows no picture, gets their file buttons."
+  :type 'boolean
+  :group 'harness-ui-markdown)
+
+(defconst harness-ui-markdown--media-types
+  '(("avif" . "image/avif") ("bmp" . "image/bmp") ("gif" . "image/gif")
+    ("ico" . "image/x-icon") ("jpeg" . "image/jpeg") ("jpg" . "image/jpeg")
+    ("png" . "image/png") ("svg" . "image/svg+xml") ("tif" . "image/tiff")
+    ("tiff" . "image/tiff") ("webp" . "image/webp") ("xpm" . "image/x-xpixmap")
+    ("avi" . "video/x-msvideo") ("m4v" . "video/mp4") ("mkv" . "video/x-matroska")
+    ("mov" . "video/quicktime") ("mp4" . "video/mp4") ("mpeg" . "video/mpeg")
+    ("mpg" . "video/mpeg") ("ogv" . "video/ogg") ("webm" . "video/webm"))
+  "Media MIME types of the file names an image in Markdown may name.")
+
+(defvar harness-ui-markdown-width nil
+  "Columns the lines of a rendering have, or nil when the window sizes them.
+`harness-ui-markdown-render-lines' binds it to the width it wraps to; a
+picture is fitted to that room rather than to the window's.")
+
+(defun harness-ui-markdown--media-mime (file)
+  "Return the image or video MIME type of FILE, or nil when it is no media.
+It follows the file's name, the media types Markdown knows and then
+the system's mailcap table."
+  (let* ((extension (downcase (or (file-name-extension file) "")))
+         (mime (or (cdr (assoc extension harness-ui-markdown--media-types))
+                   (condition-case nil
+                       (mailcap-extension-to-mime (concat "." extension))
+                     (error nil)))))
+    (and (stringp mime)
+         (or (string-prefix-p "image/" mime)
+             (string-prefix-p "video/" mime))
+         mime)))
+
+(defun harness-ui-markdown--media-string (file mime)
+  "Return FILE, a local media file of MIME, drawn, or nil.
+A picture is drawn as wide as the lines rendered (`harness-ui-markdown-width'),
+or the window sizes it; a video is the media module's rendering, whose
+poster and Play button play it.  Nil when the module that draws one is
+not loaded, or cannot draw it, so the caller shows the link instead."
+  ;; The buffer may be shown in another frame than the selected one.
+  ;; Count the comment's columns in the characters of its own frame.
+  (let* ((window (get-buffer-window nil t))
+         (frame (if window (window-frame window) (selected-frame)))
+         (width (and harness-ui-markdown-width
+                     (max 1 (* harness-ui-markdown-width (frame-char-width frame))))))
+    (cond
+     ((string-prefix-p "image/" mime)
+      (when (fboundp 'harness-ui-image-string)
+        (let ((string (ignore-errors
+                        (harness-ui-image-string
+                         ;; An object, not blank text: callers may trim a
+                         ;; blank line or omit a blank message altogether.
+                         file mime :label "\uFFFC" :max-width width))))
+          (and (stringp string) (not (string-empty-p string)) string))))
+     ((string-prefix-p "video/" mime)
+      (when (fboundp 'harness-ui-media-render-attachment)
+        (let ((string (ignore-errors
+                        (harness-ui-media-render-attachment
+                         (list :path file :mime mime :name (file-name-nondirectory file)
+                               :size (harness-file-size file) :max-width width)))))
+          (and (stringp string) (not (string-blank-p string))
+               (if (string-suffix-p "\n" string) string (concat string "\n")))))))))
+
+(defun harness-ui-markdown--media (target)
+  "Return the rendering of TARGET, a local picture or video, or nil.
+TARGET is what an image in Markdown names: a file name, a file: URL,
+or a URL to browse, which is none of the renderer's to fetch."
+  (when (and harness-ui-markdown-media
+             (stringp target)
+             (not (harness-ui-markdown--url-p target)))
+    (let* ((file (car (harness-ui-markdown--link-file target)))
+           (local (and file (not (file-remote-p file))
+                       (file-regular-p file) file))
+           (mime (and local (harness-ui-markdown--media-mime local))))
+      (and mime (harness-ui-markdown--media-string local mime)))))
+
+(defun harness-ui-markdown-media-lines (path mime width)
+  "Return PATH, an image or video of MIME, as lines WIDTH columns at most.
+Each line ends in a newline, as `harness-ui-markdown-render-lines' gives
+them; nil when the module that draws it is not loaded, or cannot.  A
+picture or a player is a display of its own, never cut into pieces."
+  (let* ((harness-ui-markdown-width (max 8 (or width 80)))
+         (string (harness-ui-markdown--media-string path mime)))
+    (when (and string (not (string-empty-p string)))
+      (let ((lines nil) (pos 0) (end (length string)))
+        (while (< pos end)
+          (let* ((eol (or (string-search "\n" string pos) end))
+                 (line (substring string pos eol))
+                 (picture (text-property-not-all 0 (length line) 'display nil line))
+                 (first (let ((prefix (get-text-property 0 'line-prefix line)))
+                          (if (stringp prefix) prefix "")))
+                 (rest (let ((prefix (get-text-property 0 'wrap-prefix line)))
+                         (if (stringp prefix) prefix "")))
+                 (pieces (cond (picture (list line))
+                               ((string-blank-p line) (list line))
+                               (t (harness-ui-markdown--wrap-line
+                                   line first rest harness-ui-markdown-width nil)))))
+            (dolist (piece pieces)
+              (let ((text (concat piece "\n")))
+                (remove-text-properties 0 (length text)
+                                        '(line-prefix nil wrap-prefix nil) text)
+                (push text lines)))
+            (setq pos (1+ eol))))
+        (nreverse lines)))))
+
 ;; Emphasis, as Markdown has it, has text against its markers: the one
 ;; that opens it is not followed by a blank, the one that closes it not
 ;; preceded by one, and an underscore does not close it before a letter
@@ -233,6 +354,8 @@ or \":12\" suffix names."
           (group-n 2 "**" (+? nonl) "**")                              ; bold
           (group-n 3 "__" (+? nonl) "__")                              ; bold
           (group-n 4 "~~" (+? nonl) "~~")                              ; strike
+          ;; An image, before the link it also looks like.
+          (group-n 11 "!" "[" (*? (not "]")) "](" (+? (not ")")) ")")  ; image
           (group-n 5 "[" (+? (not "]")) "](" (+? (not ")")) ")")       ; link
           (group-n 6 (or bol (not (any alnum "*"))) "*" (+? (not (any "*\n"))) "*")  ; italic
           (group-n 7 (or bol (not (any alnum "_"))) "_" (+? (not (any "_\n"))) "_")  ; italic
@@ -287,6 +410,27 @@ digit may follow it: a name with underscores is a name."
                          (harness-ui-markdown-inline (substring text (+ start 2) (- end 2))) 'bold)))
            ((match-beginning 4)
             (setq piece (harness-ui-markdown--add-face (substring text (+ start 2) (- end 2)) 'harness-md-strike)))
+           ((match-beginning 11)
+            ;; "![ALT](TARGET)": local media is drawn, anything else is
+            ;; the link ALT makes.
+            (let* ((m (substring text start end))
+                   (sep (string-search "](" m))
+                   (label (substring m 2 sep))
+                   (target (string-trim (substring m (+ sep 2) -1))))
+              (setq piece (or (when-let* ((media (harness-ui-markdown--media target)))
+                                ;; Quoting a drawn image/player restores its
+                                ;; Markdown, not the display placeholder.
+                                (add-text-properties
+                                 0 (if (string-suffix-p "\n" media)
+                                       (1- (length media)) (length media))
+                                 (list 'harness-md-media-source m) media)
+                                media)
+                              (cond ((harness-links-p target)
+                                     (harness-ui-markdown--harness-link
+                                      target (and (not (string-empty-p label)) label)))
+                                    ((string-empty-p label)
+                                     (harness-ui-markdown--link target target))
+                                    (t (harness-ui-markdown--link label target)))))))
            ((match-beginning 5)
             ;; "[LABEL](URL)": LABEL holds no "]", so the first "](" splits it.
             (let* ((m (substring text start end))
@@ -779,6 +923,7 @@ narrower gets eight.
 `harness-ui-markdown-hard-breaks' says whether the lines of a paragraph
 join, as in `harness-ui-markdown-render'."
   (let* ((harness-ui-markdown-table-width width)
+         (harness-ui-markdown-width width)
          (rendered (harness-ui-markdown-render text))
          (end (length rendered))
          (pos 0)
@@ -805,11 +950,15 @@ join, as in `harness-ui-markdown-render'."
              (newline (cond ((< eol end) (substring rendered eol (1+ eol)))
                             (code (propertize "\n" 'face 'harness-md-code-block))
                             (t "\n")))
-             (pieces (if (string-blank-p line)
-                         ;; A rule, or an empty line: no margin on it.
-                         (list (truncate-string-to-width line width))
-                       (harness-ui-markdown--wrap-line
-                        line first rest width (memq block '(code table))))))
+             ;; A picture is one character whose display draws it: cut
+             ;; into pieces, each would draw the whole of it again.
+             (picture (text-property-not-all 0 (length line) 'display nil line))
+             (pieces (cond (picture (list line))
+                           ((string-blank-p line)
+                            ;; A rule, or an empty line: no margin on it.
+                            (list (truncate-string-to-width line width)))
+                           (t (harness-ui-markdown--wrap-line
+                               line first rest width (memq block '(code table)))))))
         (dolist (piece pieces)
           (let ((string (concat piece newline)))
             ;; The margins are text now: left as properties they would
@@ -840,11 +989,12 @@ than the rest.  A link's face goes: in a summary a link is its label."
   "Return Markdown TEXT as one line, for a list that names items by it.
 The text is rendered, so the line has no markers of the markup in it,
 only its faces, a heading's among them as plain bold; a link is its
-label, which does nothing; the language a code block names is left out,
-and line breaks and runs of blanks become a space each.  Only the start
-of a long text is read: the first words are what a caller cuts the line
-to."
-  (let* ((rendered (harness-ui-markdown-render
+label, which does nothing, and a picture its alt text, which names it;
+the language a code block names is left out, and line breaks and runs
+of blanks become a space each.  Only the start of a long text is read:
+the first words are what a caller cuts the line to."
+  (let* ((harness-ui-markdown-media nil)
+         (rendered (harness-ui-markdown-render
                     (let ((text (or text "")))
                       (if (> (length text) harness-ui-markdown--summary-limit)
                           (substring text 0 harness-ui-markdown--summary-limit)
@@ -906,11 +1056,13 @@ block's lines."
   "Return what the rendered text at POS was made from, to read it back.
 One of `hidden' (it does not show), `label' (a code block's language),
 `code' (a code block's text), `inline' (inline code), (link . URL),
-`bullet', `bar' (a block quote's) or `text', anything else.  A code
-block inside a quote reads as text: its fences would have to go inside
-the quote."
+(media . SOURCE), `bullet', `bar' (a block quote's) or `text', anything
+else.  A code block inside a quote reads as text: its fences would have
+to go inside the quote."
   (let ((url (get-text-property pos 'harness-url)))
     (cond ((invisible-p pos) 'hidden)
+          ((get-text-property pos 'harness-md-media-source)
+           (cons 'media (get-text-property pos 'harness-md-media-source)))
           ((and (eq (get-text-property pos 'harness-md-block) 'code)
                 (not (harness-ui-markdown--quoted-line-p pos)))
            (if (harness-ui-markdown--face-p pos 'harness-md-code-lang) 'label 'code))
@@ -929,7 +1081,8 @@ next to each other of the same kind is one piece."
       (let ((next (min (next-single-char-property-change pos 'invisible nil end)
                        (next-single-property-change pos 'face nil end)
                        (next-single-property-change pos 'harness-md-block nil end)
-                       (next-single-property-change pos 'harness-url nil end)))
+                       (next-single-property-change pos 'harness-url nil end)
+                       (next-single-property-change pos 'harness-md-media-source nil end)))
             (kind (harness-ui-markdown--piece-kind pos)))
         (if (and pieces (equal kind (car (car pieces))))
             (setcdr (cdr (car pieces)) next)
@@ -942,7 +1095,8 @@ next to each other of the same kind is one piece."
 The text is read back as far as its properties tell what the renderer
 made it from: a code block goes back between fences, under its
 language, inline code between backquotes, a link whose label is not its
-target to [label](target), a bullet to \"-\", a quote bar to \">\".
+target to [label](target), a drawn image/video to ![alt](target), a bullet
+to \"-\", a quote bar to \">\".
 Emphasis and headings, which are faces alone, read as plain text, and
 so does text the renderer did not make.  Text that does not show,
 hidden in a folded block say, is left out."
@@ -963,6 +1117,7 @@ hidden in a folded block say, is left out."
                (emit (pcase kind
                        ('inline (concat "`" text "`"))
                        (`(link . ,url) (if (equal text url) text (format "[%s](%s)" text url)))
+                       (`(media . ,source) source)
                        ('bullet (string-replace "•" "-" text))
                        ('bar (string-replace "┃" ">" text))
                        (_ text)))))))

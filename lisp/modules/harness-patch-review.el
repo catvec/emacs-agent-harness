@@ -166,6 +166,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'seq)
+(require 'mailcap)
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-links)
@@ -684,7 +685,11 @@ box and sent again, edits the comment instead of making another."
              :author author :time now :sent now
              :revision (cl-some (lambda (ref) (plist-get ref :revision)) (harness-thread-refs data))
              :location (and (null parent) (harness-patch-review--thread-location data))
-             :meta (list :chat t :session session-id :refs (harness-thread-refs data)))))
+             ;; The pictures and videos the words name stay with the
+             ;; comment, which draws them under them in the thread.
+             :meta (append (list :chat t :session session-id :refs (harness-thread-refs data))
+                           (and (plist-get data :attachments)
+                                (list :attachments (plist-get data :attachments)))))))
          (thread (car (change-review-find-comment set (change-review-comment-id comment)))))
     (when (and thread (not (change-review-thread-open-p thread)))
       (change-review-update-status set thread 'open :author author :time (+ now 0.001)))
@@ -712,29 +717,80 @@ thread's data and `:response' the words under it."
   (and (consp attachment) (plist-get attachment :thread)
        (null (plist-get (plist-get attachment :thread) :id))))
 
+(defun harness-patch-review--attachment-mime (attachment)
+  "Return the MIME type of ATTACHMENT, a block or a compose attachment.
+It is ATTACHMENT's own `:mime', else what its file name makes it."
+  (or (plist-get attachment :mime)
+      (when-let* ((path (plist-get attachment :path)))
+        (condition-case nil
+            (mailcap-extension-to-mime (or (file-name-extension path t) ""))
+          (error nil)))
+      "application/octet-stream"))
+
+(defun harness-patch-review--media-of-reply (attachments response)
+  "Return the pictures and videos among ATTACHMENTS that RESPONSE names.
+ATTACHMENTS are the blocks of a message, or the attachments of the
+feedback that sends a task back: plists with `:path', `:mime', `:name',
+`:size' and, for an image, the `:label' its token, [image 1], names it
+by.  RESPONSE is the words written under the reply's card.  A picture or
+video shows in the thread of the reply only when those words name it, as
+the compose box writes a token, so an attachment of the message's own
+text is not taken for the reply's."
+  (when (stringp response)
+    (let (media)
+      (dolist (attachment attachments)
+        (let* ((path (plist-get attachment :path))
+               (mime (harness-patch-review--attachment-mime attachment))
+               (label (plist-get attachment :label))
+               (name (or (plist-get attachment :name)
+                         (and path (file-name-nondirectory path))))
+               (named (or (and (stringp label) (not (string-empty-p label))
+                               (string-search (format "[%s]" label) response))
+                          (and (stringp name) (harness-names-file-p response name))
+                          (and (stringp path)
+                               (string-search (format "@%s" path) response)))))
+          (when (and path named
+                     (or (string-prefix-p "image/" mime)
+                         (string-prefix-p "video/" mime)))
+            (push (list :path path :mime mime :name name
+                        :size (plist-get attachment :size))
+                  media))))
+      (nreverse media))))
+
 (defun harness-patch-review--register-blocks (set session-id blocks)
   "Return BLOCKS with each reply in a new thread made a comment of SET.
 SESSION-ID is the session the message is sent in.  A block that goes on
-has its thread's id in the tag of its <thread> block."
+has its thread's id in the tag of its <thread> block.  The pictures and
+videos of the message that a reply's words name go with its comment,
+which the review draws in the thread."
   (mapcar (lambda (block)
             (if (harness-patch-review--new-thread-p block)
-                (harness-thread-block
-                 (harness-patch-review--register-thread set session-id (plist-get block :thread)))
+                (let* ((data (plist-get block :thread))
+                       (media (harness-patch-review--media-of-reply
+                               blocks (plist-get data :response)))
+                       (data (if media
+                                 (plist-put (copy-sequence data) :attachments media)
+                               data)))
+                  (harness-thread-block
+                   (harness-patch-review--register-thread set session-id data)))
               block))
           blocks))
 
-(defun harness-patch-review--user-tagged-comment (set session-id block &optional draft)
+(defun harness-patch-review--user-tagged-comment (set session-id block &optional draft attachments)
   "Make BLOCK, a parsed <thread> reply of the user's, a comment of SET.
 SESSION-ID is the session the message is sent in.  DRAFT non-nil keeps
 it unsent, as a reply in a thread of the review is until the feedback
-that sends the task back.  Return the id of the thread it is in.  Signal
-when the block names a thread this review does not have."
+that sends the task back.  ATTACHMENTS are the message's blocks: only
+media named in the reply's body go with its comment.  Return the id of
+the thread it is in.  Signal when the block names a thread this review
+does not have."
   (let* ((named (plist-get block :id))
          (thread (and named (change-review-find-thread set named))))
     (when (and named (not thread))
       (signal 'harness-error
               (list (format "No thread %s in this review" named))))
     (let* ((body (harness-thread-render-text block))
+           (media (harness-patch-review--media-of-reply attachments (plist-get block :body)))
            (status (let ((value (plist-get block :status)))
                      (and (member value '("open" "closed")) (intern value))))
            (time (float-time))
@@ -743,7 +799,8 @@ when the block names a thread this review does not have."
                        set body :thread thread
                        :author (harness-patch-review--user)
                        :time time :sent (unless draft time)
-                       :meta (list :tag t :session session-id)))))
+                       :meta (append (list :tag t :session session-id)
+                                     (and media (list :attachments media)))))))
       (when (and status (or thread comment))
         (change-review-update-status
          set (or thread (change-review-comment-thread comment)) status
@@ -751,16 +808,17 @@ when the block names a thread this review does not have."
       (or (and thread (change-review-thread-id thread))
           (and comment (change-review-comment-thread comment))))))
 
-(harness-defmethod patch-review/user-reply (task-id session-id block &optional draft)
+(harness-defmethod patch-review/user-reply (task-id session-id block &optional draft attachments)
   "Make BLOCK, a parsed <thread> reply of the user's, a comment of a review.
 The review is TASK-ID's; SESSION-ID is the session the message is sent
 in.  DRAFT non-nil keeps it unsent, as a reply in a thread of the review
-is until the feedback that sends the task back.  Return the id of the
-thread it is in.  Signal when the block names a thread this review does
-not have.  The thread-reply module reads the block out of the words;
-this keeps it."
+is until the feedback that sends the task back.  ATTACHMENTS are the
+message's blocks; media named in the reply's body stay with the comment.
+Return the id of the thread it is in.  Signal when the block names a
+thread this review does not have.  The thread-reply module reads the
+block out of the words; this keeps it."
   (harness-patch-review--user-tagged-comment
-   (harness-patch-review--set-for task-id t) session-id block draft))
+   (harness-patch-review--set-for task-id t) session-id block draft attachments))
 
 (defun harness-patch-review--on-message (blocks session-id info)
   "Make the replies in threads of the user's message BLOCKS comments of a review.
@@ -807,11 +865,17 @@ alone."
       (let ((set (harness-patch-review--set-for (plist-get task :id) t)))
         (mapcar (lambda (attachment)
                   (if (harness-patch-review--new-thread-attachment-p attachment)
-                      (plist-put (copy-sequence attachment) :thread
-                                 (harness-patch-review--register-thread
-                                  set session-id
-                                  (plist-put (copy-sequence (plist-get attachment :thread))
-                                             :response (plist-get attachment :response))))
+                      (let* ((response (plist-get attachment :response))
+                             (data (plist-put (copy-sequence (plist-get attachment :thread))
+                                              :response response))
+                             (media (harness-patch-review--media-of-reply
+                                     attachments response))
+                             (data (if media
+                                       (plist-put data :attachments media)
+                                     data)))
+                        (plist-put (copy-sequence attachment) :thread
+                                   (harness-patch-review--register-thread
+                                    set session-id data)))
                     attachment))
                 attachments)))))
 

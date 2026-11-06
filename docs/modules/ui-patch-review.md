@@ -576,6 +576,7 @@ it takes its part of the report and the banner out.
 - `harness-chat-mode-hook` → `harness-ui-patch-review--setup-chat`
 - `harness-ui-event-functions` → `harness-ui-patch-review--on-event`
 - `harness-ui-linking-context-functions` → `harness-ui-patch-review--link-context`
+- `harness-ui-media-rerender-functions` → `harness-ui-patch-review--rerender-media`
 - `harness-ui-report-panel-functions` → `harness-ui-patch-review--panel`
 - `harness-ui-review-changes-functions` → `harness-ui-patch-review--banner-panel`
 - `harness-ui-review-pending-functions` → `harness-ui-patch-review--pending-p`

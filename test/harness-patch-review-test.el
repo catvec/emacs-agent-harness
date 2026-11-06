@@ -175,6 +175,31 @@ KEYS: :thread, :location (data), :revision, :sent."
 
 ;;;; Keeping the threads
 
+(ert-deftest harness-patch-review-keeps-the-media-a-reply-names ()
+  "The pictures and videos whose tokens are in a reply's words go with it.
+One attached to the message's own words, or named nowhere, stays out."
+  (let* ((image (list :type "image" :path "/tmp/shot.png" :mime "image/png"
+                      :label "image 1"))
+         (other (list :type "image" :path "/tmp/other.png" :mime "image/png"
+                      :label "image 2"))
+         (video (list :type "file" :path "/tmp/clip.mp4" :mime "video/mp4"
+                      :name "clip.mp4"))
+         (unused (list :type "image" :path "/tmp/unused.png" :mime "image/png"
+                       :label "image 3")))
+    (should (equal (list (list :path "/tmp/shot.png" :mime "image/png"
+                               :name "shot.png" :size nil)
+                         (list :path "/tmp/clip.mp4" :mime "video/mp4"
+                               :name "clip.mp4" :size nil))
+                   (harness-patch-review--media-of-reply
+                    (list image other video unused)
+                    "See [image 1] and @clip.mp4, not the other.")))
+    ;; The message's own words name image 2, the reply's do not.
+    (should (equal (list (list :path "/tmp/shot.png" :mime "image/png"
+                               :name "shot.png" :size nil))
+                   (harness-patch-review--media-of-reply
+                    (list image other) "Only [image 1] here.")))
+    (should-not (harness-patch-review--media-of-reply (list image other) nil))))
+
 (ert-deftest harness-patch-review-keeps-the-threads-of-a-task ()
   "A task starts with no thread; what a UI sends is kept in the state
 directory, announced, and read back after a restart."
@@ -423,8 +448,12 @@ the user saying anything, and the message does not say to."
       (let* ((id (harness-patch-review-test--working-task))
              (sid (plist-get (harness-call 'task/get id) :session))
              (thread (car (harness-patch-review-test--user-comment id "Why eighteen?" :sent 5.0))))
-        ;; The task's session waits between turns, blocked for the reply.
+        ;; Its turn ended talking to the user: the task waits for their
+        ;; reply, and its session says so (`blocked'), with no request
+        ;; pending (`harness-tasks--sync-reply-block').
         (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+        (should-not (plist-get (harness-call 'session/get sid) :pending))
+        (should (harness-session-waiting-on-user-p (harness-call 'session/get sid)))
         (should (plist-get (harness-call 'patch-review/apply id
                                          (list :op "set-status" :thread thread :status "closed"
                                                :id "s-last" :time 6.0
@@ -1686,6 +1715,27 @@ its meta, and, in the block that goes on, the thread's id in the tag of its
       (should (equal '("add-comment" "add-comment")
                      (mapcar (lambda (e) (format "%s" (plist-get (cadr e) :op))) (reverse events)))))))
 
+(ert-deftest harness-patch-review-keeps-a-reply-s-picture-with-it ()
+  "A picture the message attached, whose token is in the reply's words,
+is kept in the comment's meta for the thread to draw."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (agent (harness-patch-review-test--agent-says id "The button is fixed."))
+           (file (expand-file-name "shot.png" default-directory))
+           (coding-system-for-write 'no-conversion))
+      (write-region harness-test-png nil file nil 'silent)
+      (harness-patch-review-test--sends
+       id
+       (harness-patch-review-test--reply agent "See this: [image 1].")
+       (list :type "image" :path file :mime "image/png" :label "image 1"
+             :name "shot.png"))
+      (let* ((thread (car (harness-patch-review-test--threads id)))
+             (comment (car (plist-get thread :comments))))
+        (should (equal (list (list :path file :mime "image/png"
+                                   :name "shot.png" :size nil))
+                       (plist-get (plist-get comment :meta) :attachments))))
+      (delete-file file))))
+
 (ert-deftest harness-patch-review-puts-a-reply-to-lines-of-a-diff-on-those-lines ()
   "A reply to lines of a diff is a thread on them, at the revision the reference
 names: the location is the file, the side and the lines, with the lines
@@ -2011,6 +2061,28 @@ that names threads in a <thread> block in each, as an agent is told to."
         (should (= 2 (length (harness-thread-parse-blocks (plist-get (car answers) :content)))))
         (should-not (cl-find "review_comment" (harness-call 'session/nodes sid)
                              :key (lambda (n) (plist-get n :tool)) :test #'equal))))))
+
+(ert-deftest harness-patch-review-keeps-a-picture-with-a-feedback-reply ()
+  "A picture among the feedback whose token is in a reply's words is kept
+with the thread the reply makes, for the review to draw."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (file (expand-file-name "shot.png" default-directory))
+           (coding-system-for-write 'no-conversion))
+      (write-region harness-test-png nil file nil 'silent)
+      (let* ((task (harness-call 'task/get id))
+             (image (list :path file :mime "image/png" :name "shot.png"
+                          :label "image 1"))
+             (reply (list :label "reply 1" :response "Here: [image 1]"
+                          :thread (list :refs nil)))
+             (result (harness-patch-review--on-feedback-attachments
+                      (list image reply) task))
+             (data (plist-get (cadr result) :thread)))
+        (should (plist-get data :id))
+        (should (equal (list (list :path file :mime "image/png"
+                                   :name "shot.png" :size nil))
+                       (plist-get data :attachments))))
+      (delete-file file))))
 
 (ert-deftest harness-patch-review-sends-a-task-back-with-a-reply-as-one-thread ()
   "Feedback sent from the report's box, with a reply in a thread among its
@@ -2402,6 +2474,72 @@ replies\", and the model takes a step more to correct it."
                                 (plist-get (car (last (plist-get last :content))) :text))))
       ;; The turn is over, and its count goes with it.
       (should-not (gethash sid harness-thread-reply--repairs)))))
+
+(defun harness-thread-reply-test--typed-media (mime name token)
+  "Check that a typed reply keeps only its own attachment, MIME, NAME, TOKEN."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (thread (car (harness-patch-review-test--user-comment id "The button is fixed.")))
+           (file (expand-file-name name default-directory))
+           (attachment (append (list :type (if (string-prefix-p "image/" mime) "image" "file")
+                                     :path file :mime mime :name name :size 17)
+                               (and (string-prefix-p "image/" mime) (list :label "image 1"))))
+           (blocks
+            (harness-run-filter
+             'agent/message
+             (list (list :type "text"
+                         :text (format
+                                (concat "A message attachment: [image 2] and @message.mp4.\n\n"
+                                        "<thread id=\"%s\">\n"
+                                        "<quote>Earlier: [image 2] and @message.mp4.</quote>\n"
+                                        "Here: %s\n</thread>\n\n"
+                                        "<thread id=\"%s\">\n<quote>Here: %s</quote>\n"
+                                        "No attachment in this reply.\n</thread>")
+                                thread token thread token))
+                   attachment
+                   (list :type "image" :path (expand-file-name "message.png" default-directory)
+                         :mime "image/png" :label "image 2")
+                   (list :type "file" :path (expand-file-name "message.mp4" default-directory)
+                         :mime "video/mp4" :name "message.mp4"))
+             sid '(:from nil)))
+           (threads (harness-patch-review-test--threads id))
+           (comments (plist-get (cl-find thread threads
+                                        :key (lambda (item) (plist-get item :id)) :test #'equal)
+                                :comments))
+           (reply (cadr comments))
+           (unattached (caddr comments)))
+      ;; The real filters register typed replies before the task sends them.
+      (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+      (should (= 3 (length comments)))
+      (should (equal (list (list :path file :mime mime :name name :size 17))
+                     (plist-get (plist-get reply :meta) :attachments)))
+      (should (plist-get (plist-get reply :meta) :tag))
+      (should (equal sid (plist-get (plist-get reply :meta) :session)))
+      (should (numberp (plist-get reply :sent)))
+      ;; Neither the quote, the surrounding prose, nor another reply owns it.
+      (should-not (plist-get (plist-get unattached :meta) :attachments))
+      (should (equal "No attachment in this reply."
+                     (harness-thread-response
+                      (cadr (cl-remove-if-not #'harness-thread-block-p blocks)))))
+      (should (member attachment blocks))
+      ;; Re-reading the typed reply blocks keeps them unchanged.  The task's
+      ;; generated feedback also contains example <thread> markup; it is not
+      ;; another user message to run through the filters.
+      (let ((replies (cl-remove-if-not #'harness-thread-block-p blocks)))
+        (should (equal replies (harness-run-filter 'agent/message replies sid '(:from nil)))))
+      (should (= 3 (length (plist-get
+                           (cl-find thread (harness-patch-review-test--threads id)
+                                    :key (lambda (item) (plist-get item :id)) :test #'equal)
+                           :comments)))))))
+
+(ert-deftest harness-thread-reply-keeps-a-typed-reply-s-picture ()
+  "An image token in a typed reply keeps that image with only that comment."
+  (harness-thread-reply-test--typed-media "image/png" "shot.png" "[image 1]"))
+
+(ert-deftest harness-thread-reply-keeps-a-typed-reply-s-video ()
+  "A file reference in a typed reply keeps that video with only that comment."
+  (harness-thread-reply-test--typed-media "video/mp4" "clip.mp4" "@clip.mp4"))
 
 (provide 'harness-patch-review-test)
 ;;; harness-patch-review-test.el ends here

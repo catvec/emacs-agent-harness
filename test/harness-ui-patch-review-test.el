@@ -2132,6 +2132,91 @@ as typed."
         (should-not (string-search "**" (funcall shown)))
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
+(ert-deftest harness-ui-patch-review-draws-a-picture-in-a-comment ()
+  "A comment that names a local picture draws it in the threads view.
+The picture is the image the UI shows, fitted to the width of the
+comment's lines, and no Markdown of it is left to read."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (file (expand-file-name "shot.png" (harness-test-temp-dir)))
+           (asked nil)
+           (coding-system-for-write 'no-conversion))
+      (write-region harness-test-png nil file nil 'silent)
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-ui-image-string)
+                     (lambda (source &optional mime &rest props)
+                       (setq asked (list source mime props))
+                       (concat (propertize (plist-get props :label) 'display '(image :type png)) "\n"))))
+            (ignore (harness-ui-patch-review-test--comment-on
+                     review "a.el" '(:new . 2)
+                     (format "The button now:\n\n![the button](%s)" file)))
+            (harness-ui-patch-review-test--wait-text popout "The button now:")
+            (with-current-buffer popout
+              (goto-char (point-min))
+              (search-forward "The button now:")
+              (let ((at (text-property-not-all (point) (point-max) 'display nil)))
+                (should at)
+                (should (eq 'image (car-safe (get-text-property at 'display)))))
+              (should asked)
+              (should (equal file (car asked)))
+              ;; The shared renderer uses an object, not whitespace that
+              ;; a caller could trim from an image-only comment.
+              (should (equal "\uFFFC" (plist-get (nth 2 asked) :label)))
+              (should-not (string-search "](file:" (buffer-substring-no-properties
+                                                    (point-min) (point-max))))))
+        (delete-file file)))))
+
+(ert-deftest harness-ui-patch-review-draws-pictures-a-reply-carries ()
+  "A picture the user attached to a reply is drawn in its thread.
+The review keeps it with the comment; the thread shows it under the
+words, fitted to the comment's lines."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (file (expand-file-name "attached.png" (harness-test-temp-dir)))
+           (asked nil)
+           (coding-system-for-write 'no-conversion))
+      (write-region harness-test-png nil file nil 'silent)
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-ui-image-string)
+                     (lambda (source &optional mime &rest props)
+                       (setq asked (list source mime props))
+                       (concat (propertize (plist-get props :label) 'display '(image :type png)) "\n"))))
+            (ignore (harness-ui-patch-review-test--comment-on
+                     review "a.el" '(:new . 2) "Screenshot attached:"
+                     :meta (list :attachments
+                                 (list (list :path file :mime "image/png"
+                                             :name "attached.png")))))
+            (harness-ui-patch-review-test--wait-text popout "Screenshot attached:")
+            (with-current-buffer popout
+              (goto-char (point-min))
+              (search-forward "Screenshot attached:")
+              (let ((at (text-property-not-all (point) (point-max) 'display nil)))
+                (should at)
+                (should (eq 'image (car-safe (get-text-property at 'display)))))
+              (should asked)
+              (should (equal file (car asked)))))
+        (delete-file file)))))
+
+(ert-deftest harness-ui-patch-review-redraws-a-view-that-shows-a-player ()
+  "A player's rendering changed: the view that shows it is drawn again.
+The media module would edit it in place, which leaves the lines after
+the player without the bar they are drawn under, so a review's views
+redraw whole; a view that does not show the media is left alone."
+  (require 'harness-ui-media)
+  (let ((drew nil))
+    (with-temp-buffer
+      (setq-local change-review-ui--set
+                  (harness-ui-patch-review--make-set :id "t-shot" :title "A review"))
+      (setq-local change-review-ui--redraw-function (lambda () (setq drew t)))
+      (insert "A player: "
+              (propertize " " 'harness-ui-media-id "/tmp/clip.mp4")
+              "\n")
+      (should (harness-ui-patch-review--rerender-media "/tmp/clip.mp4"))
+      (should drew)
+      (should-not (harness-ui-patch-review--rerender-media "/tmp/other.mp4")))))
+
 (ert-deftest harness-ui-patch-review-acts-on-threads-in-ediff ()
   "In a version, r replies to the thread under the line at point and x closes
 it or opens it again; in the control panel they act on the thread at the
@@ -7228,6 +7313,54 @@ checks that."
           (insert-file-contents file)
           (ert-info ((format "%s" file))
             (should-not (search-forward "patch-review" nil t))))))))
+
+(ert-deftest harness-ui-patch-review-redraws-media-in-ediff-overlays ()
+  "Media in an Ediff thread redraws the overlay, not the read-only code.
+Both line comments' after-strings and file comments' before-strings count."
+  (dolist (where '((:new . 2) nil))
+    (ert-info ((format "Comment at %S" where))
+      (harness-ui-patch-review-test-with-repo
+        (let* ((review (harness-ui-patch-review-test--review repo))
+               (file (harness-ui-patch-review-test--file review "a.el"))
+               (path (expand-file-name "clip.mp4" repo))
+               (property (if where 'after-string 'before-string))
+               (state "Loading player")
+               (draws 0)
+               (code "(setq a1 1)\n(setq a2 'two)"))
+          (ignore (harness-ui-patch-review-test--comment-on
+                   review "a.el" where "Watch this clip."
+                   :meta (list :attachments (list (list :path path :mime "video/mp4")))))
+          (cl-letf (((symbol-function 'harness-ui-markdown-media-lines)
+                     (lambda (source _mime _width)
+                       (cl-incf draws)
+                       (list (propertize state 'harness-ui-media-id (copy-sequence source))))))
+            (let ((buffer (harness-ui-patch-review--side-buffer review file 'new code)))
+              (unwind-protect
+                  (with-current-buffer buffer
+                    (let* ((overlay (cl-find-if (lambda (item) (overlay-get item 'change-review-overlay))
+                                                (overlays-in (point-min) (point-max))))
+                           (text (overlay-get overlay property))
+                           (noise (make-overlay (point-min) (point-min))))
+                      (should (string-search "Loading player" text))
+                      (should (= (overlay-start overlay) (if where (point-max) (point-min))))
+                      (should-not (text-property-not-all (point-min) (point-max) 'harness-ui-media-id nil))
+                      ;; An unrelated overlay is not part of the review's drawing.
+                      (overlay-put noise 'after-string
+                                   (propertize "Other player" 'harness-ui-media-id "other-media"))
+                      (setq state "Ready player")
+                      (should (harness-ui-patch-review--rerender-media (copy-sequence path)))
+                      (should (= 2 draws))
+                      (should-not (overlay-buffer overlay))
+                      (let ((fresh (cl-find-if (lambda (item) (overlay-get item 'change-review-overlay))
+                                               (overlays-in (point-min) (point-max)))))
+                        (should (string-search "Ready player" (overlay-get fresh property)))
+                        (should-not (string-search "Loading player" (overlay-get fresh property))))
+                      (should-not (harness-ui-patch-review--rerender-media "other-media"))
+                      (should (= 2 draws))
+                      (should (equal code (buffer-string)))
+                      (should buffer-read-only)
+                      (should-not (buffer-modified-p))))
+                (kill-buffer buffer)))))))))
 
 (provide 'harness-ui-patch-review-test)
 ;;; harness-ui-patch-review-test.el ends here

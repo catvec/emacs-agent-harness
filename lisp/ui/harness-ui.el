@@ -3376,7 +3376,9 @@ position just after the region moves to the end of TEXT."
 (defun harness-ui-image-string (source &optional mime &rest props)
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
 MIME is a hint for the image type.  PROPS may hold `:max-width' and
-`:max-height', the most pixels the image takes; by default it takes at
+`:max-height', the most pixels the image takes, and `:label', the text
+the image is drawn over, `[image PATH]' by default: a caller that shows
+the picture alone gives a blank one.  By default it takes at
 most 60% of the width of the window showing the buffer and half its
 height, and never more than `harness-ui-image-max-height', so a short
 window, such as a BTW's, still shows it whole with the lines around
@@ -3392,7 +3394,10 @@ it outside Emacs."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
          (source (if (and data mime) (list :data data :mime mime) source))
+         ;; What a reader sees when no image is drawn, and what the image
+         ;; is drawn over: the caller may give a shorter one.
          (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
+         (shown-label (or (plist-get props :label) label))
          (local (and path (not (file-remote-p path))))
          ;; A file here opens larger; one on another host would block the
          ;; popout that could not read it, so it opens as any file does.
@@ -3416,7 +3421,7 @@ it outside Emacs."
                  (format "%s; + - zoom, 0 fits, 1 actual size" mime)))
          (shown (and drawable (not too-large)
                      (apply #'image-viewer-image-string source
-                            :label label
+                            :label shown-label
                             :max-width (max 1 width)
                             :max-height (max 1 height)
                             :max-scale harness-ui-image-max-scale

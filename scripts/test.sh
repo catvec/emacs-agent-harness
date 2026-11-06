@@ -3,6 +3,7 @@
 #   scripts/test.sh                      every test/*-test.el
 #   scripts/test.sh FILE... [SELECTOR]   only these files (optionally an ERT selector)
 #   scripts/test.sh --changed            only the suites the working tree's changes touch
+#   scripts/test.sh --status             check the last run, without running tests
 # Set HARNESS_INTEGRATION=1 to include tests that talk to real models.
 # Set HARNESS_TEST_JOBS to how many files run at once (default: up to 4).
 # Set HARNESS_TEST_TIMEOUT to kill one file after N seconds (default 900).
@@ -22,6 +23,12 @@
 # working tree's changes touch.  The full run, with no arguments, is
 # what a task runs once before handing its work in.
 #
+# Every run leaves scripts/.dev/test-stamp.json: full or selected run,
+# tested commit, dirty tree and failed suites.  `running' replaces any
+# earlier pass before suites start.  --status checks this record and
+# succeeds only for a passing full run on the current clean commit.
+# It runs no tests: read the saved logs when investigating a failure.
+#
 # These are the Emacs suites.  The Flutter app in harness_client/ has its own
 # check, harness_client/tool/check_build.sh, which builds it; a run here that
 # finds the app changed says so at the end, since no suite here would notice
@@ -31,14 +38,62 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
+# A read-only pre-report check.  Use the structured result, not a
+# wrapper's exit status (a pipe or `echo' after the run can hide it).
+if [ "$#" = 1 ] && [ "$1" = --status ]; then
+  python3 - "$ROOT" <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1])
+path = root / "scripts/.dev/test-stamp.json"
+try:
+    stamp = json.loads(path.read_text())
+    if not isinstance(stamp, dict) or stamp.get("format") != 1:
+        raise ValueError("unrecognized format")
+except (OSError, ValueError) as exc:
+    print(f"TEST RESULT: UNVERIFIED — cannot read {path}: {exc}")
+    sys.exit(1)
+
+print(f"TEST RESULT: {str(stamp.get('result', 'unknown')).upper()} "
+      f"({stamp.get('kind', 'unknown')}, {stamp.get('files', '?')} suites, "
+      f"{len(stamp.get('failed', []))} failed)")
+for suite in stamp.get("failed", []):
+    print(f"  FAILED: {suite}")
+try:
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    dirty = subprocess.check_output(["git", "status", "--porcelain", "-uall"], cwd=root, text=True).strip()
+except subprocess.CalledProcessError:
+    print("UNVERIFIED: cannot check the tested commit")
+    sys.exit(1)
+problems = []
+if stamp.get("result") != "pass" or stamp.get("failed"):
+    problems.append("the last run did not pass; read its saved logs")
+if stamp.get("kind") != "full":
+    problems.append("selected suites are not a full run")
+if stamp.get("head") != head:
+    problems.append("HEAD changed since the run")
+if stamp.get("dirty") is not False or dirty:
+    problems.append("the tested tree or current tree has uncommitted changes")
+for problem in problems:
+    print(f"UNVERIFIED: {problem}")
+print(f"Saved logs: {stamp.get('logs', 'scripts/.dev/test-logs')}")
+sys.exit(bool(problems))
+PY
+  exit $?
+fi
+
 files=()
 selector=t
 changed=0
+full=1
 args=()
 for a in "$@"; do
   case "$a" in
-    --changed) changed=1 ;;
-    *) args+=("$a") ;;
+    --changed) changed=1; full=0 ;;
+    *) args+=("$a"); full=0 ;;
   esac
 done
 set -- ${args[@]+"${args[@]}"}
@@ -58,10 +113,34 @@ JOBS=${HARNESS_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}
 if [ -z "${HARNESS_TEST_JOBS:-}" ] && [ "$JOBS" -gt 4 ]; then JOBS=4; fi
 TIMINGS=${HARNESS_TEST_TIMINGS:-$ROOT/scripts/.dev/test-timings}
 LOGS=${HARNESS_TEST_LOGS:-$ROOT/scripts/.dev/test-logs}
+STAMP=$ROOT/scripts/.dev/test-stamp.json
 if ! mkdir -p "$LOGS"; then
   echo "test.sh: cannot make the log directory $LOGS" >&2
   exit 2
 fi
+
+# Write atomically, including for a selected or interrupted run, so a
+# later failure cannot leave a previous full pass looking current.
+json_escape() {
+  local text=$1
+  text=${text//\\/\\\\}
+  text=${text//\"/\\\"}
+  text=${text//$'\n'/\\n}
+  text=${text//$'\r'/\\r}
+  text=${text//$'\t'/\\t}
+  printf '%s' "$text"
+}
+write_stamp() {
+  local result=$1 failed_json="" f
+  for f in ${failed[@]+"${failed[@]}"}; do
+    failed_json="${failed_json:+$failed_json, }\"$(json_escape "$f")\""
+  done
+  mkdir -p "$(dirname "$STAMP")" || return 1
+  printf '{\n  "format": 1,\n  "result": "%s",\n  "kind": "%s",\n  "head": "%s",\n  "dirty": %s,\n  "files": %d,\n  "failed": [%s],\n  "logs": "%s",\n  "wall": %d,\n  "finished": "%s"\n}\n' \
+    "$result" "$([ "$full" = 1 ] && echo full || echo selected)" "$run_head" "$run_dirty" \
+    "${#files[@]}" "$failed_json" "$(json_escape "$LOGS")" "$((SECONDS - started))" \
+    "$(date '+%Y-%m-%dT%H:%M:%S%z')" >"$STAMP.new" && mv "$STAMP.new" "$STAMP"
+}
 
 # Whether the branch has changed what the Flutter app is built from, committed
 # since it left main or not, and whether the app's build check has passed for
@@ -203,6 +282,11 @@ run_suite() {
 }
 
 started=$SECONDS
+run_head=$(git rev-parse HEAD 2>/dev/null || true)
+run_dirty=false
+[ -z "$(git status --porcelain -uall 2>/dev/null)" ] || run_dirty=true
+failed=()
+write_stamp running || exit 2
 running=0
 for f in $(ordered); do
   if [ "$running" -ge "$JOBS" ]; then
@@ -260,7 +344,17 @@ for f in "${files[@]}"; do
   fi
 done
 
+# Never attribute tests to a commit made while they ran, or let a
+# dirty run become clean merely because its changes were committed.
+if [ "$run_head" != "$(git rev-parse HEAD 2>/dev/null || true)" ] ||
+   [ -n "$(git status --porcelain -uall 2>/dev/null)" ]; then
+  run_dirty=true
+fi
+write_stamp "$([ "$fail" = 0 ] && echo pass || echo fail)" || fail=1
+
 say ""
+say "TEST RESULT: $([ "$fail" = 0 ] && echo PASS || echo FAIL) ($([ "$full" = 1 ] && echo full || echo selected) run)"
+say "result record: $STAMP"
 say "full logs: $LOGS"
 for f in ${failed[@]+"${failed[@]}"}; do
   say "  $(basename "$f" .el) log: $LOGS/$(basename "$f" .el).log"

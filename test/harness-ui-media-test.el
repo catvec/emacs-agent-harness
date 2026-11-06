@@ -101,6 +101,25 @@ Only the header, which is all the poster needs to size it."
           (should (harness-ui-media-test-has-p s (lambda (p) (let ((d (plist-get p 'display))) (and (consp d) (eq (plist-get (cdr d) :type) 'svg))))))
         (should (string-match-p "─" plain))))))
 
+(ert-deftest harness-ui-media-graphic-p-follows-the-buffer-s-frame ()
+  "Images are for the frame the buffer is shown in, not just the selected one.
+A review drawn again as a media rendering changes may be in a graphic
+frame while a terminal frame is selected."
+  (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'shown))
+            ((symbol-function 'window-frame)
+             (lambda (window) (if (eq window 'shown) 'graphic 'terminal)))
+            ((symbol-function 'selected-frame) (lambda () 'terminal))
+            ((symbol-function 'display-graphic-p)
+             (lambda (&optional frame) (eq frame 'graphic)))
+            ((symbol-function 'image-type-available-p) (lambda (_) t)))
+    (should (harness-ui-media--graphic-p)))
+  (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil))
+            ((symbol-function 'selected-frame) (lambda () 'terminal))
+            ((symbol-function 'display-graphic-p)
+             (lambda (&optional frame) (eq frame 'graphic)))
+            ((symbol-function 'image-type-available-p) (lambda (_) t)))
+    (should-not (harness-ui-media--graphic-p))))
+
 (ert-deftest harness-ui-media-rerender-in-place ()
   (harness-ui-media-test-with
     (let* ((wav (harness-ui-media-test-wav (expand-file-name "clip.wav" dir) 3.0))
@@ -156,6 +175,15 @@ plain card, and a terminal shows the caption alone."
       ;; the duration, sized from the thumbnail's shape.
       (should (equal '(320 . 180) (harness-ui-media--poster-size thumb)))
       (should (equal '(320 . 180) (harness-ui-media--poster-size nil)))
+      (should (equal '(160 . 90) (harness-ui-media--poster-size thumb 160)))
+      (should (equal '(160 . 90) (harness-ui-media--poster-size nil 160)))
+      (cl-letf (((symbol-function 'harness-ui-media--graphic-p) (lambda () t))
+                ((symbol-function 'harness-ui-media--poster-image)
+                 (lambda (_thumb width height &rest _)
+                   (should (equal '(160 . 90) (cons width height)))
+                   '(image :type svg))))
+        (harness-ui-media-render-attachment
+         (list :path video :mime "video/mp4" :max-width 160)))
       (let ((svg (harness-ui-media-test--poster-svg (harness-ui-media--poster-image thumb 320 180 nil 42))))
         (should (string-match-p "data:image/png;base64" svg))
         (should (string-match-p "<polygon" svg))

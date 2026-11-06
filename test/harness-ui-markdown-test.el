@@ -27,6 +27,128 @@
         (setq pos next)))
     (nreverse parts)))
 
+;;;; Pictures and videos
+
+(defun harness-md-test-media-file (extension)
+  "Make a temporary file named with EXTENSION and return it."
+  (make-temp-file "harness-md-media-" nil extension))
+
+(defun harness-md-test-display-at (string)
+  "Return where STRING first shows a picture, or nil."
+  (let ((pos (text-property-not-all 0 (length string) 'display nil string)))
+    (and pos (get-text-property pos 'display string) pos)))
+
+(ert-deftest harness-md-a-picture-of-this-machine-is-drawn ()
+  "An image naming a local picture is the picture, fitted to the lines drawn.
+The alt text does not show, and the image keeps none of its Markdown."
+  (let ((file (harness-md-test-media-file ".png"))
+        (asked nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness-ui-image-string)
+                   (lambda (source &optional mime &rest props)
+                     (setq asked (list source mime props))
+                     (concat (propertize (plist-get props :label) 'display '(image :type png)) "\n"))))
+          (let* ((markdown (format "The shot:\n\n![the button](%s)" file))
+                 (rendered (harness-ui-markdown-render markdown))
+                 (at (harness-md-test-display-at rendered)))
+            (should asked)
+            (should (equal file (nth 0 asked)))
+            (should (equal "image/png" (nth 1 asked)))
+            (should (equal "\uFFFC" (plist-get (nth 2 asked) :label)))
+            (should-not (string-blank-p rendered))
+            (should at)
+            (should (eq 'image (car-safe (get-text-property at 'display rendered))))
+            (should (string-match-p "The shot" (substring-no-properties rendered)))
+            (should-not (string-match-p "!\\[" (substring-no-properties rendered)))
+            ;; Drawn a line at a time, the picture has a line of its own,
+            ;; and is fitted to the room the lines have.
+            (setq asked nil)
+            (let* ((lines (harness-ui-markdown-render-lines markdown 30))
+                   (image-line (cl-find-if (lambda (line)
+                                             (harness-md-test-display-at line))
+                                           lines)))
+              (should image-line)
+              (should (= 1 (string-width (string-remove-suffix "\n" image-line))))
+              (should (equal (* 30 (frame-char-width))
+                             (plist-get (nth 2 asked) :max-width))))))
+      (delete-file file))))
+
+(ert-deftest harness-md-image-only-text-is-not-blank-and-quotes-as-markdown ()
+  "A picture survives blank-line trimming and quotes as its source, not its placeholder."
+  (let ((file (harness-md-test-media-file ".png")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness-ui-image-string)
+                   (lambda (_source &optional _mime &rest props)
+                     (concat (propertize (plist-get props :label)
+                                         'display '(image :type png)) "\n"))))
+          (let* ((markdown (format "![only the shot](%s)" file))
+                 (rendered (harness-ui-markdown-render markdown)))
+            (should-not (string-blank-p rendered))
+            (should (harness-md-test-display-at (string-trim rendered)))
+            (with-temp-buffer
+              (insert rendered)
+              (should (equal markdown (string-trim-right
+                                       (harness-ui-markdown-source (point-min) (point-max))))))))
+      (delete-file file))))
+
+(ert-deftest harness-md-a-video-of-this-machine-shows-its-player ()
+  "An image naming a local video is the media module's rendering, Play and all."
+  (let ((file (harness-md-test-media-file ".mp4"))
+        (asked nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness-ui-media-render-attachment)
+                   (lambda (attachment)
+                     (setq asked attachment)
+                     (concat "[video " (plist-get attachment :name) "]\nPlay\n"))))
+          (let ((rendered (harness-ui-markdown-render
+                           (format "Watch:\n\n![the clip](%s)" file))))
+            (should asked)
+            (should (equal file (plist-get asked :path)))
+            (should (equal "video/mp4" (plist-get asked :mime)))
+            (should (equal (file-name-nondirectory file) (plist-get asked :name)))
+            (should (string-match-p "Play" (substring-no-properties rendered)))
+            (should-not (string-match-p "!\\[" (substring-no-properties rendered)))
+            (with-temp-buffer
+              (insert rendered)
+              (should (equal (format "Watch:\n\n![the clip](%s)" file)
+                             (string-trim-right
+                              (harness-ui-markdown-source (point-min) (point-max)))))))
+          (harness-ui-markdown-render-lines (format "![clip](%s)" file) 20)
+          (should (equal (* 20 (frame-char-width)) (plist-get asked :max-width))))
+      (delete-file file))))
+
+(ert-deftest harness-md-an-image-that-is-no-local-media-is-a-link ()
+  "An image of a URL, of a missing file, or of a file that is no media is
+the link its alt text makes: the renderer fetches nothing and draws nothing."
+  (dolist (markdown '("![a shot](https://example.org/a.png)"
+                      "![a shot](/no/such/picture.png)"
+                      "![notes](notes.txt)"))
+    (ert-info ((format "%S" markdown))
+      (let ((rendered (harness-ui-markdown-render markdown)))
+        (should-not (harness-md-test-display-at rendered))
+        (should-not (string-match-p "!\\[" (substring-no-properties rendered)))
+        (should (string-match-p "a shot\\|notes" (substring-no-properties rendered)))
+        (should (get-text-property 0 'harness-url rendered))))))
+
+(ert-deftest harness-md-media-can-be-turned-off ()
+  "With `harness-ui-markdown-media' off, an image stays the link it is."
+  (let ((file (harness-md-test-media-file ".png"))
+        (drawn nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness-ui-image-string)
+                   (lambda (&rest _) (setq drawn t) "picture\n")))
+          (let ((harness-ui-markdown-media nil))
+            (should (equal "a shot"
+                           (substring-no-properties
+                            (harness-ui-markdown-render (format "![a shot](%s)" file)))))
+            (should-not drawn)
+            ;; A summary names a picture by its alt text, never drawing it.
+            (should (equal "a shot"
+                           (substring-no-properties
+                            (harness-ui-markdown-summary (format "![a shot](%s)" file)))))
+            (should-not drawn)))
+      (delete-file file))))
+
 (ert-deftest harness-md-emphasis-needs-text-against-its-markers ()
   "Stars and underscores with a blank against them, in arithmetic, C, Python,
 globs and names, stay as they are: none of the text between two of them turns

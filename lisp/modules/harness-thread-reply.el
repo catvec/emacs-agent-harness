@@ -75,7 +75,7 @@ a line in the log: the agent still reads what the user wrote."
                (push (list :type "text" :text before) out)))
            (condition-case err
                (let* ((id (harness-call 'patch-review/user-reply
-                                        task-id session-id tag draft))
+                                        task-id session-id tag draft blocks))
                       (quote (plist-get tag :quote))
                       (body (plist-get tag :body))
                       (data (append (list

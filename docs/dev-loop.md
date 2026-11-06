@@ -13,6 +13,7 @@ scripts/dev.sh errors                # recent *Messages* + harness log warnings
 scripts/dev.sh reload                # harness-reload (auto-reload also runs on save)
 scripts/test.sh --changed            # the suites the working tree's changes touch
 scripts/test.sh [FILE [SELECTOR]]    # ERT, one clean Emacs per suite
+scripts/test.sh --status             # verify the last full run's result and tested commit; runs no tests
 scripts/lint.sh [--checkdoc]         # byte-compile everything out of tree
 ```
 
@@ -112,6 +113,38 @@ other suites use cannot tell you:
 ```sh
 HARNESS_REAL_CLAUDE=$(command -v claude) scripts/test.sh test/harness-provider-claude-real-cli-test.el
 ```
+
+## Report the test result, not an interpretation of it
+
+For the final check, commit first and keep the complete output and exit
+status, without a pipe:
+
+```sh
+scripts/test.sh > "$LOG" 2>&1
+result=$?
+printf 'Full suite exit: %s\n' "$result"
+exit "$result"
+```
+
+Read the saved log's final summary, and every failed suite's complete log.
+Then `scripts/test.sh --status` checks the saved result without running
+anything again. It exits zero only for a full passing run on the current
+clean commit. Selected-suite passes, an unfinished run, a changed HEAD or
+uncommitted changes make it exit nonzero. The runner writes the structured
+record to `scripts/.dev/test-stamp.json`, replacing an old pass with
+`running` before testing, then `pass` or `fail`, the tested commit, full or
+selected scope, dirty state, log directory and failed suites. Each suite's
+complete output remains in the log directory; `last-run.txt` keeps the
+summary. This is a reporting check, **not an automatically enabled hand-in
+gate**.
+
+Report focused tests, the full suite and lint separately. A failing full
+suite must be labeled **full suite FAILED**, with its exit status and the
+failing test names, even when the same failure exists at the branch's base.
+That comparison can explain the cause, but cannot turn a failed run into
+"all tests pass". Fix an appropriate stale test or regression; otherwise
+report the failure as a blocker. Link the tool call for the actual test
+run, not a wrapper whose last `echo` happened to return zero.
 
 ## Check a provider and a model against a real account
 

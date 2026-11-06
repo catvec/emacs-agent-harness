@@ -11313,6 +11313,42 @@ and the call opens again, its body the report."
           (should (harness-chat-block-collapsed block))
           (should (overlay-get (harness-chat-block-fold block) 'invisible)))))))
 
+(ert-deftest harness-ui-chat-image-only-messages-keep-the-shared-renderer-output ()
+  "A drawn image is not an empty user message, including while queued."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (file (expand-file-name "shot.png" dir))
+           (markdown (format "![the shot](%s)" file)))
+      (with-temp-file file (insert "fixture"))
+      (cl-letf (((symbol-function 'harness-ui-image-string)
+                 (lambda (_source &optional _mime &rest props)
+                   (concat (propertize (plist-get props :label)
+                                       'display '(image :type png) 'harness-test-picture t)
+                           "\n"))))
+        (harness-call 'session/append sid (list :kind 'user :content markdown))
+        (harness-call 'session/append sid (list :kind 'assistant :content markdown))
+        (let ((buf (harness-ui-chat-test-open sid)))
+          (with-current-buffer buf
+            (dolist (kind '("user" "assistant"))
+              (let ((block (car (harness-ui-chat-test-blocks buf kind))))
+                (should block)
+                (should (text-property-not-all (harness-chat-block-start block)
+                                               (harness-chat-block-end block)
+                                               'harness-test-picture nil))))
+            (let ((harness-chat--queue (list (list :id "q-image" :text markdown)))
+                  (harness-chat--steering nil)
+                  (inhibit-read-only t))
+              (goto-char (point-max))
+              (let ((start (point)))
+                (harness-chat--insert-queue)
+                (should (text-property-not-all start (point) 'harness-test-picture nil))))
+            ;; A picture at a preview's cut boundary is not trimmed away
+            ;; as a blank line.  This is the same rendered object.
+            (let* ((text (harness-ui-markdown-render
+                          (concat "intro\n\n" markdown "\n\nlater\n\nlast")))
+                   (cut (car (harness-chat--cut-text text 3))))
+              (should (text-property-not-all 0 (length cut) 'harness-test-picture nil cut)))))))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
 

@@ -1104,14 +1104,28 @@ text as it was typed."
           (error (harness-log 'warn "patch review: a comment would not render as Markdown: %S" err)
                  nil))))
 
+(defun harness-ui-patch-review--media-lines (comment width)
+  "Return the lines drawing the pictures and videos COMMENT carries.
+What the user attached to the reply whose words name it is kept in the
+comment's meta; each shows under the words, as a message of the chat
+shows what it attached.  WIDTH is what the lines have."
+  (let ((attachments (plist-get (change-review-comment-meta comment) :attachments)))
+    (cl-loop for attachment in (if (vectorp attachments) (append attachments nil) attachments)
+             for path = (plist-get attachment :path)
+             for mime = (plist-get attachment :mime)
+             when (and (stringp path) (stringp mime))
+             append (harness-ui-markdown-media-lines path mime width))))
+
 (cl-defmethod change-review-ui-body-lines ((_set harness-ui-patch-review--set) comment width)
-  (or (harness-ui-patch-review--markdown-or
-        (let ((harness-ui-markdown-hard-breaks t))
-          ;; The id of a session the UI knows is a link to it, as in the chat.
-          (mapcar (lambda (line)
-                    (harness-ui-link-session-ids line #'harness-ui-markdown-code-at-p))
-                  (harness-ui-markdown-render-lines (change-review-comment-body comment) width))))
-      (cl-call-next-method)))
+  (append
+   (or (harness-ui-patch-review--markdown-or
+         (let ((harness-ui-markdown-hard-breaks t))
+           ;; The id of a session the UI knows is a link to it, as in the chat.
+           (mapcar (lambda (line)
+                     (harness-ui-link-session-ids line #'harness-ui-markdown-code-at-p))
+                   (harness-ui-markdown-render-lines (change-review-comment-body comment) width))))
+       (cl-call-next-method))
+   (harness-ui-patch-review--media-lines comment width)))
 
 (cl-defmethod change-review-ui-body-summary ((_set harness-ui-patch-review--set) comment)
   (or (harness-ui-patch-review--markdown-or
@@ -4924,6 +4938,42 @@ both, so both are drawn again; the reader keeps their place in the tail
     (with-current-buffer buffer
       (harness-chat-refresh-hand-ins))))
 
+(defun harness-ui-patch-review--string-shows-media-p (text id)
+  "Non-nil when the overlay string TEXT shows media ID."
+  (and (stringp text)
+       (cl-loop for pos = 0 then (next-single-property-change
+                                  pos 'harness-ui-media-id text (length text))
+                while (< pos (length text))
+                thereis (equal id (get-text-property pos 'harness-ui-media-id text)))))
+
+(defun harness-ui-patch-review--rerender-media (id)
+  "Draw again the surfaces of this module whose threads show media ID, if any.
+Return non-nil when one did.  A picture or player in a comment is part
+of the rendering of the review around it -- its lines under the bar of
+the comment, the report's text, a hand_in call's -- so the whole of what
+shows it is drawn again; the media module's edit in place would leave
+the lines after the player without the bar they are drawn under."
+  (let (handled)
+    (dolist (buffer (buffer-list))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when (and (bound-and-true-p change-review-ui--set)
+                     (functionp change-review-ui--redraw-function)
+                     (or (save-excursion
+                           (goto-char (point-min))
+                           (text-property-search-forward 'harness-ui-media-id id t))
+                         (cl-some
+                          (lambda (overlay)
+                            (and (overlay-get overlay 'change-review-overlay)
+                                 (or (harness-ui-patch-review--string-shows-media-p
+                                      (overlay-get overlay 'after-string) id)
+                                     (harness-ui-patch-review--string-shows-media-p
+                                      (overlay-get overlay 'before-string) id))))
+                          (overlays-in (point-min) (point-max)))))
+            (funcall change-review-ui--redraw-function)
+            (setq handled t)))))
+    handled))
+
 (defun harness-ui-patch-review--chat-threads-view (&optional trailing)
   "Insert this session's review threads, for the chat's C-c T.
 On `harness-chat-threads-function': the threads of the task of the
@@ -7418,6 +7468,9 @@ the review again."
     (add-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel))
   (with-eval-after-load 'harness-ui-chat
     (add-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat))
+  ;; A player in a comment is drawn again with the review around it.
+  (with-eval-after-load 'harness-ui-media
+    (add-hook 'harness-ui-media-rerender-functions #'harness-ui-patch-review--rerender-media))
   ;; C-c T in a chat draws the threads of this module, not a blank view.
   (setq harness-chat-threads-function #'harness-ui-patch-review--chat-threads-view)
   ;; A link to a thread of a review opens here, once ui-linking is there.
@@ -7437,6 +7490,8 @@ the review again."
   (remove-hook 'harness-ui-review-pending-known-functions #'harness-ui-patch-review--pending-known-p)
   (remove-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel)
   (remove-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat)
+  (when (boundp 'harness-ui-media-rerender-functions)
+    (remove-hook 'harness-ui-media-rerender-functions #'harness-ui-patch-review--rerender-media))
   (when (eq harness-chat-threads-function #'harness-ui-patch-review--chat-threads-view)
     (setq harness-chat-threads-function nil))
   (when (boundp 'harness-ui-linking-handlers)
