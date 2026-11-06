@@ -442,7 +442,7 @@ has not started, whose session has held its priority since submission."
                        "Priority for all sessions…")
                      labels))
       (should (eq #'harness-set-permission-mode
-                  (plist-get (funcall plist (transient-get-suffix 'harness-menu '(0 1 4))) :command))))))
+                  (plist-get (funcall plist (transient-get-suffix 'harness-menu "p")) :command))))))
 
 (ert-deftest harness-ui-priority-keys-and-hooks ()
   "The module binds +, -, y and Y, and adds its header function once.

@@ -5552,11 +5552,23 @@ thinking level of its own, and shares the task's other settings."
                           (list :id target key (if (and (eq key :non-interactive) (not value)) :false value))
                           (lambda (_) (message "%s" label)))))))
 
+(defvar harness-ui-model-picker-functions nil
+  "Functions that can offer a model picker instead of the default one.
+Each is called with CALLBACK, a function of (ID LABEL), and returns
+non-nil when it handles the choice, possibly asynchronously.  An empty
+choice must not call CALLBACK.  The first function that handles it wins.")
+
 (defun harness-ui-choose-model (callback)
-  "Prompt for a model from the catalogue and call CALLBACK with (ID LABEL).
-The catalogue is refreshed first, so a provider that just became
-available is offered.  An empty answer chooses nothing: CALLBACK is
-not called."
+  "Prompt for a model and call CALLBACK with (ID LABEL).
+`harness-ui-model-picker-functions' can supply an optional picker;
+otherwise use the refreshed catalogue.  An empty answer chooses nothing."
+  (unless (run-hook-with-args-until-success 'harness-ui-model-picker-functions callback)
+    (harness-ui--choose-model callback)))
+
+(defun harness-ui--choose-model (callback)
+  "Offer the default catalogue picker, calling CALLBACK with (ID LABEL).
+Refresh first so a provider that just became available is offered.
+An empty answer chooses nothing: CALLBACK is not called."
   (harness-ui-refresh-models
    (lambda (models)
      (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
@@ -6716,6 +6728,8 @@ leaves the buffer's commands out, never the whole menu."
    ["Session settings"
     ("m" "Model" harness-set-model)
     ("M" "Model for all sessions" harness-set-model-all)
+    ("=" "Model complexity" harness-model-complexity
+     :if (lambda () (harness-ui--command-available-p 'harness-model-complexity)))
     ("T" "Thinking" harness-set-thinking)
     ("H" "Thinking for all sessions" harness-set-thinking-all)
     ("p" "Permission mode" harness-set-permission-mode)
@@ -6848,6 +6862,8 @@ Choosing a group opens its menu, as a directory opens what it holds."
   [["Session settings"
     ("m" "Model" harness-set-model)
     ("M" "Model for all sessions" harness-set-model-all)
+    ("=" "Model complexity" harness-model-complexity
+     :if (lambda () (harness-ui--command-available-p 'harness-model-complexity)))
     ("!" "Check provider & model" harness-provider-check
      :if (lambda () (harness-ui--command-available-p 'harness-provider-check)))
     ("T" "Thinking" harness-set-thinking)

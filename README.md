@@ -131,6 +131,11 @@ You can set the `harness-enabled-modules` variable to `t` in order to load all m
 
 A non-comprehensive list of all the different functionality offered by modules shipped with the harness:
 
+- [Model complexity guide](docs/model-complexity.md) (optional): model names
+  sorted from Simple tasks through Very complex tasks, with Unrated models
+  last. Enable with `(harness-enable-modules :features model-complexity)`;
+  open with `C-c h =`. The session/task model picker shows the same plain
+  level names. Rankings are editable estimates, not benchmarks.
 - Agentic sessions with tool use
   - One settings line above the compose box -- in a chat and on the task
     board -- has what changes what the session does: the model, thinking

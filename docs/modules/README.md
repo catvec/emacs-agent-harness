@@ -35,6 +35,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;insights           ; The Insights report: figures and a written summary of the work, for…
  ;;judge              ; Judges: one-off questions to the simple tier of a session's model,…
  ;;merge              ; Merge queue: worktree branches merged into the session they were built…
+ ;;model-complexity   ; Plain-language estimates of model task complexity, ordered from simple…
  ;;notifications      ; Notifications for the user through pluggable providers: desktop…
  ;;patch-review       ; The threads of a task's review: kept in the state directory, delivered…
  ;;pet                ; A companion pet: hatched with random bones, named and voiced by a…
@@ -120,6 +121,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [linking](linking.md) | by default | [session](session.md) | Links in what agents write: sessions, messages, tool calls, tasks and review threads, found and written out in full, and taught to agents in the system prompt. |
 | [mcp](mcp.md) | by default | [config](config.md) | MCP host: starts tool servers in the session's sandbox and calls them. |
 | [merge](merge.md) |  | [session](session.md), [agent](agent.md) | Merge queue: worktree branches merged into the session they were built on, a checkout, or a branch of one. |
+| [model-complexity](model-complexity.md) |  | [provider](provider.md) | Plain-language estimates of model task complexity, ordered from simple to very complex. |
 | [naming](naming.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Name nameless sessions with a cheap model as soon as their first message is sent. |
 | [notifications](notifications.md) |  |  | Notifications for the user through pluggable providers: desktop (system) and Gotify. |
 | [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md), [thread-reply](thread-reply.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent. |
@@ -209,6 +211,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-linking](ui-linking.md) | by default | [ui](ui.md), [ui-chat](ui-chat.md) | Following the links agents write: a click on a harness: link opens the session, message, tool call, task or thread it names. |
 | [ui-media](ui-media.md) |  | [ui](ui.md) | Audio playback and recording, video thumbnails, clipboard images. |
 | [ui-merge](ui-merge.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | A session's merge queue: which sub-agent branches are queued, merging, in conflict, merged or failed. |
+| [ui-model-complexity](ui-model-complexity.md) |  | [ui](ui.md) | Model names sorted by plain-language estimated work complexity. |
 | [ui-notify](ui-notify.md) | by default | [ui](ui.md) | Mode line notifier with blocked/running/idle counts. |
 | [ui-patch-review](ui-patch-review.md) |  | [ui](ui.md), [ui-report](ui-report.md), [ui-review](ui-review.md) | A task's changes where its work is handed in and in its report: a file tree with the threads of comments below it, Ediff file by file with the tree beside it and the feedback box under it, approvals that skip the files done; the UI of the review. |
 | [ui-pending](ui-pending.md) | by default | [ui](ui.md), [ui-compose](ui-compose.md) | Requests a session waits on: panels, answering and the popout. |
@@ -445,6 +448,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-linking-context-functions` | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-media-rerender-functions` | [ui-media](ui-media.md) | [ui-chat](ui-chat.md) |
+| `harness-ui-model-picker-functions` | [ui](ui.md) | [ui-model-complexity](ui-model-complexity.md) |
 | `harness-ui-notification-functions` | [ui](ui.md) | [ui-tasks](ui-tasks.md) |
 | `harness-ui-notify-segment-functions` | [ui-acp-remote](ui-acp-remote.md), [ui-notify](ui-notify.md) | [ui-acp-remote](ui-acp-remote.md), [ui-tasks](ui-tasks.md), [ui-version](ui-version.md) |
 | `harness-ui-pending-changed-hook` | [ui-pending](ui-pending.md) | [ui-chat](ui-chat.md), [ui-pending](ui-pending.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md) |
