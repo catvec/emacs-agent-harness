@@ -47,11 +47,12 @@ major mode, then `harness-compose-insert` wherever it draws the box
     property; elsewhere its key types too;
   - the keys of the panels above the box from the box: a question's
     digits, a permission's y and n, the task board's F type when
-    typed in the box, so C-c . reads one key and runs it on the
-    nearest panel that binds it, point returning to the box (a
-    numeric argument takes the Nth panel up).  A host marks the text
-    of a panel with a `harness-compose-panel` property, naming it,
-    and says in its hints that C-c . is the way;
+    typed in the box, so C-c . shows the panel above the box and
+    reads a key for it, pressing C-c . again going to the next panel
+    up, point returning to the box (a numeric argument starts at the
+    Nth panel up).  A host marks the text of a panel with a
+    `harness-compose-panel` property, naming it, and says in its
+    hints that C-c . is the way;
   - M-< and M-> go to the top and the bottom of the box, and on to
     those of the buffer from there (or with an argument, or outside
     the box);
@@ -141,7 +142,6 @@ prompt blocks with `harness-compose-attachment-block`.
 ### Options
 
 - `harness-compose-download-max-size` — Largest file, in bytes, that a link dropped on a compose box downloads.
-- `harness-compose-panel-target-delay` — Seconds the panel receiving a compose key is shown before it runs.
 - `harness-compose-reply-hints` — Non-nil: a card says how to move point out of its reply, and back in.
 - `harness-compose-thumbnail-lines` — Height of the thumbnail an attached image or video shows, in lines.
 - `harness-compose-yank-media` — Non-nil: yanking in a compose box attaches the media on the clipboard.

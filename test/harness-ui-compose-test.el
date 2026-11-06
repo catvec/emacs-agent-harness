@@ -2731,9 +2731,11 @@ Both bind k; one binds z too."
     (harness-compose-panel-key n)))
 
 (ert-deftest harness-ui-compose-panel-key-presses-a-key-on-the-panel-above ()
-  "C-c . reads a key and runs it on the nearest panel above the box that binds it.
-The command runs with point on the panel, and point is back in the box,
-at the offset it had, after.  A numeric argument takes the Nth panel up.
+  "C-c . shows the panel above the box and runs the key there.
+The nearest panel is shown; pressing C-c . again while it waits goes to
+the next panel up, and around from the top to the nearest.  The command
+runs with point on the panel, and point is back in the box, at the
+offset it had, after.  A numeric argument starts at the Nth panel up.
 The keys go through the command loop, as typed."
   (harness-ui-compose-test-with
     (setq harness-ui-compose-test--panels (harness-ui-compose-test--two-panels))
@@ -2744,18 +2746,21 @@ The keys go through the command loop, as typed."
       (should (eq 'harness-compose-panel-key (key-binding (kbd "C-c ."))))
       (harness-compose-set "draft")
       (goto-char (+ harness-compose-start 2))
-      ;; k is bound by both: the nearest to the box is two.
+      ;; The nearest to the box is two; k is bound there.
       (execute-kbd-macro (kbd "C-c . k"))
       (should (equal `(("two" "k" ,two)) harness-ui-compose-test--pressed))
       (should (= (point) (+ harness-compose-start 2)))
       (should (equal "draft" (harness-compose-text)))
-      ;; z is bound by one alone.
-      (execute-kbd-macro (kbd "C-c . z"))
+      ;; z is bound by one alone: C-c . again goes up to it.
+      (execute-kbd-macro (kbd "C-c . C-c . z"))
       (should (equal `("one" "z" ,one) (car harness-ui-compose-test--pressed)))
-      ;; With a numeric argument, the second panel up that binds the key.
+      ;; With a numeric argument, the second panel up.
       (execute-kbd-macro (kbd "C-u 2 C-c . k"))
       (should (equal `("one" "k" ,one) (car harness-ui-compose-test--pressed)))
-      (should (= 3 (length harness-ui-compose-test--pressed)))
+      ;; From the top, C-c . again comes round to the nearest.
+      (execute-kbd-macro (kbd "C-u 2 C-c . C-c . k"))
+      (should (equal `("two" "k" ,two) (car harness-ui-compose-test--pressed)))
+      (should (= 4 (length harness-ui-compose-test--pressed)))
       (should (= (point) (+ harness-compose-start 2)))
       (should (equal "draft" (harness-compose-text)))
       ;; Typed with point elsewhere, the key presses all the same, and point stays.
@@ -2768,38 +2773,119 @@ The keys go through the command loop, as typed."
         (let ((err (should-error (harness-compose-panel-key) :type 'user-error)))
           (should (equal "No compose box here" (cadr err))))))))
 
-(ert-deftest harness-ui-compose-panel-key-shows-only-the-actual-target ()
-  "The indication follows the key and prefix, and never changes the draft."
+(defun harness-ui-compose-test--targets ()
+  "Return the target overlays in the buffer."
+  (cl-remove-if-not (lambda (o) (overlay-get o 'harness-compose-panel-target))
+                    (overlays-in (point-min) (point-max))))
+
+(ert-deftest harness-ui-compose-panel-key-shows-the-target-while-reading-the-key ()
+  "The panel the key will act on shows while C-c . waits for the key.
+Pressing C-c . again while it waits moves the target to the next panel
+up.  The target is the whole panel, with the face that fills it, and it
+is gone when the key runs."
   (harness-ui-compose-test-with
     (setq harness-ui-compose-test--panels (harness-ui-compose-test--two-panels))
     (harness-ui-compose-test--draw)
     (harness-compose-set "draft")
-    (let ((one (+ (point-min) (length "The transcript.\n")))
-          (noninteractive nil)
-          (seen nil))
-      (cl-letf (((symbol-function 'sit-for)
+    (let* ((one (+ (point-min) (length "The transcript.\n")))
+           (two (+ one (length "Panel one\n")))
+           (seen nil)
+           (reads (list (kbd "C-c .") "k")))
+      (cl-letf (((symbol-function 'read-key-sequence)
                  (lambda (&rest _)
-                   (let ((targets (cl-remove-if-not
-                                   (lambda (o) (overlay-get o 'harness-compose-panel-target))
-                                   (overlays-in (point-min) (point-max)))))
-                     (should (= (length targets) 1))
+                   (let ((targets (harness-ui-compose-test--targets)))
+                     (should (= 1 (length targets)))
                      (should (eq 'harness-compose-panel-target-face
                                  (overlay-get (car targets) 'face)))
                      (push (cons (overlay-start (car targets))
-                                 (overlay-end (car targets))) seen))
-                   t)))
-        (harness-ui-compose-test--panel-key "k")
-        (harness-ui-compose-test--panel-key "z")
-        (harness-ui-compose-test--panel-key "k" 2))
-      (should (equal seen (list (cons one (+ one 10)) (cons one (+ one 10))
-                                (cons (+ one 10) (+ one 20)))))
-      (should-not (cl-find-if (lambda (o) (overlay-get o 'harness-compose-panel-target))
-                              (overlays-in (point-min) (point-max))))
-      (execute-kbd-macro "x")
-      (should (equal "draftx" (harness-compose-text))))))
+                                 (overlay-end (car targets)))
+                           seen))
+                   (pop reads))))
+        (harness-compose-panel-key))
+      (should (equal (list (cons two (+ two (length "Panel two\n")))
+                           (cons one (+ one (length "Panel one\n"))))
+                     (nreverse seen)))
+      (should-not (harness-ui-compose-test--targets))
+      ;; A numeric argument starts at that panel up.
+      (setq seen nil
+            reads (list "k"))
+      (cl-letf (((symbol-function 'read-key-sequence)
+                 (lambda (&rest _)
+                   (let ((targets (harness-ui-compose-test--targets)))
+                     (should (= 1 (length targets)))
+                     (push (cons (overlay-start (car targets))
+                                 (overlay-end (car targets)))
+                           seen))
+                   (pop reads))))
+        (harness-compose-panel-key 2))
+      (should (equal (list (cons one (+ one (length "Panel one\n")))) seen))
+      (should-not (harness-ui-compose-test--targets))
+      (should (equal "draft" (harness-compose-text))))))
+
+(ert-deftest harness-ui-compose-panel-target-fills-the-panel ()
+  "The target face fills the panel from edge to edge."
+  (should (eq t (face-attribute 'harness-compose-panel-target-face :extend nil t))))
+
+(defun harness-ui-compose-test--target-prefixes ()
+  "Return the overlays painting the target's line and wrap prefixes."
+  (cl-remove-if-not (lambda (o) (overlay-get o 'harness-compose-panel-target-prefix))
+                    (overlays-in (point-min) (point-max))))
+
+(ert-deftest harness-ui-compose-panel-target-paints-the-room-prefixes-take ()
+  "The target fills the room a line's prefixes take, not only its text.
+A line draws its `line-prefix' before its text, and its `wrap-prefix'
+before the text of a continuation line; neither is text the panel's face
+reaches, so the target paints them too, and leaves the prefixes the text
+gives as they were."
+  (harness-ui-compose-test-with
+    (let* ((line (copy-sequence "   "))
+           (wrap (copy-sequence "     "))
+           (text (propertize "Panel one\nSecond line\n"
+                             'line-prefix line 'wrap-prefix wrap))
+           (start (+ (point-min) (length "The transcript.\n")))
+           (map (harness-ui-compose-test--panel-map "one" "k"))
+           (harness-ui-compose-test--pressed nil)
+           painted)
+      (setq harness-ui-compose-test--panels (list (list "one" text map)))
+      (harness-ui-compose-test--draw)
+      (harness-compose-set "draft")
+      (goto-char (+ harness-compose-start 2))
+      (cl-letf (((symbol-function 'read-key-sequence)
+                 (lambda (&rest _)
+                   ;; Take the overlays apart before a redraw takes them.
+                   (setq painted
+                         (mapcar (lambda (overlay)
+                                   (list (overlay-start overlay) (overlay-end overlay)
+                                         (overlay-get overlay 'line-prefix)
+                                         (overlay-get overlay 'wrap-prefix)))
+                                 (harness-ui-compose-test--target-prefixes)))
+                   ;; They come back over the panel drawn again.
+                   (harness-ui-compose-test--draw)
+                   (sit-for 0.3)
+                   (should (= 1 (length (harness-ui-compose-test--targets))))
+                   (should (= 1 (length (harness-ui-compose-test--target-prefixes))))
+                   "k")))
+        (harness-compose-panel-key))
+      ;; One stretch of the panel has its prefixes painted, over it all.
+      (should (= 1 (length painted)))
+      (pcase-let ((`(,beg ,end ,line-prefix ,wrap-prefix) (car painted)))
+        (should (= start beg))
+        (should (= (+ start (length text)) end))
+        (should (equal "   " line-prefix))
+        (should (equal "     " wrap-prefix))
+        (dolist (prefix (list line-prefix wrap-prefix))
+          (should (eq 'harness-compose-panel-target-face
+                      (get-text-property 0 'face prefix)))))
+      ;; The prefixes the panel was drawn with are left alone.
+      (should-not (get-text-property 0 'face line))
+      (should-not (get-text-property 0 'face wrap))
+      ;; Nothing is left behind when the key has run.
+      (should-not (harness-ui-compose-test--targets))
+      (should-not (harness-ui-compose-test--target-prefixes))
+      (should (equal `(("one" "k" ,start)) harness-ui-compose-test--pressed)))))
 
 (ert-deftest harness-ui-compose-panel-key-survives-a-redraw-while-the-target-shows ()
-  "A host redraw during the indication does not stop the key it shows.
+  "A host redraw while the target shows does not stop the key it shows.
 The board and the chat draw their panels again while C-c . waits; that
 removes the highlight, and the key still runs on the panel drawn in its
 place, unless the panel itself is gone."
@@ -2809,96 +2895,122 @@ place, unless the panel itself is gone."
     (harness-compose-set "draft")
     (goto-char (+ harness-compose-start 2))
     (let ((harness-ui-compose-test--pressed nil)
-          (noninteractive nil)
           (two (+ (point-min) (length "The transcript.\nPanel one\n"))))
-      (cl-letf (((symbol-function 'sit-for)
-                 (lambda (&rest _) (harness-ui-compose-test--draw) t)))
-        (harness-ui-compose-test--panel-key "k"))
+      (cl-letf (((symbol-function 'read-key-sequence)
+                 (lambda (&rest _)
+                   (harness-ui-compose-test--draw)
+                   ;; The target comes back on the panel drawn again.
+                   (sit-for 0.3)
+                   (should (= 1 (length (harness-ui-compose-test--targets))))
+                   "k")))
+        (harness-compose-panel-key))
       (should (equal `(("two" "k" ,two)) harness-ui-compose-test--pressed))
       (should (= (point) (+ harness-compose-start 2)))
       (should (equal "draft" (harness-compose-text)))
-      (should-not (cl-find-if (lambda (o) (overlay-get o 'harness-compose-panel-target))
-                              (overlays-in (point-min) (point-max))))
+      (should-not (harness-ui-compose-test--targets))
       ;; The panel drawn again is found by name even when it moved: a
       ;; panel drawn above it shifts it down.
       (setq harness-ui-compose-test--pressed nil)
-      (cl-letf (((symbol-function 'sit-for)
+      (cl-letf (((symbol-function 'read-key-sequence)
                  (lambda (&rest _)
                    (setq harness-ui-compose-test--panels
                          (cons (list "zero" "Panel zero\n"
                                      (harness-ui-compose-test--panel-map "zero" "k"))
                                (harness-ui-compose-test--two-panels)))
                    (harness-ui-compose-test--draw)
-                   t)))
-        (harness-ui-compose-test--panel-key "k"))
+                   "k")))
+        (harness-compose-panel-key))
       (should (equal `(("two" "k" ,(+ two (length "Panel zero\n"))))
                      harness-ui-compose-test--pressed))
       ;; No panel of that name left: the key is not pressed anywhere.
       (setq harness-ui-compose-test--pressed nil
             harness-ui-compose-test--panels (list (car (harness-ui-compose-test--two-panels))))
-      (cl-letf (((symbol-function 'sit-for)
-                 (lambda (&rest _) (harness-ui-compose-test--draw) t)))
-        (let ((err (should-error (harness-ui-compose-test--panel-key "k") :type 'user-error)))
+      (cl-letf (((symbol-function 'read-key-sequence)
+                 (lambda (&rest _)
+                   (harness-ui-compose-test--draw)
+                   (sit-for 0.3)
+                   (should-not (harness-ui-compose-test--targets))
+                   "k")))
+        (let ((err (should-error (harness-compose-panel-key) :type 'user-error)))
           (should (string-match-p "panel above the box is gone" (cadr err)))))
       (should-not harness-ui-compose-test--pressed))))
 
 (ert-deftest harness-ui-compose-panel-target-cleans-up-on-quit-error-and-redraw ()
   (harness-ui-compose-test-with
-    (let ((map (harness-ui-compose-test--panel-map "one" "k"))
-          (noninteractive nil))
+    (let ((map (harness-ui-compose-test--panel-map "one" "k")))
       (define-key map "e" (lambda () (interactive) (error "Boom")))
       (define-key map "r" (lambda () (interactive) (harness-ui-compose-test--draw)))
       (setq harness-ui-compose-test--panels (list (list "one" "Panel one\n" map)))
       (harness-ui-compose-test--draw)
       (cl-labels ((no-target ()
-                    (should-not (cl-find-if (lambda (o) (overlay-get o 'harness-compose-panel-target))
-                                            (overlays-in (point-min) (point-max))))))
+                    (should-not (harness-ui-compose-test--targets))))
+        ;; Quitting while the target shows takes it away.
         (cl-letf (((symbol-function 'read-key-sequence) (lambda (&rest _) (signal 'quit nil))))
           (should (eq 'quit (condition-case nil (harness-compose-panel-key) (quit 'quit)))))
+        ;; Nor does the keeper put it back after the command is gone.
+        (sit-for 0.3)
         (no-target)
-        (cl-letf (((symbol-function 'sit-for) (lambda (&rest _) (signal 'quit nil))))
-          (should (eq 'quit (condition-case nil (harness-ui-compose-test--panel-key "k") (quit 'quit)))))
-        (no-target)
-        (cl-letf (((symbol-function 'sit-for) (lambda (&rest _) t)))
-          (should-error (harness-ui-compose-test--panel-key "e"))
-          (no-target)
-          (harness-ui-compose-test--panel-key "r")
+        ;; A command that fails leaves no target either.
+        (cl-letf (((symbol-function 'read-key-sequence) (lambda (&rest _) "e")))
+          (should-error (harness-compose-panel-key))
+          (no-target))
+        ;; A redraw inside the command does not leave one.
+        (cl-letf (((symbol-function 'read-key-sequence) (lambda (&rest _) "r")))
+          (harness-compose-panel-key)
           (no-target))))))
 
-(ert-deftest harness-ui-compose-panel-key-says-when-no-panel-has-the-key ()
-  "A key no panel binds is no key to press, whatever the buffer does with it.
-Typing, the box's own keys and the buffer's are not a panel's; asking for
-more panels than bind the key is said too, and nothing runs."
+(ert-deftest harness-ui-compose-panel-key-says-when-the-panel-does-not-have-the-key ()
+  "A key the panel shown does not bind is no key to press, and nothing runs.
+Typing, the box's own keys and the buffer's are not the panel's; asking
+for a panel above the top is said too, and no key is read."
   (harness-ui-compose-test-with
     (setq harness-ui-compose-test--panels (harness-ui-compose-test--two-panels))
     (harness-ui-compose-test--draw)
     (harness-compose-set "draft")
     (goto-char (+ harness-compose-start 2))
     (let ((harness-ui-compose-test--pressed nil))
+      ;; The nearest panel, two, binds none of these.
       (dolist (keys '("q" "x" "\C-f" "\r" "\C-c\C-a"))
         (let ((err (should-error (harness-ui-compose-test--panel-key keys) :type 'user-error)))
-          (should (equal (format "No panel above the box has %s" (key-description keys)) (cadr err)))))
-      (let ((err (should-error (harness-ui-compose-test--panel-key "k" 3) :type 'user-error)))
-        (should (equal "Fewer than 3 panels above the box have k" (cadr err))))
-      (let ((err (should-error (harness-ui-compose-test--panel-key "z" 2) :type 'user-error)))
-        (should (equal "Fewer than 2 panels above the box have z" (cadr err))))
+          (should (equal (format "The panel above the box does not have %s"
+                                 (key-description keys))
+                         (cadr err)))))
+      ;; z is one's, not the nearest's: it is not pressed anywhere.
+      (let ((err (should-error (harness-ui-compose-test--panel-key "z") :type 'user-error)))
+        (should (equal "The panel above the box does not have z" (cadr err))))
+      ;; Asking for a panel above the top is said before a key is read.
+      (let ((reads 0))
+        (cl-letf (((symbol-function 'read-key-sequence)
+                   (lambda (&rest _) (cl-incf reads) "k")))
+          (let ((err (should-error (harness-compose-panel-key 3) :type 'user-error)))
+            (should (equal "There is no panel 3 above the box" (cadr err)))))
+        (should (= 0 reads)))
       (should-not harness-ui-compose-test--pressed)
       (should (= (point) (+ harness-compose-start 2)))
-      (should (equal "draft" (harness-compose-text))))
-    ;; The prompt says how to get out, and which panel the number asks for.
+      (should (equal "draft" (harness-compose-text)))
+      ;; With no panel at all, there is nothing to show, and no key is read.
+      (setq harness-ui-compose-test--panels nil)
+      (harness-ui-compose-test--draw)
+      (let ((err (should-error (harness-compose-panel-key) :type 'user-error)))
+        (should (equal "There is no panel above the box" (cadr err))))
+      (let ((err (should-error (harness-compose-panel-key 2) :type 'user-error)))
+        (should (equal "There is no panel 2 above the box" (cadr err)))))
+    ;; The prompt says how to go up and how to get out.
+    (setq harness-ui-compose-test--panels (harness-ui-compose-test--two-panels))
+    (harness-ui-compose-test--draw)
     (let ((prompts nil))
       (cl-letf (((symbol-function 'read-key-sequence)
                  (lambda (prompt &rest _) (push prompt prompts) "q")))
         (ignore-errors (harness-compose-panel-key))
         (ignore-errors (harness-compose-panel-key 2)))
-      (should (equal '("Key for panel 2 above (C-g quits): "
-                       "Key for the panel above (C-g quits): ")
+      (should (equal '("Key for the panel above (C-c . again for the next one up, C-g quits): "
+                       "Key for the panel above (C-c . again for the next one up, C-g quits): ")
                      prompts)))))
 
-(ert-deftest harness-ui-compose-panel-key-skips-a-panel-with-nothing-to-act-on ()
+(ert-deftest harness-ui-compose-panel-key-says-when-the-panel-has-nothing-to-act-on ()
   "A panel's key for what point is on has nothing to act on from the box.
-The panel is passed over for a farther one whose command has; with none
-it is said, and nothing runs."
+The panel shown is the one the key would run on; a farther panel is not
+tried.  Navigating up to the panel that has it runs it there."
   (harness-ui-compose-test-with
     (let ((panels (harness-ui-compose-test--two-panels))
           (harness-ui-compose-test--ran nil))
@@ -2907,9 +3019,14 @@ it is said, and nothing runs."
       (setq harness-ui-compose-test--panels panels)
       (harness-ui-compose-test--draw)
       (goto-char harness-compose-end)
-      ;; Panel one holds a thing for `i' to act on, panel two none.
-      (execute-kbd-macro (kbd "C-c . i"))
+      ;; Panel two, the nearest, holds nothing for `i' to act on.
+      (let ((err (should-error (harness-ui-compose-test--panel-key "i") :type 'user-error)))
+        (should (string-match-p "\\`i has nothing to act on from the box" (cadr err))))
+      (should-not harness-ui-compose-test--ran)
+      ;; Panel one holds a thing: C-c . again goes up to it and `i' acts.
+      (execute-kbd-macro (kbd "C-c . C-c . i"))
       (should (equal '(act) harness-ui-compose-test--ran))
+      ;; With the thing gone, it is said, and nothing runs.
       (let ((inhibit-read-only t))
         (remove-text-properties (point-min) (point-max) '(harness-ui-compose-test-thing nil)))
       (let ((err (should-error (harness-ui-compose-test--panel-key "i") :type 'user-error)))
@@ -2987,13 +3104,15 @@ panel starts at its first piece, and the pieces are not counted twice."
         (execute-kbd-macro (kbd "C-u 2 C-c . k"))
         (should (equal `("one" "k" ,one) (car harness-ui-compose-test--pressed)))
         (let ((err (should-error (harness-ui-compose-test--panel-key "k" 3) :type 'user-error)))
-          (should (equal "Fewer than 3 panels above the box have k" (cadr err))))))))
+          (should (equal "There is no panel 3 above the box" (cadr err))))))))
 
 (ert-deftest harness-ui-compose-panel-key-hint-follows-the-binding ()
   "The hints name the key where `harness-compose-panel-key' is bound.
 A panel's hint is dim, its key a key, whatever the key it names."
   (harness-ui-compose-test-with
     (should (equal "C-c ." (harness-compose-panel-keys)))
+    (should (equal (listify-key-sequence (kbd "C-c ."))
+                       (listify-key-sequence (harness-compose-panel-key-sequence))))
     (let ((hint (harness-compose-panel-hint "y"))
           (face-p (lambda (string pos face)
                     (let ((faces (get-text-property pos 'face string)))
@@ -3008,10 +3127,14 @@ A panel's hint is dim, its key a key, whatever the key it names."
             (define-key harness-compose-map (kbd "C-c .") nil)
             (define-key harness-compose-map (kbd "C-c ,") #'harness-compose-panel-key)
             (should (equal "C-c ," (harness-compose-panel-keys)))
+            (should (equal (listify-key-sequence (kbd "C-c ,"))
+                       (listify-key-sequence (harness-compose-panel-key-sequence))))
             (should (equal "from the box: C-c , 1" (substring-no-properties (harness-compose-panel-hint "1")))))
         (define-key harness-compose-map (kbd "C-c ,") nil)
         (define-key harness-compose-map (kbd "C-c .") old)))
-    (should (equal "C-c ." (harness-compose-panel-keys)))))
+    (should (equal "C-c ." (harness-compose-panel-keys)))
+    (should (equal (listify-key-sequence (kbd "C-c ."))
+                       (listify-key-sequence (harness-compose-panel-key-sequence))))))
 
 ;;;; The top and the bottom of the box
 

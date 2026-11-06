@@ -6199,7 +6199,7 @@ The draft stays in the box and so does point, where it was."
         (let ((err (should-error (cl-letf (((symbol-function 'read-key-sequence) (lambda (&rest _) "h")))
                                    (harness-compose-panel-key))
                                  :type 'user-error)))
-          (should (equal "No panel above the box has h" (cadr err))))
+          (should (equal "The panel above the box does not have h" (cadr err))))
         (should (equal "drFaft" (harness-compose-text)))
         (should (= (point) (+ harness-compose-start 3)))))))
 

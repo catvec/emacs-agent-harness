@@ -37,11 +37,12 @@
 ;;     property; elsewhere its key types too;
 ;;   - the keys of the panels above the box from the box: a question's
 ;;     digits, a permission's y and n, the task board's F type when
-;;     typed in the box, so C-c . reads one key and runs it on the
-;;     nearest panel that binds it, point returning to the box (a
-;;     numeric argument takes the Nth panel up).  A host marks the text
-;;     of a panel with a `harness-compose-panel' property, naming it,
-;;     and says in its hints that C-c . is the way;
+;;     typed in the box, so C-c . shows the panel above the box and
+;;     reads a key for it, pressing C-c . again going to the next panel
+;;     up, point returning to the box (a numeric argument starts at the
+;;     Nth panel up).  A host marks the text of a panel with a
+;;     `harness-compose-panel' property, naming it, and says in its
+;;     hints that C-c . is the way;
 ;;   - M-< and M-> go to the top and the bottom of the box, and on to
 ;;     those of the buffer from there (or with an argument, or outside
 ;;     the box);
@@ -716,9 +717,12 @@ all, and fail."
 ;; A panel above the box -- a question's options, a permission's answers,
 ;; the task board -- has keys that act on it while point is on it.  Typed
 ;; in the box the same key types (`harness-compose--pre-command'), so
-;; C-c . is the one way to press it from there: it reads a key, finds the
-;; panel that binds it, and runs what the key does on that panel, as
-;; though point were on it, then puts point back in the box.
+;; C-c . is the one way to press it from there: it shows the panel above
+;; the box it will act on, reads a key, and runs what the key does on
+;; that panel, as though point were on it, then puts point back in the
+;; box.  Pressing C-c . again while it waits for the key goes to the next
+;; panel up, and around from the top to the nearest, so the box the key
+;; will act on shows before the key is chosen.
 ;;
 ;; The host says which text is a panel with a `harness-compose-panel'
 ;; property, valued with something that names it: a request's id, `board',
@@ -744,6 +748,11 @@ panel puts it on a line of its own, or after the line telling to type an
 answer below, with a key of its own for KEY: its first option's, say."
   (concat (propertize "from the box: " 'face 'harness-dim-face)
           (harness-ui-kbd (format "%s %s" (harness-compose-panel-keys) key))))
+
+(defun harness-compose-panel-key-sequence ()
+  "Return the key sequence that runs `harness-compose-panel-key' from the box."
+  (or (where-is-internal 'harness-compose-panel-key harness-compose-map t)
+      (kbd "C-c .")))
 
 (defun harness-compose--panel-before (pos)
   "Return the panel nearest before POS, as (START . END), or nil.
@@ -816,21 +825,99 @@ argument was the panel's number: the command gets none."
       (set-marker start nil))))
 
 (defface harness-compose-panel-target-face
-  '((t :inherit highlight))
-  "Face used briefly to identify the panel receiving a compose key."
-  :group 'harness)
-
-(defcustom harness-compose-panel-target-delay 0.5
-  "Seconds the panel receiving a compose key is shown before it runs.
-A host that draws again meanwhile removes the highlight, and the key
-runs all the same, on the panel drawn in the panel's place."
-  :type 'number
+  '((t :inherit highlight :extend t))
+  "Face used briefly to identify the panel receiving a compose key.
+It fills the panel from edge to edge, so the box the key acts on reads,
+not only the text in it."
   :group 'harness)
 
 (defun harness-compose--target-changed (overlay after _beg _end &optional _length)
   "Remove target OVERLAY before its text is changed or redrawn.
 AFTER is non-nil after the change."
   (unless after (delete-overlay overlay)))
+
+(defun harness-compose--panel-target-prefix-overlays (panel)
+  "Make overlays painting the line and wrap prefixes of PANEL as the target.
+The prefixes a line draws before and around its text are no text of the
+panel, so the target face on the panel alone leaves them dark.  Each
+stretch of the panel that gives its prefixes a value gets an overlay of
+its own with a painted copy, which the display prefers over the text."
+  (let ((end (cdr panel))
+        (pos (car panel))
+        overlays)
+    (while (< pos end)
+      (let* ((line (get-text-property pos 'line-prefix))
+             (wrap (get-text-property pos 'wrap-prefix))
+             (next (min end
+                        (or (next-single-property-change pos 'line-prefix nil end) end)
+                        (or (next-single-property-change pos 'wrap-prefix nil end) end))))
+        (when (or (and (stringp line) (not (string-empty-p line)))
+                  (and (stringp wrap) (not (string-empty-p wrap))))
+          (let ((overlay (make-overlay pos next)))
+            (overlay-put overlay 'harness-compose-panel-target-prefix t)
+            (when line
+              (overlay-put overlay 'line-prefix
+                           (harness-ui-prefix-with-face line 'harness-compose-panel-target-face)))
+            (when wrap
+              (overlay-put overlay 'wrap-prefix
+                           (harness-ui-prefix-with-face wrap 'harness-compose-panel-target-face)))
+            (overlay-put overlay 'modification-hooks '(harness-compose--target-changed))
+            (push overlay overlays)))
+        (setq pos next)))
+    (nreverse overlays)))
+
+(defun harness-compose--panel-target-overlays (panel)
+  "Make overlays marking PANEL as the target of a compose key.
+There is one over the panel, whose face fills it, and one over each
+stretch whose line or wrap prefixes are painted too
+\\(`harness-compose--panel-target-prefix-overlays').  They go when
+their text changes (`harness-compose--target-changed')."
+  (cons (let ((overlay (make-overlay (car panel) (cdr panel))))
+          (overlay-put overlay 'harness-compose-panel-target t)
+          (overlay-put overlay 'face 'harness-compose-panel-target-face)
+          (overlay-put overlay 'modification-hooks '(harness-compose--target-changed))
+          overlay)
+        (harness-compose--panel-target-prefix-overlays panel)))
+
+(defun harness-compose--panel-target-delete (overlays)
+  "Remove the target OVERLAYS from their buffers."
+  (dolist (overlay overlays)
+    (when (overlay-buffer overlay) (delete-overlay overlay))))
+
+(defun harness-compose--panel-target-alive-p (overlays)
+  "Non-nil when every overlay of OVERLAYS is still in a buffer."
+  (and overlays (cl-every #'overlay-buffer overlays)))
+
+(defun harness-compose--panel-target-keep (id cell)
+  "Keep the target overlays in CELL over the panel named ID while it shows.
+A host that draws the panel again removes the overlays with the old text
+\\(`harness-compose--target-changed'); this puts them back on the panel
+drawn in its place, so the box the key will act on stays shown while it
+waits.  Return the timer; the caller cancels it when the target goes."
+  (let ((buffer (current-buffer)))
+    (run-with-timer
+     0.1 0.1
+     (lambda ()
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (unless (harness-compose--panel-target-alive-p (car cell))
+             (harness-compose--panel-target-delete (car cell))
+             (when-let* ((panel (harness-compose--panel-named id)))
+               (setcar cell (harness-compose--panel-target-overlays panel))
+               (redisplay t)))))))))
+
+(defun harness-compose--panel-up (n)
+  "Return the Nth panel above the box, nearest first, as (START . END), or nil."
+  (let ((pos (harness-compose--front)) (i 0) panel)
+    (while (and (< i n) (setq panel (harness-compose--panel-before pos)))
+      (setq pos (car panel)
+            i (1+ i)))
+    (when (= i n) panel)))
+
+(defun harness-compose--panel-next (panel)
+  "Return the panel above PANEL, or the nearest above the box after the top."
+  (or (harness-compose--panel-before (car panel))
+      (harness-compose--panel-up 1)))
 
 (defun harness-compose--panel-named (id)
   "Return the panel named ID nearest above the box, as (START . END), or nil.
@@ -844,48 +931,37 @@ text, and the overlay over it, are new."
         (setq found panel)))
     found))
 
-(defun harness-compose--show-panel-target (panel keys command)
-  "Briefly show PANEL, then run COMMAND for KEYS there.
-The indicator is removed even if input is cancelled or COMMAND fails.
-A host may draw its panels again while it shows: the overlay goes then
-(`harness-compose--target-changed'), and the panel is found again by
-name, the key running on the one drawn in its place.  Only a panel that
-is gone stops the key, with a `user-error'."
-  (let ((overlay (make-overlay (car panel) (cdr panel)))
-        (id (get-char-property (car panel) 'harness-compose-panel)))
-    (unwind-protect
-        (progn
-          (overlay-put overlay 'harness-compose-panel-target t)
-          (overlay-put overlay 'face 'harness-compose-panel-target-face)
-          (overlay-put overlay 'modification-hooks '(harness-compose--target-changed))
-          ;; The target cannot be known until the key is read.  Show it before
-          ;; dispatch, even for commands that immediately replace the panel.
-          (unless noninteractive
-            (redisplay t)
-            (sit-for (or harness-compose-panel-target-delay 0)))
-          (if (and (overlay-buffer overlay)
-                   (eq (overlay-buffer overlay) (current-buffer)))
-              (harness-compose--press-on-panel keys command (overlay-start overlay))
-            (let ((again (harness-compose--panel-named id)))
-              (unless again
-                (user-error "The panel above the box is gone; %s was not pressed"
-                            (key-description keys)))
-              (let ((pos (car again))
-                    (command (harness-compose--panel-command keys (car again))))
-                (unless command
-                  (user-error "The panel above the box no longer has %s"
-                              (key-description keys)))
-                (harness-compose--press-on-panel keys command pos)))))
-      (delete-overlay overlay))))
+(defun harness-compose--press-panel-key (id keys)
+  "Press KEYS on the panel named ID, the one the user selected.
+The panel is found again by name, since a host may have drawn it again
+while the key was read; when it is gone, say so.  A key the panel does
+not bind, or binds to a command with nothing to act on where it starts,
+is said, and nothing runs."
+  (let ((panel (harness-compose--panel-named id)))
+    (unless panel
+      (user-error "The panel above the box is gone; %s was not pressed"
+                  (key-description keys)))
+    (let* ((pos (car panel))
+           (command (harness-compose--panel-command keys pos)))
+      (unless command
+        (user-error "The panel above the box does not have %s"
+                    (key-description keys)))
+      (when (save-excursion (goto-char pos) (harness-compose--idle-p command))
+        (user-error "%s has nothing to act on from the box: it works on what point is on"
+                    (key-description keys)))
+      (harness-compose--press-on-panel keys command pos))))
 
 (defun harness-compose-panel-key (&optional n)
   "Press a key on a panel above the box, from the box.
 The panels are the parts of the buffer above the box that bind keys of
 their own, which type in the box as they do not act there: a question's
-digits, a permission's y and n, the task board's F.  This reads one key
-and runs what it does on the panel nearest above the box that binds it,
-as though point were on the panel, then puts point back in the box.  With
-numeric argument N, it is the Nth such panel up.  \\[keyboard-quit] quits.
+digits, a permission's y and n, the task board's F.
+\\<harness-compose-map>\\[harness-compose-panel-key] shows the panel it will act on, the nearest above
+the box, and reads a key.  Pressing it again while it waits for the key
+goes to the next panel up, and around from the top to the nearest; with
+a numeric argument N it starts at the Nth panel up.  The key then runs
+on the panel shown, as though point were on it, and point comes back to
+the box.  \\[keyboard-quit] quits.
 
 A key the panel binds to a command that acts on what point is on, and
 point is on nothing it acts on there -- the board's card keys, an
@@ -893,24 +969,34 @@ option a question has not -- is no key to press from the box: that is
 said, and nothing runs."
   (interactive "p")
   (unless (harness-compose-live-p) (user-error "No compose box here"))
-  (let* ((n (max 1 (or n 1)))
-         (keys (read-key-sequence (if (> n 1)
-                                      (format "Key for panel %d above (C-g quits): " n)
-                                    "Key for the panel above (C-g quits): ")))
-         (key (key-description keys))
-         (pos (harness-compose--front))
-         (found 0) (idle nil) (panel nil) (command nil))
-    (while (and (not command) (setq panel (harness-compose--panel-before pos)))
-      (setq pos (car panel))
-      (when-let* ((candidate (harness-compose--panel-command keys pos)))
-        (if (save-excursion (goto-char pos) (harness-compose--idle-p candidate))
-            (setq idle t)
-          (when (= (cl-incf found) n)
-            (setq command candidate)))))
-    (cond (command (harness-compose--show-panel-target panel keys command))
-          ((> found 0) (user-error "Fewer than %d panels above the box have %s" n key))
-          (idle (user-error "%s has nothing to act on from the box: it works on what point is on" key))
-          (t (user-error "No panel above the box has %s" key)))))
+  (let* ((index (max 1 (or n 1)))
+         (again (harness-compose-panel-key-sequence))
+         (panel (harness-compose--panel-up index))
+         (id nil)
+         (keys nil))
+    (unless panel
+      (if (= index 1)
+          (user-error "There is no panel above the box")
+        (user-error "There is no panel %d above the box" index)))
+    (while (not keys)
+      (setq id (get-char-property (car panel) 'harness-compose-panel))
+      (let* ((cell (list (harness-compose--panel-target-overlays panel)))
+             (timer (harness-compose--panel-target-keep id cell)))
+        (unwind-protect
+            (progn
+              (redisplay t)
+              (let ((read (read-key-sequence
+                           (format "Key for the panel above (%s again for the next one up, C-g quits): "
+                                   (harness-compose-panel-keys)))))
+                (if (equal (listify-key-sequence read) (listify-key-sequence again))
+                    (progn
+                      (setq panel (harness-compose--panel-next
+                                   (or (harness-compose--panel-named id) panel)))
+                      (unless panel (user-error "There is no panel above the box")))
+                  (setq keys read))))
+          (cancel-timer timer)
+          (harness-compose--panel-target-delete (car cell)))))
+    (harness-compose--press-panel-key id keys)))
 
 ;;;; The top and the bottom of the box
 

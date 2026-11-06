@@ -381,7 +381,12 @@ they do in the transcript, every line indented under \"Question\"."
           (should (string-match-p "• red" plain))
           ;; Its lines are indented under the panel's label, wrapped too.
           (should (equal "   " (get-text-property which 'line-prefix text)))
-          (should (equal "   " (get-text-property which 'wrap-prefix text))))))))
+          (should (equal "   " (get-text-property which 'wrap-prefix text)))
+          ;; The room the prefixes take is the panel's too: its background
+          ;; fills the box, with no gap where the lines begin.
+          (dolist (property '(line-prefix wrap-prefix))
+            (should (eq 'harness-ui-panel-face
+                        (get-text-property 0 'face (get-text-property which property text))))))))))
 
 (ert-deftest harness-ui-pending-popup-asks-a-question-in-its-box ()
   "A question without options is answered by typing in the popout's box."
@@ -1373,7 +1378,7 @@ offset it had, whatever the popout drew again when a request left."
         (should (= (point) (+ harness-compose-start 2)))
         ;; Only the question is left: it has no y, nor a fourth option.
         (let ((err (should-error (harness-ui-pending-test-panel-key "y") :type 'user-error)))
-          (should (equal "No panel above the box has y" (cadr err))))
+          (should (equal "The panel above the box does not have y" (cadr err))))
         (let ((err (should-error (harness-ui-pending-test-panel-key "4") :type 'user-error)))
           (should (string-match-p "\\`4 has nothing to act on from the box" (cadr err))))
         (should (= 2 (length (funcall answers))))

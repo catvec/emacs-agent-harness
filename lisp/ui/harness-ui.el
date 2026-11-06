@@ -3084,6 +3084,36 @@ the popout module, FILE is visited."
     (add-face-text-property 0 (length s) face t s)
     s))
 
+(defun harness-ui-prefix-with-face (prefix face)
+  "Return PREFIX, a line or wrap prefix, with FACE under it.
+A prefix is drawn before the text of its line and is no text of the
+buffer, so the face the text around it carries does not reach it: an
+unpainted prefix leaves the frame's background showing where a panel's
+box should be.  A copy carries FACE itself; a value that is no string is
+returned as it is."
+  (if (and (stringp prefix) (not (string-empty-p prefix)))
+      (let ((copy (copy-sequence prefix)))
+        (add-face-text-property 0 (length copy) face nil copy)
+        copy)
+    prefix))
+
+(defun harness-ui-add-prefix-face (start end face)
+  "Add FACE to the line and wrap prefixes of the text from START to END.
+The text keeps its own faces; the prefixes, which are drawn before the
+lines and are no text, are given a copy with FACE on it, so a panel's
+background fills the whole box."
+  (let ((pos start))
+    (while (< pos end)
+      (let ((next (min end
+                       (or (next-single-property-change pos 'line-prefix nil end) end)
+                       (or (next-single-property-change pos 'wrap-prefix nil end) end))))
+        (dolist (property '(line-prefix wrap-prefix))
+          (let ((prefix (get-text-property pos property)))
+            (when (stringp prefix)
+              (put-text-property pos next property
+                                 (harness-ui-prefix-with-face prefix face)))))
+        (setq pos next)))))
+
 (defun harness-ui-with-keymap (string map)
   "Return STRING with MAP answering under the keymaps it already carries.
 STRING is changed.  A button's own keymap stays in front, so a click

@@ -43,9 +43,10 @@ and a popout with nothing left closes itself.
 
 A panel's keys -- a question's digits, a permission's y, s, a, n and N
 -- act with point on the panel.  In the compose box they type, so each
-panel is a panel of the box (`harness-compose-panel`): its C-c . reads
-a key and presses it on the nearest panel that has it
-(`harness-compose-panel-key`), and every panel says so in a dim line.
+panel is a panel of the box (`harness-compose-panel`): its C-c . shows
+the panel it will press a key on, the nearest, C-c . again going on to
+the next panel up, presses the key there (`harness-compose-panel-key`),
+and every panel says so in a dim line.
 
 An answer that lasts (Allow for session, Always allow, Always deny)
 records a rule, and the panel says what the rule will cover before it

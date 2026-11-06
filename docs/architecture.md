@@ -11964,11 +11964,15 @@ view that is not watching a session can still answer it -- and drawn,
 answered and keyed by this module wherever they show: the chat's tail
 panels and a popout of their own.  The request records and the diagram
 each question shows belong to the session, not to the buffer drawing
-them, so the chat and a popout of the same request agree.  Views get one
-line about a session with `harness-ui-pending-summary` ("has a question
-for you"), a kind with `harness-ui-pending-status`, and the full request
-with `harness-ui-pending-popout` (from the session list and the task
-board, SPC, through `harness-ui-popout-at-point-functions`).  Opening a
+them, so the chat and a popout of the same request agree.  A panel's
+background (`harness-ui-panel-face`) fills it, the room its line and
+wrap prefixes take included, which is no text and so needs
+`harness-ui-add-prefix-face`; that is what makes the box whole.  Views
+get one line about a session with `harness-ui-pending-summary` ("has a
+question for you"), a kind with `harness-ui-pending-status`, and the
+full request with `harness-ui-pending-popout` (from the session list
+and the task board, SPC, through
+`harness-ui-popout-at-point-functions`).  Opening a
 popout brings the session's cached pending list into the store first
 (`harness-ui-pending-sync-session`), which is how a request a view
 already shows becomes answerable there when no chat has synced it.
@@ -13481,25 +13485,31 @@ sends typing from outside the box into it, unless the key is a command
 where it is typed).  `C-c .` (`harness-compose-panel-key`, in
 `harness-compose-map`: `.` is free after `C-c` in every host, and the
 harness menu already writes a view's plain keys behind a dot, ". F") is
-the one way to press one from there.  It reads a key sequence and finds
-the panel above the box that binds it, runs the command with point on
-that panel, as its keymap would, and puts point back in the box at the
-same offset in it, whatever the command redrew (answering a question
-draws the panels and the box again).  The host says which text is a
-panel with a `harness-compose-panel` property, valued with something
-that names it: a request's id for the pending panels
+the one way to press one from there.  It shows the panel above the box
+it will act on, the nearest, and reads a key; pressing `C-c .` again
+while it waits for the key goes to the next panel up, and around from
+the top to the nearest, with a numeric argument starting at the Nth.  It
+runs the key on the panel shown, with point there, as its keymap would,
+and puts point back in the box at the same offset in it, whatever the
+command redrew (answering a question draws the panels and the box
+again).  The target's face fills the panel from edge to edge, the room
+its line and wrap prefixes take included -- that is no text of the
+buffer, and is painted by overlays of its own -- so the box the key
+acts on reads, not only the text in it; a host that draws the panel
+again while the key waits keeps the target on the panel drawn in its
+place.  The host says which text is a panel with a
+`harness-compose-panel` property, valued with
+something that names it: a request's id for the pending panels
 (`harness-ui-pending--decorate`), `cache`, `switch`, `board`, `popout`
 (`harness-ui-popout--mark-panels`, which leaves the names of the panels
 the content drew itself alone); neighbouring text with an `equal` value
 is one panel, however many pieces the host drew it in.  A panel's keys
 are those of its own `keymap` or `local-map` property, never what the
-buffer's modes bind.  The panel nearest above the box that binds the key
-wins; a numeric argument takes the Nth up.  A key bound to a command
-that acts on what is at point, and says so with a
-`harness-compose-acts-p` property (the board's keys for a task, an
-option a question has not), is no key to press from the box when that
-finds nothing at the panel's start: that is said, and nothing runs, as
-is no panel having the key.  The panels say how to press theirs:
+buffer's modes bind.  A key bound to a command that acts on what is at
+point, and says so with a `harness-compose-acts-p` property (the
+board's keys for a task, an option a question has not), is no key to
+press from the box when that finds nothing at the panel's start: that
+is said, and nothing runs, as is a key the panel shown does not bind.  The panels say how to press theirs:
 `harness-compose-panel-hint` is the dim "from the box: C-c . 1" line a
 permission's panel (with its first answer's key), a question's (the
 digit 1), the cache panel, the cold-cache question and the model-switch
