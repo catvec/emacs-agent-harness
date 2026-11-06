@@ -2179,6 +2179,7 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type tool-call :id "…" :name "…" :input PLIST :respond FN-OR-NIL :checkpoint PLIST)
    ;; :respond present ⇒ hosted loop; call it with a tool result
    ;; (:content "…" :is-error BOOL) and the provider continues the turn.
+   ;; Until then it writes nothing more: an unanswered call is a hang.
 (:type tool-result :id "…" :content "…" :is-error BOOL)  ; hosted loops echo results
 (:type checkpoint :checkpoint PLIST :call-id "…")  ; hosted loops: where the conversation stands
 (:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N

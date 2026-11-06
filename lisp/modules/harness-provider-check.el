@@ -36,6 +36,13 @@
 ;; can open the prompt, the reply and the provider's own error: the result
 ;; never carries that error text, which a plugin may have filled with a key.
 ;;
+;; A hosted loop runs the tools itself: it hands the turn a `tool-call'
+;; and writes nothing more until the result passed to its `:respond'
+;; arrives.  The checks answer every such call, with the receipt a check
+;; asked for or a short plain result, and the transport check passes only
+;; once its answer was delivered; an unanswered call would look hung until
+;; the check's timeout.
+;;
 ;; The job runs in the harness process, so it must not block the event loop:
 ;; every check returns a promise, and completions are driven by the
 ;; provider's own events.  The UI half follows the job's events over ACP
@@ -268,13 +275,41 @@ the text completion, then opens the call that produced it."
     (dolist (session (and table (gethash id table)))
       (harness-provider-check--note-session job session))))
 
-(defun harness-provider-check--complete (job request &optional keep-open cancel-now)
+(defun harness-provider-check--answer-tool-call (event on-tool)
+  "Answer the hosted tool call EVENT with what ON-TOOL says, so its loop goes on.
+A hosted loop -- Claude Code is one -- hands the turn a `tool-call'
+event whose `:respond' takes the result, and it waits for that result
+before it writes anything more.  Left unanswered, the request never
+ends, so the check would look hung and only its timeout would settle it.
+ON-TOOL, when non-nil, is called with EVENT and returns the result plist
+\(:content TEXT :is-error BOOL); without it the call is answered with a
+short plain result.  An ON-TOOL that signals, or a `:respond' that fails,
+is logged: the model must not be left waiting for an answer."
+  (when-let* ((respond (plist-get event :respond)))
+    (when (functionp respond)
+      (let ((result (condition-case err
+                        (if on-tool
+                            (funcall on-tool event)
+                          (list :content "ok"))
+                      (error
+                       (harness-log 'warn "provider-check: answering a tool call failed: %s"
+                                    (harness-error-short-message err))
+                       (list :content "The harness could not answer this call."
+                             :is-error t)))))
+        (condition-case err
+            (funcall respond result)
+          (error (harness-log 'warn "provider-check: sending a tool result failed: %s"
+                              (harness-error-short-message err))))))))
+
+(defun harness-provider-check--complete (job request &optional keep-open cancel-now on-tool)
   "Complete REQUEST for JOB; return a promise of (:events EVENTS :state STATE).
 The promise also says `:session', the internal session that recorded the
 call, when one did.  Close the request's session afterwards unless
 KEEP-OPEN.  With CANCEL-NOW, cancel the handle as soon as it exists, so
-the cancellation path is exercised.  Every wait is bounded by
-`harness-provider-check-timeout'."
+the cancellation path is exercised.  ON-TOOL, when non-nil, is called
+with each hosted `tool-call' event to produce the result its loop waits
+for (see `harness-provider-check--answer-tool-call').  Every wait is
+bounded by `harness-provider-check-timeout'."
   (let* ((model (plist-get request :model))
          (session-id (plist-get (plist-get request :session) :id))
          (entry (harness-provider-check-job-current-check job))
@@ -333,6 +368,8 @@ the cancellation path is exercised.  Every wait is bounded by
                     (push event events)
                     (when (eq (plist-get event :type) 'provider-state)
                       (setq state (plist-get event :state)))
+                    (when (eq (plist-get event :type) 'tool-call)
+                      (harness-provider-check--answer-tool-call event on-tool))
                     (when (eq (plist-get event :type) 'done)
                       (settle nil))))))
         (error (settle err)))
@@ -506,15 +543,17 @@ the cancellation path is exercised.  Every wait is bounded by
 (defun harness-provider-check--tool-turn (job)
   "Try an echo-tool round trip on the model of JOB.
 Return a promise of (:first EVENTS :second EVENTS :call TOOL-CALL :marker
-RECEIPT :sessions SESSION-IDS).  A hosted loop receives the result
-through :respond; a native loop gets assistant/tool messages in a
-second completion.  Not calling the tool is reported separately as model
-behavior, not a provider bug."
+RECEIPT :answered BOOL :sessions SESSION-IDS).  A hosted loop receives
+the result through :respond, and ANSWERED says it was delivered; a
+native loop gets assistant/tool messages in a second completion.  Not
+calling the tool is reported separately as model behavior, not a
+provider bug."
   (let* ((model (harness-provider-check-job-model job))
          (id (format "provider-check-tool-%x" (random most-positive-fixnum)))
          (marker (format "receipt-%x" (random most-positive-fixnum)))
          (user (harness-prompt 'provider-check-tool nil model))
          (request (harness-provider-check--request model id user))
+         (answered nil)
          (tool '(:name "check_echo"
                   :description "Return a receipt for value."
                   :schema (:type "object"
@@ -522,7 +561,11 @@ behavior, not a provider bug."
                            :required ("value")))))
     (setf request (plist-put request :tools (list tool)))
     (harness-then
-     (harness-provider-check--complete job request)
+     (harness-provider-check--complete
+      job request nil nil
+      (lambda (_call)
+        (setq answered t)
+        (list :content marker)))
      (lambda (first)
        (let* ((first-events (plist-get first :events))
               (call (cl-find 'tool-call first-events
@@ -560,12 +603,12 @@ behavior, not a provider bug."
                            (lambda (reply)
                              (list :first first-events
                                    :second (plist-get reply :events)
-                                   :call call :marker marker
+                                   :call call :marker marker :answered answered
                                    :sessions (delq nil (list (plist-get first :session)
                                                              (plist-get reply :session))))))
            (harness-resolved
             (list :first first-events :second nil
-                  :call call :marker marker
+                  :call call :marker marker :answered answered
                   :sessions (delq nil (list (plist-get first :session)))))))))))
 
 (defun harness-provider-check--check-tool-transport (job)
@@ -577,7 +620,8 @@ behavior, not a provider bug."
      (harness-provider-check--note-attempt-sessions job attempt)
      (let ((events (plist-get attempt :first))
            (call (plist-get attempt :call))
-           (second (plist-get attempt :second)))
+           (second (plist-get attempt :second))
+           (answered (plist-get attempt :answered)))
        (harness-provider-check--finish-events events t)
        (if (not call)
            (if (eq (plist-get (car (last events)) :stop-reason) 'tool-use)
@@ -590,6 +634,7 @@ behavior, not a provider bug."
          (harness-provider-check--require
           (or second
               (and (plist-get call :respond)
+                   answered
                    (eq (plist-get (car (last events)) :stop-reason) 'end-turn)))
           "Tool result did not reach a completed continuation")
          '(pass . "Tool id/input and hosted or native result continuation completed."))))))
@@ -742,7 +787,12 @@ into the structured note argument rather than dropping it as a label."
                              (list (harness-provider-check--resubmit-tool
                                     label))))
     (harness-then
-     (harness-provider-check--complete job request)
+     (harness-provider-check--complete
+      job request nil nil
+      (lambda (_call)
+        ;; A hosted loop waits for this result before it can finish its
+        ;; turn; the check reads the call's argument, not the answer.
+        (list :content "Resubmitted.")))
      (lambda (reply)
        (let* ((events (plist-get reply :events))
               (call (cl-find 'tool-call events

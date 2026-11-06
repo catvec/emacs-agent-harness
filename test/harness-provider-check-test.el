@@ -7,6 +7,7 @@
 ;; network.  What is tested here is the runner: that results arrive one
 ;; at a time, that a failed check does not stop the checks after it, that
 ;; a model refusing a tool is not reported as broken transport, that a
+;; hosted loop's tool call is answered so its turn can end, that a
 ;; hanging provider times out, and that a third-party provider's error
 ;; text (which may hold a key) is not copied into a result.
 
@@ -18,6 +19,8 @@
 (defvar harness-provider-check-test--calls nil)
 (defvar harness-provider-check-test--no-thinking-error nil)
 (defvar harness-provider-check-test--no-tools nil)
+(defvar harness-provider-check-test--hosted-tool nil)
+(defvar harness-provider-check-test--hosted-answers nil)
 (defvar harness-provider-check-test--tool-use-without-call nil)
 (defvar harness-provider-check-test--drop-label nil)
 (defvar harness-provider-check-test--error-kind nil)
@@ -53,6 +56,29 @@
              (funcall emit '(:type usage :input 42 :output 5))
              (setq done t)
              (funcall emit '(:type done :stop-reason end-turn))))
+          ((and (plist-get request :tools)
+                harness-provider-check-test--hosted-tool
+                (not harness-provider-check-test--no-tools))
+           ;; As a hosted loop does: hand the turn the call and wait for the
+           ;; result in :respond before the turn can end.
+           (let* ((tool (car (plist-get request :tools)))
+                  (name (plist-get tool :name))
+                  (label (and (string-match "marker-[0-9a-f]+"
+                                            (or (plist-get tool :description) ""))
+                              (match-string 0 (plist-get tool :description))))
+                  (input (if (equal name "resubmit")
+                             (list :note (or label "marker-unknown"))
+                           (list :value "ping"))))
+             (funcall emit
+                      (list :type 'tool-call :id "call-hosted" :name name :input input
+                            :respond
+                            (lambda (result)
+                              (push result harness-provider-check-test--hosted-answers)
+                              (funcall emit (list :type 'text
+                                                  :delta (or (plist-get result :content) "")))
+                              (funcall emit '(:type usage :input 42 :output 5))
+                              (setq done t)
+                              (funcall emit '(:type done :stop-reason end-turn)))))))
           ((and (plist-get request :tools)
                 harness-provider-check-test--tool-use-without-call)
            (setq done t)
@@ -152,6 +178,8 @@ the test can read back."
      (let ((harness-provider-check-test--calls nil)
            (harness-provider-check-test--no-thinking-error nil)
            (harness-provider-check-test--no-tools nil)
+           (harness-provider-check-test--hosted-tool nil)
+           (harness-provider-check-test--hosted-answers nil)
            (harness-provider-check-test--tool-use-without-call nil)
            (harness-provider-check-test--drop-label nil)
            (harness-provider-check-test--error-kind nil)
@@ -235,6 +263,40 @@ the test can read back."
       (should (cl-some (lambda (request)
                          (equal (plist-get request :thinking) "max"))
                        harness-provider-check-test--calls)))))
+
+(ert-deftest harness-provider-check-answers-a-hosted-tool-call ()
+  "A hosted loop's tool call is answered, so its turn ends by itself.
+Claude Code is a hosted loop: it hands the turn a `tool-call' with a
+`:respond' and writes nothing more until the result is sent.  A check
+that never answers would wait for its timeout and look hung, and the
+model behavior checks that ask for a tool call could never pass."
+  (harness-provider-check-test-with
+    (setq harness-provider-check-test--hosted-tool t
+          harness-provider-check-timeout 1)
+    (let ((results (harness-provider-check-test-run "checkfake:model" 'all)))
+      (should (eq 'pass (plist-get (harness-provider-check-test-by-name
+                                    results
+                                    "Tool-call transport and tool-result continuation")
+                                  :status)))
+      (should (eq 'pass (plist-get (harness-provider-check-test-by-name
+                                    results "Instruction following") :status)))
+      (should (eq 'pass (plist-get (harness-provider-check-test-by-name
+                                    results "Choose and form a harness tool call")
+                                  :status)))
+      (should (eq 'pass (plist-get (harness-provider-check-test-by-name
+                                    results "Use the returned tool result") :status)))
+      ;; The echo tool's answer is the receipt the model is asked to report,
+      ;; so the tool-result check can see the model used what it was given.
+      (should (cl-some (lambda (answer)
+                         (let ((content (plist-get answer :content)))
+                           (and (stringp content)
+                                (string-prefix-p "receipt-" content))))
+                       harness-provider-check-test--hosted-answers))
+      ;; The instructions check's resubmit call is answered too: its turn
+      ;; must end, not wait for a result that never comes.
+      (should (cl-some (lambda (answer)
+                         (equal "Resubmitted." (plist-get answer :content)))
+                       harness-provider-check-test--hosted-answers)))))
 
 (ert-deftest harness-provider-check-results-arrive-one-at-a-time ()
   "A job announces its plan, then each result before the next check."

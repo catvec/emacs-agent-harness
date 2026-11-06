@@ -44,6 +44,13 @@ named after the check, and the result names its sessions, so the page
 can open the prompt, the reply and the provider's own error: the result
 never carries that error text, which a plugin may have filled with a key.
 
+A hosted loop runs the tools itself: it hands the turn a `tool-call`
+and writes nothing more until the result passed to its `:respond`
+arrives.  The checks answer every such call, with the receipt a check
+asked for or a short plain result, and the transport check passes only
+once its answer was delivered; an unanswered call would look hung until
+the check's timeout.
+
 The job runs in the harness process, so it must not block the event loop:
 every check returns a promise, and completions are driven by the
 provider's own events.  The UI half follows the job's events over ACP
