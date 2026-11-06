@@ -627,11 +627,11 @@ Y-LIMIT, as if a taller line, an image say, had crossed it."
   "Check BUFFER's box in WINDOW as it grows a line at a time past the window.
 Text is measured as on a graphical frame (see
 `harness-test-with-display-measures').  While the text from the
-buffer's start to the box's end fits, WINDOW shows the buffer from its
-start; once it does not, the box's last line stays on the window's last
-line, above SPARE empty lines, and point, at the end of the box, stays
-in view.  The window's start is never forced: redisplay would then move
-point, out of the box, rather than scroll."
+buffer's start to the end of the tail holding the box fits, WINDOW
+shows the buffer from its start; once it does not, the tail's last line
+stays on the window's last line, above SPARE empty lines, and point, at
+the end of the box, stays in view.  The window's start is never forced:
+redisplay would then move point, out of the box, rather than scroll."
   (let ((forced nil)
         (body (window-body-height window t))
         (line (frame-char-height (window-frame window))))
@@ -649,7 +649,8 @@ point, out of the box, rather than scroll."
             (set-window-point window (point))
             ;; Measured without the padding, which is sized again next.
             (harness-compose-repad window)
-            (let* ((height (cdr (window-text-pixel-size window (point-min) harness-compose-end)))
+            (let* ((end (harness-compose--measure-end))
+                   (height (cdr (window-text-pixel-size window (point-min) end)))
                    ;; A host's overlay lines above the box are display too
                    ;; (`harness-compose--reserved-lines-function').
                    (reserved (lambda (from)
@@ -666,7 +667,7 @@ point, out of the box, rather than scroll."
                 (should (< (point-min) (window-start window) (point)))
                 (should (= (- body (* spare line))
                            (+ (funcall reserved (window-start window))
-                              (cdr (window-text-pixel-size window (window-start window) harness-compose-end)))))))))))
+                              (cdr (window-text-pixel-size window (window-start window) end)))))))))))
     (should-not forced)))
 
 (defun harness-test-compose-c-a-c-k (buffer)

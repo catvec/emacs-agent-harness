@@ -3084,7 +3084,7 @@ Return the chat's buffer."
   "A session's settings line in a wide window: every setting it has.
 The session of the settings task, whose turn is at work: the model, the
 thinking level, the permission mode and the interactive switch, then
-where its task stands in the queue and [Pause], one line above the
+where its task stands in the queue and [Pause], one line below the
 compose box.  The header line above the transcript has what the session
 used: the context, the total tokens and the plan's quota windows.  The
 frame is wide enough for all of it."

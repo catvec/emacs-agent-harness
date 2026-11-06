@@ -34,10 +34,6 @@ One buffer per session, "*harness: NAME*", laid out top to bottom:
                 them at a time, in one place, and switches between them
   todos         the session's todo items, one per line, or folded to
                 the title line, which is how the panel starts
-  settings      one line of buttons and figures: model, thinking level,
-                permission mode, interactive or not, the context in
-                use, the tokens in all, the cost, and what other
-                modules add (a task's queue), fitted to the window
   threads       the review's threads, while C-c T shows them: the view
                 the report draws, drawn by the module that keeps the
                 review (`harness-chat-threads-function`), in place of
@@ -45,6 +41,10 @@ One buffer per session, "*harness: NAME*", laid out top to bottom:
   attachments   chips for files attached to the next message
   notice        the session was deleted, or is inactive (sending resumes it)
   compose       an editable region; C-c C-c sends, RET adds a newline
+  settings      one line of buttons under the box: model,
+                thinking level, permission mode, interactive or not,
+                and what other modules add (a task's queue), fitted
+                to the window
   mode line     status (the spinner while a turn runs), turn duration
 
 The transcript is never re-rendered on a delta: every node owns a
@@ -114,7 +114,7 @@ this file never touches a session struct.
 - `harness-chat-header-functions` — Functions putting segments in front of the chat header line.
 - `harness-chat-panel-functions` — Functions putting a panel of their own below the transcript.
 - `harness-chat-send-functions` — Functions run with the TEXT and ATTACHMENTS of each message sent.
-- `harness-chat-settings-functions` — Functions adding items to the settings line of a chat, after its settings.
+- `harness-chat-settings-functions` — Functions adding items to the settings line under a chat's compose box.
 - `harness-chat-tool-body-functions` — Functions giving a tool call block a body of their own.
 - `harness-chat-top-functions` — Functions putting something at the top of the tail, first below the transcript.
 - `harness-thread-ref-functions` — Functions that know what a region of a buffer is from.

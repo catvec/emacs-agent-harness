@@ -4181,9 +4181,10 @@ buffer.  What cannot be made to fit is left whole."
 
 ;;;; Settings lines
 
-;; The line above a compose box that holds what the thing being composed
-;; works with: a new task's model, thinking level, permission mode and
-;; whether it waits for you (the task board), or the same of a session
+;; The line by a compose box -- under a chat's, above the task board's --
+;; holds what the thing being composed works with: a new task's model,
+;; thinking level, permission mode and whether it waits for you (the task
+;; board), or the same of a session
 ;; (the chat), after which each host adds what is its own -- the board's
 ;; supervisor mode and limit, the chat's token figures, cost and queue.
 ;; The two draw one line from one component: `harness-ui-setting-specs'

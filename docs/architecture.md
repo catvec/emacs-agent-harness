@@ -12836,9 +12836,9 @@ context beside it, a button that offers the session's window
 `harness-ui-spend-segment' that opens the usage dashboard.  The cost
 goes through the shared display (see Cost display below).
 
-What changes what the session does stands on the settings line above
-the compose box, which the task board draws with the same component
-(`harness-ui-settings-line', see the task board): the model, the
+What changes what the session does stands on the settings line below
+the compose box.  The task board draws its line above its box with the
+same component (`harness-ui-settings-line', see the task board): the model, the
 thinking level, the permission mode and whether the session waits for
 you, each a button running its session setting command (the permission
 mode's opens the jail and permissions view).  Room is made the way a

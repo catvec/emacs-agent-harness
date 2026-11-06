@@ -6554,7 +6554,7 @@ own session."
 ;;;; The queue in a session
 ;;
 ;; A task's session says where its task stands in the queue on the
-;; settings line above its compose box (`harness-chat-settings-functions'):
+;; settings line under its compose box (`harness-chat-settings-functions'):
 ;; the state -- in progress, or pending with its place in line, what holds
 ;; it back and a suspended queue -- and the card's buttons for it: [Pause]
 ;; for a task at work or waiting, [Resume] for a paused one, [Start now]
@@ -6591,7 +6591,7 @@ answer differs."
 (defun harness-ui-tasks-session-start-now ()
   "Start this session's task now, even with every slot busy.
 A task waiting in the queue or paused there carries on in this session,
-where it stopped.  This is the [Start now] of the settings line above
+where it stopped.  This is the [Start now] of the settings line under
 the compose box, and the card's (`harness-ui-tasks-start'); a task in
 the backlog has the banner's (`harness-ui-tasks-session-start')."
   (interactive)

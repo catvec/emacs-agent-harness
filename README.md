@@ -172,8 +172,8 @@ A non-comprehensive list of all the different functionality offered by modules s
   open with `C-c h =`. The session/task model picker shows the same plain
   level names. Rankings are editable estimates, not benchmarks.
 - Agentic sessions with tool use
-  - One settings line above the compose box -- in a chat and on the task
-    board -- has what changes what the session does: the model, thinking
+  - One settings line -- below the compose box in a chat, above it on the
+    task board -- has what changes what the session does: the model, thinking
     level, permission mode and interactive switch, and, in a task's
     session, where its task stands in the queue with [Pause], [Resume]
     and [Start now].  A chat's header line keeps what it used: the

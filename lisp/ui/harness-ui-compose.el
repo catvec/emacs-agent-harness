@@ -1069,6 +1069,15 @@ says it may have grown."
     (let ((height (harness-ui-text-height window harness-compose-start harness-compose-end limit)))
       (if (> height limit) (list height harness-compose--typed) height))))
 
+(defun harness-compose--measure-end ()
+  "Return where the tail of the buffer that holds the box ends.
+That is `harness-compose-end', or `point-max' when the host draws
+lines under the box -- a chat's settings line -- which the box's
+padding and its follow leave room for."
+  (cond ((null harness-compose-end) (point-max))
+        ((> (point-max) (1+ harness-compose-end)) (point-max))
+        (t harness-compose-end)))
+
 (defun harness-compose-pad-window (window)
   "Keep the box at the bottom of WINDOW.
 A buffer shorter than WINDOW is padded so it ends at its bottom, each
@@ -1111,12 +1120,12 @@ the box's lines alone (`harness-compose--box-height')."
               ;; Measured without the padding.
               (when (overlay-get ov 'before-string) (overlay-put ov 'before-string nil))
               ;; Padding at the top leaves a line for the empty one after
-              ;; the box, where a host following the end (chat) puts the
+              ;; the tail, where a host following the end (chat) puts the
               ;; bottom of the window; padding inside the buffer puts the
               ;; box on the last line.
               (let* ((line (frame-char-height (window-frame window)))
                      ;; More than BODY for a buffer taller than the window: no padding.
-                     (used (+ (harness-ui-text-height window (point-min) harness-compose-end body)
+                     (used (+ (harness-ui-text-height window (point-min) (harness-compose--measure-end) body)
                               (* line (if harness-compose--reserved-lines-function
                                           (funcall harness-compose--reserved-lines-function
                                                    window (point-min))
@@ -1155,11 +1164,11 @@ again by hand is left to `auto-hscroll-mode'."
 The box's lines wrap, so it grows and shrinks as it is typed in, and
 the host redraws around it.  Emacs would recenter once the box falls
 off the bottom and leave a gap under it once it shrinks; instead WINDOW
-scrolls just enough to keep the box's last line on its last line (above
-the spare line of a host padding its top), the way a chat app's input
-grows upwards.  A buffer that fits shows from its start, for the
-padding.  Only after the text or the window's size changed: scrolling
-is left to the user.
+scrolls just enough to keep the box and any lines the host draws under
+it at the bottom (above the spare line of a host padding its top), the
+way a chat app's input grows upwards.  A buffer that fits shows from
+its start, for the padding.  Only after the text or the window's size
+changed: scrolling is left to the user.
 
 What it checks depends on the buffer outside the box, the box's height,
 the window's size and the window's start.  MEASURED, from
@@ -1193,6 +1202,7 @@ commands, rather than scroll."
         (let* ((body (window-body-height window t))
                (line (frame-char-height (window-frame window)))
                (room (- body (if harness-compose--pad-at 0 line)))
+               (end (harness-compose--measure-end))
                ;; Lines drawn over the buffer above the box are not in
                ;; `window-text-pixel-size' either (`harness-compose--reserved-lines-function').
                (reserved (lambda (from)
@@ -1205,7 +1215,7 @@ commands, rather than scroll."
                ;; box with it, out of the window on every redraw.
                (height (lambda (from)
                          (+ (funcall reserved from)
-                            (harness-ui-text-height window from harness-compose-end room))))
+                            (harness-ui-text-height window from end room))))
                (start (window-start window))
                (pt (window-point window))
                (anchor (if harness-compose--pad-at harness-compose-end (point-max))))
@@ -1220,6 +1230,14 @@ commands, rather than scroll."
                             room)
                         anchor
                       pt)))
+           ;; A host's line under the box may fall out of view before
+           ;; point does.  Keep it visible too when that can be done
+           ;; without scrolling the compose cursor out of the window.
+           ((and (> end harness-compose-end)
+                 (> (funcall height start) room)
+                 (<= (funcall height (save-excursion (goto-char pt) (vertical-motion 0 window) (point)))
+                     room))
+            (harness-compose--bottom-at window anchor))
            ;; Shrunk, leaving a gap under the box.
            ((and (> start (point-min)) (<= line (- room (funcall height start))))
             (harness-compose--bottom-at window anchor))))

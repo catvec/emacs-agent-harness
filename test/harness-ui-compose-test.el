@@ -3207,6 +3207,66 @@ active region.  The keys go through the command loop."
     (should (= (point) harness-compose-end))
     (should (= (mark t) (+ harness-compose-start 2)))))
 
+;;;; Lines under the box
+
+(defun harness-ui-compose-test--insert-footer ()
+  "Draw a read-only settings line under the test host's compose box."
+  (let ((inhibit-read-only t)
+        (end (overlay-end harness-compose-overlay)))
+    (save-excursion
+      (goto-char (point-max))
+      (insert (propertize " Model · Auto · interactive\n" 'read-only t)))
+    ;; The settings line belongs to the host, not the editable box's overlay.
+    (move-overlay harness-compose-overlay (overlay-start harness-compose-overlay) end)))
+
+(ert-deftest harness-ui-compose-footer-is-counted-in-padding ()
+  "A line under the box takes room that its top padding would otherwise use."
+  (harness-ui-compose-test-with
+    (harness-compose-setup :bottom t)
+    (harness-compose-set "draft")
+    (goto-char harness-compose-end)
+    (let* ((window (selected-window))
+           (_ (set-window-point window (point)))
+           (_ (harness-compose-pad-window window))
+           (pad (alist-get window harness-compose--pads))
+           (before (length (overlay-get pad 'before-string))))
+      (should (> before 1))
+      (harness-ui-compose-test--insert-footer)
+      (harness-compose-pad-window window)
+      (should (= (1- before) (length (overlay-get pad 'before-string))))
+      (should (equal "draft" (harness-compose-text)))
+      (should (= (window-point window) harness-compose-end)))))
+
+(ert-deftest harness-ui-compose-footer-stays-visible-while-point-still-is ()
+  "Growing the box follows its footer even while the cursor still shows.
+In a graphical Emacs point can remain on the last visible row while
+the settings line under it falls below the window.  Batch Emacs says
+no position is visible, so model visibility with measured line heights
+rather than always taking the invisible-point branch of follow."
+  (harness-ui-compose-test-with
+    (harness-compose-setup :bottom t)
+    (let* ((window (selected-window))
+           (visible (lambda (pos &optional w _partially)
+                      (let ((w (or w window)))
+                        (<= (cdr (window-text-pixel-size w (window-start w) pos))
+                            (window-body-height w t))))))
+      (harness-compose-set (mapconcat #'identity (make-list (+ 8 (window-body-height window)) "a line") "\n"))
+      (harness-ui-compose-test--insert-footer)
+      (goto-char harness-compose-end)
+      (set-window-point window (point))
+      (harness-compose--bottom-at window (point-max))
+      (harness-compose-pad-window window)
+      (should (funcall visible (1- (point-max)) window))
+      ;; These lines move the footer out of sight before the cursor leaves.
+      (insert "\nnew line\nnext line")
+      (set-window-point window (point))
+      (should (funcall visible (point) window))
+      (should-not (funcall visible (1- (point-max)) window))
+      (cl-letf (((symbol-function 'pos-visible-in-window-p) visible))
+        (harness-compose-pad-window window))
+      (should (funcall visible (point) window))
+      (should (funcall visible (1- (point-max)) window)))))
+
 ;;;; Tokens of files and tasks
 
 (defun harness-ui-compose-test--chip (token)

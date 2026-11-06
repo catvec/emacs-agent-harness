@@ -204,7 +204,7 @@ a header holds without depending on the batch frame's width."
 
 (defun harness-ui-btw-test--settings (buffer &optional room)
   "BUFFER's settings line as drawn, or the one fitted to ROOM columns.
-That is the line above the compose box, once the tail has drawn it."
+That is the line under the compose box, once the tail has drawn it."
   (with-current-buffer buffer
     (if room
         (harness-chat--settings-line room)
@@ -504,7 +504,7 @@ nothing else."
         (harness-ui-btw-test--wait-mode sid 'accept-edits)
         (should (equal "low" (plist-get (harness-call 'session/get sid) :thinking)))
         ;; The chat's own header line, after the BTW segment; the session's
-        ;; settings are the settings line above the compose box.
+        ;; settings are the settings line under the compose box.
         (should (equal '(:eval (harness-chat--header)) (buffer-local-value 'header-line-format buffer)))
         (let ((own (harness-ui-btw-test--own-full-header buffer))
               (settings (harness-ui-btw-test--settings buffer most-positive-fixnum)))

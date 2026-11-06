@@ -1086,11 +1086,11 @@ count, closed, and the changes a click away."
           (dolist (text texts)
             (should-not (invisible-p (1- (harness-ui-chat-test-find buf text))))))))))
 
-;;;; The settings line above the compose box
+;;;; The settings line under the compose box
 
 (defun harness-ui-chat-test-settings (&optional room)
   "Return the settings line of the current chat as drawn now, with its properties.
-It is the text above the compose box, fitted to the buffer's windows;
+It is the text under the compose box, fitted to the buffer's windows;
 with ROOM, the line fitted to that many columns."
   (if room
       (harness-chat--settings-line room)
@@ -1110,13 +1110,13 @@ with ROOM, the line fitted to that many columns."
          (pos (string-search label (substring-no-properties line))))
     (and pos (get-text-property pos 'harness-ui-action line))))
 
-(ert-deftest harness-ui-chat-settings-line-is-above-the-box ()
-  "What changes what the session does is one line above the box.
+(ert-deftest harness-ui-chat-settings-line-is-under-the-box ()
+  "What changes what the session does is one line under the box.
 The model, thinking level, permission mode and interactive switch, as
-buttons of a line of text above the attachments and the compose box; the
-header keeps the name, the menu and what the session used -- the context
-in use, the tokens in all and the cost -- as buttons and figures.  The
-settings line says none of the figures."
+buttons of a line of text under the compose box, after the attachments;
+the header keeps the name, the menu and what the session used -- the
+context in use, the tokens in all and the cost -- as buttons and
+figures.  The settings line says none of the figures."
   (harness-ui-chat-test-with
     (clrhash harness-ui--quotas)
     (let* ((sid (harness-ui-chat-test-session "Settings"))
@@ -1126,9 +1126,10 @@ settings line says none of the figures."
           (should (string-prefix-p " " text))
           ;; In the 80 columns of batch the line has room for it all.
           (should (string-match-p "scripted (Demo) · .*default · Ask · interactive\\'" text))
-          ;; A line of the buffer, above the attachments and the box.
+          ;; A line of the buffer, under the attachments and the box.
           (should (marker-position harness-chat--settings-marker))
-          (should (<= (marker-position harness-chat--settings-end) harness-compose-start))
+          (should (<= harness-compose-end (marker-position harness-chat--settings-marker)))
+          (should (= (marker-position harness-chat--settings-end) (point-max)))
           (should (string-match-p "scripted" (buffer-string)))
           (should (string-suffix-p "\n" (harness-ui-chat-test-settings)))
           ;; The header: the name, the figures and the menu, nothing of
@@ -1273,8 +1274,8 @@ take the line's room."
             (should (<= (string-width (harness-ui-chat-test-settings-text)) (harness-chat--settings-room)))
             (should (< (string-width (harness-ui-chat-test-settings-text)) (string-width whole)))))))))
 
-(ert-deftest harness-ui-chat-settings-line-stays-above-the-attachments ()
-  "The line is above what is attached to the next message, which is above the box."
+(ert-deftest harness-ui-chat-settings-line-stays-under-the-box ()
+  "The line is under the box; what is attached sits above the box."
   (harness-ui-chat-test-with
     (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "Attached")))
            (file (expand-file-name "notes.txt" (harness-test-temp-dir))))
@@ -1286,9 +1287,44 @@ take the line's room."
               (end (marker-position harness-chat--settings-end))
               (chip (harness-ui-chat-test-find buf "notes.txt")))
           (should chip)
-          (should (< line end chip))
           (should (< chip harness-compose-start))
+          (should (<= harness-compose-end line))
+          (should (= end (point-max)))
           (should (string-match-p "scripted" (harness-ui-chat-test-settings-text))))))))
+
+(ert-deftest harness-ui-chat-settings-refresh-keeps-the-box-separate ()
+  "Refreshing the footer never takes the draft, cursor or compose background with it."
+  (harness-ui-chat-test-with
+    (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "Footer"))))
+      (with-current-buffer buf
+        (harness-compose-set "first line\nsecond line")
+        (goto-char (+ harness-compose-start 3))
+        (let ((cursor (point)))
+          ;; Replace, remove and restore the footer without a tail redraw.
+          ;; These run without `inhibit-read-only', as a settings update does.
+          (dolist (line (list (harness-chat--settings-line 25) nil
+                             (harness-chat--settings-line 80)))
+            (harness-chat--show-settings line)
+            (should (= (point) cursor))
+            (should (equal "first line\nsecond line" (harness-compose-text)))
+            (should (= (overlay-end harness-compose-overlay)
+                       (marker-position harness-chat--settings-marker)))
+            (should (= (1+ harness-compose-end) (overlay-end harness-compose-overlay)))
+            (when line
+              (should (get-text-property harness-chat--settings-marker 'read-only))
+              (should-error (save-excursion (goto-char harness-chat--settings-marker) (insert "x"))
+                            :type 'text-read-only))))
+        ;; Typing still edits only the draft, and the footer moves with it.
+        (goto-char harness-compose-end)
+        (insert "\nthird line")
+        (should (equal "first line\nsecond line\nthird line" (harness-compose-text)))
+        (should (= (1+ harness-compose-end) (marker-position harness-chat--settings-marker)))
+        (should (string-match-p "scripted" (harness-ui-chat-test-settings-text)))
+        (harness-chat--render-tail)
+        (should (equal "first line\nsecond line\nthird line" (harness-compose-text)))
+        (should (= (1+ harness-compose-end) (overlay-end harness-compose-overlay)))
+        (should (= (overlay-end harness-compose-overlay)
+                   (marker-position harness-chat--settings-marker)))))))
 
 (ert-deftest harness-ui-chat-settings-functions-add-items ()
   "What `harness-chat-settings-functions' return follows the settings, as a group.
@@ -2297,10 +2333,10 @@ the buffer -- and laid out on every redisplay -- until then."
 
 (ert-deftest harness-ui-chat-activity-line-stands-under-the-top-of-the-tail ()
   "The activity line goes under what the top functions draw, above the rest.
-Its overlay sits where that text ends, above the settings line and the
-rest, through renders of the tail and blocks appended to the transcript
-or drawn again.  Once nothing draws there it is at the end of the
-transcript, as it was before the hook."
+Its overlay sits where that text ends, above the rest of the tail and
+the compose box, through renders of the tail and blocks appended to the
+transcript or drawn again.  Once nothing draws there it is at the end
+of the transcript, as it was before the hook."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
@@ -2323,10 +2359,11 @@ transcript, as it was before the hook."
           (should (line))
           (should (get-text-property (end) 'harness-chat-top))
           (should (= (under) (place)))
-          ;; Nothing else in the tail: right above the settings line and the box.
-          (should (= (under) (marker-position harness-chat--settings-marker)))
-          (should (<= (marker-position harness-chat--settings-end)
-                      (overlay-start harness-compose-overlay)))
+          ;; Nothing else in the tail before the box: right above the box,
+          ;; with the settings line under it.
+          (should (= (under) (overlay-start harness-compose-overlay)))
+          (should (<= (overlay-end harness-compose-overlay)
+                      (marker-position harness-chat--settings-marker)))
           ;; Above the todo list, which comes after it.
           (harness-call 'session/set-todos sid '((:id "1" :text "Survey the project" :status "in-progress")))
           (harness-test-wait (lambda () harness-chat--todos) 5 "the todo list to show")
@@ -10381,7 +10418,8 @@ arrives meanwhile applies once the transcript is in."
     (harness-test-compose-c-a-c-k (harness-ui-chat-test-open (harness-ui-chat-test-session)))))
 
 (ert-deftest harness-ui-chat-box-stays-at-the-bottom ()
-  "A box grown past the window keeps its last line above the window's spare last line."
+  "A box grown past the window keeps its settings footer at the bottom.
+The draft and footer stay above the window's spare last line."
   (harness-ui-chat-test-with
     (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
            (window (selected-window)))
@@ -10392,7 +10430,8 @@ arrives meanwhile applies once the transcript is in."
         (harness-compose-pad-window window)
         (should (> (window-start window) (point-min)))
         (should (= (- (window-body-height window t) (frame-char-height))
-                   (cdr (window-text-pixel-size window (window-start window) harness-compose-end))))))))
+                   (cdr (window-text-pixel-size window (window-start window)
+                                                (harness-compose--measure-end)))))))))
 
 (ert-deftest harness-ui-chat-todos-show-in-the-panel ()
   "A session's todo list is conspicuous without opening its tool block:

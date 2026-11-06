@@ -23,10 +23,6 @@
 ;;                 them at a time, in one place, and switches between them
 ;;   todos         the session's todo items, one per line, or folded to
 ;;                 the title line, which is how the panel starts
-;;   settings      one line of buttons and figures: model, thinking level,
-;;                 permission mode, interactive or not, the context in
-;;                 use, the tokens in all, the cost, and what other
-;;                 modules add (a task's queue), fitted to the window
 ;;   threads       the review's threads, while C-c T shows them: the view
 ;;                 the report draws, drawn by the module that keeps the
 ;;                 review (`harness-chat-threads-function'), in place of
@@ -34,6 +30,10 @@
 ;;   attachments   chips for files attached to the next message
 ;;   notice        the session was deleted, or is inactive (sending resumes it)
 ;;   compose       an editable region; C-c C-c sends, RET adds a newline
+;;   settings      one line of buttons under the box: model,
+;;                 thinking level, permission mode, interactive or not,
+;;                 and what other modules add (a task's queue), fitted
+;;                 to the window
 ;;   mode line     status (the spinner while a turn runs), turn duration
 ;;
 ;; The transcript is never re-rendered on a delta: every node owns a
@@ -406,10 +406,10 @@ Each is (REPLY-BLOCK-ID REPLY-INDEX REFERENCE): the block of the reply,
 the number of the reply in it, and the reference to the part of the node
 it quotes (`harness-thread-refs').")
 (defvar-local harness-chat--settings-marker nil
-  "Marker: where the settings line starts, above the attachments.
+  "Marker: where the settings line starts, under the compose box.
 The tail sets it whenever it is drawn (`harness-chat--render-tail-1').")
 (defvar-local harness-chat--settings-end nil
-  "Marker: where the settings line ends, the start of the attachments.")
+  "Marker: where the settings line ends, at the end of the tail.")
 (defvar-local harness-chat--settings-fitted nil
   "Columns the settings line was last fitted to.")
 
@@ -5029,15 +5029,6 @@ box's words are kept for \[harness-chat-show-compose]."
         (harness-chat--insert-todos)
         (harness-chat--insert-panels)
 
-        ;; The settings line goes here, above the attachments: text of the
-        ;; tail, fitted to the window, and redrawn in place while the
-        ;; figures move (`harness-chat--refresh-settings').
-        (let ((start (point)))
-          (insert (or (harness-chat--settings-line (harness-chat--settings-room)) ""))
-          ;; The start advances with a block appended where it is; the end
-          ;; stays before the attachments drawn there.
-          (setq harness-chat--settings-marker (copy-marker start t)
-                harness-chat--settings-end (copy-marker (point))))
         (setq harness-chat--threads-view-start
               (and harness-chat--threads-view (copy-marker (point))))
         (when harness-chat--threads-view
@@ -5058,7 +5049,27 @@ box's words are kept for \[harness-chat-show-compose]."
         (put-text-property start (point) 'read-only t)
         (if harness-chat--threads-view
             (harness-compose-hide)
-          (harness-compose-insert nil (harness-chat--box-help)))))
+          (harness-compose-insert nil (harness-chat--box-help)))
+        ;; The overlay of the box grows with text inserted where it ends;
+        ;; the line under it is not part of the box.
+        (let ((box-end (and harness-compose-overlay
+                            (overlay-buffer harness-compose-overlay)
+                            (overlay-end harness-compose-overlay))))
+          ;; The settings line goes here, under the box -- or under the
+          ;; threads view standing in for it -- as the last line of the
+          ;; tail: text fitted to the window, and redrawn in place while
+          ;; the settings move (`harness-chat--refresh-settings').
+          (let ((settings-start (point)))
+            (insert (or (harness-chat--settings-line (harness-chat--settings-room)) ""))
+            ;; The start advances with a block appended where it is; the end
+            ;; stays where the line ended.
+            (setq harness-chat--settings-marker (copy-marker settings-start t)
+                  harness-chat--settings-end (copy-marker (point)))
+            (when (< settings-start (point))
+              (put-text-property settings-start (point) 'read-only t)
+              (harness-chat--mark-tail-region settings-start (point) '(settings))))
+          (when (and box-end (overlay-buffer harness-compose-overlay))
+            (move-overlay harness-compose-overlay (overlay-start harness-compose-overlay) box-end)))))
     (cond ((and offset harness-compose-start)
            (goto-char (min (+ harness-compose-start offset) (or harness-compose-end (point-max)))))
           ((and in-tail harness-compose-end) (goto-char harness-compose-end)))
@@ -5084,7 +5095,7 @@ box's words are kept for \[harness-chat-show-compose]."
     ;; The new tail went in where the activity line was: put it back,
     ;; under the queued messages and above the rest.
     (harness-chat--refresh-activity)
-    ;; And the settings line, above the attachments and the box.
+    ;; And the settings line, under the box.
     (harness-chat--refresh-settings)))
 
 (defvar-local harness-chat-placeholder nil
@@ -6296,8 +6307,8 @@ Changes then arrive as `_harness/activity' updates."
 ;;;; The settings line
 
 ;; What the session works with -- its model, thinking level, permission
-;; mode and whether it waits for you -- stands on one line above the
-;; compose box, as a new task's settings stand above the task board's box
+;; mode and whether it waits for you -- stands on one line under the
+;; compose box.  A new task's settings stand above the task board's box
 ;; (`harness-ui-tasks--new-settings-line'): both lines are drawn by the
 ;; same component (`harness-ui-settings-line'), each setting a button
 ;; that runs its command.  Other modules add to it with
@@ -6316,7 +6327,8 @@ Changes then arrive as `_harness/activity' updates."
 ;; harness menu.
 
 (defvar harness-chat-settings-functions nil
-  "Functions adding items to the settings line of a chat, after its settings.
+  "Functions adding items to the settings line under a chat's compose box.
+The items come after its settings.
 Each is called without arguments in the chat buffer whenever the line is
 drawn, and returns a list of items -- a string, or (TEXT PRIORITY MIN)
 as `harness-ui-settings-line' takes them -- or nil for none.  The items
@@ -6347,7 +6359,7 @@ settings line.  The cost goes first, then the tokens, which shorten to
 the number before they go; the context goes last of them (see
 `harness-ui-fit-items').  Each names the command a click runs, for the
 overflow menu too.  They are information, not settings: the header
-carries them, above the compose box's settings line."
+carries them, above the compose box and its settings line."
   (let ((context (list (concat "  " (harness-ui-format-context session)) 30
                        nil #'harness-set-context-limit))
         (tokens (when-let* ((text (harness-ui-format-total-tokens session)))
@@ -6411,21 +6423,22 @@ background does not run into it."
           line)))))
 
 (defun harness-chat--settings-position ()
-  "Return where the settings line goes: above the attachments and the box.
-That is where the tail drew them (`harness-chat--render-tail-1'), else
-the start of the box."
+  "Return where the settings line goes: under the compose box.
+That is where the tail drew it (`harness-chat--render-tail-1'), else
+the end of the box."
   (cond ((and (markerp harness-chat--settings-marker) (marker-buffer harness-chat--settings-marker))
          (marker-position harness-chat--settings-marker))
         ((and harness-compose-overlay (overlay-buffer harness-compose-overlay))
-         (overlay-start harness-compose-overlay))))
+         (overlay-end harness-compose-overlay))))
 
 (defun harness-chat--show-settings (line)
   "Make LINE, or nothing when nil, the settings line.
-The line is text above the attachments, so a figure that changes
-redraws the line in place (`harness-ui-replace-region').  A line
-appearing or going changes the height of the text above the compose
-box: its padding is sized again and the windows that showed the end
-keep showing it, as for the activity line (`harness-chat--show-activity')."
+The line is text under the attachments and the compose box, so a
+setting that changes redraws the line in place
+\(`harness-ui-replace-region').  A line appearing or going changes the
+height of the tail: its padding is sized again and the windows that
+showed the end keep showing it, as for the activity line
+\(`harness-chat--show-activity')."
   (when-let* ((start (harness-chat--settings-position))
               (end (and (markerp harness-chat--settings-end)
                         (marker-buffer harness-chat--settings-end)
@@ -6434,15 +6447,24 @@ keep showing it, as for the activity line (`harness-chat--show-activity')."
            ;; Compare the properties too: what a click runs may change while
            ;; the words stay the same (the access view's command, say).
            (old (buffer-substring start end))
-           (_ (remove-text-properties 0 (length old) '(read-only nil) old))
+           (_ (remove-text-properties 0 (length old) '(read-only nil harness-chat-tail-region nil) old))
            (appeared (not (eq (string-empty-p old) (string-empty-p new))))
-           (bottom (and appeared (harness-chat--bottom-windows))))
+           (bottom (and appeared (harness-chat--bottom-windows)))
+           (box-end (and harness-compose-overlay
+                         (overlay-buffer harness-compose-overlay)
+                         (overlay-end harness-compose-overlay))))
       (unless (equal-including-properties old new)
         (harness-ui-replace-region start end new)
         (set-marker harness-chat--settings-marker start)
         (set-marker harness-chat--settings-end (+ start (length new)))
         (when (> (length new) 0)
-          (put-text-property start (+ start (length new)) 'read-only t))
+          (let ((inhibit-read-only t))
+            (harness-chat--mark-tail-region start (+ start (length new)) '(settings))
+            (put-text-property start (+ start (length new)) 'read-only t)))
+        ;; The compose overlay advances at its end, but the settings line
+        ;; next to it is not part of the box.
+        (when (and box-end (overlay-buffer harness-compose-overlay))
+          (move-overlay harness-compose-overlay (overlay-start harness-compose-overlay) box-end))
         (when appeared
           (dolist (w (harness-chat--windows)) (harness-compose-repad w))
           (dolist (w bottom) (harness-chat--pin w)))
@@ -7902,8 +7924,9 @@ the id of a session written in a message is a link to it.
                          :placeholder #'harness-chat--placeholder
                          :redraw #'harness-chat--render-tail
                          :bottom t)
-  ;; The activity and settings lines are overlay strings: make the box
-  ;; leave room for them as if they were text.
+  ;; The activity line is an overlay string: make the box leave room for
+  ;; it as if it were text.  The settings line is text under the box,
+  ;; which the box's padding counts (`harness-compose--measure-end').
   (setq-local harness-compose--reserved-lines-function #'harness-chat--reserved-lines)
   (setq-local compose-quote-function #'harness-chat--quote-at-point
               harness-quote-target-functions (list #'harness-chat--quote-target)
