@@ -255,7 +255,8 @@ An option two sections name, such as `harness-supervisor', is listed
 once, in the first.")
 
 (defconst harness-config-hidden-options
-  '(harness-process harness-module-directories harness-extra-module-directories
+  '(harness-process harness-server-address
+    harness-module-directories harness-extra-module-directories
     harness-plugin-modules
     harness-enabled-modules harness-disabled-modules
     harness-state-directory harness-server-emacs harness-server-forward-variables

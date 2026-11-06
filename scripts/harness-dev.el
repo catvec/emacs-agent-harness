@@ -139,6 +139,12 @@ Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
   ;; HARNESS_DEV_MODULES=default asks for the defaults: the core only.
   (unless (equal (getenv "HARNESS_DEV_MODULES") "default")
     (setq harness-enabled-modules t))
+  ;; HARNESS_DEV_SERVER_ADDRESS points this UI at a harness server
+  ;; elsewhere, as a user's `harness-server-address' would at start.
+  (let ((address (getenv "HARNESS_DEV_SERVER_ADDRESS")))
+    (when (and address (not (string-empty-p (string-trim address))))
+      (setq harness-server-address (string-trim address)
+            harness-acp-token (getenv "HARNESS_DEV_SERVER_TOKEN"))))
   (harness-start)
   (harness-auto-reload-mode 1))
 

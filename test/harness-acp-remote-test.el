@@ -1122,6 +1122,27 @@ request, which is left waiting, and the waiting approval (a plist the status giv
               (should (string-search "wait" (plist-get (plist-get answer :error) :message)))))
         (delete-process (car conn))))))
 
+(ert-deftest harness-acp-remote-an-emacs-ui-trades-the-shared-secret ()
+  "An Emacs ACP client, the UI, connects over plain TCP and signs in.
+It presents `harness-acp-token' as `authenticate' method `token', as
+`harness-server-address' makes the UI do at start, and then calls
+methods as any signed-in client."
+  (harness-acp-remote-test-with
+    (let* ((harness-acp-token "a-shared-secret-of-some-length")
+           (conn (harness-acp-connect (format "127.0.0.1:%d" harness-acp-remote-test-port))))
+      (unwind-protect
+          (progn
+            (harness-acp-set-handler conn #'ignore)
+            (harness-test-wait (lambda () (harness-acp-connected-p conn)) 15 "the UI's connection")
+            (let ((init (harness-test-await (harness-acp-initialize conn) 15)))
+              ;; A signed-in client hears the harness, not the reduced answer.
+              (should (plist-get init :_harness))
+              (should (plist-member init :authMethods)))
+            (should (plist-get (harness-test-await
+                                (harness-acp-request conn "_harness/harness/version" nil) 15)
+                               :version)))
+        (harness-acp-close conn)))))
+
 (ert-deftest harness-acp-remote-plain-tcp-must-authenticate-in-time ()
   (harness-acp-remote-test-with
     (let ((harness-acp-remote--preauth-timeout 0.3)

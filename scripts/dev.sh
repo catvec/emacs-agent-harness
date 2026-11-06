@@ -38,6 +38,9 @@
 # it lists the commands to run with that link as HARNESS_DEV_SOCKET.
 # HARNESS_DEV_STATE is the daemon's state directory (default
 # scripts/.dev/state-NAME, NAME being the socket's name).
+# HARNESS_DEV_SERVER_ADDRESS (with HARNESS_DEV_SERVER_TOKEN) starts its
+# UI on a harness server there, as `harness-server-address' does, so a
+# remote connection can be tried without a harness process of its own.
 #
 # In the harness's sandbox (HARNESS_SANDBOX is set there) an Emacs this
 # script starts ends with the command that started it: `start' warns,

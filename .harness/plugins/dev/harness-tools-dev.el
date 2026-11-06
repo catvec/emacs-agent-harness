@@ -1277,6 +1277,39 @@ the unrecorded ones too.  The promise resolves to the sockets stopped."
 (with-eval-after-load 'harness-tool-slots
   (add-to-list 'harness-tool-slots-tools harness-tools-dev-tool t))
 
+;;;; This repository's UI workflow
+
+(defconst harness-tools-dev--ui-copy-section
+  "## UI changes in this repository
+
+Before UI changes, read CLAUDE.md and docs/ui-guide.md. UI copy is nouns,
+noun phrases and adjectives, never full sentences: headings, buttons,
+labels, notes, tooltips, forms, headers, menus, statuses and echo-area
+errors. Prose belongs only in explicit help or setting descriptions;
+leave user/model output and other data unchanged.
+
+Use a copy-first checkpoint in your plan: inventory the intended labels,
+tooltips, headers, menus, empty/loading states, success and error text
+before implementation. Remove explanatory prose rather than just its
+punctuation. Add exact rendered-copy regression assertions for these
+states and tooltips; a sentence-guessing heuristic is not a grammar
+check. Before handing in, inspect the live screenshots and the final
+diff's changed UI strings against that inventory. Treat this as a
+separate verification step, not as a side effect of functional tests."
+  "Copy-first workflow sent to agents working on this repository.")
+
+(defun harness-tools-dev--system-prompt (prompt session)
+  "Append this repository's UI workflow to PROMPT for its SESSION only.
+The session's frozen plugin modules, not its current directory, decide
+scope. Internal sessions and callers without the plugins service keep
+PROMPT unchanged."
+  (if (and (plist-get session :id)
+           (not (member (plist-get session :kind) '(internal "internal")))
+           (harness-method-exists-p 'plugins/of-session)
+           (memq 'tools-dev (harness-call 'plugins/of-session (plist-get session :id))))
+      (concat prompt "\n\n" harness-tools-dev--ui-copy-section "\n")
+    prompt))
+
 ;;;; Init and reload
 
 (defconst harness-tools-dev--events
@@ -1298,6 +1331,7 @@ The harness offers the tool to the sessions that name this module in
 `harness-plugin-modules' only, as it does every tool of a project's
 plugin."
   (harness-add-filter 'worktree/before-remove #'harness-tools-dev--before-remove)
+  (harness-add-filter 'agent/system-prompt #'harness-tools-dev--system-prompt 70)
   (dolist (event harness-tools-dev--events)
     (harness-on event #'harness-tools-dev--schedule))
   (harness-tools-dev--start-sweeping))
@@ -1307,6 +1341,7 @@ plugin."
 The instances themselves run on: each stops once the Emacs it belongs
 to is gone (`harness-tools-dev--owner'), and a harness started again
 looks after them."
+  (harness-remove-filter 'agent/system-prompt #'harness-tools-dev--system-prompt)
   (dolist (timer (list harness-tools-dev--check-timer harness-tools-dev--sweep-timer))
     (when (timerp timer) (cancel-timer timer)))
   (setq harness-tools-dev--check-timer nil

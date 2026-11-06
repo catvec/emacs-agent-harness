@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Run a harness server: the harness, without a UI, serving ACP over TCP
+# for the UI of an Emacs on another machine.
+#
+#   HARNESS_SERVER_HOST=0.0.0.0 HARNESS_SERVER_PORT=4276 \
+#   HARNESS_SERVER_TOKEN="$(cat ~/.config/harness-token)" \
+#   scripts/harness-server
+#
+# HARNESS_SERVER_HOST defaults to 127.0.0.1 and HARNESS_SERVER_PORT to
+# an ephemeral port, both printed on stderr when the server listens.
+# A host beyond this machine needs HARNESS_SERVER_TOKEN of 16 characters
+# or more; without one the server refuses to listen there.
+#
+# HARNESS_SERVER_CONFIG names a file of Emacs Lisp forms loaded before
+# the harness starts, for settings and modules an init file would set:
+#
+#   (setq harness-enabled-modules '(tasks merge supervisor))
+#   (setq harness-state-directory "~/.local/state/harness-server/")
+#
+# The UI connects to it with `harness-server-address' set to the printed
+# HOST:PORT and `harness-acp-token' set to the same token.
+set -u
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+EMACS=${HARNESS_SERVER_EMACS:-${HARNESS_EMACS:-emacs}}
+# No parent to watch: this server is not an Emacs UI's child.
+unset HARNESS_SERVER_PARENT
+exec "$EMACS" --batch -Q -L "$ROOT" -L "$ROOT/lisp" \
+  -l "$ROOT/lisp/harness-server.el" -f harness-server-main

@@ -4,6 +4,7 @@ An Emacs native harness for agentic development.
 # Table Of Contents
 - [Overview](#overview)
 - [Getting Started](#getting-started)
+- [Connect To A Harness Server Elsewhere](#connect-to-a-harness-server-elsewhere)
 - [Install](#install)
 - [Modules](#modules)
 
@@ -68,7 +69,41 @@ To use Emacs agent harness:
    Configure the harness keymap prefix via the `harness-ui-prefix-key` variable (Default: `"C-c h"`).
    
 Now the harness is ready. To get started press `PREFIX` on its own to open the grouped menu: choose a group to see its commands, then a key to run one. `PREFIX n` creates a new session.
-   
+
+# Connect To A Harness Server Elsewhere
+
+By default the harness UI in your Emacs starts its own harness process and talks to it. To drive a harness on another machine instead, run a harness server there with `scripts/harness-server`:
+
+```bash
+# On the server. Pick a long secret; the client uses the same one.
+export HARNESS_SERVER_TOKEN="$(openssl rand -hex 24)"
+export HARNESS_SERVER_HOST=0.0.0.0
+export HARNESS_SERVER_PORT=4276
+scripts/harness-server
+```
+
+It prints `HARNESS-ACP-ADDRESS HOST:PORT` when it listens. `HARNESS_SERVER_CONFIG` may name a file of Emacs Lisp forms loaded before it starts, for modules and settings an init file would set:
+
+```elisp
+(setq harness-enabled-modules '(tasks merge supervisor))
+;; Optional: its own sessions and tasks, if another harness uses the default.
+(setq harness-state-directory "~/.local/state/harness-server/")
+```
+
+Then, in the Emacs running the UI, set the server's address and the same secret before `(harness-start)`:
+
+```elisp
+(setq harness-server-address "server.example.org:4276"
+      harness-acp-token "the same secret as HARNESS_SERVER_TOKEN")
+(harness-start)
+```
+
+The UI now starts no harness process of its own: it opens sessions, runs tools and shows tasks on that server. The server refuses a non-loopback address without a token of at least 16 characters. If it listens on its loopback interface instead, reach it through an ssh tunnel (`ssh -L 4276:127.0.0.1:4276 SERVER`) and point `harness-server-address` at `127.0.0.1:4276`.
+
+There is a form for this too. `C-c h c` (`harness-connect-server`) asks for the address and the token and connects at once, offers to remember the server for the next start (`harness-server-address`), and copies the settings as a `setq` for an init file. An empty address returns to this Emacs's own harness. `C-c h C` (`harness-server`) shows the harness the UI talks to: where it runs, its address and round trip, its version and Emacs, the sessions it runs and the modules it loaded — a server elsewhere or the harness on this machine. In corporate mode (`harness-corporate-mode`) the UI never leaves this machine.
+
+A harness that enables `harness-acp-remote` also serves ACP to other devices, over the same host and port; its shared `harness-acp-token` works here too.
+
 # Install
 ## straight.el
 

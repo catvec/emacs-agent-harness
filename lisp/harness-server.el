@@ -43,6 +43,7 @@
 (defvar harness-acp-token)
 (defvar harness-acp-port)
 (defvar harness-acp-host)
+(defvar harness-acp-allow-remote)
 (defvar harness-acp--server-enabled)
 (defvar harness-compile-subdirectory)
 (defvar harness-process)
@@ -204,6 +205,42 @@ dropped, and `harness-log' cuts the entry it keeps to the same size.")
   (princ (format "%s %s\n" (upcase (symbol-name level)) (replace-regexp-in-string "\n" "\\\\n" msg))
          #'external-debugging-output))
 
+(defun harness-server--env-flag-p (name)
+  "Non-nil when environment variable NAME is set to a true value.
+\"\", \"0\", \"no\", \"false\" and \"nil\" are false; anything else true."
+  (let ((value (getenv name)))
+    (and value (not (member (downcase (string-trim value)) '("" "0" "no" "false" "nil"))))))
+
+(defun harness-server--loopback-host-p (host)
+  "Non-nil when HOST names this machine's loopback interface."
+  (let ((host (downcase (or host ""))))
+    (or (member host '("" "localhost" "::1" "[::1]"))
+        (string-prefix-p "127." host))))
+
+(defun harness-server--standalone-address ()
+  "Return (HOST PORT) a standalone server listens on, from the environment.
+HARNESS_SERVER_HOST defaults to 127.0.0.1 and HARNESS_SERVER_PORT to 0,
+an ephemeral port."
+  (let ((host (or (getenv "HARNESS_SERVER_HOST") "127.0.0.1"))
+        (port (getenv "HARNESS_SERVER_PORT")))
+    (when (string-empty-p (string-trim host))
+      (setq host "127.0.0.1"))
+    (when (and port (not (string-empty-p (string-trim port)))
+               (not (string-match-p "\\`[0-9]+\\'" (string-trim port))))
+      (error "HARNESS_SERVER_PORT is not a port number: %s" port))
+    (list (string-trim host)
+          (if (or (null port) (string-empty-p (string-trim port)))
+              0
+            (string-to-number (string-trim port))))))
+
+(defun harness-server--public-listening-problem (host token)
+  "Return why a server may not listen on HOST with TOKEN, or nil.
+A host beyond this machine needs a shared secret of 16 characters or
+more: without one, anybody who reaches the port controls the harness."
+  (when (and (not (harness-server--loopback-host-p host))
+             (or (null token) (< (length token) 16)))
+    (format "refusing to listen on %s without HARNESS_SERVER_TOKEN of 16 characters or more" host)))
+
 (defun harness-server--log-line (line)
   "Log LINE, one line of the child's stderr, cut to `harness-server--log-line-max'."
   (when (> (length line) harness-server--log-line-max)
@@ -216,9 +253,24 @@ dropped, and `harness-log' cuts the entry it keeps to the same size.")
 (defun harness-server-main ()
   "Run the harness process.  Called by `emacs --batch'; never returns.
 Reads HARNESS_SERVER_CONFIG (a file of forms to load),
-HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
-  (let ((config (getenv "HARNESS_SERVER_CONFIG"))
-        (parent (let ((p (getenv "HARNESS_SERVER_PARENT"))) (and p (string-to-number p)))))
+HARNESS_SERVER_TOKEN, HARNESS_SERVER_PARENT, HARNESS_SERVER_HOST and
+HARNESS_SERVER_PORT from the environment.
+
+HARNESS_SERVER_HOST and HARNESS_SERVER_PORT are where a standalone
+server listens (127.0.0.1 and an ephemeral port by default); a server
+started by an Emacs serves that Emacs on 127.0.0.1 and an ephemeral
+port.  A host beyond this machine needs HARNESS_SERVER_TOKEN of at
+least 16 characters: without one, anybody who reaches the port controls
+the harness."
+  (let* ((config (getenv "HARNESS_SERVER_CONFIG"))
+         (parent (let ((p (getenv "HARNESS_SERVER_PARENT"))) (and p (string-to-number p))))
+         (token (getenv "HARNESS_SERVER_TOKEN"))
+         ;; A child UI's harness serves it on loopback; a server run on its
+         ;; own listens where the environment says.
+         (address (if parent '("127.0.0.1" 0) (harness-server--standalone-address))))
+    (when-let* ((problem (harness-server--public-listening-problem (car address) token)))
+      (princ (concat "harness: " problem "\n") #'external-debugging-output)
+      (kill-emacs 1))
     (add-hook 'harness-log-hook #'harness-server--log-to-stderr)
     ;; An error in a process filter or sentinel is logged, not fatal.
     (harness-server--guard)
@@ -232,9 +284,11 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
           ;; `harness-extra-module-directories' all but the UI ones
           ;; (see `harness--module-files').
           harness-module-directories '("lisp/modules")
-          harness-acp-token (getenv "HARNESS_SERVER_TOKEN")
-          harness-acp-host "127.0.0.1"
-          harness-acp-port 0
+          harness-acp-token token
+          harness-acp-host (car address)
+          harness-acp-port (cadr address)
+          harness-acp-allow-remote (or (not (harness-server--loopback-host-p (car address)))
+                                       (harness-server--env-flag-p "HARNESS_SERVER_ALLOW_REMOTE"))
           harness-acp--server-enabled t
           ;; They are this process's own, whatever a policy says.
           harness-policy-exempt harness-server--own-variables)
@@ -310,7 +364,7 @@ own Emacs -- what they answered `!' to, say -- and nothing else.")
 (defconst harness-server--own-variables
   '(harness-process harness-module-directories harness-extra-module-directories
     harness-compile-subdirectory harness-acp-token harness-acp-host harness-acp-port
-    harness-server-forward-variables
+    harness-server-address harness-server-forward-variables
     ;; The harness process reads the policy from where the administrator
     ;; put it, not from where this Emacs was told to look.
     harness-policy-file)

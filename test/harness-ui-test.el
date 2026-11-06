@@ -3,6 +3,7 @@
 
 (require 'harness-test-helpers)
 (require 'harness-ui)
+(require 'harness-ui-server)
 (require 'harness-carry)
 
 ;; The tasks module's cap: declared here so that the context limit test
@@ -2226,6 +2227,40 @@ agenda or Embark for instance."
     (harness-connect-remote " 127.0.0.1:9000 ")
     (should (equal '(process nil nil "127.0.0.1:9000") connected))))
 
+(ert-deftest harness-ui-start-address-is-the-configured-server ()
+  "`harness-server-address' is where the UI starts, not a harness of its own.
+It is ignored while the harness runs in this Emacs (no split, no
+server elsewhere), left as the local process when it is empty, and
+corporate mode keeps the UI on this machine."
+  (let ((harness-process t) (harness-server-address "example.org:9000"))
+    (should (equal "example.org:9000" (harness--ui-start-address))))
+  (let ((harness-process t) (harness-server-address " example.org:9000 "))
+    (should (equal "example.org:9000" (harness--ui-start-address))))
+  (let ((harness-process t) (harness-server-address "  "))
+    (should (eq 'process (harness--ui-start-address))))
+  (let ((harness-process t) (harness-server-address nil))
+    (should (eq 'process (harness--ui-start-address))))
+  (let ((harness-process nil) (harness-server-address "example.org:9000"))
+    (should-not (harness--ui-start-address)))
+  (let ((harness-process t) (harness-server-address "example.org:9000")
+        (harness-corporate-mode t))
+    (should (eq 'process (harness--ui-start-address)))))
+
+(ert-deftest harness-ui-connect-to-a-server-starts-no-process ()
+  "Connecting the UI to a server elsewhere opens that connection only:
+no harness process of this Emacs starts behind it."
+  (let ((harness-ui-connection nil) (harness-ui--server nil)
+        (harness-ui--server-address nil) (harness-ui--server-stopping nil)
+        (harness-process t) (harness-server-address "example.org:9000")
+        (opened nil) (started 0))
+    (cl-letf (((symbol-function 'harness-ui--open)
+               (lambda (address token) (push (cons address token) opened) nil))
+              ((symbol-function 'harness-ui--ensure-server)
+               (lambda () (cl-incf started))))
+      (harness-ui-connect harness-server-address)
+      (should (equal '("example.org:9000") (mapcar #'car opened)))
+      (should (zerop started)))))
+
 ;;;; Tools by their labels
 
 (defmacro harness-ui-test-with-tools (specs &rest body)
@@ -2319,7 +2354,7 @@ with is shown as it is."
 ;;;; Corporate mode
 
 (defconst harness-ui-test-corporate-refusal
-  (format-message "Corporate mode is on: the UI connects only to this Emacs's own harness")
+  (format-message "Corporate mode · local harness only")
   "What `harness-connect-remote' says when corporate mode refuses an address.")
 
 (ert-deftest harness-ui-connect-remote-refused-in-corporate-mode ()
@@ -2360,14 +2395,14 @@ reconnection."
         (should (equal '("example.org:9000" . nil) (car opened)))))))
 
 (ert-deftest harness-ui-menu-connect-remote-is-inapt-in-corporate-mode ()
-  "The menu shows Connect remote as inapt in corporate mode."
+  "The menu shows Server connection as inapt in corporate mode."
   (cl-flet ((inapt-p ()
               (harness-ui-test-with-menu-buffer #'fundamental-mode
                 (call-interactively #'harness-menu)
                 (unwind-protect
                     (with-current-buffer transient--buffer-name
                       (goto-char (point-min))
-                      (should (search-forward "Connect remote" nil t))
+                      (should (search-forward "Server connection…" nil t))
                       (and (memq 'transient-inapt-suffix
                                  (ensure-list (get-text-property (match-beginning 0) 'face)))
                            t))

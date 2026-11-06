@@ -7,6 +7,24 @@ held by `harness-ui`.  Never `require` a state module and never call a
 `session/…` bus method directly: the same code must work against a
 remote harness.
 
+The connection is to this Emacs's own harness by default.  With
+`harness-server-address` set to `"HOST:PORT"`, `harness-start` makes
+the UI a client of a harness server on that machine instead and starts
+no process of its own; `harness-acp-token` is the shared secret such a
+server checks.  `harness-connect-remote` swaps the target while Emacs
+runs, and an empty address returns to the local harness.
+Corporate mode keeps every connection on this machine.
+
+`harness-connect-server` (`C-c h c`) is the form for that connection:
+the address, the token and whether to keep the server for the next
+start, with buttons to connect, go back to the local harness, and copy
+the settings as a `setq` for an init file.  `harness-server` (`C-c h C`)
+is the page about the harness the UI talks to, a server elsewhere or
+the harness on this machine: its address, how long the connection has
+been up and its round trip, its version and Emacs, the sessions it runs
+and the modules it loaded.  Both are in `lisp/ui/harness-ui-server.el`
+(module `ui-server').
+
 ## What `harness-ui` gives you
 
 Connection and requests
@@ -64,7 +82,7 @@ Display
 
 - Built-in widgets only: `button.el`, `widget.el`, `tabulated-list-mode`, `transient`, `icons.el`, `svg.el`, `image.el`, header and mode lines.  No box-drawing UI except where the medium is a graph.
 - Never block: the UI runs in the user's Emacs and the harness in its own process (see "Processes" in architecture.md), so the only way to freeze the user is UI code itself.  Never call the bus (`harness-call`, `harness-method-exists-p`): the modules are not loaded here.  Project roots and file lists come from `harness-files` (`harness-files-project-root`, `harness-files-list` → promise).  Every request is asynchronous; show a lightweight loading state (`harness-dim-face` text, a header-line spinner) and replace it when the result arrives; failures show in the buffer, not just the echo area.
-- Words in the UI are nouns and imperatives: labels (`Network`), noun phrases (`No web tools · bash offline`, `3 offered · 2 off`), button verbs (`[Allow a directory…]`) and tooltips that tell what a click does (`Block the network (N)`).  No sentence with a subject and a verb -- never `you are asked what the mode leaves open` or `the first that matches decides it` -- in a label, a note, a tooltip, a heading or an echo-area message.  Say the state, not a story about it.  What the harness itself words, such as the reason of a refusal, is shown as it is.
+- Interface text is nouns, noun phrases and adjectives: `Network`, `No web tools · bash offline`, `3 offered · 2 off`, `connected`, `local harness`. No full sentences in headings, labels, buttons, notes, forms, tooltips, menus, status lines or echo-area messages. Say the state, not a story about it: `local harness`, not `This Emacs runs the harness itself`. Remove explanatory paragraphs rather than merely their punctuation. Prose belongs only in explicit help or setting descriptions (for example, the defcustom documentation on the settings page). User/model messages, logs and server error payloads are data, not interface copy. Follow the copy-first checklist below.
 - Every keyboard command has a mouse target: a button, a header-line segment or a mode-line segment with `help-echo`.
 - Help text is one line: with tooltips off (`tooltip-mode` nil) it shows in the echo area, where a second line grows the mini window, shrinks every window and moves the button under the mouse, so hovering it makes it hard to click.  Build `help-echo` text from parts through `harness-ui-one-line`, never with newlines.
 - Redraw incrementally with markers and `inhibit-read-only`; never re-render the whole transcript on a delta.
@@ -73,3 +91,24 @@ Display
 - A reload unbinds a command the new code no longer defines, but not the keys of a keymap that a `defvar` keeps: a change that drops or renames a command rebinds or clears (`keymap-unset`) its key at top level, which runs again, or the key reports an undefined command (`Wrong type argument: commandp`) until Emacs restarts.
 - Respect the user's theme: faces inherit from standard faces and specify light/dark variants only for backgrounds.
 - A new view, or one that now looks different, gets its README picture taken again: see [screenshots.md](screenshots.md).
+
+## Copy-first checklist
+
+1. **Before implementation:** list the words for every changed surface:
+   headings, fields, checkbox labels, buttons, tooltips, headers, menus,
+   empty/loading states, success, validation and failures. Each entry
+   must be a noun phrase or adjective, not a sentence. Move explanations
+   to explicit help rather than adding prose beneath ordinary controls.
+2. **Regression tests:** assert the exact rendered copy, not only the
+   presence of a few labels. Include tooltips and header/menu text, and
+   exercise asynchronous status changes and error messages. Keep
+   user-supplied values and server payloads distinct from authored copy.
+   The copy tests in `test/harness-ui-server-test.el` are an example.
+   A grammar guess or a test for trailing periods is not enough.
+3. **Before hand-in:** inspect live screenshots and every changed
+   user-visible string in the diff. A UI review covers the words as well
+   as behavior and layout. Record this check with the test evidence.
+
+The repository's agent instructions (`CLAUDE.md`) and project-scoped
+`tools-dev` system-prompt filter require this checklist for UI work,
+including providers that do not automatically read `CLAUDE.md`.

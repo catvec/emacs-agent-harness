@@ -15,6 +15,7 @@
 (defvar harness-acp-token)
 (defvar harness-acp--server-enabled)
 (declare-function harness-ui-request "harness-ui")
+(declare-function harness-ui-connected-p "harness-ui")
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-request "harness-acp")
 (declare-function harness-acp-close "harness-acp")
@@ -707,6 +708,74 @@ summary, and this Emacs goes on meanwhile."
           (should (> (length gaps) 2))
           (should (< (apply #'max gaps) 0.5)))
         (harness-server-test--settle)))))
+
+(ert-deftest harness-server-standalone-listen-address-comes-from-the-environment ()
+  "A standalone server listens where HARNESS_SERVER_HOST and PORT say.
+Unset or empty is loopback and an ephemeral port; a public address
+needs a shared secret before the server starts."
+  (let ((process-environment (append '("HARNESS_SERVER_HOST=0.0.0.0"
+                                       "HARNESS_SERVER_PORT=4276")
+                                     process-environment)))
+    (should (equal '("0.0.0.0" 4276) (harness-server--standalone-address)))
+    (should (harness-server--public-listening-problem "0.0.0.0" nil))
+    (should (harness-server--public-listening-problem "0.0.0.0" "short"))
+    (should-not (harness-server--public-listening-problem "0.0.0.0" "0123456789abcdef"))
+    (should-not (harness-server--public-listening-problem "127.0.0.1" nil)))
+  (let ((process-environment (append '("HARNESS_SERVER_HOST=" "HARNESS_SERVER_PORT=")
+                                     process-environment)))
+    (should (equal '("127.0.0.1" 0) (harness-server--standalone-address))))
+  (let ((process-environment (append '("HARNESS_SERVER_HOST=localhost")
+                                     process-environment)))
+    (should (equal '("localhost" 0) (harness-server--standalone-address)))
+    (should-not (harness-server--public-listening-problem "localhost" nil)))
+  (let ((process-environment (append '("HARNESS_SERVER_PORT=lots")
+                                     process-environment)))
+    (should-error (harness-server--standalone-address) :type 'error)))
+
+(ert-deftest harness-server-address-starts-a-ui-on-the-server-elsewhere ()
+  "The UI starts on the harness at `harness-server-address' and runs none of its own.
+The server is a real harness process in another Emacs, listening on
+TCP with its token; the UI in this Emacs connects with the shared
+secret and drives its sessions, without a child process of its own."
+  (harness-test-with-temp-state
+    (harness-test-share-compilation "elc" "elc-server")
+    (harness-test-reset-bus)
+    (let ((harness-enabled-modules nil)
+          (harness-model "demo:scripted")
+          (harness-server-init-file nil)
+          (harness-ui--server nil)
+          (process-environment (append '("HARNESS_SERVER_HOST=127.0.0.1"
+                                         "HARNESS_SERVER_PORT=0")
+                                       process-environment))
+          (server nil) (address nil) (token nil))
+      (unwind-protect
+          (progn
+            (setq server (harness-server-spawn
+                          :on-address (lambda (a tok) (setq address a token tok))))
+            (harness-test-wait (lambda () address) 60 "the harness server to listen")
+            (let ((harness-process t)
+                  (harness-server-address address)
+                  (harness-acp-token token))
+              (harness-start)
+              ;; The UI drives the server elsewhere, not a child of its own.
+              (should-not harness-ui--server)
+              (should (equal address harness-ui-connection-address))
+              (should (harness-test-wait (lambda () (harness-ui-connected-p))
+                                         30 "the UI to connect to the server"))
+              (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30)))
+              ;; The shared secret authenticated it: a request only a signed-in
+              ;; client may make is answered.
+              (should (listp (harness-test-await (harness-ui-request "_harness/config/describe"
+                                                                     (list :cwd harness-state-directory))
+                                                 30)))))
+        (when harness-ui-connection
+          (ignore-errors (harness-acp-close harness-ui-connection)))
+        (setq harness-ui-connection nil
+              harness-ui-connection-address nil)
+        (harness-stop)
+        (when server
+          (harness-server-stop server)
+          (harness-test-wait (lambda () (not (process-live-p server))) 30 "the server to exit"))))))
 
 (ert-deftest harness-server-an-error-line-too-long-for-the-log-is-cut-before-it-is-kept ()
   "One line of the child's stderr is cut before it reaches the log.

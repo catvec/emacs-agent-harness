@@ -10,7 +10,8 @@ module needs something more, add it here first.
  Presentation   lisp/ui/*        Emacs buffers, faces, keymaps, mouse.  Talks ACP only.
                                  Runs in the user's Emacs; everything below runs in
                                  the harness process (see Processes).
- ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
+ ------------------------------- ACP (JSON-RPC over loopback TCP, or TCP to a
+                                 harness server elsewhere; in-process lisp objects
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, insights, fallback,
                 retry, naming, judge, compaction, handoff, worktree, merge, tasks,
@@ -38,7 +39,8 @@ module needs something more, add it here first.
 
 The core never shows UI and never calls a model.  UI modules never
 `require` a state module and never touch a session struct: they hold
-an ACP connection (local by default) and render what arrives.  State
+an ACP connection (local by default, or to a harness server elsewhere)
+and render what arrives.  State
 modules never `require` a UI module.  That is the litmus test from
 DESIGN.md: every module is testable alone, with a fake connection or a
 fake provider, and without mocks of the rest.
@@ -203,6 +205,25 @@ default) the layers above are split across two Emacs processes:
   (lisp/harness-revision.el, see version): the two load their files
   separately, so a restart of the process alone can leave them on
   different commits.
+- `harness-server-address`, when it names a `HOST:PORT`, makes the
+  user's Emacs a client of a harness server elsewhere: `harness-start`
+  sets `harness-ui-connection-address` to it (`harness--ui-start-address`)
+  and starts no process of its own, and `harness-acp-token` is the
+  shared secret that server checks.  Corporate mode refuses it and keeps
+  the UI local.  The server may be another harness's ACP listener, such
+  as the remote ACP module's, or `harness-server-main` run without a
+  parent UI: it listens where `HARNESS_SERVER_HOST` (127.0.0.1 by
+  default) and `HARNESS_SERVER_PORT` (0, an ephemeral port) say, and
+  refuses a host beyond this machine without `HARNESS_SERVER_TOKEN` of
+  16 characters or more.  `scripts/harness-server` starts one without a
+  UI; `HARNESS_SERVER_CONFIG` names the forms that set its modules and
+  options, as an init file would.  The UI's own views of this are
+  `ui-server` (harness-ui-server.el): `harness-connect-server`, a form
+  for the address, the token and whether to keep the server for the
+  next start, and `harness-server`, the page that shows where the
+  harness runs, its version, its sessions and its modules.  Both ask
+  the harness over ACP, so they show a server elsewhere as they show
+  the local one.
 
 The harness process cannot prompt: TRAMP connections it opens need
 non-interactive authentication (ssh agent, a key without a passphrase,
@@ -11599,7 +11620,10 @@ authenticates with it on behalf of the editor it bridges.  Local TCP
 clients must send it with `authenticate` before any method but
 `initialize`, and a client of another harness instance has another
 token and is refused; an in-process client is this process and needs no
-proof.
+proof.  A UI whose
+`harness-server-address` names a harness server elsewhere connects
+there instead and authenticates with `harness-acp-token` as the
+connection opens (see Processes).
 
 Errors follow ACP's codes.  A call before `authenticate` (when a
 client must authenticate) gets -32000, ACP's `auth_required`, which
@@ -11905,8 +11929,11 @@ an origin out of reach is an `error` origin, not an error in the log.
 ## Presentation contracts
 
 `harness-ui` owns the connection (`harness-ui-connection`, local by
-default; `harness-connect-remote` swaps it, and an empty address swaps
-it back to this Emacs's own harness; `harness-ui-connected-hook`
+default; `harness-server-address` starts it on a harness server
+elsewhere, `harness-connect-remote` swaps it, and an empty address swaps
+it back to this Emacs's own harness; `harness-connect-server` is the
+form of those details, `harness-server` the page about the harness;
+`harness-ui-connected-hook`
 runs after every connect, where the chat reopens the sessions its
 buffers showed open, as a harness that just started has them all
 closed -- not one a buffer showed inactive, nor one a buffer still

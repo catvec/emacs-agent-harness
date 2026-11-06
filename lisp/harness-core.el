@@ -213,7 +213,7 @@ and nowhere else.  With it on:
   (`harness-acp-remote') is refused, and so is any client on another
   device.
 - This Emacs's UI connects to its own harness only, never to a harness
-  elsewhere (`harness-connect-remote').
+  elsewhere (`harness-server-address', `harness-connect-remote').
 - Network tools other than web search (web_fetch, which reaches any
   URL), and ssh, which runs commands on other machines, are not offered
   to sessions, and calls to them are denied.

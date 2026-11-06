@@ -139,7 +139,7 @@ after changing it run \\[harness-restart]."
     resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo
-    ui ui-chat ui-compose ui-notify ui-pending ui-sessions)
+    ui ui-chat ui-compose ui-notify ui-pending ui-server ui-sessions)
   "The modules that load whatever `harness-enabled-modules' says.
 They make a harness to work with: sessions and the turn loop, Claude
 Code for the default model, compaction and retries, carrying sessions
@@ -189,12 +189,55 @@ Emacs runs Lisp on one thread, so harness work done in this Emacs --
 tools, listings, model streams -- competes with typing and redisplay.
 With this on, this Emacs loads only the UI and the harness runs in a
 child `emacs --batch' it talks to over ACP (see harness-server.el).
-nil is for tests and for debugging the modules in place."
+nil is for tests and for debugging the modules in place.  To drive a
+harness server elsewhere instead of running one here, keep this on and
+set `harness-server-address'."
   :type 'boolean :group 'harness)
+
+(defcustom harness-server-address nil
+  "Address of the harness server this Emacs's UI talks to, or nil.
+Normally the UI talks to this Emacs's own harness: the harness process
+`harness-process' starts, or the harness in this Emacs.  With a
+\"HOST:PORT\" string here, the UI instead connects to the harness server
+there and starts none of its own, so the sessions, tools and tasks it
+shows are that server's.  \\[harness-connect-server] asks for a
+server's address and token in a form, and changes the connection while
+Emacs runs; an empty address there goes back to this Emacs's own
+harness.  \\[harness-server] shows the harness the UI talks to.
+
+Set `harness-acp-token' to the server's shared secret when it asks for
+one.  This counts only with `harness-process' on: with nil the harness
+runs in this Emacs and the UI talks to it in-process.  Corporate mode
+\(`harness-corporate-mode') keeps the UI on this Emacs's harness
+whatever this says.
+
+A harness server is any harness that serves ACP over TCP: a harness
+process of another Emacs (`scripts/harness-server' runs one without a
+UI), or the remote ACP listener of this harness (`harness-acp-remote').
+A server that only listens on its loopback interface, as the harness
+process does by default, is reached through an ssh tunnel
+\(`ssh -L 4276:127.0.0.1:4276 SERVER')."
+  :type '(choice (const :tag "This Emacs's own harness" nil) string)
+  :group 'harness)
 
 (defconst harness--client-module-files '("lisp/modules/harness-acp.el")
   "Module files the UI loads besides lisp/ui when `harness-process' is on.
 Only the ACP client half is used: its TCP server stays off here.")
+
+(defun harness--ui-start-address ()
+  "Return the address the UI starts on: `process', nil or \"HOST:PORT\".
+nil is the harness in this Emacs, `process' the harness process
+`harness-start' manages.  A non-empty `harness-server-address' names a
+harness server elsewhere, unless corporate mode keeps the UI on this
+machine's harness.  With `harness-process' nil the harness runs in this
+Emacs, so there is no server elsewhere to use."
+  (cond
+   ((not harness-process) nil)
+   ((and (stringp harness-server-address)
+         (not (string-blank-p harness-server-address))
+         (not (and (fboundp 'harness-corporate-p) (harness-corporate-p))))
+    (string-trim harness-server-address))
+   (t 'process)))
 
 (defvar harness-started nil "Non-nil once `harness-start' has run.")
 (defvar harness-reload-hook nil "Hook run after a successful `harness-reload'.")
@@ -566,6 +609,9 @@ its source: what loads is a compiled copy elsewhere."
 The policy (see harness-policy.el) is read first and applied before any
 module loads, and again once they all have: a policy that cannot be
 trusted signals an error, and nothing starts.
+With `harness-process' on, the UI starts on this Emacs's own harness
+process, or on the server `harness-server-address' names instead; no
+process of this Emacs starts in the latter case.
 Return non-nil when every module loaded and initialised."
   (interactive)
   (harness--setup-load-path)
@@ -599,11 +645,12 @@ Return non-nil when every module loaded and initialised."
                (harness--report-error err (format "loading %s" f))
                (harness-log 'error "loading %s failed: %S" f err))))
     (when harness-process
-      ;; The harness process serves ACP; this Emacs only connects to it.
+      ;; The harness server serves ACP; this Emacs only connects to it.
       (setq harness-acp--server-enabled nil)
-      (when (and (boundp 'harness-ui-connection-address)
-                 (not (stringp harness-ui-connection-address)))
-        (setq harness-ui-connection-address 'process)))
+      (when (boundp 'harness-ui-connection-address)
+        (setq harness-ui-connection-address (harness--ui-start-address))))
+    (when (and harness-server-address (not harness-process))
+      (harness-log 'warn "server: `harness-server-address' is ignored while `harness-process' is nil: the harness runs in this Emacs"))
     ;; The options the modules define.  The UI of a harness process
     ;; lacks those of lisp/modules, which that process applies itself.
     (condition-case err

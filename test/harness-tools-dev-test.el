@@ -178,6 +178,74 @@ is the harness's rule for every tool of a project's plugin
         (should (plist-get result :is-error))
         (should (string-prefix-p "Unknown tool open_harness" (plist-get result :content)))))))
 
+(ert-deftest harness-tools-dev-ui-workflow-is-scoped-to-project-agents ()
+  "Only non-internal sessions naming tools-dev receive the UI workflow."
+  (harness-tools-dev-test-with
+    (let ((base "Existing system prompt")
+          (asked nil))
+      (harness-register-method 'plugins/of-session
+                               (lambda (id)
+                                 (push id asked)
+                                 (and (equal id "here") '(tools-dev client-check))))
+      (dolist (kind '(main task fork subagent))
+        (should (equal (concat base "\n\n" harness-tools-dev--ui-copy-section "\n")
+                       (harness-run-filter 'agent/system-prompt base (list :id "here" :kind kind)))))
+      (should (equal '("here" "here" "here" "here") asked))
+      (setq asked nil)
+      (dolist (session '(nil (:kind main) (:id "here" :kind internal)
+                            (:id "here" :kind "internal")))
+        (should (eq base (harness-run-filter 'agent/system-prompt base session))))
+      ;; No plugin lookup at all for internal or unidentified callers.
+      (should-not asked)
+      (should (eq base (harness-run-filter 'agent/system-prompt base '(:id "elsewhere" :kind main))))
+      (should (equal '("elsewhere") asked)))))
+
+(ert-deftest harness-tools-dev-ui-workflow-without-plugins-is-unchanged ()
+  "Loading this plugin alone does not put project rules in other prompts."
+  (harness-tools-dev-test-with
+    (should-not (harness-method-exists-p 'plugins/of-session))
+    (let ((base "Existing system prompt"))
+      (should (eq base (harness-run-filter 'agent/system-prompt base '(:id "here" :kind main)))))))
+
+(ert-deftest harness-tools-dev-ui-workflow-requires-a-copy-first-checkpoint ()
+  "Agents get the copy rule, its narrow exception and the verification workflow."
+  (harness-tools-dev-test-with
+    (harness-register-method 'plugins/of-session (lambda (_id) '(tools-dev)))
+    (let ((prompt (harness-run-filter 'agent/system-prompt "Base" '(:id "here" :kind main))))
+      (dolist (text '("read CLAUDE.md and docs/ui-guide.md"
+                      "nouns,\nnoun phrases and adjectives, never full sentences"
+                      "Prose belongs only in explicit help or setting descriptions"
+                      "leave user/model output and other data unchanged"
+                      "copy-first checkpoint in your plan"
+                      "inventory the intended labels"
+                      "before implementation"
+                      "Remove explanatory prose rather than just its\npunctuation"
+                      "exact rendered-copy regression assertions"
+                      "sentence-guessing heuristic is not a grammar\ncheck"
+                      "inspect the live screenshots and the final\ndiff's changed UI strings"
+                      "separate verification step"))
+        (should (string-search text prompt))))))
+
+(ert-deftest harness-tools-dev-ui-workflow-filter-lifecycle ()
+  "Init is idempotent, shutdown removes the workflow, and init restores it."
+  (harness-tools-dev-test-with
+    (harness-register-method 'plugins/of-session (lambda (_id) '(tools-dev)))
+    (cl-letf (((symbol-function 'harness-tools-dev--start-sweeping) #'ignore))
+      (harness-tools-dev--init)
+      (harness-tools-dev--init)
+      (should (= 1 (cl-count #'harness-tools-dev--system-prompt
+                             (gethash 'agent/system-prompt harness--filters) :key #'cdr)))
+      (let ((base "Base")
+            (session '(:id "here" :kind main)))
+        (should-not (equal base (harness-run-filter 'agent/system-prompt base session)))
+        (harness-tools-dev--shutdown)
+        (should-not (cl-find #'harness-tools-dev--system-prompt
+                             (gethash 'agent/system-prompt harness--filters) :key #'cdr))
+        (should (eq base (harness-run-filter 'agent/system-prompt base session)))
+        (harness-tools-dev--init)
+        (should (equal (concat base "\n\n" harness-tools-dev--ui-copy-section "\n")
+                       (harness-run-filter 'agent/system-prompt base session)))))))
+
 (defun harness-tools-dev-test--checkout (dir)
   "Copy this repository's .dir-locals.el and its plugin to DIR; return DIR.
 DIR is made if missing: a checkout of the repository, as far as the

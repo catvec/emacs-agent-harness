@@ -4,8 +4,11 @@
 
 ;; Everything the presentation layer shares.  The UI never touches a
 ;; session struct: it holds one ACP connection (in-process by default,
-;; a TCP client after `harness-connect-remote') and renders what the
-;; connection tells it.  This file provides:
+;; a TCP client on the server `harness-server-address' names or after
+;; `harness-connect-remote') and renders what the connection tells it.
+;; The pages of that connection, the form that asks where the server is
+;; and the page that shows it, are harness-ui-server.el.  This file
+;; provides:
 ;;
 ;; - the connection and request helpers, plus the dispatch of incoming
 ;;   notifications and agent→client requests to hooks other UI modules
@@ -380,10 +383,17 @@ triangle).  Words that go with the icon take `harness-ui-level-face'."
 ;;;; Connection
 
 (defvar harness-ui-connection nil "The ACP connection the UI talks through.")
+(defvar harness-ui-connected-since nil
+  "When the current connection to the harness was initialised, a float, or nil.
+Set as the connection is up and cleared when the UI lets it go; see
+`harness-ui-connection-address' for where it leads.")
 (defvar harness-ui-connection-address nil
   "Address of the harness the UI talks to.
 It is nil for the harness in this Emacs, `process' for the harness
-process `harness-start' manages (see `harness-process'), or \"host:port\".")
+process `harness-start' manages (see `harness-process'), or \"host:port\"
+for a harness server there.  `harness-start' makes it
+`harness-server-address' when one is set, and `harness-connect-remote'
+changes it while Emacs runs.")
 
 (defvar harness-ui-update-functions nil
   "Functions called with (SESSION-ID UPDATE) for every `session/update'.
@@ -445,7 +455,7 @@ queued and sent once it listens.
 In corporate mode (`harness-corporate-mode') a \"host:port\" ADDRESS
 gives way to this Emacs's own harness: the UI connects to no other."
   (when (and (stringp address) (harness-corporate-p))
-    (message "Harness: corporate mode is on, so the UI connects to the local harness, not %s" address)
+    (message "Harness: corporate mode · local harness only · refused: %s" address)
     (setq address (harness-ui--local-address)))
   (harness-ui--let-go)
   (setq harness-ui-connection-address address)
@@ -467,7 +477,8 @@ more; the session keeps it pending, and the chat answers it with
 `permission/answer' instead."
   (when harness-ui-connection
     (ignore-errors (harness-acp-close harness-ui-connection "replaced")))
-  (setq harness-ui-connection nil))
+  (setq harness-ui-connection nil
+        harness-ui-connected-since nil))
 
 (defun harness-ui-connection-replaced-p (err)
   "Non-nil when ERR failed a request only because the UI replaced its connection.
@@ -494,6 +505,8 @@ initialize: one it let go of for another closes on purpose."
     ;; user's Emacs ask it (lisp/harness-emacs-endpoint.el).
     (harness-then (harness-acp-initialize conn (harness-emacs-endpoint-client-capabilities))
                   (lambda (_)
+                    (when (eq conn harness-ui-connection)
+                      (setq harness-ui-connected-since (float-time)))
                     (harness-ui-refresh-sessions)
                     (harness-ui-refresh-models)
                     (harness-ui-refresh-quotas)
@@ -705,25 +718,35 @@ third."
   "Restart the harness process with the current configuration.
 Sessions and tasks persist; running turns are interrupted, and carry
 on once the process is back (see `harness-tasks-resume-interrupted'
-and `harness-resilience-resume-interrupted')."
+and `harness-resilience-resume-interrupted').
+A harness server elsewhere cannot be restarted from here: connect to it
+again with \\[harness-connect-remote] instead."
   (interactive)
-  (unless (eq harness-ui-connection-address 'process)
-    (user-error "The harness does not run in its own process (see `harness-process')"))
-  (setq harness-ui--server-restarts nil)
-  (let ((old harness-ui--server))
-    (harness-ui--stop-server)
-    (if (and old (process-live-p old))
-        (set-process-sentinel old (lambda (p _e)
-                                    (unless (process-live-p p)
-                                      (harness-ui-connect 'process))))
-      (harness-ui-connect 'process))))
+  (cond
+   ((eq harness-ui-connection-address 'process)
+    (setq harness-ui--server-restarts nil)
+    (let ((old harness-ui--server))
+      (harness-ui--stop-server)
+      (if (and old (process-live-p old))
+          (set-process-sentinel old (lambda (p _e)
+                                      (unless (process-live-p p)
+                                        (harness-ui-connect 'process))))
+        (harness-ui-connect 'process))))
+   ((stringp harness-ui-connection-address)
+    (user-error "Remote harness: %s · Connection: %s"
+                harness-ui-connection-address
+                (substitute-command-keys "\\[harness-connect-server]")))
+   (t (user-error "Harness process: unavailable · harness-process nil"))))
 
 (defun harness-ui-reload-server ()
-  "Ask the harness process to reload its modules in place."
-  (when (eq harness-ui-connection-address 'process)
+  "Ask the harness the UI talks to to reload its modules in place.
+That is the harness process of this Emacs, or, when the UI drives a
+harness server elsewhere (`harness-server-address'), that server."
+  (when (or (eq harness-ui-connection-address 'process)
+            (stringp harness-ui-connection-address))
     (harness-ui-call "_harness/harness/reload" nil
-                     (lambda (_) (message "Harness process reloaded"))
-                     (lambda (e) (message "Harness process: %s" (harness-error-message e))))))
+                     (lambda (_) (message "Harness reloaded"))
+                     (lambda (e) (message "Harness: reload failed: %s" (harness-error-message e))))))
 
 ;; The harness process applies the directory-local variables of a
 ;; session's project itself, as Emacs does, so that the project's
@@ -965,17 +988,21 @@ nil when it runs in this Emacs."
   "Connect the UI to a harness ACP server at ADDRESS (\"host:port\").
 An empty or nil ADDRESS connects back to this Emacs's own harness: the
 harness process when `harness-process' is on, else the harness in this
-Emacs.  When the connection cannot be opened, for instance as ADDRESS
-has no port, the UI stays connected where it was.  In corporate mode
+Emacs.  This changes the connection only while Emacs runs; set
+`harness-server-address' to start on a harness server elsewhere.
+\\[harness-connect-server] asks for the address and token in a form
+instead, and `harness-server' shows the harness the UI talks to.
+When the connection cannot be opened, for instance as ADDRESS has no
+port, the UI stays connected where it was.  In corporate mode
 \(`harness-corporate-mode') the UI connects to its own harness only, and
 any other ADDRESS is refused."
   (interactive
    ;; Offer the remote address in use; a local harness's is `process' or nil.
-   (list (read-string "Harness server (host:port, empty for the local harness): "
+   (list (read-string "Harness server (HOST:PORT · empty: local harness): "
                       (and (stringp harness-ui-connection-address) harness-ui-connection-address))))
   (let ((remote (and address (not (string-blank-p address)) (string-trim address))))
     (when (and remote (harness-corporate-p))
-      (user-error "Corporate mode is on: the UI connects only to this Emacs's own harness"))
+      (user-error "Corporate mode · local harness only"))
     (let* ((previous harness-ui-connection-address)
            (failure (condition-case err
                         (progn (harness-ui-connect (or remote (harness-ui--local-address))) nil)
@@ -983,9 +1010,9 @@ any other ADDRESS is refused."
                              err))))
       (run-hooks 'harness-ui-redraw-hook)
       (if failure
-          (user-error "Harness: cannot connect to %s: %s"
-                      (or remote "the local harness") (harness-error-message failure))
-        (message "Harness: connected to %s" (or remote "the local harness"))))))
+          (user-error "Harness: connection failure · %s · %s"
+                      (or remote "local harness") (harness-error-message failure))
+        (message "Harness: connection · %s" (or remote "local harness"))))))
 
 (defun harness-ui--corporate-mode-changed ()
   "Make a change of `harness-corporate-mode' reach the harness.
@@ -6771,7 +6798,11 @@ leaves the buffer's commands out, never the whole menu."
     ("O" "Modules" harness-describe-modules)
     ("X" "Enable a module" harness-enable-module)
     ("z" "Companion pet" harness-pet :if (lambda () (harness-ui--command-available-p 'harness-pet)))
-    ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
+    ("c" "Server connection…" harness-connect-server
+     :if (lambda () (harness-ui--command-available-p 'harness-connect-server))
+     :inapt-if harness-corporate-p)
+    ("C" "Server details" harness-server
+     :if (lambda () (harness-ui--command-available-p 'harness-server)))
     ("P" "Remote control" harness-remote-control
      :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
      :inapt-if harness-corporate-p)
@@ -6937,7 +6968,11 @@ Choosing a group opens its menu, as a directory opens what it holds."
     ("z" "Companion pet" harness-pet
      :if (lambda () (harness-ui--command-available-p 'harness-pet)))]
    ["Remote"
-    ("c" "Connect remote" harness-connect-remote :inapt-if harness-corporate-p)
+    ("c" "Server connection…" harness-connect-server
+     :if (lambda () (harness-ui--command-available-p 'harness-connect-server))
+     :inapt-if harness-corporate-p)
+    ("C" "Server details" harness-server
+     :if (lambda () (harness-ui--command-available-p 'harness-server)))
     ("P" "Remote control" harness-remote-control
      :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
      :inapt-if harness-corporate-p)]

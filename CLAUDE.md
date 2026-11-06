@@ -1,5 +1,28 @@
 # CLAUDE.md
 
+## UI copy: before implementation and before hand-in
+
+- Interface text is nouns, noun phrases and adjectives: `Address`,
+  `connected`, `Startup server`, `5 total · 1 running`. No full sentences
+  in headings, labels, buttons, forms, notes, tooltips, menus, status
+  lines or echo-area messages. Remove explanatory prose; deleting its
+  punctuation is not a fix. Prose belongs only in explicit help or
+  setting descriptions, not on an ordinary page or form. User/model
+  messages, logs and server error payloads are data, not interface copy.
+- **Before implementation:** read [docs/ui-guide.md](docs/ui-guide.md)
+  and inventory the planned labels, tooltips, headers, menus and status
+  messages, including empty, loading, success, validation and failure
+  states. Rewrite each as a noun phrase or adjective before coding it.
+- **Before hand-in:** check the rendered text and tooltips with exact
+  regression assertions (see `test/harness-ui-server-test.el`), inspect
+  the live screenshots, and review every changed user-visible string in
+  the diff. Grammar/punctuation heuristics alone do not establish this
+  rule. A UI review must include this copy check, not just layout and
+  behavior.
+- This repository's `tools-dev` plugin adds the copy-first workflow to
+  its agents' system prompts too; it is not dependent on a provider
+  automatically loading this file.
+
 ## Finishing work
 
 - Work on this repo runs as emacs-agent-harness tasks, each in its own git
