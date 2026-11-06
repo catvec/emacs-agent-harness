@@ -290,6 +290,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `naming/failed` | [naming](naming.md) | [naming](naming.md) |  |  |
 | `notification/sent` | [notifications](notifications.md) | [notifications](notifications.md) |  |  |
 | `patch-review/changed` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
+| `patch-review/last-close` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
 | `permission/decided` | [tools](tools.md) | [tools](tools.md) | [access](access.md), [agent](agent.md), [insights](insights.md), [perms](perms.md) |  |
 | `permission/dir-allowed` | [perms](perms.md) | [access](access.md), [perms](perms.md) |  | yes |
 | `permission/dir-revoked` | [perms](perms.md) | [access](access.md), [perms](perms.md) |  | yes |
@@ -341,7 +342,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `task/backlog-mode` | [tasks](tasks.md) | [tasks](tasks.md) |  | yes |
 | `task/changed` | [tasks](tasks.md) | [tasks](tasks.md) | [supervisor](supervisor.md), [tools-sessions](tools-sessions.md), [ui-patch-review](ui-patch-review.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md) | yes |
 | `task/deleted` | [tasks](tasks.md) | [tasks](tasks.md) | [patch-review](patch-review.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md) | yes |
-| `task/done` | [tasks](tasks.md) | [tasks](tasks.md) | [pet](pet.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
+| `task/done` | [tasks](tasks.md) | [tasks](tasks.md) | [patch-review](patch-review.md), [pet](pet.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
 | `task/queue` | [tasks](tasks.md) | [tasks](tasks.md) | [ui-tasks](ui-tasks.md) | yes |
 | `task/review` | [tasks](tasks.md) | [tasks](tasks.md) | [patch-review](patch-review.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-tasks](ui-tasks.md) | yes |
 | `todo-sync/done` | [todo-sync](todo-sync.md) | [todo-sync](todo-sync.md) |  |  |

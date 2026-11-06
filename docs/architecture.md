@@ -9090,6 +9090,28 @@ whose strict syntax it reads, and the correction of a malformed reply;
   answer a thread (`harness-patch-review--attribution`) and in the
   working-phase prompt of a task, that the user looks at every thread it
   closes, so that it says what it changed and where.
+- The last close.  Closing the last thread that has a sent comment and
+  is open leaves the review with nothing to answer.  In a task at work
+  the module keeps the harness's message that no thread is left
+  (`harness-patch-review-last-close-message`, from "review") as a draft
+  of the task's session (`harness-patch-review-draft-on-last-close`, on
+  by default): nothing is sent by itself.  It waits with the review's
+  reply drafts, shown above the files in the report and in the chat's
+  threads view: [Send drafts], or C-c C-c in that view, sends the batch
+  with `patch-review/send-replies`.  The replies go as the user's one
+  message; the last-close message follows from "review", starting a
+  turn or steering one running.  The send returns `(:sent N :last-close
+  BOOL)` (N replies, BOOL whether the harness's message went too), and
+  `patch-review/discard-last-close` drops only that message unsent.
+  `patch-review/last-close TASK-ID` gives the draft
+  (`:task`, `:session`, `:text`, `:from`, `:time`) or nil, and event
+  `patch-review/last-close TASK-ID DRAFT` offers it, or takes it away
+  with nil.  The draft is kept in
+  `patch-review-last-close/TASK-ID.json`, so a harness that reloads
+  still has it; it goes when the review has a sent open thread again,
+  when the task leaves the working phase, and when it is sent or
+  dropped.  The agent's own close, a close in a task waiting for
+  review, and a thread of drafts offer none.
 - The files viewed.  The files the reviewer compared in Ediff and those
   approved are kept in `patch-review-viewed/TASK-ID.json`: `:seen` and
   `:approved`, lists of `(:path PATH :blob BLOB)` -- the blob the file
@@ -15923,9 +15945,12 @@ set draws every surface through the library's own refresh):
   section in place of the compose box, its heading line ending in the
   chat's [Compose] button (`harness-chat--threads-view-compose-button`).
   It draws the threads open, with the buttons each header has elsewhere;
-  one compact line of keys and, while a task at work has replies waiting,
-  one line with [Send replies] and C-c C-c sit above them
-  (`harness-ui-patch-review--compose-thread-map`).  The review
+  one compact line of keys and, while a task at work has drafts waiting,
+  one line with [Send drafts] and C-c C-c sit above them
+  (`harness-ui-patch-review--compose-thread-map`).  The message of the
+  last close is one of those drafts, drawn there until the batch goes.
+  Closing a thread keeps this view in place; it never brings the compose
+  box back to send a separate message.  The review
   banner passes NO-THREADS to `--section` while the view shows, so the
   threads are in one place; a task at work has no banner to begin with.
 - the column beside Ediff (below): the tree of the files, and the threads

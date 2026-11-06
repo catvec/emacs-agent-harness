@@ -237,6 +237,7 @@ it can answer for another one.")
     permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked
     decision/changed access/changed access/judged patch-review/changed tool-slots/changed
+    patch-review/last-close
     cache/warm-changed event-watch/changed chatgpt-plan/accounts-changed)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 

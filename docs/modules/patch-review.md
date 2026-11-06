@@ -57,14 +57,16 @@ THE WORKING PHASE.  A task at work is in the working phase: its review
 is a conversation with the user, and there is no feedback that could
 carry a draft until the work is handed in.  What the user writes in
 its threads waits there as drafts, all of them, until they send the
-replies together (`patch-review/send-replies`,
+drafts together (`patch-review/send-replies`,
 `harness-patch-review--send-working-replies`): one message to the
 agent, a thread block each, which the agent answers in their threads
-as one turn.  A reply that quotes a comment, as C-c > writes it, has
-its quote in the <quote> of the block -- the line that names the
-comment answered and links to it, then its words -- not as the
-Markdown \">\" lines the review keeps for a person to read; a reply
-that quotes nothing has no <quote> tag.  Closing a thread is the
+as one turn.  The message of the last close waits in the same drafts
+(see THE LAST CLOSE), and goes with them.  A reply that quotes a
+comment, as C-c > writes it, has its quote in the <quote> of the
+block -- the line that names the comment answered and links to it,
+then its words -- not as the Markdown ">" lines the review keeps
+for a person to read; a reply that quotes nothing has no <quote>
+tag.  Closing a thread is the
 user's question answered, not a way past the hand-in check: hand_in
 refuses while one is open (`harness-patch-review--hand-in-blocker`).
 
@@ -143,16 +145,21 @@ empty.
 THE LAST CLOSE.  The user closing the last thread that has a sent
 comment and is open leaves the review with nothing to answer.  In the
 working phase the agent has to know: it may be waiting for the user,
-and nothing the user typed would tell it.  So that close sends its
-session a message of the harness's own
-(`harness-patch-review--wake-agent`), and the agent takes a turn as it
-would for a message the user typed: it sees that no thread is left
-open, and hands the work in when nothing is outstanding.  The message
-does not say to hand in -- the task's prompt does.  Only the user's
-close does this: the agent's own close is in a turn of its own, a
-close in a task waiting for review needs no turn, and a thread of
-drafts was never a question the work had to answer
-(`harness-patch-review-wake-on-last-close`).
+and nothing the user typed would tell it.  So the harness keeps a
+message of its own -- that no thread is left to answer
+(`harness-patch-review-last-close-message`) -- as a draft of the
+task's session, from "review".  It is one of the drafts the user
+sends (`patch-review/send-replies`): with the replies, one send; by
+itself, when nothing else waits, the same.  The agent then takes a
+turn as it would for a message the user typed: it sees that no thread
+is left open, and hands the work in when nothing is outstanding.
+Nothing is sent by itself: the draft waits for the user, who may send
+it with the rest or drop it (`patch-review/discard-last-close`).  The
+message does not say to hand in -- the task's prompt does.  Only the
+user's close offers it: the agent's own close is in a turn of its
+own, a close in a task waiting for review needs no turn, and a thread
+of drafts was never a question the work had to answer
+(`harness-patch-review-draft-on-last-close`).
 
 THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
 the session while the agent was at work -- steering, quoting what the
@@ -178,11 +185,13 @@ to say.
 - `patch-review/apply` (task-id op) — Perform OP, an operation of change-review, on the review of task TASK-ID.
 - `patch-review/assume-viewed` (task-id &optional revision) — Take every file of task TASK-ID's review as viewed, but those changed lately.
 - `patch-review/comment` (task-id body &rest opts) — Add the agent's comment BODY to the review of task TASK-ID.
+- `patch-review/discard-last-close` (task-id) — Forget the message that TASK-ID's last thread is closed, unsent.
 - `patch-review/drafts` (task-id) — Return the draft comments of task TASK-ID's review, those not sent yet, as data.
 - `patch-review/get` (task-id) — Return the review of task TASK-ID as plain data: its versions and threads.
 - `patch-review/import-manual` (task-id) — Make the user's words by hand in task TASK-ID's session threads of its review.
+- `patch-review/last-close` (task-id) — Return the message TASK-ID's last close waits for the user to send, or nil.
 - `patch-review/open-threads` (task-id) — Return the open threads of task TASK-ID's review, as a list of plists.
-- `patch-review/send-replies` (task-id) — Send the replies the user wrote in the threads of task TASK-ID's review.
+- `patch-review/send-replies` (task-id) — Send the drafts waiting in task TASK-ID's review to its agent.
 - `patch-review/set-viewed` (task-id kind files on) — Mark FILES viewed in task TASK-ID's review, or approved, or take the mark off.
 - `patch-review/threads-text` (task-id &optional status) — Return the threads of task TASK-ID's review as text for its agent.
 - `patch-review/user-reply` (task-id session-id block &optional draft attachments) — Make BLOCK, a parsed <thread> reply of the user's, a comment of a review.
@@ -192,6 +201,7 @@ to say.
 ### Events
 
 - `patch-review/changed` — (TASK-ID OP) after an operation changed the threads of a task's review: OP, to perform on a copy.
+- `patch-review/last-close` — (TASK-ID DRAFT) when the message that a task's last review thread is closed waits for the user to send it, or when it no longer does: DRAFT is (:task :session :text :from :time), or nil.
 
 ### Hooks
 
@@ -199,7 +209,7 @@ to say.
 
 ### Options
 
-- `harness-patch-review-wake-on-last-close` — When non-nil, closing the last open thread of a task at work wakes its agent.
+- `harness-patch-review-draft-on-last-close` — When non-nil, closing the last open thread of a task at work offers a message.
 
 ## Uses
 
@@ -210,6 +220,7 @@ to say.
 - `session/get` ([session](session.md)), when it is loaded
 - `session/node` ([session](session.md))
 - `session/nodes` ([session](session.md)), when it is loaded
+- `store/delete` ([store](store.md))
 - `store/load` ([store](store.md))
 - `store/save` ([store](store.md))
 - `task/for-session` ([tasks](tasks.md))
@@ -218,11 +229,13 @@ to say.
 ### Events it handles
 
 - `task/deleted` → `harness-patch-review--on-deleted`
+- `task/done` → `harness-patch-review--on-done`
 - `task/review` → `harness-patch-review--on-review`
 
 ### Events it emits
 
 - `patch-review/changed`
+- `patch-review/last-close`
 
 ### Filter chains it joins
 

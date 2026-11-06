@@ -21,9 +21,11 @@ A task in the working phase shows its threads too -- the review of the
 work it handed in last, which is a conversation with the user rather
 than a review to send feedback on (the chat's C-c T).  What the user
 writes there is a draft as anywhere, and the threads say how many are
-waiting; [Send replies] sends them together (`patch-review/send-replies`),
+waiting; [Send drafts] sends them together (`patch-review/send-replies`),
 as one message to the agent, which answers them in their threads, and
 so does C-c C-c on the threads the chat shows in place of its box.
+The harness's message that the last thread is closed waits with them
+(THE LAST CLOSE).
 The compose view's threads have the buttons their headers have
 elsewhere, and the keys and the line over them do the same; the review
 banner leaves its copy of them out while they show there.
@@ -135,6 +137,18 @@ The folds are the review's, for the task and the round: a report or a
 banner drawn again, and the tree beside Ediff, keep what the reader
 opened or folded, and the round after starts from the defaults, where
 the comments and drafts of the user have opened what they wrote in.
+
+THE LAST CLOSE.  Closing the last open thread of a task at work leaves
+the harness's message that no thread is left to answer
+(`patch-review/last-close`) as a draft of the task's session.  It is
+one of the review's drafts: the line that sends the replies counts it
+and [Send drafts] sends it with them (or alone, when no reply waits),
+as does C-c C-c on the threads the chat shows.  It is drawn with the
+drafts -- the notes above the files, the threads view -- as the system
+message it will be, from "review", marked a draft, and [Discard] drops
+it.  It is no block of the transcript until it goes.  A report or chat
+opened after the close asks the harness once whether the message waits
+(`harness-ui-patch-review--fetch-last-close`).
 
 Reviewing a branch is going through its files, and two settings make
 that go the way a reviewer wants, each a button of the changes with its
@@ -499,6 +513,7 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-cycle-fold` — Fold the threads of the current difference: one line, conversation, all.
 - `harness-ui-patch-review-delete-comment` — Delete a draft of yours under point in Ediff, after asking.
 - `harness-ui-patch-review-delete-thread` — Delete a thread that is nothing but drafts, under point in Ediff, after asking.
+- `harness-ui-patch-review-discard-last-close` — Drop the harness's message that the last thread of REVIEW is closed.
 - `harness-ui-patch-review-ediff` — Compare the file of the row at point in Ediff, before the change and after.
 - `harness-ui-patch-review-ediff-next-file` — On to the next file of the task's changes, in Ediff.
 - `harness-ui-patch-review-ediff-previous-file` — On to the previous file of the task's changes, in Ediff.
@@ -521,7 +536,7 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-redraw-tree` — Draw the tree beside Ediff again.
 - `harness-ui-patch-review-reply` — Reply to the thread at the current difference, or at point, in Ediff.
 - `harness-ui-patch-review-select-diff` — Choose the diff the report of the changes shows.
-- `harness-ui-patch-review-send-replies` — Send the replies written in the threads to the agent, as one message.
+- `harness-ui-patch-review-send-replies` — Send the drafts waiting in the threads to the agent in one send.
 - `harness-ui-patch-review-thread-reply` — Start a reply in a thread to the lines selected in this version of a file.
 - `harness-ui-patch-review-thread-return` — Do what RET does on a thread of the changes, or on the file it is under.
 - `harness-ui-patch-review-threads` — Go to the threads of the review at point: below its files.
@@ -552,8 +567,10 @@ it takes its part of the report and the banner out.
 
 - `patch-review/apply` ([patch-review](patch-review.md))
 - `patch-review/assume-viewed` ([patch-review](patch-review.md))
+- `patch-review/discard-last-close` ([patch-review](patch-review.md))
 - `patch-review/get` ([patch-review](patch-review.md))
 - `patch-review/import-manual` ([patch-review](patch-review.md))
+- `patch-review/last-close` ([patch-review](patch-review.md))
 - `patch-review/send-replies` ([patch-review](patch-review.md))
 - `patch-review/set-viewed` ([patch-review](patch-review.md))
 - `patch-review/viewed` ([patch-review](patch-review.md))
@@ -563,6 +580,7 @@ it takes its part of the report and the banner out.
 ### Events it hears over ACP
 
 - `patch-review/changed` → `harness-ui-patch-review--on-event`
+- `patch-review/last-close` → `harness-ui-patch-review--on-event`
 - `task/changed` → `harness-ui-patch-review--on-event`
 - `task/deleted` → `harness-ui-patch-review--on-event`
 - `task/done` → `harness-ui-patch-review--on-event`
