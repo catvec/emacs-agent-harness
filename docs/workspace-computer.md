@@ -185,10 +185,17 @@ broker in this slice.
 ## The two clients
 
 **Flutter.** `WorkspaceComputerStatus` now carries `running`, `state`,
-`socket`, `url`, `reason` and the screen size.  The desk and the phone
-sheet show `Live`, `Starting` or `Off`, the real screen through
+`socket`, `url`, `reason`, the screen size, and the box's `isolation`,
+`display`, `home`, `profile`, `disk` and `missing` facts.  The desk and the
+phone sheet show `Live`, `Starting` or `Off`, the real screen through
 `VncView`/`RfbClient`, `Take over`/`Return control`, and a `Start`
-button when the box is off.  `_ComputerPreview` and its quotation
+button when the box is off.  The desk's `Hide computer` control folds it
+into a narrow rail with `Show computer` and `Details`; the rail and the
+phone sheet's `Details` open the computer's facts -- control, backend,
+isolation, display, screen size, home, profile, disk, desktop, socket,
+and the reason or missing tools when it is off -- instead of drawing the
+screen a second time.  The folded state lives with the workspace screen.
+`_ComputerPreview` and its quotation
 mock-up are gone.  A test hands `VncView` a transport of its own, but
 the real RFB client still decodes the frame, so the widget test is a
 protocol test, not a picture substitute.
@@ -224,6 +231,10 @@ reason and missing-tool text is the harness's own status data.
 | `Reading` / `Starting` / `Stopping` / `Restarting` / `Taking over` / `Returning control` | Emacs busy states |
 | `No VNC page · computer off` / `No workspace open` / `No screenshot` | Emacs echo area |
 | `Live` / `Starting` / `Off` | Flutter desk and sheet |
+| `Computer · Live` / `Computer · Starting` / `Computer · Off` | Flutter folded rail |
+| `Hide computer` / `Show computer` | Flutter desk fold control and folded rail |
+| `Details` / `Control` / `Backend` / `Isolation` / `Display` / `Screen` / `Home` / `Profile` / `Disk` / `Desktop` / `Socket` / `Reason` / `Missing` | Flutter details sheet |
+| `Agent` / `You` | Flutter details control values |
 | `Computer off` / `Start` | Flutter empty computer |
 | `Box running` / `Box · local` | Flutter desk footer |
 | `Screen lost` | Flutter lost connection |

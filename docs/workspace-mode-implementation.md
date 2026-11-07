@@ -960,13 +960,25 @@ The tab is one page at every size, and the page is the chat:
   scale widens the side columns by a bounded amount, so a name is not
   cut and the chat keeps a readable width.
 
-The computer desk draws the browser preview, the takeover pill and the
+The computer desk draws the box's screen, the takeover pill and the
 footer, and the phone's sheet draws the same window above the footer.
+Its header's `Hide computer` control folds the desk into a narrow rail:
+the chat takes the room, and the rail keeps the screen's state dot, a
+`Show computer` control that brings the desk back, and a `Details`
+control.  `Details` opens what the computer is -- its control, backend,
+isolation, display, screen size, home, profile, disk, desktop and
+socket, and the reason or missing tools when it is off -- rather than
+drawing its screen again.  The phone's computer sheet has the same
+`Details` action beside `Resources`.
 A `Take over` pill sits at the window's foot while the agent has
 control; tapping it moves the pill to the window's edge and wraps a
 stroke around the window as it goes, and `Return control` moves it
 back.  The motion honours the platform's reduced-motion setting, and
 its state is carried by the pill's words as well as its colour.
+
+| The desk folded to its rail | The computer's details |
+|---|---|
+| ![The workspace with the computer folded to a rail; the chat takes its width](../harness_client/screenshots/workspace-desktop-hidden.png) | ![The computer details sheet: control, backend, isolation, display, screen, home, profile, disk, desktop and socket](../harness_client/screenshots/workspace-details.png) |
 
 `Call` opens the existing voice screen on the thread's live session, so
 a call is attached to the thread rather than to a session picked by
@@ -1051,11 +1063,16 @@ bodies in a picture are data.
 | String | Where |
 |---|---|
 | `Computer` / `Live` / `Starting` / `Off` | desk header |
-| `Take over` / `Return control` | takeover pill |
+| `Computer · Live` / `Computer · Starting` / `Computer · Off` | folded rail |
+| `Hide computer` / `Show computer` | desk fold control and folded rail |
+| `Take over` / `Return control` | takeover pill and details control |
 | `Control · agent` / `Control · you` | control caption |
 | `Box running` / `Box · local` / `Computer off` | desk footer |
 | `Screen lost` / `Start` | VNC lost state and off state |
-| `Details` | desk action |
+| `Details` | desk action, details sheet, and the phone sheet's action |
+| `Control` / `Backend` / `Isolation` / `Display` / `Screen` / `Home` / `Profile` / `Disk` / `Desktop` / `Socket` / `Reason` / `Missing` | details sheet rows |
+| `Agent` / `You` | details control values |
+| `Resources` | details sheet action |
 
 **Empty, error and dialog**
 
@@ -1251,6 +1268,7 @@ against the rendered buffer and the final diff.
 | `Memory written from this turn` | memory footnote |
 | `The session behind this thread` | `Open episode` |
 | `The computer inside the sandbox` | `Computer` |
+| `Hide computer` / `Show computer` | the desk's fold control |
 | `Knowledge base review` | `Dream` |
 | `Agent input paused while you have control` | `Take over` |
 | `Browser session in the box` | `Browser` |

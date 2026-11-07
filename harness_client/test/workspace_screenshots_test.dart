@@ -110,6 +110,11 @@ WorkspaceController _controller({
       url: 'http://memory/vnc_lite.html',
       width: 1280,
       height: 800,
+      isolation: 'local display and process',
+      display: ':99',
+      home: '/home/noah/.harness/workspace-box/w1/home',
+      profile: '/home/noah/.harness/workspace-box/w1/browser',
+      disk: 1572864,
     ),
     pending: pending,
     entries: const [
@@ -367,6 +372,49 @@ void main() {
     expect(tester.takeException(), isNull);
     if (shots != null) {
       await _write(tester, scaled, '$shots/workspace-scale-150.png');
+    }
+  });
+
+  testWidgets('workspace on a desktop with the computer hidden', (
+    tester,
+  ) async {
+    final (boundary, _) = await _show(tester, width: 1440, height: 900);
+    await tester.tap(find.byTooltip('Hide computer'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Show computer'), findsOneWidget);
+    expect(find.text('Computer · Live'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-desktop-hidden.png');
+    }
+  });
+
+  testWidgets('workspace computer details on a desktop', (tester) async {
+    final (boundary, _) = await _show(tester, width: 1440, height: 900);
+    await tester.tap(find.text('Details'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('computer-details-sheet')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-details.png');
+    }
+  });
+
+  testWidgets('workspace computer details on a phone', (tester) async {
+    final (boundary, _) = await _show(tester, width: 390, height: 844);
+    await tester.tap(find.byTooltip('Computer'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('computer-screen-sheet')),
+        matching: find.text('Details'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('computer-details-sheet')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-details-phone.png');
     }
   });
 }

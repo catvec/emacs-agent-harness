@@ -352,6 +352,12 @@ class WorkspaceComputerStatus {
     this.reasonCode,
     this.width = 0,
     this.height = 0,
+    this.isolation = '',
+    this.display = '',
+    this.home = '',
+    this.profile = '',
+    this.disk = 0,
+    this.missing = const [],
   });
 
   factory WorkspaceComputerStatus.fromWire(JsonMap wire) {
@@ -379,6 +385,15 @@ class WorkspaceComputerStatus {
       reasonCode: reasonCode,
       width: asInt(wire['width']) ?? 0,
       height: asInt(wire['height']) ?? 0,
+      isolation: asStringOr(wire['isolation'], ''),
+      display: asStringOr(wire['display'], ''),
+      home: asStringOr(wire['home'], ''),
+      profile: asStringOr(wire['profile'], ''),
+      disk: asInt(wire['disk']) ?? 0,
+      missing: [
+        for (final tool in asList(wire['missing']))
+          if ((asString(tool) ?? '').isNotEmpty) asString(tool)!,
+      ],
     );
   }
 
@@ -401,6 +416,22 @@ class WorkspaceComputerStatus {
   final String? reasonCode;
   final int width;
   final int height;
+
+  /// `local display and process`, the boundary the backend keeps.
+  final String isolation;
+
+  /// The X display the box's desktop runs on, such as `:99`.
+  final String display;
+
+  /// The box's home directory and its browser profile directory.
+  final String home;
+  final String profile;
+
+  /// How many bytes the box's state directory takes; 0 when unknown.
+  final int disk;
+
+  /// The tools whose absence keeps the box from running.
+  final List<String> missing;
 
   bool get userControl => control == 'user';
   bool get starting => state == 'starting';
@@ -425,6 +456,12 @@ class WorkspaceComputerStatus {
       reasonCode: reasonCode,
       width: width,
       height: height,
+      isolation: isolation,
+      display: display,
+      home: home,
+      profile: profile,
+      disk: disk,
+      missing: missing,
     );
   }
 }

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../../models/resources.dart';
 import '../../models/workspace.dart';
 import '../../state/app_controller.dart';
 import '../../state/session_controller.dart';
@@ -64,6 +65,10 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   _FailedSend? _failed;
   bool _retrying = false;
   final _composerText = TextEditingController();
+
+  /// Whether the desktop desk is folded to its rail.  The chat takes the
+  /// room the screen had, and the rail keeps the way back.
+  bool _deskHidden = false;
 
   /// The conversation of the active thread's live episode: its requests are
   /// the cards above the composer, answered the way a chat answers them.
@@ -295,6 +300,28 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         harnessAddress: widget.app.address ?? widget.app.settings.address,
         harnessToken: widget.app.sessionSecret,
         vncTransportFactory: widget.vncTransportFactory,
+        onOpenDetails: () {
+          Navigator.of(context).pop();
+          unawaited(_showComputerDetails());
+        },
+        onOpenResources: () {
+          Navigator.of(context).pop();
+          unawaited(_openResources());
+        },
+      ),
+    );
+  }
+
+  /// The computer's details: what the box is, not its screen again.
+  Future<void> _showComputerDetails() async {
+    final controller = _controller;
+    if (controller == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => _ComputerDetailsSheet(
+        controller: controller,
         onOpenResources: () {
           Navigator.of(context).pop();
           unawaited(_openResources());
@@ -543,17 +570,26 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           ),
         ],
         VerticalDivider(width: 1, color: theme.colorScheme.outlineVariant),
-        SizedBox(
-          width: deskWidth,
-          child: _Desk(
+        if (_deskHidden)
+          _DeskRail(
             controller: controller,
-            onOpenComputer: _showComputer,
-            onOpenResources: _openResources,
-            harnessAddress: widget.app.address ?? widget.app.settings.address,
-            harnessToken: widget.app.sessionSecret,
-            vncTransportFactory: widget.vncTransportFactory,
+            width: _grown(context, 56, 16, 72),
+            onShow: () => setState(() => _deskHidden = false),
+            onOpenDetails: _showComputerDetails,
+          )
+        else
+          SizedBox(
+            width: deskWidth,
+            child: _Desk(
+              controller: controller,
+              onOpenDetails: _showComputerDetails,
+              onHide: () => setState(() => _deskHidden = true),
+              onOpenResources: _openResources,
+              harnessAddress: widget.app.address ?? widget.app.settings.address,
+              harnessToken: widget.app.sessionSecret,
+              vncTransportFactory: widget.vncTransportFactory,
+            ),
           ),
-        ),
       ],
     );
   }
@@ -1049,10 +1085,35 @@ class _ThreadTile extends StatelessWidget {
   }
 }
 
+String _computerStateLabel(WorkspaceComputerStatus computer) {
+  if (computer.live) return 'Live';
+  if (computer.starting) return 'Starting';
+  return 'Off';
+}
+
+Color _computerStateColor(
+  BuildContext context,
+  WorkspaceComputerStatus computer,
+) {
+  if (computer.live) return HarnessColors.moss;
+  if (computer.starting) return HarnessColors.amber;
+  return Theme.of(context).colorScheme.outline;
+}
+
+String _computerFooter(WorkspaceComputerStatus computer) {
+  if (computer.live) {
+    return computer.backend.isEmpty
+        ? 'Box running'
+        : 'Box · ${computer.backend}';
+  }
+  return computer.reason ?? 'Computer off';
+}
+
 class _Desk extends StatelessWidget {
   const _Desk({
     required this.controller,
-    required this.onOpenComputer,
+    required this.onOpenDetails,
+    required this.onHide,
     required this.onOpenResources,
     required this.harnessAddress,
     required this.harnessToken,
@@ -1060,48 +1121,26 @@ class _Desk extends StatelessWidget {
   });
 
   final WorkspaceController controller;
-  final VoidCallback onOpenComputer;
+  final VoidCallback onOpenDetails;
+  final VoidCallback onHide;
   final VoidCallback onOpenResources;
   final String? harnessAddress;
   final String harnessToken;
   final RfbTransport Function(String url)? vncTransportFactory;
 
-  String get _stateLabel {
-    final computer = controller.computer;
-    if (computer.live) return 'Live';
-    if (computer.starting) return 'Starting';
-    return 'Off';
-  }
-
-  String get _footer {
-    final computer = controller.computer;
-    if (computer.live) {
-      return computer.backend.isEmpty
-          ? 'Box running'
-          : 'Box · ${computer.backend}';
-    }
-    return computer.reason ?? 'Computer off';
-  }
-
-  Color _stateColor(BuildContext context) {
-    final computer = controller.computer;
-    if (computer.live) return HarnessColors.moss;
-    if (computer.starting) return HarnessColors.amber;
-    return Theme.of(context).colorScheme.outline;
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final computer = controller.computer;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(
             HarnessSpace.gutter,
-            HarnessSpace.lg,
-            HarnessSpace.gutter,
             HarnessSpace.sm,
+            HarnessSpace.sm,
+            0,
           ),
           child: Row(
             children: [
@@ -1109,9 +1148,15 @@ class _Desk extends StatelessWidget {
                 child: Text('Computer', style: HarnessText.label(context)),
               ),
               Text(
-                _stateLabel,
+                _computerStateLabel(computer),
                 style: HarnessText.meta(context)
-                    .copyWith(color: _stateColor(context)),
+                    .copyWith(color: _computerStateColor(context, computer)),
+              ),
+              HarnessIconButton(
+                icon: Icons.keyboard_double_arrow_right_rounded,
+                label: 'Hide computer',
+                size: 18,
+                onPressed: onHide,
               ),
             ],
           ),
@@ -1142,7 +1187,10 @@ class _Desk extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(_footer, style: HarnessText.caption(context)),
+              Text(
+                _computerFooter(computer),
+                style: HarnessText.caption(context),
+              ),
               Align(
                 alignment: AlignmentDirectional.centerEnd,
                 child: Wrap(
@@ -1151,7 +1199,7 @@ class _Desk extends StatelessWidget {
                   children: [
                     HarnessTextButton(
                       label: 'Details',
-                      onPressed: onOpenComputer,
+                      onPressed: onOpenDetails,
                       dense: true,
                     ),
                   ],
@@ -1162,6 +1210,65 @@ class _Desk extends StatelessWidget {
         ),
         Divider(height: 1, color: theme.colorScheme.outlineVariant),
       ],
+    );
+  }
+}
+
+/// The folded desk: the way back, and the details, on a narrow rail where
+/// the screen was.  The chat keeps the rest.
+class _DeskRail extends StatelessWidget {
+  const _DeskRail({
+    required this.controller,
+    required this.width,
+    required this.onShow,
+    required this.onOpenDetails,
+  });
+
+  final WorkspaceController controller;
+  final double width;
+  final VoidCallback onShow;
+  final VoidCallback onOpenDetails;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final computer = controller.computer;
+    return Container(
+      width: width,
+      color: theme.colorScheme.surfaceContainerLow,
+      child: Column(
+        children: [
+          const SizedBox(height: HarnessSpace.sm),
+          HarnessIconButton(
+            icon: Icons.desktop_windows_outlined,
+            label: 'Show computer',
+            size: 20,
+            onPressed: onShow,
+          ),
+          const SizedBox(height: HarnessSpace.xs),
+          HarnessDot(color: _computerStateColor(context, computer), size: 7),
+          Expanded(
+            child: Center(
+              child: RotatedBox(
+                quarterTurns: 3,
+                child: Text(
+                  'Computer · ${_computerStateLabel(computer)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.fade,
+                  style: HarnessText.label(context),
+                ),
+              ),
+            ),
+          ),
+          HarnessIconButton(
+            icon: Icons.info_outline_rounded,
+            label: 'Details',
+            size: 18,
+            onPressed: onOpenDetails,
+          ),
+          const SizedBox(height: HarnessSpace.md),
+        ],
+      ),
     );
   }
 }
@@ -1627,6 +1734,7 @@ class _ThreadsSheet extends StatelessWidget {
 class _ComputerSheet extends StatelessWidget {
   const _ComputerSheet({
     required this.controller,
+    required this.onOpenDetails,
     required this.onOpenResources,
     this.harnessAddress,
     this.harnessToken = '',
@@ -1634,6 +1742,7 @@ class _ComputerSheet extends StatelessWidget {
   });
 
   final WorkspaceController controller;
+  final VoidCallback onOpenDetails;
   final VoidCallback onOpenResources;
   final String? harnessAddress;
   final String harnessToken;
@@ -1645,12 +1754,8 @@ class _ComputerSheet extends StatelessWidget {
       animation: controller,
       builder: (context, _) {
         final computer = controller.computer;
-        final state = computer.live
-            ? 'Live'
-            : computer.starting
-            ? 'Starting'
-            : 'Off';
         return SafeArea(
+          key: const ValueKey('computer-screen-sheet'),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(
               HarnessSpace.sheetGutter,
@@ -1670,7 +1775,12 @@ class _ComputerSheet extends StatelessWidget {
                         style: HarnessText.sheetTitle(context),
                       ),
                     ),
-                    Text(state, style: HarnessText.meta(context)),
+                    Text(
+                      _computerStateLabel(computer),
+                      style: HarnessText.meta(context).copyWith(
+                        color: _computerStateColor(context, computer),
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: HarnessSpace.md),
@@ -1685,27 +1795,234 @@ class _ComputerSheet extends StatelessWidget {
                 ),
                 const SizedBox(height: HarnessSpace.md),
                 Text(
-                  computer.live
-                      ? (computer.backend.isEmpty
-                            ? 'Box running'
-                            : 'Box · ${computer.backend}')
-                      : (computer.reason ?? 'Computer off'),
+                  _computerFooter(computer),
                   style: HarnessText.caption(context),
                 ),
                 const SizedBox(height: HarnessSpace.sm),
-                Align(
-                  alignment: AlignmentDirectional.centerStart,
-                  child: HarnessTextButton(
-                    label: 'Resources',
-                    icon: Icons.inventory_2_outlined,
-                    onPressed: onOpenResources,
-                  ),
+                Wrap(
+                  spacing: HarnessSpace.sm,
+                  runSpacing: HarnessSpace.sm,
+                  children: [
+                    HarnessTextButton(
+                      label: 'Details',
+                      icon: Icons.info_outline_rounded,
+                      onPressed: onOpenDetails,
+                    ),
+                    HarnessTextButton(
+                      label: 'Resources',
+                      icon: Icons.inventory_2_outlined,
+                      onPressed: onOpenResources,
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
         );
       },
+    );
+  }
+}
+
+/// What the computer is: its state, boundary, control, directories and the
+/// endpoints its screen speaks to.  It draws no screen of its own; the desk
+/// and the phone's sheet are where the screen lives.
+class _ComputerDetailsSheet extends StatelessWidget {
+  const _ComputerDetailsSheet({
+    required this.controller,
+    required this.onOpenResources,
+  });
+
+  final WorkspaceController controller;
+  final VoidCallback onOpenResources;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final computer = controller.computer;
+        final screen = computer.width > 0 && computer.height > 0
+            ? '${computer.width} × ${computer.height}'
+            : '—';
+        return SafeArea(
+          key: const ValueKey('computer-details-sheet'),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(
+              HarnessSpace.sheetGutter,
+              0,
+              HarnessSpace.sheetGutter,
+              HarnessSpace.lg,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Computer',
+                        style: HarnessText.sheetTitle(context),
+                      ),
+                    ),
+                    Text(
+                      _computerStateLabel(computer),
+                      style: HarnessText.meta(context).copyWith(
+                        color: _computerStateColor(context, computer),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: HarnessSpace.sm),
+                _DetailRow(
+                  label: 'Control',
+                  value: computer.userControl ? 'You' : 'Agent',
+                  action: computer.live
+                      ? HarnessTextButton(
+                          label: computer.userControl
+                              ? 'Return control'
+                              : 'Take over',
+                          dense: true,
+                          onPressed: () => unawaited(
+                            computer.userControl
+                                ? controller.returnControl()
+                                : controller.takeOver(),
+                          ),
+                        )
+                      : null,
+                ),
+                _DetailRow(
+                  label: 'Backend',
+                  value: computer.backend.isEmpty ? '—' : computer.backend,
+                ),
+                _DetailRow(
+                  label: 'Isolation',
+                  value: computer.isolation.isEmpty ? '—' : computer.isolation,
+                ),
+                _DetailRow(
+                  label: 'Display',
+                  value: computer.display.isEmpty ? '—' : computer.display,
+                  mono: true,
+                ),
+                _DetailRow(label: 'Screen', value: screen),
+                _DetailRow(
+                  label: 'Home',
+                  value: computer.home.isEmpty ? '—' : computer.home,
+                  mono: true,
+                ),
+                _DetailRow(
+                  label: 'Profile',
+                  value: computer.profile.isEmpty ? '—' : computer.profile,
+                  mono: true,
+                ),
+                _DetailRow(
+                  label: 'Disk',
+                  value: computer.disk > 0 ? formatBytes(computer.disk) : '—',
+                ),
+                _DetailRow(
+                  label: 'Desktop',
+                  value: computer.url ?? '—',
+                  mono: true,
+                ),
+                _DetailRow(
+                  label: 'Socket',
+                  value: computer.socket ?? '—',
+                  mono: true,
+                ),
+                if (computer.reason != null)
+                  _DetailRow(
+                    label: 'Reason',
+                    value: computer.reason!,
+                    accent: HarnessColors.amber,
+                  ),
+                if (computer.missing.isNotEmpty)
+                  _DetailRow(
+                    label: 'Missing',
+                    value: computer.missing.join(' · '),
+                    accent: HarnessColors.amber,
+                  ),
+                const SizedBox(height: HarnessSpace.md),
+                Wrap(
+                  spacing: HarnessSpace.sm,
+                  runSpacing: HarnessSpace.sm,
+                  children: [
+                    HarnessTextButton(
+                      label: 'Resources',
+                      icon: Icons.inventory_2_outlined,
+                      onPressed: onOpenResources,
+                    ),
+                    if (!computer.live && !computer.starting)
+                      HarnessTextButton(
+                        label: 'Start',
+                        icon: Icons.play_arrow_rounded,
+                        onPressed: () => unawaited(controller.startComputer()),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// One label and its value in the details sheet; a long path stays on one
+/// line and its tooltip carries the whole of it.
+class _DetailRow extends StatelessWidget {
+  const _DetailRow({
+    required this.label,
+    required this.value,
+    this.mono = false,
+    this.accent,
+    this.action,
+  });
+
+  final String label;
+  final String value;
+  final bool mono;
+  final Color? accent;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = mono
+        ? HarnessText.mono(context).copyWith(fontSize: 11.5)
+        : HarnessText.body(context).copyWith(fontSize: 13);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: action == null
+            ? CrossAxisAlignment.start
+            : CrossAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 88,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Text(label, style: HarnessText.meta(context)),
+            ),
+          ),
+          Expanded(
+            child: Tooltip(
+              message: value,
+              waitDuration: const Duration(milliseconds: 500),
+              child: Text(
+                value,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: accent == null ? style : style.copyWith(color: accent),
+              ),
+            ),
+          ),
+          if (action != null) ...[
+            const SizedBox(width: HarnessSpace.sm),
+            action!,
+          ],
+        ],
+      ),
     );
   }
 }

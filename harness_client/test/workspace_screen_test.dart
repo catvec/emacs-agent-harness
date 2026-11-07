@@ -57,6 +57,11 @@ WorkspaceController _preview() {
       url: 'http://memory/vnc_lite.html',
       width: 1280,
       height: 800,
+      isolation: 'local display and process',
+      display: ':99',
+      home: '/home/noah/.harness/workspace-box/w1/home',
+      profile: '/home/noah/.harness/workspace-box/w1/browser',
+      disk: 1572864,
     ),
     entries: [
       const WorkspaceEntry(
@@ -430,6 +435,7 @@ void main() {
       ('Call', 1),
       ('Memory', 2),
       ('Computer', 1),
+      ('Hide computer', 1),
       ('Open episode', 1),
       ('Refresh', 1),
     ]) {
@@ -452,6 +458,236 @@ void main() {
     expect(find.text('Preview'), findsNothing);
     expect(find.textContaining('Sandbox staged'), findsNothing);
     expect(find.textContaining('Quartz'), findsNothing);
+  });
+
+  testWidgets('the computer screen folds to a rail and comes back', (
+    tester,
+  ) async {
+    final controller = _preview();
+    await _pump(tester, controller, size: const Size(1440, 900));
+    expect(find.byType(VncTakeover), findsOneWidget);
+    expect(find.byTooltip('Hide computer'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Hide computer'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(VncTakeover), findsNothing);
+    expect(find.byTooltip('Show computer'), findsOneWidget);
+    expect(find.byTooltip('Details'), findsOneWidget);
+    // The rail says what it holds and its state, in words.
+    expect(find.text('Computer · Live'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Show computer'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(VncTakeover), findsOneWidget);
+    expect(find.byTooltip('Hide computer'), findsOneWidget);
+    expect(find.byTooltip('Show computer'), findsNothing);
+    expect(find.text('Live'), findsOneWidget);
+  });
+
+  testWidgets('the folded rail opens the details', (tester) async {
+    final controller = _preview();
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.tap(find.byTooltip('Hide computer'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Details'));
+    await tester.pumpAndSettle();
+
+    final details = find.byKey(const ValueKey('computer-details-sheet'));
+    expect(details, findsOneWidget);
+    expect(
+      find.descendant(of: details, matching: find.text('Backend')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Details shows the computer, not its screen again', (
+    tester,
+  ) async {
+    final controller = _preview();
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.tap(find.text('Details'));
+    await tester.pumpAndSettle();
+
+    final details = find.byKey(const ValueKey('computer-details-sheet'));
+    expect(details, findsOneWidget);
+    expect(
+      find.descendant(of: details, matching: find.byType(VncTakeover)),
+      findsNothing,
+    );
+    for (final copy in const [
+      'Control',
+      'Backend',
+      'Isolation',
+      'Display',
+      'Screen',
+      'Home',
+      'Profile',
+      'Disk',
+      'Desktop',
+      'Socket',
+      'Resources',
+    ]) {
+      expect(
+        find.descendant(of: details, matching: find.text(copy)),
+        findsOneWidget,
+        reason: copy,
+      );
+    }
+    for (final value in const [
+      'Agent',
+      'local',
+      'local display and process',
+      ':99',
+      '1280 × 800',
+      '/home/noah/.harness/workspace-box/w1/home',
+      '/home/noah/.harness/workspace-box/w1/browser',
+      '1.5 MB',
+      'http://memory/vnc_lite.html',
+      'ws://memory/websockify',
+    ]) {
+      expect(
+        find.descendant(of: details, matching: find.text(value)),
+        findsOneWidget,
+        reason: value,
+      );
+    }
+
+    await tester.tap(
+      find.descendant(of: details, matching: find.text('Take over')),
+    );
+    await tester.pumpAndSettle();
+    expect(controller.computer.userControl, isTrue);
+    expect(
+      find.descendant(of: details, matching: find.text('You')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: details, matching: find.text('Return control')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('details of a box that is off name what is missing', (
+    tester,
+  ) async {
+    final controller = _preview();
+    controller.computer = const WorkspaceComputerStatus(
+      available: false,
+      state: 'failed',
+      backend: 'local',
+      reason: 'Computer tools missing: Xvfb',
+      missing: ['Xvfb', 'x11vnc'],
+      home: '/home/noah/.harness/workspace-box/w1/home',
+    );
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.tap(find.text('Details'));
+    await tester.pumpAndSettle();
+
+    final details = find.byKey(const ValueKey('computer-details-sheet'));
+    expect(details, findsOneWidget);
+    for (final copy in const [
+      'Off',
+      'Computer tools missing: Xvfb',
+      'Xvfb · x11vnc',
+    ]) {
+      expect(
+        find.descendant(of: details, matching: find.text(copy)),
+        findsOneWidget,
+        reason: copy,
+      );
+    }
+    expect(
+      find.descendant(of: details, matching: find.text('Start')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: details, matching: find.text('Screen')),
+      findsOneWidget,
+    );
+    // A stopped box has no endpoints: its details say so rather than
+    // remembering an old one.
+    expect(
+      find.descendant(of: details, matching: find.text('—')),
+      findsWidgets,
+    );
+  });
+
+  testWidgets('the computer sheet opens the details, not a second screen', (
+    tester,
+  ) async {
+    final controller = _preview();
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.tap(find.byTooltip('Computer'));
+    await tester.pumpAndSettle();
+
+    final screen = find.byKey(const ValueKey('computer-screen-sheet'));
+    expect(screen, findsOneWidget);
+    expect(
+      find.descendant(of: screen, matching: find.byType(VncTakeover)),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.descendant(of: screen, matching: find.text('Details')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('computer-screen-sheet')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('computer-details-sheet')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the phone reaches the details from its computer sheet', (
+    tester,
+  ) async {
+    final controller = _preview();
+    await _pump(tester, controller, size: const Size(390, 844));
+    await tester.tap(find.byTooltip('Computer'));
+    await tester.pumpAndSettle();
+    expect(find.byType(VncTakeover), findsOneWidget);
+
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('computer-screen-sheet')),
+        matching: find.text('Details'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final details = find.byKey(const ValueKey('computer-details-sheet'));
+    expect(details, findsOneWidget);
+    expect(find.byType(VncTakeover), findsNothing);
+    expect(
+      find.descendant(of: details, matching: find.text('1280 × 800')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the details sheet holds at twice the text on a phone', (
+    tester,
+  ) async {
+    final controller = _preview();
+    await _pump(tester, controller, size: const Size(390, 844), textScale: 2);
+    await tester.tap(find.byTooltip('Computer'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('computer-screen-sheet')),
+        matching: find.text('Details'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final details = find.byKey(const ValueKey('computer-details-sheet'));
+    expect(details, findsOneWidget);
+    expect(
+      find.descendant(of: details, matching: find.text('Isolation')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a chosen concept has its own words', (tester) async {
@@ -842,5 +1078,35 @@ void main() {
     expect(sent, isFalse);
     expect(controller.error, isNotNull);
     expect(harness.prompts, isEmpty);
+  });
+
+  test('a box status carries the facts the details sheet shows', () {
+    final status = WorkspaceComputerStatus.fromWire({
+      'available': true,
+      'running': true,
+      'state': 'running',
+      'control': 'user',
+      'backend': 'local',
+      'socket': 'ws://memory/websockify',
+      'url': 'http://memory/vnc_lite.html',
+      'width': 1280,
+      'height': 800,
+      'isolation': 'local display and process',
+      'display': ':99',
+      'home': '/home/noah/.harness/workspace-box/w1/home',
+      'profile': '/home/noah/.harness/workspace-box/w1/browser',
+      'disk': 1572864,
+      'missing': ['Xvfb', 'x11vnc'],
+    });
+    expect(status.userControl, isTrue);
+    expect(status.live, isTrue);
+    expect(status.isolation, 'local display and process');
+    expect(status.display, ':99');
+    expect(status.home, '/home/noah/.harness/workspace-box/w1/home');
+    expect(status.profile, '/home/noah/.harness/workspace-box/w1/browser');
+    expect(status.disk, 1572864);
+    expect(status.missing, ['Xvfb', 'x11vnc']);
+    expect(status.copyWith(control: 'agent').userControl, isFalse);
+    expect(status.copyWith(control: 'agent').display, ':99');
   });
 }
