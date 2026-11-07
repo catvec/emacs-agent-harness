@@ -28,6 +28,7 @@ class MessageComposer extends StatefulWidget {
     this.footer,
     this.focusNode,
     this.hint,
+    this.textController,
   });
 
   /// Takes the message to send.  Whether it was taken: where it was not
@@ -72,14 +73,18 @@ class MessageComposer extends StatefulWidget {
   /// still said first.
   final String? hint;
 
+  /// A controller the caller keeps, to restore a failed message into the
+  /// field; the field disposes only one it made itself.
+  final TextEditingController? textController;
+
   @override
   State<MessageComposer> createState() => _MessageComposerState();
 }
 
 class _MessageComposerState extends State<MessageComposer> {
-  late final TextEditingController _text = TextEditingController(
-    text: widget.drafts?.text(widget.draftKey) ?? '',
-  );
+  late final TextEditingController _text = widget.textController ??
+      TextEditingController(text: widget.drafts?.text(widget.draftKey) ?? '');
+  bool get _ownsText => widget.textController == null;
   FocusNode? _ownFocus;
   FocusNode get _focus => widget.focusNode ?? (_ownFocus ??= FocusNode());
   final _attachments = <PromptAttachment>[];
@@ -107,13 +112,28 @@ class _MessageComposerState extends State<MessageComposer> {
     if (widget.awaitingAnswer && !oldWidget.awaitingAnswer) {
       _focus.unfocus();
     }
+    // A composer that moves to another draft (the workspace switched to
+    // another thread) keeps each draft where it belongs: save what was
+    // typed under the old key, then show the new key's text.  Without
+    // this an external controller carries one thread's words to another.
+    if (oldWidget.draftKey != widget.draftKey) {
+      oldWidget.drafts?.setText(oldWidget.draftKey, _text.text);
+      final stored = widget.drafts?.text(widget.draftKey) ?? '';
+      if (stored != _text.text) {
+        _text.value = TextEditingValue(
+          text: stored,
+          selection: TextSelection.collapsed(offset: stored.length),
+        );
+        setState(() {});
+      }
+    }
   }
 
   @override
   void dispose() {
     widget.drafts?.removeListener(_followDraft);
     _text.removeListener(_rememberDraft);
-    _text.dispose();
+    if (_ownsText) _text.dispose();
     _ownFocus?.dispose();
     super.dispose();
   }

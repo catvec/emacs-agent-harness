@@ -2052,6 +2052,13 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/workspace/prompt') {
+        workspacePromptParams.add(Map<String, Object?>.of(params));
+        final gate = workspacePromptGate;
+        if (gate != null) await gate.future;
+        if (workspacePromptFail) {
+          _respondError(id, -32000, 'Refused');
+          return;
+        }
         workspacePrompts.add(asStringOr(params['text'], ''));
         _respond(id, const <String, Object?>{});
         return;
@@ -2628,6 +2635,15 @@ class FakeHarness {
     return '${text.substring(0, at)}<<${text.substring(at, at + query.length)}>>'
         '${text.substring(at + query.length)}';
   }
+
+  /// When true a workspace prompt is refused, for the failed-send path.
+  bool workspacePromptFail = false;
+
+  /// Held open to keep a workspace prompt response pending.
+  Completer<void>? workspacePromptGate;
+
+  /// The params of each workspace prompt request, for destination checks.
+  final List<Map<String, Object?>> workspacePromptParams = [];
 
   /// When true the resources methods answer an error, for the failure path.
   bool resourcesFail = false;

@@ -11,6 +11,7 @@ import '../navigation.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/markdown_view.dart';
 import '../widgets/message_composer.dart';
 import '../widgets/vnc_takeover.dart';
 import '../widgets/workspace_graph.dart';
@@ -47,6 +48,10 @@ class WorkspaceScreen extends StatefulWidget {
 class _WorkspaceScreenState extends State<WorkspaceScreen> {
   String? _lastMessageKey;
   final _scroll = ScrollController();
+  bool _unread = false;
+  _FailedSend? _failed;
+  bool _retrying = false;
+  final _composerText = TextEditingController();
 
   WorkspaceController? get _controller => widget.controller ?? widget.app.workspace;
 
@@ -75,20 +80,25 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   void dispose() {
     _controller?.removeListener(_changed);
     _scroll.dispose();
+    _composerText.dispose();
     super.dispose();
   }
 
   void _changed() {
     if (!mounted) return;
-    setState(() {});
+    final nearBottom = _scroll.hasClients &&
+        (_scroll.position.maxScrollExtent - _scroll.position.pixels) < 80;
     final entries = _controller?.visibleEntries ?? const <WorkspaceEntry>[];
     final key = entries.isEmpty
         ? ''
-        : '${entries.length}:${entries.last.text.hashCode}';
-    if (key != _lastMessageKey) {
-      _lastMessageKey = key;
-      _scrollToEnd();
-    }
+        : '${entries.length}:${entries.last.text.length}';
+    final grew = key != _lastMessageKey;
+    _lastMessageKey = key;
+    setState(() {
+      if (grew) _unread = !nearBottom;
+    });
+    _restoreFailedDraft();
+    if (grew && nearBottom) _scrollToEnd();
   }
 
   void _scrollToEnd({bool immediate = false}) {
@@ -105,6 +115,47 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         );
       }
     });
+  }
+
+  String _threadTitle(WorkspaceController controller, String? id) {
+    for (final thread in controller.threads) {
+      if (thread.id == id) return thread.title;
+    }
+    return id ?? 'Workspace';
+  }
+
+  /// Restore the failed text into the field, but never over something the
+  /// person has typed since, and only while its own thread is open.
+  void _restoreFailedDraft() {
+    final failed = _failed;
+    final controller = _controller;
+    if (failed == null || controller == null) return;
+    if (controller.selectedThread != failed.thread) return;
+    if (_composerText.text.isNotEmpty) return;
+    _composerText.value = TextEditingValue(
+      text: failed.text,
+      selection: TextSelection.collapsed(offset: failed.text.length),
+    );
+  }
+
+  void _retryFailed(WorkspaceController controller) {
+    final failed = _failed;
+    if (failed == null || _retrying || controller.sending) return;
+    setState(() => _retrying = true);
+    unawaited(
+      controller.send(failed.text, thread: failed.thread).then((sent) {
+        if (!mounted) return;
+        setState(() {
+          _retrying = false;
+          if (sent) {
+            _failed = null;
+            if (_composerText.text.trim() == failed.text.trim()) {
+              _composerText.clear();
+            }
+          }
+        });
+      }),
+    );
   }
 
   Future<void> _newThread() async {
@@ -447,7 +498,10 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         itemBuilder: (context, index) {
           final entry = entries[index];
           return _EntryReveal(
-            key: ValueKey('${entry.kind}:${entry.thread}:${entry.at}:${entry.text.hashCode}:$index'),
+            key: ValueKey(
+              '${entry.kind}:${entry.thread}:'
+              '${entry.at?.toIso8601String() ?? 'at-$index'}',
+            ),
             child: _TimelineEntry(
               entry: entry,
               thread: _threadFor(controller, entry.thread),
@@ -486,9 +540,30 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       canAttach: false,
       enabled: controller.current != null,
       hint: 'Workspace message',
+      textController: _composerText,
       onSend: (text, attachments) {
         if (!controller.canSend) return false;
-        unawaited(controller.send(text));
+        final origin = controller.selectedThread ?? controller.activeThread?.id;
+        unawaited(
+          controller.send(text, thread: origin).then((sent) {
+            if (!mounted) return;
+            setState(() {
+              if (sent) {
+                if (_failed?.text == text && _failed?.thread == origin) {
+                  _failed = null;
+                }
+                _unread = false;
+              } else {
+                _failed ??= _FailedSend(text, origin);
+              }
+            });
+            if (sent) {
+              _scrollToEnd(immediate: true);
+            } else {
+              _restoreFailedDraft();
+            }
+          }),
+        );
         return true;
       },
       onStop: () => unawaited(controller.cancel()),
@@ -502,15 +577,69 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       ),
       child: box,
     );
-    if (maxWidth == null) return padded;
+    final column = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (controller.error != null && _failed != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: HarnessSpace.gutter),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Tooltip(
+                    message: controller.error!,
+                    child: Text(
+                      'Send failed · ${_threadTitle(controller, _failed!.thread)}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: HarnessText.caption(context).copyWith(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ),
+                ),
+                HarnessTextButton(
+                  label: _retrying ? 'Sending…' : 'Retry',
+                  dense: true,
+                  onPressed: _retrying ? null : () => _retryFailed(controller),
+                ),
+              ],
+            ),
+          ),
+        if (_unread)
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: Padding(
+              padding: const EdgeInsets.only(right: HarnessSpace.gutter),
+              child: HarnessTextButton(
+                label: 'Latest',
+                icon: Icons.arrow_downward_rounded,
+                dense: true,
+                onPressed: () {
+                  setState(() => _unread = false);
+                  _scrollToEnd(immediate: true);
+                },
+              ),
+            ),
+          ),
+        padded,
+      ],
+    );
+    if (maxWidth == null) return column;
     return Align(
       alignment: AlignmentDirectional.topCenter,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxWidth),
-        child: padded,
+        child: column,
       ),
     );
   }
+}
+
+class _FailedSend {
+  const _FailedSend(this.text, this.thread);
+  final String text;
+  final String? thread;
 }
 
 class _ThreadRail extends StatelessWidget {
@@ -955,9 +1084,10 @@ class _TimelineEntry extends StatelessWidget {
     }
     final agent = entry.isAgent;
     final label = agent ? 'Agent' : 'You';
-    final body = Text(
-      entry.text,
-      style: HarnessText.body(context).copyWith(height: 1.5),
+    final body = HarnessMarkdown(
+      text: entry.text,
+      compact: true,
+      tight: true,
     );
     final bubble = Container(
       width: double.infinity,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/models/workspace.dart';
@@ -7,7 +9,11 @@ import 'package:harness_client/src/state/workspace_controller.dart';
 import 'package:harness_client/src/ui/adaptive/platform_style.dart';
 import 'package:harness_client/src/ui/screens/workspace_screen.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
+import 'package:harness_client/src/ui/widgets/markdown_view.dart';
 import 'package:harness_client/src/ui/widgets/vnc_takeover.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'support/fake_harness.dart';
 
 WorkspaceController _preview() {
   final workspace = WorkspaceSummary(
@@ -63,6 +69,12 @@ WorkspaceController _preview() {
       ),
       const WorkspaceEntry(
         kind: 'message',
+        thread: 't1',
+        role: 'assistant',
+        text: '**Matte** finish, [the sample](https://example.com/sample) and `3x6`.',
+      ),
+      const WorkspaceEntry(
+        kind: 'message',
         thread: 't2',
         role: 'user',
         text: 'How is the memory index?',
@@ -108,6 +120,24 @@ Future<void> _pump(
   );
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 350));
+}
+
+Future<(AppController, FakeHarness, WorkspaceController)> _connectedWorkspace() async {
+  SharedPreferences.setMockInitialValues({});
+  final settings = SettingsController();
+  await settings.load();
+  final harness = FakeHarness(workspace: true);
+  final app = AppController(
+    settings: settings,
+    connector: harness.connector,
+    reconnectDelays: const [Duration(milliseconds: 5)],
+  );
+  addTearDown(app.dispose);
+  await app.connect('ws://memory/acp');
+  final controller = WorkspaceController(app.harness);
+  addTearDown(controller.dispose);
+  await controller.load();
+  return (app, harness, controller);
 }
 
 void main() {
@@ -303,7 +333,7 @@ void main() {
       ('New thread', 2),
       ('Threads', 1),
       ('Call', 1),
-      ('Memory', 1),
+      ('Memory', 2),
       ('Computer', 1),
       ('Open episode', 1),
       ('Refresh', 1),
@@ -344,6 +374,121 @@ void main() {
     }
   });
 
+
+  testWidgets('a typed draft stays with its own thread', (tester) async {
+    final (_, _, controller) = await _connectedWorkspace();
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.enterText(find.byType(TextField).last, 'for kitchen');
+    await tester.pump();
+    await tester.tap(find.text('Harness memory'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(find.byType(TextField).last).controller!.text, isEmpty);
+    await tester.enterText(find.byType(TextField).last, 'for memory');
+    await tester.pump();
+    await tester.tap(find.text('Kitchen renovation'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField).last).controller!.text,
+      'for kitchen',
+    );
+    await tester.tap(find.text('Harness memory'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField).last).controller!.text,
+      'for memory',
+    );
+  });
+
+  testWidgets('retry keeps the originating thread after navigation', (tester) async {
+    final (_, harness, controller) = await _connectedWorkspace();
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.enterText(find.byType(TextField).last, 'quote-for-kitchen');
+    await tester.pump();
+    harness.workspacePromptFail = true;
+    await tester.tap(find.byKey(const Key('composer-send')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Send failed'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField).last).controller!.text, 'quote-for-kitchen');
+    await tester.tap(find.text('Harness memory'));
+    await tester.pumpAndSettle();
+    harness.workspacePromptFail = false;
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    final last = harness.workspacePromptParams.last;
+    expect((last['opts'] as Map)['thread'], 'th-1');
+    expect(last['text'], 'quote-for-kitchen');
+  });
+
+  testWidgets('rapid Retry sends exactly one retry', (tester) async {
+    final (_, harness, controller) = await _connectedWorkspace();
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.enterText(find.byType(TextField).last, 'quote-for-kitchen');
+    await tester.pump();
+    harness.workspacePromptFail = true;
+    await tester.tap(find.byKey(const Key('composer-send')));
+    await tester.pumpAndSettle();
+    harness.workspacePromptFail = false;
+    harness.workspacePromptGate = Completer<void>();
+    await tester.tap(find.text('Retry'));
+    await tester.tap(find.text('Retry'));
+    await tester.pump();
+    await tester.pump();
+    expect(
+      harness.workspacePromptParams.where((p) => p['text'] == 'quote-for-kitchen').length,
+      2,
+    );
+    harness.workspacePromptGate!.complete();
+    await tester.pumpAndSettle();
+    expect(
+      harness.workspacePromptParams.where((p) => p['text'] == 'quote-for-kitchen').length,
+      2,
+    );
+  });
+
+  testWidgets('a newer draft is not overwritten by retry', (tester) async {
+    final (_, harness, controller) = await _connectedWorkspace();
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.enterText(find.byType(TextField).last, 'quote-for-kitchen');
+    await tester.pump();
+    harness.workspacePromptFail = true;
+    await tester.tap(find.byKey(const Key('composer-send')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'a newer draft');
+    await tester.pump();
+    harness.workspacePromptFail = false;
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(find.byType(TextField).last).controller!.text, 'a newer draft');
+  });
+
+  testWidgets('the failed draft comes back when its thread is reopened', (tester) async {
+    final (_, harness, controller) = await _connectedWorkspace();
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.enterText(find.byType(TextField).last, 'quote-for-kitchen');
+    await tester.pump();
+    harness.workspacePromptFail = true;
+    await tester.tap(find.byKey(const Key('composer-send')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Harness memory'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Kitchen renovation'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Send failed'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField).last).controller!.text, 'quote-for-kitchen');
+  });
+
+  test('a retry can name its origin thread and overlaps are refused', () async {
+    final (_, harness, controller) = await _connectedWorkspace();
+    harness.workspacePromptFail = false;
+    final first = controller.send('quote-for-kitchen', thread: 'th-1');
+    final second = controller.send('quote-for-kitchen', thread: 'th-2');
+    expect(await first, isTrue);
+    expect(await second, isFalse, reason: 'an overlapping send is refused');
+    expect(harness.workspacePromptParams.length, 1);
+    expect((harness.workspacePromptParams.single['opts'] as Map)['thread'], 'th-1');
+    expect(harness.workspacePromptParams.single['text'], 'quote-for-kitchen');
+  });
+
   testWidgets('the empty, failed and no-workspace pages say what they are', (
     tester,
   ) async {
@@ -370,5 +515,83 @@ void main() {
     expect(find.text('No workspace'), findsOneWidget);
     expect(find.text('One chat, its threads and its memory'), findsOneWidget);
     expect(find.text('New workspace'), findsOneWidget);
+  });
+
+  testWidgets('a concept keeps its full name and a 44px target', (tester) async {
+    final controller = _preview();
+    await _pump(tester, controller, size: const Size(390, 844), textScale: 1.5);
+    expect(find.byWidgetPredicate((widget) => widget is Tooltip && widget.message == 'Kitchen'), findsOneWidget);
+    final tag = find.byKey(const ValueKey('concept-Kitchen'));
+    expect(tag, findsOneWidget);
+    final size = tester.getSize(tag);
+    expect(size.height, greaterThanOrEqualTo(43));
+    await tester.ensureVisible(tag);
+    await tester.pumpAndSettle();
+    await tester.tap(tag);
+    await tester.pumpAndSettle();
+    expect(controller.selectedTag, 'Kitchen');
+    await tester.tap(tag);
+    await tester.pumpAndSettle();
+    expect(controller.selectedTag, isNull);
+  });
+
+  testWidgets('a formatted message renders without its syntax', (tester) async {
+    final controller = _preview();
+    await _pump(tester, controller, size: const Size(390, 844));
+    expect(find.byType(HarnessMarkdown), findsWidgets);
+    final text = tester
+        .widgetList<Text>(find.byType(Text))
+        .map((widget) => widget.data ?? '')
+        .join(' ');
+    expect(text, isNot(contains('**Matte**')));
+    expect(text, isNot(contains('](https://'))); 
+    expect(find.textContaining('the sample'), findsOneWidget);
+  });
+
+  testWidgets('reading older messages is not interrupted by new ones', (tester) async {
+    final controller = _preview();
+    controller.entries = [
+      for (var i = 0; i < 30; i++)
+        WorkspaceEntry(
+          kind: 'message',
+          thread: 't1',
+          role: i.isEven ? 'user' : 'assistant',
+          text: 'Message $i',
+        ),
+    ];
+    await _pump(tester, controller, size: const Size(390, 844));
+    final timeline = find.byKey(const PageStorageKey('workspace-timeline'));
+    final scrollable = find.descendant(of: timeline, matching: find.byType(Scrollable)).first;
+    await tester.drag(scrollable, const Offset(0, 900));
+    await tester.pumpAndSettle();
+    final before = tester.state<ScrollableState>(scrollable).position.pixels;
+    await controller.send('A new message');
+    await tester.pumpAndSettle();
+    expect(find.text('Latest'), findsOneWidget);
+    expect(tester.state<ScrollableState>(scrollable).position.pixels, moreOrLessEquals(before, epsilon: 1));
+    await tester.tap(find.text('Latest'));
+    await tester.pumpAndSettle();
+    expect(find.text('Latest'), findsNothing);
+  });
+
+  test('a refused send is reported and can be retried once', () async {
+    SharedPreferences.setMockInitialValues({});
+    final settings = SettingsController();
+    await settings.load();
+    final harness = FakeHarness(workspace: true)..workspacePromptFail = true;
+    final app = AppController(
+      settings: settings,
+      connector: harness.connector,
+      reconnectDelays: const [Duration(milliseconds: 5)],
+    );
+    addTearDown(app.dispose);
+    await app.connect('ws://memory/acp');
+    final controller = WorkspaceController(app.harness);
+    addTearDown(controller.dispose);
+    await controller.load();
+    final sent = await controller.send('a refused message');
+    expect(sent, isFalse);
+    expect(controller.error, isNotNull);
+    expect(harness.prompts, isEmpty);
   });
 }

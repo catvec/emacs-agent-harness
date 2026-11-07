@@ -204,20 +204,22 @@ class WorkspaceController extends ChangeNotifier {
 
   /// Send [text] to the active thread.  The server records the user message
   /// and the brief, then the turn; the timeline events keep the screen live.
-  Future<void> send(String text) async {
+  Future<bool> send(String text, {String? thread}) async {
     final workspace = current;
-    if (workspace == null || text.trim().isEmpty) return;
-    final thread = activeThread?.id;
+    if (workspace == null || text.trim().isEmpty) return false;
+    if (sending) return false;
+    final origin = thread ?? activeThread?.id;
     if (_preview) {
       _appendPreview(text);
-      return;
+      return true;
     }
     sending = true;
     error = null;
     notifyListeners();
     try {
-      await _api!.promptWorkspace(workspace.id, text, thread: thread);
+      await _api!.promptWorkspace(workspace.id, text, thread: origin);
       await load(showSpinner: false);
+      return true;
     } on AcpException catch (failure) {
       error = failure.message;
     } catch (failure) {
@@ -226,6 +228,7 @@ class WorkspaceController extends ChangeNotifier {
       sending = false;
       notifyListeners();
     }
+    return false;
   }
 
   void _appendPreview(String text) {

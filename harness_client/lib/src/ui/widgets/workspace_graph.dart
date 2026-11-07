@@ -80,7 +80,7 @@ class ConceptStrip extends StatelessWidget {
   Widget build(BuildContext context) {
     if (concepts.isEmpty) return const SizedBox.shrink();
     return SizedBox(
-      height: 48,
+      height: 60,
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(
@@ -95,12 +95,14 @@ class ConceptStrip extends StatelessWidget {
           for (final concept in concepts)
             Padding(
               padding: const EdgeInsets.only(right: 6),
-              child: _ConceptTag(
+              child: Center(
+                child: _ConceptTag(
                 key: ValueKey('concept-${concept.name}'),
                 concept: concept,
                 selected:
                     selected?.toLowerCase() == concept.name.toLowerCase(),
                 onTap: () => onSelect(concept.name),
+                ),
               ),
             ),
         ],
@@ -140,11 +142,15 @@ class _ConceptTag extends StatelessWidget {
         : concept.shared
         ? HarnessColors.moss
         : theme.colorScheme.outline;
-    return Semantics(
+    return Tooltip(
+      message: concept.name,
+      child: Semantics(
       button: true,
       selected: selected,
       label: 'Concept ${concept.name}, ${concept.threads.length} threads',
-      child: Material(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(minHeight: expanded ? 40 : 44),
+        child: Material(
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(2),
@@ -212,6 +218,8 @@ class _ConceptTag extends StatelessWidget {
             ),
           ),
         ),
+      ),
+      ),
       ),
     );
   }
