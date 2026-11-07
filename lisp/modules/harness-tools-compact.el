@@ -38,9 +38,11 @@
 
 (declare-function harness-compaction-busy-p "harness-compaction" (session-id))
 
-(defconst harness-tools-compact-kinds '("summary" "brief" "transcript" "fresh" "truncate")
+(defconst harness-tools-compact-kinds '("transcript" "summary" "brief" "fresh" "truncate")
   "The kinds of compaction the `compact' tool offers, the default first.
-They are the kinds of `harness-compaction-kinds'.")
+They are the kinds of `harness-compaction-kinds', with the kind that
+asks no model first: a summary nobody chose reads the whole conversation
+uncached.")
 
 (defconst harness-tools-compact-modes '("queue" "interrupt")
   "How the `compact' tool handles the turn it is called from.
@@ -70,6 +72,21 @@ turn first.")
                     " conversation continues from the compaction after that.")
             (harness-tools-compact--kind-name kind))))
 
+(defun harness-tools-compact--not-warm-text (requested done)
+  "Say that REQUESTED was made as DONE, a kind that asks no model.
+REQUESTED and DONE are names of kinds.  Nil when they are the same, or
+when REQUESTED asks no model to read the conversation."
+  (when (and (member requested '("summary" "brief"))
+             (not (equal requested done)))
+    (format (concat "  A %s reads the whole conversation uncached, and this request is not"
+                    " known to be cached: %s instead.")
+            (if (equal requested "brief") "brief summary" "summary")
+            (pcase done
+              ("transcript" "a transcript file")
+              ("fresh" "a fresh start")
+              ("truncate" "a cut of the oldest context")
+              (_ done)))))
+
 (defun harness-tools-compact--done-text (node)
   "Say what the compaction NODE now stands for."
   (format (concat "The conversation is compacted (%s) and continues from that.  The conversation it"
@@ -79,11 +96,11 @@ turn first.")
 
 (defun harness-tools-compact--compact (input ctx)
   "Handler of the compact tool: compact the conversation of CTX's session.
-INPUT has `:kind' (`harness-tools-compact-kinds', default summary),
+INPUT has `:kind' (`harness-tools-compact-kinds', default transcript),
 `:mode' (`harness-tools-compact-modes', default queue) and an optional
 `:reason' kept with the compaction."
   (let* ((sid (plist-get ctx :session-id))
-         (kind (or (harness-tools-compact--clean (plist-get input :kind)) "summary"))
+         (kind (or (harness-tools-compact--clean (plist-get input :kind)) "transcript"))
          (mode (or (harness-tools-compact--clean (plist-get input :mode)) "queue"))
          (reason (harness-tools-compact--clean (plist-get input :reason))))
     (cond
@@ -98,19 +115,27 @@ INPUT has `:kind' (`harness-tools-compact-kinds', default summary),
      (t
       (harness-then
        (harness-call-async 'compaction/compact sid
-                           (append (list :kind kind :reason reason)
+                           (append (list :kind kind :reason reason
+                                         ;; A summary nobody chose, whose own
+                                         ;; request the cache does not hold, is
+                                         ;; a transcript instead.
+                                         :fallback "transcript")
                                    (when reason (list :meta (list :reason reason)))
                                    (if (equal mode "interrupt")
                                        (list :interrupt t)
                                      (list :queue t))))
        (lambda (result)
          (if (harness-json-true-p (plist-get result :queued))
-             (harness-tool-ok
-              (harness-tools-compact--queued-text
-               (let ((k (plist-get result :kind)))
-                 (if (stringp k) k kind))
-               (harness-json-true-p (plist-get result :interrupt))))
-           (harness-tool-ok (harness-tools-compact--done-text result))))
+             (let ((done (let ((k (plist-get result :kind)))
+                           (if (stringp k) k kind))))
+               (harness-tool-ok
+                (concat (harness-tools-compact--queued-text
+                         done (harness-json-true-p (plist-get result :interrupt)))
+                        (harness-tools-compact--not-warm-text kind done))))
+           (harness-tool-ok
+            (concat (harness-tools-compact--done-text result)
+                    (harness-tools-compact--not-warm-text
+                     kind (format "%s" (or (harness-node-compaction-kind result) "summary")))))))
        (lambda (err)
          ;; Short: the failure of a summariser can carry a whole transcript
          ;; as its data, and this is read.
@@ -123,10 +148,12 @@ INPUT has `:kind' (`harness-tools-compact-kinds', default summary),
           " and the old conversation stays on record for the session_history tool.  Call it when the context"
           " is filling this model's window, or before a long job that will add a lot more, rather than"
           " waiting for the harness to compact on its own.  kind chooses what stands in for the conversation:"
-          " summary (the default) has this session's model summarise the whole conversation, which reads all"
-          " of it again; brief has a cheap model summarise the conversation's narrative -- every user and"
-          " assistant message, each tool call and result in a line -- cheap however long the conversation"
-          " but leaving out what tools read and wrote; transcript writes the whole conversation"
+          " summary has this session's model summarise the whole conversation, which reads all of it again;"
+          " brief has a cheap model summarise the conversation's narrative -- every user and assistant"
+          " message, each tool call and result in a line -- cheap however long the conversation but leaving"
+          " out what tools read and wrote; both read all of it uncached, on a request whose own system"
+          " prompt and tools no prompt cache holds, so unless that request is known to be cached they are"
+          " made as a transcript instead (the result says so); transcript (the default) writes the whole conversation"
           " to a file and leaves a note to read what is needed of it, asking no model; fresh carries nothing"
           " over but a note, asking no model; truncate drops the oldest messages and keeps the most recent as"
           " they are, asking no model, for a conversation too big to summarise.  mode chooses when it happens:"
@@ -137,7 +164,7 @@ INPUT has `:kind' (`harness-tools-compact-kinds', default summary),
   :schema '(:type "object"
             :properties (:kind (:type "string"
                                 :enum ("summary" "brief" "transcript" "fresh" "truncate")
-                                :description "What stands in for the conversation: summary (default), brief, transcript, fresh or truncate.")
+                                :description "What stands in for the conversation: transcript (default), summary, brief, fresh or truncate; a summary nobody chose reads the whole conversation uncached and is made as a transcript instead.")
                          :mode (:type "string"
                                 :enum ("queue" "interrupt")
                                 :description "queue (default) compacts at this turn's next boundary; interrupt cancels the current turn now and compacts once it is over.")

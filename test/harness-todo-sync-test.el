@@ -198,6 +198,24 @@ TEXT defaults to a few words."
     (should-not (string-match-p "step 01 " text))
     (should (< (length text) 300))))
 
+(ert-deftest harness-todo-sync-a-question-carries-a-bounded-slice ()
+  "A sync reads a bounded slice of the work: a long turn costs no more.
+The engineer's request and the activity are cut at
+`harness-todo-sync--message-chars' and `harness-todo-sync--activity-chars',
+and the plan at 600 characters, so the call the harness makes for
+itself stays small whatever the transcript holds."
+  (let* ((session (list :id "s" :model "demo:scripted" :plan (make-string 4000 ?p)))
+         (nodes (append (list (list :id "u1" :kind 'user :content (make-string 5000 ?m)))
+                        (cl-loop for i from 1 to 40
+                                 collect (list :id (format "n%d" i) :kind 'assistant
+                                               :content (format "step %02d %s" i (make-string 300 ?.))))))
+         (prompt (harness-todo-sync--prompt session nodes nil nil)))
+    (should (string-suffix-p harness-todo-sync--ask prompt))
+    (should-not (string-match-p (regexp-quote (make-string 1300 ?m)) prompt))
+    (should (string-match-p (regexp-quote (format "step 40 %s" (make-string 300 ?.))) prompt))
+    (should-not (string-match-p "step 01 " prompt))
+    (should (< (length prompt) 8000))))
+
 (ert-deftest harness-todo-sync-the-dumb-agent-is-asked-on-its-own ()
   "The question stands alone: the request, the list, the work since; no tools, no session state."
   (harness-todo-sync-test-with

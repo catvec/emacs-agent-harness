@@ -169,8 +169,8 @@
           ;; The ways to carry it over are those of the cold-cache question,
           ;; with their keys and what each costs.
           (should (string-match-p "^   Choose how to hand over$" text))
-          (dolist (row '("^    b  Brief summary +~\\$[0-9.]+ +new model .* · narrative, tool calls in brief · first and last messages kept$"
-                         "^    s  Summary +~\\$[0-9.]+ +current model Demo scripted · whole conversation · first and last messages kept$"
+          (dolist (row '("^    b  Brief summary +~\\$[0-9.]+ +new model .* · narrative, tool calls in brief · read uncached · first and last messages kept$"
+                         "^    s  Summary +~\\$[0-9.]+ +current model Demo scripted · whole conversation · read uncached · first and last messages kept$"
                          "^    t  Transcript file +free +whole conversation as a file the model reads$"
                          "^    f  Start afresh +free +nothing carried over$"
                          "^    q  Cancel +model unchanged$"))
@@ -401,7 +401,7 @@ conversation has nothing cached and no panel shows."
       (harness-ui-handoff-test--choose-hosted (lambda () (harness-set-model sid)))
       (harness-ui-handoff-test--wait-text chat "Switch model")
       (let ((text (harness-ui-handoff-test--text chat)))
-        (should (string-match-p "current model Demo scripted · whole conversation · first and last messages kept · cache expired at [0-9:]+ · all uncached"
+        (should (string-match-p "current model Demo scripted · whole conversation · read uncached · first and last messages kept · cache expired at [0-9:]+ · all uncached"
                                 text))
         (should-not (string-match-p "cache warm" text))
         (should-not (string-match-p "Prompt cache expired" text)))

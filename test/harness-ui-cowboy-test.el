@@ -106,8 +106,8 @@ rows, the same words, only the heading and the facts above them differ."
     (should (equal "   Resend   $0.315 uncached against $0.025 cached" (nth 2 lines)))
     (should (equal "" (nth 3 lines)))
     (should (equal "   Choose what goes first" (nth 4 lines)))
-    (should (equal '("    b  Brief summary    ~$0.0040          Demo cheap · narrative, tool calls in brief · first and last messages kept · default"
-                     "    s  Summary          ~$0.330           Demo scripted · whole conversation · first and last messages kept"
+    (should (equal '("    b  Brief summary    ~$0.0040          Demo cheap · narrative, tool calls in brief · read uncached · first and last messages kept · default"
+                     "    s  Summary          ~$0.330           Demo scripted · whole conversation · read uncached · first and last messages kept"
                      "    t  Transcript file  free              whole conversation as a file the model reads"
                      "    f  Start afresh     free              nothing carried over"
                      "    c  Carry on         ~$0.315 uncached  whole conversation again, uncached"
@@ -134,7 +134,7 @@ rows, the same words, only the heading and the facts above them differ."
     ;; A choice's button says more when hovered.
     (let* ((at (string-search "Brief summary" string))
            (help (get-text-property at 'help-echo string)))
-      (should (string-prefix-p "Brief summary (~$0.0040) · Demo cheap · narrative, tool calls in brief · first and last messages kept · default"
+      (should (string-prefix-p "Brief summary (~$0.0040) · Demo cheap · narrative, tool calls in brief · read uncached · first and last messages kept · default"
                                help))
       (should (string-match-p " · After: ~900 tokens · " help))
       (should (string-suffix-p " · Press b on this panel, or click; B: default for every session, no asking" help))
@@ -231,7 +231,7 @@ falls back to the table's words (`harness-carry-ways'), with no costs."
     (should (equal "   Waiting  message from session “Reviewer” · “please look at this”" (nth 1 lines)))
     (should (equal "" (nth 2 lines)))
     (should (member "    t  Transcript file  whole conversation as a file the model reads · default" lines))
-    (should (member "    b  Brief summary    narrative, tool calls in brief · first and last messages kept" lines))
+    (should (member "    b  Brief summary    narrative, tool calls in brief · read uncached · first and last messages kept" lines))
     (should-not (cl-some (lambda (l) (string-match-p "session_history" l)) lines))))
 
 (ert-deftest harness-ui-cowboy-panel-is-a-panel-of-the-compose-box ()

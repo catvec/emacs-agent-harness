@@ -348,6 +348,7 @@ ITEM is (:id :kind :payload) in the wire shape."
         (list :id (plist-get item :id) :kind "question" :created (float-time)
               :question (plist-get payload :question) :options (plist-get payload :options)
               :diagrams (plist-get payload :diagrams) :cowboy (plist-get payload :cowboy)
+              :compaction (plist-get payload :compaction)
               :allow-multiple (and (harness-json-true-p (plist-get payload :allow-multiple)) t))
       (list :id (plist-get item :id) :kind "permission" :created (float-time)
             :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
@@ -2108,6 +2109,7 @@ clients, or the session's own pending list, answer it."
              :connection harness-ui-connection :created (float-time)
              :question (plist-get params :question) :options (plist-get params :options)
              :diagrams (plist-get params :diagrams) :cowboy (plist-get params :cowboy)
+             :compaction (plist-get params :compaction)
              :allow-multiple (and (harness-json-true-p (plist-get params :allowMultiple)) t)))
       t)))
 

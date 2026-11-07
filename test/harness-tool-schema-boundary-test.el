@@ -107,7 +107,7 @@
       (dolist (raw '("{\"prompt\":\"synthetic\"}"
                      "{\"prompt\":\"synthetic\",\"model\":null,\"thinking\":null}"))
         (harness-tools-agent--create-child
-         parent (harness-responses--parse-arguments raw) "child" default-directory nil "call" nil)
+         parent (harness-responses--parse-arguments raw) "child" default-directory nil nil)
         (should (equal "synthetic:thinker" (plist-get created :model)))
         (should (equal "high" (plist-get created :thinking))))
       (setq created nil)
@@ -115,7 +115,7 @@
        (harness-tools-agent--create-child
         parent (harness-responses--parse-arguments
                 "{\"prompt\":\"synthetic\",\"model\":\"\",\"thinking\":\"\"}")
-        "child" default-directory nil "call" nil)
+        "child" default-directory nil nil)
        :type 'harness-error)
       (should-not created))))
 

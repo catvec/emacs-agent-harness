@@ -32,6 +32,13 @@
 (defvar harness-handoff-test--requests nil
   "Requests the fake hosted provider got, newest first.")
 
+(defvar harness-handoff-test--warm t
+  "Whether the estimate is simulated as proving the compaction request cached.
+These tests are about the handoff mechanics, not warmth: a provider that
+says the summary request's own prefix is cached would let it be made.
+A test of the cold rule binds it nil and the real
+`harness-compaction-request-warm-p' decides.")
+
 (defun harness-handoff-test--define-providers ()
   "Define `hosted', a fake hosted loop, and `api', a provider sent everything."
   (harness-define-provider 'hosted
@@ -81,7 +88,12 @@
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       ,@body)))
+       (cl-letf* ((warm (symbol-function 'harness-compaction-request-warm-p))
+                  ((symbol-function 'harness-compaction-request-warm-p)
+                   (lambda (session-id kind &optional model)
+                     (or harness-handoff-test--warm
+                         (funcall warm session-id kind model)))))
+         ,@body))))
 
 (defun harness-handoff-test--session (&optional history)
   "Return a new demo session; with HISTORY, one with an answered exchange."
@@ -410,6 +422,38 @@ reads none of."
                                                    (or (plist-get n :content) "")))
                        (harness-call 'session/nodes sid)))
       (should (harness-node-handoff (car (last (harness-call 'session/nodes sid))))))))
+
+(ert-deftest harness-handoff-a-cold-compact-hands-over-the-transcript ()
+  "A handoff's compact modes are choices, not warmth: the transcript goes over.
+Neither the old model's summary nor the new model's brief is asked for
+when the estimate does not say its own request is cached; the hint says
+why, and no model reads the conversation to summarise it."
+  (harness-handoff-test-with
+    (let* ((harness-handoff-test--warm nil)
+           (sid (harness-handoff-test--session t))
+           (requests nil))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req))))
+        (let ((result (harness-test-await (harness-call 'handoff/switch sid "hosted:m" 'compact))))
+          (should (eq 'transcript (plist-get result :mode)))
+          (should (string-match-p "uncached" (plist-get result :fallback)))
+          (should (file-exists-p (plist-get result :file))))
+        (should-not (cl-some (lambda (req)
+                               (string-match-p "handoff summary" (or (plist-get req :system) "")))
+                             requests))
+        (should (cl-some (lambda (n) (string-match-p "No summary from Demo scripted"
+                                                    (or (plist-get n :content) "")))
+                         (harness-call 'session/nodes sid)))
+        (should-not (memq 'compaction (harness-handoff-test--kinds sid))))
+      ;; `compact-new' would have the new model write it: refused too.
+      (let ((sid (harness-handoff-test--session t)))
+        (setq harness-handoff-test--requests nil)
+        (let ((result (harness-test-await (harness-call 'handoff/switch sid "hosted:m" 'compact-new))))
+          (should (eq 'transcript (plist-get result :mode)))
+          (should (string-match-p "uncached" (plist-get result :fallback)))
+          (should-not harness-handoff-test--requests)
+          (should-not (memq 'compaction (harness-handoff-test--kinds sid))))))))
 
 (ert-deftest harness-handoff-waits-for-the-next-step-of-a-running-turn ()
   "Switched while a turn runs, the handoff lands after that step's tool results.

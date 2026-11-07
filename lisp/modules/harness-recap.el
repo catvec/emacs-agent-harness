@@ -161,13 +161,54 @@ since the task's last recap, or since it started when it has none."
           ((stringp choice) choice)
           (t model))))
 
+(defconst harness-recap--result-chars 400
+  "Most characters of one tool result a recap reads.
+A result can be a whole file or a test log, and the tail the request
+carries is cut to `harness-tasks-recap-context': cut first, a result
+takes a tenth of that budget rather than all of it, and the messages
+and calls around it -- which say what the work is doing -- fit in the
+rest.")
+
+(defun harness-recap--compact (text)
+  "Return TEXT with each tool result cut to `harness-recap--result-chars'.
+A result begins with \"[result] \" and runs to the next line that starts
+an entry; its own lines are cut to that budget in all.  Everything else
+is kept as it is."
+  (let ((in-result nil) (kept 0) (out nil))
+    (dolist (line (split-string text "\n"))
+      (cond
+       ((string-match-p "\\`\\[[a-z]" line)
+        (setq in-result (string-prefix-p "[result] " line) kept 0)
+        (let ((cut (if in-result
+                       (harness-truncate-end line harness-recap--result-chars)
+                     line)))
+          (when in-result (cl-incf kept (length cut)))
+          (push cut out)))
+       (in-result
+        (let ((room (- harness-recap--result-chars kept)))
+          (when (> room 0)
+            (let ((cut (harness-truncate-end line room)))
+              (push cut out)
+              (cl-incf kept (length cut))))))
+       (t (push line out))))
+    (mapconcat #'identity (nreverse out) "\n")))
+
 (defun harness-recap--tail (session-id)
-  "Return the tail of SESSION-ID's transcript, as long as a recap may carry."
-  (let* ((text (or (ignore-errors (harness-call 'session/transcript-text session-id)) ""))
-         (limit (or harness-tasks-recap-context 8000)))
+  "Return the tail of SESSION-ID's transcript, as long as a recap may carry.
+Each tool result is cut short first (`harness-recap--compact'), so the
+budget holds the messages and calls that say what the work is doing,
+and the cut starts at a line boundary when one is within a result's
+worth of characters (`harness-recap--result-chars')."
+  (let* ((text (harness-recap--compact
+                (or (ignore-errors (harness-call 'session/transcript-text session-id)) "")))
+         (limit (or harness-tasks-recap-context 3000)))
     (if (or (<= limit 0) (<= (length text) limit))
         text
-      (concat "…" (substring text (- (length text) limit))))))
+      (let* ((tail (substring text (- (length text) limit)))
+             (newline (string-match "\n" tail)))
+        (concat "…" (if (and newline (< newline harness-recap--result-chars))
+                        (substring tail (1+ newline))
+                      tail))))))
 
 (defun harness-recap--progress (task session)
   "Return the progress line of a recap request for TASK and SESSION.

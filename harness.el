@@ -136,7 +136,7 @@ after changing it run \\[harness-restart]."
 
 (defconst harness-core-modules
   '(access acp agent compaction config linking mcp naming perms priority project provider provider-check provider-claude
-    resilience retry sandbox session store usage worktree
+    replay resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo
     ui ui-chat ui-compose ui-notify ui-pending ui-server ui-sessions)

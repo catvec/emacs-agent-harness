@@ -156,6 +156,64 @@ and the tasks module would prompt the session while a test runs."
     (should-not (harness-recap--due-p task 1 1 1119.0))
     (should (harness-recap--due-p task 1 1 1120.0))))
 
+(ert-deftest harness-recap-reads-a-small-tail-of-the-transcript ()
+  "A recap is one line, so it reads a few thousand characters, not the log.
+The request carries the tail of the transcript the session keeps, cut
+to `harness-tasks-recap-context' at a line boundary, so a long turn of
+file dumps and test logs costs the same as a short one."
+  (harness-recap-test-with
+    (let ((sid (harness-recap-test-session)))
+      (dotimes (i 50)
+        (harness-call 'session/append sid
+                      (list :kind 'assistant
+                            :content (format "step %02d %s" i (make-string 300 ?x)))))
+      (let ((tail (harness-recap--tail sid)))
+        (should (<= (length tail) (1+ harness-tasks-recap-context)))
+        (should (string-prefix-p "…[assistant] " tail))
+        (should (string-suffix-p (format "step 49 %s" (make-string 300 ?x)) tail))
+        (should-not (string-match-p "step 00 " tail)))
+      ;; Zero carries the whole transcript, as it always did.
+      (let ((harness-tasks-recap-context 0))
+        (should (> (length (harness-recap--tail sid)) 10000)))
+      ;; The request carries the tail, not the whole log: the task and a
+      ;; line of progress above it cost a few hundred characters.
+      (let* ((task (list :prompt "Make the widget faster"))
+             (session (harness-call 'session/get sid))
+             (prompt (harness-recap--prompt task session))
+             (newest (format "step 49 %s" (make-string 300 ?x))))
+        (should (string-match-p "Recent transcript (oldest first, newest last):" prompt))
+        (should (string-match-p (regexp-quote newest) prompt))
+        (should-not (string-match-p "step 00 " prompt))
+        (should (< (length prompt) (+ harness-tasks-recap-context 1000)))))))
+
+(ert-deftest harness-recap-a-tool-result-takes-a-small-part-of-the-tail ()
+  "A long tool result is cut short, so the entries around it are read.
+The tail a recap carries is cut to `harness-tasks-recap-context': a
+file dump or a test log that fills it would leave the messages and
+calls that say what the work is doing out of the request."
+  (harness-recap-test-with
+    (let ((sid (harness-recap-test-session)))
+      (harness-call 'session/append sid (list :kind 'assistant :content "Before the dump."))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-result :call-id "c1"
+                          :output (mapconcat (lambda (i) (format "line %03d %s" i (make-string 200 ?x)))
+                                             (number-sequence 1 50) "\n")))
+      (harness-call 'session/append sid (list :kind 'assistant :content "After the dump."))
+      (let* ((text (harness-call 'session/transcript-text sid))
+             (compact (harness-recap--compact text))
+             (result (cl-find-if (lambda (line) (string-prefix-p "[result] " line))
+                                 (split-string compact "\n"))))
+        (should (string-match-p "Before the dump\\." compact))
+        (should (string-match-p "After the dump\\." compact))
+        (should result)
+        (should (<= (length result) harness-recap--result-chars))
+        (should-not (string-match-p "line 010" compact))
+        ;; What a recap carries holds both entries and the cut result.
+        (let ((tail (harness-recap--tail sid)))
+          (should (string-match-p "Before the dump\\." tail))
+          (should (string-match-p "After the dump\\." tail))
+          (should (< (length tail) 2000)))))))
+
 (ert-deftest harness-recap-turn-threshold-makes-one ()
   "Crossing the turn threshold sends a short request and stores the recap."
   (harness-recap-test-with

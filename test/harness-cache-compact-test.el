@@ -55,6 +55,12 @@
 (defvar harness-cache-compact-test--fail nil
   "Non-nil makes the demo provider fail a summary.")
 
+(defvar harness-cache-compact-test--real-estimate nil
+  "Non-nil leaves `compaction/estimate' as the harness makes it.
+The tests otherwise mark the model-written kinds cached, so that they can
+test the module's gate; the estimate the harness makes says `:cached'
+nil for those kinds, which keeps the module from asking a model.")
+
 (defun harness-cache-compact-test--script (request)
   "Answer REQUEST: a summary when it asks for one, else a short reply."
   (if (string-match-p "handoff summary" (or (plist-get request :system) ""))
@@ -96,7 +102,20 @@ Compacting before the lapse is on, the saved option is the default one
                  (lambda (sid kind node)
                    (setq harness-cache-compact-test--compacted
                          (append harness-cache-compact-test--compacted (list (list sid kind node))))))
-     (unwind-protect
+     (let ((real-estimate (harness-method-fn (gethash 'compaction/estimate harness--methods))))
+       ;; The gate's own tests: the estimate says the model-written
+       ;; kinds' requests are cached.  The estimate the harness makes says
+       ;; nil (see the test of the real one at the end).
+       (harness-register-method
+        'compaction/estimate
+        (lambda (sid &optional opts)
+          (let ((estimate (apply real-estimate sid opts)))
+            (unless harness-cache-compact-test--real-estimate
+              (dolist (kind (plist-get estimate :kinds))
+                (when (memq (plist-get kind :kind) '(brief summary))
+                  (plist-put kind :cached t))))
+            estimate)))
+       (unwind-protect
          (let ((harness-provider-demo--delay 0.005)
                (harness-provider-demo-script-override #'harness-cache-compact-test--script)
                (harness-compaction-brief-model "demo:scripted")
@@ -112,9 +131,10 @@ Compacting before the lapse is on, the saved option is the default one
            (harness-add-filter 'permission/decide
                                (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
            ,@body)
-       (maphash (lambda (_ entry) (when (timerp (plist-get entry :timer)) (cancel-timer (plist-get entry :timer))))
-                harness-cache--watched)
-       (maphash (lambda (_ timer) (cancel-timer timer)) harness-cache--ends))))
+         (maphash (lambda (_ entry) (when (timerp (plist-get entry :timer)) (cancel-timer (plist-get entry :timer))))
+                  harness-cache--watched)
+         (maphash (lambda (_ timer) (cancel-timer timer)) harness-cache--ends)
+         (harness-register-method 'compaction/estimate real-estimate)))))
 
 (defun harness-cache-compact-test-session (&rest plist)
   "Create a demo session with an answered exchange and a cache stamped just now.
@@ -193,7 +213,7 @@ tells of it, in a lasting decision's words."
       (let* ((notes (harness-cache-compact-test--notes sid))
              (note (car notes)))
         (should (= 1 (length notes)))
-        (should (string-match-p "\\`Prompt cache about to lapse at [0-9][0-9]:[0-9][0-9]: compacted into a brief summary, while it was still cached, so the next message sends that instead of ~3\\.0k tokens uncached\\'"
+        (should (string-match-p "\\`Prompt cache about to lapse at [0-9][0-9]:[0-9][0-9]: compacted into a brief summary, while the compaction request's own prefix was cached, so the next message sends that instead of ~3\\.0k tokens uncached\\'"
                                 (plist-get note :content)))
         (let* ((id (harness-node-decision note))
                (decision (harness-call 'decision/get id)))
@@ -201,7 +221,7 @@ tells of it, in a lasting decision's words."
           (should-not (harness-node-decided-by note))
           (should (eq 'precompact (plist-get decision :kind)))
           (should (eq 'done (plist-get decision :state)))
-          (should (equal "Compacting a conversation just before its prompt cache lapses, while it is still cached"
+          (should (equal "Compacting a conversation just before its prompt cache lapses, when the compaction request's own prefix is cached"
                          (plist-get decision :text)))
           (should (equal (plist-get note :id) (plist-get decision :node)))
           (should (equal sid (plist-get decision :session)))))
@@ -506,3 +526,23 @@ compacted -- cheaper from a cache that is hot than from one that lapsed."
 
 (provide 'harness-cache-compact-test)
 ;;; harness-cache-compact-test.el ends here
+
+(ert-deftest harness-cache-compact-a-model-compaction-whose-own-prefix-is-not-cached-is-not-made ()
+  "The chat's cache is not the compaction request's: no summary is written.
+The harness's estimate says the model-written kinds' requests are not
+cached, so the module leaves the conversation alone even with the
+feature on and the saved option a summary."
+  (harness-cache-compact-test-with
+    (let ((harness-cache-compact-test--real-estimate t)
+          (sid (harness-cache-compact-test-session)))
+      ;; The estimate the harness makes for this session, as the module reads it.
+      (let* ((estimate (harness-call 'compaction/estimate sid))
+             (brief (cl-find 'brief (plist-get estimate :kinds)
+                             :key (lambda (k) (plist-get k :kind)))))
+        (should-not (plist-get brief :cached)))
+      (harness-cache-compact--on-pre-expire sid (list :expires (+ (float-time) 30) :context 3020))
+      (should-not harness-cache-compact-test--compacted)
+      (should-not (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'compaction))
+                                    (harness-call 'session/nodes sid)))
+      ;; The conversation is still there, whole.
+      (should (= 2 (length (harness-call 'session/nodes sid)))))))

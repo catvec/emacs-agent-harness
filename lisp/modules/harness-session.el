@@ -121,6 +121,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'seq)
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-policy)
@@ -1482,6 +1483,19 @@ The directory is gone at once; what was in it is deleted in the background."
     (harness-session--touch s)
     (harness-session-plist s)))
 
+(defun harness-session-reload-nodes (id)
+  "Read session ID's transcript again from what was written, as a restart does.
+What the session holds in memory is let go first, and the nodes come
+back as `harness-session--load-nodes' reads them: a caller can compare
+what a session renders now with what it renders from its record.  Only
+for a session that is not at work: what a running turn streamed and did
+not write yet is lost.  Return non-nil when the session exists."
+  (when-let* ((s (gethash id harness-sessions)))
+    (clrhash (harness-session-nodes s))
+    (setf (harness-session-loaded s) nil)
+    (harness-session--load-nodes s)
+    t))
+
 (harness-defmethod session/deactivate (id)
   "Mark session ID inactive (not open anywhere).
 A closed session waits for nobody: what it still has pending, with no turn
@@ -2806,10 +2820,23 @@ subscription paid.  The totals may also hold `:stream-output' and
 `:stream-seconds', the output tokens of the model calls whose streaming
 was timed and the seconds they streamed: those are added by
 `session/usage-note', not by this method, which keeps them as it finds
-them.  Return the totals."
+them.  A request that follows another on the same model, with a cache
+to reuse, also emits `cache/reuse' (SESSION-ID INFO) saying how much of
+the last prompt it read from the cache (see `harness-cache.el').
+Return the totals."
   (let* ((s (harness-session--get id))
          (u (copy-sequence (harness-session-usage s)))
-         (record (harness-session--price-record (harness-session-model s) record)))
+         (record (harness-session--price-record (harness-session-model s) record))
+         ;; What the last request was, before this one replaces it: its prompt,
+         ;; the model it went to, and whether a cache was there to reuse.
+         (previous (plist-get u :context))
+         (previous-model (or (plist-get u :last-model) (plist-get u :cache-model)
+                             (harness-session-model s)))
+         (previous-cache (plist-get u :cache-at))
+         (previous-pending (harness-json-true-p (plist-get u :cache-pending)))
+         (cache-reset (harness-json-true-p (plist-get record :cache-reset)))
+         (record-model (or (plist-get record :model) (harness-session-model s)))
+         (cache-read (plist-get record :cache-read)))
     ;; Totals from before list costs were kept count as list cost too.
     (when (and (numberp (plist-get record :list-cost)) (not (numberp (plist-get u :list-cost))))
       (setq u (plist-put u :list-cost (float (or (plist-get u :cost) 0)))))
@@ -2823,8 +2850,30 @@ them.  Return the totals."
       (setq u (plist-put u :billing (harness-billing-of record)))
       (setq u (plist-put u :plan (plist-get record :plan))))
     (setq u (harness-session--cache-stamp u record (harness-session-model s)))
+    (when (or (numberp (plist-get record :input)) (numberp (plist-get record :output)))
+      (setq u (plist-put u :last-model record-model)))
     (setf (harness-session-usage s) u)
     (harness-emit 'session/usage id u record)
+    ;; Say how much of the last prompt this request could reuse.  The first
+    ;; request, a small prompt, one after a compaction, and one after a model
+    ;; switch have nothing to compare, so they say nothing: the watcher of the
+    ;; cache health (`harness-cache.el') reads this event and alerts on a miss.
+    (when (and (numberp previous) (> previous 0)
+               (numberp cache-read)
+               (numberp previous-cache)
+               (not previous-pending)
+               (not cache-reset)
+               (equal previous-model record-model)
+               (numberp (plist-get record :context))
+               (not (harness-session--hosted-loop-p record-model)))
+      (harness-emit 'cache/reuse id
+                    (list :ratio (min 1.0 (/ (float cache-read) previous))
+                          :previous previous
+                          :cache-read cache-read
+                          :wasted (max 0 (- previous cache-read))
+                          :context (plist-get record :context)
+                          :model record-model
+                          :at (float-time))))
     (harness-session--touch s)
     ;; A subscriber of the event may have added to the totals meanwhile
     ;; (the streamed output, see `session/usage-note').
@@ -3010,31 +3059,17 @@ Nil when the node has no images."
                                       (list :type "image" :mime (plist-get image :mime) :path path))))
                              images))))))
 
-(harness-defmethod session/messages (id)
-  "Return provider messages (:role :content BLOCKS) for the transcript of ID.
-Adjacent assistant-side nodes merge into one assistant message; tool
-results become user messages with tool_result blocks; the transcript
-starts at the last compaction node when one exists, one the user did
-not revert (`compaction/revert'): the conversation before a reverted
-compaction is sent whole.  A steering message stands where the model
-got it, after its `:delivered-after' node and the tool results right
-after that, not where it was sent mid-step.
-Every tool call is answered in the message after it, by a stand-in
-result when the path has none (see `harness-session--pair-tools').
-A tool_result block is (:type \"tool_result\" :tool_use_id ID :content
-TEXT :is_error BOOL), its content always a string; the images the call
-returned follow as `:images', image blocks that name their files (see
-`harness-session--result-images'), on a block whose call returned any.
-A message sent to a running turn is a node where the model got it, so
-it stands after the tool results it was recorded between, as a user
-message holds results before any words.
-A call the harness recorded, and its result, are left out: the model
-never made it (`harness-outside-node-p')."
-  (let* ((s (harness-session--get id))
-         (path (harness-session--from-compaction (harness-session--path s)))
-         (delivered (harness-session--delivered path))
-         (ready nil)
-         (messages nil) (cur nil) (cur-role nil))
+(defun harness-session--render-messages (path delivered &optional start)
+  "Return the provider messages of PATH from index START on.
+DELIVERED is what `harness-session--delivered' made of PATH.  A START
+of nil or 0 renders the whole path; a later one renders only the
+messages the nodes from there add, which is what a request that already
+carries the messages before them needs (see `session/messages-from').
+The two are the same messages only where the node at START does not
+render as part of the message before it, which is the caller's to
+see (`session/messages-from' says how)."
+  (let ((ready nil)
+        (messages nil) (cur nil) (cur-role nil))
     (cl-labels ((flush () (when cur
                             (push (list :role cur-role :content (nreverse cur)) messages)
                             (setq cur nil cur-role nil)))
@@ -3052,7 +3087,7 @@ never made it (`harness-outside-node-p')."
                        (or ready
                            (and (eq cur-role 'user)
                                 (cl-some (lambda (b) (equal (plist-get b :type) "tool_result")) cur))))))
-      (dolist (n path)
+      (dolist (n (nthcdr (or start 0) path))
         ;; Delivered steering goes in before the next node that is not a
         ;; tool result: tool results come first in the user message.
         (when (and ready (memq (plist-get n :kind) '(user assistant thinking tool-call plan compaction))
@@ -3099,6 +3134,163 @@ never made it (`harness-outside-node-p')."
       (mapc #'user ready)
       (flush))
     (harness-session--pair-tools (nreverse messages))))
+
+(harness-defmethod session/messages (id)
+  "Return provider messages (:role :content BLOCKS) for the transcript of ID.
+Adjacent assistant-side nodes merge into one assistant message; tool
+results become user messages with tool_result blocks; the transcript
+starts at the last compaction node when one exists, one the user did
+not revert (`compaction/revert'): the conversation before a reverted
+compaction is sent whole.  A steering message stands where the model
+got it, after its `:delivered-after' node and the tool results right
+after that, not where it was sent mid-step.
+Every tool call is answered in the message after it, by a stand-in
+result when the path has none (see `harness-session--pair-tools').
+A tool_result block is (:type \"tool_result\" :tool_use_id ID :content
+TEXT :is_error BOOL), its content always a string; the images the call
+returned follow as `:images', image blocks that name their files (see
+`harness-session--result-images'), on a block whose call returned any.
+A message sent to a running turn is a node where the model got it, so
+it stands after the tool results it was recorded between, as a user
+message holds results before any words.
+A call the harness recorded, and its result, are left out: the model
+never made it (`harness-outside-node-p')."
+  (let* ((s (harness-session--get id))
+         (path (harness-session--from-compaction (harness-session--path s))))
+    (harness-session--render-messages path (harness-session--delivered path))))
+
+;;;; The transcript as a request, kept as it was sent
+
+;; A provider's prompt cache matches a request it wrote before only as
+;; far as the next one starts the same, and the harness renders the
+;; whole conversation again with every step.  A change of the rendering
+;; code, not of the transcript, would then change a prefix the provider
+;; had cached, and every token after the first difference is paid for
+;; again (harness-replay.el keeps the payload of the last request and
+;; sends it as it is).  What says whether a rendering of the same nodes
+;; is the same is a digest of what rendering reads of them: the nodes
+;; themselves may change in ways a request never shows, such as the
+;; usage a step is given.
+
+(defconst harness-session--render-fields
+  '(:kind :content :blocks :call-id :tool :input :output :is-error :images)
+  "The keys of a node that rendering its transcript reads.
+`:blocks', when a message has them, are the message the model gets
+instead of its `:content' (`harness-session--text-blocks').  `:meta' is
+read too, but only its `harness-session--render-meta-fields'.")
+
+(defconst harness-session--render-meta-fields
+  '(:signature :delivered-after :steering :compaction :from :handoff)
+  "The keys of a node's `:meta' that rendering its transcript reads.
+The rest is bookkeeping -- the usage of a step, the report of a call --
+and may change without changing what the model is sent.")
+
+(defun harness-session--render-view (node)
+  "Return what rendering NODE reads of it, as a value to compare.
+Two nodes with an equal view render the same, whatever else changed
+about them (`harness-session--render-fields')."
+  (let ((meta (plist-get node :meta)))
+    (cons (plist-get node :id)
+          (append (mapcar (lambda (key) (plist-get node key)) harness-session--render-fields)
+                  (mapcar (lambda (key) (plist-get meta key)) harness-session--render-meta-fields)))))
+
+(defun harness-session--render-digest-of (path n)
+  "Return a digest of the first N nodes of PATH as rendering reads them.
+See `harness-session--render-view'.  PATH is a transcript's nodes,
+oldest first; a digest of no node is a digest of nothing."
+  (with-temp-buffer
+    (let ((print-length nil) (print-level nil) (print-circle t))
+      (dolist (node (seq-take path n))
+        (prin1 (harness-session--render-view node) (current-buffer))
+        (insert "\n")))
+    (secure-hash 'sha1 (current-buffer))))
+
+(harness-defmethod session/render-state (id)
+  "Return the nodes `session/messages' renders for ID, and a digest of them.
+The value is (:nodes IDS :digest DIGEST): IDS are the ids of those
+nodes, oldest first -- the path from the last compaction -- and DIGEST
+is a hash of what rendering reads of them.  A request stored with them
+can be sent again as it was while they are the same, though the code
+that rendered it changed (see harness-replay.el); a node changed in
+what it renders gives another digest."
+  (let* ((s (harness-session--get id))
+         (path (harness-session--from-compaction (harness-session--path s))))
+    (list :nodes (mapcar (lambda (node) (plist-get node :id)) path)
+          :digest (harness-session--render-digest-of path (length path)))))
+
+(harness-defmethod session/render-digest (id ids)
+  "Return the digest of IDS, the first nodes IDS of ID's transcript, or nil.
+Nil when IDS is not how those nodes start: a node is gone, the
+transcript starts elsewhere since, or the ids are not the transcript's
+own (`session/render-state')."
+  (let* ((s (harness-session--get id))
+         (path (harness-session--from-compaction (harness-session--path s))))
+    (when (listp ids)
+      (let ((n (length ids)))
+        (when (and (<= n (length path))
+                   (equal (mapcar (lambda (node) (plist-get node :id)) (seq-take path n)) ids))
+          (harness-session--render-digest-of path n))))))
+
+(defun harness-session--delivered-across-p (path delivered index)
+  "Non-nil when a node among the first INDEX+1 of PATH renders after INDEX.
+A steering message is rendered after the node it was delivered after
+\(`harness-session--delivered'), which can be a later node: the messages
+from INDEX on alone cannot then be rendered, since the steering message
+belongs before them."
+  (let ((pos (make-hash-table :test 'equal)))
+    (cl-loop for node in path for i from 0 do (puthash (plist-get node :id) i pos))
+    (cl-loop for node in (seq-take path (1+ index))
+             thereis (let ((anchor (plist-get (plist-get node :meta) :delivered-after)))
+                       (and (gethash (plist-get node :id) (car delivered))
+                            anchor (> (gethash anchor pos 0) index))))))
+
+(defun harness-session--last-rendered-node (path index)
+  "Return the last node of PATH up to INDEX that rendering makes a message from.
+A hint renders nothing, and neither does a call the harness recorded."
+  (cl-loop for node in (reverse (seq-take path (1+ index)))
+           unless (or (eq (plist-get node :kind) 'hint)
+                      (harness-outside-node-p node))
+           return node))
+
+(defun harness-session--first-rendered-node (path index)
+  "Return the first node of PATH after INDEX that rendering makes a message from.
+A hint renders nothing, and neither does a call the harness recorded."
+  (cl-loop for node in (nthcdr (1+ index) path)
+           unless (or (eq (plist-get node :kind) 'hint)
+                      (harness-outside-node-p node))
+           return node))
+
+(harness-defmethod session/messages-from (id node-id)
+  "Return the provider messages the nodes after NODE-ID add to a request.
+A request that already carries the messages of the transcript up to
+NODE-ID can be extended with these rather than rendered whole
+\(harness-replay.el does).  The value is (:ok t :messages MESSAGES) when
+that is what `session/messages' would make of them in place, and
+\(:ok nil :why TEXT) when it is not: a user message follows a user-side
+one and renders as part of it, a node before NODE-ID renders after it
+because a message was delivered after a later node, NODE-ID is not on
+the transcript at all, or the request it ends does not end at a user
+message (an unanswered call puts a stand-in result after it).
+MESSAGES are the messages of the nodes after it alone, as
+`session/messages' would make them."
+  (let* ((s (harness-session--get id))
+         (path (harness-session--from-compaction (harness-session--path s)))
+         (delivered (harness-session--delivered path))
+         (index (cl-position node-id path :test #'equal
+                             :key (lambda (node) (plist-get node :id))))
+         (next (and index (harness-session--first-rendered-node path index))))
+    (cond
+     ((null index)
+      (list :ok nil :why "the node is not on the transcript the request was made from"))
+     ((null next) (list :ok t :messages nil))
+     ((memq (plist-get next :kind) '(user tool-result compaction))
+      (list :ok nil :why "a user message follows, and renders as one with the message before it"))
+     ((harness-session--delivered-across-p path delivered index)
+      (list :ok nil :why "a message was delivered after a later node"))
+     ((not (memq (plist-get (harness-session--last-rendered-node path index) :kind)
+                 '(user tool-result)))
+      (list :ok nil :why "the request does not end at a user message"))
+     (t (list :ok t :messages (harness-session--render-messages path delivered (1+ index)))))))
 
 (harness-defmethod session/transcript-text (id)
   "Return the transcript of session ID as searchable plain text.
@@ -3341,7 +3533,7 @@ SECRETS is a list of secrets, plists (:value :label :fingerprint :source)
 that the caller holds in memory (see harness-redaction.el); each
 occurrence is replaced by a placeholder naming the secret by its label
 and fingerprint.  The method is meant for the harness process: a secret
-given by a client over the wire is on the wire.  Three copies are
+given by a client over the wire is on the wire.  Four copies are
 cleaned:
 
   - the node log, every field of every line, the lines of node updates
@@ -3356,7 +3548,12 @@ cleaned:
     including text that is in memory only, such as a streamed reply that
     no update has written yet;
   - the text of the record -- `harness-session--redact-slots' -- which
-    is written at once and announced (`session/changed') when it changed.
+    is written at once and announced (`session/changed') when it changed;
+  - what the provider was sent (`harness-replay.el'): the responses it
+    replayed from are cleaned in place, the line of each response that
+    holds a secret written again, and the payload of the last request is
+    dropped, since the next one is rendered from the redacted transcript
+    anyway.
 
 With DRY-RUN nothing changes and nothing is loaded for good: the result
 is what a run would find.  The result is a plist, never a value of a
@@ -3365,11 +3562,13 @@ secret or a snippet of text:
   :id            ID
   :hit           non-nil when a secret was found anywhere, memory included
   :count         the secrets found in the stores of the session: the node
-                 log's plus the record's (the nodes in memory overlap
-                 the log, so they are reported apart)
+                 log's, the record's and the payload's (the nodes in
+                 memory overlap the log, so they are reported apart)
   :log-count     how many in the node log
   :memory-count  how many in the nodes held in memory (0: not loaded)
   :record-count  how many in the record
+  :payload-count how many in what the provider was sent
+  :payload-files those files, when any held one
   :nodes         the ids of the nodes a secret was in, in the order of the
                  log, those only in memory last
   :kinds         the kinds of those nodes (`tool-result', `user', ...)
@@ -3397,6 +3596,7 @@ the CLI sessions and entries that hold the conversation), and
                  (when kind (cl-pushnew (if (stringp kind) (intern kind) kind) kinds))
                  (dolist (key keys) (cl-pushnew key fields))))
          (log-count 0) (memory-count 0) (record-count 0) (record-fields nil)
+         (payload-count 0) (payload-files nil)
          (spill nil) (checkpoints nil))
     (unwind-protect
         (progn
@@ -3407,7 +3607,16 @@ the CLI sessions and entries that hold the conversation), and
             (setq memory-count (harness-session--redact-memory s secrets dry-run note)))
           (pcase-let ((`(,n . ,slots) (harness-session--redact-record s secrets dry-run)))
             (setq record-count n record-fields slots))
-          (when (> (+ log-count memory-count record-count) 0)
+          ;; What the provider was sent is a copy too: the responses it
+          ;; replayed from and the payload of the last request
+          ;; (harness-replay.el).  The responses are cleaned in place;
+          ;; the payload is dropped, since the next request is rendered
+          ;; from the redacted transcript anyway.
+          (when (harness-method-exists-p 'replay/redact)
+            (let ((result (harness-call 'replay/redact id secrets dry-run)))
+              (setq payload-count (or (plist-get result :count) 0)
+                    payload-files (plist-get result :files))))
+          (when (> (+ log-count memory-count record-count payload-count) 0)
             (pcase-let ((`(,files . ,cps) (harness-session--spill-and-checkpoints s)))
               (setq spill files checkpoints cps))))
       ;; A session nobody had open is as it was: its nodes, loaded to
@@ -3415,11 +3624,12 @@ the CLI sessions and entries that hold the conversation), and
       (unless was-loaded
         (clrhash (harness-session-nodes s))
         (setf (harness-session-loaded s) nil)))
-    (let ((hit (> (+ log-count memory-count record-count) 0)))
+    (let ((hit (> (+ log-count memory-count record-count payload-count) 0)))
       (append
        (list :id id :hit hit
-             :count (+ log-count record-count)
+             :count (+ log-count record-count payload-count)
              :log-count log-count :memory-count memory-count :record-count record-count
+             :payload-count payload-count :payload-files payload-files
              :nodes (nreverse nodes)
              :kinds (harness-session--by-name kinds)
              :fields (harness-session--by-name fields)

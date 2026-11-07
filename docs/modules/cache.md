@@ -2,7 +2,7 @@
 
 # cache
 
-Watches the sessions' prompt caches and says when one is about to lapse (cache/pre-expire), and whether the user is around.
+Watches the sessions' prompt caches: says when one is about to lapse (cache/pre-expire), whether the user is around, and alerts when a request reads too little of the last prompt (cache/poor-hit).
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-cache.el](../../lisp/modules/harness-cache.el)
@@ -44,6 +44,18 @@ claims the session for that moment (`cache/claim`), and the ones that
 come after it ask (`cache/claimed`).  The claim is good for the moment
 of the lapse it was made for: a request that read the cache moves the
 moment, and with it ends the claim.
+
+A cache is worth more than a warning about the lapse: it is what keeps
+an agent loop from paying for its whole conversation every step.  The
+session says after each request how much of the last prompt came from
+the cache (`cache/reuse`, emitted by `session/usage-add`), and this
+module watches that: a request that reads less than
+`harness-cache-health-threshold` of the previous prompt is a miss, and
+a streak of them says the cache is not working.  It then tells the
+user -- a hint, a notification, a warning, `cache/poor-hit` -- and,
+with `harness-cache-health-action` `stop`, cancels the turn, rather
+than let a session re-send its context at the uncached rate step after
+step without anyone noticing.
 
 Whether to act on a lapse depends on whether the user is around.  A
 sign of life from them -- a message they send, a question they answer,
@@ -89,26 +101,41 @@ that keeps it five minutes or an hour (`cache/periods`):
 
 ### Events
 
+- `cache/poor-hit` — (SESSION-ID INFO) when a session's prompt cache misses again and again: INFO is a `cache/reuse` with :streak, the misses it took, and :wasted, the tokens they sent again, added.  See `harness-cache-health-threshold`.
 - `cache/pre-expire` — (SESSION-ID INFO) a few seconds before the prompt cache of the session lapses, while the context is still hot in it: INFO is (:expires TIME :ttl SECONDS :lead SECONDS :at TIME :model MODEL :context TOKENS :status STATUS :running BOOL).  Once for each moment a cache lapses.
 - `cache/presence-changed` — (SESSION-ID PRESENCE) when the user starts or stops counting as around in a session, or the end of the period they count as around for moves: PRESENCE is as `cache/presence` returns it, nil once they are not.
+- `cache/reuse` — (SESSION-ID INFO) after a request that follows another on the same model, saying how much of the last prompt it read from the cache: INFO is (:ratio F :previous TOKENS :cache-read TOKENS :wasted TOKENS :context TOKENS :model MODEL :at TIME).  The first request of a session, one after a compaction or a model switch, a hosted loop's and one with no cache stamp say nothing.
+
+### Options
+
+- `harness-cache-health-action` — What a cache health alert does beyond telling the user.
+- `harness-cache-health-cooldown` — Seconds before a session that alerted can alert again.
+- `harness-cache-health-min-context` — Fewest tokens of previous prompt for which a miss is worth an alert.
+- `harness-cache-health-streak` — Consecutive misses before the cache health alert comes.
+- `harness-cache-health-threshold` — Share of the previous prompt a request should read from the cache.
 
 ## Uses
 
 ### Methods it calls
 
+- `agent/cancel` ([agent](agent.md)), when it is loaded
+- `notification/send` ([notifications](notifications.md)), when it is loaded
 - `provider/cache-ttl` ([provider](provider.md)), when it is loaded
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
+- `session/hint` ([session](session.md))
 - `session/list` ([session](session.md))
 
 ### Events it handles
 
+- `cache/reuse` → `harness-cache--on-reuse`
 - `question/answered` → `harness-cache--on-answered`
 - `session/changed` → `harness-cache--on-changed`
 - `session/deleted` → `harness-cache--on-deleted`
 
 ### Events it emits
 
+- `cache/poor-hit`
 - `cache/pre-expire`
 - `cache/presence-changed`
 

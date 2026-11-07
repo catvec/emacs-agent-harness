@@ -8,7 +8,7 @@ Session records, conversation DAG, queue and pending requests.
 - **Source:** [lisp/modules/harness-session.el](../../lisp/modules/harness-session.el)
 - **Loaded:** by default
 - **Requires:** [store](store.md), [project](project.md)
-- **Required by:** [access](access.md), [agent](agent.md), [cache](cache.md), [cache-compact](cache-compact.md), [cache-warm](cache-warm.md), [commit-attribution](commit-attribution.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [linking](linking.md), [merge](merge.md), [naming](naming.md), [plugins](plugins.md), [readonly](readonly.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [secret-sandbox](secret-sandbox.md), [seed](seed.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-handin](tools-handin.md), [tools-plan](tools-plan.md), [tools-question](tools-question.md), [tools-review](tools-review.md), [tools-session-info](tools-session-info.md), [tools-sessions](tools-sessions.md), [tools-todo](tools-todo.md), [usage](usage.md)
+- **Required by:** [access](access.md), [agent](agent.md), [cache](cache.md), [cache-compact](cache-compact.md), [cache-warm](cache-warm.md), [commit-attribution](commit-attribution.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [linking](linking.md), [merge](merge.md), [naming](naming.md), [plugins](plugins.md), [readonly](readonly.md), [recap](recap.md), [redact](redact.md), [replay](replay.md), [resilience](resilience.md), [retry](retry.md), [secret-sandbox](secret-sandbox.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-handin](tools-handin.md), [tools-plan](tools-plan.md), [tools-question](tools-question.md), [tools-review](tools-review.md), [tools-session-info](tools-session-info.md), [tools-sessions](tools-sessions.md), [tools-todo](tools-todo.md), [usage](usage.md)
 
 ## About
 
@@ -149,6 +149,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/interrupted` — Return the sessions the start of this harness found cut short.
 - `session/list` (&optional filter) — Return session plists matching FILTER, newest first.
 - `session/messages` (id) — Return provider messages (:role :content BLOCKS) for the transcript of ID.
+- `session/messages-from` (id node-id) — Return the provider messages the nodes after NODE-ID add to a request.
 - `session/move` (id dir &rest options) — Move session ID to the working directory DIR, and to DIR's project.
 - `session/move-check` (id dir) — Return how session ID would move to DIR, or signal why it cannot.
 - `session/node` (id node-id) — Return node NODE-ID of session ID or nil.
@@ -165,6 +166,8 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/queue-take` (id &optional qids) — Return and remove the queued items of session ID, in queue order.
 - `session/queue-update` (id qid text &optional attachments) — Replace the text (and attachments when given) of queued item QID in session ID.
 - `session/redact-text` (id secrets &optional dry-run) — Take SECRETS out of the stored text of session ID, or count them (DRY-RUN).
+- `session/render-digest` (id ids) — Return the digest of IDS, the first nodes IDS of ID's transcript, or nil.
+- `session/render-state` (id) — Return the nodes `session/messages` renders for ID, and a digest of them.
 - `session/reset-drops-cache-p` (id) — Non-nil when `session/reset-provider` on session ID would drop its prompt cache.
 - `session/reset-provider` (id) — Drop the provider conversation of session ID: its next turn starts a new one.
 - `session/resume` (id) — Make session ID active again (status idle) and load its nodes.
@@ -241,6 +244,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `provider/model` ([provider](provider.md)), when it is loaded
 - `provider/tier-model` ([provider](provider.md)), when it is loaded
 - `question/cancel` ([tools-question](tools-question.md)), when it is loaded
+- `replay/redact` ([replay](replay.md)), when it is loaded
 - `store/append` ([store](store.md))
 - `store/delete` ([store](store.md))
 - `store/list` ([store](store.md))
@@ -259,6 +263,7 @@ take it in.  The session list hides internal sessions unless asked.
 
 ### Events it emits
 
+- `cache/reuse`
 - `session/changed`
 - `session/created`
 - `session/deactivated`

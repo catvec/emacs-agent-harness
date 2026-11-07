@@ -283,7 +283,11 @@ on failure."
   (message "%s" (harness-ui-compact-doing kind))
   (harness-ui-call "_harness/compaction/compact"
                    (list :session-id session-id
-                         :opts (append (list :kind (symbol-name kind))
+                         :opts (append (list :kind (symbol-name kind)
+                                             ;; A summary whose own request
+                                             ;; is not cached is written to a
+                                             ;; transcript, not refused.
+                                             :fallback "transcript")
                                        (pcase mode
                                          ('queue (list :queue t))
                                          ('interrupt (list :interrupt t))

@@ -34,6 +34,18 @@
 ;; of the lapse it was made for: a request that read the cache moves the
 ;; moment, and with it ends the claim.
 ;;
+;; A cache is worth more than a warning about the lapse: it is what keeps
+;; an agent loop from paying for its whole conversation every step.  The
+;; session says after each request how much of the last prompt came from
+;; the cache (`cache/reuse', emitted by `session/usage-add'), and this
+;; module watches that: a request that reads less than
+;; `harness-cache-health-threshold' of the previous prompt is a miss, and
+;; a streak of them says the cache is not working.  It then tells the
+;; user -- a hint, a notification, a warning, `cache/poor-hit' -- and,
+;; with `harness-cache-health-action' `stop', cancels the turn, rather
+;; than let a session re-send its context at the uncached rate step after
+;; step without anyone noticing.
+;;
 ;; Whether to act on a lapse depends on whether the user is around.  A
 ;; sign of life from them -- a message they send, a question they answer,
 ;; and whatever a client says with `cache/active': the chat reports the
@@ -333,6 +345,11 @@ the session before it.")
 (defvar harness-cache--claims (make-hash-table :test 'equal)
   "Session id -> (:expires TIME :by SYMBOL): who acts on the lapse at `:expires'.")
 
+(defvar harness-cache--health (make-hash-table :test 'equal)
+  "Session id -> (:streak N :wasted N :alerted-at TIME :ratio R).
+The misses since the last good read or alert, the tokens they sent
+again, and when the session last alerted.")
+
 (defun harness-cache--lapsing (session)
   "Return SESSION's `:cache' when it is one that lapses by itself, else nil.
 SESSION is a session plist.  A cache a redaction dropped, one held for a
@@ -415,6 +432,7 @@ On `session/changed'."
   (harness-cache--cancel sid)
   (remhash sid harness-cache--fired)
   (remhash sid harness-cache--claims)
+  (remhash sid harness-cache--health)
   (when-let* ((timer (gethash sid harness-cache--ends)))
     (cancel-timer timer))
   (remhash sid harness-cache--ends)
@@ -422,6 +440,136 @@ On `session/changed'."
   (when (gethash sid harness-cache--announced)
     (remhash sid harness-cache--announced)
     (harness-emit 'cache/presence-changed sid nil)))
+
+;;;; Cache health
+
+;; A cache that does not serve the next request costs the whole prompt
+;; again, at the uncached rate or worse (a write, on a provider that
+;; charges for one), and an agent loop makes that cost every step.  The
+;; session says after each request how much of the last prompt came from
+;; the cache (`cache/reuse'); these settings decide when that is a
+;; problem worth telling the user about.  The measure is the share of the
+;; *previous* prompt, so a working cache reads 1.0 however much new
+;; content the request added.
+
+(defcustom harness-cache-health-threshold 0.99
+  "Share of the previous prompt a request should read from the cache.
+A request that reads less is a cache miss: the rest of the last prompt
+was sent again and paid for at the uncached rate.  The share is of the
+previous prompt, not of the current one, so a cache that serves the
+whole reusable prefix reads 1.0 even when the request added a tool
+result.  A provider caches in blocks (128 tokens on OpenAI's routes,
+1024 on Amazon Bedrock's Anthropic models), and the last, partial one
+is not served: on a prompt just over the minimum the share reads a
+little low, and a provider whose blocks are large wants the minimum
+raised.  See `harness-cache-health-streak' for how many misses alert."
+  :type 'number :group 'harness)
+
+(defcustom harness-cache-health-min-context 20000
+  "Fewest tokens of previous prompt for which a miss is worth an alert.
+A small prompt costs little to send again, and a provider caches only
+above a minimum length; below this a miss is neither surprising nor
+expensive."
+  :type 'integer :group 'harness)
+
+(defcustom harness-cache-health-streak 2
+  "Consecutive misses before the cache health alert comes.
+One miss can be a provider routing a request to another machine; a
+streak is a cache that is not serving the conversation.  0 alerts on
+the first miss of each episode, the cooldown still holding between
+them."
+  :type 'integer :group 'harness)
+
+(defcustom harness-cache-health-cooldown 300
+  "Seconds before a session that alerted can alert again.
+A session whose cache keeps missing says so once in this long, however
+many requests it makes meanwhile."
+  :type 'integer :group 'harness)
+
+(defcustom harness-cache-health-action 'alert
+  "What a cache health alert does beyond telling the user.
+`alert' adds a hint to the transcript, sends a notification when one
+can be sent, logs a warning and emits `cache/poor-hit'.  `stop' does
+that too and cancels the running turn, so the session does not go on
+paying for a cache that does not work.  See
+`harness-cache-health-threshold' for what counts as a miss."
+  :type '(choice (const :tag "Alert" alert)
+                 (const :tag "Stop the turn" stop))
+  :group 'harness)
+
+(defun harness-cache--alert (sid info)
+  "Tell the user that SESSION-ID's prompt cache is missing, about INFO.
+INFO is the `cache/reuse' plist with `:streak' and `:wasted' added.  The
+alert is a hint in the transcript, a notification when the notifications
+module is loaded, a warning in the log, and `cache/poor-hit'.  With
+`harness-cache-health-action' `stop', the running turn is cancelled too."
+  (let* ((session (ignore-errors (harness-call 'session/get sid)))
+         (name (or (and session (plist-get session :name)) "Session"))
+         (streak (plist-get info :streak))
+         (wasted (plist-get info :wasted))
+         (ratio (plist-get info :ratio))
+         (summary (format "%d calls · %s tokens re-sent"
+                          streak (harness-format-tokens-compact wasted)))
+         (hint (format "Prompt cache miss · %d%% cached · %s"
+                       (round (* 100 (or ratio 0))) summary)))
+    (when session
+      (harness-call 'session/hint sid hint)
+      (when (harness-method-exists-p 'notification/send)
+        (harness-catch
+         (harness-call-async 'notification/send
+                             (list :title "Prompt cache miss"
+                                   :body (format "%s · %s" name summary)
+                                   :urgency 'normal
+                                   :source "cache" :kind "cache-health"
+                                   :session sid :project (plist-get session :project)))
+         (lambda (err) (harness-log 'warn "cache: notifying failed: %s"
+                                    (harness-error-message err)))))
+      (harness-log 'warn "cache: %s read %d%% of its previous prompt; %s over %d calls"
+                   sid (round (* 100 (or ratio 0)))
+                   (harness-format-tokens wasted) streak)
+      (harness-emit 'cache/poor-hit sid info)
+      (when (eq harness-cache-health-action 'stop)
+        (when (harness-method-exists-p 'agent/cancel)
+          (harness-call 'agent/cancel sid)))))
+  info)
+
+(defun harness-cache--on-reuse (sid info)
+  "Watch the reuse of SESSION-ID's prompt cache from INFO, a `cache/reuse'.
+A request that reads its share (`harness-cache-health-threshold') clears
+the streak.  A miss counts, and when `harness-cache-health-streak' of
+them have come and the cooldown has passed, `harness-cache--alert' tells
+the user.  Nothing is said of a prompt under
+`harness-cache-health-min-context', of an internal session, or of an
+event without a ratio.  On `cache/reuse'."
+  (let* ((ratio (plist-get info :ratio))
+         (previous (plist-get info :previous))
+         (session (ignore-errors (harness-call 'session/get sid)))
+         (kind (and session (plist-get session :kind))))
+    (when (and session
+               (not (eq (if (stringp kind) (intern kind) kind) 'internal))
+               (numberp ratio)
+               (numberp previous)
+               (>= previous harness-cache-health-min-context))
+      (if (>= ratio harness-cache-health-threshold)
+          (remhash sid harness-cache--health)
+        (let* ((old (gethash sid harness-cache--health))
+               (streak (1+ (or (plist-get old :streak) 0)))
+               (wasted (+ (or (plist-get old :wasted) 0) (or (plist-get info :wasted) 0)))
+               (now (float-time))
+               (last (plist-get old :alerted-at)))
+          (if (and (>= streak harness-cache-health-streak)
+                   (or (not (numberp last))
+                       (>= (- now last) harness-cache-health-cooldown)))
+              (progn
+                (harness-cache--alert sid (plist-put (plist-put (copy-sequence info)
+                                                                :streak streak)
+                                                     :wasted wasted))
+                ;; Start a new episode: the next alert reports its own misses,
+                ;; and the cooldown holds until then.
+                (puthash sid (list :streak 0 :wasted 0 :alerted-at now :ratio ratio)
+                         harness-cache--health))
+            (puthash sid (list :streak streak :wasted wasted :alerted-at last :ratio ratio)
+                     harness-cache--health)))))))
 
 ;;;; Claiming a lapse
 
@@ -472,7 +620,8 @@ that lapses, or the event came already."
   (dolist (sid (hash-table-keys harness-cache--ends))
     (when-let* ((timer (gethash sid harness-cache--ends)))
       (cancel-timer timer))
-    (remhash sid harness-cache--ends)))
+    (remhash sid harness-cache--ends))
+  (clrhash harness-cache--health))
 
 (defun harness-cache--init ()
   "Watch the sessions' caches: subscribe, and set the timers of those that exist.
@@ -480,6 +629,7 @@ Set again at a reload, which leaves a timer set for the moment as it is."
   (harness-on 'session/changed #'harness-cache--on-changed)
   (harness-on 'session/deleted #'harness-cache--on-deleted)
   (harness-on 'question/answered #'harness-cache--on-answered)
+  (harness-on 'cache/reuse #'harness-cache--on-reuse)
   (harness-add-filter 'agent/message #'harness-cache--on-message 90)
   (when (harness-method-exists-p 'session/list)
     (dolist (session (harness-call 'session/list))
@@ -489,8 +639,12 @@ Set again at a reload, which leaves a timer set for the moment as it is."
 
 (harness-declare-event 'cache/pre-expire "(SESSION-ID INFO) a few seconds before the prompt cache of the session lapses, while the context is still hot in it: INFO is (:expires TIME :ttl SECONDS :lead SECONDS :at TIME :model MODEL :context TOKENS :status STATUS :running BOOL).  Once for each moment a cache lapses.")
 
+(harness-declare-event 'cache/reuse "(SESSION-ID INFO) after a request that follows another on the same model, saying how much of the last prompt it read from the cache: INFO is (:ratio F :previous TOKENS :cache-read TOKENS :wasted TOKENS :context TOKENS :model MODEL :at TIME).  The first request of a session, one after a compaction or a model switch, a hosted loop's and one with no cache stamp say nothing.")
+
+(harness-declare-event 'cache/poor-hit "(SESSION-ID INFO) when a session's prompt cache misses again and again: INFO is a `cache/reuse' with :streak, the misses it took, and :wasted, the tokens they sent again, added.  See `harness-cache-health-threshold'.")
+
 (harness-define-module 'cache
-  :doc "Watches the sessions' prompt caches and says when one is about to lapse (cache/pre-expire), and whether the user is around."
+  :doc "Watches the sessions' prompt caches: says when one is about to lapse (cache/pre-expire), whether the user is around, and alerts when a request reads too little of the last prompt (cache/poor-hit)."
   :requires '(session)
   :init #'harness-cache--init
   :shutdown #'harness-cache--shutdown)

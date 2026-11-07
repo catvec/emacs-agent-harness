@@ -1699,14 +1699,71 @@ node that is none of the session's: nothing is removed."
                     (funcall orig req))))
         (harness-await (harness-call 'agent/prompt id "hi")))
       (should (string-match-p "EXTRA SECTION" seen-system))
-      (should (string-match-p "Working directory" seen-system))
+      (should (string-match-p "Working directory: this session's own" seen-system))
+      (should (string-match-p "a worktree of the project" seen-system))
       (should (equal '("list_dir") seen-tools))
-      ;; The Environment names the session's own temporary directory, which exists.
+      ;; The Environment names no path of the session's own, and no date:
+      ;; either one costs the whole conversation at the next request.
       (let ((tmp (harness-call 'session/tmp-dir id)))
-        (should (string-match-p (concat "^- Temporary directory: " (regexp-quote tmp) " (") seen-system))
+        (should tmp)
+        (should-not (string-search (directory-file-name tmp) seen-system))
+        (should-not (string-search (plist-get (harness-call 'session/get id) :cwd) seen-system))
+        (should-not (string-match-p "Date:" seen-system))
+        (should-not (string-match-p "nil" seen-system))
+        ;; The prompt neither names nor makes it: the session's temporary
+        ;; directory is made again whenever a tool asks for it.
         (delete-directory tmp t)
-        (harness-await (harness-call 'agent/prompt id "again"))
+        (should (equal (directory-file-name tmp)
+                       (directory-file-name (harness-call 'session/tmp-dir id))))
         (should (file-directory-p tmp))))))
+
+(ert-deftest harness-agent-a-transcript-renders-the-same-request-twice ()
+  "The same transcript renders to the same request, before and after a restart.
+A provider's prompt cache reads a request only as far as it starts like
+the one that wrote the prompt, so a message that renders differently on
+a second pass -- rebuilt from blocks instead of replayed, or read back
+from the store in another order -- pays for the whole conversation
+again, and tells the model a slightly different story too."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session)))
+      (harness-call 'session/append id '(:kind user :content "read it"))
+      (harness-call 'session/append
+                    id (list :kind 'assistant :content "I will read it."
+                             :blocks (list (list :type "thinking" :text "I will read it."
+                                                 :signature "signature-1")
+                                           (list :type "tool_use" :id "call-1" :name "list_dir"
+                                                 :input (list :path ".")))))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "call-1" :content "a.el"))
+      (let ((first (harness-agent-step-request id nil #'ignore)))
+        (should (= 3 (length (plist-get first :messages))))
+        ;; Read back from what was written, as a restart does, the request
+        ;; is the same words.
+        (harness-session-flush)
+        (should (harness-session-reload-nodes id))
+        (let ((again (harness-agent-step-request id nil #'ignore)))
+          (should (equal (plist-get first :system) (plist-get again :system)))
+          (should (equal (plist-get first :messages) (plist-get again :messages)))
+          (should (equal (plist-get first :tools) (plist-get again :tools)))
+          (should (equal (plist-get first :session) (plist-get again :session))))))))
+
+(ert-deftest harness-agent-a-prompt-that-names-no-path-and-no-date ()
+  "The Environment is the same words for every session of a project, and every day.
+A path in it, or the date, changes the prompt of a session that comes
+back to it -- a restart, a fork, a seed -- and costs the whole
+conversation again, uncached."
+  (harness-agent-test-with
+    (let* ((dir (harness-test-temp-dir))
+           (one (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id))
+           (two (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id))
+           (a (harness-agent--system-prompt (harness-call 'session/get one)))
+           (b (harness-agent--system-prompt (harness-call 'session/get two))))
+      (should (equal a b))
+      (dolist (session (list one two))
+        (should-not (string-search (directory-file-name
+                                    (harness-call 'session/tmp-dir session)) a))
+        (should-not (string-search (plist-get (harness-call 'session/get session) :cwd) a)))
+      (should-not (string-match-p "Date:" a))
+      (should (string-match-p "## Environment" a)))))
 
 (ert-deftest harness-agent-prompt-resumes-inactive-session ()
   (harness-agent-test-with

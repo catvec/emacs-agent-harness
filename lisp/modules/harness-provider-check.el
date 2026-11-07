@@ -59,6 +59,10 @@
 ;; The checks' text is in the prompt registry.
 (require 'harness-prompts)
 
+(declare-function harness-agent-step-request "harness-agent" (session-id state on-event))
+(declare-function harness-session-flush "harness-session" ())
+(declare-function harness-session-reload-nodes "harness-session" (id))
+
 (defgroup harness-provider-check nil
   "Live checks of a provider's contract and a model's harness skills."
   :prefix "harness-provider-check-"
@@ -466,6 +470,11 @@ bounded by `harness-provider-check-timeout'."
        (setf (harness-provider-check-job-base job) reply)
        '(pass . "Start, text and one successful done; no model wording asserted.")))))
 
+(defun harness-provider-check--usage (events)
+  "Return the last usage event of EVENTS, or nil."
+  (car (last (cl-remove-if-not (lambda (event) (eq (plist-get event :type) 'usage))
+                               events))))
+
 (defun harness-provider-check--check-usage (job)
   "Check that the basic completion of JOB reported nonnegative usage."
   (let ((base (harness-provider-check-job-base job)))
@@ -473,12 +482,157 @@ bounded by `harness-provider-check-timeout'."
         '(skip . "Text completion did not return events.")
       (harness-provider-check--note-check-sessions job "completion")
       (let* ((events (plist-get base :events))
-             (usage (cl-remove-if-not
-                     (lambda (event) (eq (plist-get event :type) 'usage))
-                     events)))
+             (usage (harness-provider-check--usage events)))
         (harness-provider-check--require usage "No usage event")
         (harness-provider-check--events events)
         '(pass . "Nonnegative input and output usage reported.")))))
+
+(defconst harness-provider-check--cache-filler
+  (mapconcat #'identity (make-list 200 "Padding for the prompt cache check.") " ")
+  "Text long enough to pass a provider's minimum cacheable prompt length.
+Two identical requests carry it in the system prompt, whose prefix the
+provider should cache after the first; a few kilobytes put the prompt
+over the 1,024-token minimum of the models that document one.")
+
+(defun harness-provider-check--check-tiers (job)
+  "Check that the tier models the provider of JOB declares resolve.
+A tier that names no model of the catalogue is not an error in itself,
+but the callers that ask for it -- the permission judge, naming, recaps
+-- fall back to the session's own model, which is the expensive one.
+`frontier' is the exception: the harness never picks it on its own (see
+`harness-model-tiers'), so a plan that declares none, or one its
+catalogue does not list, costs no fallback."
+  (let* ((model (harness-provider-check-job-model job))
+         (provider (harness-provider-check-job-provider job))
+         (listed (ignore-errors (harness-call 'provider/cached-models
+                                              (harness-provider-check-job-provider-id job))))
+         (tiers (and provider (harness-provider-normalize-tiers
+                               (harness-provider-tiers provider)))))
+    (cond
+     ((not provider) '(skip . "Provider is not registered."))
+     ((not tiers) '(skip . "Provider declares no tier models."))
+     ((and listed (null (cdr listed)))
+      '(skip . "The catalogue lists one model."))
+     (t
+      (let (missing notes)
+        (dolist (tier '(:simple :medium :hard :frontier))
+          (when (plist-get tiers tier)
+            (let* ((name (substring (symbol-name tier) 1))
+                   (info (ignore-errors (harness-call 'provider/tier-model-info model tier)))
+                   (resolved (car info))
+                   (reason (cdr info)))
+              (cond
+               (resolved
+                (push (format "%s: %s" name
+                              (or (cdr (harness-provider-parse-model resolved)) resolved))
+                      notes))
+               ((eq tier :frontier)
+                (push (format "frontier: none (%s)" (or reason 'none)) notes))
+               (t (push (format "%s (%s)" name (or reason 'none)) missing))))))
+        (if missing
+            (harness-provider-check--require
+             nil
+             (format "Tier %s matches no model; judges, naming and recaps fall back to the session's model"
+                     (mapconcat #'identity (nreverse missing) ", ")))
+          (cons 'pass
+                (if notes
+                    (format "Resolved %s." (mapconcat #'identity (nreverse notes) "; "))
+                  "No tier names a model."))))))))
+
+(defun harness-provider-check--check-prompt-cache (job)
+  "Check that repeating a prompt reads the provider's prompt cache.
+Two identical requests, with a system prompt above the usual minimum
+cacheable length, are sent; the second must report cached tokens.  A
+provider that reports no cache tokens is skipped: nothing is known
+about its cache either way."
+  (let* ((model (harness-provider-check-job-model job))
+         (greeting (harness-prompt 'provider-check-greeting nil model))
+         (system (concat (harness-prompt 'provider-check-system nil model)
+                         "\n\n" harness-provider-check--cache-filler))
+         (request (lambda (suffix)
+                    (harness-provider-check--request
+                     model (format "provider-check-cache-%s" suffix)
+                     greeting system))))
+    (harness-then
+     (harness-provider-check--complete job (funcall request "warm"))
+     (lambda (_warm)
+       (harness-then
+        (harness-provider-check--complete job (funcall request "read"))
+        (lambda (read)
+          (let* ((events (plist-get read :events))
+                 (usage (harness-provider-check--usage events)))
+            (harness-provider-check--finish-events events)
+            (cond
+             ((null usage) '(skip . "No usage event reported."))
+             ((not (plist-member usage :cache-read))
+              '(skip . "Provider reports no prompt cache tokens."))
+             ((> (or (plist-get usage :cache-read) 0) 0)
+              '(pass . "A repeated prompt read cached tokens."))
+             (t
+              (harness-provider-check--require
+               nil
+               "A repeated prompt read no cached tokens; every step would re-send it at the uncached rate"))))))))))
+
+(defun harness-provider-check--check-transcript-round-trip (job)
+  "Check that the same transcript renders to the same request twice.
+The harness builds every request from the session's transcript, and a
+provider's prompt cache reads a request only as far as it starts like
+the one that wrote the prompt: a message that renders differently on a
+second pass -- rebuilt from blocks instead of replayed, or read back
+from the store in another order -- pays for the whole conversation
+again.  This makes a small session with a text message, thinking with
+its signature, and a tool call with its result; renders its request;
+writes the session to the store and reads it back as a restart does;
+renders it again; and compares what the provider would be sent.  It
+makes no request, so it checks the harness rather than the provider,
+and runs for every model."
+  (let ((model (harness-provider-check-job-model job)))
+    (if (not (and (harness-method-exists-p 'session/create)
+                  (harness-method-exists-p 'session/append)
+                  (fboundp 'harness-agent-step-request)
+                  (fboundp 'harness-session-reload-nodes)))
+        '(skip . "The session and agent layers are not loaded.")
+      (let ((sid (plist-get (harness-call 'session/create
+                                          :cwd (or (bound-and-true-p harness-state-directory)
+                                                   temporary-file-directory)
+                                          :model model :kind 'internal
+                                          :name "Transcript round trip")
+                            :id)))
+        (unwind-protect
+            (condition-case err
+                (progn
+                  (harness-call 'session/append sid
+                                '(:kind user :content "Round trip: read a.txt."))
+                  (harness-call 'session/append sid
+                                (list :kind 'assistant
+                                      :content (list (list :type "thinking" :text "I will read it."
+                                                           :signature "signature-round-trip")
+                                                     (list :type "tool_use" :id "call-round-trip"
+                                                           :name "read_file" :input (list :path "a.txt")))))
+                  (harness-call 'session/append sid
+                                (list :kind 'tool-result :call-id "call-round-trip" :content "hello"))
+                  (let* ((first (harness-agent-step-request sid nil #'ignore))
+                         (again (progn
+                                  (harness-session-flush)
+                                  (harness-session-reload-nodes sid)
+                                  (harness-agent-step-request sid nil #'ignore)))
+                         (same (and (equal (plist-get first :system) (plist-get again :system))
+                                    (equal (plist-get first :messages) (plist-get again :messages))
+                                    (equal (plist-get first :tools) (plist-get again :tools)))))
+                    (if same
+                        '(pass . "The same transcript rendered to the same request before and after a restart.")
+                      (cons 'fail
+                            (format (concat "The same transcript rendered differently the second time (%s):"
+                                            " every message after the one that changed would be sent"
+                                            " again, uncached")
+                                    (cond ((not (equal (plist-get first :system)
+                                                       (plist-get again :system))) "system prompt")
+                                          ((not (equal (plist-get first :tools)
+                                                       (plist-get again :tools))) "tools")
+                                          (t "messages")))))))
+              (error (cons 'skip (format "Nothing could be rendered: %s"
+                                         (harness-error-short-message err)))))
+          (ignore-errors (harness-call 'session/delete sid)))))))
 
 (defun harness-provider-check--check-no-thinking (job)
   "Check that a request without thinking is accepted for JOB."
@@ -885,6 +1039,11 @@ into the structured note argument rather than dropping it as a label."
             :name "Registry and model catalogue"
             :advice "Fix :models / model metadata; do not rely on the model picker until it lists this model."
             :fn #'harness-provider-check--check-catalogue)
+      (list :suite 'provider :id "tiers"
+            :name "Tier model resolution"
+            :advice (concat "Judges, naming and recaps fall back to the session's model when a tier "
+                            "matches none; name a model of this plan for :simple (see `harness-responses-tiers').")
+            :fn #'harness-provider-check--check-tiers)
       (list :suite 'provider :id "completion"
             :name "Text completion and event lifecycle"
             :advice "Do not use this provider for sessions until completion and event framing work."
@@ -893,6 +1052,16 @@ into the structured note argument rather than dropping it as a label."
             :name "Usage accounting"
             :advice "Do not advertise accurate token/cost tracking until :usage is populated."
             :fn #'harness-provider-check--check-usage)
+      (list :suite 'provider :id "cache"
+            :name "Prompt caching"
+            :advice (concat "Every step would re-send the whole prompt at the uncached rate; "
+                            "fix the provider's cache, or use one that caches, before long sessions.")
+            :fn #'harness-provider-check--check-prompt-cache)
+      (list :suite 'provider :id "transcript-round-trip"
+            :name "Transcript round trip"
+            :advice (concat "The harness renders one transcript two ways; messages would be "
+                            "re-sent uncached from the one that differs. Fix the rendering, not the provider.")
+            :fn #'harness-provider-check--check-transcript-round-trip)
       (list :suite 'provider :id "no-thinking"
             :name "No-thinking request"
             :advice "Fix reasoning-effort mapping (e.g. unsupported 'none'); do not claim :thinking support until fixed."

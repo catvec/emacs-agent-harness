@@ -661,10 +661,15 @@ Whichever comes first of this, `harness-tasks-recap-turns' and
 `harness-tasks-recap-tool-calls'; nil never refreshes on time."
   :type '(choice (const :tag "Never" nil) (number :tag "Seconds")) :group 'harness)
 
-(defcustom harness-tasks-recap-tool-calls 8
+(defcustom harness-tasks-recap-tool-calls 12
   "Tool calls since the last recap that make a new one due.
 Whichever comes first of this, `harness-tasks-recap-turns' and
-`harness-tasks-recap-seconds'; nil never refreshes on tool calls."
+`harness-tasks-recap-seconds'; nil never refreshes on tool calls.
+A recap is a one-line convenience, not a record of the work, so it does
+not need refreshing after every few calls: a busy turn still gets one
+every dozen, and `harness-tasks-recap-seconds' covers a slow one.  Each
+is a call the harness makes for itself, and how often it is made is
+what it costs."
   :type '(choice (const :tag "Never" nil) (integer :tag "Tool calls")) :group 'harness)
 
 (defcustom harness-tasks-recap-model 'auto
@@ -694,9 +699,15 @@ which needs a larger budget to fit."
   "Longest recap a card shows, in characters."
   :type 'integer :group 'harness)
 
-(defcustom harness-tasks-recap-context 8000
+(defcustom harness-tasks-recap-context 3000
   "Characters of transcript a recap request may carry.
-The tail of the transcript, so the request stays short on a long task."
+The tail of the transcript, so the request stays short on a long task.
+A recap is one line about what the work is doing, and most of a long
+tail is tool output -- a file's contents, a test log -- so a few
+thousand characters carry what it needs; the task, its plan and its
+todos come with the request already.  The call is one the harness makes
+for itself, on the cheap tier (`harness-tasks-recap-model'), and how
+much it reads is what it costs."
   :type 'integer :group 'harness)
 
 (defcustom harness-tasks-recap-interval 30

@@ -508,20 +508,30 @@ activity replaces it once it starts, and its end clears it."
 
 ;;;; Prompt assembly
 
-(defconst harness-agent--tmp-dir-line
-  "- Temporary directory: %s (yours alone and already allowed, bash included: put scratch files, logs and screenshots there rather than in the working directory or /tmp)\n"
-  "System prompt line naming the session's own temporary directory (%s).
-It steers scratch files there: inside the sandbox /tmp is private to
-each command and starts empty, so a file a command leaves there is gone
-by the next call, and outside the sandbox /tmp is not an allowed
-directory.")
+(defconst harness-agent--environment-lines
+  (concat "- Working directory: this session's own, where its tools run -- a worktree of the"
+          " project, when it works in one%s\n"
+          "- Scratch files: this session's own temporary directory, which is yours alone and"
+          " already allowed, bash included; put them there rather than in the working directory"
+          " or /tmp%s\n")
+  "System prompt lines about where the session works, with no path in them.
+A prompt cache matches a request only as far as it starts like the one
+that wrote it, so a prompt that names the session's own directories --
+or the date -- is a prompt no other session, and no later day, can
+share, and every one of those differences costs the whole conversation.
+The model finds the paths where it needs them: its tools run in the
+session's directory, and `session_info' names both directories and the
+worktree.  The two %s are the same pointer to that tool, or empty
+without it.")
 
 (defconst harness-agent--error-details-line
-  "- Harness errors: unexpected failures inside the harness are written to %s with a full stack trace and the session and task ids. You cannot read that file by default: read_harness_errors returns the recent reports, and asks the user for access.\n"
-  "System prompt line naming the harness error details file (%s).
-The file is kept out of what a session may inspect, so the agent is
-told it exists and reads it through the `read_harness_errors' tool,
-which asks the user.")
+  "- Harness errors: unexpected failures inside the harness are written to its error details file with a full stack trace and the session and task ids. You cannot read that file by default: read_harness_errors returns the recent reports, and asks the user for access.\n"
+  "System prompt line about the harness error details file.
+It names no path: the file is kept out of what a session may inspect
+and read through the `read_harness_errors' tool, which asks the user,
+and a path is different in every run of the harness -- a session resumed
+after a restart would send a different prompt, and so the whole
+conversation again, uncached.")
 
 (defun harness-agent--tmp-dir (session)
   "Return SESSION's own temporary directory, made if missing, or nil."
@@ -535,22 +545,28 @@ which asks the user.")
 
 (defun harness-agent--system-prompt (session)
   "Return the system prompt for SESSION after the `agent/system-prompt' filter.
-Its Environment section names the session's own temporary directory,
-made here when it is missing (see `session/tmp-dir'), so the directory
-the model is told about exists when it reads about it."
-  (let* ((tmp (harness-agent--tmp-dir session))
+Its Environment section is the same for every session of a project, and
+from one day to the next: no path of the session's own, no date, no
+time (see `harness-agent--environment-lines').  A prompt cache matches
+a request only as far as it starts like the one that wrote it, so a
+value that changes -- a directory, the date -- costs the whole
+conversation again, and one that names the session's own directory is a
+prompt no fork or seed of it can share.  What the model needs to know
+about where it works it reads from `session_info', or from the tools
+themselves, which run there."
+  (let* ((pointer (if (and (fboundp 'harness-tool-get) (harness-tool-get "session_info"))
+                      " (session_info names it)"
+                    ""))
          (details (and (boundp 'harness-error-reporting) harness-error-reporting
                        (fboundp 'harness-error-details-path)
                        (harness-error-details-path)))
-         (base (format "%s\n\n## Environment\n- Working directory: %s\n%s%s- Project: %s\n- Date: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
+         (base (format "%s\n\n## Environment\n%s%s- Project: %s\n- System: %s\n- Editor: GNU Emacs %s\n"
                       harness-agent--base-system-prompt
-                      (plist-get session :cwd)
-                      (if tmp (format harness-agent--tmp-dir-line tmp) "")
-                      (if details (format harness-agent--error-details-line details) "")
+                      (format harness-agent--environment-lines pointer pointer)
+                      (if details harness-agent--error-details-line "")
                       (or (and (harness-method-exists-p 'project/name)
                                (harness-call 'project/name (plist-get session :project)))
                           (plist-get session :project))
-                      (format-time-string "%Y-%m-%d")
                       system-configuration
                       emacs-version)))
     (harness-run-filter 'agent/system-prompt base session)))
@@ -1457,6 +1473,24 @@ the state."
       (harness-call 'session/set-provider-state sid nil))
     usable))
 
+(defun harness-agent--replay-messages (request)
+  "Return REQUEST's messages continued from its session's last request.
+The payload of the last request is sent again as it was, and only the
+messages the nodes added since are rendered, so that no change of the
+code that renders them, and no restart, can change a prefix a provider
+has cached (see harness-replay.el).  A request whose conversation cannot
+be continued -- another model, another system prompt, a node changed in
+what it renders -- is returned as it is."
+  (let ((prefix (and (harness-method-exists-p 'replay/prefix)
+                     (harness-call 'replay/prefix request))))
+    (if (not prefix)
+        request
+      (plist-put (copy-sequence request)
+                 :messages (append (plist-get prefix :messages)
+                                   (harness-agent--prepare-messages
+                                    (plist-get request :session)
+                                    (plist-get prefix :suffix)))))))
+
 (defun harness-agent-step-request (session-id state on-event)
   "Return the request the next step of SESSION-ID sends to its model.
 STATE is the provider state the step carries (`harness-agent--provider-state')
@@ -1467,21 +1501,29 @@ the turn calls it for every step, and so does whatever has to send
 something that starts like a step -- the same model, system prompt,
 tools, thinking level and conversation -- so that a provider's prompt
 cache, which reads a request only as far as it starts like the one that
-wrote it, serves both (see harness-cache-warm.el).  Nothing is changed
-by making it."
+wrote it, serves both (see harness-cache-warm.el).  The messages are
+those of the last request, as they were sent, plus the ones the nodes
+added since (`harness-agent--replay-messages'), unless the provider
+holds the conversation itself: it is sent the newest message only.
+Nothing is changed by making it (see `harness-agent--step', which keeps
+the payload)."
   (let* ((session (harness-call 'session/get session-id))
-         (model (plist-get session :model)))
-    (list :model model
-          :session session
-          :system (harness-agent--system-prompt session)
-          :messages (harness-agent--request-messages session)
-          :tools (if (harness-method-exists-p 'tools/list) (harness-call 'tools/list session-id) nil)
-          ;; Tools the provider runs itself, in place of these.
-          :builtin-tools (and (harness-method-exists-p 'tools/builtin)
-                              (harness-call 'tools/builtin session-id))
-          :thinking (plist-get session :thinking)
-          :provider-state state
-          :on-event on-event)))
+         (model (plist-get session :model))
+         (request (list :model model
+                        :session session
+                        :system (harness-agent--system-prompt session)
+                        :messages (harness-agent--request-messages session)
+                        :tools (if (harness-method-exists-p 'tools/list)
+                                   (harness-call 'tools/list session-id) nil)
+                        ;; Tools the provider runs itself, in place of these.
+                        :builtin-tools (and (harness-method-exists-p 'tools/builtin)
+                                            (harness-call 'tools/builtin session-id))
+                        :thinking (plist-get session :thinking)
+                        :provider-state state
+                        :on-event on-event)))
+    (if (harness-agent--hosted-p session)
+        request
+      (harness-agent--replay-messages request))))
 
 (defun harness-agent--step (turn)
   "Call the provider once for TURN."
@@ -1499,10 +1541,19 @@ by making it."
             (harness-agent-turn-step-nodes turn) nil
             (harness-agent-turn-pending turn) 0 (harness-agent-turn-waiting-done turn) nil
             (harness-agent-turn-stop-reason turn) nil (harness-agent-turn-error turn) nil)
-      (let* ((model (plist-get (harness-call 'session/get sid) :model))
+      (let* ((session (harness-call 'session/get sid))
+             (model (plist-get session :model))
              (state (harness-agent--provider-state sid model))
              (request (harness-agent-step-request
                        sid state (lambda (ev) (harness-agent--on-event turn ev model)))))
+        ;; The payload is kept before it is sent: a provider that reads it
+        ;; writes its prompt cache, and the next step is continued from it
+        ;; (harness-replay.el).  A provider that holds the conversation
+        ;; itself is sent one message, and keeping that would be no use.
+        (unless (harness-agent--hosted-p session)
+          (when (harness-method-exists-p 'replay/save-request)
+            (harness-agent--try (format "keeping the request of %s" sid)
+              (harness-call 'replay/save-request request))))
         (puthash sid model harness-agent--step-models)
         (puthash sid (harness-plist-remove request :on-event) harness-agent--last-requests)
         (harness-emit 'agent/step-started sid (harness-agent-turn-steps turn))

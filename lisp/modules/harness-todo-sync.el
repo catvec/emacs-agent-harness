@@ -139,11 +139,19 @@ conversation.")
 (defconst harness-todo-sync--retry 120
   "Seconds a failed request keeps the next try off.")
 
-(defconst harness-todo-sync--message-chars 2500
-  "Characters of the engineer's request that a question carries.")
+(defconst harness-todo-sync--message-chars 1200
+  "Characters of the engineer's request that a question carries.
+The opening and the latest message each, as much as says what the work
+is: a list of three to ten short items needs no more, and the call is
+one the harness makes for itself, on the cheap tier.")
 
-(defconst harness-todo-sync--activity-chars 10000
-  "Characters of the agent's work that a question carries, the newest last.")
+(defconst harness-todo-sync--activity-chars 4000
+  "Characters of the agent's work that a question carries, the newest last.
+The entries are clipped already (see `harness-todo-sync--entry'), so a
+few thousand characters hold a good many steps; a sync happens every
+`harness-todo-sync-steps' steps, so what runs between two of them fits.
+The call is one the harness makes for itself, and how much it reads is
+what it costs.")
 
 (defconst harness-todo-sync--system-prompt
   (harness-prompt-default 'todo-sync-system)
@@ -441,7 +449,7 @@ used."
            (list (and opening (concat "The engineer's request:\n" (harness-todo-sync--quote opening)))
                  (and latest (concat "Their latest message:\n" (harness-todo-sync--quote latest)))
                  (and (stringp plan) (not (harness-string-blank-p plan))
-                      (concat "The agent's plan:\n" (harness-truncate-end (string-trim plan) 1200)))
+                      (concat "The agent's plan:\n" (harness-truncate-end (string-trim plan) 600)))
                  (concat "The todo list now:\n" (harness-todo-sync--render todos))
                  (concat "What the agent did since the list was last updated, oldest first:\n<activity>\n"
                          (if (string-empty-p activity) "(nothing yet)" activity)

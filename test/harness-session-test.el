@@ -2093,6 +2093,92 @@ request still sent to the old model stamps that model's cache."
       (harness-session--load-all)
       (should (equal '(:at 1200.0 :ttl 300 :expires 1500.0 :model "test-api:b") (funcall cache))))))
 
+(ert-deftest harness-session-usage-says-what-the-cache-reused ()
+  "A request that follows another on the same model says how much of the
+last prompt it read from the cache (`cache/reuse'): the share, the
+prompt, the tokens read again and paid for, the context and the model.
+The first request of a session has no earlier prompt to compare."
+  (harness-session-test-with-loop
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                       :model "test-api:a") :id))
+           (events nil))
+      (harness-on 'cache/reuse
+                  (lambda (sid info)
+                    (when (equal sid id) (push info events))))
+      (harness-call 'session/usage-add id '(:input 1000 :output 10 :context 1010 :cache-write 1000))
+      (should-not events)
+      (harness-call 'session/usage-add id '(:input 1200 :output 20 :cache-read 900 :context 1220))
+      (should (= 1 (length events)))
+      (pcase-let ((`(,info) events))
+        (should (= (/ 900 1010.0) (plist-get info :ratio)))
+        (should (= 1010 (plist-get info :previous)))
+        (should (= 900 (plist-get info :cache-read)))
+        (should (= 110 (plist-get info :wasted)))
+        (should (= 1220 (plist-get info :context)))
+        (should (equal "test-api:a" (plist-get info :model)))
+        (should (numberp (plist-get info :at))))
+      ;; More than the last prompt read is all of it, nothing wasted.
+      (setq events nil)
+      (harness-call 'session/usage-add id '(:input 1300 :output 20 :cache-read 2000 :context 1320))
+      (should (= 1.0 (plist-get (car events) :ratio)))
+      (should (= 0 (plist-get (car events) :wasted)))
+      ;; A turn counted is no request to compare.
+      (setq events nil)
+      (harness-call 'session/usage-add id '(:turns 1))
+      (should-not events))))
+
+(ert-deftest harness-session-usage-says-nothing-of-a-request-with-nothing-to-reuse ()
+  "A request after one that used no cache, a compaction's, the first
+request after one, a model switch's and a hosted loop's say nothing of
+reuse: there is no earlier cache of this conversation to measure."
+  (harness-session-test-with-loop
+    (let ((events nil)
+          (new (lambda (model)
+                 (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                          :model model)
+                            :id))))
+      (harness-on 'cache/reuse
+                  (lambda (sid info) (push (cons sid info) events)))
+      ;; The request before used no cache: nothing was kept to reuse.
+      (setq events nil)
+      (let ((id (funcall new "test-api:a")))
+        (harness-call 'session/usage-add id '(:input 1000 :output 10 :context 1010))
+        (harness-call 'session/usage-add id '(:input 1200 :output 20 :cache-read 900 :context 1220))
+        (should-not events))
+      ;; A compaction starts the conversation over.
+      (setq events nil)
+      (let ((id (funcall new "test-api:a")))
+        (harness-call 'session/usage-add id '(:input 1000 :output 10 :cache-read 900 :context 1010))
+        (harness-call 'session/usage-add id '(:input 100 :output 10 :cache-read 80 :context 300
+                                               :cache-reset t))
+        (should-not events))
+      ;; The first request after a compaction populates the new cache.
+      (setq events nil)
+      (let ((id (funcall new "test-api:a")))
+        (harness-call 'session/usage-add id '(:input 1000 :output 10 :cache-read 900 :context 1010))
+        (harness-call 'session/usage-add id '(:input 100 :output 10 :context 110 :cache-reset t))
+        (harness-call 'session/usage-add id '(:input 300 :output 10 :cache-read 200 :context 320))
+        (should-not events)
+        (harness-call 'session/usage-add id '(:input 400 :output 10 :cache-read 320 :context 420))
+        (should (= 1 (length events)))
+        (should (= 320 (plist-get (cdar events) :previous))))
+      ;; Another model has no cache of this conversation.
+      (setq events nil)
+      (let ((id (funcall new "test-api:a")))
+        (harness-call 'session/usage-add id '(:input 1000 :output 10 :cache-read 900 :context 1010))
+        (harness-call 'session/update id :model "test-api:b" :silent t)
+        (harness-call 'session/usage-add id '(:input 300 :output 10 :cache-read 200 :context 320))
+        (should-not events)
+        (harness-call 'session/usage-add id '(:input 400 :output 10 :cache-read 320 :context 420))
+        (should (= 1 (length events))))
+      ;; A hosted loop keeps the conversation itself: its requests are no
+      ;; measure of a cache this session holds.
+      (setq events nil)
+      (let ((id (funcall new "test-loop:l")))
+        (harness-call 'session/usage-add id '(:input 1000 :output 10 :cache-read 900 :context 1010))
+        (harness-call 'session/usage-add id '(:input 1200 :output 20 :cache-read 900 :context 1220))
+        (should-not events)))))
+
 (ert-deftest harness-session-cache-goes-when-the-conversation-starts-over ()
   "Nothing is cached once the conversation starts over.
 A compaction replaces it with a summary (`:cache-reset'), whatever the

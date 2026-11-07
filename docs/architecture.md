@@ -13,9 +13,9 @@ module needs something more, add it here first.
  ------------------------------- ACP (JSON-RPC over loopback TCP, or TCP to a
                                  harness server elsewhere; in-process lisp objects
                                  when `harness-process' is nil)
- State          session, agent, config, project, store, usage, insights, fallback,
-                retry, naming, judge, compaction, handoff, worktree, merge, tasks,
-                tasks-notify, supervisor, seed, skills, perms, decisions, sandbox,
+ State          session, replay, agent, config, project, store, usage, insights,
+                fallback, retry, naming, judge, compaction, handoff, worktree, merge, tasks,
+                tasks-notify, supervisor, skills, perms, decisions, sandbox,
                 notifications, secrets, redact, plugins, chatgpt-plan
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot, provider-responses
@@ -951,7 +951,7 @@ model is a hosted loop and no reset marked it since the last request
 that stamped a cache (`session/reset-drops-cache-p` says whether a reset
 would).  Then, while the stamp has not lapsed by itself, `:cache` ends
 with `:dropped`, the same time, and its `:expires` is that time too: the
-cold-cache gate (see cowboy), the seeds and the UI, which read
+cold-cache gate (see cowboy) and the UI, which read
 `:expires`, find the cache gone from the drop on, and `:dropped` tells
 them why.  A cache that had lapsed before the drop is reported as it
 was.  A session on a provider that is sent the whole transcript with
@@ -1084,7 +1084,7 @@ ancestor chain (same node ids) into the new session and records
 `:parent-id` / `:fork-node`, so the tree view can merge families by id.
 A tool call the fork copies without a result gets one of the fork's
 own, after the copied nodes (`:meta (:forked t)`).  That happens when
-the parent is mid-turn, as with `spawn_agent` forking it, or when its
+the parent is mid-turn, as when the user forks it mid-turn, or when its
 head was moved back between a call and its result.  The result goes
 to the parent, never to the fork, and providers that pair calls with
 results (DeepSeek and other strict OpenAI-compatible servers, Bedrock)
@@ -1452,7 +1452,10 @@ Persistence under `harness-state-directory`:
 ### session
 
 Owns session records, nodes, status, queue, pending requests, persistence
-(sessions/ID.json + sessions/ID.nodes.jsonl).
+(sessions/ID.json + sessions/ID.nodes.jsonl); what the provider was sent
+of them is replay's (`sessions/ID.responses.jsonl` and
+`sessions/ID.request.jsonl`), and `session/redact-text` cleans those
+two as well.
 
 Restarts: records are written shortly after a change, at once when the
 status changes, and all of them on exit; nodes are appended as they
@@ -1939,6 +1942,65 @@ redact).
   five.
 - Event `session/changed ID SESSION` fires after any of the above (for UIs
   that just want to redraw).
+
+### replay
+
+The provider's view of a session, kept as it was sent.  A provider keeps
+the start of the last request it read in its prompt cache, and two things
+the harness sends can change without the transcript changing; each one
+makes every token after the change a fresh read:
+
+- a response that called a tool goes back as the model delivered it,
+  reasoning items included.  The Responses provider remembered those in
+  memory (`harness-responses--responses-by-session`); after a restart a
+  message was built again from its blocks, without its reasoning and
+  without the response's own ids, and the model lost what it was thinking
+  as well as the cache from that message on.  Each response is appended
+  to `sessions/ID.responses.jsonl` under the call ids it made and read
+  back into the provider's table the first time the session is rendered;
+  a fork reads its parent's from there too.
+- the messages of a request are rendered from the transcript with every
+  step, so a change of the rendering code changed a prefix the provider
+  had cached.  `harness-agent-step-request` therefore continues the
+  payload of the last request: `sessions/ID.request.jsonl` holds the
+  model, thinking level, system prompt, tools and messages as the last
+  step sent them, the ids of the nodes they were rendered from, and a
+  digest of what rendering reads of those nodes (`session/render-state`,
+  `session/render-digest`).  While the transcript still starts with those
+  nodes and they render the same, the request is the kept messages
+  verbatim plus the messages the new nodes add (`session/messages-from`);
+  otherwise it is rendered afresh and kept in their place
+  (`replay/prefix`, `replay/save-request`).  A change of the system
+  prompt, of the tools or of the model is a change of what the model is
+  told, not a re-rendering, and starts a request afresh too.
+
+The kept file is read losslessly: an empty object comes back as `:empty`
+and an empty array as `[]`, where the harness's own reading of JSON makes
+both nil, and a request written again with null where it had `{}` or `[]`
+is not the request the provider cached.
+
+What is kept is not a second transcript.  It is dropped when a
+compaction replaces the conversation (`compaction/done`) and when the
+session is deleted; a redaction cleans the responses in place, since a
+message that lost its reasoning items would change, and drops the last
+request, which costs no cache, the next one being rendered from the
+redacted transcript anyway (`replay/redact`, counted by the report as
+what the provider was sent).  A request that holds a picture's bytes is
+not kept, nor one over `harness-replay-request-max-bytes`, nor one of a
+provider that holds the conversation itself (Claude Code, Copilot),
+which is sent the newest message only.
+
+- `replay/responses ID` → the responses kept, oldest first, the file cut
+  back to the newest `harness-replay-responses-limit`; `replay/responses-p
+  ID` says whether any are kept; `replay/remember-response ID ITEMS`
+  appends one; `replay/keep-responses ID CALL-IDS` cuts the file back to
+  what the provider's table kept.
+- `replay/prefix REQUEST` → `(:messages MESSAGES :suffix SUFFIX)`, the
+  payload to send and the messages the new nodes add, or nil; the caller
+  prepares the suffix as the rest were prepared.
+  `replay/save-request REQUEST` keeps what the step sent.
+- `replay/forget ID` deletes both files; `replay/redact ID SECRETS
+  &optional DRY-RUN` → `(:count N :files (FILE…))`.
 
 ### provider
 
@@ -2924,12 +2986,12 @@ and the provider is built to what it accepts:
   goes back as a reasoning item with that signature as its
   `encrypted_content`, which stateless mode requires; a thinking block
   without one is left out rather than sent unreadable.  A delivered
-  response is remembered keyed by its tool-call ids
-  (`harness-responses--responses`, the last
-  `harness-responses--responses-max`), so a message whose calls are all
-  remembered is replayed verbatim and only a half-remembered one is
-  rebuilt -- the same device as Bedrock's
-  (`harness-bedrock--remembered-content`).
+  response is remembered keyed by its tool-call ids, per session
+  (`harness-responses--responses-by-session`, the last
+  `harness-responses--session-responses-max`) and on disk (see replay),
+  so a message whose calls are all remembered is replayed verbatim --
+  after a restart too -- and only a half-remembered one is rebuilt; the
+  same device as Bedrock's (`harness-bedrock--remembered-content`).
 - Images go in as `input_image` parts (a data URL or a file read here),
   never through the Files API, which this route does not offer; image
   generation, file search, Code Interpreter, hosted MCP, `tool_search`
@@ -4256,9 +4318,9 @@ half `ui-access`, the access view).
   off and dropped directories; a fork its read-only directories and its
   `:caps` too, as `session/fork` copies the parent's directory grants,
   permission mode and non-interactive state.  A fork is a session with a
-  `:fork-node`: one made by `session/fork`, which `spawn_agent` with
-  `fork` uses too.  A sub-agent that starts afresh and a BTW get no
-  capability: they ask.  Task sessions have no parent and keep their own
+  `:fork-node`: one made by `session/fork`, which is the user's own
+  (`spawn_agent` refuses to fork).  A sub-agent that starts afresh and a
+  BTW get no capability: they ask.  Task sessions have no parent and keep their own
   access.
 - Judgements: every `permission/decided` is recorded per session in
   memory (`harness-access--judged`, the newest 300) as `(:call-id :tool
@@ -4685,7 +4747,11 @@ decisions.
   a step's request is made: the turn calls it for every step, and what
   has to send something that starts like a step does too -- a provider's
   prompt cache reads a request only as far as it starts like the one that
-  wrote it (see cache-warm).  Making one changes nothing.
+  wrote it (see cache-warm).  The messages are the payload of the last
+  request, as it was sent, plus the messages the nodes added since
+  (`harness-agent--replay-messages`, see replay), unless the provider
+  holds the conversation itself.  Making one changes nothing; the step
+  keeps the payload before it sends it (`replay/save-request`).
   `harness-agent-last-request SESSION-ID` is the request of the latest
   step of the session's running turn, without its `:on-event`, nil when
   no turn runs: the step after a tool call starts as it ended, so sending
@@ -4898,11 +4964,16 @@ decisions.
   `agent/stream SID NODE-ID KIND DELTA` (kind text|thinking),
   `agent/tool-call SID NODE`, `agent/tool-result SID NODE`,
   `agent/activity-changed SID ACTIVITY`.
-- The system prompt's Environment section names the working directory,
-  the session's own temporary directory (asked for with
-  `session/tmp-dir` at every step, so it exists whenever the model is
-  told about it; the line is left out when there is none), the project,
-  the date, the system and the Emacs version.
+- The system prompt's Environment section names no path of the
+  session's own and no date: the project, the system and the Emacs
+  version are what it says, plus a line each for the working directory
+  and the temporary directory that says whose they are, not where they
+  are (`session_info` names both).  It is the same words for every
+  session of a project and from one day to the next, which is what
+  lets a fork or a session resumed after a restart send a
+  prompt a provider's cache still holds: a value that changes -- a
+  directory, a timestamp, the error file's path, different in every
+  run -- costs the whole conversation again.
 - Turn loop: build system prompt → messages → `provider/complete`;
   stream deltas into a live assistant/thinking node (created on the
   first delta with visible text: whitespace before it is held back and
@@ -5548,7 +5619,7 @@ and tools.
   on is left to it: a task's (`task/for-session`, see
   `harness-tasks-resume-interrupted`), an internal one, and a
   sub-agent no `spawn_agent` call started (a supervisor's worker, the
-  merge queue's resolver, a seed: the module that started it).  Any
+  merge queue's resolver: the module that started it).  Any
   other is sent a message of the harness's (`agent/prompt`, `:from`
   `(harness-sender-system "restart")`) naming the tool calls that did not
   finish and the prompt it waited on, unless
@@ -5587,8 +5658,8 @@ and tools.
   which announces it once (`harness-resilience--announce`): the
   parent's transcript gets a hint naming the child and what it asks,
   which starts no turn, and the user a notification that opens the
-  child (kind `prompt-waiting`).  A session that is no sub-agent and a
-  seed say nothing, and `session/deleted` forgets what was announced.
+  child (kind `prompt-waiting`).  A session that is no sub-agent says
+  nothing, and `session/deleted` forgets what was announced.
 - Prompts: every `harness-resilience--tick-seconds` (30) a repeating
   timer looks at the blocked sub-agents.  A pending request older than
   `harness-resilience-prompt-timeout` (600 s; nil never) is answered by
@@ -5624,10 +5695,23 @@ and tools.
   `compaction` node, which stands in for the conversation from then on:
   `session/messages` starts at it, as a user message, followed by the
   unanswered user messages carried over after it.  OPTS `:kind` (one of
-  `harness-compaction-kinds`) says what it holds:
-  - `summary` (the default): the session's model (OPTS `:model`
-    another) summarises the conversation, and the message reads
-    "Summary of the conversation so far: ...".  OPTS `:context` is
+  `harness-compaction-kinds`) says what it holds.  A `summary` or
+  `brief` reads the whole conversation as the input of a request with a
+  system prompt and (for a summary) no tools of its own, so no cache of
+  the chat covers it (`harness-compaction-request-warm-p`, which only
+  the estimate can say, and never says today).  One is made only when
+  the estimate says that request's own prefix is cached, for the very
+  model it would go to; otherwise OPTS `:fallback`, a kind that asks no
+  model, is made instead, said in a hint and kept in the node's `:meta`
+  as `:requested-kind`; without one, the call is refused before a
+  request exists.  Nobody's choice is warmth: OPTS `:approved`, an
+  answer to the question, the compact panel, a saved cowboy default and
+  a handoff mode all fail closed the same way.  An informed exception
+  to buy a cold summary is a product decision that is not implemented:
+  it would be Noah's to make, not the harness's to assume.
+  - `summary` (the default kind of a bare call): the session's model
+    (OPTS `:model` another) summarises the conversation, and the
+    message reads "Summary of the conversation so far: ...".  OPTS `:context` is
     `full` (the default) or `sample`, which sends the conversation's
     narrative — every user and assistant message, each tool call and
     result in one line, never a payload — so a summariser that has to
@@ -5834,9 +5918,31 @@ and tools.
   app (harness_client) draws the same two buttons under it
   (`CompactionToggle`), where the harness announces both methods.
 - Settings (section "Compaction"): `harness-compaction-kind`, the kind
-  automatic compaction makes (`summary`; any of the kinds, `truncate`
-  included), `harness-compaction-mid-turn` (on) and
+  automatic compaction makes where nobody is asked (`summary`; any of
+  the kinds, `truncate` included), `harness-compaction-ask` (on), which
+  asks before an automatic compaction where the user can be asked,
+  `harness-compaction-mid-turn` (on) and
   `harness-compaction-brief-model`.
+- A summary is never made cold: `summary` and `brief` read the whole
+  conversation uncached, on a request with a system prompt and (for a
+  summary) no tools of its own, so no cache of the chat covers it
+  (`harness-compaction-request-warm-p`; `compaction/estimate` says
+  `:cached` nil for both).  Every path asks
+  `harness-compaction--effective-kind` which kind it may use, and one
+  that asks a model becomes a `transcript` unless the estimate says
+  that request's own prefix is cached.  The guard sits in
+  `harness-compaction--compact-now`, the one place a compaction is
+  made, so a queued, stale or direct caller cannot bypass it: OPTS
+  `:fallback` is the kind that asks no model, and without it a model
+  kind is refused before a request exists.  The guard looks at the
+  request that would really be sent: OPTS `:context` `sample` makes a
+  summary a brief (its warmth is the brief entry's), and OPTS `:model`
+  must be the model the estimate priced, or the warmth is not this
+  request's.  `:approved`, an answer to the question, a saved cowboy
+  answer, the compact panel and a handoff mode are choices, not
+  warmth, and none of them makes a cold request.  A standing exception
+  for an informed user to buy one is not implemented; that is a product
+  decision to put to Noah, not an assumed consent.
 - Auto: `agent/before-turn` compacts, as `harness-compaction-kind`
   says, when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
@@ -5847,6 +5953,48 @@ and tools.
   earlier (`harness-tasks-context-limit', 384k tokens by default).
   It judges the session as it is then, read again: the fallback,
   earlier in the chain, may have moved it to another model.
+- The question: compacting spends money, so with `harness-compaction-ask`
+  on, in a session that waits for the user (`harness-compaction--asks-p':
+  the setting, a session that is not non-interactive, and a
+  `question/ask'), the automatic compaction asks first
+  (`harness-compaction--ask', event `compaction/asked').  The question
+  says how full the context is against the window, and what carrying on
+  costs uncached against the cache while it lasts; its options are the
+  kinds (`harness-compaction--ask-kinds': brief, summary, transcript,
+  fresh, truncate, each with what it costs, the configured one marked
+  the default), carrying on (left out when the conversation is past the
+  window and could not be sent at all) and not now.  Its payload
+  `:compaction' has the context, the window and the usable part of it,
+  the model, what carrying on costs with and without the cache, the
+  default and the choices, for a client that draws more than the
+  question (`harness-ui-compaction-ask').  The turn waits for the
+  answer: a kind compacts as it says, carrying on sends the
+  conversation as it is, and a dismissed question holds the message,
+  with `harness-compaction--hold-reason', as not now does.  An answer
+  naming no choice asks again.  A question that cannot be asked (an
+  error, or no `question/ask') falls back to
+  `harness-compaction--effective-kind' of `harness-compaction-kind': a
+  summary or brief nobody chose is a transcript there too.  An answer
+  for a kind chooses it, with what it costs in front of the user, but a
+  summary or brief among them is still made only when the estimate says
+  its own request is cached; otherwise a transcript is written and a
+  hint says what was not made and why.  Whatever the answer, the
+  transcript says what goes first and why
+  (`harness-compaction--say': "Context nearly full: compacting into a
+  summary first, as you chose"), and the node's `:meta' `:auto' keeps
+  the choice and who made it.
+- Nobody asked: a session that never waits for the user -- a task, a
+  supervisor's worker, one whose `harness-non-interactive' is
+  set -- has no one to answer, so the compaction is made as
+  `harness-compaction-kind' says, with the hint saying that is why
+  ("as harness-compaction-kind says (nobody to ask)") -- a `summary` or
+  `brief` there is a transcript instead, since nobody chose to pay for
+  it, and a second hint says what was not made and why ("The summary
+  would read the whole conversation uncached, so it was not made:
+  transcript file instead", `harness-compaction--say-not-warm`).  A
+  client that asks about a cold cache there is left to ask as it did
+  (`harness-cowboy-ask'); what an automatic compaction may not do is
+  spend without saying so.
 - Auto, in the middle of a turn: the `agent/step` filter
   `harness-compaction--before-step` (priority 35: after a handoff's 10
   and a queued compaction's 12, so the fresh context is what it sees,
@@ -5859,8 +6007,21 @@ and tools.
   on its own side).  A turn of many tool calls, an unattended task's,
   would otherwise outgrow the window long before it ends.  The step
   waits for `compaction/compact` of `harness-compaction-kind`, asked
-  with OPTS `:meta` `(:mid-turn t)`, and goes on whether it was made
-  or failed.  `:mid-turn` is kept on the node's `:meta`: the content then
+  with OPTS `:meta` `(:mid-turn t)`, and goes on once it was made, or
+  once a transcript or a cut was made in its place.  When neither can
+  be made the step is refused (`:proceed` nil,
+  `harness-compaction--uncacheable-reason`), and the turn ends
+  `blocked`, rather than the whole conversation being sent uncached.
+  Where the user can be asked (`harness-compaction--asks-p`) it asks
+  first, as before a turn does: a kind compacts and the step goes on,
+  and the user's own answer to carry on sends the conversation as it
+  is.  A dismissed question, and the answer to hold, refuse the step
+  instead (`harness-compaction--held-step-reason`), as a compaction
+  that cannot be made does: none of them answered to pay for the whole
+  conversation.
+  The question is not put at every step: a boundary that asked, and was
+  told to carry on, counts as a try (`harness-compaction--mid-turn-due-p'),
+  so the next question waits for the cooldown.  `:mid-turn` is kept on the node's `:meta`: the content then
   ends in `harness-compaction--mid-turn-note`, telling the model the work
   it describes is not finished and to carry on without waiting for the
   user (nothing follows the compaction in what the model is sent next,
@@ -5898,7 +6059,15 @@ as it is, all of the conversation uncached, without a decision.
   the session again and goes on untouched unless `harness-cowboy-cold-p`:
   the `:cache` (see "Session") expired, the session has a head, and its
   context is at least `harness-cowboy-min-context` (0).  A session with
-  no `:cache` never is.  A cache a redaction dropped has expired from the
+  no `:cache` is cold only as a conversation nobody has sent yet
+  (`harness-cowboy--new-conversation-p`): it inherited one (`:fork-node`)
+  and its first message would send at least
+  `harness-cowboy-new-conversation-limit` (100000) tokens, so its first
+  request is a cache write of the whole thing at the price of sending
+  it -- a fork of a long session, a supervisor's worker, one
+  resumed with its history.  A conversation that starts as one usually
+  does has almost nothing to send, and is never asked about.  A cache a
+  redaction dropped has expired from the
   drop on (`:expires` is `:dropped`, see "Session"), though its provider
   would have kept it longer: the session's provider conversation went
   with the secret, and its next message would send the whole transcript
@@ -5909,14 +6078,25 @@ as it is, all of the conversation uncached, without a decision.
   in lisp/harness-carry.el, which the model switch offers too, with the
   same keys b s t f c i q and the same words): `brief`, `summary`,
   `transcript` and `fresh` compact as `compaction/compact` does, with
-  `:meta (:cowboy (:choice C :by BY))`, before the message; `carry-on`
-  sends the conversation as it is and says so in a hint; `ignore` sends
-  it as it is and adds nothing at all (no hint, no compaction, no
-  status change); `hold` stops the turn (`:proceed` nil, reason "not
-  now: …"), the message staying in the transcript to go with the next
-  one.  A summary that fails falls back to `transcript` (`:fallback` in
-  the meta), and that to `carry-on`, each said in a hint: the message
-  always goes unless held.  A hint says what went first and why ("as
+  `:meta (:cowboy (:choice C :by BY))`, before the message.  `brief` and
+  `summary` are model requests that read the whole conversation, and
+  they read it uncached: their system prompt and tool list differ from
+  the chat's (`harness-compaction--summary-request` has `:tools` nil), so
+  no cache of the chat covers them, and a small summary says nothing
+  about the size of the input it read.  `transcript` and `fresh` ask no
+  model.  `carry-on` sends the conversation as it is and says so in a
+  hint; `ignore` sends it as it is and adds nothing at all (no hint, no
+  compaction, no status change); `hold` stops the turn (`:proceed` nil,
+  reason "not now: …"), the message staying in the transcript to go with the next
+  one.  A summary or brief is made only when the estimate says its own
+  request is cached, for the model it would go to: an unasked default,
+  a user's answer and a saved "always" answer are all choices, not
+  warmth, and become a transcript with a hint saying what was not made.
+  A warm summary that fails falls back to `transcript` (`:fallback` in
+  the meta), each said in a hint.  When the transcript
+  cannot be written either -- and a cut would drop nothing -- the
+  message is held (`:proceed` nil, `harness-cowboy--uncacheable-reason`):
+  it is never sent uncached as a fallback.  A hint says what went first and why ("as
   you chose", "the default for a session that does not wait for you",
   …), except for `ignore`, which leaves no hint.  While the compaction
   runs the session is `running` with the activity `(:phase compacting)`
@@ -5967,11 +6147,12 @@ as it is, all of the conversation uncached, without a decision.
   `:after`; redo sets `:after` while they hold `:before`; else the
   decision ends `changed`, the settings left as they are.  A hint of
   the default taken unasked (BY `default`, `non-interactive`,
-  `unasked`, `cold-start`) names the decision whose `:after` the
-  settings hold now as `:decided-by` (`harness-cowboy--live-decision`).
-- Not asked, `harness-cowboy-default` goes first (`brief`, the one
-  choice that never reads the whole conversation uncached and still
-  leaves a summary).  No model judges the choice.
+  `unasked`) names the decision whose `:after` the settings hold now as
+  `:decided-by` (`harness-cowboy--live-decision`).
+- Not asked, `harness-cowboy-default` goes first (`transcript`, which
+  asks no model; `brief` and `summary` read the whole conversation
+  uncached, and `carry-on` sends it as it is).  No model judges the
+  choice.
 - `agent/cancelling` or `agent/turn-ended` while the question waits
   dismisses it; `session/deleted` lets the turn go.  A harness that
   stops while it waits loses the turn, not the message: settling the
@@ -5983,26 +6164,7 @@ as it is, all of the conversation uncached, without a decision.
 - `cowboy/asking SESSION-ID` → the id of the question the session waits
   on, or nil.  Events `cowboy/asked SID PID` and `cowboy/decided SID
   CHOICE BY`, BY one of `user`, `always`, `non-interactive`, `default`
-  (asking off), `unasked` (the question could not be asked) and
-  `cold-start` (`cowboy/compact`, below).
-- `cowboy/compact SESSION-ID &rest OPTS` → a promise.  What the gate
-  does for a session nobody is asked about, for a caller that made a
-  session whose conversation no warm cache holds, before its first turn
-  (a fork has no `:cache` of its own, so the gate never finds it cold).
-  With `harness-cowboy-min-context` above 0 and a context
-  (`compaction/estimate`) under it, it does nothing and resolves nil,
-  with no hint.  Otherwise it takes `harness-cowboy-default` (never
-  `hold`), emits `cowboy/decided SID CHOICE BY`, adds a hint (none for
-  `ignore`) and, unless the choice is `carry-on` or `ignore`, compacts
-  as the gate does (`:meta (:cowboy (:choice C :by BY))`, the
-  fallbacks included).  It does not mark the session busy: no turn is
-  running.  It resolves with the choice taken,
-  a symbol, and never rejects: an error is logged and resolves nil.
-  OPTS: `:by` SYMBOL, BY, default `cold-start`; `:why` STRING, which
-  opens the hint in place of "Prompt cache cold since HH:MM", a time a
-  session with no cache could not give (for example "No prompt cache on
-  MODEL holds the supervisor's conversation").  The hint ends "the
-  default for a session no warm cache holds (harness-cowboy-default)".
+  (asking off) and `unasked` (the question could not be asked).
 - `cowboy/default [SESSION-ID]` → `(:choice CHOICE :ask BOOL :asks BOOL
   :decision ID)`: the compaction option the user saved for a cold cache --
   `harness-cowboy-default` (never `hold`), whether the question is asked
@@ -6128,28 +6290,36 @@ nobody would be asked what goes first.
 
 - Handles `cache/pre-expire` at priority 60, when the cache is not claimed
   (the user is not around, so cache-warm did not take it) and
-  `harness-cache-precompact` is on; the session is idle and not a seed (its
-  context is shared), with no compaction, question, turn or outstanding
-  work (`agent/outstanding`); its context (the last request's) is at least
+  `harness-cache-precompact` is on (off by default); the session is idle
+  and not marked `:seed` (a legacy marker whose context is shared), with
+  no compaction, question, turn or outstanding work
+  (`agent/outstanding`); its context (the last request's) is at least
   `harness-cache-precompact-min-context` (30000) and
   `harness-cowboy-min-context`; the user's saved option (`cowboy/default`,
   which this module requires: with no cowboy module there is none) is a
-  compaction -- carry-on and ignore leave the conversation as it is; and
+  compaction -- carry-on, ignore, a transcript and a fresh start leave the
+  conversation as it is; and
   nobody would be asked: the compaction is what the cold-cache gate does,
   unasked, to the message that comes later, so a session whose user is
   asked what goes first (`:asks`: asking on, the session waits for them) is
   left alone and its question stays theirs.  Answering "always" (which
   turns asking off) or a session that never waits for the user
-  (non-interactive) is where it acts.  It claims the cache, then calls
-  `compaction/compact` with the
-  option's kind (`:idle t`, `:meta (:precompact (:choice KIND :expires T))`:
-  the chat says "before the prompt cache lapsed") -- from a hot cache a
-  summary reads at the cache price -- and holds a user message that comes
-  meanwhile (an `agent/before-turn` gate at priority 11) until it is done.
-  A failure is logged and left to the compaction's own hint.
+  (non-interactive) is where it acts.  It also requires the estimate for
+  the chosen kind (`compaction/estimate`) to say that kind's own request
+  is cached: the chat's cache, the last request and a time to live say
+  nothing about the compaction request's prefix, which has its own system
+  prompt and no tools.  The estimates the harness makes today say
+  `:cached` nil for `brief` and `summary`, so a model-written compaction
+  is not made here; `transcript` and `fresh` ask no model.  It claims the
+  cache, then calls `compaction/compact` with the option's kind
+  (`:idle t`, `:meta (:precompact (:choice KIND :expires T))`) and holds
+  a user message that comes meanwhile (an `agent/before-turn` gate at
+  priority 11) until it is done.  A failure is logged and left to the
+  compaction's own hint.
 - The note that follows (a hint, "Prompt cache about to lapse at HH:MM:
-  compacted into a brief summary, while it was still cached, so the next
-  message sends that instead of ~84.0k tokens uncached") tells of a lasting
+  compacted into a brief summary, while the compaction request's own
+  prefix was cached, so the next message sends that instead of ~84.0k
+  tokens uncached") tells of a lasting
   decision of the kind `precompact` (`:meta :decision`), `done` while the
   feature is on: [Turn off] undoes it (`harness-cache-precompact` set
   false and saved through `config/set`), [Turn on] redoes it, from any
@@ -6159,7 +6329,7 @@ nobody would be asked what goes first.
   one is kept).  The note also names, as `:decided-by`, the "always"
   decision that made the saved option the default, with its own undo and
   redo, when there is one.  The event `cache/compacted SID KIND NODE` follows.
-- Settings: `harness-cache-precompact` (on),
+- Settings: `harness-cache-precompact` (off),
   `harness-cache-precompact-min-context` (30000); section "Prompt cache"
   of the settings page with `harness-cache-warm`.
 
@@ -6332,9 +6502,10 @@ without a word in the model's conversation or prompt.
   session provider's `:simple` tier (`provider/tier-model`) a question
   that stands on its own: `:ephemeral t`, no tools, `:no-thinking t`, a
   600-token budget, one user message holding the opening message, the
-  latest one when it differs, the session's plan, the list as it stands
+  latest one when it differs, each cut to 1200 characters, the
+  session's plan (at most 600 characters), the list as it stands
   (`[x]`, `[~]`, `[ ]` lines) and the entries since the anchor, the
-  newest 10000 characters of them.  A model name asks that model the
+  newest 4000 characters of them.  A model name asks that model the
   same; nil asks the session's own model (`:session`, the conversation
   from `session/messages` with the question added to its last user
   message, the images of tool results left out) on a fork of its
@@ -8298,9 +8469,9 @@ made it is added to the scope.
     :temp :nodes :fields :record-fields :files :running :out-of-scope
     :provider :would-reset :cache-dropped :cache-would-drop :context
     :error)`: the occurrences in its node log and record
-    (`:count`), in the log, the nodes in memory, the record, the index's
-    rows, the CLI logs, the task records and the files, and the node ids
-    and field names they were in.  `:provider` is `reset`, `deferred`,
+    (`:count`), in the log, the nodes in memory, the record, what the
+    provider was sent, the index's rows, the CLI logs, the task records
+    and the files, and the node ids and field names they were in.  `:provider` is `reset`, `deferred`,
     `failed`, or `kept` for a session outside the scope that shares a
     provider conversation with one in it and whose own transcript still
     holds the secret: the conversation is left as it is, the log they
@@ -8358,7 +8529,7 @@ made it is added to the scope.
 
   | Method | Does |
   |---|---|
-  | `session/redact-text ID SECRETS &optional DRY-RUN` | cleans the node log, the nodes in memory and the text of the record (`name queue pending todos plan ext move`); → `(:id :hit :count :log-count :memory-count :record-count :nodes :kinds :fields :record-fields :file :running)`, and when something was found `:spill-files`, `:checkpoints` and `:provider-state` |
+  | `session/redact-text ID SECRETS &optional DRY-RUN` | cleans the node log, the nodes in memory, the text of the record (`name queue pending todos plan ext move`) and what the provider was sent (`replay/redact`: the responses in place, the last request dropped); → `(:id :hit :count :log-count :memory-count :record-count :payload-count :payload-files :nodes :kinds :fields :record-fields :file :running)`, and when something was found `:spill-files`, `:checkpoints` and `:provider-state` |
   | `session/reset-provider ID` | drops the provider state, `provider-node` and the `:checkpoint` of every node, in memory and in the log; signals while ID runs a turn; when `session/reset-drops-cache-p` is true it first marks the usage `:cache-dropped` with the moment, so what the reset announces already says the cache is gone; → `(:checkpoints N)`, and `:cache-dropped t` when it marked one |
   | `session/reset-drops-cache-p ID` | non-nil when `session/reset-provider` on ID would mark its prompt cache dropped now: the session reports a cache (a stamp and a context above 0), its model is a hosted loop (`provider/capabilities` says `:hosted-loop`) and no reset marked it since the last request that stamped one; changes nothing; signals for a session that does not exist |
   | `session/family-ids ID` | ID and the sessions whose parent chain reaches it, oldest first |
@@ -9438,7 +9609,7 @@ and a message for the echo area.  Only the user calls it.
   `mundane` and `standard`, to a model id or a plist `(:model ID
   :thinking LEVEL)`, either key left out to keep the default),
   `harness-supervisor-step-budget` (30) and
-  `harness-supervisor-fork-limit` (tokens, 20000; nil for no limit), in
+  `harness-supervisor-fork-limit` (tokens, 10000; nil for no limit), in
   the settings section "Supervisor mode".  The thinking levels are the
   tiers' own, in the providers' tier settings (section "Model tiers":
   see provider).
@@ -9619,31 +9790,28 @@ and a message for the echo area.  Only the user calls it.
   the thinking level is the step's `:thinking`, else the supervisor's
   own, fitted to the worker's model
   (`harness-supervisor--worker-thinking`).  A fork step forks the
-  supervisor (`session/fork`) at the plan's `:node` and `:call-id`,
-  through `seed/fork` when the plan has two or more fork steps on the
-  step's model, so that the context is written to that model's cache
-  once, and is given the thinking level as `:thinking` when it differs
-  from the supervisor's, so that a raised supervisor level is not
-  inherited.  How a fork step's worker is made also depends on the size
-  of the conversation and on the attempt (the next two bullets).
+  supervisor (`session/fork`) at the plan's `:node` and `:call-id`, only
+  while the conversation it inherits is at or under
+  `harness-supervisor-fork-limit` (below).  It is given the thinking
+  level as `:thinking` when it differs from the supervisor's, so that a
+  raised supervisor level is not inherited.
   The worker gets one `agent/prompt`, from the supervisor session, of
-  these parts in this order: the `:preamble` of `seed/fork`; an opening
-  (a fresh worker is told that it starts without the supervisor's
-  conversation, a fork that it is a worker now; both that other workers
-  may run at the same time in the same working tree, so it keeps to its
-  step's files); the plan's summary ("## The plan"); the step; the
-  plan's other steps, a line each in the form `- ID: TITLE (after A,
-  B)`, leaving out the step itself and any that a later plan superseded
-  ("## The other steps"); the attempt before it when the step starts
-  again (below); what the steps before it reported (each cut to 2000
-  characters); and a closing that asks for a short report of what
-  changed, how it was checked and anything the other steps need to know.
-  The summary and the other steps go to a worker with no `submit_plan`
-  call in its conversation, a fresh one or a fork compacted before its
-  first turn; a fork that inherits the whole conversation has the call,
-  which holds both, and gets neither.  So the supervisor writes what the
-  steps share once, in the summary: the approach, the interfaces, names
-  and data shapes, and which step makes each.  Workers carry no
+  these parts in this order: an opening (a fresh worker is told that it
+  starts without the supervisor's conversation, a fork that it is a
+  worker now; both that other workers may run at the same time in the
+  same working tree, so it keeps to its step's files); the plan's
+  summary ("## The plan"); the step; the plan's other steps, a line
+  each in the form `- ID: TITLE (after A, B)`, leaving out the step
+  itself and any that a later plan superseded ("## The other steps");
+  the attempt before it when the step starts again (below); what the
+  steps before it reported (each cut to 2000 characters); and a closing
+  that asks for a short report of what changed, how it was checked and
+  anything the other steps need to know.  The summary and the other
+  steps go to a fresh worker, which has no `submit_plan` call in its
+  conversation; a fork has the whole conversation up to the call, which
+  holds both, and gets neither.  So the supervisor writes what the steps
+  share once, in the summary: the approach, the interfaces, names and
+  data shapes, and which step makes each.  Workers carry no
   `:supervisor`: they have every tool.  A worker's turn ending
   `end-turn` or `max-tokens` makes the step done; any other end, or no
   worker, makes it failed.
@@ -9654,7 +9822,7 @@ and a message for the echo area.  Only the user calls it.
   after it reads it again; with a long supervisor conversation and
   several workers that was most of a plan's cost, which is why a step is
   fresh by default.  A fork step is allowed only while the conversation
-  is short.  `harness-supervisor--conversation-tokens SESSION-ID`
+  is small.  `harness-supervisor--conversation-tokens SESSION-ID`
   estimates it from the transcript, the text the provider is sent
   (`session/messages`), at about four characters a token
   (`harness-estimate-tokens`); a tool call counts by its input and a
@@ -9662,51 +9830,33 @@ and a message for the echo area.  Only the user calls it.
   and the tools, which a fresh worker has too, and the thinking, whose
   signatures tie it to the supervisor's model.  `submit_plan` measures it
   when a step is a fork, before the plan or a hint joins the transcript.
-  Past `harness-supervisor-fork-limit` (nil is no limit)
-  `harness-supervisor--fork-problems` refuses the plan with one problem
-  that names the fork steps, the size and the limit and tells the
-  supervisor to make them fresh and to put what the workers need in the
-  summary and their prompts.  An accepted plan with a fork step keeps the
-  estimate as `:fork-tokens`.  A fork step whose plan is past the limit
-  all the same, because it was made before the limit existed or the limit
-  was lowered since (`harness-supervisor--fork-tokens` reads the plan's
-  estimate, or measures the conversation as it is now for a plan stored
-  without one), is neither forked whole nor forked through a seed, on its
-  first attempt as on any other: the worker is a `session/fork` onto the
-  model, compacted before its first turn as a step that starts again with
-  no warm seed is (below, `harness-supervisor--compact-fork`).  This
-  branch of `harness-supervisor--make-worker` comes before the one for a
-  step that starts again.
+  Past `harness-supervisor-fork-limit`, 10000 tokens by default (nil is
+  no limit), `harness-supervisor--fork-problems` refuses the plan with
+  one problem that names the fork steps, the size and the limit and
+  tells the supervisor to make them fresh and to put what the workers
+  need in the summary and their prompts; an estimate that cannot be made
+  is refused the same way, since how much a fork would send uncached is
+  unknown.  An accepted plan with a fork step keeps the estimate as
+  `:fork-tokens`.  A fork step whose plan is past the limit all the same,
+  because it was made before the limit existed or the limit was lowered
+  since (`harness-supervisor--fork-tokens` reads the plan's estimate, or
+  measures the conversation as it is now for a plan stored without one),
+  fails before a fork or a request is made, on its first attempt as on
+  any other.  It is not compacted into a summary first: a compaction
+  request has a system prompt and a tool list of its own, so no cache of
+  the chat covers it, and it reads the whole conversation cold before
+  writing its small summary -- often more than the turn it would save.
+  The way out is a fresh step, whose brief is the plan's summary and its
+  own prompt, never the conversation.
 - A step that starts again (`:attempts` above 1: `retry_step`, perhaps
   on a higher tier, or an interrupted, failed or cancelled step run
-  again) decides a fork worker's context by the cache; a fresh step that
-  starts again is a `session/create` like the first time, with the
-  attempt before it in its message.  A fork never shares its parent's
-  cache, a higher tier is a model that never read the plan's
-  conversation, and a new fork has no `:cache`, so the cowboy's gate
-  never finds it cold: forking the supervisor as a first attempt does
-  would send all of it uncached at that model's price.  With
-  `seed/warm-p` holding for (the supervisor, the plan's `:node`, the
-  step's model), a seed whose cache is warm or which a turn is warming,
-  the worker forks through `seed/fork` as above.  Otherwise it is a
-  `session/fork` onto the model, compacted before its first turn:
-  `cowboy/compact` on the fork (`:why` "No prompt cache on MODEL holds the
-  supervisor's conversation", `:by cold-start`; the cowboy's default, a
-  brief summary unless the user chose otherwise); with no cowboy,
-  `compaction/compact` `:kind brief` and a hint on the fork; with no
-  compaction, the whole conversation and a hint.  A compaction that fails
-  fails nothing.  The worker plist that `worker-made` gets then has
-  `:context-cache` `seed`, `compacted` (and `:compaction`, the kind of
-  node the fork wrote) or `whole`, plus `:fork-limit` t when the fork
-  limit sent it here, and the supervisor a hint naming the
-  step, attempt, model and which it was ("Step s2 (attempt 2) on M:
-  forked from the warm shared context", "…no warm prompt cache holds the
-  plan's conversation, so its worker starts from a brief summary of it
-  rather than reading it all uncached", "…and it was not compacted, so
-  its worker reads it all uncached"; for the fork limit "…the plan's
-  conversation is past harness-supervisor-fork-limit, so its worker
-  starts from a brief summary of it rather than inheriting all of it").
-  First attempts within the fork limit and fresh steps are unchanged.
+  again) follows the same rule: a fresh step is a `session/create` like
+  the first time, with the attempt before it in its message; a fork step
+  forks only a conversation at or under the limit, and fails before a
+  worker exists when it is past it or cannot be measured.  No compaction
+  stands in for the fork, for the reason above.  What a retry inherits is
+  bounded by the limit, and it writes that much into its model's cache
+  once.
 - The attempt before.  Before it wipes `:session` and `:error`, a step
   that starts again keeps its worker in `:previous`, when it had one, with
   the model the worker ran on: its session's, else `:worker-model`.  The
@@ -9782,76 +9932,28 @@ and a message for the echo area.  Only the user calls it.
   `task/changed`, `agent/turn-started`, `agent/tool-call`,
   `tools/finished`, `agent/turn-ended` and `session/deleted`.
 
-### seed
+### Shared seeds (removed)
 
-Seed sessions (module `seed`, requires `session`, `agent`): forks onto a
-model that share one warm prompt cache.  A provider's cache serves only
-the model that wrote it and only a request that starts with the very
-prefix the writing request had, the tools, then the system prompt, then
-the messages, word for word.  Forking a long session onto a cheaper
-model makes each fork write the whole context into that model's cache,
-and two forks never share a prefix, since a session's system prompt
-names its own working and temporary directories.
-
-- `seed/fork SOURCE-ID MODEL &rest PLIST` → promise of the new fork's
-  session plist plus `:seed`, the id of the seed it was forked from, and
-  `:preamble`, a string or nil.  PLIST: `:node` (default SOURCE-ID's head;
-  the seed, and so the cache, belongs to (SOURCE-ID, NODE, MODEL), so a
-  caller forking one turn several times gives the same node each time,
-  the head moving), `:call-id` (as for `session/fork`), `:seed-name`
-  (default "Shared context for SOURCE (MODEL)") and any `session/fork`
-  key of the fork (`:name :cwd :worktree :kind`, default `subagent`,
-  `:id`…); a nil MODEL is SOURCE-ID's own.  The steps: find or make the
-  seed, a `subagent` fork of SOURCE-ID at NODE onto MODEL that is sent
-  `harness-seed-prime-message` and whose turn is waited for; warm it,
-  sending `harness-seed-warm-message` when `session/get` gives it no
-  `:cache` or one that lapses within `harness-seed-warm-margin` (30)
-  seconds; fork the seed at its head with PLIST.  Calls for one key at
-  the same time share the first two steps.  A seed turn that does not end
-  well, or a fork that cannot be made, rejects the promise, and the
-  caller may fork SOURCE-ID directly; errors of the call itself reject
-  it too, since it always returns a promise.
-- Frozen prompts.  The sync filter `agent/system-prompt` (1000, after
-  every other section) records each seed's final prompt, and a fork made
-  here sends it, as it was when the fork was made, in place of the one it
-  would assemble.  It names the seed's directories, so `:preamble` is a
-  text for the fork's first message that names the fork's own (nil when
-  nothing differs).  The records are in memory only: after a restart a
-  resumed fork assembles its own prompt, which is right, just uncached,
-  and the next call makes a new seed.
-- The seed's messages are the harness's (sender "seed") and leave the
-  seed as it is, its transcript being the prefix the forks share and its
-  model the one whose cache they read: the `agent/before-turn` stage at
-  5 sends such a message through the stages from 21 on only, leaving out
-  the ones that would change either, fallback and handoff (10), the
-  cold-cache question (cowboy, 15) and compaction (20).  The budgets
-  (from 30) still apply.
-- `seed/warm-p SOURCE-ID MODEL &optional NODE` → the id of the seed or
-  nil: whether `seed/fork` for (SOURCE-ID, NODE, MODEL) would find the
-  shared context in a cache that lasts.  Non-nil when a known seed
-  exists for the three, running on MODEL, and either its cache is warm
-  (not gone, and not lapsing within `harness-seed-warm-margin`) or it
-  runs a turn now, being primed or warmed, which a fork waits for.  NODE
-  nil is SOURCE-ID's head and MODEL nil its own model, as for
-  `seed/fork`.  It only reads: no seed is made, primed or warmed, and
-  none forgotten but a stale one that the lookup drops as `seed/fork`
-  would; it never signals, an error being nil.  A caller that can do
-  without a seed asks it to choose between forking through the seed and
-  compacting a fork (the supervisor, for a fork step that starts again).
-- `seed/list &optional SOURCE-ID` → seeds, newest first, `(:id :source
-  :node :model :cache)`, for diagnostics and the UI; kept in memory, so
-  one made before a restart is not listed, though its session remains.
-- A seed is an ordinary session of kind `subagent`, in the session list
-  and readable, deleted with `session/delete`; nothing deletes one.  Its
-  forks are children of the seed, not of SOURCE-ID, so whatever is keyed
-  on `:parent-id` (the merge queue, say) sees the seed as their parent.
-  Its record carries `:seed t` in its `:ext` (set with `session/set-ext`
-  when the seed is made), which goes to every client with the record:
-  the UI reads it with `harness-ui-seed-session-p` and
-  `harness-ui-navigable-session-p`, and leaves seeds out of navigation
-  (the header's link to the parent, `harness-open-latest-session`, the
-  session pickers).  The supervisor module forks the workers of its fork
-  steps this way, when a plan has two or more on one model.
+There is no seed module.  The harness does not prime one session's
+conversation on a model so that forks of it could read a shared prompt
+cache; it was removed for want of evidence that a real provider reads
+the cache it writes, and because a seed that misses writes the whole
+context again for every reader, which is the cost it was meant to save.
+Measured on this account: of 73 ChatGPT forks, 73 first requests read 0
+cached tokens (5.8M tokens); of the historical seeded workers on
+DeepSeek whose seed had a same-model usage record in the preceding five
+minutes, 25 of 48 first requests read 0 cached tokens on Flash and 16 of
+23 on v4-pro.  The tests established only that the rendered requests
+shared a prefix, which is necessary and not sufficient: a provider
+keeps a cache on one machine and may route the next request elsewhere,
+and a demo provider that reports cache writes is not evidence of a
+cached read.  The supervisor's fork steps are bounded by
+`harness-supervisor-fork-limit` instead, and a fresh step is the
+fallback; nothing in the supervisor compacts a cold conversation into a
+summary, because the compaction request has a different prefix and
+reads it uncached too (see the supervisor and cowboy sections).  Legacy
+sessions marked `:seed` in their `:ext` are still recognised by the UI
+and kept out of navigation.
 
 ### mcp
 
@@ -9958,7 +10060,7 @@ TRAMP prefixes come from the session host):
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`; describes the session and its live access: effective permission mode and non-interactive state, network, writing, writable and read-only directories with their sources, tools turned off, Linux capabilities, and the standing rules that apply) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
-| `spawn_agent` | Sub-agent | prompt, fork, model, thinking, name, cwd, worktree, priority (of the child's session: low/medium/high; default: what it inherits) | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
+| `spawn_agent` | Sub-agent | prompt, model, thinking, name, cwd, worktree, priority (of the child's session: low/medium/high; default: what it inherits) | meta (runs the child in the background and returns at once; the child starts fresh, from its prompt alone, and a call that asks for a fork is refused; the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit (a session's priority is shown in its line when it is not medium) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, mode (text/literal/regexp/semantic), regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -10057,9 +10159,12 @@ before that is not asked.
 `compact` (`tools-compact`) lets an agent compact its own conversation
 when it sees the context filling up mid-task, and lets the harness ask
 for one the same way: the handler calls the core `compaction/compact`
-with OPTS `:kind` (`harness-compaction-kinds`: summary (the default),
-brief, transcript, fresh or truncate), `:reason` (kept on the node's
-`:meta`) and `:mode` for what a running turn means.  `queue`, the
+with OPTS `:kind` (`harness-compaction-kinds`: transcript (the default),
+summary, brief, fresh or truncate), `:reason` (kept on the node's
+`:meta`) and `:mode` for what a running turn means.  A summary or brief
+reads the whole conversation uncached and is made only when the estimate
+says its own request is cached; the tool is the agent's, not the user's,
+so it is made as a transcript instead, and the result says so.  `queue`, the
 default, registers the compaction for the turn's next boundary and lets
 the turn go on; `interrupt` cancels the running turn first
 (`agent/cancel`) and compacts as soon as it is over, losing the step in
@@ -10323,13 +10428,10 @@ started it").  `spawn_agent` adds it to the child's transcript with
 `session/hint`, once the child exists and before its first message; a
 hint that cannot be added is logged and does not fail the sub-agent.
 The supervisor's workers get the same hint once the worker exists
-(`harness-supervisor--limit-hint`).  A fork worker compacted before its
-first turn (a fork step that starts again with no warm seed, or whose
-plan is past `harness-supervisor-fork-limit`) starts with far less than
-the supervisor holds, so its limit is fitted first: the cap
-plus the context `compaction/estimate` gives the compacted fork
-(`harness-tools-agent-context-limit SUPERVISOR t CONTEXT`), set with
-`session/update` `:silent t`, as the hint that follows says it.
+(`harness-supervisor--limit-hint`).  A fork is never compacted to make
+one fit: the limit is the supervisor's context plus the cap, and a step
+whose plan is past `harness-supervisor-fork-limit` fails before a
+worker exists, a fresh step the way on.
 
 A sub-agent's thinking level starts from its parent's: `spawn_agent`
 passes it to `session/create`, and `session/fork` inherits it, so a
@@ -11538,7 +11640,7 @@ Extension methods: any bus method whose name starts with `session/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`,
 `project/`, `task/`, `plugins/`, `search/`, `notification/`, `sandbox/status`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `acp/remote-`,
-`pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
+`pet/`, `version/`, `insights/`, `supervisor/`, `priority/`,
 `secrets/`, `commit-msg/`, `patch-review/`, `tool-slots/`, `cache/`, `todo-sync/`,
 `event-watch/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
@@ -11552,8 +11654,7 @@ of the harness, as `harness-describe-modules` lists them.  The
 supervisor module's methods are `_harness/supervisor/set {sessionId, on}`
 (the UI's `harness-toggle-supervisor`), `.../set-all {on, filter}` (the
 UI's `harness-set-supervisor-all`, the menu's V, for every governed
-session at once), `.../get` and `.../active-p`,
-and the seed module's `_harness/seed/fork` and `.../list`.
+session at once), `.../get` and `.../active-p`.
 
 The methods under `secrets/` (see secrets and redact) take secrets: as
 references to where they can be read, which any client may send.  Their
@@ -12547,6 +12648,15 @@ option as on any question; answers go through
 `harness-ui-pending-answer-question` (`harness-ui-cowboy-answer`), and
 text typed in the box answers it too.  Without a `:cowboy` the ordinary
 question panel shows.
+The question before an automatic compaction (`harness-ui-compaction-ask`,
+module `ui-compaction-ask`) is that panel too, from the question's
+`:compaction': "Context nearly full", the context against the window and
+the model, a row for what carrying on costs uncached against the cache
+while it lasts, and the kinds with what each costs, the configured one
+marked the default.  Its keys are the choices' (b, s, t, f, x for the
+cut, c, q), there is no capitals line -- every automatic compaction is
+the user's to decide -- and its footer points at session_history.
+Without a `:compaction` the ordinary question panel shows.
 The question of a model switch (`harness-ui-handoff`, module `ui-handoff`)
 is the same panel with a local question: a spec made whenever the panel
 is drawn, so what the cache means for the summary is true as of then,
@@ -15508,7 +15618,11 @@ while the cache is kept warm, the user's activity reported to the
 harness, `/warm`; see "Chat buffer"), the cold-cache question
 (`harness-ui-cowboy`: what asks what goes first when a
 message meets a cold cache, in that panel, through
-`harness-ui-pending-panel-functions`; see "Chat buffer"), compacting by hand
+`harness-ui-pending-panel-functions`; see "Chat buffer"), the question
+before an automatic compaction (`harness-ui-compaction-ask`: the same
+panel for a context near its window, its heading the context against
+the window, its rows what carrying on costs against the cache, no
+"always"; see "Chat buffer"), compacting by hand
 (`harness-ui-compact`: `harness-compact`, `C-c h C` and "C" in the
 menu, asks which kind with `read-multiple-choice`, the help buffer a
 table of each kind's writer, cost and effect and what carrying on

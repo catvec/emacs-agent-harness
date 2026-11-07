@@ -247,7 +247,7 @@ of the supervisor's own for them any more."
   (should (eq 'auto (eval (car (get 'harness-supervisor-judge-model 'standard-value)) t)))
   (should (null (eval (car (get 'harness-supervisor-tiers 'standard-value)) t)))
   (should (= 30 (eval (car (get 'harness-supervisor-step-budget 'standard-value)) t)))
-  (should (= 20000 (eval (car (get 'harness-supervisor-fork-limit 'standard-value)) t)))
+  (should (= 10000 (eval (car (get 'harness-supervisor-fork-limit 'standard-value)) t)))
   (dolist (gone '(harness-supervisor-thinking harness-supervisor-worker-thinking))
     (should-not (get gone 'standard-value)))
   ;; The mode is a choice of three: judge, always supervise, always hands-on.

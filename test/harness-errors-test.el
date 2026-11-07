@@ -275,12 +275,15 @@ are there to filter on."
         (should (string-search (harness-error-details-path) (plist-get result :content)))))))
 
 (ert-deftest harness-errors-system-prompt-names-the-file ()
-  "The agent is told the details file exists and that it needs permission."
+  "The agent is told the details file exists and that it needs permission.
+The prompt names no path: it is the same words in every run of the
+harness, so a session resumed after a restart still sends the same
+prompt, and the provider's cache still serves it."
   (require 'harness-agent)
   (let ((prompt (harness-agent--system-prompt
                  (list :id "session-prompt" :cwd "/tmp" :model "model" :project "/tmp"))))
     (should (string-search "Harness errors:" prompt))
-    (should (string-search (harness-error-details-path) prompt))
+    (should-not (string-search (harness-error-details-path) prompt))
     (should (string-match-p "cannot read that file by default" prompt))
     (should (string-search "read_harness_errors" prompt))))
 

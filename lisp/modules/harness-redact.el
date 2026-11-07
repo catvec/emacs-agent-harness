@@ -303,9 +303,9 @@ files', and the others hold compiled code, recordings and pictures.")
 (defun harness-redact-entry (run sid)
   "Return the entry RUN keeps for session SID, a plist, or nil.
 An entry says what was found in the stores of a session and what was
-done: `:log', `:memory', `:record', `:search', `:claude', `:copilot' and
-`:tasks' count occurrences (rows, for the index), `:nodes', `:fields'
-and `:record-fields' say where in the transcript and the record,
+done: `:log', `:memory', `:record', `:payload', `:search', `:claude',
+`:copilot' and `:tasks' count occurrences (rows, for the index), `:nodes',
+`:fields' and `:record-fields' say where in the transcript and the record,
 `:files' which files, `:provider' what happened to the provider
 conversation, `:error' what could not be done.  `:provider-target' says
 the session's provider conversation held the secret and starts over.
@@ -690,6 +690,8 @@ comes with it, as `:secret-counts': conses of a fingerprint and a count."
     (put :log (plist-get result :log-count))
     (put :memory (plist-get result :memory-count))
     (put :record (plist-get result :record-count))
+    (put :payload (plist-get result :payload-count))
+    (put :payload-files (plist-get result :payload-files))
     (put :nodes (plist-get result :nodes))
     (put :kinds (plist-get result :kinds))
     (put :fields (plist-get result :fields))
@@ -1716,7 +1718,7 @@ so what is there is what those rows are."
   "Non-nil when session SID changed in RUN, or had its provider reset."
   (let ((entry (harness-redact-entry run sid)))
     (or (cl-some (lambda (key) (> (or (plist-get entry key) 0) 0))
-                 (append '(:log :memory :record :search :claude :copilot :tasks)
+                 (append '(:log :memory :record :payload :search :claude :copilot :tasks)
                          (mapcar #'car harness-redact--file-counts)))
         (memq (plist-get entry :provider) '(reset deferred failed)))))
 
@@ -1728,6 +1730,8 @@ so what is there is what those rows are."
                        (and (> (or (plist-get entry :record) 0) 0)
                             (list (expand-file-name (format "sessions/%s.json" sid)
                                                     harness-state-directory)))
+                       (and (> (or (plist-get entry :payload) 0) 0)
+                            (plist-get entry :payload-files))
                        (plist-get entry :files)
                        nil)))))
 
@@ -1767,6 +1771,7 @@ them."
            :counts (append (list :log (harness-redact--count run sid :log)
                                  :memory (harness-redact--count run sid :memory)
                                  :record (harness-redact--count run sid :record)
+                                 :payload (harness-redact--count run sid :payload)
                                  :search (harness-redact--count run sid :search)
                                  :cli (+ (harness-redact--count run sid :claude)
                                          (harness-redact--count run sid :copilot))
@@ -1783,6 +1788,7 @@ them."
   (let ((parts nil)
         (log (harness-redact--count run sid :log))
         (record (harness-redact--count run sid :record))
+        (payload (harness-redact--count run sid :payload))
         (search (harness-redact--count run sid :search))
         (claude (harness-redact--count run sid :claude))
         (copilot (harness-redact--count run sid :copilot))
@@ -1792,6 +1798,8 @@ them."
                     (harness-redact--n (length (plist-get (harness-redact-entry run sid) :nodes)) "node"))
             parts))
     (when (> record 0) (push (format "%s in the session record" (harness-redact--n record "occurrence")) parts))
+    (when (> payload 0)
+      (push (format "%s in what the provider was sent" (harness-redact--n payload "occurrence")) parts))
     (when (> search 0) (push (format "%s in the search index" (harness-redact--n search "row")) parts))
     (when (> claude 0) (push (format "%s in the Claude Code log" (harness-redact--n claude "occurrence")) parts))
     (when (> copilot 0) (push (format "%s in the Copilot log" (harness-redact--n copilot "occurrence")) parts))
@@ -1907,10 +1915,12 @@ tokens of context the prompt cache of such a session holds."
                        (truncate-string-to-width (car (harness-redaction-string (plist-get session :name) secrets))
                                                  80 nil nil "…"))
             :project (plist-get session :project)
-            :count (+ (harness-redact--count run sid :log) (harness-redact--count run sid :record))
+            :count (+ (harness-redact--count run sid :log) (harness-redact--count run sid :record)
+                      (harness-redact--count run sid :payload))
             :log (harness-redact--count run sid :log)
             :memory (harness-redact--count run sid :memory)
             :record (harness-redact--count run sid :record)
+            :payload (harness-redact--count run sid :payload)
             :search (harness-redact--count run sid :search)
             :claude (harness-redact--count run sid :claude)
             :copilot (harness-redact--count run sid :copilot)
@@ -1951,6 +1961,10 @@ tokens of context the prompt cache of such a session holds."
               (when (> (plist-get report :record) 0)
                 (push (format "%s in the record (%s)" (harness-redact--n (plist-get report :record) "occurrence")
                               (mapconcat #'identity (plist-get report :record-fields) ", "))
+                      parts))
+              (when (> (plist-get report :payload) 0)
+                (push (format "%s in what the provider was sent"
+                              (harness-redact--n (plist-get report :payload) "occurrence"))
                       parts))
               (when (> (plist-get report :search) 0)
                 (push (format "%s in the search index" (harness-redact--n (plist-get report :search) "row")) parts))
@@ -2214,7 +2228,8 @@ scope of RUN, the request that is verified
                                    (harness-redact-run-order again)))))
       (push (list :store "node logs" :count (sum :log)) rows)
       (push (list :store "nodes in memory" :count (sum :memory)) rows)
-      (push (list :store "session records" :count (sum :record)) rows))
+      (push (list :store "session records" :count (sum :record)) rows)
+      (push (list :store "what the provider was sent" :count (sum :payload)) rows))
     (dolist (store (reverse (harness-redact-run-stores again)))
       (let ((files (cl-remove-if-not (lambda (f) (> (or (plist-get f :count) 0) 0))
                                      (plist-get store :files))))
@@ -2335,7 +2350,8 @@ for the values of the secrets before it is returned."
          (totals (append
                   (list (list :store "node logs" :count (funcall sum :log))
                         (list :store "nodes in memory" :count (funcall sum :memory))
-                        (list :store "session records" :count (funcall sum :record)))
+                        (list :store "session records" :count (funcall sum :record))
+                        (list :store "what the provider was sent" :count (funcall sum :payload)))
                   (mapcar (lambda (store)
                             (list :store (plist-get store :store)
                                   :count (or (plist-get store :count) (plist-get store :rows) 0)))
@@ -2523,10 +2539,12 @@ The report is (:mode :secrets ((:label :fingerprint :source) ...)
 :deferred IDS :errors STRINGS :remaining STRINGS :complete BOOL
 :verification V :text TEXT).
 SESSIONS lists the sessions with something found or changed, each (:id
-:name :project :count :log :memory :record :search :claude :copilot
-:tasks :nodes :fields :record-fields :files :running :provider
+:name :project :count :log :memory :record :payload :search :claude
+:copilot :tasks :nodes :fields :record-fields :files :running :provider
 :would-reset :cache-dropped :cache-would-drop :context :error);
-:count is the occurrences in its node log and record.  `:cache-dropped'
+:count is the occurrences in its node log, record and what the provider
+was sent (`:payload', the responses replayed from and the last
+request).  `:cache-dropped'
 is t on a session whose reset dropped its prompt cache.  In a scan,
 `:would-reset' is t on a session whose provider conversation a
 redaction would start over, and `:cache-would-drop' on one whose

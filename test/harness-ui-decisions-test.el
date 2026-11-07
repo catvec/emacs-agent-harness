@@ -289,7 +289,7 @@ off, with a tooltip that says what a click does.  Every other kind keeps
 a switch's notes keep their text when it is off."
   (harness-ui-decisions-test-with
     (let ((sent nil)
-          (text "Compacting a conversation just before its prompt cache lapses, while it is still cached"))
+          (text "Compacting a conversation just before its prompt cache lapses, when the compaction request's own prefix is cached"))
       (dolist (d (list (list :id "d-on" :kind "precompact" :state "done" :text text)
                        (list :id "d-off" :kind "precompact" :state "undone" :text text)
                        (list :id "d-end" :kind "precompact" :state "changed" :text text)

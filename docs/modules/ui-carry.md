@@ -6,9 +6,9 @@ The panel that asks how to carry a conversation over: a cold prompt cache, a mod
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-carry.el](../../lisp/ui/harness-ui-carry.el)
-- **Loaded:** when enabled (see `harness-enable-modules`)
+- **Loaded:** by default
 - **Requires:** [ui](ui.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md)
-- **Required by:** [ui-cowboy](ui-cowboy.md), [ui-handoff](ui-handoff.md)
+- **Required by:** [ui-compaction-ask](ui-compaction-ask.md), [ui-cowboy](ui-cowboy.md), [ui-handoff](ui-handoff.md)
 
 ## About
 

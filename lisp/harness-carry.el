@@ -40,9 +40,9 @@
 
 (defconst harness-carry-ways
   '((brief :key ?b :label "Brief summary"
-           :what "narrative, tool calls in brief · first and last messages kept")
+           :what "narrative, tool calls in brief · read uncached · first and last messages kept")
     (summary :key ?s :label "Summary"
-             :what "whole conversation · first and last messages kept")
+             :what "whole conversation · read uncached · first and last messages kept")
     (transcript :key ?t :label "Transcript file"
                 :what "whole conversation as a file the model reads")
     (fresh :key ?f :label "Start afresh"

@@ -79,10 +79,13 @@ ordinary question with its options.
 A session that never waits for the user (`harness-non-interactive`) is
 not asked, and neither is any session once asking is off: no judge
 model weighs the choices, the default is taken.  The default default
-is the brief summary, the one choice that never pays for the whole
-conversation uncached and still leaves the model a summary to go on.
-A summary that cannot be made falls back to the transcript, and that
-to carrying on: the message always goes, unless held.
+is the transcript file: it asks no model, so it cannot send the whole
+conversation uncached.  A summary, `brief` or `summary`, does: it
+reads the whole conversation on a request of its own, whose system
+prompt and tool list no cache of the conversation holds, and its small
+output does not make that input small.  A summary that cannot be made
+falls back to the transcript, and that to carrying on: the message
+always goes, unless held.
 
 The message waiting for the answer is not in the transcript yet: the
 turn appends it once the gate settles, after the compaction (see
@@ -107,38 +110,24 @@ waits with the turn (`agent/hold`) and goes after the compaction, the
 turn's own message first, rather than steering it: recorded at once it
 would lie before the compaction node, where the model never reads it.
 
-The gate only sees a session whose own `:cache` lapsed.  A session
-made from another -- the supervisor's worker, a fork of the
-supervisor's whole conversation onto a model that has never read it
-(harness-supervisor.el) -- has no `:cache` at all, so it is never
-cold, and its first turn would send the whole conversation uncached
-with nobody asked.  `cowboy/compact` is the gate's unasked path for
-such a caller, before the session's first turn: it takes
-`harness-cowboy-default` (never `hold`, and nothing when the context
-is under `harness-cowboy-min-context`), says so in a hint, compacts as
-the gate does -- with the same fallbacks -- and resolves with the
-choice taken.  It never rejects, so the caller can always go on.  It
-records its decision as `cold-start` by default and, with `:why`,
-opens its hint with the caller's reason in place of the clock.
-
 ## Provides
 
 ### Methods
 
 - `cowboy/asking` (session-id) — Return the id of the cold-cache question SESSION-ID waits on, or nil.
-- `cowboy/compact` (session-id &rest opts) — Compact SESSION-ID, unasked, before its first turn; promise the choice.
 - `cowboy/default` (&optional session-id) — Return what goes first, unasked, when a session's prompt cache is cold.
 
 ### Events
 
 - `cowboy/asked` — (SESSION-ID PENDING-ID) after asking what goes first in a session whose prompt cache went cold.
-- `cowboy/decided` — (SESSION-ID CHOICE BY) once what goes first is decided: CHOICE one of `harness-cowboy-choices`, BY `user`, `always` (the answer made it the default), `non-interactive`, `default` (asking is off), `unasked` (the question could not be asked) or `cold-start` (`cowboy/compact`, for a session no warm cache holds; its caller may name another BY).
+- `cowboy/decided` — (SESSION-ID CHOICE BY) once what goes first is decided: CHOICE one of `harness-cowboy-choices`, BY `user`, `always` (the answer made it the default), `non-interactive`, `default` (asking is off) or `unasked` (the question could not be asked).
 
 ### Options
 
 - `harness-cowboy-ask` — Non-nil to ask what goes first when a message meets a cold prompt cache.
 - `harness-cowboy-default` — What a message to a session whose prompt cache went cold does first, unasked.
 - `harness-cowboy-min-context` — Smallest context, in tokens, whose cold prompt cache is worth a question.
+- `harness-cowboy-new-conversation-limit` — Most tokens of context a conversation may start with, a cache bomb unasked.
 
 ## Uses
 

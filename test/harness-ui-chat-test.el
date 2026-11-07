@@ -5743,7 +5743,9 @@ message does, the model answers it, and nothing is queued."
            (waits "Compacting the conversation.*1 message waits: “and now the lexer”"))
       (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
       (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
-      (let ((compaction (harness-call 'compaction/compact sid '(:kind "summary" :idle t))))
+      (let ((compaction (cl-letf (((symbol-function 'harness-compaction-request-warm-p)
+                                   (lambda (&rest _) t)))
+                          (harness-call 'compaction/compact sid '(:kind "summary" :idle t)))))
         (harness-ui-chat-test-type buf "and now the lexer")
         (with-current-buffer buf (harness-chat-send))
         ;; The line says what the session does, and what waits for it.
@@ -5806,7 +5808,9 @@ cancelled, and nothing of either reaches the model."
            (buf (harness-ui-chat-test-open sid)))
       (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
       (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
-      (let ((compaction (harness-call 'compaction/compact sid '(:kind "summary" :idle t))))
+      (let ((compaction (cl-letf (((symbol-function 'harness-compaction-request-warm-p)
+                                   (lambda (&rest _) t)))
+                          (harness-call 'compaction/compact sid '(:kind "summary" :idle t)))))
         (harness-ui-chat-test-type buf "and now the lexer")
         (with-current-buffer buf (harness-chat-send))
         (harness-test-wait (lambda () (harness-ui-chat-test-waiting-texts buf)) 5 "the first message shown")
@@ -7001,7 +7005,7 @@ and the two follow their own decisions."
            (saved (plist-get (harness-call 'decision/record 'test sid "Always testing"
                                            '(:before before :after after))
                              :id))
-           (text "Compacting a conversation just before its prompt cache lapses, while it is still cached")
+           (text "Compacting a conversation just before its prompt cache lapses, when the compaction request's own prefix is cached")
            (id (plist-get (harness-call 'decision/record 'precompact sid text
                                         '(:before (:enabled :false) :after (:enabled t)))
                           :id))
@@ -7455,7 +7459,9 @@ undone, [redo].  Another hint has no buttons."
 (defun harness-ui-chat-test-compact (sid)
   "Compact session SID with the demo model; return the compaction node."
   (let ((harness-provider-demo-script-override harness-ui-chat-test-summary-script))
-    (harness-await (harness-call 'compaction/compact sid))))
+    (cl-letf (((symbol-function 'harness-compaction-request-warm-p)
+               (lambda (&rest _) t)))
+      (harness-await (harness-call 'compaction/compact sid)))))
 
 (ert-deftest harness-ui-chat-the-newest-compaction-offers-to-be-taken-back ()
   "The newest compaction draws [Revert]; clicking it asks the harness, which

@@ -55,8 +55,8 @@ and the line saying how to press a key from the compose box."
     (should (equal "   Resend   $0.315 uncached" (nth 3 lines)))
     (should (equal "" (nth 4 lines)))
     (should (equal "   Choose what goes first" (nth 5 lines)))
-    (should (equal '("    b  Brief summary    ~$0.0040  Cheap · narrative, tool calls in brief · first and last messages kept · default"
-                     "    s  Summary          ~$0.330   whole conversation · first and last messages kept"
+    (should (equal '("    b  Brief summary    ~$0.0040  Cheap · narrative, tool calls in brief · read uncached · first and last messages kept · default"
+                     "    s  Summary          ~$0.330   whole conversation · read uncached · first and last messages kept"
                      "    t  Transcript file  free      whole conversation as a file the model reads"
                      "    q  Not now                    message waits")
                    (seq-subseq lines 6 10)))
@@ -76,7 +76,7 @@ line; `:always' adds the capitals' line and says what they do."
          (always (harness-ui-carry-test--lines
                   (harness-ui-carry-panel-string (harness-ui-carry-test--spec :always t :hint nil)))))
     (should (string-match-p "\\` .*Bare\\'" (nth 0 bare)))
-    (should (equal '("" "    b  Brief summary  narrative, tool calls in brief · first and last messages kept"
+    (should (equal '("" "    b  Brief summary  narrative, tool calls in brief · read uncached · first and last messages kept"
                      "    q  Not now        message waits" "")
                    (cdr bare)))
     (should-not (cl-some (lambda (l) (string-match-p "from the box" l)) always))
@@ -120,12 +120,16 @@ in amber too."
 (ert-deftest harness-ui-carry-flow-breaks-between-segments ()
   "A wording breaks between its segments at the width, the next lines
 indented under the first, and never inside a segment; with no width it is one line."
-  (let ((segments '("Demo cheap" "narrative, tool calls in brief" "first and last messages kept" "default")))
-    (should (equal "Demo cheap · narrative, tool calls in brief · first and last messages kept · default"
+  (let ((segments '("Demo cheap" "narrative, tool calls in brief" "read uncached"
+                    "first and last messages kept" "default")))
+    (should (equal (concat "Demo cheap · narrative, tool calls in brief · read uncached ·"
+                           " first and last messages kept · default")
                    (harness-ui-carry--flow segments 10 nil)))
-    (should (equal "Demo cheap · narrative, tool calls in brief\n          first and last messages kept · default"
+    (should (equal (concat "Demo cheap · narrative, tool calls in brief · read uncached\n"
+                           "          first and last messages kept · default")
                    (harness-ui-carry--flow segments 10 70)))
-    (should (equal "Demo cheap\n    narrative, tool calls in brief\n    first and last messages kept\n    default"
+    (should (equal (concat "Demo cheap\n    narrative, tool calls in brief\n    read uncached\n"
+                           "    first and last messages kept\n    default")
                    (harness-ui-carry--flow segments 4 34)))
     (should (equal "alone" (harness-ui-carry--flow '("alone") 4 10)))))
 
@@ -140,9 +144,10 @@ buffer that truncates its lines (the session list) shows all of it."
     ;; The first line of the wording follows the cost; the others are under it,
     ;; broken between segments and never inside one.
     (should (member "    b  Brief summary    ~$0.0040  Cheap · narrative, tool calls in brief" lines))
-    (should (member (concat (make-string 34 ?\s) "first and last messages kept · default") lines))
+    (should (member (concat (make-string 34 ?\s) "read uncached · first and last messages kept") lines))
+    (should (member (concat (make-string 34 ?\s) "default") lines))
     ;; Wide enough, nothing breaks.
-    (should (member "    b  Brief summary    ~$0.0040  Cheap · narrative, tool calls in brief · first and last messages kept · default"
+    (should (member "    b  Brief summary    ~$0.0040  Cheap · narrative, tool calls in brief · read uncached · first and last messages kept · default"
                     (harness-ui-carry-test--lines
                      (harness-ui-carry-panel-string (harness-ui-carry-test--spec :width 200)))))))
 

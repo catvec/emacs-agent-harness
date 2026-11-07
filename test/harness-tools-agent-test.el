@@ -43,13 +43,16 @@ recorded for it carries.  Otherwise the call gets a fresh one."
   (harness-tools-agent-test-with
     (should (harness-call 'tools/get "spawn_agent"))))
 
-(ert-deftest harness-tools-agent-system-prompt-mentions-forks-worktrees-merge ()
+(ert-deftest harness-tools-agent-system-prompt-mentions-sub-agents-worktrees-merge ()
   (harness-tools-agent-test-with
     (let* ((sid (harness-tools-agent-test-session))
            (prompt (harness-run-filter 'agent/system-prompt "BASE" (harness-call 'session/get sid))))
       (should (string-prefix-p "BASE" prompt))
       (should (string-match-p "## Planning" prompt))
-      (should (string-match-p "fork" prompt))
+      ;; A sub-agent is fresh, and the section says so rather than offering a fork.
+      (should (string-match-p "never inherits this conversation" prompt))
+      (should-not (string-match-p "fork=" prompt))
+      (should-not (string-match-p "fork=true" prompt))
       (should (string-match-p "worktree" prompt))
       (should (string-match-p "merge queue" prompt))
       (should (string-match-p "spawn_agent" prompt))
@@ -105,38 +108,34 @@ recorded for it carries.  Otherwise the call gets a fresh one."
             (should (string-match-p "\\[sub-agent session: [-0-9a-f]+, 1 tool calls, cost \\$" report)))
           (should (eq 'idle (plist-get (harness-call 'session/get cid) :status))))))))
 
-(ert-deftest harness-tools-agent-spawn-forked-child-shares-history ()
+(ert-deftest harness-tools-agent-spawn-refuses-to-fork ()
+  "A call that asks spawn_agent to fork is refused, and starts nothing.
+A fork's first request sends the parent's whole conversation again, and
+no provider serves that from the parent's prompt cache, so forking is
+the user's own (`session/fork') and never an agent's.  A model that
+learned the old option is told so, rather than given a fresh child it
+did not ask for."
   (harness-tools-agent-test-with
     (let ((sid (harness-tools-agent-test-session)))
       (harness-test-await (harness-call 'agent/prompt sid "hello there"))
-      (let* ((parent-nodes (harness-call 'session/nodes sid))
-             (result (harness-test-await
-                      (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "carry on" :fork t))))
-             (cid (plist-get (plist-get result :meta) :child-id))
-             (child (harness-call 'session/get cid))
-             (child-nodes (harness-call 'session/nodes cid)))
-        (should-not (plist-get result :is-error))
-        ;; The call returns at once, naming the child.
-        (should (string-match-p "started (session" (plist-get result :content)))
-        (should (eq 'subagent (plist-get child :kind)))
-        (should (equal sid (plist-get child :parent-id)))
-        (should (equal (plist-get (car (last parent-nodes)) :id) (plist-get child :fork-node)))
-        ;; The child's transcript starts with the parent's nodes, same ids.
-        (should (equal (mapcar (lambda (n) (plist-get n :id)) parent-nodes)
-                       (mapcar (lambda (n) (plist-get n :id)) (seq-take child-nodes (length parent-nodes)))))
-        (should (> (length child-nodes) (length parent-nodes)))
-        ;; Its new message is the parent's, and holds its prompt; the
-        ;; copied one stays the user's.
-        (should-not (harness-node-sender (car child-nodes)))
-        (let ((new (cl-find 'user (nthcdr (length parent-nodes) child-nodes)
-                            :key (lambda (n) (plist-get n :kind)))))
-          (should (string-match-p "carry on" (plist-get new :content)))
-          (should (equal sid (plist-get (harness-node-sender new) :id))))
-        ;; The parent's own transcript keeps its nodes: the child's turn
-        ;; writes to it only through the report it sends.
-        (should (equal (mapcar (lambda (n) (plist-get n :id)) parent-nodes)
-                       (mapcar (lambda (n) (plist-get n :id))
-                               (seq-take (harness-call 'session/nodes sid) (length parent-nodes)))))))))
+      (let ((result (harness-test-await
+                     (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "carry on" :fork t)))))
+        (should (plist-get result :is-error))
+        (should (string-match-p "does not fork" (plist-get result :content)))
+        (should (string-match-p "session/fork" (plist-get result :content))))
+      ;; Nothing of it exists: no child, no worktree, nothing outstanding.
+      (should-not (harness-call 'session/list (list :parent-id sid)))
+      (should-not (harness-call 'agent/outstanding sid))
+      ;; The schema does not offer the option any more either.
+      (let ((spec (harness-call 'tools/get "spawn_agent")))
+        (should spec)
+        (should-not (plist-member (plist-get (plist-get spec :schema) :properties) :fork)))
+      ;; The same call without it starts a fresh child, as always.
+      (let* ((fresh (harness-test-await
+                     (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "carry on"))))
+             (child (harness-call 'session/get (plist-get (plist-get fresh :meta) :child-id))))
+        (should-not (plist-get fresh :is-error))
+        (should-not (plist-get child :fork-node))))))
 
 (ert-deftest harness-tools-agent-spawn-needs-a-prompt ()
   (harness-tools-agent-test-with
@@ -206,31 +205,22 @@ model `plain' offers none."
   (harness-call 'session/get (harness-tools-agent-test-spawn sid input)))
 
 (ert-deftest harness-tools-agent-spawn-child-thinks-at-its-parents-level ()
-  "Without `:thinking' a child thinks at its parent's level, fresh and forked."
+  "Without `:thinking' a child thinks at its parent's level."
   (harness-tools-agent-test-with
     (let ((sid (harness-tools-agent-test-session)))
       (harness-tools-agent-test-thinking sid "high")
       (should (equal "high" (plist-get (harness-tools-agent-test-spawned sid '(:prompt "hi")) :thinking)))
-      (should (equal "high" (plist-get (harness-tools-agent-test-spawned
-                                        sid '(:prompt "carry on" :fork t))
-                                       :thinking)))
       (should (equal "high" (plist-get (harness-call 'session/get sid) :thinking))))))
 
 (ert-deftest harness-tools-agent-spawn-child-thinks-at-the-level-it-is-asked-for ()
-  "An explicit `:thinking' is the child's level, fresh and forked, and
-the fork's is the level it was asked for rather than its parent's."
+  "An explicit `:thinking' is the child's level, and the parent keeps its own."
   (harness-tools-agent-test-with
     (let ((sid (harness-tools-agent-test-session)))
       (harness-tools-agent-test-thinking sid "low")
       (let ((fresh (harness-tools-agent-test-spawned sid '(:prompt "hi" :thinking "high"))))
         (should (eq 'subagent (plist-get fresh :kind)))
-        (should (equal "high" (plist-get fresh :thinking))))
-      (let ((forked (harness-tools-agent-test-spawned
-                     sid '(:prompt "carry on" :fork t :thinking "high"))))
-        (should (equal "high" (plist-get forked :thinking)))
-        ;; The fork shares the parent's conversation, its own thinking aside.
-        (should (equal (plist-get (harness-call 'session/get sid) :id)
-                       (plist-get forked :parent-id))))
+        (should (equal "high" (plist-get fresh :thinking)))
+        (should (equal sid (plist-get fresh :parent-id))))
       ;; The parent keeps the level it had.
       (should (equal "low" (plist-get (harness-call 'session/get sid) :thinking))))))
 
@@ -243,12 +233,6 @@ parent's, or the `:model' the call gives it."
       ;; The child's model offers the level, the parent's does not.
       (let ((child (harness-tools-agent-test-spawned
                     sid '(:prompt "hi" :model "test-think:thinker" :thinking "medium"))))
-        (should (equal "test-think:thinker" (plist-get child :model)))
-        (should (equal "medium" (plist-get child :thinking))))
-      ;; A fork on another model takes the level the same way.
-      (let ((child (harness-tools-agent-test-spawned
-                    sid '(:prompt "carry on" :fork t :model "test-think:thinker"
-                          :thinking "medium"))))
         (should (equal "test-think:thinker" (plist-get child :model)))
         (should (equal "medium" (plist-get child :thinking))))
       ;; Without a level the parent's stands, even one the child's model
@@ -272,8 +256,10 @@ levels it does, and no child starts."
                                 (plist-get result :content)))
         (should (string-match-p "it offers low, high" (plist-get result :content)))
         (should (string-match-p "Leave :thinking out" (plist-get result :content))))
-      ;; A fork is refused the same way.
-      (should (plist-get (funcall try '(:prompt "hi" :fork t :thinking "max")) :is-error))
+      ;; A call that asks to fork is refused before the level is looked at.
+      (let ((result (funcall try '(:prompt "hi" :fork t :thinking "max"))))
+        (should (plist-get result :is-error))
+        (should (string-match-p "does not fork" (plist-get result :content))))
       ;; A model the catalogue gives no levels at all.
       (let ((result (funcall try '(:prompt "hi" :model "test-think:plain" :thinking "low"))))
         (should (plist-get result :is-error))
@@ -430,7 +416,7 @@ and with the user away the call is denied and no child starts."
         (should (string-match-p "outside the allowed directories" (plist-get r :content))))
       (should-not (harness-call 'session/list (list :parent-id sid))))))
 
-;;;; A sub-agent forked mid-turn, against a strict OpenAI-compatible server
+;;;; A strict OpenAI-compatible server, and what it refuses
 
 (require 'harness-http)
 (require 'harness-provider-openai)
@@ -484,7 +470,7 @@ message to answer a call of the assistant message before it."
 An invalid request gets DeepSeek's HTTP 400.  Otherwise a request that
 brings tool results gets a closing answer, one whose last message asks
 to investigate gets the sub-agent's finding, and any other one gets a
-spawn_agent call forking the session."
+spawn_agent call."
   (let* ((messages (plist-get body :messages))
          (last (car (last messages)))
          (text (lambda (s)
@@ -496,7 +482,7 @@ spawn_agent call forking the session."
      (err (cons 400 (harness-json-encode (list :error (list :message err :type "invalid_request_error")))))
      ((equal (plist-get last :role) "tool") (cons 200 (funcall text "The sub-agent reported back.")))
      ((string-match-p "investigate" (harness-tools-agent-test--text-of last))
-      (cons 200 (funcall text "Found it: the fork lost its tool results.")))
+      (cons 200 (funcall text "Found it: the sub-agent did its work.")))
      ((string-match-p "Sub-agent report" (harness-tools-agent-test--text-of last))
       (cons 200 (funcall text "Noted.")))
      (t (cons 200 (harness-tools-agent-test--sse
@@ -505,7 +491,7 @@ spawn_agent call forking the session."
                                      :delta (list :tool_calls
                                                   (list (list :index 0 :id "call_spawn" :type "function"
                                                               :function (list :name "spawn_agent"
-                                                                              :arguments "{\"prompt\":\"investigate the bug\",\"fork\":true}"))))
+                                                                              :arguments "{\"prompt\":\"investigate the bug\"}"))))
                                      :finish_reason "tool_calls")))
                    "[DONE]"))))))
 
@@ -530,68 +516,6 @@ The model list is empty; chat completions are recorded and answered by
              (funcall (plist-get args :callback) status nil text nil))))))
     handle))
 
-(ert-deftest harness-tools-agent-spawn-fork-mid-turn-strict-server ()
-  "A sub-agent forked in the middle of a turn makes a first request that a
-strict OpenAI-compatible server accepts.  The transcript it copies ends
-with the spawn_agent call forking it, whose result only ever reaches
-the parent: left unanswered in the fork, DeepSeek refused the fork's
-first request with HTTP 400 and the sub-agent died before doing
-anything.  The fork answers that call itself, saying it is the
-sub-agent the call started."
-  (harness-tools-agent-test-with
-    (let ((harness-tools-agent-test--bodies nil))
-      (unwind-protect
-          (cl-letf (((symbol-function 'harness-http-request) #'harness-tools-agent-test--strict-request))
-            (harness-openai-register-endpoint harness-tools-agent-test--strict-endpoint)
-            (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
-                                                 :model "teststrict:deepseek-flash")
-                                   :id))
-                   (turn (harness-test-await (harness-call 'agent/prompt sid "Please delegate this") 20))
-                   (result (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
-                                                        (equal (plist-get n :call-id) "call_spawn")))
-                                       (harness-call 'session/nodes sid)))
-                   (cid (plist-get (car (harness-call 'session/list (list :parent-id sid))) :id))
-                   (bodies (reverse harness-tools-agent-test--bodies)))
-              (should (eq 'end-turn (plist-get turn :stop-reason)))
-              ;; The spawn returned at once, naming the child for the chat
-              ;; to link; the fork's finding arrives later as a report.
-              (should-not (plist-get result :is-error))
-              (should (equal cid (plist-get (plist-get result :meta) :child-id)))
-              ;; And so does the call itself, from the moment the child
-              ;; exists: the chat links it while the call still runs.
-              (let ((call (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-call)
-                                                       (equal (plist-get n :call-id) "call_spawn")))
-                                      (harness-call 'session/nodes sid))))
-                (should (equal cid (plist-get (plist-get call :meta) :child-id))))
-              (should (string-match-p "started (session" (plist-get result :output)))
-              (should (eq 'subagent (plist-get (harness-call 'session/get cid) :kind)))
-              (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 20 "the fork's report")
-              (should (string-match-p "Found it"
-                                      (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
-              ;; Every request was a valid one: the fork answered the
-              ;; copied call itself before its task.
-              (dolist (body bodies)
-                (should-not (harness-tools-agent-test--strict-error (plist-get body :messages))))
-              ;; The sub-agent's request: the parent's transcript, the call
-              ;; that forked it answered, then its task.
-              (let* ((body (cl-find-if (lambda (b)
-                                         (cl-some (lambda (m)
-                                                    (equal "investigate the bug"
-                                                           (harness-tools-agent-test--text-of m)))
-                                                  (plist-get b :messages)))
-                                       bodies))
-                     (messages (cdr (plist-get body :messages))) ; after the system prompt
-                     (tool (cl-find "tool" messages :key (lambda (m) (plist-get m :role)) :test #'equal)))
-                (should body)
-                (should (equal '("user" "assistant" "tool" "user")
-                               (mapcar (lambda (m) (plist-get m :role)) messages)))
-                (should (equal "Please delegate this" (harness-tools-agent-test--text-of (nth 0 messages))))
-                (should (equal "call_spawn" (plist-get (car (plist-get (nth 1 messages) :tool_calls)) :id)))
-                (should (equal "call_spawn" (plist-get tool :tool_call_id)))
-                (should (string-match-p "sub-agent" (plist-get tool :content)))
-                (should (equal "investigate the bug" (harness-tools-agent-test--text-of (nth 3 messages)))))))
-        (harness-provider-unregister 'teststrict)))))
-
 (defvar harness-non-interactive)
 
 (ert-deftest harness-tools-agent-children-keep-the-parents-switch ()
@@ -599,15 +523,14 @@ sub-agent the call started."
   (harness-tools-agent-test-with
     (let ((harness-non-interactive t))
       (dolist (on '(nil t))
-        (dolist (fork '(nil t))
-          (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
-                                               :non-interactive (if on t :false))
-                                 :id))
-                 (result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent"
-                                                                           (list :prompt "hi" :fork fork))))
-                 (cid (plist-get (plist-get result :meta) :child-id)))
-            (ert-info ((format "parent non-interactive %s, fork %s" on fork))
-              (should (eq on (plist-get (harness-call 'session/get cid) :non-interactive))))))))))
+        (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
+                                             :non-interactive (if on t :false))
+                               :id))
+               (result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent"
+                                                                         (list :prompt "hi"))))
+               (cid (plist-get (plist-get result :meta) :child-id)))
+          (ert-info ((format "parent non-interactive %s" on))
+            (should (eq on (plist-get (harness-call 'session/get cid) :non-interactive)))))))))
 
 ;;;; The context cap
 
@@ -697,30 +620,8 @@ sub-agent the call started."
                                :child-id)))
         (should (= 90000 (plist-get (harness-call 'session/get grand) :context-window-limit)))))))
 
-(ert-deftest harness-tools-agent-spawn-fork-has-the-inherited-context-plus-the-cap ()
-  "A forked child's window is its inherited context plus the cap."
-  (harness-tools-agent-test-with
-    (let ((sid (harness-tools-agent-test-session)))
-      (harness-test-await (harness-call 'agent/prompt sid "hello there"))
-      (let* ((usage (plist-get (harness-call 'session/get sid) :usage))
-             (inherited (+ (or (plist-get usage :context) 0) (or (plist-get usage :last-output) 0)))
-             (result (harness-test-await
-                      (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "carry on" :fork t))))
-             (cid (plist-get (plist-get result :meta) :child-id)))
-        (should (> inherited 0))
-        (should (= (+ 256000 inherited)
-                   (plist-get (harness-call 'session/get cid) :context-window-limit)))))
-    ;; The parent's own limit still bounds it.
-    (let ((sid (harness-tools-agent-test-session)))
-      (harness-call 'session/update sid :context-window-limit 60000 :silent t)
-      (harness-test-await (harness-call 'agent/prompt sid "hello there"))
-      (let* ((result (harness-test-await
-                      (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "carry on" :fork t))))
-             (cid (plist-get (plist-get result :meta) :child-id)))
-        (should (= 60000 (plist-get (harness-call 'session/get cid) :context-window-limit)))))))
-
 (ert-deftest harness-tools-agent-spawn-without-a-cap-leaves-limits-alone ()
-  "With no cap a fresh child has no limit and a fork keeps its parent's."
+  "With no cap a fresh child has no limit, whatever its parent's is."
   (harness-tools-agent-test-with
     (let* ((harness-subagent-context-limit nil)
            (sid (harness-tools-agent-test-session)))
@@ -731,10 +632,10 @@ sub-agent the call started."
         (should-not (plist-get (harness-call 'session/get cid) :context-window-limit)))
       (harness-call 'session/update sid :context-window-limit 70000 :silent t)
       (let ((cid (plist-get (plist-get (harness-test-await
-                                        (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "hi" :fork t)))
+                                        (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "hi")))
                                        :meta)
                             :child-id)))
-        (should (= 70000 (plist-get (harness-call 'session/get cid) :context-window-limit)))))))
+        (should-not (plist-get (harness-call 'session/get cid) :context-window-limit))))))
 
 ;;;; The hint that says the cap
 
@@ -810,46 +711,16 @@ sub-agent the call started."
       (should (equal '("Context window capped at 90k tokens, as a sub-agent's is (harness-subagent-context-limit)")
                      (harness-tools-agent-test-hints (harness-tools-agent-test-spawn sid '(:prompt "hi"))))))))
 
-(ert-deftest harness-tools-agent-spawn-says-the-cap-in-a-forks-transcript ()
-  "A fork's hint has what it starts with and the cap on top, and comes after what it copied."
-  (harness-tools-agent-test-with
-    (let ((sid (harness-tools-agent-test-session)))
-      (harness-test-await (harness-call 'agent/prompt sid "hello there"))
-      (harness-call 'session/usage-add sid '(:input 10 :output 40 :context 3020))
-      (let* ((parent-nodes (harness-call 'session/nodes sid))
-             (usage (plist-get (harness-call 'session/get sid) :usage))
-             (inherited (+ (plist-get usage :context) (plist-get usage :last-output)))
-             (cid (harness-tools-agent-test-spawn sid '(:prompt "carry on" :fork t)))
-             (nodes (harness-call 'session/nodes cid)))
-        (should (> inherited 0))
-        (should (equal (list (format "Context window capped at %s tokens: the %s it starts with plus 256k of its own, as a sub-agent's is (harness-subagent-context-limit)"
-                                     (harness-format-tokens (+ 256000 inherited))
-                                     (harness-format-tokens inherited)))
-                       (harness-tools-agent-test-hints cid)))
-        ;; It follows the parent's nodes the fork copied and comes before the prompt.
-        (should (eq 'hint (plist-get (nth (length parent-nodes) nodes) :kind)))
-        (should (eq 'user (plist-get (nth (1+ (length parent-nodes)) nodes) :kind)))
-        (should-not (harness-tools-agent-test-hints sid))))
-    ;; The parent's own limit still bounds it, and the hint says so.
-    (let ((sid (harness-tools-agent-test-session)))
-      (harness-call 'session/update sid :context-window-limit 60000 :silent t)
-      (harness-test-await (harness-call 'agent/prompt sid "hello there"))
-      (should (equal '("Context window capped at 60k tokens, as a sub-agent's is (harness-subagent-context-limit), and no higher than the limit of the session that started it")
-                     (harness-tools-agent-test-hints
-                      (harness-tools-agent-test-spawn sid '(:prompt "carry on" :fork t))))))))
-
 (ert-deftest harness-tools-agent-spawn-says-nothing-when-there-is-no-cap ()
-  "Without a cap, a fresh child and a fork get no hint."
+  "Without a cap a child gets no hint."
   (harness-tools-agent-test-with
     (let* ((harness-subagent-context-limit nil)
            (sid (harness-tools-agent-test-session)))
       (harness-test-await (harness-call 'agent/prompt sid "hello there"))
-      (dolist (fork '(nil t))
-        (let ((cid (harness-tools-agent-test-spawn sid (list :prompt "hi" :fork fork))))
-          (ert-info ((format "fork %s" fork))
-            (should-not (harness-tools-agent-test-hints cid))
-            (should-not (cl-find 'hint (harness-call 'session/nodes cid)
-                                 :key (lambda (n) (plist-get n :kind)))))))
+      (let ((cid (harness-tools-agent-test-spawn sid '(:prompt "hi"))))
+        (should-not (harness-tools-agent-test-hints cid))
+        (should-not (cl-find 'hint (harness-call 'session/nodes cid)
+                             :key (lambda (n) (plist-get n :kind)))))
       ;; A fresh child starts with the prompt, as it always did.
       (let ((cid (harness-tools-agent-test-spawn sid '(:prompt "hi"))))
         (should (eq 'user (plist-get (car (harness-call 'session/nodes cid)) :kind)))))))
@@ -1183,15 +1054,11 @@ grants nothing, and a grant that fails fails nothing."
               ;; No worktree, nothing to read.
               (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "plain"))
               (should (= 1 (length grants)))
-              ;; A fork in a worktree is a sub-agent in one.
-              (let ((fork (harness-tools-agent-test-spawn sid '(:prompt "carry on" :name "fork" :fork t :worktree t))))
-                (should (equal (list sid fork (plist-get (harness-call 'session/get fork) :worktree))
-                               (car grants))))
               ;; A grant that cannot be made fails no sub-agent.
               (setq fails t)
               (let ((cid (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "again" :worktree t))))
                 (should (plist-get (harness-call 'session/get cid) :worktree))
-                (should (= 2 (length grants))))
+                (should (= 1 (length grants))))
               ;; Without the access module there is nobody to tell.
               (harness-unregister-method 'access/grant-child-worktree)
               (should (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "alone" :worktree t)))))

@@ -2,7 +2,7 @@
 
 # compaction
 
-Summarise the transcript when it nears the context window, before a turn or in the middle of one; queue or interrupt one while a turn runs.
+Summarise the transcript when it nears the context window, before a turn or in the middle of one, asking the user first with what each kind costs; queue or interrupt one while a turn runs.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-compaction.el](../../lisp/modules/harness-compaction.el)
@@ -77,8 +77,11 @@ the model to see it, and it would be compacted again before the model
 did.  The chats draw [Revert] and [Go post-compaction] on the latest
 compaction's note and follow its update.
 
-Automatic compaction makes `harness-compaction-kind`; by hand (the
-UI's `harness-compact`, or the panel of a session whose prompt cache
+Automatic compaction makes `harness-compaction-kind`, but where the
+user can be asked it asks them first, with what each kind costs and
+what carrying on costs (`harness-compaction-ask`; see "Asking before
+compacting automatically" below).  By hand (the UI's
+`harness-compact`, or the panel of a session whose prompt cache
 expired) any kind, with what each costs (`compaction/estimate`).  A
 message to a session whose prompt cache went cold makes one of them
 first, or carries on, as the cowboy module decides (harness-cowboy.el).
@@ -152,6 +155,27 @@ message, each tool call and result in one line -- so a summary can be
 made on the new provider without that provider's context taking the
 whole conversation, payloads and all, at once.
 
+A summary and a brief summary read the whole conversation as the input
+of a request of their own -- a system prompt and, for a summary, no
+tools -- so no cache of the chat covers that request, and the size of
+what the model writes says nothing about the size of what it reads.  A
+cold one is therefore as expensive as the turn it would save, and can
+cost more.  Only an estimate that says that request's own prefix is
+cached (`harness-compaction-request-warm-p`, which no chat's cache
+satisfies) lets one be sent: every automatic path asks
+`harness-compaction--effective-kind` for the kind it may use, and a
+summary or brief whose own request is not cached becomes a transcript.
+`compaction/compact`
+is the single place that decides (`harness-compaction--compact-now`), so
+a queued compaction, a stale caller or a new one cannot bypass it: OPTS
+`:fallback` is the kind that asks no model to use instead, and without
+one a summary whose own request is not cached is refused before a
+request exists.  No choice, approval or saved answer is warmth: a user
+who picks a summary, a saved always answer, a handoff mode and the
+compact panel all fail closed the same way.  When neither the transcript
+nor a cut can be made, the turn is held rather than the whole
+conversation sent uncached.
+
 `compaction/status` grades how full the window is so a UI can colour
 the token count progressively.
 
@@ -168,11 +192,13 @@ the token count progressively.
 
 ### Events
 
+- `compaction/asked` — (SESSION-ID PENDING-ID) after asking, before an automatic compaction, what goes first and what it costs.
 - `compaction/done` — (SESSION-ID NODE) after a compaction node is appended.
 - `compaction/failed` — (SESSION-ID MESSAGE) when a compaction fails.
 
 ### Options
 
+- `harness-compaction-ask` — Non-nil to ask before an automatic compaction, where the user can be asked.
 - `harness-compaction-brief-model` — Model that writes a brief summary, as PROVIDER:NAME, or `auto`.
 - `harness-compaction-kind` — How a conversation that nears its model's context window is compacted.
 - `harness-compaction-mid-turn` — Non-nil to compact in the middle of a turn that outgrew its context limit.
@@ -189,6 +215,8 @@ the token count progressively.
 - `provider/fork` ([provider](provider.md))
 - `provider/model` ([provider](provider.md))
 - `provider/tier-model` ([provider](provider.md))
+- `question/ask` ([tools-question](tools-question.md)), when it is loaded
+- `question/cancel` ([tools-question](tools-question.md)), when it is loaded
 - `session/append` ([session](session.md))
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
@@ -205,11 +233,15 @@ the token count progressively.
 
 ### Events it handles
 
+- `agent/cancelling` → `harness-compaction--on-question-turn-ended`
+- `agent/turn-ended` → `harness-compaction--on-question-turn-ended`
 - `agent/turn-ended` → `harness-compaction--on-turn-ended`
+- `session/deleted` → `harness-compaction--on-question-deleted`
 - `session/deleted` → `harness-compaction--on-deleted`
 
 ### Events it emits
 
+- `compaction/asked`
 - `compaction/done`
 - `compaction/failed`
 

@@ -162,7 +162,7 @@ is never used for any other failure.")
     "sandbox/detect" "sandbox/check"
     "harness/api" "harness/modules" "harness/version" "harness/reload"
     "question/" "project/" "task/" "plugins/" "search/"
-    "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/"
+    "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "priority/"
     "secrets/" "commit-msg/" "errors/"
     "decision/" "access/" "patch-review/" "tool-slots/" "cache/" "link/" "todo-sync/"
     "event-watch/" "chatgpt-plan/" "model-complexity/")
@@ -1925,8 +1925,10 @@ the reply's answer then lists those picked, one to a line, then what
 the user typed; a client that does not know it shows an ordinary
 question, which its user can still answer in words.  `cowboy'
 marks the harness's question about a cold prompt cache and says what
-each choice costs (see harness-cowboy.el); a client that knows it
-draws its own panel, any other shows the question and its options.
+each choice costs (see harness-cowboy.el); `compaction' marks the one
+before an automatic compaction (see harness-compaction.el), with the
+same.  A client that knows one draws its own panel, any other shows the
+question and its options.
 The reply is {answer}, with `attachments' when the user attached files
 to it (see `harness-acp--question-answer')."
   (let* ((payload (or (plist-get pending :payload) pending))
@@ -1938,7 +1940,9 @@ to it (see `harness-acp--question-answer')."
                    :options (plist-get payload :options))
              (and (plist-get payload :diagrams) (list :diagrams (plist-get payload :diagrams)))
              (and (harness-json-true-p (plist-get payload :allow-multiple)) (list :allowMultiple t))
-             (and (plist-get payload :cowboy) (list :cowboy (plist-get payload :cowboy))))
+             (and (plist-get payload :cowboy) (list :cowboy (plist-get payload :cowboy)))
+             (and (plist-get payload :compaction)
+                  (list :compaction (plist-get payload :compaction))))
      (lambda (result)
        (harness-acp--call-safely 'question/answer sid pid (harness-acp--question-answer result))))))
 

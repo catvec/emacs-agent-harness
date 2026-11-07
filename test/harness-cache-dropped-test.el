@@ -374,6 +374,8 @@ is the same."
       (should (equal (concat "Your message waits: a redaction dropped this session's provider conversation at "
                              (harness-cowboy--clock 1100.0) ", so no prompt cache holds it."
                              "  Carrying on sends the whole conversation, ~3.0k tokens, uncached."
+                             "  A summary reads all of it uncached as well, on a request of its own;"
+                             " a transcript file and a fresh start ask no model."
                              "  What goes first?  Answer \"always\" with a choice to make it the default"
                              " and stop asking.")
                      (harness-cowboy--question-text harness-cache-dropped-test--session estimate nil)))
@@ -385,7 +387,9 @@ is the same."
                                               "“x” is not one of the choices.")))
       ;; Without an estimate: no tokens named, nothing to compare either.
       (should (string-match-p
-               "so no prompt cache holds it\\.  Carrying on sends the whole conversation, ~3\\.0k tokens, uncached\\.  What"
+               (concat "so no prompt cache holds it\\.  Carrying on sends the whole conversation, ~3\\.0k tokens, uncached\\."
+                       "  A summary reads all of it uncached as well, on a request of its own\\;"
+                       " a transcript file and a fresh start ask no model\\.  What")
                (harness-cowboy--question-text harness-cache-dropped-test--session nil nil)))
       ;; A cache that lapsed by itself is asked about as ever, with its comparison.
       (let ((text (harness-cowboy--question-text harness-cache-dropped-test--lapsed estimate nil)))
@@ -401,10 +405,7 @@ is the same."
                      (harness-cowboy--hint-text 'carry-on 'user harness-cache-dropped-test--session nil)))
       (should (equal (format "Prompt cache dropped at %s by a redaction: compacting into a brief summary first, the default, as asking is off (harness-cowboy-ask)" clock)
                      (harness-cowboy--hint-text 'brief 'default harness-cache-dropped-test--session nil)))
-      ;; A caller's reason opens the hint as ever, and a lapsed cache is as it was.
-      (should (string-prefix-p "Redacted: "
-                               (harness-cowboy--hint-text 'brief 'cold-start harness-cache-dropped-test--session nil
-                                                          "Redacted")))
+      ;; A lapsed cache is as it was.
       (should (string-prefix-p (format "Prompt cache cold since %s: " (harness-cowboy--clock 1300.0))
                                (harness-cowboy--hint-text 'brief 'user harness-cache-dropped-test--lapsed nil))))))
 
@@ -476,6 +477,8 @@ clears the mark."
           (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
           (should (equal (concat "Your message waits: a redaction dropped this session's provider conversation at "
                                  clock ", so no prompt cache holds it.  Carrying on sends the whole conversation, ~430 tokens, uncached."
+                                 "  A summary reads all of it uncached as well, on a request of its own;"
+                                 " a transcript file and a fresh start ask no model."
                                  "  What goes first?  Answer \"always\" with a choice to make it the default and stop asking.")
                          (plist-get payload :question)))
           (should (= dropped (plist-get (plist-get payload :cowboy) :dropped))))

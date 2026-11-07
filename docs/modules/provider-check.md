@@ -86,6 +86,10 @@ provider's own events.  The UI half follows the job's events over ACP
 - `provider/fork` ([provider](provider.md))
 - `provider/model` ([provider](provider.md))
 - `provider/quota` ([provider](provider.md))
+- `provider/tier-model-info` ([provider](provider.md))
+- `session/append` ([session](session.md)), when it is loaded
+- `session/create` ([session](session.md)), when it is loaded
+- `session/delete` ([session](session.md))
 
 ### Events it emits
 

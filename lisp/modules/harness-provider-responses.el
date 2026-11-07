@@ -64,6 +64,20 @@
 ;; content; otherwise it is left out, since a reasoning item without
 ;; one is not worth sending.
 ;;
+;; What is remembered is kept per session, and a fork reads its parent's
+;; too.  A message sent back as the response delivered it renders as
+;; what it rendered as before; one whose response was pruned in the
+;; meantime is rebuilt from the blocks, which is a different prefix --
+;; and the prompt cache matches only up to the first message that
+;; changed, so everything after it is sent again uncached.  A table
+;; shared by every session let one session's long turn prune what
+;; another was still replaying; each session's now keeps its own, and
+;; big enough that a long turn does not prune itself.  A session's
+;; responses are kept on disk as well (`harness-replay.el'), and the
+;; table is read back from there the first time the session is
+;; rendered: a restart used to lose every reasoning item, which cost the
+;; model what it was thinking as well as the cache from that message on.
+;;
 ;; The reasoning effort is model-specific.  `reasoning.effort' may take
 ;; none, minimal, low, medium, high, xhigh and max, but each model takes
 ;; a subset: GPT-6 Astra rejects `none', and older models stop at
@@ -190,7 +204,23 @@ first token, and the whole reasoning counts against the request.")
   "Seconds a fetched model list stays cached for the account it was for.")
 
 (defconst harness-responses--responses-max 200
-  "Most remembered responses kept for replaying reasoning.")
+  "Most remembered responses kept for a request that names no session.
+A session's are kept in its own table, and there are far more of those
+(`harness-responses--session-responses-max'); this one serves the calls
+made outside any session, which have no history to replay.")
+
+(defconst harness-responses--session-responses-max 1000
+  "Most remembered responses kept per session, for replaying reasoning.
+A session's transcript is replayed from these: every assistant message
+with a call goes back as the response delivered it, reasoning included.
+Dropping one changes the rendering of a message the next request still
+carries, and from that message on the prompt cache cannot match -- so
+the table is the session's own and big enough that a long turn does not
+prune it (the newest are kept).")
+
+(defconst harness-responses--session-tables-max 64
+  "Most sessions whose remembered responses are kept.
+The least recently used are dropped beyond this, with their entries.")
 
 (defcustom harness-responses-base-url "https://api.openai.com/v1"
   "Base URL of the Responses API a ChatGPT plan pays for.
@@ -200,19 +230,26 @@ access token would not be accepted.  A test points it elsewhere."
   :type 'string :group 'harness)
 
 (defcustom harness-responses-tiers
-  '(:simple "mini\\|nano\\|flash"
-    :medium "sol\\|gpt-6\\|gpt-5\\|o4"
+  '(:simple "luna\\|mini\\|nano\\|flash"
+    :medium "terra"
     :hard "sol\\|max\\|pro"
-    :frontier nil)
+    :frontier "astra")
   "Model names or id regexps the ChatGPT plan names for the tiers.
 The plan's catalogue carries no prices, so nothing can be ranked by
 price here: a tier no pattern matches has no model, and the harness
 falls back to the session's own model for the calls it would have made
 on it (`provider/tier-model-info' says `none').  The values are
-regexps over the model slugs the account lists, and the defaults are
-the families ChatGPT's models are named after; change them to name the
-models your plan lists.  `:simple' is what names sessions and judges
-permissions, and `:frontier' is never chosen on the harness's own."
+regexps over the model slugs the account lists, and the defaults follow
+the families ChatGPT names its models after: Luna is the efficient one
+for high volume, Terra the fast, efficient one, Sol the balanced one
+and Astra the most capable.  So `:simple' -- what names sessions and
+judges permissions -- is Luna, `:medium' is Terra, `:hard' is Sol, and
+`:frontier' is Astra, as Fable is Claude's: the model the harness never
+picks on its own, only you do (see `harness-model-tiers').  A tier
+matches the first model of the catalogue its regexp finds, so a plan
+whose families differ leaves a tier with no model -- the live check
+says which -- and the harness falls back to the session's own model
+where it needs one.  Change them to name the models your plan lists."
   :type harness-provider-tiers-type :group 'harness)
 
 (defun harness-responses--custom-set (symbol value)
@@ -230,7 +267,28 @@ permissions, and `:frontier' is never chosen on the harness's own."
 (defvar harness-responses--responses (make-hash-table :test 'equal)
   "Tool call id -> (TIME . ITEMS) of the response that made the call.
 ITEMS are the response's output items, reasoning included, which must
-go back unchanged while the tool loop continues.")
+go back unchanged while the tool loop continues.  This table serves a
+request that names no session; a session's own are kept apart (see
+`harness-responses--responses-by-session').")
+
+(defvar harness-responses--responses-by-session (make-hash-table :test 'equal)
+  "Session id -> (:at TIME :entries HASH) of its remembered responses.
+Each HASH maps a call id to (TIME . ITEMS), as the flat table does.
+A session's transcript is replayed from its own table, and a fork from
+its parent's: pruning one session's history because another ran a lot
+of steps would change how an old message is sent, and the prompt cache
+cannot match a prefix past a message that changed.")
+
+(defvar harness-responses--current-session nil
+  "The session whose request is being rendered, or nil.
+Bound while `harness-responses--body' builds a request, since the
+messages rendered from its transcript are replayed from its table.")
+
+(defvar harness-responses--current-tables nil
+  "The tables the request being rendered is replayed from, or nil.
+Bound with `harness-responses--current-session' (see
+`harness-responses--lineage-tables'), which walks the session's parents
+once per request rather than once per message.")
 
 ;;;; Talking to the plan's account
 
@@ -603,36 +661,142 @@ reasoning, and a reasoning item without it says nothing useful."
                                items))))
     (and ids (cons (car ids) ids))))
 
-(defun harness-responses--remember (items)
-  "Keep ITEMS, a response's output items, under the call ids they made.
-Only a response that called a tool is kept: its reasoning has to go back
-with those calls, and nothing else is ever replayed."
-  (when-let* ((key (harness-responses--response-key items)))
-    (when (> (hash-table-count harness-responses--responses) harness-responses--responses-max)
+(defun harness-responses--prune-session-tables ()
+  "Drop the least recently used session tables beyond the limit.
+The sessions' responses go with them; a session that is still at work
+is used with every request, so it is never the one dropped."
+  (let ((excess (- (hash-table-count harness-responses--responses-by-session)
+                   harness-responses--session-tables-max)))
+    (when (> excess 0)
       (let (entries)
-        (maphash (lambda (k v) (push (cons (car v) k) entries)) harness-responses--responses)
-        (dolist (entry (seq-take (sort entries (lambda (a b) (< (car a) (car b))))
-                                 (/ harness-responses--responses-max 2)))
-          (remhash (cdr entry) harness-responses--responses))))
-    (let ((entry (cons (float-time) items)))
-      (dolist (id (cdr key))
-        (puthash id entry harness-responses--responses)))))
+        (maphash (lambda (id entry) (push (cons (or (plist-get entry :at) 0) id) entries))
+                 harness-responses--responses-by-session)
+        (dolist (item (seq-take (sort entries (lambda (a b) (< (car a) (car b)))) excess))
+          (remhash (cdr item) harness-responses--responses-by-session))))))
+
+(defun harness-responses--load-session-responses (id table)
+  "Fill TABLE, the responses of session ID, with the ones kept on disk.
+They are what the session sent back as the model delivered it, reasoning
+items included, before the harness stopped (`harness-replay.el'); without
+them a message would be built again from its blocks, and the prompt
+cache could not match from that message on."
+  (when (and (harness-method-exists-p 'replay/responses-p)
+             (harness-method-exists-p 'replay/responses)
+             (harness-call 'replay/responses-p id))
+    (dolist (record (harness-call 'replay/responses id))
+      (let ((ids (plist-get record :ids))
+            (items (plist-get record :items)))
+        (when (and (consp ids) (consp items))
+          (let ((entry (cons (or (plist-get record :at) 0) items)))
+            (dolist (call-id ids) (puthash call-id entry table))))))))
+
+(defun harness-responses--stored-p (id)
+  "Non-nil when the disk holds responses kept for session ID."
+  (and id (harness-method-exists-p 'replay/responses-p)
+       (harness-call 'replay/responses-p id)))
+
+(defun harness-responses--session-table (session create)
+  "Return the table remembering SESSION's responses, or nil.
+With CREATE, make one when the session has none, and drop the least
+recently used tables when there are too many.  A table made for a
+session that has responses kept on disk is filled from them
+\(`harness-responses--load-session-responses').  Nil without a session."
+  (when-let* ((id (and session (plist-get session :id))))
+    (let ((entry (gethash id harness-responses--responses-by-session)))
+      (when (or entry create)
+        (unless entry
+          (setq entry (list :at (float-time) :entries (make-hash-table :test 'equal)))
+          (puthash id entry harness-responses--responses-by-session)
+          (harness-responses--load-session-responses id (plist-get entry :entries))
+          (harness-responses--prune-session-tables))
+        (plist-put entry :at (float-time))
+        (plist-get entry :entries)))))
+
+(defun harness-responses-forget-session (id)
+  "Let go of what is remembered in memory for session ID.
+Its next request reads its responses again from the disk
+\(`harness-replay.el'), which a redaction may have cleaned meanwhile."
+  (remhash id harness-responses--responses-by-session))
+
+(defun harness-responses--lineage-tables (session)
+  "Return the tables SESSION's messages may be replayed from, nearest first.
+Its own, then its parent's and so on up -- a fork's history is the
+parent's -- and last the table of a request that names no session.  A
+session whose table is not in memory reads it from the disk when it has
+one there, so a fork still replays what its parent sent before a
+restart."
+  (let ((tables nil) (current session) (seen 0))
+    (while (and current (< seen 16))
+      (when-let* ((table (harness-responses--session-table
+                          current (harness-responses--stored-p
+                                   (plist-get current :id)))))
+        (push table tables))
+      (let ((parent-id (plist-get current :parent-id)))
+        (setq current (and parent-id
+                           (not (equal parent-id (plist-get current :id)))
+                           (ignore-errors (harness-call 'session/get parent-id))))
+        (setq seen (1+ seen))))
+    (append (nreverse tables) (list harness-responses--responses))))
+
+(defun harness-responses--remember (items &optional session)
+  "Keep ITEMS, a response's output items, under the call ids they made.
+They go in SESSION's table when it names one, else in the table that
+serves a request without a session.  Only a response that called a tool
+is kept: its reasoning has to go back with those calls, and nothing else
+is ever replayed.  The session's own table is kept apart so that one
+session's traffic never prunes the history another is replayed from, and
+it is kept on disk too, so that a restart replays what the session sent
+\(`harness-replay.el')."
+  (when-let* ((key (harness-responses--response-key items)))
+    (let* ((own (harness-responses--session-table session t))
+           (table (or own harness-responses--responses))
+           (max (if own harness-responses--session-responses-max
+                  harness-responses--responses-max))
+           (known (gethash (car key) table)))
+      (unless (and known (equal (cdr known) items))
+        (let ((entry (cons (float-time) items)))
+          (dolist (id (cdr key))
+            (puthash id entry table)))
+        (when (and own session (stringp (plist-get session :id))
+                   (harness-method-exists-p 'replay/remember-response))
+          (harness-call 'replay/remember-response (plist-get session :id) items)))
+      ;; The newest are kept: past the limit, the oldest half goes.  The
+      ;; disk keeps what the table keeps, so that a restart reads back no
+      ;; response this table dropped.
+      (when (> (hash-table-count table) max)
+        (let (entries)
+          (maphash (lambda (k v) (push (cons (car v) k) entries)) table)
+          (dolist (entry (seq-take (sort entries (lambda (a b) (< (car a) (car b))))
+                                   (/ max 2)))
+            (remhash (cdr entry) table)))
+        (when (and own session (stringp (plist-get session :id))
+                   (harness-method-exists-p 'replay/keep-responses))
+          (harness-call 'replay/keep-responses (plist-get session :id)
+                        (hash-table-keys table)))))))
 
 (defun harness-responses--remembered (blocks)
   "Return the remembered output items for the calls in assistant BLOCKS, or nil.
 The whole response is returned when every call id the message made is
 one it was remembered under, so that a message half-remembered never
 comes back as a mixture of what the model said and what the harness
-made up."
+made up.  The tables are those of the session the request is rendered
+for, and of its parents (`harness-responses--lineage-tables')."
   (let* ((ids (delq nil (mapcar (lambda (b) (and (equal (harness-responses--block-type b) "tool_use")
                                                  (plist-get b :id)))
                                 blocks)))
-         (entry (and ids (gethash (car ids) harness-responses--responses)))
-         (kept (and entry (cdr entry))))
-    (and kept
-         (cl-every (lambda (id) (gethash id harness-responses--responses)) ids)
-         (equal (harness-responses--response-key kept) (cons (car ids) ids))
-         kept)))
+         (tables (and ids
+                      (or harness-responses--current-tables
+                          (harness-responses--lineage-tables
+                           harness-responses--current-session)))))
+    (and ids
+         (cl-some (lambda (table)
+                    (let ((entry (gethash (car ids) table)))
+                      (when-let* ((kept (cdr entry)))
+                        (and (cl-every (lambda (id) (gethash id table)) ids)
+                             (equal (harness-responses--response-key kept)
+                                    (cons (car ids) ids))
+                             kept))))
+                  tables))))
 
 (defun harness-responses--strip-content-part (part)
   "Return message content PART with its empty array fields as [].
@@ -827,13 +991,16 @@ efforts NAME takes fit the one REQUEST asks for, so a model that does
 not take `none' or `max' is asked for a value it does.  A key the route
 refuses is never written here; see the Commentary for the list, and for
 why a request's `:max-tokens' does not reach the wire."
-  (let ((body (list :model name
-                    :input (harness-json-array (harness-responses--input request))
-                    :store :false
-                    :stream t
-                    :include (harness-json-array '("reasoning.encrypted_content"))))
-        (instructions (harness-responses--system-text request))
-        (reasoning (harness-responses--reasoning request (harness-responses--model-efforts name))))
+  (let* ((harness-responses--current-session (plist-get request :session))
+         (harness-responses--current-tables
+          (harness-responses--lineage-tables harness-responses--current-session))
+         (body (list :model name
+                     :input (harness-json-array (harness-responses--input request))
+                     :store :false
+                     :stream t
+                     :include (harness-json-array '("reasoning.encrypted_content"))))
+         (instructions (harness-responses--system-text request))
+         (reasoning (harness-responses--reasoning request (harness-responses--model-efforts name))))
     (when instructions
       (setq body (plist-put body :instructions instructions)))
     (when reasoning
@@ -892,7 +1059,7 @@ when it does not.  See `harness-responses--error-kinds' for the kinds."
 
 (cl-defstruct (harness-responses--stream (:copier nil))
   "Accumulated state of one streamed Responses request."
-  on-event name http model finished (status nil) (raw "") (error nil) (error-kind nil)
+  on-event name http model session finished (status nil) (raw "") (error nil) (error-kind nil)
   retry-after usage stop-reason calls items cancelled
   quota-told ; the plan windows the turn was last told about
   (progress (make-hash-table :test 'equal)))
@@ -1018,7 +1185,8 @@ answer that simply ended."
     ;; The completed response is the authority on its output items: what
     ;; arrived item by item is the same list, and this is what is replayed.
     (dolist (item items) (harness-responses--note-item--once stream item))
-    (harness-responses--remember (harness-responses--stream-items stream))
+    (harness-responses--remember (harness-responses--stream-items stream)
+                                 (harness-responses--stream-session stream))
     (harness-responses--finish stream
                                (if (harness-responses--stream-calls stream) 'tool-use 'end-turn))))
 
@@ -1118,7 +1286,11 @@ read and dropped."
   "Build the usage event from a Responses USAGE object.
 The plan pays, so the call is recorded as `subscription' with no cost;
 the cache the prompt was read from is reported, since this route does
-not bill it but the session's own accounting wants to know."
+not bill it but the session's own accounting wants to know.  This route
+counts the cached tokens in `input_tokens' -- `cached_tokens' is a part
+of them, not an addition -- so `:context' is `input_tokens' as it is:
+adding the cached tokens would read a session as up to twice as full as
+it is and compact it at half its window."
   (let ((input (or (plist-get usage :input_tokens) 0))
         (output (or (plist-get usage :output_tokens) 0))
         (cached (or (harness-plist-get-in usage '(:input_tokens_details :cached_tokens)) 0)))
@@ -1132,7 +1304,7 @@ not bill it but the session's own accounting wants to know."
           ;; prices the record from the model catalogue, which has no rates
           ;; for this route, and a plan-covered call is free either way.
           :billing 'subscription
-          :context (+ input cached)
+          :context input
           :last-output output)))
 
 (defun harness-responses--finish (stream reason &optional error kind)
@@ -1360,7 +1532,8 @@ nothing blocks.  A request whose account has to be signed in again
 fails with a `done' event saying so."
   (let* ((on-event (or (plist-get request :on-event) #'ignore))
          (name (cdr (harness-provider-parse-model (plist-get request :model))))
-         (stream (make-harness-responses--stream :on-event on-event :name name)))
+         (stream (make-harness-responses--stream :on-event on-event :name name
+                                                 :session (plist-get request :session))))
     (harness-responses--emit stream (list :type 'start))
     (harness-then
      (harness-responses--access-token)
@@ -1539,7 +1712,7 @@ nil when there is nothing to call the plan's models with."
           :complete #'harness-responses--complete
           :resolve #'harness-responses--resolve
           :quota #'harness-responses--quota
-          :capabilities '(:vision t :thinking t :quota t)
+          :capabilities '(:vision t :thinking t :quota t :cache-ttl 1800)
           :tiers harness-responses-tiers)
         (setq harness-responses--registered t)
         harness-responses-provider-id)

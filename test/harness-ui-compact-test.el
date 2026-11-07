@@ -200,7 +200,7 @@ cancelling does nothing.  An idle session still compacts now."
       (harness-compact "s1" 'transcript)
       (should (equal "Compacting “Parser work”, which is running a turn" (car asked)))
       (should (equal '(?i ?q ?c) (mapcar #'car (cadr asked))))
-      (should (equal '(:kind "transcript" :queue t)
+      (should (equal '(:kind "transcript" :fallback "transcript" :queue t)
                      (plist-get (cadr (car calls)) :opts))))
     ;; Interrupting: the turn is cancelled and the compaction runs once it is over.
     (setq calls nil asked nil)
@@ -208,7 +208,7 @@ cancelling does nothing.  An idle session still compacts now."
                (lambda (method params &optional _callback _on-error) (push (list method params) calls)))
               ((symbol-function 'read-multiple-choice) (lambda (&rest _) (list ?i nil))))
       (harness-compact "s1" 'transcript)
-      (should (equal '(:kind "transcript" :interrupt t)
+      (should (equal '(:kind "transcript" :fallback "transcript" :interrupt t)
                      (plist-get (cadr (car calls)) :opts))))
     ;; Cancelled: nothing is sent.
     (setq calls nil)
@@ -223,7 +223,7 @@ cancelling does nothing.  An idle session still compacts now."
     (cl-letf (((symbol-function 'harness-ui-call)
                (lambda (method params &optional _callback _on-error) (push (list method params) calls))))
       (harness-compact "s1" 'transcript))
-    (should (equal '(:kind "transcript" :idle t)
+    (should (equal '(:kind "transcript" :fallback "transcript" :idle t)
                    (plist-get (cadr (car calls)) :opts)))))
 
 ;;;; In a chat
@@ -231,6 +231,11 @@ cancelling does nothing.  An idle session still compacts now."
 (defconst harness-ui-compact-test--summary
   '((:type text :delta "BRIEF SUMMARY") (:type done :stop-reason end-turn))
   "The summary the demo provider writes.")
+
+(defvar harness-ui-compact-test--warm t
+  "Whether the estimate is simulated as proving the compaction request cached.
+The panel and slash-command mechanics leave it t; a test of the cold rule
+binds it nil and the real `harness-compaction-request-warm-p' decides.")
 
 (defmacro harness-ui-compact-test-with (&rest body)
   "Load the state layer with compaction, the demo provider and the chat, run BODY."
@@ -254,12 +259,17 @@ cancelling does nothing.  An idle session still compacts now."
        (dolist (m '(ui ui-compose ui-markdown ui-chat ui-compact))
          (harness-test-load-module m))
        (clrhash harness-ui--sessions)
-       (unwind-protect
+       (cl-letf* ((warm (symbol-function 'harness-compaction-request-warm-p))
+                  ((symbol-function 'harness-compaction-request-warm-p)
+                   (lambda (session-id kind &optional model)
+                     (or harness-ui-compact-test--warm
+                         (funcall warm session-id kind model)))))
+        (unwind-protect
            (progn ,@body)
          (maphash (lambda (_ b) (when (buffer-live-p b) (kill-buffer b))) harness-chat--buffers)
          (clrhash harness-chat--buffers)
          (dolist (c (copy-sequence harness-acp--clients))
-           (harness-acp--drop-client c))))))
+           (harness-acp--drop-client c)))))))
 
 (defun harness-ui-compact-test--menu-command ()
   "Return the command the harness menu binds C to, or nil."
@@ -374,6 +384,33 @@ what kind of compaction it was.  /compact alone asks, with the costs."
         (should-error (harness-chat-send) :type 'user-error)
         (should (equal "/compact sideways" (harness-compose-text)))
         (harness-chat--clear-compose)))))
+
+(ert-deftest harness-ui-compact-a-panel-summary-cannot-make-a-cold-one ()
+  "A summary chosen in the compact panel is a choice, not warmth.
+The chat writes a transcript instead and says what it did; no summariser
+request is made."
+  (harness-ui-compact-test-with
+    (let* ((harness-ui-compact-test--warm nil)
+           (sid (harness-ui-compact-test--session))
+           (buffer (harness-ui-compact-test--open sid))
+           (requests nil))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req)))
+                 ((symbol-function 'read-multiple-choice)
+                  (lambda (_prompt offered &rest _) (assq ?s offered))))
+        (harness-ui-compact-test--send buffer "/compact")
+        (harness-test-wait (lambda () (harness-ui-compact-test--compactions sid)) 10
+                           "the transcript"))
+      (should-not (cl-some (lambda (req)
+                             (string-match-p "handoff summary" (or (plist-get req :system) "")))
+                           requests))
+      (let ((node (car (harness-ui-compact-test--compactions sid))))
+        (should (equal "transcript" (harness-node-compaction-kind node)))
+        (should (equal "summary" (plist-get (plist-get node :meta) :requested-kind))))
+      (harness-test-wait (lambda () (harness-ui-compact-test--shows
+                                     buffer "context compacted into a transcript file"))
+                         5 "the transcript in the chat"))))
 
 (ert-deftest harness-ui-compact-slash-command-is-the-whole-message ()
   "Only a message that is /compact, maybe with a word after it, is the

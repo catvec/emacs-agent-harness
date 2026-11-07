@@ -73,6 +73,20 @@ when it carries a `:signature`, which is taken for its encrypted
 content; otherwise it is left out, since a reasoning item without
 one is not worth sending.
 
+What is remembered is kept per session, and a fork reads its parent's
+too.  A message sent back as the response delivered it renders as
+what it rendered as before; one whose response was pruned in the
+meantime is rebuilt from the blocks, which is a different prefix --
+and the prompt cache matches only up to the first message that
+changed, so everything after it is sent again uncached.  A table
+shared by every session let one session's long turn prune what
+another was still replaying; each session's now keeps its own, and
+big enough that a long turn does not prune itself.  A session's
+responses are kept on disk as well (`harness-replay.el`), and the
+table is read back from there the first time the session is
+rendered: a restart used to lose every reasoning item, which cost the
+model what it was thinking as well as the cache from that message on.
+
 The reasoning effort is model-specific.  `reasoning.effort` may take
 none, minimal, low, medium, high, xhigh and max, but each model takes
 a subset: GPT-6 Astra rejects `none`, and older models stop at
@@ -156,6 +170,11 @@ another Emacs.
 
 - `chatgpt-plan/access-token` ([chatgpt-plan](chatgpt-plan.md))
 - `chatgpt-plan/status` ([chatgpt-plan](chatgpt-plan.md))
+- `replay/keep-responses` ([replay](replay.md)), when it is loaded
+- `replay/remember-response` ([replay](replay.md)), when it is loaded
+- `replay/responses` ([replay](replay.md)), when it is loaded
+- `replay/responses-p` ([replay](replay.md)), when it is loaded
+- `session/get` ([session](session.md))
 
 ### Events it handles
 

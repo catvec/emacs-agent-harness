@@ -450,16 +450,20 @@ Return the mock; `harness-bedrock-mock-url' gives its URL."
 (defun harness-bedrock-mock-agent-handler (request)
   "Answer REQUEST like a model that calls a tool once, then reports its result.
 A user message that names a tool in backquotes, as in \"call
-\\=`list_dir\\=`\", gets that tool called with the session directory read
-from the system prompt; a tool result gets a reply quoting it; anything
-else is echoed.  Model listings are answered too."
+\\=`list_dir\\=`\", gets that tool called with the session's directory, read
+from the request; a tool result gets a reply quoting it; anything else
+is echoed.  Model listings are answered too."
   (or (harness-bedrock-mock-listing request)
       (let* ((json (plist-get request :json))
              (last (harness-bedrock-mock--last-message json))
              (result (cl-find-if (lambda (b) (plist-get b :toolResult)) (plist-get last :content)))
              (text (string-join (delq nil (mapcar (lambda (b) (plist-get b :text)) (plist-get last :content))) " "))
              (system (string-join (delq nil (mapcar (lambda (b) (plist-get b :text)) (plist-get json :system))) "\n"))
-             (cwd (and (string-match "Working directory: \\([^\n]+\\)" system) (match-string 1 system)))
+             ;; A test that sends its own prompt names the directory there;
+             ;; the harness's own prompt names none, and the request does.
+             (cwd (or (and (string-match "Working directory: \\(/[^\n]+\\)" system)
+                           (match-string 1 system))
+                      (plist-get (plist-get request :session) :cwd)))
              (tool (and (string-match "`\\([a-z_]+\\)[`']" text) (match-string 1 text)))
              (stream (cond
                       (result

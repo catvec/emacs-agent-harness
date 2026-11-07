@@ -27,6 +27,7 @@
 (defvar harness-cache--presence)
 (defvar harness-cache--announced)
 (defvar harness-cache--ends)
+(defvar harness-cache--health)
 (defvar harness-cache-ttl)
 (defvar harness-cache-ttl-overrides)
 (defvar harness-providers)
@@ -60,6 +61,7 @@ Caches last what the test says.  Events are collected in
      (clrhash harness-cache--presence)
      (clrhash harness-cache--announced)
      (clrhash harness-cache--ends)
+     (clrhash harness-cache--health)
      (setq harness-cache-test--events nil
            harness-cache-test--presence nil)
      (harness-define-provider 'fake
@@ -99,6 +101,13 @@ session's id."
   "Stamp session SID's cache again: a request FROM-NOW that kept it TTL seconds."
   (harness-call 'session/usage-add sid (list :input 10 :output 10 :cache-read 3000 :context 3020
                                              :cache-at (+ (float-time) from-now) :cache-ttl ttl)))
+
+(defun harness-cache-test--reuse (sid &rest plist)
+  "Emit a `cache/reuse' for SID with PLIST, a full miss by default."
+  (harness-emit 'cache/reuse sid
+                (append plist (list :ratio 0.0 :previous 50000 :cache-read 0
+                                    :wasted 50000 :context 50000
+                                    :model "fake:m" :at (float-time)))))
 
 (defun harness-cache-test--expires (sid)
   "Return when session SID's cache lapses, or nil."
@@ -404,10 +413,12 @@ queue sends out."
     (let ((sid (harness-cache-test-session 300 0)))
       (harness-call 'cache/active sid)
       (harness-call 'cache/claim sid 'warm)
+      (puthash sid (list :streak 1 :wasted 50000 :alerted-at nil :ratio 0.0)
+               harness-cache--health)
       (should (gethash sid harness-cache--ends))
       (harness-call 'session/delete sid)
       (dolist (table (list harness-cache--watched harness-cache--ends harness-cache--presence
-                           harness-cache--claims harness-cache--fired))
+                           harness-cache--claims harness-cache--fired harness-cache--health))
         (should-not (gethash sid table)))
       (should (equal (list sid nil) (car (last harness-cache-test--presence)))))))
 
@@ -420,6 +431,146 @@ queue sends out."
   (should (harness-acp--extension-allowed-p "cache/warm-list"))
   (should (harness-acp--extension-allowed-p "cache/periods"))
   (should (memq 'cache/warm-changed harness-acp--forwarded-events)))
+
+
+;;;; Cache health
+
+(ert-deftest harness-cache-health-a-streak-of-misses-alerts ()
+  "Two misses in a row tell the user: a hint, a notification and `cache/poor-hit'.
+The hint says the last share and what the misses cost together; the
+first miss says nothing, and one inside the cooldown does not repeat it."
+  (harness-cache-test-with
+    (let ((harness-cache-health-streak 2)
+          (harness-cache-health-min-context 1000)
+          (alerts nil)
+          (notified nil))
+      (harness-on 'cache/poor-hit (lambda (sid info) (push (cons sid info) alerts)))
+      (harness-register-method 'notification/send
+                               (lambda (notification &optional _providers)
+                                 (push notification notified) t))
+      (unwind-protect
+          (let ((sid (harness-cache-test-session 300 0)))
+            (harness-cache-test--reuse sid :previous 40000 :wasted 40000)
+            (should-not alerts)
+            (should-not notified)
+            (harness-cache-test--reuse sid :ratio 0.25 :cache-read 10000
+                                       :previous 40000 :wasted 30000)
+            (should (= 1 (length alerts)))
+            (let ((info (cdar alerts)))
+              (should (= 2 (plist-get info :streak)))
+              (should (= 70000 (plist-get info :wasted))))
+            (let* ((nodes (harness-call 'session/nodes sid))
+                   (hint (car (last (cl-remove-if-not
+                                     (lambda (node) (eq (plist-get node :kind) 'hint))
+                                     nodes)))))
+              (should hint)
+              (should (equal "Prompt cache miss · 25% cached · 2 calls · 70k tokens re-sent"
+                             (plist-get hint :content))))
+            (should (= 1 (length notified)))
+            (let ((notification (car notified)))
+              (should (equal "Prompt cache miss" (plist-get notification :title)))
+              (should (equal "Session · 2 calls · 70k tokens re-sent"
+                             (plist-get notification :body)))
+              (should (equal sid (plist-get notification :session))))
+            ;; A third miss, below the streak again, says nothing more.
+            (harness-cache-test--reuse sid :ratio 0.5 :cache-read 20000
+                                       :previous 40000 :wasted 20000)
+            (should (= 1 (length alerts)))
+            (should (= 1 (length notified))))
+        (harness-unregister-method 'notification/send)))))
+
+(ert-deftest harness-cache-health-a-good-read-clears-the-streak ()
+  "A request that reads its share starts the count again.
+The share is of the previous prompt, and exactly the threshold is a
+good read: the streak is the misses in a row."
+  (harness-cache-test-with
+    (let ((harness-cache-health-streak 2)
+          (harness-cache-health-threshold 0.99)
+          (harness-cache-health-min-context 1000)
+          (alerts nil))
+      (harness-on 'cache/poor-hit (lambda (sid info) (push (cons sid info) alerts)))
+      (let ((sid (harness-cache-test-session 300 0)))
+        (harness-cache-test--reuse sid :ratio 0.5 :cache-read 20000
+                                   :previous 40000 :wasted 20000)
+        (harness-cache-test--reuse sid :ratio 0.995 :cache-read 39800
+                                   :previous 40000 :wasted 200)
+        (harness-cache-test--reuse sid :ratio 0.5 :cache-read 20000
+                                   :previous 40000 :wasted 20000)
+        (should-not alerts)
+        (harness-cache-test--reuse sid :ratio 0.0 :cache-read 0
+                                   :previous 40000 :wasted 40000)
+        (should (= 1 (length alerts)))
+        (should (= 2 (plist-get (cdar alerts) :streak)))
+        ;; Exactly the threshold is a good read, and clears what came before.
+        (harness-cache-test--reuse sid :ratio 0.99 :cache-read 39600
+                                   :previous 40000 :wasted 400)
+        (harness-cache-test--reuse sid :ratio 0.5 :cache-read 20000
+                                   :previous 40000 :wasted 20000)
+        (should (= 1 (length alerts)))))))
+
+(ert-deftest harness-cache-health-says-nothing-of-a-small-prompt-or-an-internal-session ()
+  "A prompt below the minimum is not worth a cache, nor an alert; a
+judge, naming or recap call is an internal session, and not the user's
+to be told about."
+  (harness-cache-test-with
+    (let ((harness-cache-health-streak 1)
+          (harness-cache-health-min-context 20000)
+          (alerts nil))
+      (harness-on 'cache/poor-hit (lambda (sid _info) (push sid alerts)))
+      (let ((sid (harness-cache-test-session 300 0)))
+        (harness-cache-test--reuse sid :previous 19999 :wasted 19999)
+        (harness-cache-test--reuse sid :previous 19999 :wasted 19999)
+        (should-not alerts))
+      (let ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                          :kind 'internal :name "judge")
+                            :id)))
+        (harness-cache-test--reuse sid :previous 50000 :wasted 50000)
+        (harness-cache-test--reuse sid :previous 50000 :wasted 50000)
+        (should-not alerts))
+      ;; The same prompts in a session of the user's do alert.
+      (let ((sid (harness-cache-test-session 300 0)))
+        (harness-cache-test--reuse sid :previous 50000 :wasted 50000)
+        (should (equal (list sid) alerts))))))
+
+(ert-deftest harness-cache-health-holds-a-cooldown-between-alerts ()
+  "A session that keeps missing says so once in the cooldown, and again
+after it, with the streak it has then."
+  (harness-cache-test-with
+    (let ((harness-cache-health-streak 2)
+          (harness-cache-health-min-context 1000)
+          (harness-cache-health-cooldown 300)
+          (alerts nil))
+      (harness-on 'cache/poor-hit (lambda (sid info) (push (cons sid info) alerts)))
+      (let ((sid (harness-cache-test-session 300 0)))
+        (dotimes (_ 2) (harness-cache-test--reuse sid :previous 40000 :wasted 40000))
+        (should (= 1 (length alerts)))
+        (dotimes (_ 2) (harness-cache-test--reuse sid :previous 40000 :wasted 40000))
+        (should (= 1 (length alerts)))
+        ;; The cooldown over, the next miss alerts with the streak so far.
+        (let ((harness-cache-health-cooldown 0))
+          (harness-cache-test--reuse sid :previous 40000 :wasted 40000))
+        (should (= 2 (length alerts)))
+        (should (= 3 (plist-get (cdar alerts) :streak)))
+        (should (= 120000 (plist-get (cdar alerts) :wasted)))))))
+
+(ert-deftest harness-cache-health-can-stop-the-turn ()
+  "With the stop action the alert cancels the session's running turn too,
+so it stops paying before the next step; the alert itself still comes."
+  (harness-cache-test-with
+    (let ((harness-cache-health-streak 1)
+          (harness-cache-health-min-context 1000)
+          (harness-cache-health-action 'stop)
+          (cancelled nil)
+          (alerts 0))
+      (harness-on 'cache/poor-hit (lambda (_sid _info) (cl-incf alerts)))
+      (harness-register-method 'agent/cancel
+                               (lambda (session-id) (push session-id cancelled) t))
+      (unwind-protect
+          (let ((sid (harness-cache-test-session 300 0)))
+            (harness-cache-test--reuse sid :previous 40000 :wasted 40000)
+            (should (equal (list sid) cancelled))
+            (should (= 1 alerts)))
+        (harness-unregister-method 'agent/cancel)))))
 
 (provide 'harness-cache-test)
 ;;; harness-cache-test.el ends here

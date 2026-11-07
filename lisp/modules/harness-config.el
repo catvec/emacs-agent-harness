@@ -211,7 +211,7 @@ reader of the layers skips it (see `harness-config--layered-keys').")
      :keys (harness-cowboy-ask harness-cowboy-default harness-cowboy-min-context))
     (cache
      :title "Prompt cache"
-     :doc "Keeping a conversation's prompt cache from lapsing while that pays.  While you are around, typing or using the session, or while its turn waits on a long tool call, the cache is read once more just before it would lapse, a tenth of the price of sending the conversation again; it stops once the refreshes would cost as much as that.  Once you are gone, a conversation of some size is compacted a few seconds before its cache lapses, while it is still cached, the way you saved for a cold cache -- where you would not be asked what goes first: after an \"always\" answer to the cold-cache question, with asking off, or in a session that never waits for you."
+     :doc "Keeping a conversation's prompt cache from lapsing while that pays.  While you are around, typing or using the session, or while its turn waits on a long tool call, the cache is read once more just before it would lapse, a tenth of the price of sending the conversation again; it stops once the refreshes would cost as much as that.  Once you are gone, a conversation of some size is compacted a few seconds before its cache lapses, when the compaction request's own prefix is cached, the way you saved for a cold cache -- where you would not be asked what goes first: after an \"always\" answer to the cold-cache question, with asking off, or in a session that never waits for you."
      :keys (harness-cache-warm harness-cache-precompact harness-cache-precompact-min-context))
     (safety
      :title "Files and safety"

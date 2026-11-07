@@ -26,6 +26,16 @@
 (defvar harness-provider-check-test--error-kind nil)
 (defvar harness-provider-check-test--error-text nil)
 (defvar harness-provider-check-test--events nil)
+(defvar harness-provider-check-test--cache-read nil
+  "The `:cache-read' the fake provider's usage events report, when a number.")
+
+(defun harness-provider-check-test--usage ()
+  "Return the usage event of the fake provider.
+It carries `:cache-read' when `harness-provider-check-test--cache-read'
+is a number; a provider that reports no cache tokens says nothing of them."
+  (append '(:type usage :input 42 :output 5)
+          (and (numberp harness-provider-check-test--cache-read)
+               (list :cache-read harness-provider-check-test--cache-read))))
 
 (defun harness-provider-check-test--complete (request)
   "Fake completion of REQUEST, including tool continuation and cancellation."
@@ -53,7 +63,7 @@
            (let* ((tool (car (plist-get (car (last (plist-get request :messages))) :content)))
                   (receipt (plist-get tool :content)))
              (funcall emit (list :type 'text :delta receipt))
-             (funcall emit '(:type usage :input 42 :output 5))
+             (funcall emit (harness-provider-check-test--usage))
              (setq done t)
              (funcall emit '(:type done :stop-reason end-turn))))
           ((and (plist-get request :tools)
@@ -118,7 +128,7 @@
              (funcall emit (list :type 'text :delta (or (and vision "red") "hello")))
              (unless (plist-get request :ephemeral)
                (funcall emit '(:type provider-state :state (:id "fake-state"))))
-             (funcall emit '(:type usage :input 42 :output 5))
+             (funcall emit (harness-provider-check-test--usage))
              (setq done t)
              (funcall emit '(:type done :stop-reason end-turn))))))))
     (list :cancel
@@ -185,6 +195,7 @@ the test can read back."
            (harness-provider-check-test--error-kind nil)
            (harness-provider-check-test--error-text nil)
            (harness-provider-check-test--events nil)
+           (harness-provider-check-test--cache-read nil)
            (harness-provider-check-timeout 1))
        (harness-on 'provider-check/started
                    (lambda (&rest args)
@@ -240,13 +251,13 @@ the test can read back."
 (ert-deftest harness-provider-check-both-suites-pass-offline ()
   (harness-provider-check-test-with
     (let ((results (harness-provider-check-test-run "checkfake:model" 'all)))
-      (should (= 11 (cl-count 'provider results
+      (should (= 14 (cl-count 'provider results
                               :key (lambda (r) (plist-get r :suite)))))
       (should (= 4 (cl-count 'model results
                              :key (lambda (r) (plist-get r :suite)))))
       (should (= 12 (cl-count 'pass results
                               :key (lambda (r) (plist-get r :status)))))
-      (should (= 3 (cl-count 'skip results
+      (should (= 6 (cl-count 'skip results
                              :key (lambda (r) (plist-get r :status)))))
       (should (cl-some
                (lambda (request)
@@ -304,17 +315,17 @@ model behavior checks that ask for a tool call could never pass."
     (let* ((job (harness-provider-check-start "checkfake:model" 'provider))
            (started (car (harness-provider-check-test-events 'started))))
       (should (equal (nth 0 started) (harness-provider-check-job-id job)))
-      (should (= 11 (nth 3 started)))
+      (should (= 14 (nth 3 started)))
       (should (null (harness-provider-check-test-events 'result)))
       (harness-await (harness-provider-check-job-promise job) 10)
       (let ((results (harness-provider-check-test-events 'result)))
-        (should (= 11 (length results)))
+        (should (= 14 (length results)))
         (should (equal (mapcar (lambda (event) (nth 2 event)) results)
-                       (number-sequence 1 11)))
-        (should (= 11 (nth 3 (car (last results)))))
+                       (number-sequence 1 14)))
+        (should (= 14 (nth 3 (car (last results)))))
         (let ((finished (car (harness-provider-check-test-events 'finished))))
-          (should (= 11 (length (nth 2 finished))))
-          (should (= 11 (plist-get (nth 3 finished) :completed))))))))
+          (should (= 14 (length (nth 2 finished))))
+          (should (= 14 (plist-get (nth 3 finished) :completed))))))))
 
 (ert-deftest harness-provider-check-continues-after-effort-rejection ()
   (harness-provider-check-test-with
@@ -385,6 +396,71 @@ model behavior checks that ask for a tool call could never pass."
                       "Provider-state and fork (optional)" "Embeddings (optional)"))
         (should (eq 'pass (plist-get (harness-provider-check-test-by-name
                                       results name) :status)))))))
+
+(ert-deftest harness-provider-check-prompt-caching-needs-a-second-hit ()
+  "The check sends the same prompt twice and reads the second's cache tokens.
+A provider that reports them passes when the second reads some, fails
+when it reads none, and is skipped when it reports no cache tokens at
+all: nothing is known of its cache either way."
+  (harness-provider-check-test-with
+    (let ((harness-provider-check-test--cache-read 1000))
+      (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
+        (should (eq 'pass (plist-get (harness-provider-check-test-by-name
+                                      results "Prompt caching") :status)))))
+    (setq harness-provider-check-test--cache-read 0)
+    (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+           (cache (harness-provider-check-test-by-name results "Prompt caching")))
+      (should (eq 'fail (plist-get cache :status)))
+      (should (string-match-p "uncached rate" (plist-get cache :advice))))
+    (setq harness-provider-check-test--cache-read nil)
+    (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
+      (should (eq 'skip (plist-get (harness-provider-check-test-by-name
+                                    results "Prompt caching") :status))))))
+
+(ert-deftest harness-provider-check-tier-models-resolve ()
+  "Every tier the provider declares must name a model of its catalogue.
+A tier that matches none is a failure naming it, so a plan whose judges
+fall back to the session's model says so; a catalogue of one model has
+nothing to choose between and is skipped."
+  (harness-provider-check-test-with
+    (harness-define-provider 'checkfake
+      :models (lambda () (harness-resolved '((:name "small") (:name "big"))))
+      :complete #'harness-provider-check-test--complete
+      :tiers '(:simple "small" :medium "big" :hard nil :frontier nil))
+    (let* ((results (harness-provider-check-test-run "checkfake:big" 'provider))
+           (tiers (harness-provider-check-test-by-name results "Tier model resolution")))
+      (should (eq 'pass (plist-get tiers :status)))
+      (should (string-match-p "simple: small" (plist-get tiers :detail)))
+      (should (string-match-p "medium: big" (plist-get tiers :detail))))
+    ;; A tier that matches no model leaves the harness on the session's.
+    (harness-define-provider 'checkfake
+      :models (lambda () (harness-resolved '((:name "small") (:name "big"))))
+      :complete #'harness-provider-check-test--complete
+      :tiers '(:simple "nano" :hard "big" :frontier nil))
+    (let* ((results (harness-provider-check-test-run "checkfake:big" 'provider))
+           (tiers (harness-provider-check-test-by-name results "Tier model resolution")))
+      (should (eq 'fail (plist-get tiers :status)))
+      (should (string-match-p "simple (none)" (plist-get tiers :detail)))
+      (should (string-match-p "session's model" (plist-get tiers :advice))))
+    ;; `frontier' is the user's to choose: the harness never asks for it,
+    ;; so one the catalogue does not list is no fallback and no failure.
+    (harness-define-provider 'checkfake
+      :models (lambda () (harness-resolved '((:name "small") (:name "big"))))
+      :complete #'harness-provider-check-test--complete
+      :tiers '(:simple "small" :frontier "astra"))
+    (let* ((results (harness-provider-check-test-run "checkfake:big" 'provider))
+           (tiers (harness-provider-check-test-by-name results "Tier model resolution")))
+      (should (eq 'pass (plist-get tiers :status)))
+      (should (string-match-p "simple: small" (plist-get tiers :detail)))
+      (should (string-match-p "frontier: none" (plist-get tiers :detail))))
+    ;; One model: a tier has nothing to choose between.
+    (harness-define-provider 'checkfake
+      :models #'harness-provider-check-test--models
+      :complete #'harness-provider-check-test--complete
+      :tiers '(:simple "model"))
+    (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+           (tiers (harness-provider-check-test-by-name results "Tier model resolution")))
+      (should (eq 'skip (plist-get tiers :status))))))
 
 (ert-deftest harness-provider-check-bad-quota-does-not-block-cancellation ()
   (harness-provider-check-test-with
@@ -566,7 +642,7 @@ Only account and network conditions turn a check into a SKIP."
         (should (string-match-p "Timed out" (plist-get basic :detail))))
       (should (eq 'skip (plist-get (harness-provider-check-test-by-name
                                     results "Usage accounting") :status)))
-      (should (= 11 (length results))))))
+      (should (= 14 (length results))))))
 
 (ert-deftest harness-provider-check-cancellation-needs-a-cancel-function ()
   "A completion handle without :cancel fails the cancellation check."
@@ -593,17 +669,18 @@ Only account and network conditions turn a check into a SKIP."
     (let* ((job (harness-provider-check-start "checkfake:model" 'provider))
            (id (harness-provider-check-job-id job))
            (deadline (+ (float-time) 5)))
-      ;; The catalogue check settles first; the completion then hangs.
+      ;; The catalogue and tier checks settle first; the completion then hangs.
       (while (and (null (harness-provider-check-test-events 'result))
                   (< (float-time) deadline))
         (accept-process-output nil 0.02)
         (sit-for 0.01))
       (should (harness-provider-check-test-events 'result))
-      (should (harness-provider-check-cancel id))
-      (harness-await (harness-provider-check-job-promise job) 5)
-      (let ((finished (car (harness-provider-check-test-events 'finished))))
-        (should (harness-json-true-p (plist-get (nth 3 finished) :cancelled)))
-        (should (= 1 (length (nth 2 finished)))))
+      (let ((so-far (length (harness-provider-check-test-events 'result))))
+        (should (harness-provider-check-cancel id))
+        (harness-await (harness-provider-check-job-promise job) 5)
+        (let ((finished (car (harness-provider-check-test-events 'finished))))
+          (should (harness-json-true-p (plist-get (nth 3 finished) :cancelled)))
+          (should (= so-far (length (nth 2 finished))))))
       (should-not (gethash id harness-provider-check--jobs)))))
 
 (ert-deftest harness-provider-check-methods-start-and-cancel-a-job ()
@@ -618,8 +695,8 @@ Only account and network conditions turn a check into a SKIP."
            (id (plist-get answer :job))
            (job (gethash id harness-provider-check--jobs)))
       (should (equal id "test-job"))
-      (should (= 11 (plist-get answer :total)))
-      (should (= 11 (length (plist-get answer :checks))))
+      (should (= 14 (plist-get answer :total)))
+      (should (= 14 (length (plist-get answer :checks))))
       (should job)
       (should (harness-call 'provider/check-cancel id))
       (harness-await (harness-provider-check-job-promise job) 5)

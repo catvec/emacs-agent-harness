@@ -90,12 +90,16 @@
 ;; call.  Past `harness-supervisor-fork-limit' tokens of it
 ;; (`harness-supervisor--conversation-tokens', recorded on the plan as
 ;; `:fork-tokens') `submit_plan' refuses fork steps, and a fork step of
-;; an older plan past it starts from a compaction
-;; (`harness-supervisor--compact-fork').  When a plan has two or more
-;; fork steps on one model they all fork through one seed (`seed/fork'),
-;; so that the context is written to that model's prompt cache once.  The
-;; window of both is capped as `harness-tools-agent-context-limit' says,
-;; and never silently: a hint in the worker's transcript says so
+;; an older plan past it fails before a worker or a request exists, as
+;; does one whose size cannot be measured.  Nothing compacts it first:
+;; the compaction's own request has a different system prompt and tool
+;; list from the conversation's, so no prompt cache covers it, and it
+;; reads the whole conversation cold and then writes a summary -- often
+;; more than the turn it would save.  The way out is a fresh step, whose
+;; brief is the plan's summary and its own prompt, never the
+;; conversation.  The window of both is capped as
+;; `harness-tools-agent-context-limit' says, and never silently: a hint
+;; in the worker's transcript says so
 ;; (`harness-supervisor--limit-hint').  The worker's reply is the step's
 ;; result, which the steps that wait for it are given.  A worker shows
 ;; in the supervisor's transcript as the `spawn_agent' call that would
@@ -117,27 +121,18 @@
 ;; configured, and workers as their supervisor does.
 ;;
 ;; A step that starts again -- `retry_step', perhaps on a higher tier, or an
-;; interrupted step after a restart -- decides its context by the cache.  A
-;; fork never shares its parent's cache (its system prompt names its own
-;; directories, its tool list differs), and a retry on a higher tier runs
-;; on a model that has never read the plan's conversation, so forking the
-;; supervisor would send all of it uncached at that model's price, and the
-;; cowboy's gate (harness-cowboy.el) never sees a new fork as cold.  So
-;; with a warm seed for the plan's node on the step's model (`seed/warm-p')
-;; the worker forks through it, as above, and reads the shared context from
-;; the cache.  Without one it forks the supervisor directly and the fork is
-;; compacted before its first turn, as the cowboy would for a session
-;; nobody is asked about (`cowboy/compact', its default, a brief summary
-;; unless the user chose otherwise; with no cowboy, a brief summary from
-;; `compaction/compact'; with no compaction, the whole conversation).  A
-;; compaction that fails fails nothing.  Either way the supervisor gets a
-;; hint saying which, and the worker's message says its conversation was
-;; compacted.  The step keeps the attempt before as `:previous' (`:attempt
-;; :session :model :error'), which the worker's message points at: it can
-;; read what was tried with session_read, and should not repeat what
-;; failed.  A fork step of a plan past `harness-supervisor-fork-limit' is
-;; compacted the same way on its first attempt too, seed or not.  Other
-;; first attempts, and fresh steps, decide as before.
+;; interrupted step after a restart -- forks only a conversation at or
+;; under the limit, measured when the plan was made; past it the step
+;; fails, as it does on a first attempt, and a fresh step is the way out.
+;; No fork reads its parent's cache, and a retry on a higher tier runs on
+;; a model that has never read the plan's conversation: what it inherits
+;; is bounded by the limit, and it writes that much into its model's cache
+;; once.  It is not compacted first: the compaction's request is a
+;; different prefix from the chat's, so it would read the whole
+;; conversation cold at the summarizer's price.  The step keeps the
+;; attempt before as `:previous' (`:attempt :session :model :error'),
+;; which the worker's message points at: it can read what was tried with
+;; session_read, and should not repeat what failed.
 ;;
 ;; The plans of a session are its `:ext' `:supervisor-plans', so they
 ;; survive a restart and the UI shows them: each change of a step is a
@@ -365,7 +360,7 @@ and the default nudges well before that.  It is on the settings page,
 under Supervisor mode."
   :type 'integer :safe (lambda (v) (and (integerp v) (> v 0))) :group 'harness)
 
-(defcustom harness-supervisor-fork-limit 20000
+(defcustom harness-supervisor-fork-limit 10000
   "Most tokens of conversation a worker of a plan may inherit by forking.
 A step's worker starts fresh by default, with the plan's summary, its
 own prompt and the reports of the steps it waits for.  A fork step's
@@ -373,12 +368,15 @@ worker inherits the supervisor's conversation instead, and no fork
 reads its parent's prompt cache: its system prompt and tools differ,
 and its model usually does.  So its first request writes the whole
 conversation into its model's cache, and every request after reads it
-again.  Past this many tokens of conversation, estimated from the
-transcript without the system prompt and tools a fresh worker has too
+again.  Past this many tokens of conversation -- about the size of a
+fresh worker's brief -- estimated from the transcript without the system
+prompt and tools a fresh worker has too
 \(`harness-supervisor--conversation-tokens'), `submit_plan' refuses
 fork steps, and a fork step of a plan made before, or past a limit
-lowered since, starts from a compaction of the conversation instead.
-Nil puts no limit on forks.  It is on the settings page, under
+lowered since, fails before a worker is made.  It is not compacted into
+a summary first: the compaction's request has a different system prompt
+and tool list, so its input is uncached too.  Make the step fresh
+instead.  Nil puts no limit on forks.  It is on the settings page, under
 Supervisor mode."
   :type '(choice (const :tag "No limit" nil) (integer :tag "Tokens"))
   :safe (lambda (v) (or (null v) (and (integerp v) (>= v 0))))
@@ -2054,28 +2052,6 @@ hint that cannot be added fails nothing."
     (error (harness-log 'warn "supervisor: no context cap hint for %s: %s"
                         (plist-get worker :id) (harness-error-short-message err)))))
 
-(defun harness-supervisor--refit-limit (session-id worker)
-  "Fit the context window limit of WORKER to its compacted conversation.
-WORKER is a fork of SESSION-ID, the supervisor.  Its limit was set when
-it was made, from all the supervisor holds; compacted, it starts with
-far less, so it gets the limit of a fork that starts with that much
-\(`harness-supervisor--context-limit'), and no window of its own beyond
-it.  The change is silent here: the hint about the cap that follows says
-it.  Return (:context-limit LIMIT :context-inherited N) once the limit
-is set, nil when nothing caps a worker or the context cannot be told."
-  (condition-case err
-      (let* ((wid (plist-get worker :id))
-             (context (and (harness-method-exists-p 'compaction/estimate)
-                           (plist-get (harness-call 'compaction/estimate wid) :context)))
-             (limit (and (numberp context)
-                         (harness-supervisor--context-limit session-id t (round context)))))
-        (when limit
-          (harness-call 'session/update wid :context-window-limit limit :silent t)
-          (list :context-limit limit :context-inherited (round context))))
-    (error (harness-log 'warn "supervisor: could not fit the context limit of %s: %s"
-                        (plist-get worker :id) (harness-error-short-message err))
-           nil)))
-
 (defun harness-supervisor--conversation-tokens (session-id)
   "Return about how many tokens the conversation of SESSION-ID holds.
 That is what a fork of it inherits beyond the system prompt and the
@@ -2084,8 +2060,9 @@ provider is sent (`session/messages'), estimated as
 `harness-estimate-tokens' does it.  A tool call counts by its input and
 a tool result by its output.  Thinking is left out, since its signature
 ties it to the model that made it, so it does not travel to a worker's
-model.  A conversation that cannot be read counts as none, with a
-warning in the log."
+model.  Nil, with a warning in the log, when it cannot be read: a
+caller that would fork such a conversation must refuse rather than
+send it uncached."
   (condition-case err
       (let ((tokens 0))
         (dolist (message (harness-call 'session/messages session-id))
@@ -2104,7 +2081,7 @@ warning in the log."
     (error
      (harness-log 'warn "supervisor: could not measure the conversation of %s: %s"
                   session-id (harness-error-short-message err))
-     0)))
+     nil)))
 
 (defun harness-supervisor--past-fork-limit-p (tokens)
   "Non-nil when TOKENS of conversation are past `harness-supervisor-fork-limit'.
@@ -2114,11 +2091,12 @@ A nil limit is no limit: nothing is past it."
        (> tokens harness-supervisor-fork-limit)))
 
 (defun harness-supervisor--fork-tokens (session-id plan)
-  "Return the tokens of conversation a fork step of PLAN inherits.
+  "Return the tokens of conversation a fork step of PLAN inherits, or nil.
 That is the plan's `:fork-tokens', measured when `submit_plan' made it.
 A plan stored before plans recorded it has none; then the conversation
 of SESSION-ID, the supervisor, is measured as it is now
-\(`harness-supervisor--conversation-tokens'), which is at least as much."
+\(`harness-supervisor--conversation-tokens'), which is at least as much.
+Nil when that cannot be measured."
   (let ((tokens (plist-get plan :fork-tokens)))
     (if (numberp tokens)
         tokens
@@ -2126,107 +2104,27 @@ of SESSION-ID, the supervisor, is measured as it is now
 
 (defun harness-supervisor--fork-problems (steps tokens)
   "Return the problems STEPS have with forking TOKENS of conversation.
-Nil unless some of STEPS has the context fork and TOKENS are past
-`harness-supervisor-fork-limit'; then a list of one text, which names
-the fork steps, says why a fork is refused and what to do instead."
+Nil unless some of STEPS has the context fork and either TOKENS cannot
+be measured or they are past `harness-supervisor-fork-limit'; then a
+list of one text, which names the fork steps, says why a fork is
+refused and what to do instead."
   (let* ((forks (cl-remove-if-not (lambda (step) (equal (plist-get step :context) "fork"))
                                   steps))
          (many (cdr forks))
-         (ids (mapconcat (lambda (step) (or (plist-get step :id) "?")) forks ", ")))
-    (when (and forks (harness-supervisor--past-fork-limit-p tokens))
-      (list (format (concat "%s %s %s this conversation, which holds about %s tokens, past harness-supervisor-fork-limit (%s):"
+         (ids (mapconcat (lambda (step) (or (plist-get step :id) "?")) forks ", "))
+         (why (cond
+               ((not (numberp tokens))
+                "which could not be measured, so how much a fork would send uncached is unknown")
+               ((harness-supervisor--past-fork-limit-p tokens)
+                (format "which holds about %s tokens, past harness-supervisor-fork-limit (%s)"
+                        (harness-format-tokens-compact tokens)
+                        (harness-format-tokens-compact harness-supervisor-fork-limit))))))
+    (when (and forks why)
+      (list (format (concat "%s %s %s this conversation, %s:"
                             " a fork writes all of it into its worker model's cache and reads it again on every call."
                             " Make %s fresh, and put what the workers need in the summary, which every fresh worker gets, and in their prompts")
-                    (if many "steps" "step") ids (if many "fork" "forks")
-                    (harness-format-tokens-compact tokens)
-                    (harness-format-tokens-compact harness-supervisor-fork-limit)
+                    (if many "steps" "step") ids (if many "fork" "forks") why
                     (if many "them" "it"))))))
-
-(defun harness-supervisor--seeded-p (plan step)
-  "Non-nil when the worker of STEP forks through a seed.
-That is when PLAN has two or more fork steps on STEP's model, all its
-steps counted: they share one seed, whose cache is written once."
-  (and (equal (plist-get step :context) "fork")
-       (harness-method-exists-p 'seed/fork)
-       (>= (cl-count-if (lambda (other) (and (equal (plist-get other :context) "fork")
-                                             (equal (plist-get other :model) (plist-get step :model))))
-                        (plist-get plan :steps))
-           2)))
-
-(defun harness-supervisor--restarted-p (step)
-  "Non-nil when STEP starts again: this is its second attempt or a later one.
-`harness-supervisor--start-step' counts the attempt before the worker is
-made, so a step on its first attempt has 1."
-  (> (or (plist-get step :attempts) 0) 1))
-
-(defun harness-supervisor--warm-seed (session-id plan step)
-  "Return the id of the warm seed a fork of STEP of PLAN would read, or nil.
-SESSION-ID is the supervisor.  It is `seed/warm-p' for the plan's node
-and the step's model: a seed whose cache lasts, or is being primed or
-warmed.  Nil too when there is no seed module, or it cannot tell."
-  (and (harness-method-exists-p 'seed/warm-p)
-       (harness-method-exists-p 'seed/fork)
-       (condition-case nil
-           (harness-call 'seed/warm-p session-id (plist-get step :model) (plist-get plan :node))
-         (error nil))))
-
-(defun harness-supervisor--own-compaction (worker-id)
-  "Return the kind of the compaction WORKER-ID itself made, a string, or nil.
-Its own: the nodes it inherited from the supervisor may hold others."
-  (condition-case nil
-      (let ((node (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'compaction)
-                                               (equal (plist-get n :session) worker-id)))
-                              (harness-call 'session/nodes worker-id) :from-end t)))
-        (and node (harness-node-compaction-kind node)))
-    (error nil)))
-
-(defun harness-supervisor--compaction-hint (worker-id model text)
-  "Add a hint to WORKER-ID, a fork onto MODEL: no cache holds its context.
-TEXT says what is done about it."
-  (harness-supervisor--hint
-   worker-id (format "No prompt cache on %s holds the supervisor's conversation: %s" model text)))
-
-(defun harness-supervisor--compact-fork (session-id worker model)
-  "Return a promise of WORKER, a fork of SESSION-ID onto MODEL, compacted.
-No warm prompt cache holds the conversation the fork inherited, so its
-first turn would send all of it uncached at MODEL's price.  The cowboy
-compacts it as it does a session nobody is asked about (`cowboy/compact',
-its default, brief unless the user chose otherwise); without the cowboy
-a brief summary is made (`compaction/compact'); without compaction the
-fork goes on as it is, with a hint saying so.  A compaction that fails
-fails nothing: the promise resolves all the same.
-
-It resolves with WORKER and, under `:context-cache', how its context
-stands: `compacted' (and `:compaction', the kind of node the worker
-made) or `whole'.  A compacted fork's context window limit is fitted to
-what it now holds (`harness-supervisor--refit-limit'), whose
-`:context-limit' and `:context-inherited' it then has too."
-  (let* ((wid (plist-get worker :id))
-         (done (lambda (&rest _)
-                 (append worker
-                         (if-let* ((kind (harness-supervisor--own-compaction wid)))
-                             (append (list :context-cache 'compacted :compaction kind)
-                                     (harness-supervisor--refit-limit session-id worker))
-                           (list :context-cache 'whole))))))
-    (harness-then
-     (cond
-      ((harness-method-exists-p 'cowboy/compact)
-       (harness-call-async 'cowboy/compact wid
-                           :why (format "No prompt cache on %s holds the supervisor's conversation" model)
-                           :by 'cold-start))
-      ((harness-method-exists-p 'compaction/compact)
-       (harness-supervisor--compaction-hint wid model "compacting into a brief summary first")
-       (harness-call-async 'compaction/compact wid (list :kind 'brief)))
-      (t
-       (harness-supervisor--compaction-hint
-        wid model "nothing can compact it here, so carrying on with the whole conversation, uncached")
-       (harness-resolved nil)))
-     done
-     (lambda (err)
-       (harness-log 'warn "supervisor: compacting the fork %s failed: %s" wid (harness-error-short-message err))
-       (harness-supervisor--hint
-        wid (format "No compaction (%s): carrying on with the whole conversation" (harness-error-short-message err)))
-       (funcall done)))))
 
 (defun harness-supervisor--worker-thinking (session step)
   "Return the thinking level the worker of STEP of SESSION runs at, or nil.
@@ -2242,36 +2140,25 @@ worker at its model's own level, as its supervisor is."
   "Return a promise of the session of the worker of STEP of PLAN.
 SESSION-ID is the supervisor.  A fresh step, which is any step that is
 not a fork, is a new session in the supervisor's directory, with its
-settings; a fork step forks the supervisor at the call that submitted
-the plan -- through a seed when the plan has several fork steps on the
-model.  Either way the worker thinks at the level of its tier, else at
-the supervisor's (`harness-supervisor--worker-thinking').
+settings and a brief made of the plan's summary and the step, never the
+supervisor's conversation; a fork step forks the supervisor at the call
+that submitted the plan, and only while the conversation it inherits is
+at or under `harness-supervisor-fork-limit'.  Either way the worker
+thinks at the level of its tier, else at the supervisor's
+\(`harness-supervisor--worker-thinking').
 
-A fork step of a plan whose conversation is past
-`harness-supervisor-fork-limit' (`harness-supervisor--fork-tokens': a
-plan made before plans recorded its size, or a limit lowered since;
-`submit_plan' refuses such a fork in a new plan) forks the supervisor
-directly and compacts the fork before its first turn
-\(`harness-supervisor--compact-fork'), on a first attempt too, rather
-than write the whole conversation into the cache of its model.  The
-worker the promise resolves with then has `:fork-limit' as well.
-
-A fork step that starts again (`harness-supervisor--restarted-p': its
-`retry_step', or a restart of the harness) decides by the cache instead,
-for the model it now has may be one that has never read the plan's
-conversation, and a fork never shares its parent's cache.  With a warm
-seed for it (`seed/warm-p') it forks through the seed as above: the
-shared context is read from the cache.  Without one it forks the
-supervisor directly and compacts the fork before its first turn
-\(`harness-supervisor--compact-fork'), rather than send the whole
-conversation uncached.  The worker the promise resolves with then has
-`:context-cache' (`seed', `compacted' or `whole'); a first attempt
-within the limit and a fresh step never do.
+A fork step of a plan whose conversation is past the limit
+\(`harness-supervisor--fork-tokens': a plan made before plans recorded
+its size, or a limit lowered since; `submit_plan' refuses such a fork in
+a new plan), or whose size cannot be measured, fails the promise before
+a fork or a request exists.  Nothing compacts it first: a compaction
+reads the whole conversation cold on a request whose system prompt and
+tool list no prompt cache holds, and then writes a summary -- often more
+than the turn it would save.  The way out is a fresh step.
 
 Every worker's context window is capped as a sub-agent's is
 \(`harness-supervisor--context-limit'), and once the worker exists a
-hint in its transcript says so (`harness-supervisor--limit-hint'): with
-the limit fitted to the compacted conversation for a fork compacted."
+hint in its transcript says so (`harness-supervisor--limit-hint')."
   (let* ((session (harness-call 'session/get session-id))
          (model (plist-get step :model))
          (name (harness-supervisor--worker-name step))
@@ -2285,10 +2172,7 @@ the limit fitted to the compacted conversation for a fork compacted."
          (forks (append (and level (not (equal level (plist-get session :thinking)))
                              (list :thinking level))
                         options))
-         (seed-fork (lambda ()
-                      (apply #'harness-call-async 'seed/fork session-id model
-                             :node (plist-get plan :node) :call-id (plist-get plan :call-id)
-                             :name name forks)))
+         (tokens (and (not fresh) (harness-supervisor--fork-tokens session-id plan)))
          (plain-fork (lambda ()
                        (apply #'harness-call-async 'session/fork session-id
                               :node (plist-get plan :node) :call-id (plist-get plan :call-id)
@@ -2306,31 +2190,21 @@ the limit fitted to the compacted conversation for a fork compacted."
               :non-interactive (if (harness-json-true-p (plist-get session :non-interactive)) t :false)
               :allowed-dirs (plist-get session :allowed-dirs)
               options))
-      ;; A fork of a conversation past the limit -- in a plan made before
-      ;; plans recorded its size, or under a limit lowered since --
-      ;; starts from a compaction, seed or not.
-      ((harness-supervisor--past-fork-limit-p (harness-supervisor--fork-tokens session-id plan))
-       (harness-then (funcall plain-fork)
-                     (lambda (worker)
-                       (harness-then (harness-supervisor--compact-fork session-id worker model)
-                                     (lambda (compacted) (append compacted (list :fork-limit t)))))))
-      ((harness-supervisor--restarted-p step)
-       (if (harness-supervisor--warm-seed session-id plan step)
-           (harness-then (funcall seed-fork)
-                         (lambda (worker) (append worker (list :context-cache 'seed))))
-         (harness-then (funcall plain-fork)
-                       (lambda (worker) (harness-supervisor--compact-fork session-id worker model)))))
-      ((harness-supervisor--seeded-p plan step)
-       (funcall seed-fork))
+      ((not (numberp tokens))
+       (harness-rejected
+        (list 'harness-error
+              "the conversation this fork step would inherit could not be measured, so how much it would send uncached is unknown: start the step fresh instead")))
+      ((harness-supervisor--past-fork-limit-p tokens)
+       (harness-rejected
+        (list 'harness-error
+              (format (concat "the conversation this fork step would inherit holds about %s tokens,"
+                              " past harness-supervisor-fork-limit (%s): start the step fresh instead")
+                      (harness-format-tokens-compact tokens)
+                      (harness-format-tokens-compact harness-supervisor-fork-limit)))))
       (t
        (funcall plain-fork)))
      (lambda (worker)
-       ;; A compacted fork's limit was fitted to what it holds now.
-       (harness-supervisor--limit-hint
-        worker
-        (if (plist-member worker :context-limit) (plist-get worker :context-limit) limit)
-        (not fresh)
-        (if (plist-member worker :context-inherited) (plist-get worker :context-inherited) inherited))
+       (harness-supervisor--limit-hint worker limit (not fresh) inherited)
        worker))))
 
 (defconst harness-supervisor--fork-opening
@@ -2340,10 +2214,6 @@ the limit fitted to the compacted conversation for a fork compacted."
 (defconst harness-supervisor--fresh-opening
   "You are a worker for one step of a plan that a supervisor made. You have the full tool set: you can read and change files and run commands. You start without the supervisor's conversation: the plan and your step below are your brief, and the decisions in them are made. Read the code you need. Do this one step and nothing else: other workers do the other steps, some at the same time in the same working tree, so keep to your step's files."
   "What a worker that starts fresh is told first.")
-
-(defconst harness-supervisor--compacted-note
-  "The conversation before this message was compacted into a summary; the session_history tool searches and reads the full conversation it replaced."
-  "What a worker whose forked conversation was compacted is told after its opening.")
 
 (defconst harness-supervisor--worker-closing
   "Do the step, then verify it. End with a short report of what you changed, how you checked it, and anything the other steps need to know. Do not commit unless the step says so."
@@ -2368,25 +2238,19 @@ what failed."
                   "You can read what it tried with the session_read tool on that session, and should not repeat what failed."
                 "That session was deleted, so what it tried cannot be read; do not repeat what failed.")))))
 
-(defun harness-supervisor--worker-text (plan step preamble &optional compacted)
+(defun harness-supervisor--worker-text (plan step)
   "Return the message that gives the worker of STEP of PLAN its job.
-PREAMBLE is what `seed/fork' asks a fork's first message to open with,
-or nil.  COMPACTED is non-nil for a fork whose inherited conversation
-was compacted before this message, which the opening then says.  The
-message is the preamble, the opening, the plan's summary, the step, the
-other steps of the plan that no later plan superseded, the attempt
-before it when STEP starts again (its `:previous'), what the steps it
-waits for reported (cut short), and the closing.
+The message is the opening, the plan's summary, the step, the other
+steps of the plan that no later plan superseded, the attempt before it
+when STEP starts again (its `:previous'), what the steps it waits for
+reported (cut short), and the closing.
 
-A worker with no `submit_plan' call in its conversation -- a fresh one,
-or a fork whose conversation was compacted -- is given the summary and
-the other steps, which that call holds.  A fork with the whole
-conversation gets neither section, since the call it inherits has both."
+A fresh worker, with no `submit_plan' call in its conversation, is given
+the summary and the other steps, which that call holds.  A fork has the
+whole conversation up to the call, so it gets neither section."
   (let* ((fork (equal (plist-get step :context) "fork"))
-         ;; Only a whole fork has the plan's call in its conversation.
-         (brief (or (not fork) compacted))
          (summary (plist-get plan :summary))
-         (others (and brief
+         (others (and (not fork)
                       (cl-remove-if (lambda (other)
                                       (or (equal (plist-get other :id) (plist-get step :id))
                                           (harness-supervisor--state-p other "superseded")))
@@ -2395,12 +2259,10 @@ conversation gets neither section, since the call it inherits has both."
                                    (plist-get step :after))))
          (previous (harness-supervisor--previous-text (plist-get step :previous))))
     (concat
-     (and (stringp preamble) (not (string-blank-p preamble)) (concat (string-trim preamble) "\n\n"))
      (if fork
-         (concat harness-supervisor--fork-opening
-                 (and compacted (concat " " harness-supervisor--compacted-note)))
+         harness-supervisor--fork-opening
        harness-supervisor--fresh-opening)
-     (and brief (not (harness-string-blank-p summary))
+     (and (not fork) (not (harness-string-blank-p summary))
           (format "\n\n## The plan\n\n%s" (string-trim summary)))
      (format "\n\n## Step %s: %s\n\n%s\n" (plist-get step :id) (plist-get step :title)
              (plist-get step :prompt))
@@ -2532,51 +2394,13 @@ to do."
                   session-id plan-id (plist-get step :id) "failed"
                   (format "the worker could not be started: %s" (harness-error-short-message err)))))))))
 
-(defun harness-supervisor--compaction-words (kind)
-  "Return in words what a compaction of KIND, a string, leaves of a conversation."
-  (pcase kind
-    ("brief" "a brief summary of it")
-    ("summary" "a summary of it")
-    ("transcript" "a note pointing at a transcript file of it")
-    ("fresh" "nothing but a note pointing at it")
-    (_ "a compacted copy of it")))
-
-(defun harness-supervisor--restart-hint (session-id step worker)
-  "Tell supervisor SESSION-ID how the worker of STEP got its context.
-WORKER is its session, whose `:context-cache' says: `seed' (forked from
-a warm shared context), `compacted' (no warm cache held the plan's
-conversation, so the fork starts from a compaction of it) or `whole'
-\(and was not compacted).  A fork step that starts again has one, and
-so does a fork step past `harness-supervisor-fork-limit' on a first
-attempt too (its worker has `:fork-limit'), which the hint then says
-is the reason; nothing is said for any other."
-  (when-let* ((how (plist-get worker :context-cache)))
-    (harness-supervisor--hint
-     session-id
-     (format "Step %s (attempt %s) on %s: %s" (plist-get step :id) (or (plist-get step :attempts) "?")
-             (plist-get step :model)
-             (pcase how
-               ('seed "forked from the warm shared context")
-               ('compacted
-                (if (plist-get worker :fork-limit)
-                    (format "the plan's conversation is past harness-supervisor-fork-limit, so its worker starts from %s rather than inheriting all of it"
-                            (harness-supervisor--compaction-words (plist-get worker :compaction)))
-                  (format "no warm prompt cache holds the plan's conversation, so its worker starts from %s rather than reading it all uncached"
-                          (harness-supervisor--compaction-words (plist-get worker :compaction)))))
-               (_ (if (plist-get worker :fork-limit)
-                      "the plan's conversation is past harness-supervisor-fork-limit but could not be compacted, so its worker reads it all uncached"
-                    "no warm prompt cache holds the plan's conversation and it was not compacted, so its worker reads it all uncached")))))))
-
 (defun harness-supervisor--worker-made (session-id plan-id step-id worker attempt)
   "Run the step STEP-ID of plan PLAN-ID of session SESSION-ID on its new WORKER.
-WORKER is the session `seed/fork', `session/fork' or `session/create'
-made, plus `:context-cache', `:compaction' and `:fork-limit' for a fork
-step that starts again or whose conversation is past the fork limit
-\(see `harness-supervisor--make-worker'), whose supervisor is told how
-its context stands (`harness-supervisor--restart-hint').
-The step notes the model of the worker, which `retry_step' may change
-before the step starts again.  The worker's turn is the step: when it
-ends the step is done or it failed.
+WORKER is the session `session/fork' or `session/create' made (see
+`harness-supervisor--make-worker').  The step notes the model of the
+worker, which `retry_step' may change before the step starts again.
+The worker's turn is the step: when it ends the step is done or it
+failed.
 
 WORKER was made for ATTEMPT of the step.  A step that no longer waits
 for it (`harness-supervisor--making-p') -- interrupted or ended
@@ -2595,19 +2419,12 @@ made, and never gets the step."
                                              :session wid :worker-model (plist-get worker :model))
             (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id))
                    (step (harness-supervisor--step plan step-id)))
-              ;; A hint that cannot be added fails nothing.
-              (condition-case hint-err
-                  (harness-supervisor--restart-hint session-id step worker)
-                (error (harness-log 'warn "supervisor: no hint for step %s: %s"
-                                    step-id (harness-error-short-message hint-err))))
               ;; The worker shows in the supervisor's chat as the
               ;; spawn_agent call that would have started it.
               (harness-supervisor--open-call session-id wid step)
               (harness-then
                (harness-call-async 'agent/prompt wid
-                                   (harness-supervisor--worker-text
-                                    plan step (plist-get worker :preamble)
-                                    (eq (plist-get worker :context-cache) 'compacted))
+                                   (harness-supervisor--worker-text plan step)
                                    (list :from (harness-sender-session (harness-call 'session/get session-id))))
                (lambda (result)
                  (harness-supervisor--turn-ended session-id plan-id step-id wid result))
@@ -2683,7 +2500,12 @@ cannot be shown fails nothing.  Return the open call, or nil."
         (progn
           (harness-call 'session/append session-id
                         (list :kind 'tool-call :tool "spawn_agent" :call-id call-id :input input
-                              :title (harness-tool-title "spawn_agent" input)
+                              ;; The title says a fork of the supervisor's
+                              ;; conversation, which spawn_agent itself
+                              ;; never does: the supervisor forked it.
+                              :title (concat (harness-tool-title "spawn_agent" input)
+                                             (if (equal (plist-get step :context) "fork")
+                                                 " (fork)" ""))
                               :meta (list :from (harness-supervisor--sender) :child-id worker-id)))
           (puthash worker-id (list :session session-id :call-id call-id :started (float-time))
                    harness-supervisor--spawns))
@@ -3191,11 +3013,10 @@ in one message.
 
 The new worker is told of the attempt before it: the step keeps it as
 `:previous' (`harness-supervisor--start-step'), so the worker can read
-what it tried.  A fork step's worker does not read the plan's
-conversation uncached on a model that never saw it: the cache decides
-\(`harness-supervisor--make-worker').  It forks through a warm shared
-context when a seed holds one, else it is compacted before it starts,
-and a hint tells the supervisor which."
+what it tried.  A fork step forks only a conversation at or under
+`harness-supervisor-fork-limit'; past it, or when its size cannot be
+measured, the step fails again rather than send the whole conversation
+uncached or compact it cold (`harness-supervisor--make-worker')."
   (let* ((sid (plist-get ctx :session-id))
          (step-id (harness-supervisor--text (plist-get input :step)))
          (plan-id (harness-supervisor--text (plist-get input :plan)))
@@ -3586,7 +3407,7 @@ appended.  Other sessions keep PROMPT."
   ;; before the judge (30): it keeps the judge off the plans.
   (harness-add-filter 'permission/decide #'harness-supervisor--approval 28)
   (harness-add-filter 'agent/stop #'harness-supervisor--stop)
-  ;; After the sections the other modules add, before the seed freezes the prompt.
+  ;; After the sections the other modules add, so the supervisor's own is final.
   (harness-add-filter 'agent/system-prompt #'harness-supervisor--system-prompt 900)
   (harness-on 'session/created #'harness-supervisor--on-created)
   (harness-on 'session/ext-changed #'harness-supervisor--on-ext-changed)

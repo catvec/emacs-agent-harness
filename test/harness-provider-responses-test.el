@@ -73,13 +73,15 @@ which lets a test answer differently on each request to the same URL."
 (defmacro harness-responses-test-with-fake (responses &rest body)
   "Run BODY with the HTTP layer and the signed-in account faked.
 RESPONSES is `harness-responses-test--responses'.  The remembered
-responses and the model cache start empty, so nothing a test does
-leaks into the next one."
+responses (a session's own and the flat table of requests that name
+none) and the model cache start empty, so nothing a test does leaks
+into the next one."
   (declare (indent 1))
   `(let ((harness-responses-test--requests nil)
          (harness-responses-test--responses ,responses)
          (harness-responses-test--status harness-responses-test--status)
          (harness-responses--responses (make-hash-table :test 'equal))
+         (harness-responses--responses-by-session (make-hash-table :test 'equal))
          (harness-responses--models-cache nil)
          (harness-responses--efforts-by-model (make-hash-table :test 'equal))
          (harness-responses--efforts-account nil)
@@ -288,6 +290,8 @@ and read_file-style tool results, rather than bypassing the vision gate."
        (should (eq t (plist-get (harness-provider-capabilities provider) :thinking)))
        (should (eq t (plist-get (harness-provider-capabilities provider) :vision)))
        (should (eq t (plist-get (harness-provider-capabilities provider) :quota)))
+       ;; The plan keeps a prompt cache half an hour after its last use.
+       (should (= 1800 (plist-get (harness-provider-capabilities provider) :cache-ttl)))
        ;; The plan's models are the provider's own listing, so the
        ;; tiers are what the setting names rather than a price.
        (should (harness-provider-tiers provider)))
@@ -578,6 +582,98 @@ the model a story that never happened."
       (should (equal '("call_1" "call_2")
                      (mapcar (lambda (i) (plist-get i :call_id)) (nthcdr 2 inputs)))))))
 
+(defun harness-responses-test--call-items (n)
+  "Return a response's output items whose one call is call N."
+  (list (list :type "reasoning" :id (format "rs_%d" n) :summary nil
+              :encrypted_content (format "E-%d" n))
+        (list :type "function_call" :id (format "fc_%d" n) :call_id (format "call_%d" n)
+              :name "echo" :arguments "{}")))
+
+(ert-deftest harness-provider-responses-remembers-a-sessions-response-in-its-own-table ()
+  "A request that names a session keeps its response in that session's table.
+The table is the session's own so that the responses it replays from
+stay what they were, however much another session sends."
+  (harness-responses-test-with-fake
+      `(("/responses" . (:chunks ,(harness-responses-test--tool-call-events))))
+    (harness-responses-test--complete
+     `(:model "chatgpt:gpt-5" :session (:id "s1")
+       :messages ((:role user :content ((:type "text" :text "look"))))))
+    ;; Nothing went to the table of the requests that name no session.
+    (should (= 0 (hash-table-count harness-responses--responses)))
+    (should (gethash "call_1" (harness-responses--session-table '(:id "s1") nil)))))
+
+(ert-deftest harness-provider-responses-a-session-prunes-only-its-own-history ()
+  "A long turn of one session does not prune what another is replayed from.
+A response dropped from the table changes how the message that made it
+is rendered, and from that message on the prompt cache cannot match; so
+each session's is pruned on its own, and the newest are kept."
+  (let ((harness-responses--session-responses-max 2)
+        (harness-responses--responses-by-session (make-hash-table :test 'equal))
+        (harness-responses--responses (make-hash-table :test 'equal)))
+    (harness-responses--remember (harness-responses-test--call-items 1) '(:id "a"))
+    (harness-responses--remember (harness-responses-test--call-items 2) '(:id "b"))
+    ;; A's third response goes past the limit and prunes A's table, and
+    ;; only the oldest entry of A's with it.
+    (harness-responses--remember (harness-responses-test--call-items 3) '(:id "a"))
+    (harness-responses--remember (harness-responses-test--call-items 4) '(:id "a"))
+    (let ((a (harness-responses--session-table '(:id "a") nil))
+          (b (harness-responses--session-table '(:id "b") nil)))
+      ;; The newest are kept, up to the limit, and the older go.
+      (should-not (gethash "call_1" a))
+      (should-not (gethash "call_2" a))
+      (should (gethash "call_3" a))
+      (should (gethash "call_4" a))
+      (should (<= (hash-table-count a) 2))
+      ;; B's is as it was, though A went past the limit.
+      (should (= 1 (hash-table-count b)))
+      (should (gethash "call_2" b)))
+    ;; A request that names no session keeps the flat table it always had.
+    (harness-responses--remember (harness-responses-test--call-items 5) nil)
+    (should (gethash "call_5" harness-responses--responses))
+    (should (= 1 (hash-table-count harness-responses--responses)))))
+
+(ert-deftest harness-provider-responses-a-fork-replays-what-its-parent-remembered ()
+  "A fork finds the responses of its parent, which wrote the calls it replays.
+A fork keeps the parent's transcript, so the messages it sends include
+the parent's tool calls, and the response that made each was remembered
+in the parent's table: the fork reads it there, or rebuilds the message
+differently and the cache cannot match from there on."
+  (let ((harness-responses--responses-by-session (make-hash-table :test 'equal))
+        (harness-responses--responses (make-hash-table :test 'equal))
+        (blocks '((:type "tool_use" :id "call_1" :name "echo" :input (:value "a")))))
+    (harness-responses--remember (harness-responses-test--call-items 1) '(:id "parent"))
+    (cl-letf (((symbol-function 'harness-call)
+               (lambda (name &rest args)
+                 (should (eq name 'session/get))
+                 (list :id (car args) :parent-id (and (equal (car args) "fork") "parent")))))
+      (let ((harness-responses--current-session (list :id "fork" :parent-id "parent" :fork-node "n1"))
+            (harness-responses--current-tables nil))
+        (let ((items (harness-responses--remembered blocks)))
+          (should items)
+          (should (equal "E-1" (plist-get (car items) :encrypted_content)))
+          (should (equal "call_1" (plist-get (car (last items)) :call_id))))))
+    ;; The parent finds its own, and a session of another family finds nothing.
+    (let ((harness-responses--current-session '(:id "parent"))
+          (harness-responses--current-tables nil))
+      (should (harness-responses--remembered blocks)))
+    (let ((harness-responses--current-session '(:id "elsewhere"))
+          (harness-responses--current-tables nil))
+      (should-not (harness-responses--remembered blocks)))))
+
+(ert-deftest harness-provider-responses-the-oldest-session-tables-go-first ()
+  "Beyond the limit the least recently used session's table is dropped."
+  (let ((harness-responses--session-tables-max 2)
+        (harness-responses--responses-by-session (make-hash-table :test 'equal))
+        (harness-responses--responses (make-hash-table :test 'equal)))
+    (harness-responses--remember (harness-responses-test--call-items 1) '(:id "a"))
+    (harness-responses--remember (harness-responses-test--call-items 2) '(:id "b"))
+    ;; A is used again, so B is the one nobody needs when C comes.
+    (harness-responses--session-table '(:id "a") nil)
+    (harness-responses--remember (harness-responses-test--call-items 3) '(:id "c"))
+    (should (harness-responses--session-table '(:id "a") nil))
+    (should (harness-responses--session-table '(:id "c") nil))
+    (should-not (harness-responses--session-table '(:id "b") nil))))
+
 (ert-deftest harness-provider-responses-reasoning-effort-follows-the-level ()
   "A thinking level becomes an effort; no thinking asks for none; an unknown level is the default.
 The summary is what the chat shows as thinking, so it is asked for
@@ -790,7 +886,9 @@ the record from the catalogue, and a plan-covered call is free either way."
       (should (= 120 (plist-get usage :input)))
       (should (= 30 (plist-get usage :output)))
       (should (= 64 (plist-get usage :cache-read)))
-      (should (= 184 (plist-get usage :context))))))
+      ;; The route counts cached tokens in `input_tokens'; the context is the
+      ;; prompt as it is, not the prompt plus the part that was cached.
+      (should (= 120 (plist-get usage :context))))))
 
 (ert-deftest harness-provider-responses-completed-without-a-call-ends-the-turn ()
   "A response that called nothing ends the turn, having streamed its text."
@@ -1131,19 +1229,27 @@ picker that was working a moment ago."
 (ert-deftest harness-provider-responses-tier-model-is-chosen-from-the-catalogue ()
   "A tier names a model the account lists, so the harness can pick one on its own.
 The plan's catalogue carries no prices, so nothing can be ranked by
-price here; a tier is a name pattern or nothing."
+price here; a tier is a name pattern or nothing.  The families the plan
+names now are Luna, Terra, Sol and Astra: the judge, naming and recaps
+take Luna, never the session's own Sol, and Astra is frontier -- the
+model the harness never picks, as Fable is for Claude."
   (harness-responses-test-with-fake
       `(("/models" . (:body ,(harness-json-encode
-                              '(:models ((:slug "o4" :display_name "o4" :visibility "list")
-                                         (:slug "gpt-5-mini" :display_name "GPT-5 mini" :visibility "list")))))))
+                              '(:models ((:slug "gpt-6.1-sol" :display_name "GPT-6.1 Sol" :visibility "list")
+                                         (:slug "gpt-6.1-terra" :display_name "GPT-6.1 Terra" :visibility "list")
+                                         (:slug "gpt-6-luna" :display_name "GPT-6 Luna" :visibility "list")
+                                         (:slug "gpt-6-astra" :display_name "GPT-6 Astra" :visibility "list")))))))
     (harness-responses-test-with-provider
      (harness-responses-refresh)
      ;; The catalogue has to be listed before a tier can choose from it.
      (harness-test-await (funcall (harness-provider-models-fn (harness-provider-get 'chatgpt)) t))
-     (should (equal "chatgpt:gpt-5-mini" (harness-provider-tier-model 'chatgpt :simple)))
-     (should (equal "chatgpt:o4" (harness-provider-tier-model 'chatgpt :medium)))
-     ;; `:frontier' is nil in the tiers, so there is no model for it.
-     (should-not (harness-provider-tier-model 'chatgpt :frontier)))))
+     (should (equal "chatgpt:gpt-6-luna" (harness-provider-tier-model 'chatgpt :simple)))
+     (should (equal "chatgpt:gpt-6.1-terra" (harness-provider-tier-model 'chatgpt :medium)))
+     (should (equal "chatgpt:gpt-6.1-sol" (harness-provider-tier-model 'chatgpt :hard)))
+     (should (equal "chatgpt:gpt-6-astra" (harness-provider-tier-model 'chatgpt :frontier)))
+     ;; No pattern names two families, so each tier has the one model.
+     (should (eq 'frontier (harness-call 'provider/model-tier "chatgpt:gpt-6-astra")))
+     (should (eq 'hard (harness-call 'provider/model-tier "chatgpt:gpt-6.1-sol"))))))
 
 ;;;; Quota
 

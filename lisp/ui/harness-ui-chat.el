@@ -6605,8 +6605,9 @@ after every session's figures were fetched again, redraws every header."
 ;; header spends on it -- the session's own name needs the room -- and
 ;; its tooltip says what the relation is and which session that is.  A
 ;; seed conversation in between is stepped over rather than named: a
-;; fork made through a seed is the seed's child, and a seed is a prompt
-;; cache, not a conversation to open (`harness-ui-seed-session-p').
+;; fork made through a seed is the seed's child, and a seed was a prompt
+;; cache, not a conversation to open (`harness-ui-seed-session-p').  The
+;; harness no longer makes seeds, but old sessions are still marked.
 
 (defconst harness-chat--parent-labels
   '((fork . "fork of")
@@ -6626,13 +6627,13 @@ over ACP, a string."
 (defun harness-chat--parent-id ()
   "Return the id of the session this buffer's session was started from, or nil.
 See `harness-chat--parent-label'.  A seed conversation in between is
-stepped over: a fork made through a seed is the seed's child, and the
-seed is the shared prompt cache, not a conversation to open (see
-harness-seed.el).  The id is then the nearest ancestor that is not a
-seed -- the session the whole family was started from -- so the header
-segment and `harness-up-to-parent' lead there rather than into a seed.
-A session whose parent is a seed with no parent of its own has none to
-lead to, and gets nil."
+stepped over: a fork made through a seed is the seed's child, and a
+seed was the shared prompt cache, not a conversation to open (a legacy
+marker; see `harness-ui-seed-session-p').  The id is then the nearest
+ancestor that is not a seed -- the session the whole family was started
+from -- so the header segment and `harness-up-to-parent' lead there
+rather than into a seed.  A session whose parent is a seed with no
+parent of its own has none to lead to, and gets nil."
   (let ((id (plist-get (harness-chat--session) :parent-id))
         (steps 0))
     ;; A cycle, which nothing should make, must not hang a redisplay.

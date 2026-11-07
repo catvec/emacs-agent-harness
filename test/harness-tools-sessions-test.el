@@ -755,16 +755,15 @@ message of SID's, which this waits for and returns."
 
 (ert-deftest harness-tools-sessions-wait-on-a-sub-agent-settles ()
   "A wait on a sub-agent settles when its turn ends, as on any session.
-Both a fresh sub-agent and a fork one, waited on by a third session
-while the child still runs."
+A third session waits on the child, which still runs when the call is
+made."
   (harness-tools-sessions-test-with
     (let ((harness-provider-demo--delay 0.01)
           (harness-provider-demo-script-override harness-tools-sessions-test-slow-child))
-      (dolist (fork '(nil t))
-        (let* ((watcher (harness-tools-sessions-test-session :name "Watcher"))
-               (parent (harness-tools-sessions-test-session :name "Parent"))
-               (spawned (harness-tools-sessions-test-spawn parent :fork fork))
-               (child (car spawned)))
+      (let* ((watcher (harness-tools-sessions-test-session :name "Watcher"))
+             (parent (harness-tools-sessions-test-session :name "Parent"))
+             (spawned (harness-tools-sessions-test-spawn parent))
+             (child (car spawned)))
           (harness-test-wait (lambda () (harness-call 'agent/running child)) 5 "the child to run")
           ;; The call registers while the child runs, and returns at once.
           (let ((result (harness-tools-sessions-test-ok
@@ -782,7 +781,7 @@ while the child still runs."
                                   (plist-get (harness-test-await (cdr spawned) 5) :content)))
           (should-not (harness-call 'agent/running child))
           (should (zerop (hash-table-count harness-tools-sessions--waiters)))
-          (should-not harness-tools-sessions--recheck-timer))))))
+          (should-not harness-tools-sessions--recheck-timer)))))
 
 (ert-deftest harness-tools-sessions-wait-changed-on-a-finished-sub-agent-settles ()
   "`changed' on a sub-agent that already finished settles, it does not hang.

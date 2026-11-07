@@ -12,10 +12,14 @@ The Sub-agent tool (spawn_agent), and the Planning section of the system prompt.
 
 ## About
 
-`spawn_agent` creates a child session (fresh or forked, optionally
-in its own git worktree, optionally at a priority of its own) and
-runs one prompt in it.  The call returns as soon as the child
-starts, so a spawn never blocks the conversation and several
+`spawn_agent` creates a fresh child session (optionally in its own
+git worktree, optionally at a priority of its own) and runs one
+prompt in it.  It does not fork: a fork's first request sends the
+parent's whole conversation again, and no provider serves that from
+the parent's prompt cache, so a fork is the user's to start
+(`session/fork`, the fork command of the chat) and never an agent's
+(`harness-tools-agent--refuse-fork`).  The call returns as soon as
+the child starts, so a spawn never blocks the conversation and several
 sub-agents can run at once; the child's answer arrives later in a
 message of its own, and one that still has work going on (a wait it
 registered, a sub-agent of its own) is reported when that work is
@@ -33,8 +37,8 @@ merges (`harness-tools-agent--grant-worktree`; the access module keeps
 the grant, read-only: see there).
 
 The module also adds a Planning section to the system prompt that
-explains forks, sub-agents, worktrees and the merge queue, so plans
-can use them.  It names the plan tool (tools-plan) and todo_write
+explains sub-agents, worktrees and the merge queue, so plans can use
+them.  It names the plan tool (tools-plan) and todo_write
 (tools-todo), modules of their own, as are ask_user (tools-question)
 and session_info (tools-session-info).
 
@@ -44,7 +48,7 @@ Nothing here waits: every long operation returns a promise.
 
 ### Tools
 
-- `spawn_agent` — Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call.
+- `spawn_agent` — Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. The child starts fresh, with only the prompt: a sub-agent never forks this session. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call.
 
 ### Events
 

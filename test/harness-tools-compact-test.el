@@ -100,16 +100,29 @@ the compaction."
         (should (= 1 (length nodes)))
         (should (equal "transcript" (harness-node-compaction-kind (car nodes)))))
       (should-not (gethash id harness-compaction--pending)))
-    ;; A model-written kind: the request is made, the reason is on the node.
+    ;; A model-written kind nobody chose: the request is not made -- its
+    ;; own prefix is not cached -- and a transcript is written instead.
     (let* ((id (harness-tools-compact-test-session))
            (harness-provider-demo-script-override harness-tools-compact-test-script)
-           (result (harness-await (harness-tools-compact-test-call
-                                   id '(:kind "brief" :reason "the context is filling")))))
+           (requests nil)
+           (result nil))
+      (setq result
+            (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                       ((symbol-function 'harness-method/provider/complete)
+                        (lambda (req) (push req requests) (funcall orig req))))
+              (harness-await (harness-tools-compact-test-call
+                              id '(:kind "brief" :reason "the context is filling")))))
+      ;; No request reads the whole conversation to summarise it.
+      (should-not (cl-some (lambda (req)
+                             (string-match-p "handoff summary" (or (plist-get req :system) "")))
+                           requests))
       (should-not (plist-get result :is-error))
-      (should (string-match-p "brief summary" (plist-get result :content)))
+      (should (string-match-p "transcript file" (plist-get result :content)))
+      (should (string-match-p "reads the whole conversation uncached"
+                              (plist-get result :content)))
       (let ((node (car (harness-tools-compact-test-compactions id))))
-        (should (equal "brief" (harness-node-compaction-kind node)))
-        (should (string-prefix-p "BRIEF SUMMARY" (plist-get node :content)))
+        (should (equal "transcript" (harness-node-compaction-kind node)))
+        (should-not (string-prefix-p "BRIEF SUMMARY" (plist-get node :content)))
         (should (equal "the context is filling" (plist-get (plist-get node :meta) :reason)))))))
 
 (ert-deftest harness-tools-compact-queues-for-a-running-turn ()
@@ -123,6 +136,10 @@ turn goes on, not cancelled."
       (should-not (plist-get result :is-error))
       (should (string-match-p "queued" (plist-get result :content)))
       (should (string-match-p "next boundary" (plist-get result :content)))
+      ;; A brief summary nobody chose is queued as a transcript.
+      (should (string-match-p "transcript file" (plist-get result :content)))
+      (should (string-match-p "reads the whole conversation uncached"
+                              (plist-get result :content)))
       (should (gethash id harness-compaction--pending))
       (should-not (harness-tools-compact-test-compactions id))
       (should-not (harness-agent-turn-cancelled turn))

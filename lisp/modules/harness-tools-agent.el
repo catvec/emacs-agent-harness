@@ -2,10 +2,14 @@
 
 ;;; Commentary:
 
-;; `spawn_agent' creates a child session (fresh or forked, optionally
-;; in its own git worktree, optionally at a priority of its own) and
-;; runs one prompt in it.  The call returns as soon as the child
-;; starts, so a spawn never blocks the conversation and several
+;; `spawn_agent' creates a fresh child session (optionally in its own
+;; git worktree, optionally at a priority of its own) and runs one
+;; prompt in it.  It does not fork: a fork's first request sends the
+;; parent's whole conversation again, and no provider serves that from
+;; the parent's prompt cache, so a fork is the user's to start
+;; (`session/fork', the fork command of the chat) and never an agent's
+;; (`harness-tools-agent--refuse-fork').  The call returns as soon as
+;; the child starts, so a spawn never blocks the conversation and several
 ;; sub-agents can run at once; the child's answer arrives later in a
 ;; message of its own, and one that still has work going on (a wait it
 ;; registered, a sub-agent of its own) is reported when that work is
@@ -23,8 +27,8 @@
 ;; the grant, read-only: see there).
 ;;
 ;; The module also adds a Planning section to the system prompt that
-;; explains forks, sub-agents, worktrees and the merge queue, so plans
-;; can use them.  It names the plan tool (tools-plan) and todo_write
+;; explains sub-agents, worktrees and the merge queue, so plans can use
+;; them.  It names the plan tool (tools-plan) and todo_write
 ;; (tools-todo), modules of their own, as are ask_user (tools-question)
 ;; and session_info (tools-session-info).
 ;;
@@ -50,8 +54,7 @@
 When a task is complex (several files, several steps, anything you cannot verify in one go), produce a plan with the `plan` tool before changing anything. The plan states the approach, the concrete steps, how the result will be verified, and how the work will be split.
 
 Split work with the mechanisms this harness provides:
-- Session forks share the cached context of the current session, so they are much cheaper than a fresh sub-agent that has to gather all the context again. Prefer a fork (spawn_agent with fork=true) when the sub-task needs what you already know.
-- spawn_agent starts a fresh sub-agent (fork=false) when the sub-task is self-contained and does not need the current context; it gets its own session, and the call never blocks: it returns as soon as the child starts, and the child's answer arrives later in a message of its own. Start independent sub-tasks that way, together, and carry on while they run instead of waiting for one after another.
+- spawn_agent starts a fresh sub-agent that reads the prompt alone, so write the context the child needs into that prompt: a child never inherits this conversation, and forking the session is the user's to do, not the agent's. The call never blocks: it returns as soon as the child starts, and the child's answer arrives later in a message of its own. Start independent sub-tasks that way, together, and carry on while they run instead of waiting for one after another.
 - Several spawn_agent calls made in the same step run at once, each child starting its own turn without blocking the others.
 - Each sub-agent can work in its own git worktree (worktree=true), so independent steps run in parallel worktrees without touching each other's files. You may read that worktree (read_file, grep, glob, list_dir) without asking until its branch merges; to change a file there, ask the sub-agent (session_send) or request the directory.
 - A merge queue brings a worktree's branch back into the parent session's working directory, one child at a time; conflicts are handed to the child to resolve. Plan independent steps as parallel worktrees that merge back, and dependent steps sequentially in this session.
@@ -556,52 +559,40 @@ is logged, never fails the sub-agent.  Return non-nil when it was made."
                           parent-id worktree child-id (harness-error-message err))
              nil))))
 
-(defun harness-tools-agent--create-child (parent input child-id cwd worktree call-id priority)
+(defun harness-tools-agent--create-child (parent input child-id cwd worktree priority)
   "Return a promise of the child session plist for PARENT from INPUT.
 CHILD-ID is the id to use, CWD its working directory and WORKTREE
 its worktree path (or nil): once the child exists, PARENT may read that
-worktree (`harness-tools-agent--grant-worktree').  CALL-ID is the
-spawn_agent call's: a fork copies it among the parent's calls still
-running, and answers it with a result saying the fork is the sub-agent
-it started.  PRIORITY, a level or nil, is the child session's own
-priority (see `harness-tools-agent--child-priority'): it orders the
-queues the child's work waits in, as the parent's does its own (see the
-priority plugin).  The child's context is capped as
+worktree (`harness-tools-agent--grant-worktree').  PRIORITY, a level
+or nil, is the child session's own priority (see
+`harness-tools-agent--child-priority'): it orders the queues the child's
+work waits in, as the parent's does its own (see the priority plugin).
+The child is fresh -- it starts from its prompt alone, never from the
+parent's conversation: `spawn_agent' refuses to fork
+\(`harness-tools-agent--refuse-fork').  Its context is capped as
 `harness-tools-agent-context-limit' says, and a hint in its transcript
 says so (`harness-tools-agent-context-limit-hint'), added once it
 exists.  INPUT's `:thinking', when given, is checked against the
-child's model (`harness-tools-agent--child-thinking'); a fresh child
-without one starts at its parent's level, and a fork inherits it."
-  (let* ((fork (harness-json-true-p (plist-get input :fork)))
-         (name (plist-get input :name))
+child's model (`harness-tools-agent--child-thinking'); without one the
+child starts at its parent's level."
+  (let* ((name (plist-get input :name))
          (model (or (plist-get input :model) (plist-get parent :model)))
          (thinking (harness-tools-agent--child-thinking model (plist-get input :thinking)))
-         ;; Only a level the call asked for goes to a fork: one it did not
-         ;; ask for is the fork's own default, its parent's level.
-         (thinking-option (and thinking (list :thinking thinking)))
-         (limit (harness-tools-agent-context-limit (plist-get parent :id) fork))
-         (hint (harness-tools-agent-context-limit-hint
-                limit fork (and fork (harness-tools-agent-inherited-context (plist-get parent :id)))))
-         ;; Without a cap a fork keeps its parent's limit, as it always did.
+         (limit (harness-tools-agent-context-limit (plist-get parent :id) nil))
+         (hint (harness-tools-agent-context-limit-hint limit nil))
          (limit-option (and limit (list :context-window-limit limit)))
          (created
-          (if fork
-              (harness-as-promise
-               (apply #'harness-call 'session/fork (plist-get parent :id)
-                      :id child-id :kind 'subagent :name name :model model
-                      :cwd cwd :worktree worktree :call-id call-id
-                      (append limit-option thinking-option)))
-            (harness-as-promise
-             (apply #'harness-call 'session/create
-                    :id child-id :cwd cwd :worktree worktree :kind 'subagent
-                    :parent-id (plist-get parent :id) :name name :model model
-                    :host (plist-get parent :host)
-                    :permission-mode (plist-get parent :permission-mode)
-                    ;; Its parent's level, unless the call asked for its own.
-                    :thinking (or thinking (plist-get parent :thinking))
-                    ;; Off too, not left to the setting.
-                    :non-interactive (if (harness-json-true-p (plist-get parent :non-interactive)) t :false)
-                    limit-option)))))
+          (harness-as-promise
+           (apply #'harness-call 'session/create
+                  :id child-id :cwd cwd :worktree worktree :kind 'subagent
+                  :parent-id (plist-get parent :id) :name name :model model
+                  :host (plist-get parent :host)
+                  :permission-mode (plist-get parent :permission-mode)
+                  ;; Its parent's level, unless the call asked for its own.
+                  :thinking (or thinking (plist-get parent :thinking))
+                  ;; Off too, not left to the setting.
+                  :non-interactive (if (harness-json-true-p (plist-get parent :non-interactive)) t :false)
+                  limit-option))))
     (if (and (null hint) (null priority) (null worktree))
         created
       (harness-then created
@@ -640,12 +631,29 @@ one (`tools/execute' from outside an agent turn) has none to name."
     (harness-call 'session/update-node session-id (plist-get node :id)
                   :meta (plist-put (copy-sequence (plist-get node :meta)) :child-id child-id))))
 
+(defun harness-tools-agent--refuse-fork (input)
+  "Signal when INPUT asks the tool to fork the session that calls it.
+`spawn_agent' makes a fresh child only: a fork's first request sends the
+parent's whole conversation again, and no provider serves it from the
+parent's prompt cache (the system prompt of a session names its own
+directories), so a fork is the user's choice and never an agent's --
+`session/fork', or the fork command of the chat.  A model that learned
+the old option from an older conversation is told so, rather than
+getting a fresh child it did not ask for."
+  (when (harness-json-true-p (plist-get input :fork))
+    (signal 'harness-error
+            (list (concat "spawn_agent starts a fresh sub-agent, with only the prompt: it does not fork. "
+                          "The child does not inherit this conversation, so give it the context it needs "
+                          "in its prompt. Forking is the user's (`session/fork'), who pays for the whole "
+                          "conversation to be sent again.")))))
+
 (defun harness-tools-agent--spawn (input ctx)
   "Handler of the spawn_agent tool.
 Run INPUT's prompt in a child of the session in CTX and return at once,
 naming the child.  A spawn never blocks the conversation: the child runs
 on its own, and its answer is reported to the parent in a message of its
 own once its turn ends and nothing of it is outstanding any more."
+  (harness-tools-agent--refuse-fork input)
   (let* ((sid (plist-get ctx :session-id))
          (parent (harness-call 'session/get sid))
          ;; The child reads the prompt in its own session, so the links in
@@ -673,8 +681,8 @@ own once its turn ends and nothing of it is outstanding any more."
        (let ((worktree (plist-get wt :path))
              (branch (plist-get wt :branch)))
          (harness-then
-          (harness-tools-agent--create-child parent input child-id (or worktree cwd) worktree
-                                             (plist-get ctx :call-id) priority)
+          (harness-tools-agent--create-child parent input child-id (or worktree cwd)
+                                             worktree priority)
           (lambda (child)
             (let* ((cid (plist-get child :id))
                    (entry (list :parent sid :name (plist-get child :name)
@@ -713,10 +721,9 @@ own once its turn ends and nothing of it is outstanding any more."
 
 (harness-define-tool "spawn_agent"
   :label "Sub-agent"
-  :description "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call."
+  :description "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. The child starts fresh, with only the prompt: a sub-agent never forks this session. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "The task for the sub-agent.")
-                         :fork (:type "boolean" :description "Fork this session instead of starting fresh (default false).")
                          :model (:type "string" :description "Model id for the child (default: this session's model).")
                          :thinking (:type "string" :description "Thinking level for the child (default: this session's). One of the levels the child's model offers.")
                          :name (:type "string" :description "Display name for the child session.")
@@ -729,9 +736,8 @@ own once its turn ends and nothing of it is outstanding any more."
   ;; The child works where it starts: the jail checks that like bash's cwd.
   :paths (lambda (input) (list (or (plist-get input :cwd) ".")))
   :timeout 3600
-  :subject (lambda (input) (format "%s%s"
-                                   (or (plist-get input :name) (harness-first-line (plist-get input :prompt) 50))
-                                   (if (harness-json-true-p (plist-get input :fork)) " (fork)" "")))
+  :subject (lambda (input) (or (plist-get input :name)
+                               (harness-first-line (plist-get input :prompt) 50)))
   :handler #'harness-tools-agent--spawn)
 
 ;;;; Registration

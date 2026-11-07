@@ -1169,17 +1169,17 @@ PREDICATE filters the rest further."
 (defun harness-ui-seed-session-p (session)
   "Non-nil when SESSION is a seed conversation, not one to navigate to.
 SESSION is a session plist as `harness-ui-session' gives it, or a
-session id, which is looked up in the cache.  A seed is the shared
-prompt cache a session's forks read, an ordinary sub-agent the harness
-marks as one (`:seed' in its `:ext', see harness-seed.el); it is not a
-conversation to open, so what navigates to a session -- the header
-line's `harness-up-to-parent', `harness-open-latest-session', the
-session chosen to switch to -- leaves it out.  A seed deleted and made
-again is marked again; a session that is not a seed, or that the cache
-does not know, is nil.
+session id, which is looked up in the cache.  A seed was the shared
+prompt cache a session's forks read, marked `:seed' in its `:ext'; the
+harness no longer makes one, but sessions it made before are still
+marked, and a seed is not a conversation to open, so what navigates to
+a session -- the header line's `harness-up-to-parent',
+`harness-open-latest-session', the session chosen to switch to --
+leaves it out.  A session that is not a seed, or that the cache does
+not know, is nil.
 
 Nothing guesses a seed from its name: the marker travels with the
-session, so this works for a remote harness's seeds as well as this
+session, so this works for a remote harness's old seeds as well as this
 Emacs's own."
   (let ((s (if (stringp session) (harness-ui-session session) session)))
     (and (consp s) (harness-json-true-p (plist-get (plist-get s :ext) :seed)))))

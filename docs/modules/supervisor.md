@@ -100,12 +100,16 @@ whole conversation into its model's cache and reads it again on every
 call.  Past `harness-supervisor-fork-limit` tokens of it
 (`harness-supervisor--conversation-tokens`, recorded on the plan as
 `:fork-tokens`) `submit_plan` refuses fork steps, and a fork step of
-an older plan past it starts from a compaction
-(`harness-supervisor--compact-fork`).  When a plan has two or more
-fork steps on one model they all fork through one seed (`seed/fork`),
-so that the context is written to that model's prompt cache once.  The
-window of both is capped as `harness-tools-agent-context-limit` says,
-and never silently: a hint in the worker's transcript says so
+an older plan past it fails before a worker or a request exists, as
+does one whose size cannot be measured.  Nothing compacts it first:
+the compaction's own request has a different system prompt and tool
+list from the conversation's, so no prompt cache covers it, and it
+reads the whole conversation cold and then writes a summary -- often
+more than the turn it would save.  The way out is a fresh step, whose
+brief is the plan's summary and its own prompt, never the
+conversation.  The window of both is capped as
+`harness-tools-agent-context-limit` says, and never silently: a hint
+in the worker's transcript says so
 (`harness-supervisor--limit-hint`).  The worker's reply is the step's
 result, which the steps that wait for it are given.  A worker shows
 in the supervisor's transcript as the `spawn_agent` call that would
@@ -127,27 +131,18 @@ Claude's, keeps the old behavior: sessions think as they were
 configured, and workers as their supervisor does.
 
 A step that starts again -- `retry_step`, perhaps on a higher tier, or an
-interrupted step after a restart -- decides its context by the cache.  A
-fork never shares its parent's cache (its system prompt names its own
-directories, its tool list differs), and a retry on a higher tier runs
-on a model that has never read the plan's conversation, so forking the
-supervisor would send all of it uncached at that model's price, and the
-cowboy's gate (harness-cowboy.el) never sees a new fork as cold.  So
-with a warm seed for the plan's node on the step's model (`seed/warm-p`)
-the worker forks through it, as above, and reads the shared context from
-the cache.  Without one it forks the supervisor directly and the fork is
-compacted before its first turn, as the cowboy would for a session
-nobody is asked about (`cowboy/compact`, its default, a brief summary
-unless the user chose otherwise; with no cowboy, a brief summary from
-`compaction/compact`; with no compaction, the whole conversation).  A
-compaction that fails fails nothing.  Either way the supervisor gets a
-hint saying which, and the worker's message says its conversation was
-compacted.  The step keeps the attempt before as `:previous` (`:attempt
-:session :model :error'), which the worker's message points at: it can
-read what was tried with session_read, and should not repeat what
-failed.  A fork step of a plan past `harness-supervisor-fork-limit` is
-compacted the same way on its first attempt too, seed or not.  Other
-first attempts, and fresh steps, decide as before.
+interrupted step after a restart -- forks only a conversation at or
+under the limit, measured when the plan was made; past it the step
+fails, as it does on a first attempt, and a fresh step is the way out.
+No fork reads its parent's cache, and a retry on a higher tier runs on
+a model that has never read the plan's conversation: what it inherits
+is bounded by the limit, and it writes that much into its model's cache
+once.  It is not compacted first: the compaction's request is a
+different prefix from the chat's, so it would read the whole
+conversation cold at the summarizer's price.  The step keeps the
+attempt before as `:previous` (`:attempt :session :model :error`),
+which the worker's message points at: it can read what was tried with
+session_read, and should not repeat what failed.
 
 The plans of a session are its `:ext` `:supervisor-plans`, so they
 survive a restart and the UI shows them: each change of a step is a
@@ -255,20 +250,15 @@ lets them carry on.
 - `agent/prompt` ([agent](agent.md))
 - `agent/running` ([agent](agent.md))
 - `agent/stop-outstanding` ([agent](agent.md))
-- `compaction/compact` ([compaction](compaction.md)), when it is loaded
-- `compaction/estimate` ([compaction](compaction.md)), when it is loaded
 - `config/get` ([config](config.md)), when it is loaded
 - `config/set` ([config](config.md)), when it is loaded
 - `config/unset` ([config](config.md))
-- `cowboy/compact` ([cowboy](cowboy.md)), when it is loaded
 - `provider/complete` ([provider](provider.md)), when it is loaded
 - `provider/fit-thinking` ([provider](provider.md)), when it is loaded
 - `provider/tier-model` ([provider](provider.md)), when it is loaded
 - `provider/tier-model-async` ([provider](provider.md)), when it is loaded
 - `provider/tier-model-info` ([provider](provider.md)), when it is loaded
 - `provider/tier-thinking` ([provider](provider.md)), when it is loaded
-- `seed/fork` ([seed](seed.md)), when it is loaded
-- `seed/warm-p` ([seed](seed.md)), when it is loaded
 - `session/append` ([session](session.md))
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))

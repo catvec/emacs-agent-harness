@@ -5,17 +5,25 @@
 ;; A conversation whose prompt cache is about to lapse is going to be
 ;; sent again, whole and uncached, by whoever writes to it next -- or,
 ;; when the cold-cache question is on, compacted first (harness-cowboy.el),
-;; with the user waiting for it.  Compacting it a few seconds before the
-;; cache lapses is the same job done at the better time: what the
-;; summarising model reads of the conversation it reads from the cache,
-;; a tenth of the uncached price (a `brief' summary of the narrative and
-;; the kinds that ask no model cost the same at either moment), and the
-;; next message finds a small conversation and no wait.
+;; with the user waiting for it.  Compacting it before the cache lapses
+;; would be cheaper only if the summarising model's request began with
+;; the prefix the cache holds.  It does not: a compaction request has a
+;; system prompt of its own and no tools (`harness-compaction--summary-request'),
+;; so no cache of the chat covers it.  Its input is sent uncached, and a
+;; small summary does not make that input small -- for a long
+;; conversation it can cost more than the turn it was meant to save
+;; (`harness-compaction--estimate-brief' says `:cached' nil for the same
+;; reason).  This module therefore does nothing unless the estimate for
+;; the chosen kind says that kind's own request is cached.  It does not
+;; infer that from the session's `:cache', from the last request or from
+;; a time to live: those describe the chat's prefix, not the
+;; compaction's.  It is off by default; the `transcript' and `fresh'
+;; choices ask no model and are the cold-cache gate's cheap ways out.
 ;;
-;; This module does it on `cache/pre-expire' (harness-cache.el), when
-;; the cache is not claimed -- the user is no longer around, so there is no
+;; When it does run -- on `cache/pre-expire' (harness-cache.el), when
+;; the cache is not claimed (the user is no longer around, so there is no
 ;; reason to keep it warm (harness-cache-warm.el, the handler before this
-;; one, claims it while there is) -- and all of these hold:
+;; one, claims it while there is) -- all of these hold:
 ;;
 ;; - `harness-cache-precompact' is on;
 ;; - the session waits for the user, with no turn, no question, no
@@ -25,36 +33,19 @@
 ;;   tokens (and `harness-cowboy-min-context', when that is more): the
 ;;   compaction of a small one saves little and costs the detail;
 ;; - the option the user saved for a cold cache -- the choice an
-;;   \"always\" answer to the cold-cache question made the default, else
-;;   `harness-cowboy-default' (`cowboy/default') -- is to compact.  \"Carry
-;;   on\" and \"ignore\" are the user's word that the conversation goes on
+;;   "always" answer to the cold-cache question made the default, else
+;;   `harness-cowboy-default' (`cowboy/default') -- is to compact.  "Carry
+;;   on" and "ignore" are the user's word that the conversation goes on
 ;;   as it is, and so nothing is done here;
+;; - the estimate for that kind says its request is cached;
 ;; - nobody would be asked: the compaction is what the cold-cache gate
 ;;   would have done, unasked, to a message that comes later, only
-;;   earlier and cheaper, so a session whose user is asked what goes
-;;   first when a message meets the cold cache -- asking is on and the
-;;   session waits for them -- is left as it is, its question not taken
-;;   from them.  Answering \"always\" turns asking off; a session that
-;;   never waits for the user (a non-interactive task) is never asked.
+;;   earlier, so a session whose user is asked what goes first when a
+;;   message meets the cold cache -- asking is on and the session waits
+;;   for them -- is left as it is, its question not taken from them.
+;;   Answering "always" turns asking off; a session that never waits for
+;;   the user (a non-interactive task) is never asked.
 ;;
-;; The compaction is the one the cold-cache gate would have made
-;; (`compaction/compact' of that kind); its node says it was made before
-;; the cache lapsed (`:meta' `:precompact').  A note follows it in the
-;; transcript.  The note is a lasting decision's (see harness-decisions.el):
-;; a decision of the kind `precompact', which is done while the
-;; feature is on, with [Turn off] to undo it and [Turn on] to redo it, in
-;; any session -- the way \"Always a brief summary\" can be undone and redone.
-;; The note also names the decision that made the saved option the default,
-;; if there is one (`:decided-by'), with its own undo and redo: so the
-;; choice of what goes first can be changed from the note, too.
-;;
-;; A message that comes to the session while the compaction runs waits
-;; for it: it is sent the compacted conversation, as one that met the
-;; cold-cache gate would be.  Any compaction of a session holds a turn
-;; that starts meanwhile (`harness-compaction--wait-gate'); this module's
-;; gate covers what that one cannot see: the moment between the decision
-;; and the compaction's start, and the note written after it.
-
 ;;; Code:
 
 (require 'cl-lib)
@@ -67,24 +58,23 @@
 
 (declare-function harness-compaction-busy-p "harness-compaction" (session-id))
 (declare-function harness-compaction-show-waiting "harness-compaction" (session-id))
+(declare-function harness-compaction-request-warm-p "harness-compaction" (session-id kind))
 
-(defcustom harness-cache-precompact t
+(defcustom harness-cache-precompact nil
   "Non-nil to compact a conversation just before its prompt cache lapses.
-When nobody has been around for a while, so that nothing keeps the
-cache warm (`harness-cache-warm'), the conversation is compacted a few
-seconds before the cache lapses, while the context is still hot in it:
-what the summarising model reads, it reads from the cache at a tenth of
-the price, and the next message finds a small conversation instead of
-sending the whole one again, uncached.  It is compacted as the user
-saved for a cold cache -- the choice an \"always\" answer to the
-cold-cache question made the default (`harness-cowboy-default'), a brief
-summary unless they chose otherwise -- and a user who chose to carry on
-or to ignore the cold cache has nothing compacted.  It is what would be
-done, unasked, to the message that comes later, done sooner: a session
-whose user would be asked what goes first (`harness-cowboy-ask' on, and
-a session that waits for them) is left alone.  Only conversations of
-`harness-cache-precompact-min-context' tokens or more.  The note that
-tells of it offers [Turn off] and then [Turn on]."
+Off by default: a compaction is a model request with a system prompt and
+tool list of its own, so the chat's cache does not cover it.  Its input
+is read uncached -- the whole conversation -- and its summary is small
+only in what it writes, not in what it reads.  Turning this on does
+nothing unless `compaction/estimate' says the chosen kind's own request
+is cached; it never infers that from the session's `:cache', the last
+request or a time to live.  When it does run, it compacts as the user
+saved for a cold cache (`harness-cowboy-default'), and a user who chose
+to carry on, to ignore the cold cache, or to write a transcript has
+nothing compacted.  Only conversations of
+`harness-cache-precompact-min-context' tokens or more, and not where its
+user would be asked what goes first.  The note that tells of it offers
+[Turn off] and then [Turn on]."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defcustom harness-cache-precompact-min-context 30000
@@ -96,7 +86,7 @@ a floor to it, the size under which a cold cache is no concern at all."
   :type 'natnum :safe #'natnump :group 'harness)
 
 (defconst harness-cache-compact--decision-text
-  "Compacting a conversation just before its prompt cache lapses, while it is still cached"
+  "Compacting a conversation just before its prompt cache lapses, when the compaction request's own prefix is cached"
   "What the lasting decision of the kind `precompact' says it does.")
 
 (defconst harness-cache-compact--kinds '(brief summary transcript fresh)
@@ -131,6 +121,15 @@ message that meets SID's cold cache would be asked about."
 
 ;;;; When
 
+(defun harness-cache-compact--kind-cached-p (sid kind)
+  "Non-nil when a compaction of SID as KIND is known to read cached input.
+KIND is the kind's symbol.  The estimate must name that kind and say its
+own request reads the prompt cache
+\(`harness-compaction-request-warm-p'): the chat's cache, the last
+request or a time to live say nothing about the compaction request's prefix."
+  (and (fboundp 'harness-compaction-request-warm-p)
+       (harness-compaction-request-warm-p sid kind)))
+
 (defun harness-cache-compact--seed-p (session)
   "Non-nil when SESSION is a seed: its context is shared with the forks made of it."
   (harness-json-true-p (plist-get (plist-get session :ext) :seed)))
@@ -160,7 +159,10 @@ INFO is that of `cache/pre-expire'."
            "the conversation is small")
           ((null option) "there is no saved option to follow")
           ((plist-get option :asks) "a message to it would be asked what goes first")
-          ((null (plist-get option :kind)) "the saved option is to carry on"))))
+          ((null (plist-get option :kind)) "the saved option is to carry on")
+          ((and (memq (plist-get option :kind) '(brief summary))
+                (not (harness-cache-compact--kind-cached-p sid (plist-get option :kind))))
+           "the compaction request's own prefix is not cached"))))
 
 ;;;; The decision: turning it off and on
 
@@ -256,7 +258,7 @@ SID.  Nil without the decisions module, or when keeping it failed."
   "Return the note that tells session compacted as KIND before its cache lapsed.
 INFO is that of `cache/pre-expire'."
   (let ((context (plist-get info :context)))
-    (format "Prompt cache about to lapse at %s: %s, while it was still cached%s"
+    (format "Prompt cache about to lapse at %s: %s, while the compaction request's own prefix was cached%s"
             (harness-cache-compact--clock (plist-get info :expires))
             (harness-cache-compact--what kind)
             (if (and (numberp context) (> context 0))
@@ -364,7 +366,7 @@ message meanwhile (`harness-compaction-show-waiting')."
 (harness-declare-event 'cache/compacted "(SESSION-ID KIND NODE) after a session was compacted as KIND just before its prompt cache lapsed (harness-cache-compact.el): NODE is the compaction node.")
 
 (harness-define-module 'cache-compact
-  :doc "Compacts a conversation just before its prompt cache lapses, while it is still hot in it, as the user saved for a cold cache and where they would not be asked."
+  :doc "Compacts a conversation just before its prompt cache lapses, when the compaction request's own prefix is cached, as the user saved for a cold cache and where they would not be asked."
   :requires '(session compaction cache cowboy)
   :init #'harness-cache-compact--init)
 
