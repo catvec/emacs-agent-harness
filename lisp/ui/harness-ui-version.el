@@ -2,8 +2,10 @@
 
 ;;; Commentary:
 
-;; `harness-version' (C-c h v) answers "are we running the latest
-;; changes?".  It shows one row per place a version lives:
+;; `harness-version' (C-c h U) answers "are we running the latest
+;; changes?".  The key is U, not the v it had before voice: v is
+;; voice's while that module is enabled, and V is supervisor mode.  The
+;; page shows one row per place a version lives:
 ;;
 ;; - Running: the commit the harness process runs, and the commit this
 ;;   Emacs loaded the UI from when they differ;
@@ -1017,6 +1019,28 @@ else the last one it made, for the nag icon."
       (harness-ui-version--check harness-ui-version--max-age)
     (harness-ui-version--fetch)))
 
+(defconst harness-ui-version--key "U"
+  "Key of the version page in `harness-ui-map'.
+`v' belongs to voice while `ui-voice' is enabled, and `V' to
+supervisor mode.")
+
+(defun harness-ui-version--claim-key ()
+  "Bind the version page's key, and take back `v' where an older page bound it.
+A key another command owns stays: a user's own binding outranks the
+module's."
+  (let ((current (lookup-key harness-ui-map (kbd harness-ui-version--key))))
+    (when (memq current '(nil harness-version))
+      (define-key harness-ui-map (kbd harness-ui-version--key) #'harness-version)))
+  ;; Older versions put the page on v; voice owns v now.
+  (when (eq (lookup-key harness-ui-map (kbd "v")) #'harness-version)
+    (define-key harness-ui-map (kbd "v") nil t)))
+
+(defun harness-ui-version--release-key ()
+  "Unbind the version page's key, and `v', where they still run it."
+  (dolist (key (list harness-ui-version--key "v"))
+    (when (eq (lookup-key harness-ui-map (kbd key)) #'harness-version)
+      (define-key harness-ui-map (kbd key) nil t))))
+
 (defun harness-ui-version--init ()
   "Wire the page and the nag icon into the UI."
   (add-hook 'harness-ui-event-functions #'harness-ui-version--on-event)
@@ -1024,7 +1048,7 @@ else the last one it made, for the nag icon."
   (add-hook 'harness-ui-connected-hook #'harness-ui-version--on-connected)
   (add-hook 'harness-update-hook #'harness-ui-version--on-update)
   (add-hook 'harness-plugin-update-hook #'harness-ui-version--on-plugin-update)
-  (define-key harness-ui-map (kbd "v") #'harness-version)
+  (harness-ui-version--claim-key)
   (harness-ui-version--init-nag)
   ;; Started again while connected, as after `harness-stop': no
   ;; connection opens to ask for the report.
@@ -1048,6 +1072,7 @@ else the last one it made, for the nag icon."
   (remove-hook 'harness-chat-header-end-functions #'harness-ui-version--chat-header)
   (remove-hook 'harness-ui-tasks-header-functions #'harness-ui-version--board-header)
   (remove-hook 'harness-ui-notify-segment-functions #'harness-ui-version--notify-segment)
+  (harness-ui-version--release-key)
   (setq harness-ui-version--report nil
         harness-ui-version--checking nil
         harness-ui-version--error nil

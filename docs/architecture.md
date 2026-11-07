@@ -14059,7 +14059,7 @@ secret it reads has a fingerprint the harness redacted
 (`harness-ui-secrets--matching`).  A harness on another machine reads
 other files, so it is not followed.
 
-Version page (`harness-ui-version`, `C-c h v`, `harness-version`): a
+Version page (`harness-ui-version`, `C-c h U`, `harness-version`): a
 header line with the version and the verdict, then one row for each
 place a version lives -- Running (the harness process's commit, and,
 when it runs in its own process, the commit this Emacs loaded the UI

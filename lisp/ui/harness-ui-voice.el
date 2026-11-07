@@ -798,6 +798,16 @@ in the existing harness workflow."
 
 ;;;; Module
 
+(defun harness-voice--claim-key (map key command &optional stale)
+  "Bind KEY in MAP to COMMAND unless another command owns it.
+A free key, COMMAND itself, or STALE -- a binding older code gave the
+key -- is claimed; any other command stays.  A number means the key
+sequence runs past the map's bindings, so the key is free."
+  (let ((current (lookup-key map (kbd key))))
+    (when (or (null current) (numberp current)
+              (eq current command) (eq current stale))
+      (define-key map (kbd key) command))))
+
 (defun harness-voice--init ()
   "Wire optional voice into compose boxes and the session menu."
   (setq harness-voice--enabled t harness-voice--connection harness-ui-connection)
@@ -810,9 +820,12 @@ in the existing harness workflow."
   (unless (member harness-voice--mode-line global-mode-string)
     (setq global-mode-string (append (if (stringp global-mode-string) (list global-mode-string) global-mode-string)
                                     (list harness-voice--mode-line))))
-  (define-key harness-ui-map (kbd "v") #'harness-voice)
-  (define-key harness-compose-map (kbd "C-c v") #'harness-voice-dictate)
-  (define-key harness-compose-map (kbd "C-c V") #'harness-voice-interrupt)
+  ;; v is voice's; the version page moved to U.  An older version
+  ;; module may still have left v on `harness-version': take that over,
+  ;; but leave any other command the user bound there.
+  (harness-voice--claim-key harness-ui-map "v" #'harness-voice 'harness-version)
+  (harness-voice--claim-key harness-compose-map "C-c v" #'harness-voice-dictate)
+  (harness-voice--claim-key harness-compose-map "C-c V" #'harness-voice-interrupt)
   (ignore-errors (transient-remove-suffix 'harness-session-menu "v"))
   (transient-append-suffix 'harness-session-menu "r" '("v" "Voice chat" harness-voice)))
 
