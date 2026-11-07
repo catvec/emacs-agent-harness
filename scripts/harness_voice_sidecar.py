@@ -30,12 +30,14 @@ import io
 import json
 import os
 import queue
+import select
 import shutil
 import socket
 import ssl
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -174,6 +176,147 @@ def pcm_energy(pcm):
     return total / (count * 32768.0)
 
 
+class Backend:
+    """One way to capture and play raw PCM16 mono on this machine.
+
+    ``capture`` and ``play`` build the argv list for a sample rate, with
+    PCM16 mono on standard output and standard input.  ``programs`` is
+    the capture and the playback program, so a reason Emacs shows can
+    name the one that is missing.  The order and the names are the ones
+    in `harness-ui-media.el', where the WAV dictation picks its recorder
+    and player; keep the two tables in step.
+    """
+
+    def __init__(self, name, label, capture, play, programs):
+        self.name = name
+        self.label = label
+        self.capture = capture
+        self.play = play
+        self.programs = programs
+
+    def capture_command(self, rate):
+        """Return the argv list capturing RATE Hz PCM16 mono to stdout."""
+        return self.capture(int(rate))
+
+    def play_command(self, rate):
+        """Return the argv list playing RATE Hz PCM16 mono from stdin."""
+        return self.play(int(rate))
+
+
+def _pipewire_capture(rate):
+    return ["pw-record", "--rate", str(rate), "--channels", "1",
+            "--format", "s16", "--raw", "-"]
+
+
+def _pipewire_play(rate):
+    return ["pw-play", "--rate", str(rate), "--channels", "1",
+            "--format", "s16", "--raw", "-"]
+
+
+def _pulse_capture(rate):
+    return ["parec", "--raw", "--format=s16le", "--rate=%d" % rate,
+            "--channels=1", "--latency-msec=50"]
+
+
+def _pulse_play(rate):
+    return ["paplay", "--raw", "--format=s16le", "--rate=%d" % rate,
+            "--channels=1", "--latency-msec=50"]
+
+
+def _alsa_capture(rate):
+    return ["arecord", "-q", "-f", "S16_LE", "-r", str(rate), "-c", "1",
+            "-t", "raw"]
+
+
+def _alsa_play(rate):
+    return ["aplay", "-q", "-f", "S16_LE", "-r", str(rate), "-c", "1",
+            "-t", "raw"]
+
+
+def _ffmpeg_capture(rate):
+    return ["ffmpeg", "-loglevel", "error", "-nostdin", "-f", "pulse",
+            "-i", "default", "-f", "s16le", "-ar", str(rate), "-ac", "1", "-"]
+
+
+def _ffmpeg_play(rate):
+    return ["ffmpeg", "-loglevel", "error", "-nostdin", "-f", "s16le",
+            "-ar", str(rate), "-ac", "1", "-i", "-", "-f", "pulse", "default"]
+
+
+AUDIO_BACKENDS = (
+    Backend("pipewire", "PipeWire", _pipewire_capture, _pipewire_play,
+            ("pw-record", "pw-play")),
+    Backend("pulse", "PulseAudio", _pulse_capture, _pulse_play,
+            ("parec", "paplay")),
+    Backend("alsa", "ALSA", _alsa_capture, _alsa_play, ("arecord", "aplay")),
+    Backend("ffmpeg", "FFmpeg", _ffmpeg_capture, _ffmpeg_play,
+            ("ffmpeg", "ffmpeg")),
+)
+
+AUDIO_AUTO = "auto"
+
+#: What a missing side is called in a reason, in the sidecar's own words.
+AUDIO_SIDES = {"capture": "microphone", "playback": "speaker"}
+
+
+def audio_backend_names():
+    """Return every value the sidecars' `--audio' option takes."""
+    return [AUDIO_AUTO] + [backend.name for backend in AUDIO_BACKENDS]
+
+
+def audio_backend(name):
+    """Return the backend NAME names, or None when no backend has that name."""
+    for backend in AUDIO_BACKENDS:
+        if backend.name == name:
+            return backend
+    return None
+
+
+def audio_installed(backend):
+    """Return whether both of BACKEND's programs are on this machine."""
+    return all(shutil.which(program) for program in backend.programs)
+
+
+def audio_backends(requested=AUDIO_AUTO):
+    """Return the backends to try for REQUESTED, in preference order.
+
+    `auto' offers every backend whose programs are installed, so a
+    machine without alsa-utils records through PipeWire or its
+    PulseAudio compatibility instead.  A named backend offers itself
+    alone: a forced backend that fails says so rather than switching to
+    another one under the user.
+    """
+    if requested and requested != AUDIO_AUTO:
+        backend = audio_backend(requested)
+        return [backend] if backend and audio_installed(backend) else []
+    return [backend for backend in AUDIO_BACKENDS if audio_installed(backend)]
+
+
+def _listed(items):
+    """Return ITEMS as "a, b or c"."""
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " or " + items[-1]
+
+
+def audio_missing_reason(requested, side):
+    """Return why the SIDE of REQUESTED audio cannot start.
+
+    SIDE is `capture' or `playback'.  The line names the programs that
+    would make it work, in preference order, so the fix is visible
+    without reading the source.
+    """
+    index = 0 if side == "capture" else 1
+    if requested and requested != AUDIO_AUTO:
+        backend = audio_backend(requested)
+        if backend is None:
+            return "audio backend unknown · %s" % requested
+        return "%s command unavailable · %s" % (
+            AUDIO_SIDES[side], backend.programs[index])
+    programs = [backend.programs[index] for backend in AUDIO_BACKENDS]
+    return "%s unavailable · %s" % (AUDIO_SIDES[side], _listed(programs))
+
+
 class Player:
     """Play raw PCM16 mono through a subprocess, cancellably.
 
@@ -181,27 +324,68 @@ class Player:
     ``stop`` kills the process at once and ``busy`` reports the tail of
     the audio still queued, which the sidecar turns into
     ``speaking``/``listening``.
+
+    The player takes the first installed backend that starts.  One that
+    dies is dropped and the next one is tried, so a missing aplay or a
+    PipeWire session that stopped does not leave a silent session
+    behind: ``error`` says what happened.
     """
 
-    def __init__(self, rate=GPT_RATE, command=None):
+    def __init__(self, rate=GPT_RATE, command=None, backend=AUDIO_AUTO):
         self.rate = rate
-        self.command = list(command or ("aplay", "-q", "-f", "S16_LE",
-                                        "-r", str(rate), "-c", "1", "-t", "raw"))
+        self.command = list(command) if command else None
+        self.requested = backend or AUDIO_AUTO
+        self.backend = None
+        self.error = None
+        self._candidates = None
         self._process = None
         self._until = 0.0
         self._lock = threading.Lock()
         self.played = 0
         self._level = 0.0
 
+    def candidates(self):
+        """Return the playback commands this player has still to try."""
+        if self._candidates is None:
+            if self.command:
+                self._candidates = [(self.command[0], self.command)]
+            else:
+                self._candidates = [(backend.name, backend.play_command(self.rate))
+                                    for backend in audio_backends(self.requested)]
+        return self._candidates
+
+    def available(self):
+        """Return nil, or why this player cannot start."""
+        if self.candidates():
+            return None
+        return audio_missing_reason(self.requested, "playback")
+
     def level(self):
         """Return the level of the audio still playing, in [0, 1]."""
         return self._level if self.busy() else 0.0
 
-    def available(self):
-        """Return nil, or why this player cannot start."""
-        if not shutil.which(self.command[0]):
-            return "playback command unavailable · %s" % self.command[0]
-        return None
+    def _start(self):
+        """Start the next playback backend; called with the lock held."""
+        pending = self.candidates()
+        while pending:
+            name, command = pending.pop(0)
+            if not shutil.which(command[0]):
+                continue
+            try:
+                process = subprocess.Popen(
+                    command, stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError as error:
+                self.error = "speaker failed · %s: %s" % (command[0], error)
+                continue
+            self.backend = name
+            self._process = process
+            self.error = None
+            log("playback · %s" % " ".join(command))
+            return True
+        if self.error is None:
+            self.error = audio_missing_reason(self.requested, "playback")
+        return False
 
     def play(self, pcm):
         """Queue PCM16 bytes for playback."""
@@ -209,14 +393,14 @@ class Player:
             return
         with self._lock:
             if self._process is None or self._process.poll() is not None:
-                self._process = subprocess.Popen(
-                    self.command, stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if not self._start():
+                    return
             try:
                 self._process.stdin.write(pcm)
                 self._process.stdin.flush()
-            except (BrokenPipeError, ValueError):
-                self._process = None
+            except (BrokenPipeError, ValueError) as error:
+                log("playback lost · %s: %s" % (self.backend, error))
+                self._discard()
                 return
             self.played += len(pcm)
             self._level = max(self._level * 0.6, pcm_energy(pcm))
@@ -226,21 +410,25 @@ class Player:
         """Non-nil while the queued audio is still playing."""
         return time.monotonic() < self._until
 
+    def _discard(self):
+        """Kill the playing process; called with the lock held."""
+        process, self._process = self._process, None
+        self._until = 0.0
+        if process is None:
+            return
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
     def stop(self):
         """Silence playback now and forget what was queued."""
         with self._lock:
-            self._until = 0.0
-            process, self._process = self._process, None
-            if process is None:
-                return
-            try:
-                process.kill()
-            except OSError:
-                pass
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
+            self._discard()
 
     def close(self):
         """Stop playback and close the pipe."""
@@ -259,46 +447,140 @@ class Player:
 
 
 class Recorder:
-    """Raw PCM16 mono from the microphone, through a subprocess."""
+    """Raw PCM16 mono from the microphone, through a subprocess.
 
-    def __init__(self, rate=GPT_RATE, command=None):
+    The first installed backend starts.  One that exits, or that sends
+    nothing at all for ``STALL_SECONDS``, is dropped and the next one is
+    tried: a machine whose PipeWire session is down still records
+    through its PulseAudio compatibility or its ALSA devices.  A backend
+    that delivered audio and then stopped is replaced the same way, so a
+    microphone that goes away leaves a working session rather than a
+    dead one.
+
+    ``backend`` names the backend in use, and ``error`` the last
+    failure, which a sidecar reports to Emacs instead of waiting on a
+    stream that will never speak.
+    """
+
+    #: Seconds without a single sample before a backend counts as broken.
+    STALL_SECONDS = 5.0
+
+    def __init__(self, rate=GPT_RATE, command=None, backend=AUDIO_AUTO):
         self.rate = rate
-        self.command = list(command or ("arecord", "-q", "-f", "S16_LE",
-                                        "-r", str(rate), "-c", "1", "-t", "raw"))
+        self.command = list(command) if command else None
+        self.requested = backend or AUDIO_AUTO
+        self.backend = None
+        self.error = None
+        self._candidates = None
         self._process = None
+        self._started = 0.0
+        self._last = 0.0
+        self._heard = 0
+
+    def candidates(self):
+        """Return the capture commands this recorder has still to try."""
+        if self._candidates is None:
+            if self.command:
+                self._candidates = [(self.command[0], self.command)]
+            else:
+                self._candidates = [(backend.name, backend.capture_command(self.rate))
+                                    for backend in audio_backends(self.requested)]
+        return self._candidates
 
     def available(self):
         """Return nil, or why this recorder cannot start."""
-        if not shutil.which(self.command[0]):
-            return "microphone command unavailable · %s" % self.command[0]
-        return None
+        if self.candidates():
+            return None
+        return audio_missing_reason(self.requested, "capture")
+
+    def exhausted(self):
+        """Return whether every backend was tried and none still runs."""
+        return self._process is None and not self.candidates()
 
     def open(self):
-        """Start capture, unless it already runs."""
+        """Start capture on the next backend, unless it already runs."""
         if self._process is not None and self._process.poll() is None:
             return
-        self._process = subprocess.Popen(
-            self.command, stdout=subprocess.PIPE,
-            stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pending = self.candidates()
+        while pending:
+            name, command = pending.pop(0)
+            if not shutil.which(command[0]):
+                continue
+            try:
+                process = subprocess.Popen(
+                    command, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except OSError as error:
+                self.error = "microphone failed · %s: %s" % (command[0], error)
+                continue
+            self.backend = name
+            self._process = process
+            self._started = self._last = time.monotonic()
+            self._heard = 0
+            self.error = None
+            log("capture · %s" % " ".join(command))
+            return
+        if self.error is None:
+            self.error = audio_missing_reason(self.requested, "capture")
 
     def read(self, frames, timeout=0.2):
-        """Return about FRAMES samples as PCM16 bytes, or b"" on silence."""
+        """Return about FRAMES samples as PCM16 bytes, or b"" when none yet."""
         self.open()
         process = self._process
         if process is None or process.stdout is None:
             return b""
-        wanted = frames * 2
-        chunk = b""
         try:
-            chunk = process.stdout.read(wanted)
+            ready, _, _ = select.select([process.stdout], [], [], timeout)
         except (OSError, ValueError):
-            chunk = b""
-        if chunk:
-            return chunk
-        # A pipe read blocks; when it returns nothing the recorder died.
+            ready = []
+        if ready:
+            try:
+                chunk = os.read(process.stdout.fileno(), frames * 2)
+            except (OSError, ValueError):
+                chunk = b""
+            if chunk:
+                self._heard += len(chunk)
+                self._last = time.monotonic()
+                return chunk
         if process.poll() is not None:
-            self._process = None
+            self._died(process)
+        elif time.monotonic() - self._last > self.STALL_SECONDS:
+            self._died(process, "no audio")
         return b""
+
+    def _died(self, process, reason=None):
+        """Forget PROCESS, remember why it ended, and free the next backend."""
+        if process is self._process:
+            self._process = None
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        message = self._stderr_text(process) or reason
+        if self._heard:
+            self.error = "microphone stopped · %s%s" % (
+                self.backend or "recorder", _after(message))
+            log("capture stopped · %s" % self.error)
+        else:
+            self.error = "microphone unavailable · %s%s" % (
+                self.backend or "recorder", _after(message))
+            log("capture failed · %s" % self.error)
+        self._heard = 0
+
+    @staticmethod
+    def _stderr_text(process):
+        """Return the last line PROCESS wrote to stderr, or an empty string."""
+        try:
+            data = process.stderr.read() or b""
+        except (OSError, ValueError, AttributeError):
+            return ""
+        lines = [line.strip() for line in data.decode("utf-8", "replace").splitlines()
+                 if line.strip()]
+        return lines[-1][:200] if lines else ""
 
     def close(self):
         """Stop the recorder."""
@@ -313,6 +595,11 @@ class Recorder:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             pass
+
+
+def _after(message):
+    """Return MESSAGE as a ` · message' suffix, or an empty string."""
+    return " · %s" % message if message else ""
 
 
 class NullAudio:
@@ -1117,3 +1404,68 @@ def self_test_ok(name):
     sys.stdout.write("self-test ok · %s\n" % name)
     sys.stdout.flush()
     return 0
+
+
+def self_test_audio():
+    """Check the audio backend table and its failover without hardware.
+
+    Returns a failure line, or nil when the backends keep their
+    preference order, each builds a command for the rate it is given,
+    and a recorder whose first program dies falls through to the next
+    installed backend instead of leaving a silent session.
+    """
+    names = [backend.name for backend in AUDIO_BACKENDS]
+    if names != ["pipewire", "pulse", "alsa", "ffmpeg"]:
+        return "audio backend order · %s" % names
+    if audio_backend_names() != [AUDIO_AUTO] + names:
+        return "audio backend names"
+    if audio_backend("no-such-backend") is not None:
+        return "unknown audio backend accepted"
+    for backend in AUDIO_BACKENDS:
+        capture = backend.capture_command(GPT_RATE)
+        play = backend.play_command(GPT_RATE)
+        if capture[0] != backend.programs[0] or play[0] != backend.programs[1]:
+            return "audio programs · %s" % backend.name
+        if str(GPT_RATE) not in " ".join(capture) or str(GPT_RATE) not in " ".join(play):
+            return "audio rate · %s" % backend.name
+    forced = audio_backends("alsa")
+    if [backend.name for backend in forced] not in ([], ["alsa"]):
+        return "forced backend falls back"
+    work = tempfile.mkdtemp(prefix="harness-audio-")
+    original = os.environ.get("PATH", "")
+    try:
+        # pw-record dies at once; parec keeps sending silence.  A recorder
+        # that starts on the first must end up on the second.
+        scripts = {
+            "pw-record": "#!/bin/sh\nexit 3\n",
+            "pw-play": "#!/bin/sh\nexit 0\n",
+            "paplay": "#!/bin/sh\nexit 0\n",
+            "parec": ("#!/usr/bin/env python3\n"
+                      "import sys, time\n"
+                      "while True:\n"
+                      "    sys.stdout.buffer.write(b'\\x00' * 640)\n"
+                      "    sys.stdout.buffer.flush()\n"
+                      "    time.sleep(0.02)\n"),
+        }
+        for name, body in scripts.items():
+            path = os.path.join(work, name)
+            with open(path, "w") as handle:
+                handle.write(body)
+            os.chmod(path, 0o755)
+        os.environ["PATH"] = work + os.pathsep + original
+        recorder = Recorder(GPT_RATE)
+        chunk = b""
+        deadline = time.monotonic() + 5
+        try:
+            while time.monotonic() < deadline and not chunk:
+                chunk = recorder.read(320)
+            if not chunk:
+                return "audio failover · no audio"
+            if recorder.backend != "pulse":
+                return "audio failover · %s" % recorder.backend
+        finally:
+            recorder.close()
+    finally:
+        os.environ["PATH"] = original
+        shutil.rmtree(work, ignore_errors=True)
+    return None

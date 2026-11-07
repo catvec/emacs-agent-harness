@@ -249,6 +249,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Providers with a `wav` or `live` capability: WAV dictation, ChatGPT Live over the API, a local whisper.cpp and text-to-speech pipeline, the scripted fixture or a custom sidecar
   - Live voice keeps the audio path in a JSON-lines sidecar and delegates to the chat, with an animated stage line, a styled transcript, mute, playback interruption and separate work cancellation
   - Effort levels (low, medium, high) pick the local whisper model and the provider's own fragments
+  - [Voice audio backends](docs/voice-audio.md): PipeWire, PulseAudio, ALSA or ffmpeg, newest first, with failover
   - [Realtime voice research](docs/voice-realtime.md): GPT-Live, backchannels, delegation, the sidecar protocol and open-source pipelines
 - [Compose stacks](docs/stacks.md) (`stacks`, optional) on a [container runtime](docs/container-runtime.md) (`container-runtime`, optional)
   - Docker over its socket or rootless Podman, chosen automatically or by hand; a stack never calls either directly

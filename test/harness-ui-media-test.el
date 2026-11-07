@@ -313,13 +313,18 @@ rendering keeps the properties its buffer gave it."
       (cl-letf (((symbol-function 'executable-find) (lambda (p) (and (member p '("pw-record")) p))))
         (should (equal "pw-record" (car (harness-ui-media--recorder-command "/tmp/x.wav"))))
         (should (member "/tmp/x.wav" (harness-ui-media--recorder-command "/tmp/x.wav"))))
+      (cl-letf (((symbol-function 'executable-find) (lambda (p) (and (member p '("parec")) p))))
+        (should (equal '("parec" "--file-format=wav" "--format=s16le" "--rate=16000" "--channels=1" "/tmp/x.wav")
+                       (harness-ui-media--recorder-command "/tmp/x.wav"))))
       (cl-letf (((symbol-function 'executable-find) (lambda (p) (and (member p '("arecord")) p))))
         (should (equal "arecord" (car (harness-ui-media--recorder-command "/tmp/x.wav")))))
       (cl-letf (((symbol-function 'executable-find) (lambda (p) (and (member p '("ffmpeg")) p))))
         (should (equal '("-f" "pulse") (seq-take (member "-f" (harness-ui-media--recorder-command "/tmp/x.wav")) 2))))
       (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) nil)))
         (should-not (harness-ui-media--recorder-command "/tmp/x.wav"))
-        (should-error (harness-record-audio) :type 'user-error)))
+        (should (equal "Recorder unavailable · pw-record, parec, arecord or ffmpeg"
+                       (error-message-string
+                        (should-error (harness-record-audio) :type 'user-error))))))
     (let ((harness-ui-media-recorder-command '("myrec" "-o" :file)))
       (cl-letf (((symbol-function 'executable-find) (lambda (p) (and (equal p "myrec") p))))
         (should (equal '("myrec" "-o" "/tmp/y.wav") (harness-ui-media--recorder-command "/tmp/y.wav")))))
@@ -331,6 +336,51 @@ rendering keeps the properties its buffer gave it."
     ;; The meter is a string with a display image or a block character.
     (let ((m (harness-ui-media--meter 0.5)))
       (should (or (get-text-property 0 'display m) (string-match-p "[▁▂▃▄▅▆▇█]" m))))))
+
+(ert-deftest harness-ui-media-audio-backends ()
+  "Audio backends are found newest first, and each side on its own."
+  (harness-ui-media-test-with
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (p) (and (member p '("parec" "paplay" "aplay")) p))))
+      (should (eq 'pulse (car (harness-ui-media-audio-backend))))
+      (should-not (harness-ui-media-audio-missing 'capture))
+      (should-not (harness-ui-media-audio-missing 'playback)))
+    ;; One side from each backend is no backend voice can open on its own.
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (p) (and (member p '("pw-record" "aplay")) p))))
+      (should (eq 'pipewire (car (harness-ui-media-audio-backend 'capture))))
+      (should (eq 'alsa (car (harness-ui-media-audio-backend 'playback))))
+      (should-not (harness-ui-media-audio-backend)))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (p) (and (member p '("pw-record" "pw-play" "parec" "paplay")) p))))
+      (should (eq 'pipewire (car (harness-ui-media-audio-backend))))
+      (should (equal "PipeWire" (nth 1 (harness-ui-media-audio-backend))))
+      (should (equal "pw-record, parec, arecord or ffmpeg"
+                     (harness-ui-media-audio-programs 'capture)))
+      (should (equal "pw-play, paplay, aplay or ffmpeg"
+                     (harness-ui-media-audio-programs 'playback))))
+    (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) nil)))
+      (should-not (harness-ui-media-audio-backend))
+      (should (equal "Microphone unavailable · pw-record, parec, arecord or ffmpeg"
+                     (harness-ui-media-audio-missing 'capture)))
+      (should (equal "Speaker unavailable · pw-play, paplay, aplay or ffmpeg"
+                     (harness-ui-media-audio-missing 'playback))))))
+
+(ert-deftest harness-ui-media-player-detection ()
+  "An external player is picked from the newest interface first."
+  (harness-ui-media-test-with
+    (let ((harness-ui-media-player-program nil))
+      (cl-letf (((symbol-function 'executable-find)
+                 (lambda (p) (and (member p '("mpv" "pw-play" "ffplay" "paplay")) p))))
+        (should (equal "mpv" (harness-ui-media--player-program))))
+      (cl-letf (((symbol-function 'executable-find)
+                 (lambda (p) (and (member p '("pw-play" "ffplay" "paplay")) p))))
+        (should (equal "pw-play" (harness-ui-media--player-program)))
+        (should (equal '("pw-play" "--volume=0.80" "/tmp/x.wav")
+                       (harness-ui-media--player-command "pw-play" "/tmp/x.wav"))))
+      (cl-letf (((symbol-function 'executable-find)
+                 (lambda (p) (and (member p '("ffplay" "paplay")) p))))
+        (should (equal "ffplay" (harness-ui-media--player-program)))))))
 
 (ert-deftest harness-ui-media-recording-round-trip ()
   "Record with a fake recorder that writes a WAV, stop it, receive the attachment."

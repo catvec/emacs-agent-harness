@@ -267,9 +267,9 @@ Three live providers ship here:
 
 `custom` runs any sidecar in `harness-voice-live-command`, so a Pipecat, Moshi
 or other stack can be attached without changing Emacs. The shared plumbing
-lives in `scripts/harness_voice_sidecar.py`: the event loop, `arecord`/`aplay`
-audio, an energy voice detector, HTTP helpers and a small RFC 6455 client, all
-in the Python standard library.
+lives in `scripts/harness_voice_sidecar.py`: the event loop, the audio
+backends (PipeWire, PulseAudio, ALSA or ffmpeg), an energy voice detector, HTTP
+helpers and a small RFC 6455 client, all in the Python standard library.
 
 ### Audio ownership
 

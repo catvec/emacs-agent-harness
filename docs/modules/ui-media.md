@@ -27,15 +27,15 @@ Media helpers the chat uses when this module is present:
   copy (a chat block's margins and read-only).  The chat module (see
   harness-ui-chat.el) is what shows these renderings.
 - `harness-record-audio` records from the microphone with pw-record,
-  arecord or ffmpeg into harness-state-directory/recordings/, shows a
-  live level meter in the mode line (the level is the RMS of the
-  newest samples of the growing WAV file) and, when stopped, hands
-  the ATTACHMENT to `harness-ui-media-attach-function`.
+  parec, arecord or ffmpeg into harness-state-directory/recordings/,
+  shows a live level meter in the mode line (the level is the RMS of
+  the newest samples of the growing WAV file) and, when stopped,
+  hands the ATTACHMENT to `harness-ui-media-attach-function`.
 - `harness-ui-media-clipboard-image` saves the clipboard image to
   harness-state-directory/clips/ and returns an ATTACHMENT.
 
-Playback prefers an external player (mpv, ffplay, paplay) started
-as an asynchronous process; `play-sound-file` is the fallback for
+Playback prefers an external player (mpv, pw-play, ffplay, paplay)
+started as an asynchronous process; `play-sound-file` is the fallback for
 WAV/AU and runs in a thread, which keeps the command loop alive
 between chunks but cannot be stopped mid-file.
 
@@ -57,7 +57,7 @@ between chunks but cannot be stopped mid-file.
 
 ### Options
 
-- `harness-ui-media-player-program` — External audio player, or nil to pick the first of mpv, ffplay, paplay.
+- `harness-ui-media-player-program` — External audio player, or nil to pick the first of mpv, pw-play, ffplay, paplay.
 - `harness-ui-media-recorder-command` — Recorder command as a list of strings with `:file` where the WAV path goes.
 - `harness-ui-media-video-player` — Program playing videos, or nil for the first one installed of several.
 - `harness-ui-media-volume` — Playback volume in percent for external players.

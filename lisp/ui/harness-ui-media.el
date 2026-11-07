@@ -17,15 +17,15 @@
 ;;   copy (a chat block's margins and read-only).  The chat module (see
 ;;   harness-ui-chat.el) is what shows these renderings.
 ;; - `harness-record-audio' records from the microphone with pw-record,
-;;   arecord or ffmpeg into harness-state-directory/recordings/, shows a
-;;   live level meter in the mode line (the level is the RMS of the
-;;   newest samples of the growing WAV file) and, when stopped, hands
-;;   the ATTACHMENT to `harness-ui-media-attach-function'.
+;;   parec, arecord or ffmpeg into harness-state-directory/recordings/,
+;;   shows a live level meter in the mode line (the level is the RMS of
+;;   the newest samples of the growing WAV file) and, when stopped,
+;;   hands the ATTACHMENT to `harness-ui-media-attach-function'.
 ;; - `harness-ui-media-clipboard-image' saves the clipboard image to
 ;;   harness-state-directory/clips/ and returns an ATTACHMENT.
 ;;
-;; Playback prefers an external player (mpv, ffplay, paplay) started
-;; as an asynchronous process; `play-sound-file' is the fallback for
+;; Playback prefers an external player (mpv, pw-play, ffplay, paplay)
+;; started as an asynchronous process; `play-sound-file' is the fallback for
 ;; WAV/AU and runs in a thread, which keeps the command loop alive
 ;; between chunks but cannot be stopped mid-file.
 
@@ -47,16 +47,60 @@
   "Audio and video in the chat." :group 'harness-ui)
 
 (defcustom harness-ui-media-player-program nil
-  "External audio player, or nil to pick the first of mpv, ffplay, paplay.
+  "External audio player, or nil to pick the first of mpv, pw-play, ffplay, paplay.
 The symbol `native' forces `play-sound-file'."
   :type '(choice (const :tag "Auto-detect" nil) (const native) string)
   :group 'harness-ui-media)
 
 (defcustom harness-ui-media-recorder-command nil
   "Recorder command as a list of strings with `:file' where the WAV path goes.
-Nil auto-detects pw-record, arecord or ffmpeg (PulseAudio input)."
+Nil auto-detects pw-record, parec, arecord or ffmpeg (PulseAudio input)."
   :type '(choice (const :tag "Auto-detect" nil) (repeat (choice string (const :file))))
   :group 'harness-ui-media)
+
+(defconst harness-ui-media-audio-backends
+  '((pipewire "PipeWire" "pw-record" "pw-play")
+    (pulse "PulseAudio" "parec" "paplay")
+    (alsa "ALSA" "arecord" "aplay")
+    (ffmpeg "FFmpeg" "ffmpeg" "ffmpeg"))
+  "Audio backends in preference order, the newest interface first.
+Each entry is (ID LABEL CAPTURE-PROGRAM PLAYBACK-PROGRAM).  The voice
+sidecars keep the same order and the same ids in
+`scripts/harness_voice_sidecar.py', where their `--audio' option takes
+one of them.")
+
+(defun harness-ui-media-audio-backend (&optional side)
+  "Return the audio backend entry voice uses, or nil when none is installed.
+SIDE is `capture', `playback' or nil for a backend that does both."
+  (let ((usable
+         (pcase side
+           ('capture (lambda (entry) (executable-find (nth 2 entry))))
+           ('playback (lambda (entry) (executable-find (nth 3 entry))))
+           (_ (lambda (entry) (and (executable-find (nth 2 entry))
+                                   (executable-find (nth 3 entry))))))))
+    (cl-find-if usable harness-ui-media-audio-backends)))
+
+(defun harness-ui-media--or-list (items)
+  "Return ITEMS as \"a, b or c\"."
+  (cond ((null items) "")
+        ((null (cdr items)) (car items))
+        (t (concat (string-join (butlast items) ", ") " or " (car (last items))))))
+
+(defun harness-ui-media-audio-programs (&optional side)
+  "Return the programs voice would use for SIDE, as \"a, b or c\".
+SIDE is `capture', `playback' or nil for the capture programs."
+  (harness-ui-media--or-list
+   (mapcar (lambda (entry) (nth (if (eq side 'playback) 3 2) entry))
+           harness-ui-media-audio-backends)))
+
+(defun harness-ui-media-audio-missing (side)
+  "Return a one-line reason SIDE audio is unavailable, or nil.
+SIDE is `capture' or `playback'; the line names the programs that
+would make it work, in preference order."
+  (unless (harness-ui-media-audio-backend side)
+    (format "%s unavailable · %s"
+            (if (eq side 'playback) "Speaker" "Microphone")
+            (harness-ui-media-audio-programs side))))
 
 (defcustom harness-ui-media-volume 80
   "Playback volume in percent for external players."
@@ -248,12 +292,13 @@ file is never read: that would block."
   (pcase harness-ui-media-player-program
     ('native nil)
     ((and (pred stringp) p) (and (executable-find p) p))
-    (_ (cl-find-if #'executable-find '("mpv" "ffplay" "paplay")))))
+    (_ (cl-find-if #'executable-find '("mpv" "pw-play" "ffplay" "paplay")))))
 
 (defun harness-ui-media--player-command (program path)
   "Return the command list playing PATH with PROGRAM."
   (pcase (file-name-nondirectory program)
     ("mpv" (list program "--no-video" "--really-quiet" (format "--volume=%d" harness-ui-media-volume) path))
+    ("pw-play" (list program (format "--volume=%.2f" (/ harness-ui-media-volume 100.0)) path))
     ("ffplay" (list program "-nodisp" "-autoexit" "-loglevel" "quiet"
                     "-volume" (number-to-string harness-ui-media-volume) path))
     ("paplay" (list program (format "--volume=%d" (round (* 655.36 harness-ui-media-volume))) path))
@@ -701,14 +746,22 @@ anything else a file button."
 (defvar harness-ui-media--rec-string "" "Mode line text while recording.")
 (defconst harness-ui-media--rec-construct '(:eval harness-ui-media--rec-string))
 
+(defun harness-ui-media--recorder-template ()
+  "Return the WAV recorder command template of the installed backend.
+The template is a list of strings with `:file' where the path goes, or
+nil when no capture backend is installed."
+  (pcase (car (harness-ui-media-audio-backend 'capture))
+    ('pipewire '("pw-record" "--rate" "16000" "--channels" "1" "--format" "s16" :file))
+    ('pulse '("parec" "--file-format=wav" "--format=s16le" "--rate=16000"
+                       "--channels=1" :file))
+    ('alsa '("arecord" "-q" "-f" "S16_LE" "-r" "16000" "-c" "1" :file))
+    ('ffmpeg '("ffmpeg" "-loglevel" "error" "-y" "-f" "pulse" "-i" "default"
+                       "-ac" "1" "-ar" "16000" :file))))
+
 (defun harness-ui-media--recorder-command (file)
   "Return the command list recording into FILE, or nil when no recorder exists."
-  (let ((template
-         (or harness-ui-media-recorder-command
-             (cond ((executable-find "pw-record") '("pw-record" "--rate" "16000" "--channels" "1" "--format" "s16" :file))
-                   ((executable-find "arecord") '("arecord" "-q" "-f" "S16_LE" "-r" "16000" "-c" "1" :file))
-                   ((executable-find "ffmpeg") '("ffmpeg" "-loglevel" "error" "-y" "-f" "pulse" "-i" "default"
-                                                 "-ac" "1" "-ar" "16000" :file))))))
+  (let ((template (or harness-ui-media-recorder-command
+                      (harness-ui-media--recorder-template))))
     (when (and template (executable-find (car template)))
       (mapcar (lambda (x) (if (eq x :file) file x)) template))))
 
@@ -829,7 +882,10 @@ The finished WAV is handed to `harness-ui-media-attach-function'."
       (user-error "Microphone unavailable · Voice active"))
     (let* ((file (expand-file-name (format-time-string "rec-%Y%m%d-%H%M%S.wav") (harness-ui-media--dir "recordings")))
            (cmd (harness-ui-media--recorder-command file)))
-      (unless cmd (user-error "No recorder found: install pipewire (pw-record), alsa-utils (arecord) or ffmpeg"))
+      (unless cmd
+        (user-error "Recorder unavailable · %s"
+                    (harness-ui-media--or-list
+                     (mapcar (lambda (entry) (nth 2 entry)) harness-ui-media-audio-backends))))
       (setq harness-ui-media--recording-file file
             harness-ui-media--recording-started (float-time)
             harness-ui-media--level 0.0

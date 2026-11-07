@@ -35,6 +35,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-ui-media)
 ;; The local stack is optional: a client that has no docker keeps the
 ;; provider, and the setup list says the stack is unavailable.
 (require 'harness-stacks nil t)
@@ -308,6 +309,7 @@ The buffer is read-only once its mode is on, so this binds that off."
           (insert " · " (propertize reason 'face 'harness-failure-face)))
         (insert "\n")))
     (harness-voice--insert-stack)
+    (harness-voice--insert-audio)
     (insert "\n"
             (propertize "Effort" 'face 'harness-label-face)
             "  ")
@@ -326,6 +328,40 @@ The buffer is read-only once its mode is on, so this binds that off."
              (propertize "[Voice settings]" 'face 'button
                          'help-echo "Voice options")
              (lambda () (customize-group 'harness-voice)))
+            "\n")))
+
+(defun harness-voice--audio-line ()
+  "Return the setup line naming the backend voice records and plays through.
+A live sidecar opens the microphone and the speaker itself, and the WAV
+dictation records with the same backend, so the line is what would run
+rather than what the selected provider needs.  A side with no backend
+at all is named, with the programs that would give it one."
+  (let* ((capture (harness-ui-media-audio-backend 'capture))
+         (playback (harness-ui-media-audio-backend 'playback))
+         (both (harness-ui-media-audio-backend))
+         (backends (and capture playback
+                        (format "%s + %s" (nth 1 capture) (nth 1 playback)))))
+    (cond
+     ((null capture)
+      (cons (format "Microphone unavailable · %s"
+                    (harness-ui-media-audio-programs 'capture))
+            'harness-failure-face))
+     ((null playback)
+      (cons (format "Speaker unavailable · %s"
+                    (harness-ui-media-audio-programs 'playback))
+            'harness-failure-face))
+     (both (cons (format "%s · %s, %s" (nth 1 both) (nth 2 both) (nth 3 both)) nil))
+     ;; A backend for each side, none for both: name them both.
+     (t (cons (format "%s · %s, %s" backends (nth 2 capture) (nth 3 playback)) nil)))))
+
+(defun harness-voice--insert-audio ()
+  "Insert the audio backend line above the effort buttons."
+  (let ((line (harness-voice--audio-line)))
+    (insert "\n"
+            (propertize "Audio" 'face 'harness-label-face)
+            "  "
+            (propertize (car line) 'face (cdr line)
+                        'help-echo "Voice microphone and speaker")
             "\n")))
 
 (defun harness-voice--stack-id ()
@@ -570,6 +606,13 @@ optional `unmute' service."
                (stringp (car harness-voice-live-command)))
     "Sidecar command unset"))
 
+(defun harness-voice--audio-need ()
+  "Return why a live sidecar has no microphone or speaker, or nil.
+A sidecar records and plays through the first backend Emacs finds, so
+the reason names the programs that would make it work."
+  (or (harness-ui-media-audio-missing 'capture)
+      (harness-ui-media-audio-missing 'playback)))
+
 (harness-define-voice-provider 'wav
   :label "WAV dictation"
   :capability 'wav
@@ -584,15 +627,14 @@ optional `unmute' service."
   :capability 'live
   :doc "GPT-Live over the API: continuous audio, backchannels and delegation to this chat."
   :command #'harness-voice-chatgpt-command
-  :needs '((env "OPENAI_API_KEY") (executable "arecord") (executable "aplay")))
+  :needs '((env "OPENAI_API_KEY") harness-voice--audio-need))
 
 (harness-define-voice-provider 'unmute
   :label "Local pipeline"
   :capability 'live
   :doc "Local whisper.cpp and text-to-speech pipeline · no hosted model, no key."
   :command #'harness-voice-unmute-command
-  :needs '((executable "arecord") (executable "aplay")
-           harness-voice-unmute-need)
+  :needs '(harness-voice--audio-need harness-voice-unmute-need)
   :stack 'voice-local)
 
 (harness-define-voice-provider 'fixture

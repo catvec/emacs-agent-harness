@@ -122,8 +122,9 @@ same.
 ### ChatGPT Live
 
 `chatgpt` runs `scripts/harness-voice-live-gpt`, a GPT-Live WebSocket client.
-It speaks PCM16 at 24 kHz through `arecord` and `aplay`, starts a session with
-client delegation, and turns each delegation into a prompt in the current chat.
+It speaks PCM16 at 24 kHz through the machine's audio backend (see
+[Recorder and player](#recorder-and-player)), starts a session with client
+delegation, and turns each delegation into a prompt in the current chat.
 
 ```elisp
 (setq harness-voice-provider 'chatgpt
@@ -172,9 +173,10 @@ service is used when it runs; see the stack's README for building it. Without
 either, the setup list says `Text to speech endpoint unset`.
 
 A whisper.cpp server (see below) and a Piper server with the same request shape
-work too, so the local provider needs no Unmute installation. `arecord` and
-`aplay` are required, as they are for the WAV recorder. The energy detector is
-not acoustic echo cancellation: use headphones when the speaker is open.
+work too, so the local provider needs no Unmute installation. The sidecar
+records and plays through the same audio backend as the WAV recorder. The
+energy detector is not acoustic echo cancellation: use headphones when the
+speaker is open.
 
 The local stack in `scripts/stacks/voice-local/` runs whisper.cpp in a
 container on a network of its own, published on a random loopback port;
@@ -395,14 +397,32 @@ For a small, less natural but quick local fallback, install `espeak-ng`:
 
 ### Recorder and player
 
+Voice takes audio from the first backend installed, the newest interface
+first, so a PipeWire desktop needs no `alsa-utils`, and a machine without the
+PipeWire tools falls back to PulseAudio's or ALSA's:
+
+| Backend | Record | Play |
+| --- | --- | --- |
+| PipeWire | `pw-record` | `pw-play` |
+| PulseAudio | `parec` | `paplay` |
+| ALSA | `arecord` | `aplay` |
+| ffmpeg | `ffmpeg -f pulse` | `ffmpeg -f pulse` |
+
+The setup list (`M-x harness-voice-setup`) names the backend in its `Audio`
+line, and the live sidecars report the command they started in their error
+buffer. [How voice gets its audio](voice-audio.md) has the reasoning, the
+alternatives and the failover rules. A sidecar whose first program fails or stalls switches to the next
+backend and says so, instead of leaving a session that never hears anything;
+`--audio pipewire|pulse|alsa|ffmpeg` pins one when the choice matters.
+
 Recording uses the existing `harness-ui-media-recorder-command`. Its default
-selects `pw-record`, `arecord`, or `ffmpeg` with PulseAudio input and records
-16 kHz mono audio. Override the recorder for your operating system or preferred
+records 16 kHz mono WAV, and the sidecars stream the same backends as raw
+PCM16. Override the recorder for your operating system or preferred
 microphone. OS microphone permission still applies.
 
 `harness-voice-player-command` defaults to an external player selected from the
-existing media integration (`mpv`, `ffplay`, or `paplay`). Override it with a
-command list containing `:file` for the generated WAV. An external,
+existing media integration (`mpv`, `pw-play`, `ffplay`, or `paplay`). Override
+it with a command list containing `:file` for the generated WAV. An external,
 interruptible process is required for reliable interruption; native
 `play-sound-file` is not the voice playback contract.
 

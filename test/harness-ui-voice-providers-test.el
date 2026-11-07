@@ -148,19 +148,81 @@
     (harness-define-voice-provider 'third
       :label "Third voice" :capability 'live)
     (setenv "HARNESS_TEST_VOICE_UNSET" nil)
-    (with-temp-buffer
-      (harness-voice-setup--insert)
-      (should (equal (concat "Voice providers\n"
-                             "\n"
-                             "  ○ First voice  WAV  ready\n"
-                             "  ● Second voice  live  selected"
-                             " · Environment variable · HARNESS_TEST_VOICE_UNSET\n"
-                             "  ○ Third voice  live  ready\n"
-                             "\n"
-                             "Effort  [Low] [Medium] [High]\n"
-                             "\n"
-                             "[Voice settings]\n")
-                     (buffer-substring-no-properties (point-min) (point-max)))))))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) '(pipewire "PipeWire" "pw-record" "pw-play"))))
+      (with-temp-buffer
+        (harness-voice-setup--insert)
+        (should (equal (concat "Voice providers\n"
+                               "\n"
+                               "  ○ First voice  WAV  ready\n"
+                               "  ● Second voice  live  selected"
+                               " · Environment variable · HARNESS_TEST_VOICE_UNSET\n"
+                               "  ○ Third voice  live  ready\n"
+                               "\n"
+                               "Audio  PipeWire · pw-record, pw-play\n"
+                               "\n"
+                               "Effort  [Low] [Medium] [High]\n"
+                               "\n"
+                               "[Voice settings]\n")
+                       (buffer-substring-no-properties (point-min) (point-max))))))))
+
+(ert-deftest harness-ui-voice-providers-setup-audio-line ()
+  "The setup list names the audio backend, or what an installed one needs."
+  (let ((harness-voice-providers (make-hash-table :test 'eq)))
+    (harness-define-voice-provider 'voice :label "Voice" :capability 'live
+                                   :command '("true"))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) '(pulse "PulseAudio" "parec" "paplay"))))
+      (with-temp-buffer
+        (harness-voice-setup--insert)
+        (should (string-match-p
+                 "^Audio  PulseAudio · parec, paplay$"
+                 (buffer-substring-no-properties (point-min) (point-max))))))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional side)
+                 (and (eq side 'capture) '(pipewire "PipeWire" "pw-record" "pw-play")))))
+      (with-temp-buffer
+        (harness-voice-setup--insert)
+        (should (string-match-p
+                 "^Audio  Speaker unavailable · pw-play, paplay, aplay or ffmpeg$"
+                 (buffer-substring-no-properties (point-min) (point-max))))))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) nil)))
+      (with-temp-buffer
+        (harness-voice-setup--insert)
+        (should (string-match-p
+                 "^Audio  Microphone unavailable · pw-record, parec, arecord or ffmpeg$"
+                 (buffer-substring-no-properties (point-min) (point-max))))))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional side)
+                 (pcase side
+                   ('playback '(pulse "PulseAudio" "parec" "paplay"))
+                   ('capture '(pipewire "PipeWire" "pw-record" "pw-play"))))))
+      (with-temp-buffer
+        (harness-voice-setup--insert)
+        (should (string-match-p
+                 "^Audio  PipeWire \\+ PulseAudio · pw-record, paplay$"
+                 (buffer-substring-no-properties (point-min) (point-max))))))))
+
+(ert-deftest harness-ui-voice-providers-needs-audio-side ()
+  "A live provider says which side of the audio is missing, or is ready."
+  (let ((harness-voice-providers (make-hash-table :test 'eq))
+        (harness-voice-provider 'live-voice))
+    (harness-define-voice-provider 'live-voice
+      :label "Live voice" :capability 'live :command '("true")
+      :needs '(harness-voice--audio-need))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional side)
+                 (and (eq side 'capture) '(pipewire "PipeWire" "pw-record" "pw-play")))))
+      (should (equal "Speaker unavailable · pw-play, paplay, aplay or ffmpeg"
+                     (harness-voice-provider-unavailable-reason 'live-voice))))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) nil)))
+      (should (equal "Microphone unavailable · pw-record, parec, arecord or ffmpeg"
+                     (harness-voice-provider-unavailable-reason 'live-voice))))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) '(pipewire "PipeWire" "pw-record" "pw-play"))))
+      (should-not (harness-voice-provider-unavailable-reason 'live-voice)))))
 
 (ert-deftest harness-ui-voice-providers-sidecar-self-tests ()
   "Each bundled sidecar checks its own mapping without audio or network."

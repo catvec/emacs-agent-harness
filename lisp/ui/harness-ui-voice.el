@@ -221,7 +221,7 @@ down, so the control shows the state the user is creating."
   (if harness-voice-player-command
       (harness-voice--command harness-voice-player-command file)
     (let ((program (harness-ui-media--player-program)))
-      (unless program (user-error "Voice player unavailable · mpv, ffplay or paplay"))
+      (unless program (user-error "Voice player unavailable · mpv, pw-play, ffplay or paplay"))
       (harness-ui-media--player-command program file))))
 
 (defun harness-voice--dispose (job)
@@ -430,7 +430,7 @@ in the controls, before changing audio ownership or microphone power."
             (length (harness-compose-text))))
     (condition-case err
         (let ((command (harness-ui-media--recorder-command file)))
-          (unless command (user-error "Voice recorder unavailable · pw-record, arecord or ffmpeg"))
+          (unless command (user-error "Voice recorder unavailable · pw-record, parec, arecord or ffmpeg"))
           (harness-voice--run job 'recording command)
           (harness-voice--release-mode 1)
           (harness-voice--set-state 'listening))

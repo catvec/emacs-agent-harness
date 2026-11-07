@@ -15,11 +15,15 @@ import importlib.util
 import json
 import os
 import queue
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -27,7 +31,9 @@ sys.path.insert(0, os.path.join(ROOT, "test"))
 
 import voice_fixtures as fixtures  # noqa: E402
 from harness_voice_sidecar import (  # noqa: E402
-    FakeEvents, NullAudio, SpeechDetector, Vad, wav_from_pcm,
+    AUDIO_BACKENDS, FakeEvents, NullAudio, Player, Recorder, SpeechDetector, Vad,
+    audio_backend, audio_backend_names, audio_backends, audio_missing_reason,
+    self_test_audio, wav_from_pcm,
 )
 
 SCRIPT = os.path.join(ROOT, "scripts", "harness-voice-live-unmute")
@@ -483,6 +489,252 @@ class LatencyBudgetTest(unittest.TestCase):
             self.assertEqual(rig.tts_calls, ["Held."])
         finally:
             rig.stop()
+
+
+class AudioBackendTest(unittest.TestCase):
+    """The recorder and player follow the installed backend, without hardware.
+
+    The programs are fakes on PATH: a ``pw-record`` that dies at once and
+    a ``parec`` that keeps talking are the PipeWire session of a machine
+    that installed the tools but has nothing to record from, which is
+    what a missing alsa-utils used to look like instead.
+    """
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp(prefix="harness-audio-")
+        self.path = os.environ.get("PATH", "")
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.addCleanup(os.environ.__setitem__, "PATH", self.path)
+
+    def program(self, name, body):
+        """Write an executable NAME whose body is BODY, and return its path."""
+        path = os.path.join(self.work, name)
+        with open(path, "w") as handle:
+            handle.write(body)
+        os.chmod(path, 0o755)
+        return path
+
+    def only(self, *names):
+        """Put the fakes for NAMES first on PATH."""
+        os.environ["PATH"] = self.work + os.pathsep + self.path
+        return names
+
+    def test_backends_keep_the_newest_interface_first(self):
+        self.assertEqual([backend.name for backend in AUDIO_BACKENDS],
+                         ["pipewire", "pulse", "alsa", "ffmpeg"])
+        self.assertEqual(audio_backend_names(),
+                         ["auto", "pipewire", "pulse", "alsa", "ffmpeg"])
+        self.assertIsNone(audio_backend("none"))
+        for backend in AUDIO_BACKENDS:
+            self.assertEqual(backend.capture_command(16000)[0], backend.programs[0])
+            self.assertEqual(backend.play_command(16000)[0], backend.programs[1])
+            self.assertIn("16000", " ".join(backend.capture_command(16000)))
+            self.assertIn("16000", " ".join(backend.play_command(16000)))
+        self.assertIsNone(self_test_audio())
+
+    def test_a_missing_backend_names_the_programs(self):
+        os.environ["PATH"] = self.work
+        self.assertEqual(audio_missing_reason("auto", "capture"),
+                         "microphone unavailable · pw-record, parec, arecord or ffmpeg")
+        self.assertEqual(audio_missing_reason("auto", "playback"),
+                         "speaker unavailable · pw-play, paplay, aplay or ffmpeg")
+        self.assertEqual(audio_missing_reason("alsa", "capture"),
+                         "microphone command unavailable · arecord")
+        self.assertEqual(audio_missing_reason("none", "capture"),
+                         "audio backend unknown · none")
+        self.assertEqual(audio_backends("alsa"), [])
+
+    def test_a_forced_backend_does_not_fall_back(self):
+        self.program("parec", "#!/bin/sh\nexit 0\n")
+        self.program("paplay", "#!/bin/sh\nexit 0\n")
+        self.only()
+        self.assertEqual([backend.name for backend in audio_backends("pulse")], ["pulse"])
+        self.assertEqual(audio_backends("alsa"), [])
+
+    def test_a_recorder_falls_over_from_a_dead_backend(self):
+        self.program("pw-record", "#!/bin/sh\nexit 3\n")
+        self.program("pw-play", "#!/bin/sh\nexit 0\n")
+        self.program("paplay", "#!/bin/sh\nexit 0\n")
+        self.program("parec", (
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "while True:\n"
+            "    sys.stdout.buffer.write(b'\\x00' * 640)\n"
+            "    sys.stdout.buffer.flush()\n"
+            "    time.sleep(0.02)\n"))
+        self.only()
+        recorder = Recorder(16000)
+        try:
+            chunk = b""
+            deadline = time.monotonic() + 10
+            while not chunk and time.monotonic() < deadline:
+                chunk = recorder.read(320)
+            self.assertTrue(chunk)
+            self.assertEqual(recorder.backend, "pulse")
+        finally:
+            recorder.close()
+
+    def test_the_player_writes_through_the_backend(self):
+        played = os.path.join(self.work, "played.raw")
+        self.program("pw-record", "#!/bin/sh\nexit 0\n")
+        self.program("pw-play", (
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "out = open(%r, 'wb')\n"
+            "while True:\n"
+            "    data = sys.stdin.buffer.read1(4096)\n"
+            "    if not data:\n"
+            "        break\n"
+            "    out.write(data)\n"
+            "    out.flush()\n") % played)
+        self.only()
+        player = Player(16000)
+        try:
+            player.play(b"\x01\x00" * 800)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not os.path.exists(played):
+                time.sleep(0.02)
+            self.assertEqual(player.backend, "pipewire")
+            player.close()
+            with open(played, "rb") as handle:
+                self.assertEqual(handle.read(), b"\x01\x00" * 800)
+        finally:
+            player.close()
+
+
+class Service(BaseHTTPRequestHandler):
+    """Speech to text and text to speech with the OpenAI request shapes."""
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        if self.path.endswith("/audio/transcriptions"):
+            payload = json.dumps({"text": "add a docstring"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path.endswith("/audio/speech"):
+            data = wav_from_pcm(tone(0.4), fixtures.RATE)
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+
+class SidecarAudioTest(unittest.TestCase):
+    """The real sidecar process records and plays through its backends."""
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp(prefix="harness-sidecar-")
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.played = os.path.join(self.work, "played.raw")
+
+    def program(self, name, body):
+        path = os.path.join(self.work, name)
+        with open(path, "w") as handle:
+            handle.write(body)
+        os.chmod(path, 0o755)
+        return path
+
+    def test_the_local_sidecar_runs_the_whole_loop(self):
+        tone_file = os.path.join(self.work, "tone.raw")
+        with open(tone_file, "wb") as handle:
+            handle.write(tone(1.0))
+        # A recorder that says one utterance and then keeps the room quiet,
+        # and a player that keeps what it was given.  Both are the backend
+        # programs Emacs would start on a PipeWire machine.
+        self.program("pw-record", (
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "sys.stdout.buffer.write(open(%r, 'rb').read())\n"
+            "sys.stdout.buffer.flush()\n"
+            "while True:\n"
+            "    sys.stdout.buffer.write(b'\\x00' * 640)\n"
+            "    sys.stdout.buffer.flush()\n"
+            "    time.sleep(0.02)\n") % tone_file)
+        self.program("pw-play", (
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "out = open(%r, 'wb')\n"
+            "while True:\n"
+            "    data = sys.stdin.buffer.read1(4096)\n"
+            "    if not data:\n"
+            "        break\n"
+            "    out.write(data)\n"
+            "    out.flush()\n") % self.played)
+        os.environ["PATH"] = self.work + os.pathsep + os.environ.get("PATH", "")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Service)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = "http://127.0.0.1:%d" % server.server_address[1]
+        sidecar = subprocess.Popen(
+            [sys.executable, SCRIPT, "--stt-url", base + "/v1/audio/transcriptions",
+             "--tts-url", base + "/v1/audio/speech", "--threshold", "0.02"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=dict(os.environ), text=True, bufsize=1)
+        seen = []
+        events = queue.Queue()
+
+        def read_events():
+            for line in sidecar.stdout:
+                try:
+                    events.put(json.loads(line))
+                except ValueError:
+                    pass
+
+        threading.Thread(target=read_events, daemon=True).start()
+
+        def send(**fields):
+            sidecar.stdin.write(json.dumps(fields) + "\n")
+            sidecar.stdin.flush()
+
+        def wait_for(kind, timeout=20):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    event = events.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                seen.append(event.get("event"))
+                if event.get("event") == kind:
+                    return event
+            self.fail("no %s event, saw %s" % (kind, seen))
+
+        try:
+            send(event="start", protocol=1, context="")
+            wait_for("ready")
+            delegation = wait_for("delegation")
+            self.assertEqual(delegation.get("text"), "add a docstring")
+            send(event="delegate_result", id=delegation.get("id"), text="It is in place.")
+            wait_for("speaking")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if os.path.exists(self.played) and os.path.getsize(self.played) >= 1600:
+                    break
+                time.sleep(0.05)
+            send(event="stop")
+            wait_for("closed")
+        finally:
+            sidecar.stdin.close()
+            sidecar.wait(timeout=15)
+            log = sidecar.stderr.read()
+            sidecar.stdout.close()
+            sidecar.stderr.close()
+            server.shutdown()
+            server.server_close()
+        self.assertIn("capture · pw-record", log)
+        self.assertIn("playback · pw-play", log)
+        with open(self.played, "rb") as handle:
+            self.assertGreaterEqual(len(handle.read()), 1600)
 
 
 if __name__ == "__main__":

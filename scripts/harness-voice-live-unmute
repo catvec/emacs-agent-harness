@@ -22,9 +22,12 @@ Unmute without changing Emacs:
     POST /v1/audio/speech           {"model", "voice", "input", "response_format": "wav"}
                                     -> WAV bytes
 
-Audio is PCM16 mono at 16 kHz, captured with ``arecord`` and played
-with ``aplay``.  No audio leaves the machine, and the sidecar needs no
-API key unless ``--api-key-env`` names a variable holding one for a
+Audio is PCM16 mono at 16 kHz, captured and played through the
+machine's audio backend -- PipeWire's ``pw-record`` and ``pw-play``,
+PulseAudio's ``parec`` and ``paplay``, ALSA's ``arecord`` and ``aplay``,
+or ``ffmpeg`` -- and ``--audio`` names one instead of taking the first
+installed.  No audio leaves the machine, and the sidecar needs no API
+key unless ``--api-key-env`` names a variable holding one for a
 protected endpoint.
 """
 
@@ -42,9 +45,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness_voice_sidecar import (  # noqa: E402
-    LOCAL_RATE, FakeEvents, Loop, NullAudio, Player, Recorder, Sidecar, Vad,
-    http_json, http_multipart, log, pcm_from_wav, self_test_failed,
-    self_test_ok, wav_from_pcm,
+    AUDIO_AUTO, LOCAL_RATE, FakeEvents, Loop, NullAudio, Player, Recorder,
+    Sidecar, Vad, audio_backend_names, http_json, http_multipart, log,
+    pcm_from_wav, self_test_audio, self_test_failed, self_test_ok, wav_from_pcm,
 )
 
 DEFAULT_STT_URL = "http://127.0.0.1:8000/v1/audio/transcriptions"
@@ -71,10 +74,12 @@ class UnmuteSidecar(Sidecar):
 
     def __init__(self, args, events=None, player=None, recorder=None,
                  post_multipart=None, post_json=None):
-        super().__init__(events=events, player=player or Player(LOCAL_RATE),
+        audio = getattr(args, "audio", AUDIO_AUTO)
+        super().__init__(events=events,
+                         player=player or Player(LOCAL_RATE, backend=audio),
                          rate=LOCAL_RATE)
         self.args = args
-        self.recorder = recorder or Recorder(LOCAL_RATE)
+        self.recorder = recorder or Recorder(LOCAL_RATE, backend=audio)
         self.vad = Vad(
             LOCAL_RATE, threshold=args.threshold,
             hangover=getattr(args, "hangover", 0.85),
@@ -111,6 +116,10 @@ class UnmuteSidecar(Sidecar):
         super().start_session(event)
 
     def on_start(self):
+        reason = self.recorder.available()
+        if reason:
+            self.fail(reason)
+            return
         self.stopping.clear()
         self.started = True
         self._start_workers()
@@ -193,6 +202,10 @@ class UnmuteSidecar(Sidecar):
 
     def tick(self):
         if not self.started:
+            return
+        if self.recorder.exhausted():
+            # Every backend died: say why instead of waiting on silence.
+            self.fail(self.recorder.error or "microphone unavailable")
             return
         self.tick_playback()
         chunk = self.recorder.read(320)  # 20 ms at 16 kHz
@@ -456,6 +469,8 @@ def parse_args(argv):
     parser.add_argument("--hangover", type=float, default=0.85)
     parser.add_argument("--max-speech", type=float, default=120.0)
     parser.add_argument("--api-key-env", default="")
+    parser.add_argument("--audio", default=AUDIO_AUTO, choices=audio_backend_names(),
+                        help="audio backend (default: the first installed)")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv[1:])
 
@@ -572,6 +587,9 @@ def self_test(args):
         return self_test_failed("no closed event")
     if sidecar.workers:
         return self_test_failed("workers survived stop")
+    problem = self_test_audio()
+    if problem:
+        return self_test_failed(problem)
     return self_test_ok("harness-voice-live-unmute")
 
 

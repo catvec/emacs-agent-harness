@@ -20,7 +20,10 @@ tool calls, questions and approvals stay on screen in Emacs.
 
 ``OPENAI_API_KEY`` must hold a project API key; keep it in the
 environment, never in an Emacs option.  Audio is PCM16 mono at 24 kHz,
-taken from ``arecord`` and played with ``aplay``.
+taken from the machine's audio backend -- PipeWire's ``pw-record`` and
+``pw-play``, PulseAudio's ``parec`` and ``paplay``, ALSA's ``arecord``
+and ``aplay``, or ``ffmpeg'' -- and ``--audio`` names one instead of
+taking the first installed.
 """
 
 import argparse
@@ -35,8 +38,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness_voice_sidecar import (  # noqa: E402
-    GPT_RATE, PROTOCOL, FakeConnection, FakeEvents, NullAudio, Player, Recorder,
-    Sidecar, Vad, WebSocket, log, self_test_failed, self_test_ok,
+    AUDIO_AUTO, AUDIO_BACKENDS, GPT_RATE, PROTOCOL, FakeConnection, FakeEvents,
+    NullAudio, Player, Recorder, Sidecar, Vad, WebSocket, audio_backend,
+    audio_backend_names, log, self_test_audio, self_test_failed, self_test_ok,
 )
 
 DEFAULT_URL = "wss://api.openai.com/v1/live/sessions"
@@ -89,12 +93,14 @@ class GptSidecar(Sidecar):
     provider = "chatgpt"
 
     def __init__(self, args, events=None, connection=None, player=None, recorder=None):
-        super().__init__(events=events, player=player or Player(GPT_RATE), rate=GPT_RATE)
+        audio = getattr(args, "audio", AUDIO_AUTO)
+        super().__init__(events=events, player=player or Player(GPT_RATE, backend=audio),
+                         rate=GPT_RATE)
         self.args = args
         self.connection = connection if connection is not None else WebSocket(
             args.url,
             headers={"Authorization": "Bearer %s" % os.environ.get(args.api_key_env, "")})
-        self.recorder = recorder or Recorder(GPT_RATE)
+        self.recorder = recorder or Recorder(GPT_RATE, backend=audio)
         self.reader = None
         self.started = False
         self.pending_audio = b""
@@ -188,6 +194,10 @@ class GptSidecar(Sidecar):
                     self.finished = True
                     self.finish("session closed")
         if not self.started or self.muted or self.finished:
+            return
+        if self.recorder.exhausted():
+            # Every backend died: say why instead of waiting on silence.
+            self.fail(self.recorder.error or "microphone unavailable")
             return
         chunk = self.recorder.read(1200)  # 50 ms at 24 kHz
         if not chunk:
@@ -339,6 +349,8 @@ def parse_args(argv):
     parser.add_argument("--instructions", default=DEFAULT_INSTRUCTIONS)
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
+    parser.add_argument("--audio", default=AUDIO_AUTO, choices=audio_backend_names(),
+                        help="audio backend (default: the first installed)")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv[1:])
 
@@ -460,6 +472,9 @@ def self_test(args):
     if "interrupted" not in kinds:
         return self_test_failed("interrupt event")
     problem = self_test_socket()
+    if problem:
+        return self_test_failed(problem)
+    problem = self_test_audio()
     if problem:
         return self_test_failed(problem)
     return self_test_ok("harness-voice-live-gpt")

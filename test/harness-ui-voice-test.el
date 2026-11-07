@@ -507,7 +507,7 @@
                     (should-error (harness-voice--command '("harness-no-such-executable" :file) "audio.wav")))))
     (let ((harness-voice-player-command nil))
       (cl-letf (((symbol-function 'harness-ui-media--player-program) (lambda () nil)))
-        (should (equal "Voice player unavailable · mpv, ffplay or paplay"
+        (should (equal "Voice player unavailable · mpv, pw-play, ffplay or paplay"
                        (error-message-string (should-error (harness-voice--player "audio.wav")))))))
     (should (equal "Spoken replies unavailable · Chat required"
                    (error-message-string (should-error (harness-voice-mode 1)))))
@@ -515,7 +515,8 @@
     (cl-letf (((symbol-function 'harness-ui-media--recorder-command) (lambda (_) nil)))
       (harness-voice-hold)
       (should-not harness-voice--job)
-      (should (equal "Voice recorder unavailable · pw-record, arecord or ffmpeg" harness-voice--error)))
+      (should (equal "Voice recorder unavailable · pw-record, parec, arecord or ffmpeg"
+                     harness-voice--error)))
     (harness-ui-voice-test--record)
     (let ((harness-ui-media-recording-blocked-p-functions '(harness-voice--recording-p)))
       (should (equal "Microphone unavailable · Voice active"
