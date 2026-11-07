@@ -1137,8 +1137,12 @@ PREDICATE filters the rest further."
   (cl-remove-if #'harness-ui-internal-session-p (harness-ui-sessions predicate)))
 
 (defun harness-ui-refresh-sessions (&optional callback)
-  "Reload the session cache from the harness, then call CALLBACK."
-  (harness-ui-call "_harness/session/list" nil
+  "Reload the session cache from the harness, then call CALLBACK.
+The listing is lean: it leaves out the provider conversation and the
+permission state behind it, which no view draws and which made a list of
+many sessions megabytes to send.  What a view needs of one session it
+asks `session/get' for."
+  (harness-ui-call "_harness/session/list" (list :filter (list :lean t))
                    (lambda (sessions)
                      (clrhash harness-ui--sessions)
                      (clrhash harness-ui--internal-ids)
@@ -3466,6 +3470,22 @@ than one."
   "[0-9a-f]\\{8\\}\\(?:-[0-9a-f]\\{4\\}\\)\\{3\\}-[0-9a-f]\\{12\\}"
   "Regexp matching a session id: a UUID as `harness-uuid' writes it.")
 
+(defun harness-ui--hex-char-p (c)
+  "Return non-nil when C is a lowercase hexadecimal digit."
+  (or (<= ?0 c ?9) (<= ?a c ?f)))
+
+(defun harness-ui--session-id-at-p (string start)
+  "Return non-nil when STRING holds a session id at START.
+That is a lowercase UUID as `harness-uuid' writes it: eight hex digits,
+then groups of four, four and four, and twelve."
+  (and (>= start 0)
+       (<= (+ start 36) (length string))
+       (cl-loop for i from 0 below 36
+                for c = (aref string (+ start i))
+                always (if (memq i '(8 13 18 23))
+                           (eq c ?-)
+                         (harness-ui--hex-char-p c)))))
+
 (defun harness-ui--word-char-at-p (string index)
   "Return non-nil when STRING has a letter, digit or underscore at INDEX.
 Nil when INDEX lies outside STRING.  An id with one on either side is
@@ -3488,22 +3508,26 @@ only a whole one counts, not one inside a longer word, and never a short
 id, which is as likely a git hash.  An id the cache does not know stays
 plain text.  So does one SKIP, a function of STRING and the position of
 the id in it, says to leave: a message's code, which is meant literally
-\(`harness-ui-markdown-code-at-p')."
+\(`harness-ui-markdown-code-at-p').
+
+A hyphen is where a candidate id ends its first group, so only the
+hyphens of the text are examined: a transcript of many long messages
+has far fewer of them than characters, and scanning it this way rather
+than with a regexp took most of the time a transcript took to draw."
   (when (and (stringp string) (>= (length string) 36))
-    (let ((case-fold-search nil)
-          (pos 0))
-      (while (string-match harness-ui--session-id-regexp string pos)
-        (let ((start (match-beginning 0))
-              (end (match-end 0)))
-          (unless (or (harness-ui--word-char-at-p string (1- start))
-                      (harness-ui--word-char-at-p string end)
-                      (and skip (funcall skip string start)))
-            (let ((id (substring-no-properties string start end)))
+    (let ((pos (string-search "-" string)))
+      (while pos
+        (let ((start (- pos 8)))
+          (when (and (harness-ui--session-id-at-p string start)
+                     (not (harness-ui--word-char-at-p string (1- start)))
+                     (not (harness-ui--word-char-at-p string (+ start 36)))
+                     (not (and skip (funcall skip string start))))
+            (let ((id (substring-no-properties string start (+ start 36))))
               (when (harness-ui-session id)
-                (add-face-text-property start end 'harness-ui-session-link-face nil string)
-                (harness-ui-add-session-keys string id nil start end
-                                             (harness-ui-session-action id)))))
-          (setq pos end)))))
+                (add-face-text-property start (+ start 36) 'harness-ui-session-link-face nil string)
+                (harness-ui-add-session-keys string id nil start (+ start 36)
+                                             (harness-ui-session-action id))))))
+        (setq pos (string-search "-" string (1+ pos))))))
   string)
 
 (defun harness-ui-add-keymap (start end map)

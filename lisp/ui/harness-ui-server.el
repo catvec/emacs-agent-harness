@@ -368,7 +368,7 @@ harness sends it."
                      (lambda (answer)
                        (harness-ui-server--answer buf :version answer connected start))
                      (lambda (error) (harness-ui-server--failed buf error) nil))
-    (harness-ui-call "_harness/session/list" nil
+    (harness-ui-call "_harness/session/list" (list :filter (list :lean t))
                      (lambda (sessions) (harness-ui-server--answer buf :sessions sessions nil nil))
                      (lambda (error) (harness-ui-server--failed buf error) nil))
     (harness-ui-call "_harness/harness/modules" nil
@@ -378,7 +378,7 @@ harness sends it."
 (defun harness-ui-server--refresh-sessions (&optional buffer)
   "Ask for the sessions again, and redraw BUFFER."
   (let ((buf (or buffer (current-buffer))))
-    (harness-ui-call "_harness/session/list" nil
+    (harness-ui-call "_harness/session/list" (list :filter (list :lean t))
                      (lambda (sessions)
                        (when (buffer-live-p buf)
                          (with-current-buffer buf

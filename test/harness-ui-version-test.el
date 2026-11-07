@@ -302,6 +302,39 @@ cut, and no line is wider than the window."
       (should (equal '("[Check now]") (harness-ui-version-test--buttons)))
       (should-error (harness-ui-version-update) :type 'user-error))))
 
+(ert-deftest harness-ui-version-says-what-an-update-is-doing ()
+  "The update row names its stage and its age, and the page redraws while it moves.
+A verification that spends ten seconds compiling does not read as one
+that stopped."
+  (let ((harness-ui-version--progress-timer nil))
+    (unwind-protect
+        (harness-ui-version-test-with-page (harness-ui-version-test--behind)
+          (setq harness--updating t
+                harness--update-progress (list :stage "checking" :since (- (float-time) 3)))
+          (harness-ui-version--render)
+          (should (string-match-p "Updating… checking · 3s"
+                                  (harness-ui-version-test--line "^ Remote")))
+          (should (timerp harness-ui-version--progress-timer))
+          ;; The stage moves as the update gets on, and so does its age.
+          (setq harness--update-progress (list :stage "installing" :since (- (float-time) 1)))
+          (harness-ui-version--render)
+          (should (string-match-p "Updating… installing · 1s"
+                                  (harness-ui-version-test--line "^ Remote")))
+          ;; A check of the page's own says how long it has waited too.
+          (setq harness--updating nil
+                harness--update-progress nil
+                harness-ui-version--checking (- (float-time) 4))
+          (harness-ui-version--render)
+          (should (string-match-p "Checking… 4s" (harness-ui-version-test--text)))
+          (should (timerp harness-ui-version--progress-timer))
+          ;; Nothing running: no timer redraws the page.
+          (setq harness-ui-version--checking nil)
+          (harness-ui-version--render)
+          (should-not (timerp harness-ui-version--progress-timer)))
+      (when (timerp harness-ui-version--progress-timer)
+        (cancel-timer harness-ui-version--progress-timer)
+        (setq harness-ui-version--progress-timer nil)))))
+
 (ert-deftest harness-ui-version-shows-commits-not-fetched-yet ()
   "A remote commit no local repository holds is not counted, and is said."
   (let ((report (harness-ui-version-test--report

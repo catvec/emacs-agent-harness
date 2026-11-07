@@ -326,6 +326,35 @@ extension data, for a client that reads chunks rather than nodes."
             (should (string-match-p "look at the project" (plist-get (plist-get chunk :content) :text)))))
         (harness-acp-close other)))))
 
+(ert-deftest harness-acp-local-load-replays-the-nodes-alone-when-asked ()
+  "A client that keeps the harness's own nodes asks for them alone.
+Each node is one update, where the standard replay sends the same text
+as a chunk beside it; the transcript would go over the wire twice."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (harness-acp-test-prompt conn sid "give me the tour")
+      (let* ((seen nil)
+             (other (harness-acp-connect)))
+        (harness-acp-set-handler other (lambda (method params _respond) (push (list method params) seen)))
+        (let ((loaded (harness-acp-test-request
+                       other "session/load"
+                       (list :sessionId sid :_harness (list :replay "nodes")))))
+          ;; Its answer carries the session's modes, as the standard replay's does.
+          (should (equal "ask" (plist-get (plist-get loaded :modes) :currentModeId))))
+        (let* ((nodes (harness-call 'session/nodes sid))
+               (updates (harness-acp-test-updates seen))
+               (kinds (mapcar (lambda (update) (plist-get update :sessionUpdate)) updates)))
+          (should (equal (append (make-list (length nodes) "_harness/node")
+                                 '("_harness/session"))
+                         kinds))
+          (should (equal (mapcar (lambda (node) (plist-get node :id)) nodes)
+                         (mapcar (lambda (update) (plist-get (plist-get update :node) :id))
+                                 (butlast updates))))
+          ;; The record the replay ends with is the one it began from.
+          (should (equal sid (plist-get (plist-get (car (last updates)) :session) :id))))
+        (harness-acp-close other)))))
+
 ;;;; What is made while a session loads
 
 ;; The replay of a long session to a client that reads slowly waits for room
@@ -793,6 +822,19 @@ show, with words for the person."
       ;; Enum values arrive as strings and are interned before the bus sees them.
       (should (= 1 (length (harness-acp-test-request conn "_harness/session/list" '(:filter (:status "idle"))))))
       (should (= 0 (length (harness-acp-test-request conn "_harness/session/list" '(:filter (:status "running"))))))
+      ;; A lean listing leaves out the provider conversation and the
+      ;; permission state behind it, which no home screen draws.
+      (let ((lean (car (harness-acp-test-request conn "_harness/session/list" '(:filter (:lean t))))))
+        (should (equal sid (plist-get lean :id)))
+        (dolist (key '(:provider-state :provider-node :allowed-dirs :move))
+          (should-not (plist-member lean key)))
+        (should (plist-member lean :usage))
+        (should (plist-member lean :ext))
+        ;; The full listing, and the record of the session, still have them.
+        (should (plist-member (car (harness-acp-test-request conn "_harness/session/list" nil))
+                              :provider-state))
+        (should (plist-member (harness-acp-test-request conn "_harness/session/get" (list :id sid))
+                              :allowed-dirs)))
       (should (equal sid (plist-get (harness-acp-test-request conn "_harness/session/get" (list :id sid)) :id)))
       ;; Explicit positional form.
       (should (equal sid (plist-get (harness-acp-test-request conn "_harness/session/get" (list :args (list sid))) :id)))

@@ -182,32 +182,31 @@ class SessionController extends ChangeNotifier {
       // into the runs it folds and not into cards that fold a moment later.
       await _loadTools();
       // ACP's session/load resumes the session and replays the transcript.
+      // A harness with its own nodes replays those alone: each node is one
+      // update, where the standard replay adds a chunk for the same text.
+      // The transcript is drawn as the updates come, so a long conversation
+      // fills the screen while it loads.
+      final rich = api.capabilities.richNodes;
+      if (rich) transcript.reset();
       // Its answer carries the session's modes, as session/new's does.
-      final loaded = await api.loadSession(sessionId, cwd: summary?.cwd);
+      final loaded = await api.loadSession(
+        sessionId,
+        cwd: summary?.cwd,
+        replay: rich ? 'nodes' : null,
+      );
       adoptModes(loaded['modes']);
       // Read again: what a lost connection may have left behind is made up
       // for.  (One lost from here on marks it stale again.)
       _stale = false;
-      if (api.capabilities.richNodes) {
+      if (rich && summary == null) {
+        // The record the replay ends with did not arrive; ask for it.
         try {
           final info = await api.sessionGet(sessionId);
           adopt(SessionSummary.fromWire(info));
         } catch (_) {
           // Keep the summary from the list; the replay is still usable.
         }
-        try {
-          final nodes = await api.sessionNodes(sessionId, limit: 400);
-          if (nodes.isNotEmpty) {
-            transcript.reset();
-            for (final node in nodes) {
-              transcript.applyNode(node);
-            }
-          }
-        } catch (_) {
-          // Rich nodes are an enhancement; the standard replay stands.
-        }
       }
-      await refreshInfo();
       // The messages the turn has not taken are no node of the transcript:
       // the session says which they are.
       transcript.syncPending(_held(summary?.steering));
@@ -1070,30 +1069,7 @@ class SessionController extends ChangeNotifier {
       final sid = asString(notification.params['sessionId']);
       if (sid != sessionId) return;
       final update = asMap(notification.params['update']);
-      final kind = asString(update['sessionUpdate']);
-      switch (kind) {
-        case '_harness/session':
-          final session = asMap(update['session']);
-          if (session.isNotEmpty) {
-            final record = SessionSummary.fromWire(session);
-            summary = summary == null ? record : summary!.merge(record);
-            _syncPlan();
-            _dropRecovered(summary!);
-          }
-        case '_harness/activity':
-          final raw = update['activity'];
-          activity = raw is Map && asMap(raw).isNotEmpty
-              ? TurnActivity.fromWire(asMap(raw))
-              : null;
-        case '_harness/session_deleted':
-          deleted = true;
-        case 'current_mode_update':
-          final current = asString(update['currentModeId']);
-          if (current != null && current.isNotEmpty) _setCurrentMode(current);
-          unawaited(refreshInfo());
-        default:
-          transcript.apply(update);
-      }
+      _handleSessionUpdate(update);
       _notify();
       return;
     }
@@ -1102,6 +1078,33 @@ class SessionController extends ChangeNotifier {
         asStringOr(notification.params['event'], ''),
         asList(notification.params['args']),
       );
+    }
+  }
+
+  void _handleSessionUpdate(JsonMap update) {
+    final kind = asString(update['sessionUpdate']);
+    switch (kind) {
+      case '_harness/session':
+        final session = asMap(update['session']);
+        if (session.isNotEmpty) {
+          final record = SessionSummary.fromWire(session);
+          summary = summary == null ? record : summary!.merge(record);
+          _syncPlan();
+          _dropRecovered(summary!);
+        }
+      case '_harness/activity':
+        final raw = update['activity'];
+        activity = raw is Map && asMap(raw).isNotEmpty
+            ? TurnActivity.fromWire(asMap(raw))
+            : null;
+      case '_harness/session_deleted':
+        deleted = true;
+      case 'current_mode_update':
+        final current = asString(update['currentModeId']);
+        if (current != null && current.isNotEmpty) _setCurrentMode(current);
+        unawaited(refreshInfo());
+      default:
+        transcript.apply(update);
     }
   }
 

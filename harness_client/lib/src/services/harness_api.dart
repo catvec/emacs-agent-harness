@@ -212,11 +212,16 @@ class HarnessApi {
     return asMap(result);
   }
 
-  Future<JsonMap> loadSession(String sessionId, {String? cwd}) async {
+  Future<JsonMap> loadSession(
+    String sessionId, {
+    String? cwd,
+    String? replay,
+  }) async {
     final result = await _request('session/load', {
       'sessionId': sessionId,
       if (cwd != null && cwd.isNotEmpty) 'cwd': cwd,
       'mcpServers': const <Object?>[],
+      if (replay != null && replay.isNotEmpty) '_harness': {'replay': replay},
     });
     return asMap(result);
   }
@@ -260,8 +265,11 @@ class HarnessApi {
   }) async {
     final result = await extensionRaw('session/nodes', {
       'id': sessionId,
-      if (limit != null) 'limit': limit,
-      if (before != null) 'before': before,
+      if (limit != null || before != null)
+        'opts': {
+          if (limit != null) 'limit': limit,
+          if (before != null) 'before': before,
+        },
     });
     return asMapList(result);
   }

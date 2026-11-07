@@ -137,6 +137,29 @@ with its connection.")
 (defvar harness-ui-version--checking nil
   "When the page asked for the check it waits for (float seconds), or nil.")
 
+(defvar harness-ui-version--progress-timer nil
+  "Timer that redraws the page while a check or an update runs, or nil.")
+
+(defun harness-ui-version--progress-active-p ()
+  "Non-nil while the page has a progress to show."
+  (or (harness-ui-version--checking-p) (harness-ui-version--updating-p)))
+
+(defun harness-ui-version--progress-sync ()
+  "Keep one timer running while the page shows progress, and none otherwise."
+  (cond ((harness-ui-version--progress-active-p)
+         (unless (timerp harness-ui-version--progress-timer)
+           (setq harness-ui-version--progress-timer
+                 (run-at-time 1 1 #'harness-ui-version--progress-redraw))))
+        ((timerp harness-ui-version--progress-timer)
+         (cancel-timer harness-ui-version--progress-timer)
+         (setq harness-ui-version--progress-timer nil))))
+
+(defun harness-ui-version--progress-redraw ()
+  "Redraw the page so the seconds of a check or update move."
+  (if (harness-ui-version--progress-active-p)
+      (harness-ui-version--redraw-all)
+    (harness-ui-version--progress-sync)))
+
 (defvar harness-ui-version--error nil
   "Why the last check the page asked for failed, or nil.")
 
@@ -229,6 +252,28 @@ See `harness--straight-package', which the update command uses too."
 (defun harness-ui-version--updating-p ()
   "Non-nil while `harness-update' runs in this Emacs."
   (and (boundp 'harness--updating) harness--updating))
+
+(defun harness-ui-version--updating-status ()
+  "Return the status of an update running now, a noun phrase.
+It names the stage the update reached and how long ago it did, so an
+update that spends seconds checking a commit does not read as one that
+stopped."
+  (let* ((progress (and (boundp 'harness--update-progress) harness--update-progress))
+         (stage (plist-get progress :stage))
+         (since (plist-get progress :since))
+         (elapsed (and (numberp since) (floor (- (float-time) since)))))
+    (concat "Updating…"
+            (if (and (stringp stage) (not (string-empty-p stage)))
+                (format " %s" stage)
+              "")
+            (if (and elapsed (> elapsed 0)) (format " · %ds" elapsed) ""))))
+
+(defun harness-ui-version--checking-status ()
+  "Return the status of the check running now, a noun phrase, with its age."
+  (let ((elapsed (and harness-ui-version--checking
+                      (floor (- (float-time) harness-ui-version--checking)))))
+    (concat "Checking…"
+            (if (and elapsed (> elapsed 0)) (format " %ds" elapsed) ""))))
 
 (defun harness-ui-version--last-update ()
   "The last update's outcome, when this Emacs made one, else nil."
@@ -517,7 +562,8 @@ HELP is its tooltip."
     (if remote
         (if (harness-ui-version--updating-p)
             (harness-ui-version--insert-row
-             "Remote" 'caution (harness-ui-version--short (plist-get remote :commit)) "Updating…" nil
+             "Remote" 'caution (harness-ui-version--short (plist-get remote :commit))
+             (harness-ui-version--updating-status) nil
              (harness-ui-version--origin-location remote))
           (harness-ui-version--insert-row
            "Remote" (harness-ui-version--status-level remote)
@@ -782,7 +828,7 @@ restart prompt a failed reload needs."
                           'face 'harness-dim-face)
               "  "))
     (if (harness-ui-version--checking-p)
-        (insert (propertize "Checking…" 'face 'harness-dim-face))
+        (insert (propertize (harness-ui-version--checking-status) 'face 'harness-dim-face))
       (harness-ui-button "[Check now]" #'harness-ui-version-refresh
                          :help "Check the origins again (g)"))
     (insert "\n")
@@ -790,6 +836,7 @@ restart prompt a failed reload needs."
       (insert " " (propertize (format "Check failed: %s" harness-ui-version--error)
                               'face 'harness-failure-face)
               "\n"))
+    (harness-ui-version--progress-sync)
     (goto-char (point-min))
     (forward-line (1- line))))
 

@@ -744,7 +744,12 @@ class AppController extends ChangeNotifier {
     try {
       List<SessionSummary> loaded;
       if (service.can('session/list')) {
-        final raw = await service.extensionRaw('session/list');
+        final raw = await service.extensionRaw('session/list', {
+          // A lean listing leaves out the provider conversation and the
+          // permission state behind it: a home screen of many sessions then
+          // reads what it draws, not megabytes it never shows.
+          'filter': {'lean': true},
+        });
         loaded = [
           for (final wire in asMapList(raw)) SessionSummary.fromWire(wire),
         ];

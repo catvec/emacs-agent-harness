@@ -525,6 +525,13 @@ class FakeHarness {
   /// The nodes come only to the app that asks without it.  Off, the fake
   /// serves them to anyone, as it always did.
   bool strictNodeParams = false;
+
+  /// Whether `session/load' asks for the harness's nodes alone and gets
+  /// them, as the real harness answers such a request.  A test turns this
+  /// off for a harness that ignores the request and replays the standard
+  /// way: the app must read either.
+  bool nodeReplay = true;
+
   final Map<String, Map<String, Object?>> tasks = {};
 
   /// The projects whose pending queue is suspended, and those whose backlog
@@ -1701,7 +1708,12 @@ class FakeHarness {
           _respondError(id, -32603, 'No session $sid');
           return;
         }
-        _replay(sid);
+        _replay(
+          sid,
+          nodesOnly:
+              nodeReplay &&
+              asString(asMap(params['_harness'])['replay']) == 'nodes',
+        );
         _respond(id, {'modes': _modesFor(sessions[sid]!)});
         return;
       }
@@ -3278,7 +3290,7 @@ class FakeHarness {
     ).toUtc().toIso8601String(),
   };
 
-  void _replay(String sid) {
+  void _replay(String sid, {bool nodesOnly = false}) {
     final session = sessions[sid];
     if (session == null) return;
     _send('session/update', {
@@ -3289,7 +3301,12 @@ class FakeHarness {
     // goes out is no part of it.
     var sent = 0;
     for (final node in List.of(nodes[sid] ?? const <Map<String, Object?>>[])) {
-      for (final update in _updatesForNode(node, replay: true)) {
+      final updates = nodesOnly
+          ? [
+              {'sessionUpdate': '_harness/node', 'node': node},
+            ]
+          : _updatesForNode(node, replay: true);
+      for (final update in updates) {
         _send('session/update', {'sessionId': sid, 'update': update});
       }
       whileReplaying?.call(sid, ++sent);

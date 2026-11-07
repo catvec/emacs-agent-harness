@@ -1430,15 +1430,25 @@ machine: a device elsewhere may not use it (see
   (let ((sid (harness-acp--param params :sessionId t)))
     (if (harness-acp--virtual-session-p sid)
         (harness-acp--load-virtual client sid params)
-      (let ((session (harness-call 'session/resume sid)))
+      (let* ((session (harness-call 'session/resume sid))
+             ;; A client that keeps the harness's own nodes asks for them
+             ;; alone: each is one message, where the standard replay adds a
+             ;; chunk for the same text, and a long transcript is sent twice.
+             (harness-params (harness-acp--kebab-keys (plist-get params :_harness)))
+             (nodes-only (equal (plist-get harness-params :replay) "nodes")))
         ;; The nodes as they are now, and what is made while they go out
         ;; waits for them (see `harness-acp--replay-begin').
         (harness-acp--replay-begin client sid)
         (unwind-protect
             (progn
               (dolist (node (harness-call 'session/nodes sid))
-                (dolist (update (harness-acp--node-updates node nil))
-                  (harness-acp--client-notify client "session/update" (list :sessionId sid :update update))))
+                (if nodes-only
+                    (harness-acp--client-notify
+                     client "session/update"
+                     (list :sessionId sid
+                           :update (list :sessionUpdate "_harness/node" :node node)))
+                  (dolist (update (harness-acp--node-updates node nil))
+                    (harness-acp--client-notify client "session/update" (list :sessionId sid :update update)))))
               ;; The record as it was when the replay began: what was made
               ;; since is held, and newer.
               (harness-acp--client-notify client "session/update"
@@ -1577,7 +1587,7 @@ directory as the harness holds it, ending in a slash."
                                                    (equal cwd (harness-acp--list-directory (plist-get session :cwd))))
                                                (or (null after) (harness-acp--list-key-before-p after key))
                                                (cons key session))))
-                                      (harness-call 'session/list)))
+                                      (harness-call 'session/list (list :lean t))))
                         (lambda (a b) (harness-acp--list-key-before-p (car a) (car b)))))
          (page (take size entries)))
     (append (list :sessions (harness-json-array

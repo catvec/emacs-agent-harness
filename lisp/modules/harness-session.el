@@ -209,7 +209,15 @@ defaults."
   (or (gethash id harness-sessions)
       (signal 'harness-error (list (format "No session %s" id)))))
 
-(defun harness-session-plist (s)
+(defconst harness-session--lean-keys '(:provider-state :provider-node :allowed-dirs :move)
+  "Keys a lean session listing leaves out.
+They are the harness's own business -- the provider conversation it
+resumes, the directories a permission answer added, a move waiting for
+a turn to end -- and no view draws them.  A list of many sessions that
+carried them sent megabytes no client read, and serialising them held
+the harness's event loop.  `session/get' always has them.")
+
+(defun harness-session-plist (s &optional lean)
   "Return the public plist of session struct S.
 `:context-window' is the window in effect (see `harness-session--window');
 `:context-window-override' and `:context-window-limit' are what was set
@@ -217,31 +225,39 @@ for S, and are nil when unset.  `:cache' is what is known of its prompt
 cache (see `harness-session--cache').  `:last-message' is when S's latest
 user or assistant message was written (see `session/append'), nil
 before it has one: unlike `:updated', which moves with every change, it
-moves with messages only."
-  (list :id (harness-session-id s) :name (harness-session-name s)
-        :kind (harness-session-kind s) :project (harness-session-project s)
-        :cwd (harness-session-cwd s) :host (harness-session-host s)
-        :worktree (harness-session-worktree s) :model (harness-session-model s)
-        :permission-mode (harness-session-permission-mode s)
-        :thinking (harness-session-thinking s)
-        :non-interactive (harness-session-non-interactive s)
-        :allowed-dirs (harness-session-allowed-dirs s)
-        :status (harness-session-status s) :parent-id (harness-session-parent-id s)
-        :fork-node (harness-session-fork-node s) :created (harness-session-created s)
-        :updated (harness-session-updated s) :usage (harness-session-usage s)
-        :context-window (harness-session--window s)
-        :context-window-override (harness-session-context-window s)
-        :context-window-limit (harness-session-context-window-limit s)
-        :budget (harness-session-budget s) :head (harness-session-head s)
-        :queue (harness-session-queue s) :steering (harness-session-steering s)
-        :pending (harness-session-pending s)
-        :todos (harness-session-todos s) :plan (harness-session-plan s)
-        :provider-state (harness-session-provider-state s)
-        :provider-node (harness-session-provider-node s)
-        :cache (harness-session--cache s)
-        :move (harness-session-move s)
-        :ext (harness-session-ext s)
-        :last-message (harness-session-last-message s)))
+moves with messages only.
+
+With LEAN non-nil the keys of `harness-session--lean-keys' are left
+out: a listing of many sessions then carries what a view draws, not the
+provider conversation and permission state behind it."
+  (let ((plist
+         (list :id (harness-session-id s) :name (harness-session-name s)
+               :kind (harness-session-kind s) :project (harness-session-project s)
+               :cwd (harness-session-cwd s) :host (harness-session-host s)
+               :worktree (harness-session-worktree s) :model (harness-session-model s)
+               :permission-mode (harness-session-permission-mode s)
+               :thinking (harness-session-thinking s)
+               :non-interactive (harness-session-non-interactive s)
+               :allowed-dirs (harness-session-allowed-dirs s)
+               :status (harness-session-status s) :parent-id (harness-session-parent-id s)
+               :fork-node (harness-session-fork-node s) :created (harness-session-created s)
+               :updated (harness-session-updated s) :usage (harness-session-usage s)
+               :context-window (harness-session--window s)
+               :context-window-override (harness-session-context-window s)
+               :context-window-limit (harness-session-context-window-limit s)
+               :budget (harness-session-budget s) :head (harness-session-head s)
+               :queue (harness-session-queue s) :steering (harness-session-steering s)
+               :pending (harness-session-pending s)
+               :todos (harness-session-todos s) :plan (harness-session-plan s)
+               :provider-state (harness-session-provider-state s)
+               :provider-node (harness-session-provider-node s)
+               :cache (harness-session--cache s)
+               :move (harness-session-move s)
+               :ext (harness-session-ext s)
+               :last-message (harness-session-last-message s))))
+    (if lean
+        (apply #'harness-plist-remove plist harness-session--lean-keys)
+      plist)))
 
 ;; The `ext' slot holds what the modules that are not the session's own
 ;; keep about it, a plist of keyword to value (`session/set-ext').  It
@@ -1440,8 +1456,11 @@ nothing is deleted."
   "Return session plists matching FILTER, newest first.
 FILTER keys: :project :status :kind :parent-id :active :ids.
 `:ids' is a list of session ids: only the sessions it names match, and
-nil (or a missing key) matches every session, as the other keys do."
-  (let (out)
+nil (or a missing key) matches every session, as the other keys do.
+With :lean non-nil a plist leaves out what no view draws (see
+`harness-session-plist'): a list of many sessions then stays small."
+  (let ((lean (plist-get filter :lean))
+        out)
     (maphash
      (lambda (_ s)
        (when (and (or (null (plist-get filter :project))
@@ -1456,7 +1475,7 @@ nil (or a missing key) matches every session, as the other keys do."
                       (member (harness-session-id s) (plist-get filter :ids)))
                   (or (null (plist-get filter :active))
                       (not (eq (harness-session-status s) 'inactive))))
-         (push (harness-session-plist s) out)))
+         (push (harness-session-plist s lean) out)))
      harness-sessions)
     (sort out (lambda (a b) (> (plist-get a :updated) (plist-get b :updated))))))
 

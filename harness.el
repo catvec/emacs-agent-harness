@@ -1392,13 +1392,33 @@ conflict.  The result is (:from FROM-short :to TO-short :commits COMMITS
          (setq count (string-to-number (string-trim (car parts)))
                commits (harness-revision-parse-commits (cadr parts)))
          (when (> count 0)
+           (harness--update-note-stage "checking")
            (thread-first
              (harness--verify-commit dir target)
-             (harness-then (lambda (_) (harness--git dir "merge" "--ff-only" "--quiet" target)))
+             (harness-then (lambda (_)
+                             (harness--update-note-stage "installing")
+                             (harness--git dir "merge" "--ff-only" "--quiet" target)))
              (harness-then (lambda (_) nil))))))
       (harness-then (lambda (_) (harness--git dir "rev-parse" "--short" "HEAD")))
       (harness-then (lambda (to) (list :from (substring from 0 7) :to to
                                        :commits commits :count count))))))
+
+(defvar harness--updating nil
+  "Non-nil while `harness-update' runs, so that two updates never overlap.")
+
+(defvar harness--update-progress nil
+  "Where the update running now is: a plist (:stage NAME :since TIME), or nil.
+NAME is \"fetching\", \"checking\", \"installing\" or \"reloading\"; the
+version page says it and how long it has been there, so a check that
+takes seconds does not read as one that is stuck.  Nothing else reads
+it, and an update that is over leaves it nil.")
+
+(defun harness--update-note-stage (stage)
+  "Record that the update running now is at STAGE, since now.
+Nothing is recorded when no update of this Emacs is running: a plugin's
+own update is no part of the version page's update."
+  (when harness--updating
+    (setq harness--update-progress (and stage (list :stage stage :since (float-time))))))
 
 (defun harness--update-checkout (dir)
   "Fast-forward DIR, a git checkout of the harness, to its remote branch.
@@ -1672,6 +1692,7 @@ it does for commits that came in, and reloads."
        ((not harness-started)
         (setq text (format "%s; `harness-start' loads it" summary)))
        (t
+        (harness--update-note-stage "reloading")
         (setq reload (harness--reload))
         (setq text
               (cond
@@ -1692,11 +1713,10 @@ it does for commits that came in, and reloads."
     (setq harness--last-update (list :state state :from from :to to :commits commits
                                      :count count :reload reload :message text
                                      :at (float-time)))
+    (setq harness--updating nil
+          harness--update-progress nil)
     (run-hook-with-args 'harness-update-hook harness--last-update)
     text))
-
-(defvar harness--updating nil
-  "Non-nil while `harness-update' runs, so that two updates never overlap.")
 
 ;;;###autoload
 (defun harness-update ()
@@ -1725,16 +1745,23 @@ came in, each with its subject and message body."
   (when harness--updating
     (user-error "The harness is updating already"))
   (setq harness--updating t)
+  (harness--update-note-stage "fetching")
   (message "Harness: fetching and checking updates…")
   (let ((dir harness-directory))
     (harness-then (harness--update-package dir)
                   (lambda (result)
-                    (setq harness--updating nil)
                     ;; From the command loop, not the dynamic extent of git's sentinel.
-                    (harness-run-soon #'harness--updated dir result)
+                    (harness-run-soon
+                     (lambda ()
+                       ;; An error while reloading must not leave the update
+                       ;; looking as if it still ran.
+                       (unwind-protect (harness--updated dir result)
+                         (setq harness--updating nil
+                               harness--update-progress nil))))
                     nil)
                   (lambda (err)
-                    (setq harness--updating nil)
+                    (setq harness--updating nil
+                          harness--update-progress nil)
                     (let ((reason (harness-error-message err)))
                       (message "Harness update failed: %s" reason)
                       (setq harness--last-update

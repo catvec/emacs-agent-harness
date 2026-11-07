@@ -223,6 +223,19 @@ class TranscriptState {
   String? _lastAssistantKey;
   String? _lastThinkingKey;
 
+  /// The order [displayItems] worked out, kept until something changes.
+  /// A screen asks for it on every build, and a long transcript's order
+  /// walks the nodes' parents; nothing has changed between two builds of
+  /// the same list, so the walk is done once.
+  List<TranscriptItem>? _displayCache;
+  int _displayCacheVersion = -1;
+  int _version = 0;
+
+  /// Something about [items] or their order changed.
+  void _changed() {
+    _version++;
+  }
+
   bool get isEmpty => items.isEmpty;
   bool get hasStreaming =>
       items.any((item) => item.streaming) ||
@@ -232,6 +245,7 @@ class TranscriptState {
       toolsByCallId.values.where((tool) => tool.isRunning).toList();
 
   void reset() {
+    _changed();
     items.clear();
     plan.clear();
     availableCommands.clear();
@@ -243,6 +257,7 @@ class TranscriptState {
   }
 
   TranscriptItem addLocalUser(String text, {JsonMap? thread}) {
+    _changed();
     final reply = thread == null
         ? null
         : ChatThread.fromWire(thread, response: text);
@@ -264,7 +279,10 @@ class TranscriptState {
   /// Take back a message that was shown before the harness had it, and
   /// never will.
   void removeLocalEcho(TranscriptItem item) {
-    if (item.localEcho) items.remove(item);
+    if (item.localEcho) {
+      _changed();
+      items.remove(item);
+    }
   }
 
   /// What the screen shows, top to bottom: the transcript in the order the
@@ -295,12 +313,21 @@ class TranscriptState {
   /// middle, a window of its nodes, whose first node follows one it does not
   /// hold.
   List<TranscriptItem> get displayItems {
+    final cached = _displayCache;
+    if (cached != null && _displayCacheVersion == _version) return cached;
     final recorded = _inRecordedOrder();
-    if (!recorded.any((item) => item.pending)) return recorded;
-    return [
-      ...recorded.where((item) => !item.pending),
-      ...recorded.where((item) => item.pending),
-    ];
+    final ordered = recorded.any((item) => item.pending)
+        ? [
+            ...recorded.where((item) => !item.pending),
+            ...recorded.where((item) => item.pending),
+          ]
+        : recorded;
+    // Callers read it; a view that sorted it in place would otherwise
+    // change what the next build shows.
+    final result = List<TranscriptItem>.unmodifiable(ordered);
+    _displayCache = result;
+    _displayCacheVersion = _version;
+    return result;
   }
 
   /// [items] in the order the harness recorded their nodes (see
@@ -397,6 +424,7 @@ class TranscriptState {
   /// longer held was taken back, and goes.  [sender] is the name of whoever
   /// sent a message that the person did not, as `formatSender` reads it.
   void syncPending(List<({String id, String text, String? sender})> held) {
+    _changed();
     final ids = {for (final message in held) message.id};
     items.removeWhere((item) => item.pending && !ids.contains(item.nodeId));
     for (final message in held) {
@@ -441,6 +469,7 @@ class TranscriptState {
 
   /// Apply one `session/update` object (the value of `update`).
   void apply(JsonMap update) {
+    _changed();
     final kind = asStringOr(update['sessionUpdate'], '');
     final harness = asMap(update['_harness']);
     final nodeId = asString(harness['nodeId']);
@@ -701,6 +730,7 @@ class TranscriptState {
 
   /// Replace or settle an item from a full harness node.
   void applyNode(JsonMap node) {
+    _changed();
     final nodeId = asString(node['id']);
     final kind = asStringOr(node['kind'], '');
     final content = asString(node['content']) ?? '';
@@ -911,6 +941,7 @@ class TranscriptState {
 
   /// The turn is over: nothing is streaming any more.
   void finish() {
+    _changed();
     for (final item in items) {
       item.streaming = false;
     }

@@ -540,9 +540,6 @@ void main() {
     test('puts what was recorded while the app was away between the messages '
         'around it', () async {
       final (app, harness) = await connected();
-      // As the real harness answers a request for the nodes with `limit`:
-      // the app has the replay of `session/load`, and nothing else.
-      harness.strictNodeParams = true;
       final conversation = _conversation();
       harness.sessions['order'] = {
         ...harness.sessions['s1']!,
@@ -566,11 +563,13 @@ void main() {
       // The app reads the conversation again, as it does once it is back.
       await controller.open(force: true);
       expect(shown(controller.transcript.displayItems), _expected);
-      // As the updates came, what it missed stood below the newest message.
+      // The conversation read again replaces what was shown with what the
+      // harness recorded, in its order: the note the app missed stands
+      // between the messages around it, not below the newest one.
       final asItCame = shown(controller.transcript.items);
       expect(
         asItCame.indexOf('non-interactive on'),
-        greaterThan(asItCame.indexOf('Done.')),
+        lessThan(asItCame.indexOf('Done.')),
       );
     });
   });

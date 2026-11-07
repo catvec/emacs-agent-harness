@@ -662,6 +662,30 @@ while the rest is swept."
       (should (equal (list a) (harness-session-test-ids
                                (harness-call 'session/select (list :ids (list a b) :except (list b)))))))))
 
+(ert-deftest harness-session-list-lean-leaves-out-what-no-view-draws ()
+  "A lean listing omits the provider conversation and the permission state.
+What a view needs of one session `session/get' still has."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (full (car (harness-call 'session/list)))
+           (lean (car (harness-call 'session/list (list :lean t))))
+           (get (harness-call 'session/get id)))
+      (dolist (key '(:provider-state :provider-node :allowed-dirs :move))
+        (should (plist-member full key))
+        (should-not (plist-member lean key))
+        (should (plist-member get key)))
+      ;; Everything a home screen, a chat or the tree draws stays.
+      (dolist (key '(:id :name :kind :project :cwd :worktree :model :permission-mode
+                     :thinking :non-interactive :status :parent-id :fork-node :created
+                     :updated :usage :context-window :budget :head :queue :steering
+                     :pending :todos :plan :cache :ext :last-message))
+        (should (equal (plist-get full key) (plist-get lean key))))
+      ;; A lean filter still narrows the listing, and nil is the full one.
+      (should (= 1 (length (harness-call 'session/list (list :lean t :ids (list id))))))
+      (should (equal (harness-plist-keys full)
+                     (harness-plist-keys (car (harness-call 'session/list (list :lean nil)))))))))
+
 (ert-deftest harness-session-set-all-changes-only-the-sessions-ids-names ()
   "A bulk change with `:ids' reaches those sessions and no other, even when
 `:tasks' adds the sessions of the current tasks."
