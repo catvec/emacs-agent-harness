@@ -235,9 +235,11 @@ subscription must not recurse into itself.")
   "Return WORKSPACE as clients read it, with thread states."
   (let* ((threads (mapcar (lambda (thread)
                             (let* ((live (plist-get thread :live))
-                                   (state (if live
-                                              (harness-workspace--session-state live)
-                                            "parked")))
+                                   (state (if (plist-get thread :merged-into)
+                                              "merged"
+                                            (if live
+                                                (harness-workspace--session-state live)
+                                              "parked"))))
                               (append (copy-sequence thread) (list :state state))))
                           (plist-get workspace :threads)))
          (threads (sort threads
@@ -782,19 +784,27 @@ implementation keeps no graph of its own."
          (threads (plist-get workspace :threads))
          (live (cl-count-if (lambda (thread) (plist-get thread :live)) threads))
          (memory (when (harness-method-exists-p 'memory/status)
-                   (harness-call 'memory/status id))))
+                   (harness-call 'memory/status id)))
+         (box (when (harness-method-exists-p 'workspace/box/status)
+                (condition-case err
+                    (harness-call 'workspace/box/status id)
+                  (error
+                   (harness-log 'warn "workspace: box status failed: %s"
+                                (harness-error-message err))
+                   nil)))))
     (list :id id :name (plist-get workspace :name)
           :threads (length threads) :live live
           :last-thread (plist-get workspace :last-thread)
-          :memory memory)))
+          :memory memory :box box)))
 
 (harness-defmethod workspace/resources/status (id)
   "Return workspace ID's browser, wallet, access and credential resources.
-The box and the payment broker are staged, so the browser and wallet
-sections are empty and say so.  Credentials are the harness's own
-declared secrets, read through the secret-sandbox module when it is
-loaded: label, fingerprint, usability, error and last use, never a
-value.  The answer is metadata only."
+The browser section is the box's own Firefox profile when the computer
+runs: sites, cookie counts, saved site sessions, storage and cache
+sizes, never a cookie value or a password.  The wallet stays
+unavailable because no payment broker is part of this harness.  The
+credentials are the harness's declared secrets, through the
+secret-sandbox module.  The answer is metadata only."
   (harness-workspace--get id)
   (let* ((module (harness-method-exists-p 'secret-sandbox/secrets))
          (secrets (when module
@@ -808,6 +818,31 @@ value.  The answer is metadata only."
                           (condition-case nil
                               (harness-call 'secret-sandbox/status)
                             (error nil))))
+         (box (when (harness-method-exists-p 'workspace/box/status)
+                (condition-case err
+                    (harness-call 'workspace/box/status id)
+                  (error
+                   (harness-log 'warn "workspace: box status failed: %s"
+                                (harness-error-message err))
+                   nil))))
+         (box-running (and box (harness-json-true-p (plist-get box :running))))
+         (browser (and box-running
+                       (harness-method-exists-p 'workspace/box/browser)
+                       (condition-case err
+                           (harness-call 'workspace/box/browser id)
+                         (error
+                          (harness-log 'warn "workspace: browser resources failed: %s"
+                                       (harness-error-message err))
+                          nil))))
+         (box-reason (or (plist-get box :reason)
+                         (and (not box-running)
+                              (list :code "box-not-running"
+                                    :text "workspace computer not running"))))
+         (browser-reason (cond (browser nil)
+                               (box-running
+                                (list :code "browser-unavailable"
+                                      :text "browser profile unavailable"))
+                               (t box-reason)))
          (credentials
           (mapcar (lambda (secret)
                     (list :label (plist-get secret :label)
@@ -817,12 +852,23 @@ value.  The answer is metadata only."
                           :last-use (plist-get secret :last-use)))
                   secrets)))
     (list :workspace id
-          :status (if module "ready" "unavailable")
-          :reason (unless module "box-staged")
+          :status (cond (browser "ready")
+                        (module "ready")
+                        (t "unavailable"))
+          :reason (cond (browser nil)
+                        (module nil)
+                        (t (or (plist-get box-reason :code) "box-not-running")))
           :metadata-only t
-          :browser nil :wallet nil :access nil :audit nil
-          :browser-status "unavailable"
+          :box box
+          :browser browser
+          :wallet nil
+          :access nil
+          :audit nil
+          :browser-status (if browser "ready" "unavailable")
+          :browser-reason browser-reason
           :wallet-status "unavailable"
+          :wallet-reason (list :code "wallet-unavailable"
+                               :text "no payment broker")
           :credentials credentials
           :credentials-status
           (list :status (cond ((null secret-status) "unavailable")
@@ -832,58 +878,29 @@ value.  The answer is metadata only."
                 :locked (plist-get secret-status :locked)
                 :why (plist-get secret-status :why)
                 :count (length secrets)))))
-(harness-defmethod workspace/browser/clear (id scope &optional origin kinds)
-  "Clear browser data in workspace ID and return the resources answer.
-SCOPE is \"profile\" or \"site\"; ORIGIN names the site for the latter.
-KINDS lists what to clear: \"cookies\", \"storage\", \"cache\" or
-\"permissions\".  The box is staged: nothing is cleared, the answer is
-`:status \"unavailable\"\' with `:reason \"box-staged\"\' and `:changed
-nil\', and no value is part of it."
-  (harness-workspace--get id)
-  (unless (member scope '("profile" "site"))
-    (signal 'harness-error (list (format "Unknown browser scope: %s" scope))))
-  (when (and (equal scope "site")
-             (not (and (stringp origin) (not (harness-string-blank-p origin)))))
-    (signal 'harness-error (list "A site clear needs an origin")))
-  (list :workspace id :status "unavailable" :reason "box-staged"
-        :metadata-only t :scope scope :origin origin
-        :kinds (append kinds nil) :changed nil
-        :browser nil :wallet nil :access nil :audit nil))
-
-(harness-defmethod workspace/browser/login/forget (id login)
-  "Forget the saved site LOGIN in workspace ID and return the resources.
-The box is staged: nothing is forgotten, the answer is `:status
-\"unavailable\"\' with `:reason \"box-staged\"\' and `:changed nil', and
-no cookie or token is part of it."
-  (harness-workspace--get id)
-  (unless (and (stringp login) (not (harness-string-blank-p login)))
-    (signal 'harness-error (list "Forgetting a login needs its id")))
-  (list :workspace id :status "unavailable" :reason "box-staged"
-        :metadata-only t :login login :changed nil
-        :browser nil :wallet nil :access nil :audit nil))
 
 (harness-defmethod workspace/wallet/authorization/create (id &rest plist)
   "Ask for a bounded purchase authorization for workspace ID.
 PLIST names the card reference, amount, currency, cap kind, merchant
 scope, expiry and fee policy.  The payment broker is staged: nothing
 is created, the answer is `:status \"unavailable\"\' with `:reason
-\"box-staged\"\' and `:changed nil', and PLIST is never echoed back,
+\"wallet-unavailable\"\' and `:changed nil', and PLIST is never echoed back,
 because it may name a card reference."
   (harness-workspace--get id)
   (ignore plist)
-  (list :workspace id :status "unavailable" :reason "box-staged"
+  (list :workspace id :status "unavailable" :reason "wallet-unavailable"
         :metadata-only t :changed nil
         :browser nil :wallet nil :access nil :audit nil))
 
 (harness-defmethod workspace/wallet/authorization/revoke (id authorization)
   "Revoke purchase AUTHORIZATION in workspace ID and return the resources.
 The payment broker is staged: nothing is revoked, the answer is
-`:status \"unavailable\"\' with `:reason \"box-staged\"\' and `:changed
+`:status \"unavailable\"\' with `:reason \"wallet-unavailable\"\' and `:changed
 nil\'."
   (harness-workspace--get id)
   (unless (and (stringp authorization) (not (harness-string-blank-p authorization)))
     (signal 'harness-error (list "Revoking needs an authorization id")))
-  (list :workspace id :status "unavailable" :reason "box-staged"
+  (list :workspace id :status "unavailable" :reason "wallet-unavailable"
         :metadata-only t :authorization authorization :changed nil
         :browser nil :wallet nil :access nil :audit nil))
 
@@ -891,11 +908,11 @@ nil\'."
   "Decide a proposed PURCHASE in workspace ID: allow or deny it.
 DECISION is \"allow\" or \"deny\".  The payment broker is staged:
 nothing is charged or declined, the answer is `:status
-\"unavailable\"\' with `:reason \"box-staged\"\' and `:changed nil'."
+\"unavailable\"\' with `:reason \"wallet-unavailable\"\' and `:changed nil'."
   (harness-workspace--get id)
   (unless (member decision '("allow" "deny"))
     (signal 'harness-error (list (format "Unknown purchase decision: %s" decision))))
-  (list :workspace id :status "unavailable" :reason "box-staged"
+  (list :workspace id :status "unavailable" :reason "wallet-unavailable"
         :metadata-only t :purchase purchase :decision decision :changed nil
         :browser nil :wallet nil :access nil :audit nil))
 
@@ -965,8 +982,12 @@ OPTS may name `:limit', `:before' (an index), `:thread', `:kinds'."
          (limit (or (plist-get opts :limit) 200))
          (before (plist-get opts :before)))
     (when thread
-      (setq entries (cl-remove-if-not
-                     (lambda (entry) (equal (plist-get entry :thread) thread)) entries)))
+      (let* ((workspace (harness-workspace--get id))
+             (found (harness-workspace--thread workspace thread))
+             (related (cons thread (plist-get found :merged-from))))
+        (setq entries (cl-remove-if-not
+                       (lambda (entry) (member (plist-get entry :thread) related))
+                       entries))))
     (when kinds
       (let ((wanted (mapcar (lambda (kind) (if (symbolp kind) kind (intern kind))) kinds)))
         (setq entries (cl-remove-if-not
@@ -1013,6 +1034,35 @@ OPTS may name `:limit', `:before' (an index), `:thread', `:kinds'."
     (harness-workspace--save workspace)
     (harness-emit 'workspace/thread-changed id found)
     found))
+
+(harness-defmethod workspace/thread/merge (id from into)
+  "Merge thread FROM of workspace ID into thread INTO.
+The timeline is not rewritten: FROM is parked, marked `merged`, and
+names INTO, so the timeline of INTO includes both threads' entries and
+the old episode stays whole."
+  (let* ((workspace (harness-workspace--get id))
+         (source (harness-workspace--thread workspace from))
+         (target (harness-workspace--thread workspace into)))
+    (unless source (signal 'harness-error (list (format "No thread %s" from))))
+    (unless target (signal 'harness-error (list (format "No thread %s" into))))
+    (when (equal from into)
+      (signal 'harness-error (list "A thread cannot merge into itself")))
+    (if (equal (plist-get source :merged-into) into)
+        target
+      (when (plist-get source :live)
+        (harness-workspace--park workspace source
+                                 (format "Merged into %s." (or (plist-get target :title) into))))
+      (setf (plist-get source :status) "merged"
+            (plist-get source :merged-into) into
+            (plist-get source :state) "merged")
+      (setf (plist-get target :merged-from)
+            (append (plist-get target :merged-from) (list from)))
+      (harness-workspace--put-thread workspace source)
+      (harness-workspace--put-thread workspace target)
+      (harness-workspace--save workspace)
+      (harness-emit 'workspace/thread-changed id source)
+      (harness-emit 'workspace/thread-changed id target)
+      target)))
 
 (harness-defmethod workspace/thread/park (id thread)
   "Park THREAD of workspace ID at the next turn boundary."
@@ -1094,7 +1144,9 @@ OPTS may name `:limit', `:before' (an index), `:thread', `:kinds'."
           :memory (when (harness-method-exists-p 'memory/status)
                     (harness-call 'memory/status id))
           :tasks (when (harness-method-exists-p 'task/list)
-                   (ignore-errors (harness-call 'task/list (plist-get workspace :root)))))))
+                   (ignore-errors (harness-call 'task/list (plist-get workspace :root))))
+          :box (when (harness-method-exists-p 'workspace/box/status)
+                 (ignore-errors (harness-call 'workspace/box/status id))))))
 
 ;;;; Events and module
 
@@ -1126,6 +1178,17 @@ Only an episode gets them; a normal session is unchanged."
   "Load the workspaces and follow the episodes."
   (harness-workspace--load)
   (harness-workspace--install-acp)
+  ;; The computer is part of the workspace's first slice: load it with
+  ;; the workspace, so a harness prepared for workspace mode has a real
+  ;; screen and says why when it cannot.
+  (condition-case err
+      (progn
+        (require 'harness-workspace-box nil t)
+        (when (harness-module-get 'workspace-box)
+          (harness-module-start 'workspace-box)))
+    (error
+     (harness-log 'warn "workspace: computer module failed: %s"
+                  (harness-error-message err))))
   (with-eval-after-load 'harness-acp (harness-workspace--install-acp))
   (unless harness-workspace--subscribed
     (setq harness-workspace--subscribed t)

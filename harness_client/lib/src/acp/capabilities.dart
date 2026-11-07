@@ -119,7 +119,7 @@ class HarnessCapabilities {
   bool get workspaceComputer => has('workspace/box/status');
 
   /// The workspace's first-class resources: its browser, wallet and access.
-  /// The methods answer `unavailable · box-staged` until the box and the
+  /// The methods answer `unavailable · box-tools-missing` until the box and the
   /// payment broker exist, so the surface shows what is blocked rather than
   /// hiding it.
   bool get workspaceResources => has('workspace/resources/status');

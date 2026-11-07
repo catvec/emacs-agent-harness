@@ -194,6 +194,97 @@ with `:id', `:thread', `:role', `:text', `:ts' and `:snippet'."
                                 (list workspace limit)))))
     (mapcar #'harness-workspace-memory--row rows)))
 
+(harness-defmethod memory/get (workspace id &optional opts)
+  "Return note ID of WORKSPACE, or signal when it is not there.
+OPTS is accepted for the contract and may name `:thread'."
+  (ignore opts)
+  (let* ((db (harness-workspace-memory--open))
+         (row (car (sqlite-select db
+                                  "SELECT id, thread, role, text, ts FROM notes WHERE workspace = ? AND id = ?"
+                                  (list workspace id)))))
+    (unless row
+      (signal 'harness-error (list (format "No memory note %s" id))))
+    (harness-workspace-memory--row row)))
+
+(harness-defmethod memory/forget (workspace id &optional opts)
+  "Delete note ID of WORKSPACE and return what was removed.
+A note that is not there is not an error: the answer says `:deleted
+nil\' so a forget can be repeated."
+  (ignore opts)
+  (let* ((db (harness-workspace-memory--open))
+         (row (car (sqlite-select db
+                                  "SELECT id, thread, role, text, ts FROM notes WHERE workspace = ? AND id = ?"
+                                  (list workspace id)))))
+    (if (not row)
+        (list :deleted nil :id id)
+      (sqlite-execute db "DELETE FROM notes WHERE workspace = ? AND id = ?"
+                      (list workspace id))
+      (harness-emit 'workspace/memory-changed workspace (list :forgot id))
+      (append (harness-workspace-memory--row row) (list :deleted t)))))
+
+(harness-defmethod memory/pages (workspace &optional filter)
+  "Return the pages of WORKSPACE, one per thread with its note count.
+FILTER is accepted for the contract; a page is a thread here."
+  (ignore filter)
+  (let* ((db (harness-workspace-memory--open))
+         (rows (sqlite-select db
+                              "SELECT thread, COUNT(*), MAX(ts) FROM notes WHERE workspace = ? GROUP BY thread ORDER BY MAX(ts) DESC"
+                              (list workspace)))
+         (titles (when (harness-method-exists-p 'workspace/get)
+                   (ignore-errors
+                     (let ((view (harness-call 'workspace/get workspace)))
+                       (mapcar (lambda (thread)
+                                 (cons (plist-get thread :id) (plist-get thread :title)))
+                               (plist-get view :threads)))))))
+    (mapcar (lambda (row)
+              (let ((thread (nth 0 row)))
+                (list :id thread
+                      :title (or (cdr (assoc thread titles)) thread)
+                      :notes (nth 1 row) :last (nth 2 row))))
+            rows)))
+
+(harness-defmethod memory/page (workspace page &optional opts)
+  "Return the note page of WORKSPACE's PAGE, newest first.
+A page is a thread; OPTS may name `:limit'."
+  (let ((limit (or (plist-get opts :limit) 200)))
+    (mapcar #'harness-workspace-memory--row
+            (sqlite-select (harness-workspace-memory--open)
+                           "SELECT id, thread, role, text, ts FROM notes WHERE workspace = ? AND thread = ? ORDER BY ts DESC LIMIT ?"
+                           (list workspace page limit)))))
+
+(harness-defmethod memory/recall-test (workspace query)
+  "Return what a brief would recall for QUERY in WORKSPACE."
+  (harness-call 'memory/search workspace query
+                (list :limit harness-workspace-memory-default-limit)))
+
+(harness-defmethod memory/reindex (workspace &optional opts)
+  "Rebuild the full-text index of WORKSPACE and return its counts.
+OPTS is accepted for the contract; the note table is the source of
+truth, so a rebuild reads it rather than any second store."
+  (ignore opts)
+  (let* ((db (harness-workspace-memory--open))
+         (rebuild nil))
+    (when harness-workspace-memory--fts
+      (setq rebuild
+            (condition-case err
+                (progn
+                  (sqlite-execute db "INSERT INTO notes_fts(notes_fts) VALUES('rebuild')")
+                  t)
+              (error
+               (harness-log 'warn "workspace-memory: rebuild failed: %s"
+                            (error-message-string err))
+               nil))))
+    (list :workspace workspace :rebuilt (and rebuild t)
+          :notes (or (caar (sqlite-select db "SELECT COUNT(*) FROM notes WHERE workspace = ?"
+                                          (list workspace)))
+                     0)
+          :fts harness-workspace-memory--fts)))
+
+(harness-defmethod memory/sync (workspace &optional opts)
+  "Bring the index of WORKSPACE up to date and return its counts.
+The note table is written synchronously, so this is the reindex path."
+  (harness-call 'memory/reindex workspace opts))
+
 (harness-defmethod memory/remember (session-id text &optional thread)
   "Write TEXT as a note for SESSION-ID's workspace and THREAD.
 The session must be a workspace episode.  Return the note's id."

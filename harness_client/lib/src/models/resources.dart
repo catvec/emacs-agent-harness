@@ -30,11 +30,15 @@ class WorkspaceResources {
       workspace: asStringOr(wire['workspace'], ''),
       status: asStringOr(wire['status'], 'unavailable'),
       reason: asString(wire['reason']),
-      metadataOnly: asBool(wire['metadata-only'] ?? wire['metadataOnly'], fallback: true),
+      metadataOnly: asBool(
+        wire['metadata-only'] ?? wire['metadataOnly'],
+        fallback: true,
+      ),
       browser: browser.isEmpty ? null : BrowserData.fromWire(browser),
       wallet: wallet.isEmpty ? null : WalletData.fromWire(wallet),
       access: [
-        for (final item in asMapList(wire['access'])) AccessGrant.fromWire(item),
+        for (final item in asMapList(wire['access']))
+          AccessGrant.fromWire(item),
       ],
       audit: [
         for (final item in asMapList(wire['audit'])) AuditEntry.fromWire(item),
@@ -96,9 +100,14 @@ class WorkspaceResources {
   /// What the panel says under the status.
   String? get reasonLabel => switch (reason) {
     'box-staged' => 'Box staged',
+    'box-tools-missing' => 'Computer tools',
+    'box-not-running' => 'Computer off',
+    'backend-unavailable' => 'Computer unavailable',
+    'wallet-unavailable' => 'Wallet provider',
     'wallet-provider' => 'Wallet provider',
     'payment-broker' => 'Payment broker',
     'browser-tools' => 'Browser tools',
+    'browser-unavailable' => 'Browser profile',
     'permission' => 'Permission',
     'browser-stopped' => 'Browser stopped',
     _ => reason,
@@ -145,13 +154,41 @@ class WorkspaceResources {
         ),
       ],
       audit: [
-        AuditEntry(at: DateTime.now().subtract(const Duration(minutes: 12)), action: 'Created', resource: r'Authorization · $10', actor: 'user', scope: 'authorization'),
-        AuditEntry(at: DateTime.now().subtract(const Duration(hours: 3)), action: 'Used', resource: 'Site · stoneco.example', actor: 'agent', scope: 'site'),
-        AuditEntry(at: DateTime.now().subtract(const Duration(days: 1)), action: 'Forgotten', resource: 'Login · bank.example', actor: 'user', scope: 'login'),
+        AuditEntry(
+          at: DateTime.now().subtract(const Duration(minutes: 12)),
+          action: 'Created',
+          resource: r'Authorization · $10',
+          actor: 'user',
+          scope: 'authorization',
+        ),
+        AuditEntry(
+          at: DateTime.now().subtract(const Duration(hours: 3)),
+          action: 'Used',
+          resource: 'Site · stoneco.example',
+          actor: 'agent',
+          scope: 'site',
+        ),
+        AuditEntry(
+          at: DateTime.now().subtract(const Duration(days: 1)),
+          action: 'Forgotten',
+          resource: 'Login · bank.example',
+          actor: 'user',
+          scope: 'login',
+        ),
       ],
       credentials: const [
-        CredentialResource(label: 'deploy-key', fingerprint: '4f9c2a1b', usable: true, lastUsed: null),
-        CredentialResource(label: 'npm-token', fingerprint: 'b81e7d20', usable: false, error: 'Masking off'),
+        CredentialResource(
+          label: 'deploy-key',
+          fingerprint: '4f9c2a1b',
+          usable: true,
+          lastUsed: null,
+        ),
+        CredentialResource(
+          label: 'npm-token',
+          fingerprint: 'b81e7d20',
+          usable: false,
+          error: 'Masking off',
+        ),
       ],
       credentialsStatus: const CredentialsStatus(
         status: 'ready',
@@ -203,9 +240,19 @@ class BrowserType {
       : 'Experimental';
 
   static const defaults = [
-    BrowserType(id: 'firefox', label: 'Firefox', primary: true, support: 'primary'),
+    BrowserType(
+      id: 'firefox',
+      label: 'Firefox',
+      primary: true,
+      support: 'primary',
+    ),
     BrowserType(id: 'chromium', label: 'Chromium', support: 'secondary'),
-    BrowserType(id: 'webkit', label: 'WebKit', available: false, support: 'experimental'),
+    BrowserType(
+      id: 'webkit',
+      label: 'WebKit',
+      available: false,
+      support: 'experimental',
+    ),
   ];
 }
 
@@ -228,7 +275,8 @@ class BrowserData {
         for (final item in asMapList(wire['sites'])) BrowserSite.fromWire(item),
       ],
       logins: [
-        for (final item in asMapList(wire['logins'])) BrowserLogin.fromWire(item),
+        for (final item in asMapList(wire['logins']))
+          BrowserLogin.fromWire(item),
       ],
       cookies: asInt(totals['cookies']) ?? 0,
       bytes: asInt(totals['bytes']) ?? 0,
@@ -252,13 +300,51 @@ class BrowserData {
         lastUsed: now.subtract(const Duration(minutes: 4)),
       ),
       sites: [
-        BrowserSite(origin: 'https://stoneco.example', cookies: 12, storageBytes: 320000, cacheBytes: 640000, permissions: 2, auth: 'signed-in', lastUsed: now.subtract(const Duration(minutes: 12))),
-        BrowserSite(origin: 'https://github.com', cookies: 4, storageBytes: 110000, cacheBytes: 210000, permissions: 0, auth: 'signed-out', lastUsed: now.subtract(const Duration(hours: 5))),
-        BrowserSite(origin: 'https://bank.example', cookies: 8, storageBytes: 64000, cacheBytes: 90000, permissions: 1, auth: 'signed-in', lastUsed: now.subtract(const Duration(days: 1))),
+        BrowserSite(
+          origin: 'https://stoneco.example',
+          cookies: 12,
+          storageBytes: 320000,
+          cacheBytes: 640000,
+          permissions: 2,
+          auth: 'signed-in',
+          lastUsed: now.subtract(const Duration(minutes: 12)),
+        ),
+        BrowserSite(
+          origin: 'https://github.com',
+          cookies: 4,
+          storageBytes: 110000,
+          cacheBytes: 210000,
+          permissions: 0,
+          auth: 'signed-out',
+          lastUsed: now.subtract(const Duration(hours: 5)),
+        ),
+        BrowserSite(
+          origin: 'https://bank.example',
+          cookies: 8,
+          storageBytes: 64000,
+          cacheBytes: 90000,
+          permissions: 1,
+          auth: 'signed-in',
+          lastUsed: now.subtract(const Duration(days: 1)),
+        ),
       ],
       logins: [
-        BrowserLogin(id: 'lg-1', origin: 'https://stoneco.example', username: 'j•••@example.com', state: 'active', created: now.subtract(const Duration(days: 20)), lastUsed: now.subtract(const Duration(minutes: 12))),
-        BrowserLogin(id: 'lg-2', origin: 'https://bank.example', username: 'j•••@example.com', state: 'expired', created: now.subtract(const Duration(days: 40)), lastUsed: now.subtract(const Duration(days: 9))),
+        BrowserLogin(
+          id: 'lg-1',
+          origin: 'https://stoneco.example',
+          username: 'j•••@example.com',
+          state: 'active',
+          created: now.subtract(const Duration(days: 20)),
+          lastUsed: now.subtract(const Duration(minutes: 12)),
+        ),
+        BrowserLogin(
+          id: 'lg-2',
+          origin: 'https://bank.example',
+          username: 'j•••@example.com',
+          state: 'expired',
+          created: now.subtract(const Duration(days: 40)),
+          lastUsed: now.subtract(const Duration(days: 9)),
+        ),
       ],
       cookies: 24,
       bytes: 412 * 1024 * 1024,
@@ -329,7 +415,9 @@ class BrowserSite {
   final DateTime? lastUsed;
 
   /// The host without its scheme, for a row's title.
-  String get host => origin.replaceFirst(RegExp(r'^[a-z]+://'), '').replaceAll(RegExp(r'/$'), '');
+  String get host => origin
+      .replaceFirst(RegExp(r'^[a-z]+://'), '')
+      .replaceAll(RegExp(r'/$'), '');
 
   String get authLabel => switch (auth) {
     'signed-in' => 'Signed in',
@@ -373,7 +461,9 @@ class BrowserLogin {
   final DateTime? created;
   final DateTime? lastUsed;
 
-  String get host => origin.replaceFirst(RegExp(r'^[a-z]+://'), '').replaceAll(RegExp(r'/$'), '');
+  String get host => origin
+      .replaceFirst(RegExp(r'^[a-z]+://'), '')
+      .replaceAll(RegExp(r'/$'), '');
   String get stateLabel => switch (state) {
     'active' => 'Active',
     'expired' => 'Expired',
@@ -408,13 +498,45 @@ class WalletData {
     final now = DateTime.now();
     return WalletData(
       cards: [
-        WalletCard(id: 'card-1', label: 'Visa •••• 4242', network: 'Visa', last4: '4242', expMonth: 9, expYear: 2028, state: 'active', added: now.subtract(const Duration(days: 30)), lastUsed: now.subtract(const Duration(minutes: 12))),
+        WalletCard(
+          id: 'card-1',
+          label: 'Visa •••• 4242',
+          network: 'Visa',
+          last4: '4242',
+          expMonth: 9,
+          expYear: 2028,
+          state: 'active',
+          added: now.subtract(const Duration(days: 30)),
+          lastUsed: now.subtract(const Duration(minutes: 12)),
+        ),
       ],
       authorizations: [
-        WalletAuthorization(id: 'auth-1', card: 'card-1', amount: 1000, currency: 'USD', capKind: 'cumulative', merchantScope: const ['stoneco.example'], fees: 'included', expires: now.add(const Duration(hours: 20)), status: 'active', spent: 0, reserved: 940, advisory: true, created: now.subtract(const Duration(hours: 4))),
+        WalletAuthorization(
+          id: 'auth-1',
+          card: 'card-1',
+          amount: 1000,
+          currency: 'USD',
+          capKind: 'cumulative',
+          merchantScope: const ['stoneco.example'],
+          fees: 'included',
+          expires: now.add(const Duration(hours: 20)),
+          status: 'active',
+          spent: 0,
+          reserved: 940,
+          advisory: true,
+          created: now.subtract(const Duration(hours: 4)),
+        ),
       ],
       purchases: [
-        WalletPurchase(id: 'buy-1', authorization: 'auth-1', merchant: 'stoneco.example', amount: 940, currency: 'USD', status: 'proposed', at: now.subtract(const Duration(minutes: 12))),
+        WalletPurchase(
+          id: 'buy-1',
+          authorization: 'auth-1',
+          merchant: 'stoneco.example',
+          amount: 940,
+          currency: 'USD',
+          status: 'proposed',
+          at: now.subtract(const Duration(minutes: 12)),
+        ),
       ],
     );
   }
@@ -503,7 +625,9 @@ class WalletAuthorization {
     currency: asStringOr(wire['currency'], 'USD'),
     capKind: asStringOr(wire['cap-kind'] ?? wire['capKind'], 'cumulative'),
     merchantScope: [
-      for (final merchant in asList(wire['merchant-scope'] ?? wire['merchantScope']))
+      for (final merchant in asList(
+        wire['merchant-scope'] ?? wire['merchantScope'],
+      ))
         if (asString(merchant) != null) asString(merchant)!,
     ],
     fees: asStringOr(wire['fees'], 'included'),
@@ -572,11 +696,15 @@ class WalletAuthorization {
     if (charge <= 0) return 'No amount';
     if (currency != this.currency) return 'Currency';
     if (merchantScope.isNotEmpty &&
-        !merchantScope.any((scope) => scope.toLowerCase() == merchant.toLowerCase())) {
+        !merchantScope.any(
+          (scope) => scope.toLowerCase() == merchant.toLowerCase(),
+        )) {
       return 'Merchant';
     }
     if (perTransaction && charge > amount) return 'Over cap';
-    if (!perTransaction && spent + reserved + charge > amount) return 'Over cap';
+    if (!perTransaction && spent + reserved + charge > amount) {
+      return 'Over cap';
+    }
     if (duplicate) return 'Duplicate';
     return null;
   }
@@ -745,7 +873,11 @@ class CredentialsStatus {
   final int count;
 
   bool get ready => status == 'ready';
-  String get label => ready ? 'Locked run · ready' : status == 'needs-approval' ? 'Needs approval' : 'Unavailable';
+  String get label => ready
+      ? 'Locked run · ready'
+      : status == 'needs-approval'
+      ? 'Needs approval'
+      : 'Unavailable';
 }
 
 /// `3.2 MB`; the sizes a settings page shows, without a trailing `.0`.

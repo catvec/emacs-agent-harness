@@ -52,7 +52,10 @@ Future<void> _pump(
         debugShowCheckedModeBanner: false,
         theme: HarnessTheme.material(Brightness.light),
         home: MediaQuery(
-          data: MediaQueryData(size: size, textScaler: TextScaler.linear(textScale)),
+          data: MediaQueryData(
+            size: size,
+            textScaler: TextScaler.linear(textScale),
+          ),
           child: ResourcesScreen(
             app: app,
             workspace: _workspace,
@@ -67,10 +70,8 @@ Future<void> _pump(
   }
 }
 
-Finder _dialogText(String text) => find.descendant(
-  of: find.byType(AlertDialog),
-  matching: find.text(text),
-);
+Finder _dialogText(String text) =>
+    find.descendant(of: find.byType(AlertDialog), matching: find.text(text));
 
 void main() {
   testWidgets('the phone shows the browser, its sites and its logins', (
@@ -95,7 +96,7 @@ void main() {
     expect(find.text('Saved logins'), findsOneWidget);
     expect(find.text('j•••@example.com · Active · 12m ago'), findsOneWidget);
     expect(find.text('Export…'), findsOneWidget);
-    expect(find.text('Needs box · approval'), findsNWidgets(2));
+    expect(find.text('Later stage'), findsNWidgets(2));
     expect(find.text('No sites'), findsNothing);
     expect(tester.takeException(), isNull);
     // The wire carried a fake cookie value and password; neither is drawn.
@@ -105,11 +106,16 @@ void main() {
         .join(' ');
     expect(text, isNot(contains('SESSION-SECRET')));
     expect(text, isNot(contains('hunter2')));
-    expect(find.bySemanticsLabel(RegExp('Site stoneco.example')), findsOneWidget);
+    expect(
+      find.bySemanticsLabel(RegExp('Site stoneco.example')),
+      findsOneWidget,
+    );
     semantics.dispose();
   });
 
-  testWidgets('a site sheet clears only after the confirmation', (tester) async {
+  testWidgets('a site sheet clears only after the confirmation', (
+    tester,
+  ) async {
     final (app, harness, controller) = await _rig();
     await _pump(tester, app, controller);
     await tester.tap(find.text('stoneco.example').first);
@@ -135,11 +141,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(controller.resources!.browser!.sites.first.cookies, 0);
     expect(controller.resources!.browser!.sites.first.auth, 'signed-out');
-    expect(harness.resourcesCalls.last['method'], '_harness/workspace/browser/clear');
+    expect(
+      harness.resourcesCalls.last['method'],
+      '_harness/workspace/browser/clear',
+    );
     expect(controller.notice, 'Cleared');
   });
 
-  testWidgets('a login is forgotten only after the confirmation', (tester) async {
+  testWidgets('a login is forgotten only after the confirmation', (
+    tester,
+  ) async {
     final (app, harness, controller) = await _rig();
     await _pump(tester, app, controller);
     await tester.drag(find.byType(ListView), const Offset(0, -700));
@@ -155,7 +166,10 @@ void main() {
     await tester.tap(_dialogText('Forget'));
     await tester.pumpAndSettle();
     expect(controller.resources!.browser!.logins, isEmpty);
-    expect(harness.resourcesCalls.last['method'], '_harness/workspace/browser/login/forget');
+    expect(
+      harness.resourcesCalls.last['method'],
+      '_harness/workspace/browser/login/forget',
+    );
   });
 
   testWidgets('the wallet shows the card, the bound and the purchase', (
@@ -182,11 +196,16 @@ void main() {
     await tester.tap(_dialogText('Allow'));
     await tester.pumpAndSettle();
     expect(controller.resources!.wallet!.purchases.single.status, 'approved');
-    expect(harness.resourcesCalls.last['method'], '_harness/workspace/wallet/purchase/decide');
+    expect(
+      harness.resourcesCalls.last['method'],
+      '_harness/workspace/wallet/purchase/decide',
+    );
     expect(controller.notice, 'Allowed');
   });
 
-  testWidgets('an authorization is bounded by a validated form', (tester) async {
+  testWidgets('an authorization is bounded by a validated form', (
+    tester,
+  ) async {
     final (app, harness, controller) = await _rig();
     await _pump(tester, app, controller, size: const Size(1440, 900));
     await tester.tap(find.text('Wallet'));
@@ -260,7 +279,9 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('a preview is labelled and its actions do nothing', (tester) async {
+  testWidgets('a preview is labelled and its actions do nothing', (
+    tester,
+  ) async {
     final app = AppController(settings: SettingsController());
     addTearDown(app.dispose);
     final controller = ResourcesController.preview();
@@ -279,13 +300,19 @@ void main() {
     final (app, _, controller) = await _rig(resources: false);
     await _pump(tester, app, controller);
     expect(find.text('Unavailable'), findsOneWidget);
-    expect(find.text('Box staged'), findsWidgets);
+    expect(find.text('Computer tools'), findsWidgets);
     expect(find.text('No browser data'), findsOneWidget);
   });
 
-  testWidgets('the page holds at desktop widths and larger text', (tester) async {
+  testWidgets('the page holds at desktop widths and larger text', (
+    tester,
+  ) async {
     final (app, harness, controller) = await _rig();
-    for (final size in const [Size(390, 844), Size(900, 700), Size(1440, 900)]) {
+    for (final size in const [
+      Size(390, 844),
+      Size(900, 700),
+      Size(1440, 900),
+    ]) {
       for (final scale in const [1.0, 1.5, 2.0]) {
         await _pump(tester, app, controller, size: size, textScale: scale);
         expect(tester.takeException(), isNull, reason: '$size at $scale');
@@ -296,7 +323,9 @@ void main() {
     expect(harness.resourcesCalls, isEmpty);
   });
 
-  testWidgets('a refused clear keeps the old state and says why', (tester) async {
+  testWidgets('a refused clear keeps the old state and says why', (
+    tester,
+  ) async {
     final (app, harness, controller) = await _rig();
     await _pump(tester, app, controller);
     harness.resourcesFail = true;

@@ -53,7 +53,7 @@
            (harness-workspace-episode-turns 120)
            (default-directory dir))
        (dolist (module '(store project config provider provider-demo tools session agent
-                               workspace-memory workspace))
+                               workspace-memory workspace-box workspace))
          (harness-test-load-module module))
        (clrhash harness-sessions)
        (clrhash harness-tools)
@@ -298,15 +298,13 @@
         (should-not (plist-get written :is-error))
         (should (harness-call 'memory/search id "warm grey"))))))
 
-(ert-deftest harness-workspace-resources-answer-blocked-and-hold-no-values ()
-  "The resources methods exist, answer box-staged, and never carry a value."
+(ert-deftest harness-workspace-resources-answer-what-the-computer-has ()
+  "The resources methods exist and never carry a value; without a running
+computer they say so, and a browser mutation refuses rather than pretending."
   (harness-workspace-test-with
     (let* ((workspace (harness-workspace-test-workspace))
            (id (plist-get workspace :id))
            (status (harness-call 'workspace/resources/status id))
-           (clear (harness-call 'workspace/browser/clear id "site"
-                                "https://stoneco.example" '("cookies" "storage")))
-           (forget (harness-call 'workspace/browser/login/forget id "lg-1"))
            (create (harness-call 'workspace/wallet/authorization/create id
                                  :card "card-1" :amount 1000 :currency "USD"
                                  :cap-kind "cumulative"))
@@ -318,25 +316,33 @@
                                                 workspace/wallet/authorization/revoke
                                                 workspace/wallet/purchase/decide))
         (should (harness-method-exists-p method)))
-      (dolist (answer (list status clear forget create revoke decide))
+      (should (equal "unavailable" (plist-get status :status)))
+      (should (member (plist-get status :reason)
+                      '("box-not-running" "box-tools-missing" "backend-unavailable")))
+      (should (eq t (plist-get status :metadata-only)))
+      (should-not (plist-get status :browser))
+      (should-not (plist-get status :wallet))
+      (should-not (plist-get status :access))
+      (should-not (plist-get status :audit))
+      (should (equal "unavailable" (plist-get status :browser-status)))
+      (should (equal "unavailable" (plist-get status :wallet-status)))
+      (dolist (answer (list create revoke decide))
         (should (equal "unavailable" (plist-get answer :status)))
-        (should (equal "box-staged" (plist-get answer :reason)))
+        (should (equal "wallet-unavailable" (plist-get answer :reason)))
         (should (eq t (plist-get answer :metadata-only)))
         (should-not (plist-get answer :changed))
-        (should-not (plist-get answer :browser))
-        (should-not (plist-get answer :wallet))
-        (should-not (plist-get answer :access))
-        (should-not (plist-get answer :audit))
         (dolist (forbidden '(:value :secret :token :password :pan :cvv :number))
           (should-not (plist-get answer forbidden))))
-      (should (equal "site" (plist-get clear :scope)))
-      (should (equal "https://stoneco.example" (plist-get clear :origin)))
-      (should (equal '("cookies" "storage") (plist-get clear :kinds)))
-      (should (equal "lg-1" (plist-get forget :login)))
       (should (equal "auth-1" (plist-get revoke :authorization)))
       (should (equal "buy-1" (plist-get decide :purchase)))
       (should (equal "allow" (plist-get decide :decision)))
       (should-not (plist-get create :plist))
+      ;; A browser mutation on a stopped computer refuses, with the reason.
+      (should-error (harness-call 'workspace/browser/clear id "site"
+                                  "https://stoneco.example" '("cookies"))
+                    :type 'harness-error)
+      (should-error (harness-call 'workspace/browser/login/forget id "lg-1")
+                    :type 'harness-error)
       ;; A blocked mutation changes nothing.
       (should (null (plist-get (harness-call 'workspace/get id) :threads))))))
 
@@ -365,10 +371,65 @@
         (dolist (forbidden '(:value :secret :token :password :pan :cvv :number))
           (should-not (plist-get first forbidden)))
         (should (= 1 (plist-get (plist-get answer :credentials-status) :count)))
-        ;; The browser and wallet are still blocked, and say so.
+        ;; The browser and wallet are still off, and say so.
         (should-not (plist-get answer :browser))
         (should-not (plist-get answer :wallet))
-        (should (equal "unavailable" (plist-get answer :browser-status)))))))
+        (should (equal "unavailable" (plist-get answer :browser-status)))
+        (should (member (plist-get (plist-get answer :browser-reason) :code)
+                        '("box-not-running" "box-tools-missing"
+                          "backend-unavailable")))))))
+
+(ert-deftest harness-workspace-thread-merge-keeps-both-timelines ()
+  "A merged thread is parked, names its target, and its entries stay in
+the target's timeline."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (source (harness-call 'workspace/thread/create id "Kitchen"))
+           (target (harness-call 'workspace/thread/create id "Quote")))
+      (harness-call 'workspace/prompt id "The tile is matte."
+                    (list :thread (plist-get source :id)))
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let ((merged (harness-call 'workspace/thread/merge
+                                  id (plist-get source :id) (plist-get target :id))))
+        (should (equal (plist-get target :id) (plist-get merged :id)))
+        (should (member (plist-get source :id) (plist-get merged :merged-from))))
+      (let* ((source-now (harness-call 'workspace/thread id (plist-get source :id)))
+             (timeline (harness-call 'workspace/timeline
+                                     id (list :thread (plist-get target :id)))))
+        (should (equal "merged" (plist-get source-now :state)))
+        (should (equal (plist-get target :id) (plist-get source-now :merged-into)))
+        (should (cl-find-if (lambda (entry)
+                              (equal (plist-get source :id)
+                                     (plist-get entry :thread)))
+                            timeline))))))
+
+(ert-deftest harness-workspace-memory-read-and-forget ()
+  "A note can be read by id, paged by thread, recalled and forgotten."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread (harness-call 'workspace/thread/create id "Notes"))
+           (note (harness-call 'memory/write id (plist-get thread :id)
+                               'user "The grout is warm grey."))
+           (read (harness-call 'memory/get id note))
+           (pages (harness-call 'memory/pages id))
+           (page (harness-call 'memory/page id (plist-get thread :id)))
+           (recall (harness-call 'memory/recall-test id "warm grey"))
+           (reindex (harness-call 'memory/reindex id))
+           (sync (harness-call 'memory/sync id)))
+      (should (equal "The grout is warm grey." (plist-get read :text)))
+      (should (cl-find-if (lambda (item) (equal (plist-get thread :id)
+                                                (plist-get item :id)))
+                          pages))
+      (should (= 1 (length page)))
+      (should (string-match-p "warm grey" (plist-get (car recall) :text)))
+      (should (equal 1 (plist-get reindex :notes)))
+      (should (equal 1 (plist-get sync :notes)))
+      (should (equal t (plist-get (harness-call 'memory/forget id note) :deleted)))
+      (should (null (harness-call 'memory/page id (plist-get thread :id))))
+      (should (equal nil (plist-get (harness-call 'memory/forget id note) :deleted))))))
 
 (defun harness-workspace-test-assistant-text (id)
   "Return the text of the newest assistant entry of workspace ID."

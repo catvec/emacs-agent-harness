@@ -128,6 +128,11 @@ class AppController extends ChangeNotifier {
   String? error;
   String? address;
 
+  /// The session secret this connection proves, for the other WebSockets it
+  /// opens on the same harness: the workspace computer's VNC tunnel asks for
+  /// it in the `bearer.` subprotocol, and never in the URL.
+  String get sessionSecret => _secret.isNotEmpty ? _secret : settings.token;
+
   /// Why the connection was lost, in words for a person, while the app is
   /// getting it back ([ConnectionPhase.reconnecting]).
   String? lostReason;

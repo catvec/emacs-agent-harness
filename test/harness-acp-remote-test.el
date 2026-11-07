@@ -296,6 +296,12 @@ WebSocket is open."
                        (harness-acp-remote-ws-frame 'text (concat (harness-json-encode object) "\n")
                                                     (unibyte-string 11 22 33 44))))
 
+(defun harness-acp-remote-test-send-binary (c data)
+  "Send DATA as one masked binary frame over C's WebSocket."
+  (process-send-string (harness-acp-remote-test-ws-proc c)
+                       (harness-acp-remote-ws-frame 'binary data
+                                                    (unibyte-string 11 22 33 44))))
+
 (defun harness-acp-remote-test-answer (c id)
   "Return the answer C received to request ID, or nil."
   (cl-find-if (lambda (m) (and (equal (plist-get m :id) id) (not (plist-get m :method))))
@@ -774,6 +780,69 @@ request, which is left waiting, and the waiting approval (a plist the status giv
             (c (harness-acp-remote-test-connect)))
         (harness-acp-remote-test-ask c "initialize" '(:protocolVersion 1 :clientCapabilities (:_harness (:sessionRefresh t))))
         (should (plist-get (harness-acp-remote-test-ask c "authenticate" '(:methodId "token" :token "short")) :error))))))
+
+(ert-deftest harness-acp-remote-tunnel-carries-bytes-to-a-loopback-service ()
+  "A signed-in device reaches a loopback service only by naming it, and its
+bytes come back whole in binary frames."
+  (harness-acp-remote-test-with
+    (let* ((echoed nil)
+           (accepted nil)
+           (target (make-network-process
+                    :name "acp-remote-test-tunnel-target" :server t
+                    :host "127.0.0.1" :service 0
+                    :coding 'binary :noquery t
+                    :log (lambda (_server client _message)
+                           (setq accepted client)
+                           (set-process-filter
+                            client (lambda (proc chunk)
+                                     (setq echoed (concat echoed chunk))
+                                     (process-send-string proc chunk))))))
+           (port (process-contact target :service)))
+      (unwind-protect
+          (progn
+            (setq harness-acp-remote-tunnels
+                  (list (cons "/workspace/vnc"
+                              (lambda (_request _session)
+                                (list :host "127.0.0.1" :port port)))))
+            ;; No session secret: the screen is not a place to sign in.
+            (should (= 401 (harness-acp-remote-test-ws-status
+                            (harness-acp-remote-test-connect
+                             :path "/workspace/vnc" :protocols '("vnc.v1")))))
+            ;; A service beyond this machine is not bridged.
+            (let ((harness-acp-remote-tunnels
+                   (list (cons "/workspace/vnc"
+                               (lambda (_request _session)
+                                 (list :host "example.invalid" :port port)))))
+                  (secret (harness-acp-remote-test-secret)))
+              (should (= 403 (harness-acp-remote-test-ws-status
+                              (harness-acp-remote-test-connect
+                               :path "/workspace/vnc" :protocols '("vnc.v1")
+                               :secret secret)))))
+            ;; A live session reaches the service, and the bytes (an RFB
+            ;; greeting, say) come back as the same binary frame.
+            (let* ((secret (harness-acp-remote-test-secret "phone"))
+                   (c (harness-acp-remote-test-connect
+                       :path "/workspace/vnc" :protocols '("vnc.v1")
+                       :secret secret)))
+              (should (= 101 (harness-acp-remote-test-ws-status c)))
+              (should (cl-some (lambda (h) (equal "Sec-WebSocket-Protocol: vnc.v1" h))
+                               (harness-acp-remote-test-ws-headers c)))
+              (harness-acp-remote-test-send-binary c (unibyte-string 82 70 66 32 48 48 51 46 48 48 56 10))
+              (harness-test-wait
+               (lambda ()
+                 (cl-some (lambda (event)
+                            (and (eq (car event) 'binary)
+                                 (equal (cdr event) (unibyte-string 82 70 66 32 48 48 51 46 48 48 56 10))))
+                          (harness-acp-remote-test-ws-events c)))
+               15 "the tunneled bytes")
+              (should (equal (unibyte-string 82 70 66 32 48 48 51 46 48 48 56 10) echoed))
+              ;; Closing the device ends the bridge it held.
+              (delete-process (harness-acp-remote-test-ws-proc c))
+              (harness-test-wait
+               (lambda () (and accepted (null (process-live-p accepted))))
+               15 "the tunnel's service to be let go")))
+        (when (process-live-p target) (delete-process target))
+        (setq harness-acp-remote-tunnels nil)))))
 
 (ert-deftest harness-acp-remote-refused-secrets-make-an-address-wait ()
   (harness-acp-remote-test-with

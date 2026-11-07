@@ -7,6 +7,9 @@ import '../../state/app_controller.dart';
 import '../../state/workspace_controller.dart';
 import '../../services/voice_runtime.dart';
 import '../../voice/voice_controller.dart';
+import '../../vnc/rfb.dart';
+import '../../vnc/vnc_view.dart';
+import '../../vnc/websocket_transport.dart';
 import '../navigation.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
@@ -32,6 +35,7 @@ class WorkspaceScreen extends StatefulWidget {
     required this.app,
     required this.onOpenSession,
     this.controller,
+    this.vncTransportFactory,
   });
 
   final AppController app;
@@ -40,6 +44,11 @@ class WorkspaceScreen extends StatefulWidget {
   /// A controller for the widget tests and the screenshot cases; the shell
   /// passes null and the screen follows [AppController.workspace].
   final WorkspaceController? controller;
+
+  /// Where the RFB bytes come from.  The app leaves it null and opens the
+  /// endpoint's WebSocket; a test hands it a transport of its own, so the
+  /// picture is still decoded by the real client.
+  final RfbTransport Function(String url)? vncTransportFactory;
 
   @override
   State<WorkspaceScreen> createState() => _WorkspaceScreenState();
@@ -53,7 +62,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   bool _retrying = false;
   final _composerText = TextEditingController();
 
-  WorkspaceController? get _controller => widget.controller ?? widget.app.workspace;
+  WorkspaceController? get _controller =>
+      widget.controller ?? widget.app.workspace;
 
   @override
   void initState() {
@@ -203,9 +213,9 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       onSettingsChanged: widget.app.settings.setVoiceSettings,
     );
     if (!mounted) return;
-    await Navigator.of(context).push(
-      harnessRoute(context, (context) => VoiceScreen(controller: voice)),
-    );
+    await Navigator.of(
+      context,
+    ).push(harnessRoute(context, (context) => VoiceScreen(controller: voice)));
   }
 
   Future<void> _showComputer() async {
@@ -217,6 +227,9 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       isScrollControlled: true,
       builder: (context) => _ComputerSheet(
         controller: controller,
+        harnessAddress: widget.app.address ?? widget.app.settings.address,
+        harnessToken: widget.app.sessionSecret,
+        vncTransportFactory: widget.vncTransportFactory,
         onOpenResources: () {
           Navigator.of(context).pop();
           unawaited(_openResources());
@@ -361,9 +374,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             selected: controller.selectedTag,
             onSelect: controller.selectTag,
           ),
-        Expanded(
-          child: _timeline(context, controller),
-        ),
+        Expanded(child: _timeline(context, controller)),
         _composer(context, controller),
       ],
     );
@@ -372,12 +383,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   /// A column of the desktop layout, wider when the text is larger: a font
   /// at 150% needs a third more room for a thread's name before it is cut,
   /// and the chat keeps a readable width in what is left.
-  double _grown(
-    BuildContext context,
-    double base,
-    double perStep,
-    double max,
-  ) {
+  double _grown(BuildContext context, double base, double perStep, double max) {
     final scale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 2.0);
     return (base + (scale - 1) * perStep).clamp(base, max);
   }
@@ -424,10 +430,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           width: railWidth,
           onNew: _newThread,
         ),
-        VerticalDivider(
-          width: 1,
-          color: theme.colorScheme.outlineVariant,
-        ),
+        VerticalDivider(width: 1, color: theme.colorScheme.outlineVariant),
         Expanded(
           child: Column(
             children: [
@@ -437,10 +440,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           ),
         ),
         if (controller.concepts.isNotEmpty) ...[
-          VerticalDivider(
-            width: 1,
-            color: theme.colorScheme.outlineVariant,
-          ),
+          VerticalDivider(width: 1, color: theme.colorScheme.outlineVariant),
           ConceptRail(
             concepts: controller.concepts,
             selected: controller.selectedTag,
@@ -448,16 +448,16 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             width: conceptWidth,
           ),
         ],
-        VerticalDivider(
-          width: 1,
-          color: theme.colorScheme.outlineVariant,
-        ),
+        VerticalDivider(width: 1, color: theme.colorScheme.outlineVariant),
         SizedBox(
           width: deskWidth,
           child: _Desk(
             controller: controller,
             onOpenComputer: _showComputer,
             onOpenResources: _openResources,
+            harnessAddress: widget.app.address ?? widget.app.settings.address,
+            harnessToken: widget.app.sessionSecret,
+            vncTransportFactory: widget.vncTransportFactory,
           ),
         ),
       ],
@@ -479,9 +479,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         onRetry: () => controller.reload(),
       );
     } else if (controller.current == null) {
-      child = _EmptyWorkspace(
-        onCreate: () => controller.create('Home'),
-      );
+      child = _EmptyWorkspace(onCreate: () => controller.create('Home'));
     } else if (entries.isEmpty) {
       child = const _EmptyTimeline();
     } else {
@@ -539,7 +537,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   }) {
     final box = MessageComposer(
       drafts: widget.app.drafts,
-      draftKey: 'workspace:${controller.current?.id}:${controller.selectedThread}',
+      draftKey:
+          'workspace:${controller.current?.id}:${controller.selectedThread}',
       running: controller.sending,
       cancelling: false,
       canAttach: false,
@@ -664,84 +663,84 @@ class _ThreadRail extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final content = Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            HarnessSpace.gutter,
+            HarnessSpace.lg,
+            HarnessSpace.sm,
+            HarnessSpace.sm,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text('Threads', style: HarnessText.label(context)),
+              ),
+              HarnessIconButton(
+                icon: Icons.add_rounded,
+                label: 'New thread',
+                size: 18,
+                onPressed: onNew,
+              ),
+            ],
+          ),
+        ),
+        if (controller.selectedTag != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(
               HarnessSpace.gutter,
-              HarnessSpace.lg,
+              0,
               HarnessSpace.sm,
               HarnessSpace.sm,
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text('Threads', style: HarnessText.label(context)),
-                ),
-                HarnessIconButton(
-                  icon: Icons.add_rounded,
-                  label: 'New thread',
-                  size: 18,
-                  onPressed: onNew,
-                ),
-              ],
-            ),
-          ),
-          if (controller.selectedTag != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                HarnessSpace.gutter,
-                0,
-                HarnessSpace.sm,
-                HarnessSpace.sm,
-              ),
-              child: Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: InputChip(
-                  label: Text('Tag · ${controller.selectedTag}'),
-                  onDeleted: () => controller.selectTag(null),
-                  deleteIcon: const Icon(Icons.close_rounded, size: 15),
-                  visualDensity: VisualDensity.compact,
-                  side: BorderSide(color: theme.colorScheme.outlineVariant),
-                  labelStyle: HarnessText.meta(context),
-                ),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: InputChip(
+                label: Text('Tag · ${controller.selectedTag}'),
+                onDeleted: () => controller.selectTag(null),
+                deleteIcon: const Icon(Icons.close_rounded, size: 15),
+                visualDensity: VisualDensity.compact,
+                side: BorderSide(color: theme.colorScheme.outlineVariant),
+                labelStyle: HarnessText.meta(context),
               ),
             ),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.symmetric(horizontal: HarnessSpace.sm),
-              children: [
-                if (controller.shownThreads.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.all(HarnessSpace.gutter),
-                    child: Text(
-                      'No threads',
-                      style: HarnessText.caption(context),
-                    ),
-                  ),
-                for (final thread in controller.shownThreads)
-                  _ThreadTile(
-                    thread: thread,
-                    selected: thread.id == controller.selectedThread,
-                    onTap: () {
-                      controller.selectThread(thread.id);
-                      onPick?.call(thread);
-                    },
-                  ),
-              ],
-            ),
           ),
-          Padding(
-            padding: const EdgeInsets.all(HarnessSpace.gutter),
-            child: Text(
-              controller.memory == null
-                  ? 'Memory · unavailable'
-                  : 'Memory · ${controller.memory!.notes} notes',
-              style: HarnessText.caption(context),
-            ),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(horizontal: HarnessSpace.sm),
+            children: [
+              if (controller.shownThreads.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.all(HarnessSpace.gutter),
+                  child: Text(
+                    'No threads',
+                    style: HarnessText.caption(context),
+                  ),
+                ),
+              for (final thread in controller.shownThreads)
+                _ThreadTile(
+                  thread: thread,
+                  selected: thread.id == controller.selectedThread,
+                  onTap: () {
+                    controller.selectThread(thread.id);
+                    onPick?.call(thread);
+                  },
+                ),
+            ],
           ),
-        ],
-      );
+        ),
+        Padding(
+          padding: const EdgeInsets.all(HarnessSpace.gutter),
+          child: Text(
+            controller.memory == null
+                ? 'Memory · unavailable'
+                : 'Memory · ${controller.memory!.notes} notes',
+            style: HarnessText.caption(context),
+          ),
+        ),
+      ],
+    );
     return width.isFinite ? SizedBox(width: width, child: content) : content;
   }
 }
@@ -833,16 +832,45 @@ class _Desk extends StatelessWidget {
     required this.controller,
     required this.onOpenComputer,
     required this.onOpenResources,
+    required this.harnessAddress,
+    required this.harnessToken,
+    this.vncTransportFactory,
   });
 
   final WorkspaceController controller;
   final VoidCallback onOpenComputer;
   final VoidCallback onOpenResources;
+  final String? harnessAddress;
+  final String harnessToken;
+  final RfbTransport Function(String url)? vncTransportFactory;
+
+  String get _stateLabel {
+    final computer = controller.computer;
+    if (computer.live) return 'Live';
+    if (computer.starting) return 'Starting';
+    return 'Off';
+  }
+
+  String get _footer {
+    final computer = controller.computer;
+    if (computer.live) {
+      return computer.backend.isEmpty
+          ? 'Box running'
+          : 'Box · ${computer.backend}';
+    }
+    return computer.reason ?? 'Computer off';
+  }
+
+  Color _stateColor(BuildContext context) {
+    final computer = controller.computer;
+    if (computer.live) return HarnessColors.moss;
+    if (computer.starting) return HarnessColors.amber;
+    return Theme.of(context).colorScheme.outline;
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final computer = controller.computer;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -859,12 +887,9 @@ class _Desk extends StatelessWidget {
                 child: Text('Computer', style: HarnessText.label(context)),
               ),
               Text(
-                computer.preview ? 'Preview' : 'Live',
-                style: HarnessText.meta(context).copyWith(
-                  color: computer.preview
-                      ? HarnessColors.amber
-                      : HarnessColors.moss,
-                ),
+                _stateLabel,
+                style: HarnessText.meta(context)
+                    .copyWith(color: _stateColor(context)),
               ),
             ],
           ),
@@ -877,13 +902,11 @@ class _Desk extends StatelessWidget {
               HarnessSpace.gutter,
               HarnessSpace.sm,
             ),
-            child: VncTakeover(
-              active: computer.userControl,
-              available: computer.available,
-              preview: computer.preview,
-              onTakeOver: () => unawaited(controller.takeOver()),
-              onReturnControl: () => unawaited(controller.returnControl()),
-              child: const _ComputerPreview(),
+            child: _ComputerWindow(
+              controller: controller,
+              harnessAddress: harnessAddress,
+              harnessToken: harnessToken,
+              vncTransportFactory: vncTransportFactory,
             ),
           ),
         ),
@@ -897,14 +920,7 @@ class _Desk extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                computer.preview
-                    ? 'Sandbox staged · preview'
-                    : computer.backend.isEmpty
-                    ? 'Box running'
-                    : 'Box · ${computer.backend}',
-                style: HarnessText.caption(context),
-              ),
+              Text(_footer, style: HarnessText.caption(context)),
               Align(
                 alignment: AlignmentDirectional.centerEnd,
                 child: Wrap(
@@ -928,104 +944,160 @@ class _Desk extends StatelessWidget {
   }
 }
 
-class _ComputerPreview extends StatelessWidget {
-  const _ComputerPreview();
+/// The computer's screen: the box's RFB stream, or an honest empty state
+/// when there is no box.  A test can hand it a transport, but the widget
+/// still decodes whatever that transport carries with the real client.
+class _ComputerWindow extends StatefulWidget {
+  const _ComputerWindow({
+    required this.controller,
+    this.harnessAddress,
+    this.harnessToken = '',
+    this.vncTransportFactory,
+  });
+
+  final WorkspaceController controller;
+  final String? harnessAddress;
+  final String harnessToken;
+  final RfbTransport Function(String url)? vncTransportFactory;
+
+  @override
+  State<_ComputerWindow> createState() => _ComputerWindowState();
+}
+
+class _ComputerWindowState extends State<_ComputerWindow> {
+  int _generation = 0;
+  String? _socket;
+  RfbTransport? _transport;
+  int _transportGeneration = -1;
+  bool _lost = false;
+
+  @override
+  void didUpdateWidget(_ComputerWindow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final socket = oldWidget.controller.computer.socket;
+    final next = widget.controller.computer.socket;
+    if (socket != next) {
+      _generation++;
+      _lost = false;
+    }
+  }
+
+  RfbTransport? _transportFor(String socket) {
+    if (_socket != socket) {
+      _socket = socket;
+      _generation++;
+      _transport = null;
+      _transportGeneration = -1;
+      _lost = false;
+    }
+    if (_transport == null || _transportGeneration != _generation) {
+      final resolved = VncEndpoint.resolve(socket, widget.harnessAddress);
+      if (resolved == null) return null;
+      final factory = widget.vncTransportFactory;
+      _transport = factory != null
+          ? factory(resolved)
+          : WebSocketTransport.connect(resolved, token: widget.harnessToken);
+      _transportGeneration = _generation;
+    }
+    return _transport;
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-      ),
-      child: Column(
-        children: [
-          Container(
-            height: 34,
-            padding: const EdgeInsets.symmetric(horizontal: 11),
-            color: theme.colorScheme.surfaceContainerHigh,
-            child: Row(
-              children: [
-                _Dot(color: theme.colorScheme.error),
-                const SizedBox(width: 5),
-                _Dot(color: HarnessColors.amber),
-                const SizedBox(width: 5),
-                _Dot(color: HarnessColors.moss),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'stoneco.example/quote',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: HarnessText.mono(context).copyWith(
-                      fontSize: 11,
-                      color: theme.colorScheme.onSurfaceVariant,
+    final computer = widget.controller.computer;
+    if (computer.live && computer.socket != null) {
+      final transport = _transportFor(computer.socket!);
+      if (transport != null) {
+        return VncTakeover(
+          active: computer.userControl,
+          available: true,
+          preview: false,
+          onTakeOver: () => unawaited(widget.controller.takeOver()),
+          onReturnControl: () => unawaited(widget.controller.returnControl()),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              VncView(
+                key: ValueKey('workspace-vnc-$_generation'),
+                transport: transport,
+                enabled: computer.userControl && !_lost,
+                onLost: (_) {
+                  if (mounted && !_lost) setState(() => _lost = true);
+                },
+              ),
+              if (_lost)
+                Positioned(
+                  left: 12,
+                  right: 12,
+                  bottom: 60,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.62),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 7,
+                      ),
+                      child: Text(
+                        'Screen lost',
+                        textAlign: TextAlign.center,
+                        style: HarnessText.caption(context)
+                            .copyWith(color: Colors.white),
+                      ),
                     ),
                   ),
                 ),
-              ],
-            ),
+            ],
           ),
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
+        );
+      }
+    }
+    final starting = computer.starting;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(HarnessSpace.lg),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (starting) ...[
+                const HarnessActivity(radius: 10),
+                const SizedBox(height: 12),
+                Text('Starting', style: HarnessText.rowTitle(context)),
+              ] else ...[
+                Icon(
+                  Icons.desktop_windows_outlined,
+                  size: 30,
+                  color: theme.colorScheme.outline,
+                ),
+                const SizedBox(height: 8),
+                Text('Computer off', style: HarnessText.rowTitle(context)),
+                if (computer.reason != null) ...[
+                  const SizedBox(height: 4),
                   Text(
-                    'Stone Co — Countertop quote',
-                    style: HarnessText.rowTitle(context).copyWith(fontSize: 14),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    'Quartz · 2cm edge · template Tuesday',
+                    computer.reason!,
+                    textAlign: TextAlign.center,
                     style: HarnessText.caption(context),
                   ),
-                  const SizedBox(height: 14),
-                  Container(
-                    height: 8,
-                    width: 150,
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.outlineVariant,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Container(
-                    height: 8,
-                    width: 106,
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.outlineVariant.withValues(alpha: 0.7),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Text(
-                    'Quote · 5,800 · template Tuesday',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
                 ],
-              ),
-            ),
+                const SizedBox(height: 12),
+                HarnessPill(
+                  label: 'Start',
+                  icon: Icons.play_arrow_rounded,
+                  onTap: () => unawaited(widget.controller.startComputer()),
+                ),
+              ],
+            ],
           ),
-        ],
+        ),
       ),
-    );
-  }
-}
-
-class _Dot extends StatelessWidget {
-  const _Dot({required this.color});
-
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 7,
-      height: 7,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
     );
   }
 }
@@ -1302,7 +1374,10 @@ class _ThreadsSheet extends StatelessWidget {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text('Threads', style: HarnessText.sheetTitle(context)),
+                    child: Text(
+                      'Threads',
+                      style: HarnessText.sheetTitle(context),
+                    ),
                   ),
                   HarnessTextButton(
                     label: 'New thread',
@@ -1331,10 +1406,16 @@ class _ComputerSheet extends StatelessWidget {
   const _ComputerSheet({
     required this.controller,
     required this.onOpenResources,
+    this.harnessAddress,
+    this.harnessToken = '',
+    this.vncTransportFactory,
   });
 
   final WorkspaceController controller;
   final VoidCallback onOpenResources;
+  final String? harnessAddress;
+  final String harnessToken;
+  final RfbTransport Function(String url)? vncTransportFactory;
 
   @override
   Widget build(BuildContext context) {
@@ -1342,63 +1423,66 @@ class _ComputerSheet extends StatelessWidget {
       animation: controller,
       builder: (context, _) {
         final computer = controller.computer;
+        final state = computer.live
+            ? 'Live'
+            : computer.starting
+            ? 'Starting'
+            : 'Off';
         return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          HarnessSpace.sheetGutter,
-          0,
-          HarnessSpace.sheetGutter,
-          HarnessSpace.lg,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              HarnessSpace.sheetGutter,
+              0,
+              HarnessSpace.sheetGutter,
+              HarnessSpace.lg,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(
-                  child: Text('Computer', style: HarnessText.sheetTitle(context)),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Computer',
+                        style: HarnessText.sheetTitle(context),
+                      ),
+                    ),
+                    Text(state, style: HarnessText.meta(context)),
+                  ],
                 ),
+                const SizedBox(height: HarnessSpace.md),
+                SizedBox(
+                  height: 300,
+                  child: _ComputerWindow(
+                    controller: controller,
+                    harnessAddress: harnessAddress,
+                    harnessToken: harnessToken,
+                    vncTransportFactory: vncTransportFactory,
+                  ),
+                ),
+                const SizedBox(height: HarnessSpace.md),
                 Text(
-                  computer.preview ? 'Preview' : 'Live',
-                  style: HarnessText.meta(context),
+                  computer.live
+                      ? (computer.backend.isEmpty
+                            ? 'Box running'
+                            : 'Box · ${computer.backend}')
+                      : (computer.reason ?? 'Computer off'),
+                  style: HarnessText.caption(context),
+                ),
+                const SizedBox(height: HarnessSpace.sm),
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: HarnessTextButton(
+                    label: 'Resources',
+                    icon: Icons.inventory_2_outlined,
+                    onPressed: onOpenResources,
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: HarnessSpace.md),
-            SizedBox(
-              height: 300,
-              child: VncTakeover(
-                active: computer.userControl,
-                available: computer.available,
-                preview: computer.preview,
-                onTakeOver: () => unawaited(controller.takeOver()),
-                onReturnControl: () => unawaited(controller.returnControl()),
-                child: const _ComputerPreview(),
-              ),
-            ),
-            const SizedBox(height: HarnessSpace.md),
-            Text(
-              computer.preview
-                  ? 'Sandbox staged · preview'
-                  : computer.backend.isEmpty
-                  ? 'Box running'
-                  : 'Box · ${computer.backend}',
-              style: HarnessText.caption(context),
-            ),
-            const SizedBox(height: HarnessSpace.sm),
-            Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: HarnessTextButton(
-                label: 'Resources',
-                icon: Icons.inventory_2_outlined,
-                onPressed: onOpenResources,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+          ),
+        );
       },
     );
   }

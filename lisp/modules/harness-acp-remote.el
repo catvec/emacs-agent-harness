@@ -568,6 +568,17 @@ The last one repeats, for as long as `harness-acp-remote' is on.")
 (defvar harness-acp-remote-max-body 8192
   "Most bytes an HTTP request's body may take before it is refused.")
 
+(defvar harness-acp-remote-tunnels nil
+  "Alist of (PATH . FUNCTION) serving an authenticated WebSocket tunnel.
+A request whose path is PATH, once its session secret proves a live
+session, is handed to FUNCTION with the parsed REQUEST and the SESSION.
+FUNCTION returns nil when it cannot serve that request, or a plist
+`(:host HOST :port PORT)' naming a loopback service to bridge the
+WebSocket's binary frames to and from; a host beyond this machine is
+refused.  A module adds its path here and takes it out when it shuts
+down, so the listener carries the screens of the modules that are on
+and no others.")
+
 (defconst harness-acp-remote--virtual-interfaces
   "\\`\\(?:docker\\|br-\\|veth\\|virbr\\|vnet\\|lxc\\|lxd\\|cni\\|flannel\\|podman\\|vmnet\\|vboxnet\\|kube\\)"
   "Interfaces of containers and virtual machines, whose addresses no phone reaches.")
@@ -1401,8 +1412,9 @@ makes meanwhile until Lisp nesting overflows."
                           (process-name proc) (harness-error-message err))))))
 
 (defun harness-acp-remote--close (proc)
-  "Close the socket PROC and drop its client."
+  "Close the socket PROC and drop its client, or its tunnel."
   (process-put proc 'harness-acp-remote-state 'closing)
+  (harness-acp-remote--close-tunnel proc)
   (when-let* ((client (process-get proc 'harness-acp-remote-client)))
     (harness-acp-drop-client client))
   (when (process-live-p proc) (delete-process proc)))
@@ -1634,6 +1646,125 @@ It ends the session whose secret REQUEST holds, as a WebSocket does."
 
 ;;;; WebSocket and plain TCP
 
+(defun harness-acp-remote--loopback-host-p (host)
+  "Non-nil when HOST names this machine."
+  (and (stringp host)
+       (member (downcase host)
+               '("127.0.0.1" "::1" "[::1]" "localhost"))))
+
+(defun harness-acp-remote--tunnel-frame (proc chunk)
+  "Forward CHUNK, bytes from a tunnel's service, to the WebSocket on PROC."
+  (let ((server (process-get proc 'harness-acp-remote-server)))
+    (when (and (process-live-p server)
+               (> (length chunk) 0))
+      (harness-acp-remote--send server (harness-acp-remote-ws-frame 'binary chunk)))))
+
+(defun harness-acp-remote--tunnel-sentinel (proc _event)
+  "End the WebSocket beside PROC when the tunnel's service ended."
+  (unless (process-live-p proc)
+    (let ((server (process-get proc 'harness-acp-remote-server)))
+      (when (process-live-p server)
+        (harness-acp-remote--send
+         server (harness-acp-remote-ws-close-frame 1000 "The endpoint stopped"))
+        (harness-acp-remote--close server)))))
+
+(defun harness-acp-remote--close-tunnel (proc)
+  "Close the tunnel of the WebSocket on PROC, if it has one."
+  (when-let* ((bridge (process-get proc 'harness-acp-remote-tunnel)))
+    (process-put proc 'harness-acp-remote-tunnel nil)
+    (when (process-live-p bridge)
+      (delete-process bridge))))
+
+(defun harness-acp-remote--tunnel-input (proc chunk)
+  "Forward CHUNK, WebSocket frames on tunnel PROC, to its service.
+The RFB stream travels in binary frames; a text frame is ignored,
+a ping is answered, and a close ends both sides."
+  (let ((bridge (process-get proc 'harness-acp-remote-tunnel))
+        (decoder (process-get proc 'harness-acp-remote-decoder)))
+    (dolist (event (and decoder (harness-acp-remote-decode decoder chunk)))
+      (pcase event
+        (`(binary . ,data)
+         (when (and (process-live-p bridge) (> (length data) 0))
+           (process-send-string bridge data)))
+        (`(text . ,_) nil)
+        (`(ping . ,payload)
+         (harness-acp-remote--send proc (harness-acp-remote-ws-frame 'pong payload)))
+        (`(pong . ,_) nil)
+        (`(close . ,_)
+         (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame 1000))
+         (harness-acp-remote--close proc))
+        (`(error ,code . ,message)
+         (harness-log 'info "acp-remote: closing the tunnel of %s: %s"
+                      (process-get proc 'harness-acp-remote-address) message)
+         (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame code message))
+         (harness-acp-remote--close proc))))))
+
+(defun harness-acp-remote--tunnel-protocol (request)
+  "Return the subprotocol to answer a tunnel REQUEST with, or nil.
+An offered name that is not a `bearer.' secret is chosen; the secret
+itself is never echoed."
+  (let ((offered (harness-acp-remote-ws-offered-protocols request)))
+    (or (car (member "vnc.v1" offered))
+        (cl-find-if-not (lambda (protocol) (string-prefix-p "bearer." protocol))
+                        offered))))
+
+(defun harness-acp-remote--serve-tunnel (proc request session function)
+  "Bridge the WebSocket on PROC to the endpoint FUNCTION names for SESSION.
+FUNCTION answers `(:host HOST :port PORT)' for a loopback service, or
+nil to refuse.  Only a live session reaches this, and only a loopback
+host is connected to; the frames are binary and carry the service's
+stream whole."
+  (let* ((target (condition-case err
+                     (funcall function request session)
+                   (error
+                    (harness-log 'warn "acp-remote: the tunnel of %s failed: %s"
+                                 (plist-get request :path)
+                                 (harness-error-message err))
+                    nil)))
+         (host (plist-get target :host))
+         (port (plist-get target :port))
+         (bridge nil))
+    (cond
+     ((or (null target) (null port))
+      (harness-acp-remote--respond-text proc 404 "Nothing here."))
+     ((not (harness-acp-remote--loopback-host-p host))
+      (harness-log 'warn "acp-remote: refusing a tunnel to %s" host)
+      (harness-acp-remote--respond-text
+       proc 403 "Only a service on this machine can be bridged."
+       '(("Cache-Control" . "no-store"))))
+     (t
+      (condition-case err
+          (setq bridge (make-network-process
+                        :name "harness-acp-remote-tunnel"
+                        :host host :service (if (stringp port) (string-to-number port) port)
+                        :coding 'binary :noquery t
+                        :filter #'harness-acp-remote--tunnel-frame
+                        :sentinel #'harness-acp-remote--tunnel-sentinel))
+        (error
+         (harness-log 'warn "acp-remote: the tunnel target did not answer: %s"
+                      (harness-error-message err))
+         (setq bridge nil)))
+      (if (not (process-live-p bridge))
+          (harness-acp-remote--respond-text
+           proc 502 "The endpoint is not answering." '(("Cache-Control" . "no-store")))
+        (process-put bridge 'harness-acp-remote-server proc)
+        (process-put proc 'harness-acp-remote-tunnel bridge)
+        (process-put proc 'harness-acp-remote-decoder
+                     (harness-acp-remote-decoder
+                      :max-message harness-acp-remote-max-message))
+        (process-put proc 'harness-acp-remote-state 'ws)
+        (harness-acp-remote--send
+         proc (harness-acp-remote-ws-handshake
+               request (harness-acp-remote--tunnel-protocol request)
+               (list (cons "Cache-Control" "no-store"))))
+        (harness-acp-remote--touch session
+                                    (process-get proc 'harness-acp-remote-address))
+        (harness-acp-remote--changed
+         "connected" (process-get proc 'harness-acp-remote-address))
+        (let ((rest (plist-get request :rest)))
+          (unless (string-empty-p rest)
+            (harness-acp-remote--tunnel-input proc rest))))))))
+
 (defun harness-acp-remote--upgrade (proc request)
   "Turn the socket PROC into a WebSocket for ACP, as REQUEST asks.
 A request that holds a live session secret opens a connection that is
@@ -1721,26 +1852,30 @@ at once when too many connections have none."
 
 (defun harness-acp-remote--ws-input (proc chunk)
   "Handle CHUNK, bytes of the WebSocket on PROC."
-  (let ((client (process-get proc 'harness-acp-remote-client))
-        (decoder (process-get proc 'harness-acp-remote-decoder)))
-    (dolist (event (harness-acp-remote-decode decoder chunk))
-      (pcase event
-        (`(text . ,text)
-         ;; One message per frame, though some clients end it with a
-         ;; newline and bridges forward several lines at once.
-         (dolist (line (split-string text "\n" t "[ \t\r]+"))
-           (harness-acp-client-receive client line)))
-        (`(binary . ,_) (harness-log 'debug "acp-remote: binary WebSocket message ignored"))
-        (`(ping . ,payload) (harness-acp-remote--send proc (harness-acp-remote-ws-frame 'pong payload)))
-        (`(pong . ,_) nil)
-        (`(close . ,_)
-         (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame 1000))
-         (harness-acp-remote--close proc))
-        (`(error ,code . ,message)
-         (harness-log 'info "acp-remote: closing the WebSocket of %s: %s"
-                      (process-get proc 'harness-acp-remote-address) message)
-         (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame code message))
-         (harness-acp-remote--close proc))))))
+  (if (process-get proc 'harness-acp-remote-tunnel)
+      (harness-acp-remote--tunnel-input proc chunk)
+    (let ((client (process-get proc 'harness-acp-remote-client))
+          (decoder (process-get proc 'harness-acp-remote-decoder)))
+      (dolist (event (harness-acp-remote-decode decoder chunk))
+        (pcase event
+          (`(text . ,text)
+           ;; One message per frame, though some clients end it with a
+           ;; newline and bridges forward several lines at once.
+           (dolist (line (split-string text "\n" t "[ \t\r]+"))
+             (harness-acp-client-receive client line)))
+          (`(binary . ,_)
+           (harness-log 'debug "acp-remote: binary WebSocket message ignored"))
+          (`(ping . ,payload)
+           (harness-acp-remote--send proc (harness-acp-remote-ws-frame 'pong payload)))
+          (`(pong . ,_) nil)
+          (`(close . ,_)
+           (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame 1000))
+           (harness-acp-remote--close proc))
+          (`(error ,code . ,message)
+           (harness-log 'info "acp-remote: closing the WebSocket of %s: %s"
+                        (process-get proc 'harness-acp-remote-address) message)
+           (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame code message))
+           (harness-acp-remote--close proc)))))))
 
 ;;;; Routing
 
@@ -1756,7 +1891,12 @@ none, whatever it asks for.  (A WebSocket is let in, to sign in with ACP.)"
       (harness-acp-remote--respond
        proc 403 (harness-acp-remote--page "Not available"
                                           "Corporate mode is on: this harness serves no other device.")))
-     ((harness-acp-remote-ws-upgrade-p request) (harness-acp-remote--upgrade proc request))
+     ((harness-acp-remote-ws-upgrade-p request)
+      (if-let* ((tunnel (assoc path harness-acp-remote-tunnels)))
+          (if-let* ((session (harness-acp-remote--request-session request)))
+              (harness-acp-remote--serve-tunnel proc request session (cdr tunnel))
+            (harness-acp-remote--unauthorized proc request))
+        (harness-acp-remote--upgrade proc request)))
      ((and (equal path "/login") (harness-acp-remote--oidc-configured-p))
       (harness-acp-remote--oidc-login proc request))
      ((and (equal path "/oidc/callback") (harness-acp-remote--oidc-configured-p))
@@ -1845,6 +1985,7 @@ bytes."
                  (harness-acp-remote--resume-later)))
       (when-let* ((timer (process-get proc 'harness-acp-remote-timer)))
         (cancel-timer timer))
+      (harness-acp-remote--close-tunnel proc)
       (when-let* ((decoder (process-get proc 'harness-acp-remote-decoder)))
         (process-put proc 'harness-acp-remote-decoder nil)
         (harness-acp-remote-decoder-free decoder))

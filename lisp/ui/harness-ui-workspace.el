@@ -38,6 +38,9 @@
 (defvar-local harness-ui-workspace--memory nil
   "The memory status of this workspace, or nil.")
 
+(defvar-local harness-ui-workspace--box nil
+  "The computer status of this workspace, or nil.")
+
 (defvar-local harness-ui-workspace--thread nil
   "The thread id this buffer is composing into.")
 
@@ -63,6 +66,7 @@
     (define-key map (kbd "C-c w n") #'harness-ui-workspace-new-thread)
     (define-key map (kbd "C-c w o") #'harness-ui-workspace-open-episode)
     (define-key map (kbd "C-c w g") #'harness-ui-workspace-refresh)
+    (define-key map (kbd "C-c w c") #'harness-ui-workspace-computer)
     (define-key map (kbd "C-c w R") #'harness-ui-workspace-resources)
     (define-key map (kbd "C-c w b") #'harness-ui-workspace-open-board)
     (define-key map (kbd "C-c w s") #'harness-ui-workspace-stop)
@@ -116,11 +120,16 @@ Letters type into the compose box; these chords act on the workspace.")
                      "Memory · unavailable"
                    (if harness-ui-workspace--memory
                        "Memory · ready"
-                     "Memory · unavailable"))))
+                     "Memory · unavailable")))
+         (box (plist-get harness-ui-workspace--box :state))
+         (computer (cond ((equal box "running") "Computer · live")
+                         ((equal box "starting") "Computer · starting")
+                         (t "Computer · off"))))
     (insert (propertize "Workspace" 'face 'harness-header-face)
             " · " (propertize name 'face 'harness-header-face)
             "   " (propertize (format "Thread · %s" thread-title) 'face 'harness-dim-face)
             "   " (propertize memory 'face 'harness-dim-face)
+            "   " (propertize computer 'face 'harness-dim-face)
             "   ")
     (harness-ui-workspace--insert-button
      "Tasks" #'harness-ui-workspace-open-board "The task board of this workspace")
@@ -136,6 +145,10 @@ Letters type into the compose box; these chords act on the workspace.")
     (insert " ")
     (harness-ui-workspace--insert-button
      "Refresh" #'harness-ui-workspace-refresh "Read the workspace again")
+    (insert " ")
+    (harness-ui-workspace--insert-button
+     "Computer" #'harness-ui-workspace-computer
+     "The workspace computer's screen")
     (insert " ")
     (harness-ui-workspace--insert-button
      "Resources" #'harness-ui-workspace-resources
@@ -251,7 +264,10 @@ Letters type into the compose box; these chords act on the workspace.")
       (setq harness-ui-workspace--rendered-key
             (list harness-ui-workspace--id selected harness-ui-workspace--state
                   (length harness-ui-workspace--entries)))
-      (harness-compose-fetch-completions)
+      ;; Before the first answer there is no root to list, and a file
+      ;; listing without one is an error, not an empty list.
+      (when (plist-get harness-ui-workspace--data :root)
+        (harness-compose-fetch-completions))
       (set-buffer-modified-p nil))))
 
 (defun harness-ui-workspace--render-tail ()
@@ -263,11 +279,12 @@ Letters type into the compose box; these chords act on the workspace.")
   (when-let* ((root (plist-get workspace :root)))
     (setq default-directory (file-name-as-directory (expand-file-name root)))))
 
-(defun harness-ui-workspace--set-data (workspace entries memory)
-  "Take WORKSPACE, its ENTRIES and MEMORY as this buffer's state."
+(defun harness-ui-workspace--set-data (workspace entries memory &optional box)
+  "Take WORKSPACE, its ENTRIES, MEMORY and BOX as this buffer's state."
   (setq harness-ui-workspace--data workspace
         harness-ui-workspace--entries entries
         harness-ui-workspace--memory memory
+        harness-ui-workspace--box box
         harness-ui-workspace--error nil
         harness-ui-workspace--state 'ready)
   (harness-ui-workspace--use-root workspace)
@@ -290,19 +307,23 @@ Letters type into the compose box; these chords act on the workspace.")
                                          (list :id id :opts (list :limit 200))))
            (memory (harness-catch
                     (harness-ui-request "_harness/memory/status" (list :workspace id))
-                    (lambda (_) nil))))
+                    (lambda (_) nil)))
+           (box (harness-catch
+                 (harness-ui-request "_harness/workspace/box/status" (list :workspace id))
+                 (lambda (_) nil))))
       (setq harness-ui-workspace--request generation)
       (unless (eq harness-ui-workspace--state 'ready)
         (setq harness-ui-workspace--state 'loading)
         (harness-ui-workspace--render))
       (harness-then
-       (harness-all (list get timeline memory))
+       (harness-all (list get timeline memory box))
        (lambda (values)
          (when (and (buffer-live-p buffer)
                     (eq generation (buffer-local-value 'harness-ui-workspace--request buffer)))
            (with-current-buffer buffer
              (when (derived-mode-p 'harness-ui-workspace-mode)
-               (harness-ui-workspace--set-data (nth 0 values) (nth 1 values) (nth 2 values))))))
+               (harness-ui-workspace--set-data (nth 0 values) (nth 1 values)
+                                               (nth 2 values) (nth 3 values))))))
        (lambda (err)
          (when (and (buffer-live-p buffer)
                     (eq generation (buffer-local-value 'harness-ui-workspace--request buffer)))
@@ -436,7 +457,8 @@ Letters type into the compose box; these chords act on the workspace.")
   (let ((event (if (symbolp event) (symbol-name event) event)))
     (when (member event '("workspace/changed" "workspace/deleted"
                           "workspace/timeline-appended" "workspace/thread-changed"
-                          "workspace/episode-changed" "workspace/memory-changed"))
+                          "workspace/episode-changed" "workspace/memory-changed"
+                          "workspace/box-status"))
       (let ((id (car-safe args)))
       (dolist (buffer (harness-ui-workspace--buffers))
         (with-current-buffer buffer
@@ -554,6 +576,7 @@ the `C-c w' keys act on the workspace."
        ["Workspace"
         ("C-c w n" "New thread" harness-ui-workspace-new-thread)
         ("C-c w o" "Open episode" harness-ui-workspace-open-episode)
+        ("C-c w c" "Computer" harness-ui-workspace-computer)
         ("C-c w b" "Task board" harness-ui-workspace-open-board)
         ("C-c w s" "Stop" harness-ui-workspace-stop)
         ("C-c w g" "Refresh" harness-ui-workspace-refresh)
@@ -591,9 +614,10 @@ the `C-c w' keys act on the workspace."
 ;; credentials and the access the agent has to each.  It reads the same
 ;; `_harness/workspace/resources/status' as the Flutter client, and it shows
 ;; metadata only: no cookie value, password, card number or token is ever
-;; inserted in this buffer.  The box and the payment broker are staged, so
-;; the browser and wallet sections say what is missing; the credentials are
-;; the harness's declared secrets, through the secret-sandbox module.
+;; inserted in this buffer.  A running box gives a real Firefox profile;
+;; a stopped one says why.  The payment broker is still absent, so the
+;; wallet says so; the credentials are the harness's declared secrets,
+;; through the secret-sandbox module.
 
 (defvar harness-ui-workspace-resources--id nil
   "Workspace id of the resources buffer.")
@@ -649,13 +673,17 @@ with their owner, scope, state and access; a value is never shown.
   "Insert the browser section of BROWSER."
   (harness-ui-workspace-resources--heading "Browser")
   (if (null browser)
-      (insert "  " (propertize "Box staged" 'face 'harness-dim-face)
+      (insert "  " (propertize (or (plist-get (plist-get harness-ui-workspace-resources--data
+                                                       :browser-reason)
+                                               :code)
+                                    "Computer off")
+                               'face 'harness-dim-face)
               "  ·  " (propertize "No browser data" 'face 'harness-dim-face) "\n")
     (let ((profile (plist-get browser :profile)))
       (harness-ui-workspace-resources--line
        (format "Profile · %s" (or (plist-get profile :label) "default"))
        (format "%s · %s sites"
-               (or (plist-get profile :kind) "Chromium")
+               (or (plist-get profile :kind) "Firefox")
                (or (plist-get profile :sites) 0)))
       (dolist (site (plist-get browser :sites))
         (harness-ui-workspace-resources--line
@@ -672,9 +700,12 @@ with their owner, scope, state and access; a value is never shown.
           (harness-ui-workspace-resources--line
            (or (plist-get login :origin) "Login")
            (format "%s · %s"
-                   (or (plist-get login :username) "account")
+                   (if-let* ((username (plist-get login :username))
+                             ((not (harness-string-blank-p username))))
+                       username
+                     "site session")
                    (or (plist-get login :state) "unknown")))))
-      (insert "  " (propertize "Export / Import · needs box · approval"
+      (insert "  " (propertize "Export / Import · later stage"
                                'face 'harness-dim-face) "\n")))
   (insert "\n"))
 
@@ -849,7 +880,7 @@ one the workspace buffer opened last."
                      harness-ui-workspace--id)
                 harness-ui-workspace--last-id)))
     (unless id
-      (user-error "No workspace: open one with M-x harness-workspace first"))
+      (user-error "No workspace open"))
     (let ((buffer (get-buffer-create "*Workspace Resources*")))
       (with-current-buffer buffer
         (harness-ui-workspace-resources-mode)
@@ -860,3 +891,301 @@ one the workspace buffer opened last."
         (harness-ui-workspace-resources--render))
       (pop-to-buffer buffer)
       (harness-ui-workspace-resources-refresh buffer))))
+
+;;;; Workspace computer
+
+;; The workspace's computer as the Emacs client sees it: the real box's
+;; state and VNC endpoint, and its screen as the picture the box took.  The
+;; app draws the live RFB stream; Emacs opens the same noVNC page in the
+;; desktop's browser, or takes a screenshot, because it cannot draw RFB
+;; itself.  There is no drawn preview here: a box that is off says what it
+;; needs, and a screenshot is the framebuffer x11vnc is serving now.
+
+(defvar-local harness-ui-workspace-computer--workspace nil
+  "Workspace id of the computer buffer.")
+
+(defvar-local harness-ui-workspace-computer--data nil
+  "The `workspace/box/status' answer this buffer shows.")
+
+(defvar-local harness-ui-workspace-computer--error nil
+  "Why the last computer request failed, or nil.")
+
+(defvar-local harness-ui-workspace-computer--busy nil
+  "The action in flight, or nil.")
+
+(defvar-local harness-ui-workspace-computer--shot nil
+  "The last screenshot file this buffer drew, or nil.")
+
+(defvar harness-ui-workspace-computer-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "s") #'harness-ui-workspace-computer-start)
+    (define-key map (kbd "S") #'harness-ui-workspace-computer-stop)
+    (define-key map (kbd "r") #'harness-ui-workspace-computer-refresh)
+    (define-key map (kbd "t") #'harness-ui-workspace-computer-take-over)
+    (define-key map (kbd "T") #'harness-ui-workspace-computer-return-control)
+    (define-key map (kbd "o") #'harness-ui-workspace-computer-open-vnc)
+    (define-key map (kbd "p") #'harness-ui-workspace-computer-screenshot)
+    (define-key map (kbd "q") #'harness-ui-bury)
+    map)
+  "Keys of the workspace computer buffer.")
+
+(define-derived-mode harness-ui-workspace-computer-mode special-mode "Workspace Computer"
+  "Major mode of the workspace's computer page.
+It shows the real box's state and VNC endpoint, starts and stops it,
+hands control between the agent and the user, opens the noVNC page and
+draws a screenshot the box took.
+\\<harness-ui-workspace-computer-mode-map>\\[harness-ui-workspace-computer-refresh] reads it again."
+  (setq buffer-read-only t)
+  (setq-local truncate-lines nil
+              word-wrap t))
+
+(defun harness-ui-workspace-computer--run-state (data)
+  "Return how DATA's box reads in one word."
+  (pcase (plist-get data :state)
+    ("running" "Live")
+    ("starting" "Starting")
+    ("failed" "Unavailable")
+    ("stopped" "Off")
+    (_ "Off")))
+
+(defun harness-ui-workspace-computer--line (label value &optional face)
+  "Insert LABEL and VALUE on one line, VALUE with FACE."
+  (insert "  " (propertize label 'face 'harness-dim-face) "  "
+          (propertize (format "%s" (or value "")) 'face (or face 'default))
+          "\n"))
+
+(defun harness-ui-workspace-computer--render ()
+  "Draw the computer buffer."
+  (let ((inhibit-read-only t)
+        (data harness-ui-workspace-computer--data))
+    (erase-buffer)
+    (insert (propertize "Workspace computer" 'face 'harness-header-face)
+            "  ·  "
+            (propertize (or (plist-get data :name)
+                            harness-ui-workspace-computer--workspace
+                            "Workspace")
+                        'face 'harness-header-face)
+            "  ·  "
+            (propertize (harness-ui-workspace-computer--run-state data)
+                        'face (if (harness-json-true-p (plist-get data :running))
+                                  'harness-status-running-face
+                                'harness-dim-face))
+            "\n\n")
+    (when harness-ui-workspace-computer--busy
+      (insert (propertize (format "%s…" harness-ui-workspace-computer--busy)
+                          'face 'harness-dim-face)
+              "\n\n"))
+    (when harness-ui-workspace-computer--error
+      (insert (propertize harness-ui-workspace-computer--error
+                          'face 'harness-failure-face)
+              "\n\n"))
+    (insert (propertize "State" 'face 'harness-label-face) "\n")
+    (harness-ui-workspace-computer--line
+     "Backend" (or (plist-get data :backend) "local"))
+    (harness-ui-workspace-computer--line
+     "Isolation" (or (plist-get data :isolation) "—"))
+    (harness-ui-workspace-computer--line
+     "Control" (pcase (plist-get data :control)
+                 ("user" "You")
+                 (_ "Agent")))
+    (harness-ui-workspace-computer--line
+     "Display" (or (plist-get data :display) "—"))
+    (harness-ui-workspace-computer--line
+     "Screen" (if (and (plist-get data :width) (plist-get data :height))
+                  (format "%s × %s"
+                          (plist-get data :width) (plist-get data :height))
+                "—"))
+    (when-let* ((reason (plist-get data :reason)))
+      (harness-ui-workspace-computer--line
+       "Reason" (or (plist-get reason :text) reason) 'harness-caution-face))
+    (when-let* ((missing (plist-get data :missing)))
+      (harness-ui-workspace-computer--line
+       "Missing" (mapconcat (lambda (tool) (format "%s" tool)) missing " ")
+       'harness-caution-face))
+    (insert "\n" (propertize "Screen" 'face 'harness-label-face) "\n")
+    (harness-ui-workspace-computer--line
+     "VNC" (or (plist-get data :url) "—"))
+    (harness-ui-workspace-computer--line
+     "Socket" (or (plist-get data :socket) "—"))
+    (insert "  ")
+    (harness-ui-button "Start" #'harness-ui-workspace-computer-start
+                       :help "Start the workspace computer")
+    (insert "  ")
+    (harness-ui-button "Stop" #'harness-ui-workspace-computer-stop
+                       :help "Stop the workspace computer")
+    (insert "  ")
+    (harness-ui-button "Restart" #'harness-ui-workspace-computer-restart
+                       :help "Restart the workspace computer")
+    (insert "  ")
+    (harness-ui-button "Take over" #'harness-ui-workspace-computer-take-over
+                       :help "Reviewer control of the screen")
+    (insert "  ")
+    (harness-ui-button "Return control" #'harness-ui-workspace-computer-return-control
+                       :help "Agent control of the screen")
+    (insert "  ")
+    (harness-ui-button "Open VNC" #'harness-ui-workspace-computer-open-vnc
+                       :help "The computer's noVNC page")
+    (insert "  ")
+    (harness-ui-button "Screenshot" #'harness-ui-workspace-computer-screenshot
+                       :help "A picture of the current screen")
+    (insert "  ")
+    (harness-ui-button "Refresh" #'harness-ui-workspace-computer-refresh
+                       :help "Read the computer again")
+    (insert "\n")
+    (when (and harness-ui-workspace-computer--shot
+               (file-readable-p harness-ui-workspace-computer--shot))
+      (insert "\n" (propertize "Picture" 'face 'harness-label-face) "\n")
+      (insert-image (create-image harness-ui-workspace-computer--shot 'png t)
+                    "[Screenshot]")
+      (insert "\n"))
+    (insert "\n"
+            (propertize "s · start" 'face 'harness-hint-face) "   "
+            (propertize "S · stop" 'face 'harness-hint-face) "   "
+            (propertize "t · take over" 'face 'harness-hint-face) "   "
+            (propertize "T · return control" 'face 'harness-hint-face) "   "
+            (propertize "o · open VNC" 'face 'harness-hint-face) "   "
+            (propertize "p · screenshot" 'face 'harness-hint-face) "   "
+            (propertize "r · refresh" 'face 'harness-hint-face) "   "
+            (propertize "q · bury" 'face 'harness-hint-face) "\n")
+    (goto-char (point-min))))
+
+(defun harness-ui-workspace-computer--done (result &optional _action)
+  "Take RESULT of ACTION and draw it."
+  (when (buffer-live-p (current-buffer))
+    (setq harness-ui-workspace-computer--data result
+          harness-ui-workspace-computer--error nil
+          harness-ui-workspace-computer--busy nil)
+    (harness-ui-workspace-computer--render)))
+
+(defun harness-ui-workspace-computer-refresh (&optional buffer)
+  "Read the computer of the buffer's workspace again."
+  (interactive)
+  (let* ((buffer (or buffer (current-buffer)))
+         (id (buffer-local-value 'harness-ui-workspace-computer--workspace buffer)))
+    (with-current-buffer buffer
+      (setq harness-ui-workspace-computer--busy "Reading")
+      (harness-ui-workspace-computer--render))
+    (harness-ui-call
+     "_harness/workspace/box/status"
+     (list :workspace id)
+     (lambda (result)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (harness-ui-workspace-computer--done result))))
+     (lambda (err)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq harness-ui-workspace-computer--busy nil
+                 harness-ui-workspace-computer--error (harness-error-message err))
+           (harness-ui-workspace-computer--render)))))))
+
+(defun harness-ui-workspace-computer--action (method label)
+  "Call METHOD for the computer, showing LABEL while it runs."
+  (let ((id harness-ui-workspace-computer--workspace)
+        (buffer (current-buffer)))
+    (setq harness-ui-workspace-computer--busy label
+          harness-ui-workspace-computer--error nil)
+    (harness-ui-workspace-computer--render)
+    (harness-ui-call
+     method (list :workspace id)
+     (lambda (result)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (harness-ui-workspace-computer--done result))))
+     (lambda (err)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq harness-ui-workspace-computer--busy nil
+                 harness-ui-workspace-computer--error (harness-error-message err))
+           (harness-ui-workspace-computer--render)
+           (harness-ui-workspace-computer-refresh buffer)))))))
+
+(defun harness-ui-workspace-computer-start ()
+  "Start the workspace computer."
+  (interactive)
+  (harness-ui-workspace-computer--action "_harness/workspace/box/start" "Starting"))
+
+(defun harness-ui-workspace-computer-stop ()
+  "Stop the workspace computer."
+  (interactive)
+  (harness-ui-workspace-computer--action "_harness/workspace/box/stop" "Stopping"))
+
+(defun harness-ui-workspace-computer-restart ()
+  "Restart the workspace computer."
+  (interactive)
+  (harness-ui-workspace-computer--action "_harness/workspace/box/restart" "Restarting"))
+
+(defun harness-ui-workspace-computer-take-over ()
+  "Give the reviewer control of the workspace computer."
+  (interactive)
+  (harness-ui-workspace-computer--action "_harness/workspace/box/take-over" "Taking over"))
+
+(defun harness-ui-workspace-computer-return-control ()
+  "Return control of the workspace computer to the agent."
+  (interactive)
+  (harness-ui-workspace-computer--action "_harness/workspace/box/return-control" "Returning control"))
+
+(defun harness-ui-workspace-computer-open-vnc ()
+  "Open the workspace computer's noVNC page."
+  (interactive)
+  (let ((url (plist-get harness-ui-workspace-computer--data :url)))
+    (unless (and (stringp url) (not (string-empty-p url)))
+      (user-error "No VNC page · computer off"))
+    (browse-url url)))
+
+(defun harness-ui-workspace-computer-screenshot ()
+  "Take a screenshot of the workspace computer and draw it here."
+  (interactive)
+  (let ((id harness-ui-workspace-computer--workspace)
+        (buffer (current-buffer)))
+    (setq harness-ui-workspace-computer--busy "Screenshot"
+          harness-ui-workspace-computer--error nil)
+    (harness-ui-workspace-computer--render)
+    (harness-ui-call
+     "_harness/workspace/box/screenshot"
+     (list :workspace id)
+     (lambda (result)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (let ((data (plist-get result :data))
+                 (mime (or (plist-get result :mime) "image/png")))
+             (if (not (stringp data))
+                 (setq harness-ui-workspace-computer--error "No screenshot")
+               (let ((file (make-temp-file "harness-workspace-screen-" nil
+                                           (if (string-match-p "jpe?g" mime) ".jpg" ".png"))))
+                 (with-temp-file file
+                   (set-buffer-multibyte nil)
+                   (insert (base64-decode-string data)))
+                 (setq harness-ui-workspace-computer--shot file))))
+           (setq harness-ui-workspace-computer--busy nil)
+           (harness-ui-workspace-computer--render))))
+     (lambda (err)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (setq harness-ui-workspace-computer--busy nil
+                 harness-ui-workspace-computer--error (harness-error-message err))
+           (harness-ui-workspace-computer--render)))))))
+
+;;;###autoload
+(defun harness-ui-workspace-computer (&optional workspace)
+  "Show the computer of WORKSPACE, or of the current workspace."
+  (interactive)
+  (let* ((source (and (derived-mode-p 'harness-ui-workspace-mode)
+                      (current-buffer)))
+         (id (or workspace
+                 (and source (buffer-local-value 'harness-ui-workspace--id source))
+                 harness-ui-workspace--last-id))
+         (box (and source (buffer-local-value 'harness-ui-workspace--box source))))
+    (unless id
+      (user-error "No workspace open"))
+    (let ((buffer (get-buffer-create "*Workspace Computer*")))
+      (with-current-buffer buffer
+        (harness-ui-workspace-computer-mode)
+        (setq harness-ui-workspace-computer--workspace id
+              harness-ui-workspace-computer--data box
+              harness-ui-workspace-computer--error nil
+              harness-ui-workspace-computer--busy nil
+              harness-ui-workspace-computer--shot nil)
+        (harness-ui-workspace-computer--render))
+      (pop-to-buffer buffer)
+      (harness-ui-workspace-computer-refresh buffer))))

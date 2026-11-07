@@ -46,7 +46,10 @@ class WorkspaceSummary {
     return threads.isEmpty ? null : threads.first;
   }
 
-  WorkspaceSummary copyWith({List<WorkspaceThread>? threads, String? lastThread}) {
+  WorkspaceSummary copyWith({
+    List<WorkspaceThread>? threads,
+    String? lastThread,
+  }) {
     return WorkspaceSummary(
       id: id,
       name: name,
@@ -216,7 +219,11 @@ class WorkspaceEntry {
 
 /// What the workspace's local memory says about itself.
 class WorkspaceMemoryStatus {
-  const WorkspaceMemoryStatus({this.notes = 0, this.last, this.fullText = false});
+  const WorkspaceMemoryStatus({
+    this.notes = 0,
+    this.last,
+    this.fullText = false,
+  });
 
   factory WorkspaceMemoryStatus.fromWire(JsonMap wire) => WorkspaceMemoryStatus(
     notes: asInt(wire['notes']) ?? 0,
@@ -229,47 +236,97 @@ class WorkspaceMemoryStatus {
   final bool fullText;
 }
 
-/// The computer panel's state.  The sandboxed box is staged; until its
-/// methods are there the panel is a preview, and says so.
+/// The computer panel's state: the real box the harness runs.
+///
+/// A box that is off has no [socket] and says why in [reason]; there is
+/// no drawn preview and no stand-in screen.  When [live] is true the app
+/// watches [socket] with the RFB client it already has.
 class WorkspaceComputerStatus {
   const WorkspaceComputerStatus({
     this.available = false,
+    this.running = false,
+    this.state = 'stopped',
     this.control = 'agent',
     this.backend = '',
+    this.socket,
     this.url,
-    this.error,
-    this.preview = true,
+    this.reason,
+    this.reasonCode,
+    this.width = 0,
+    this.height = 0,
   });
 
   factory WorkspaceComputerStatus.fromWire(JsonMap wire) {
+    final reasonWire = wire['reason'];
+    String? reason;
+    String? reasonCode;
+    if (reasonWire is Map) {
+      reason = asString(reasonWire['text']);
+      reasonCode = asString(reasonWire['code']);
+    } else {
+      reason = asString(reasonWire);
+    }
     return WorkspaceComputerStatus(
-      available: true,
+      available: asBool(wire['available']),
+      running: asBool(wire['running']),
+      state: asStringOr(
+        wire['state'],
+        asBool(wire['running']) ? 'running' : 'stopped',
+      ),
       control: asStringOr(wire['control'], 'agent'),
       backend: asStringOr(wire['backend'], ''),
+      socket: asString(wire['socket']),
       url: asString(wire['url']),
-      preview: false,
+      reason: reason,
+      reasonCode: reasonCode,
+      width: asInt(wire['width']) ?? 0,
+      height: asInt(wire['height']) ?? 0,
     );
   }
 
   final bool available;
+  final bool running;
+
+  /// `running`, `starting`, `stopped` or `failed`.
+  final String state;
   final String control;
   final String backend;
-  final String? url;
-  final String? error;
 
-  /// True when the harness has no box yet: the panel is a drawn preview.
-  final bool preview;
+  /// The WebSocket an RFB client speaks to, `ws://HOST:PORT/websockify`.
+  final String? socket;
+
+  /// The noVNC page beside it; never opened as the app's screen.
+  final String? url;
+
+  /// Why the box cannot be watched, from the harness.
+  final String? reason;
+  final String? reasonCode;
+  final int width;
+  final int height;
 
   bool get userControl => control == 'user';
+  bool get starting => state == 'starting';
+  bool get live => available && running && (socket?.isNotEmpty ?? false);
+  bool get off => !running;
 
-  WorkspaceComputerStatus copyWith({String? control, bool? available}) {
+  WorkspaceComputerStatus copyWith({
+    String? control,
+    String? state,
+    bool? available,
+    bool? running,
+  }) {
     return WorkspaceComputerStatus(
       available: available ?? this.available,
+      running: running ?? this.running,
+      state: state ?? this.state,
       control: control ?? this.control,
       backend: backend,
+      socket: socket,
       url: url,
-      error: error,
-      preview: preview,
+      reason: reason,
+      reasonCode: reasonCode,
+      width: width,
+      height: height,
     );
   }
 }
@@ -277,12 +334,59 @@ class WorkspaceComputerStatus {
 /// Stopwords for [conceptTags]: the little words of a title that say nothing
 /// about what it is about.
 const _conceptStopwords = {
-  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'about',
-  'under', 'over', 'after', 'before', 'new', 'old', 'one', 'two', 'how',
-  'what', 'when', 'why', 'where', 'who', 'are', 'was', 'were', 'will',
-  'would', 'should', 'can', 'could', 'not', 'its', 'our', 'your', 'their',
-  'has', 'have', 'had', 'get', 'got', 'make', 'made', 'use', 'using',
-  'more', 'most', 'less', 'than', 'then', 'also', 'just', 'like',
+  'the',
+  'and',
+  'for',
+  'with',
+  'from',
+  'that',
+  'this',
+  'into',
+  'about',
+  'under',
+  'over',
+  'after',
+  'before',
+  'new',
+  'old',
+  'one',
+  'two',
+  'how',
+  'what',
+  'when',
+  'why',
+  'where',
+  'who',
+  'are',
+  'was',
+  'were',
+  'will',
+  'would',
+  'should',
+  'can',
+  'could',
+  'not',
+  'its',
+  'our',
+  'your',
+  'their',
+  'has',
+  'have',
+  'had',
+  'get',
+  'got',
+  'make',
+  'made',
+  'use',
+  'using',
+  'more',
+  'most',
+  'less',
+  'than',
+  'then',
+  'also',
+  'just',
+  'like',
 };
 
 /// Return the high-level concepts a title names, at most two.
@@ -300,7 +404,5 @@ List<String> conceptTags(String title) {
     if (!words.contains(lower)) words.add(lower);
     if (words.length == 2) break;
   }
-  return [
-    for (final word in words) word[0].toUpperCase() + word.substring(1),
-  ];
+  return [for (final word in words) word[0].toUpperCase() + word.substring(1)];
 }

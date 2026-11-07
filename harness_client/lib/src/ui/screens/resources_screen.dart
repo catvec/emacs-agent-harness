@@ -46,7 +46,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   @override
   void initState() {
     super.initState();
-    _controller = widget.controller ??
+    _controller =
+        widget.controller ??
         ResourcesController(
           widget.app.harness,
           workspaceId: widget.workspace.id,
@@ -71,9 +72,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   String _subtitle(WorkspaceResources? resources) {
     final parts = [
       widget.workspace.name,
-      _controller.preview
-          ? 'Preview'
-          : resources?.statusLabel ?? 'Loading',
+      _controller.preview ? 'Preview' : resources?.statusLabel ?? 'Loading',
       if (resources?.reasonLabel != null) resources!.reasonLabel,
     ];
     return parts.join(' · ');
@@ -173,10 +172,13 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               _chip(status, color),
-              if (resources?.reasonLabel != null) _chip(resources!.reasonLabel!, null),
+              if (resources?.reasonLabel != null)
+                _chip(resources!.reasonLabel!, null),
               if (resources?.ready ?? false) _chip('Metadata only', null),
-              if (resources?.credentialsReady ?? false) _chip('Credentials', HarnessColors.moss),
-              if (resources == null && _controller.loading) _chip('Loading', null),
+              if (resources?.credentialsReady ?? false)
+                _chip('Credentials', HarnessColors.moss),
+              if (resources == null && _controller.loading)
+                _chip('Loading', null),
             ],
           ),
           if (resources?.browser case final browser?) ...[
@@ -243,7 +245,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                       boxShadow: _tab == index
                           ? [
                               BoxShadow(
-                                color: HarnessColors.ink.withValues(alpha: 0.06),
+                                color: HarnessColors.ink.withValues(
+                                  alpha: 0.06,
+                                ),
                                 blurRadius: 6,
                                 offset: const Offset(0, 2),
                               ),
@@ -275,9 +279,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   List<Widget> _browser(WorkspaceResources resources) {
     final browser = resources.browser;
     if (browser == null) {
-      return [
-        _empty('No browser data', 'Box staged'),
-      ];
+      return [_empty('No browser data', 'Computer off')];
     }
     return [
       _section('Browsers'),
@@ -299,8 +301,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         for (final login in browser.logins) _loginCard(login),
       const SizedBox(height: HarnessSpace.lg),
       _section('Transfer'),
-      _disabledRow('Export…', 'Needs box · approval', Icons.upload_file_outlined),
-      _disabledRow('Import…', 'Needs box · approval', Icons.download_outlined),
+      _disabledRow('Export…', 'Later stage', Icons.upload_file_outlined),
+      _disabledRow('Import…', 'Later stage', Icons.download_outlined),
     ];
   }
 
@@ -314,12 +316,14 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             decoration: BoxDecoration(
               color: type.primary
-                  ? Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.45)
+                  ? Theme.of(context).colorScheme.primaryContainer
+                        .withValues(alpha: 0.45)
                   : Theme.of(context).colorScheme.surfaceContainerLow,
               borderRadius: BorderRadius.circular(2),
               border: Border.all(
                 color: type.primary
-                    ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.5)
+                    ? Theme.of(context).colorScheme.primary
+                          .withValues(alpha: 0.5)
                     : Theme.of(context).colorScheme.outlineVariant,
               ),
             ),
@@ -333,8 +337,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                   size: 15,
                   color: type.available
                       ? (type.primary
-                          ? Theme.of(context).colorScheme.primary
-                          : Theme.of(context).colorScheme.onSurfaceVariant)
+                            ? Theme.of(context).colorScheme.primary
+                            : Theme.of(context).colorScheme.onSurfaceVariant)
                       : Theme.of(context).colorScheme.outline,
                 ),
                 const SizedBox(width: 5),
@@ -344,7 +348,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: HarnessText.meta(context).copyWith(
-                      fontWeight: type.primary ? FontWeight.w700 : FontWeight.w500,
+                      fontWeight: type.primary
+                          ? FontWeight.w700
+                          : FontWeight.w500,
                     ),
                   ),
                 ),
@@ -376,7 +382,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           width: 42,
           height: 42,
           decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.10),
+            color: Theme.of(context).colorScheme.primary
+                .withValues(alpha: 0.10),
             borderRadius: BorderRadius.circular(2),
           ),
           child: Icon(
@@ -407,7 +414,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     final action = _action(
       'Clear all…',
       enabled: _controller.canManageBrowser,
-      reason: _controller.preview ? 'Preview' : 'Box staged',
+      reason: _controller.preview ? 'Preview' : 'Computer off',
       onPressed: _confirmClearProfile,
     );
     return Container(
@@ -415,19 +422,22 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       decoration: _cardDecoration(),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final stacked = constraints.maxWidth < 320 ||
+          final stacked =
+              constraints.maxWidth < 320 ||
               MediaQuery.textScalerOf(context).scale(1) > 1.6;
           if (!stacked) {
-            return Row(children: [Expanded(child: details), action]);
+            return Row(
+              children: [
+                Expanded(child: details),
+                action,
+              ],
+            );
           }
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               details,
-              Align(
-                alignment: AlignmentDirectional.centerEnd,
-                child: action,
-              ),
+              Align(alignment: AlignmentDirectional.centerEnd, child: action),
             ],
           );
         },
@@ -439,7 +449,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final two = constraints.maxWidth >= 640;
-        final width = two ? (constraints.maxWidth - 10) / 2 : constraints.maxWidth;
+        final width = two
+            ? (constraints.maxWidth - 10) / 2
+            : constraints.maxWidth;
         return Wrap(
           spacing: 10,
           runSpacing: 10,
@@ -458,7 +470,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       'signed-out' => Theme.of(context).colorScheme.outline,
       _ => HarnessColors.amber,
     };
-    final initial = site.host.isEmpty ? '?' : site.host.substring(0, 1).toUpperCase();
+    final initial = site.host.isEmpty
+        ? '?'
+        : site.host.substring(0, 1).toUpperCase();
     return Semantics(
       button: true,
       label: 'Site ${site.host}, ${site.dataLabel}, ${site.authLabel}',
@@ -554,7 +568,11 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                 Text(login.host, style: HarnessText.rowTitle(context)),
                 const SizedBox(height: 2),
                 Text(
-                  '${login.username} · ${login.stateLabel} · ${_ago(login.lastUsed)}',
+                  [
+                    if (login.username.isNotEmpty) login.username,
+                    login.stateLabel,
+                    _ago(login.lastUsed),
+                  ].join(' · '),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: HarnessText.caption(context),
@@ -565,7 +583,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           _action(
             'Forget',
             enabled: _controller.canManageBrowser,
-            reason: _controller.preview ? 'Preview' : 'Box staged',
+            reason: _controller.preview ? 'Preview' : 'Computer off',
             onPressed: () => _confirmForget(login),
           ),
         ],
@@ -602,11 +620,17 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           runSpacing: 12,
           children: [for (final card in wallet.cards) _cardTile(card)],
         ),
-      _disabledRow('Add card…', 'Needs wallet provider', Icons.add_card_rounded),
+      _disabledRow(
+        'Add card…',
+        'Needs wallet provider',
+        Icons.add_card_rounded,
+      ),
       const SizedBox(height: HarnessSpace.lg),
       if (wallet.purchases.any((purchase) => purchase.proposed)) ...[
         _section('Purchase'),
-        for (final purchase in wallet.purchases.where((purchase) => purchase.proposed))
+        for (final purchase in wallet.purchases.where(
+          (purchase) => purchase.proposed,
+        ))
           _purchaseCard(wallet, purchase),
         const SizedBox(height: HarnessSpace.lg),
       ],
@@ -646,7 +670,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: const Color(0xFF141743),
-        border: Border.all(color: const Color(0xFFE8D9B5).withValues(alpha: 0.45)),
+        border: Border.all(
+          color: const Color(0xFFE8D9B5).withValues(alpha: 0.45),
+        ),
         borderRadius: BorderRadius.circular(2),
         // Flat, like the desktop panels: a rule, not a shadow.
       ),
@@ -655,7 +681,11 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         children: [
           Row(
             children: [
-              const Icon(Icons.credit_card_rounded, size: 18, color: Colors.white70),
+              const Icon(
+                Icons.credit_card_rounded,
+                size: 18,
+                color: Colors.white70,
+              ),
               const SizedBox(width: 8),
               Text(
                 card.network.toUpperCase(),
@@ -742,7 +772,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               if (card != null) card.label,
               if (authorization != null)
                 '${authorization.capLabel} · ${_money(authorization.remaining, authorization.currency)} left',
-              if (authorization != null && !authorization.allIn) 'Cap excludes fees',
+              if (authorization != null && !authorization.allIn)
+                'Cap excludes fees',
             ].join(' · '),
             style: HarnessText.caption(context),
           ),
@@ -759,12 +790,17 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               ),
               OutlinedButton(
                 onPressed: _controller.canManageWallet
-                    ? () => unawaited(_controller.decidePurchase(purchase.id, allow: false))
+                    ? () => unawaited(
+                        _controller.decidePurchase(purchase.id, allow: false),
+                      )
                     : null,
                 child: const Text('Deny'),
               ),
               if (!_controller.canManageWallet)
-                _chip(_controller.preview ? 'Preview' : 'Broker unavailable', null),
+                _chip(
+                  _controller.preview ? 'Preview' : 'Broker unavailable',
+                  null,
+                ),
             ],
           ),
         ],
@@ -772,12 +808,14 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     );
   }
 
-  Widget _authorizationTile(WalletData wallet, WalletAuthorization authorization) {
+  Widget _authorizationTile(
+    WalletData wallet,
+    WalletAuthorization authorization,
+  ) {
     final card = wallet.cardOf(authorization);
     final used = authorization.amount == 0
         ? 0.0
-        : (authorization.spent + authorization.reserved) /
-              authorization.amount;
+        : (authorization.spent + authorization.reserved) / authorization.amount;
     return Semantics(
       button: true,
       label:
@@ -818,7 +856,10 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                         ],
                       ),
                     ),
-                    _statusChip(authorization.statusLabel, authorization.status),
+                    _statusChip(
+                      authorization.statusLabel,
+                      authorization.status,
+                    ),
                   ],
                 ),
                 const SizedBox(height: 10),
@@ -827,7 +868,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                   child: LinearProgressIndicator(
                     value: used.clamp(0, 1),
                     minHeight: 5,
-                    backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    backgroundColor: Theme.of(context)
+                        .colorScheme
+                        .surfaceContainerHighest,
                     color: authorization.status == 'active'
                         ? HarnessColors.moss
                         : Theme.of(context).colorScheme.outline,
@@ -906,7 +949,10 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                     ],
                   ),
                 ),
-                _chip(status?.label ?? 'Unavailable', status?.ready == true ? HarnessColors.moss : null),
+                _chip(
+                  status?.label ?? 'Unavailable',
+                  status?.ready == true ? HarnessColors.moss : null,
+                ),
               ],
             ),
             if (resources.credentials.isNotEmpty) ...[
@@ -960,7 +1006,10 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(credential.label, style: HarnessText.rowTitle(context)),
+                    Text(
+                      credential.label,
+                      style: HarnessText.rowTitle(context),
+                    ),
                     const SizedBox(height: 2),
                     Text(
                       [
@@ -1032,16 +1081,25 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                 style: HarnessText.caption(context),
               ),
               const SizedBox(height: HarnessSpace.md),
-              _readRow('Fingerprint', credential.fingerprint.isEmpty ? 'None' : credential.fingerprint),
-              _readRow('Last used', credential.lastUsed == null ? 'Never' : _ago(credential.lastUsed)),
+              _readRow(
+                'Fingerprint',
+                credential.fingerprint.isEmpty
+                    ? 'None'
+                    : credential.fingerprint,
+              ),
+              _readRow(
+                'Last used',
+                credential.lastUsed == null
+                    ? 'Never'
+                    : _ago(credential.lastUsed),
+              ),
               _readRow('Value', 'Sandbox only'),
               if (credential.error != null) ...[
                 const SizedBox(height: HarnessSpace.sm),
                 Text(
                   credential.error!,
-                  style: HarnessText.caption(context).copyWith(
-                    color: Theme.of(context).colorScheme.error,
-                  ),
+                  style: HarnessText.caption(context)
+                      .copyWith(color: Theme.of(context).colorScheme.error),
                 ),
               ],
               const SizedBox(height: HarnessSpace.md),
@@ -1073,7 +1131,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   }
 
   Widget _accessTile(AccessGrant grant) {
-    final revocable = _controller.canManageWallet && grant.kind == 'authorization';
+    final revocable =
+        _controller.canManageWallet && grant.kind == 'authorization';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
       child: Row(
@@ -1107,12 +1166,15 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               ],
             ),
           ),
-          _chip(grant.accessLabel, grant.access == 'allowed' ? HarnessColors.moss : null),
+          _chip(
+            grant.accessLabel,
+            grant.access == 'allowed' ? HarnessColors.moss : null,
+          ),
           const SizedBox(width: 4),
           _action(
             'Revoke',
             enabled: revocable,
-            reason: _controller.preview ? 'Preview' : 'Needs box',
+            reason: _controller.preview ? 'Preview' : 'Later stage',
             onPressed: () => _confirmRevoke(grant),
           ),
         ],
@@ -1181,7 +1243,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
   Future<void> _confirmPurchase(WalletPurchase purchase) async {
     final wallet = _controller.resources?.wallet;
     WalletAuthorization? authorization;
-    for (final item in wallet?.authorizations ?? const <WalletAuthorization>[]) {
+    for (final item
+        in wallet?.authorizations ?? const <WalletAuthorization>[]) {
       if (item.id == purchase.authorization) authorization = item;
     }
     final ok = await _confirm(
@@ -1190,7 +1253,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         purchase.merchant,
         _money(purchase.amount, purchase.currency),
         if (authorization != null) authorization.capLabel,
-        if (authorization != null) '${_money(authorization.remaining, authorization.currency)} left',
+        if (authorization != null)
+          '${_money(authorization.remaining, authorization.currency)} left',
         'Advisory · no broker',
       ].join(' · '),
       'Allow',
@@ -1209,8 +1273,11 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
 
   String? _authorizationId(AccessGrant grant) {
     final wallet = _controller.resources?.wallet;
-    for (final authorization in wallet?.authorizations ?? const <WalletAuthorization>[]) {
-      if (grant.label.startsWith(_money(authorization.amount, authorization.currency))) {
+    for (final authorization
+        in wallet?.authorizations ?? const <WalletAuthorization>[]) {
+      if (grant.label.startsWith(
+        _money(authorization.amount, authorization.currency),
+      )) {
         return authorization.id;
       }
     }
@@ -1225,13 +1292,15 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       isScrollControlled: true,
       constraints: const BoxConstraints(maxWidth: 620),
       builder: (context) => StatefulBuilder(
-        builder: (context, setSheet) => _siteSheet(context, site, login, setSheet),
+        builder: (context, setSheet) =>
+            _siteSheet(context, site, login, setSheet),
       ),
     );
   }
 
   BrowserLogin? _loginFor(String origin) {
-    for (final login in _controller.resources?.browser?.logins ?? const <BrowserLogin>[]) {
+    for (final login
+        in _controller.resources?.browser?.logins ?? const <BrowserLogin>[]) {
       if (login.origin == origin) return login;
     }
     return null;
@@ -1258,9 +1327,15 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             Row(
               children: [
                 Expanded(
-                  child: Text(site.host, style: HarnessText.sheetTitle(context)),
+                  child: Text(
+                    site.host,
+                    style: HarnessText.sheetTitle(context),
+                  ),
                 ),
-                _chip(site.authLabel, site.auth == 'signed-in' ? HarnessColors.moss : null),
+                _chip(
+                  site.authLabel,
+                  site.auth == 'signed-in' ? HarnessColors.moss : null,
+                ),
               ],
             ),
             const SizedBox(height: 4),
@@ -1269,10 +1344,26 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               style: HarnessText.caption(context),
             ),
             const SizedBox(height: HarnessSpace.md),
-            _factRow('Cookies', '${site.cookies}', () => _clearKind(site, 'cookies', setSheet)),
-            _factRow('Site data', formatBytes(site.storageBytes), () => _clearKind(site, 'storage', setSheet)),
-            _factRow('Cache', formatBytes(site.cacheBytes), () => _clearKind(site, 'cache', setSheet)),
-            _factRow('Permissions', '${site.permissions}', () => _clearKind(site, 'permissions', setSheet)),
+            _factRow(
+              'Cookies',
+              '${site.cookies}',
+              () => _clearKind(site, 'cookies', setSheet),
+            ),
+            _factRow(
+              'Site data',
+              formatBytes(site.storageBytes),
+              () => _clearKind(site, 'storage', setSheet),
+            ),
+            _factRow(
+              'Cache',
+              formatBytes(site.cacheBytes),
+              () => _clearKind(site, 'cache', setSheet),
+            ),
+            _factRow(
+              'Permissions',
+              '${site.permissions}',
+              () => _clearKind(site, 'permissions', setSheet),
+            ),
             const SizedBox(height: HarnessSpace.lg),
             Wrap(
               spacing: 8,
@@ -1296,7 +1387,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             if (!_controller.canManageBrowser) ...[
               const SizedBox(height: 6),
               Text(
-                _controller.preview ? 'Preview · no changes' : 'Needs box',
+                _controller.preview ? 'Preview · no changes' : 'Later stage',
                 style: HarnessText.caption(context),
               ),
             ],
@@ -1304,9 +1395,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               const SizedBox(height: 8),
               Text(
                 _controller.error!,
-                style: HarnessText.caption(context).copyWith(
-                  color: Theme.of(context).colorScheme.error,
-                ),
+                style: HarnessText.caption(context)
+                    .copyWith(color: Theme.of(context).colorScheme.error),
               ),
             ],
           ],
@@ -1326,7 +1416,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           _action(
             'Clear',
             enabled: _controller.canManageBrowser,
-            reason: _controller.preview ? 'Preview' : 'Needs box',
+            reason: _controller.preview ? 'Preview' : 'Later stage',
             onPressed: clear,
           ),
         ],
@@ -1334,9 +1424,17 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     );
   }
 
-  Future<void> _clearKind(BrowserSite site, String kind, StateSetter setSheet) async {
+  Future<void> _clearKind(
+    BrowserSite site,
+    String kind,
+    StateSetter setSheet,
+  ) async {
     final ok = await _confirm(
-      'Clear ${kind == 'cookies' ? 'cookies' : kind == 'storage' ? 'site data' : kind}',
+      'Clear ${kind == 'cookies'
+          ? 'cookies'
+          : kind == 'storage'
+          ? 'site data'
+          : kind}',
       'Site · ${site.host} · ${kind == 'cookies' ? '${site.cookies} cookies' : 'cannot be undone'}',
       'Clear',
     );
@@ -1353,7 +1451,12 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       'Clear site',
     );
     if (!ok || !mounted) return;
-    await _controller.clearSite(site.origin, const ['cookies', 'storage', 'cache', 'permissions']);
+    await _controller.clearSite(site.origin, const [
+      'cookies',
+      'storage',
+      'cache',
+      'permissions',
+    ]);
     setSheet(() {});
     if (_controller.notice != null && mounted) Navigator.of(context).maybePop();
   }
@@ -1370,14 +1473,18 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     if (_controller.notice != null && mounted) Navigator.of(context).maybePop();
   }
 
-  Future<void> _showAuthorization(WalletData wallet, WalletAuthorization authorization) async {
+  Future<void> _showAuthorization(
+    WalletData wallet,
+    WalletAuthorization authorization,
+  ) async {
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
       constraints: const BoxConstraints(maxWidth: 620),
       builder: (context) => StatefulBuilder(
-        builder: (context, setSheet) => _authorizationSheet(context, wallet, authorization, setSheet),
+        builder: (context, setSheet) =>
+            _authorizationSheet(context, wallet, authorization, setSheet),
       ),
     );
   }
@@ -1422,12 +1529,24 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             ),
             const SizedBox(height: HarnessSpace.md),
             _readRow('Card', card?.label ?? 'Card'),
-            _readRow('Remaining', _money(authorization.remaining, authorization.currency)),
-            _readRow('Spent', _money(authorization.spent, authorization.currency)),
+            _readRow(
+              'Remaining',
+              _money(authorization.remaining, authorization.currency),
+            ),
+            _readRow(
+              'Spent',
+              _money(authorization.spent, authorization.currency),
+            ),
             if (authorization.reserved > 0)
-              _readRow('Reserved', _money(authorization.reserved, authorization.currency)),
+              _readRow(
+                'Reserved',
+                _money(authorization.reserved, authorization.currency),
+              ),
             _readRow('Expires', _until(authorization.expires)),
-            _readRow('Broker', authorization.advisory ? 'Advisory' : 'Enforced'),
+            _readRow(
+              'Broker',
+              authorization.advisory ? 'Advisory' : 'Enforced',
+            ),
             const SizedBox(height: HarnessSpace.lg),
             _section('History'),
             if (purchases.isEmpty)
@@ -1443,8 +1562,12 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               alignment: AlignmentDirectional.centerStart,
               child: _action(
                 'Revoke…',
-                enabled: _controller.canManageWallet && authorization.status == 'active',
-                reason: _controller.preview ? 'Preview' : 'Needs wallet provider',
+                enabled:
+                    _controller.canManageWallet &&
+                    authorization.status == 'active',
+                reason: _controller.preview
+                    ? 'Preview'
+                    : 'Needs wallet provider',
                 onPressed: () async {
                   final navigator = Navigator.of(context);
                   final ok = await _confirm(
@@ -1455,7 +1578,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                   if (!ok || !mounted) return;
                   await _controller.revokeAuthorization(authorization.id);
                   setSheet(() {});
-                  if (_controller.notice != null && mounted) navigator.maybePop();
+                  if (_controller.notice != null && mounted) {
+                    navigator.maybePop();
+                  }
                 },
               ),
             ),
@@ -1463,9 +1588,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               const SizedBox(height: 8),
               Text(
                 _controller.error!,
-                style: HarnessText.caption(context).copyWith(
-                  color: Theme.of(context).colorScheme.error,
-                ),
+                style: HarnessText.caption(context)
+                    .copyWith(color: Theme.of(context).colorScheme.error),
               ),
             ],
           ],
@@ -1495,10 +1619,8 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       showDragHandle: true,
       isScrollControlled: true,
       constraints: const BoxConstraints(maxWidth: 620),
-      builder: (context) => _AuthorizationForm(
-        controller: _controller,
-        card: card,
-      ),
+      builder: (context) =>
+          _AuthorizationForm(controller: _controller, card: card),
     );
     if (mounted) setState(() {});
   }
@@ -1536,15 +1658,13 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     );
   }
 
-  Widget _statusChip(String label, String status) => _chip(
-    label,
-    switch (status) {
-      'active' => HarnessColors.moss,
-      'expired' || 'exhausted' => HarnessColors.amber,
-      'revoked' => Theme.of(context).colorScheme.error,
-      _ => null,
-    },
-  );
+  Widget _statusChip(String label, String status) =>
+      _chip(label, switch (status) {
+        'active' => HarnessColors.moss,
+        'expired' || 'exhausted' => HarnessColors.amber,
+        'revoked' => Theme.of(context).colorScheme.error,
+        _ => null,
+      });
 
   Widget _action(
     String label, {
@@ -1682,7 +1802,9 @@ class _AuthorizationFormState extends State<_AuthorizationForm> {
   @override
   Widget build(BuildContext context) {
     final amount = _minor;
-    final scope = _merchant.text.trim().isEmpty ? 'Any merchant' : _merchant.text.trim();
+    final scope = _merchant.text.trim().isEmpty
+        ? 'Any merchant'
+        : _merchant.text.trim();
     final summary = [
       amount == null ? 'Amount' : 'Max ${_money(amount, 'USD')}',
       _capKind == 'cumulative' ? 'Cumulative' : 'Per transaction',
@@ -1712,8 +1834,12 @@ class _AuthorizationFormState extends State<_AuthorizationForm> {
               TextField(
                 key: const ValueKey('authorization-amount'),
                 controller: _amount,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+                ],
                 decoration: const InputDecoration(
                   labelText: 'Amount',
                   prefixText: r'$ ',
@@ -1738,11 +1864,15 @@ class _AuthorizationFormState extends State<_AuthorizationForm> {
               SegmentedButton<String>(
                 segments: const [
                   ButtonSegment(value: 'cumulative', label: Text('Cumulative')),
-                  ButtonSegment(value: 'per-transaction', label: Text('Per transaction')),
+                  ButtonSegment(
+                    value: 'per-transaction',
+                    label: Text('Per transaction'),
+                  ),
                 ],
                 selected: {_capKind},
                 showSelectedIcon: false,
-                onSelectionChanged: (value) => setState(() => _capKind = value.first),
+                onSelectionChanged: (value) =>
+                    setState(() => _capKind = value.first),
               ),
               const SizedBox(height: HarnessSpace.md),
               DropdownButtonFormField<String>(
@@ -1784,9 +1914,8 @@ class _AuthorizationFormState extends State<_AuthorizationForm> {
                 const SizedBox(height: HarnessSpace.sm),
                 Text(
                   _problem!,
-                  style: HarnessText.caption(context).copyWith(
-                    color: Theme.of(context).colorScheme.error,
-                  ),
+                  style: HarnessText.caption(context)
+                      .copyWith(color: Theme.of(context).colorScheme.error),
                 ),
               ],
               const SizedBox(height: HarnessSpace.lg),
@@ -1821,7 +1950,8 @@ class _AuthorizationFormState extends State<_AuthorizationForm> {
       ),
       child: Text(
         label,
-        style: HarnessText.meta(context).copyWith(color: color, fontWeight: FontWeight.w600),
+        style: HarnessText.meta(context)
+            .copyWith(color: color, fontWeight: FontWeight.w600),
       ),
     );
   }

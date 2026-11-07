@@ -5,11 +5,13 @@ The main page is the design and the experience; this page is what a
 stage's task reads before it writes code: the modules and their
 dependencies, storage, methods, events, options, tools, prompts, the
 detailed UI and copy inventory, the tests, and the staged plan.  The
-first slice is implemented: `workspace`, `workspace-memory` and
-`ui-workspace` are in the tree, with their tests, and the Flutter
-client has the `Workspace` tab, its responsive layout and the computer
-takeover.  The Logseq client, the scribe/dream, the box, routines and
-voice are not.
+first slice is implemented: `workspace`, `workspace-memory`,
+`workspace-box` and `ui-workspace` are in the tree, with their tests,
+and the Flutter client has the `Workspace` tab, its responsive layout
+and a computer that draws the real RFB stream.  The Logseq client, the
+scribe/dream, the container backend, routines and voice are not.  The
+computer's design and its `local` boundary are in
+[workspace computer](workspace-computer.md).
 
 ## Contents
 
@@ -109,7 +111,7 @@ talks ACP.
 | `workspace-memory` | state | `logseq`, `secrets`, `usage`, the shared embeddings library | The index, retrieval, the memory tools and the write path.  It knows pages, blocks and provenance, not threads or chats. |
 | `workspace` | state | `workspace-memory`, `session`, `agent`, `project`; uses `tasks`, `supervisor` and `seed` when loaded | Workspaces, threads, episodes, the timeline, routing, the brief, the scribe and the curator.  It is the mode. |
 | `workspace-dream` | state | `workspace-memory`, `workspace` | The dream scheduler, phases, reports and review state. |
-| `workspace-box` | state | `sandbox`, `access` | The box lifecycle, mounts, control channel, browser and VNC endpoint.  Optional: without it the workspace has no computer. |
+| `workspace-box` | state | `store` | The computer's lifecycle, private X display, browser profile, input, control lock and VNC endpoint.  Optional: without it the workspace has no computer.  The first backend is `local`, not the container in the design. |
 | `workspace-routines` | state | `workspace`, `notifications` | Triggers, runs and delivery.  Optional; a workspace without it has no scheduled work. |
 | `ui-workspace-voice` | UI | `ui-workspace`, `ui-voice` (when present) | The call control on a thread; the delegation path is `workspace/prompt` with `:channel 'voice`, which marks the turns. |
 | `ui-workspace` | UI | `ui`, `ui-chat`, `ui-compose`, `ui-pending` | The workspace chat buffer, thread sidebar, header, dividers and settings line. |
@@ -370,9 +372,11 @@ The resources methods are the first-class resource contract described
 in [workspace resources](workspace-resources.md): a browser profile,
 its sites and saved logins, the wallet's cards and bounded purchase
 authorizations, and the access the agent has to each.  They carry
-metadata only and answer `unavailable` with `:reason "box-staged"`
-until the box and the payment broker exist; the client says so rather
-than simulating a change.
+metadata only.  With a running box the browser section is the real
+Firefox profile; with none it answers `unavailable` with the box's own
+reason (`box-not-running`, `box-tools-missing` or `backend-unavailable`).
+The wallet still answers `wallet-unavailable` because no payment broker
+exists; the client says so rather than simulating a change.
 | `workspace/browser/login` | `workspace site &optional fields` | a pending login request |
 
 **Routines**
@@ -628,18 +632,16 @@ The model tiers:
   stages, rules, judge, jail and access profile apply.
 - The workspace's file tools see the workspace root and the projects
   the user granted.  A path outside is a normal permission request.
-- The box is a **sandbox profile** on the host side: the `bash` tool,
-  routed to `workspace/box/exec`, is allowed inside the workspace box
-  for the workspace's session, and the host's `bash` is not used.  The box's mounts and
-  network are the boundary.  The user approves the profile once, when
-  the box is created or enabled: from then on, commands whose working
-  directory is `/workspace`, `/projects/<name>` or `/scratch`, and the
-  file tools on paths inside those same roots, run without a
-  per-command prompt, and the auto-mode judge is not asked to
-  second-guess them.  `harness-workspace-box-always-ask` turns the
-  per-command prompt back on for a cautious setup.  A path outside the
+- The `local` box is **not** a sandbox profile yet: `workspace/box/exec`
+  is a separate method, and the workspace session's `bash` tool still
+  runs on the host under the ordinary permission chain.  A container
+  backend with mounts, a network policy and a routed `bash` is the
+  design; until it lands, the status says `local display and process`
+  and the permission chain is unchanged.  A container backend will
+  need a profile the user approves once, with `/workspace`,
+  `/projects/<name>` and `/scratch` inside it; a path outside the
   mounts, a new mount, a network change, a login or an outside action
-  still asks.  Stopping or removing the box revokes the profile.
+  still asks, and stopping or removing the box revokes the profile.
 - The memory tools have their own `permission/decide` stages:
   `memory_forget` is user-only in every mode; `memory_write` to a
   user-edited block asks; `memory_write` to `Preferences` or a
@@ -986,9 +988,9 @@ column at 880 px.  A site or an authorization opens a sheet with its
 metadata and its safe actions.  The page never shows a cookie, a
 password, a card number or a token: the wire has no field for one and
 the client has no place to put it.  When the box and the payment
-broker are absent the page says `Unavailable · box staged` and every
-action is disabled; when a preview is drawn it says `Preview · no
-changes`.  [Workspace resources](workspace-resources.md) is the model,
+broker are absent the page says `Unavailable · Computer tools` (or the
+box's own reason) and every action is disabled; the preview fixture is
+drawn only in the client's own tests and says `Preview`.  [Workspace resources](workspace-resources.md) is the model,
 the wallet invariants and the blocked contract.
 
 The graph is a prototype, and the only part of it the first slice
@@ -1048,10 +1050,11 @@ bodies in a picture are data.
 
 | String | Where |
 |---|---|
-| `Computer` / `Preview` / `Live` | desk header |
+| `Computer` / `Live` / `Starting` / `Off` | desk header |
 | `Take over` / `Return control` | takeover pill |
 | `Control · agent` / `Control · you` | control caption |
-| `Sandbox staged · preview` / `Box running` / `Box · docker` | desk footer |
+| `Box running` / `Box · local` / `Computer off` | desk footer |
+| `Screen lost` / `Start` | VNC lost state and off state |
 | `Details` | desk action |
 
 **Empty, error and dialog**
@@ -1078,11 +1081,11 @@ bodies in a picture are data.
 |---|---|
 | `Resources` | page title and desk action |
 | `Browser` / `Wallet` / `Credentials` / `Access` | tabs |
-| `Profile · Home` / `Chromium · 18 sites · 412 MB` | profile card |
+| `Profile · Home` / `Firefox · 18 sites · 412 MB` | profile card |
 | `Cookies 12` / `Site data 3.1 KB` / `Cache 625 KB` / `Permissions 2` | site rows |
 | `Signed in` / `Signed out` / `Unknown` | authenticated state |
-| `Saved logins` / `Forget login` | logins (no reveal) |
-| `Clear all…` / `Clear site data` / `Export…` / `Import…` / `Needs box · approval` | cleanup and transfer |
+| `Saved logins` / `Forget login` / `site session` | logins (no reveal, no value) |
+| `Clear all…` / `Clear site data` / `Export…` / `Import…` / `Later stage` | cleanup and transfer |
 | `Cards` / `Visa •••• 4242` / `09/2028` / `Active` | wallet cards |
 | `Purchase · $9.40` / `Allow` / `Deny` | proposed purchase |
 | `Authorizations` / `$10.00 · Cumulative` / `Remaining $0.60` | authorizations |
@@ -1091,7 +1094,7 @@ bodies in a picture are data.
 | `Agent access` / `Allowed` / `Ask` / `None` / `Revoke` | access |
 | `Audit` / `Created` / `Used` / `Forgotten` | history |
 | `Credentials` / `Secrets module` / `Locked run · ready` / `SHA-256 4f9c2a1b` | the secrets module's declared credentials |
-| `Unavailable` / `Box staged` / `Needs wallet provider` / `Preview · no changes` | states |
+| `Unavailable` / `Computer tools` / `Computer off` / `Needs wallet provider` / `Preview · no changes` | states |
 | `No sites` / `No logins` / `No cards` / `No authorizations` / `No purchases` | empty states |
 
 The resource rows are metadata by construction; the credentials come
@@ -1303,7 +1306,7 @@ are the tests the later stages add.
 | `test/harness-workspace-test.el` | workspace/thread/episode records, the timeline, routing (hard, similarity, model), brief budgets, continuation and re-entry, a restart, a deleted episode, a moved project, settings |
 | `test/harness-workspace-scribe-test.el` | the scribe's prompts, batching, duplicate detection, hash conflict, no write for a BTW, a failed write queued |
 | `test/harness-workspace-dream-test.el` | phases, candidate scoring, duplicate/update/contradiction, risk classification, idempotent apply, user-edit guard, review/apply/skip, undo, budget stop, backup failure, a crash resumed |
-| `test/harness-workspace-box-test.el` | a fake executor: lifecycle, mount validation, path translation, screenshot/input, takeover lock, login request, backend absence, fail closed, reset, snapshot |
+| `test/harness-workspace-box-test.el` | the `local` box: the off state and its missing tools, a running record's VNC URL and socket, the control lock and input refusal, the window parser, browser metadata with no values, and every method the clients call |
 | `test/harness-workspace-routines-test.el` | schedule computation, timezone, missed runs, catch-up, read-only tools, delivery, pause/resume, event triggers |
 | `test/harness-ui-workspace-test.el` | exact rendered copy (the inventory), header states, empty/loading/error states, dividers, brief cards, event cards, compose routing, keys, overflow, mouse buttons |
 | `test/harness-ui-workspace-memory-test.el` | memory browser states, provenance, correct/forget, index line, exact copy |
@@ -1456,15 +1459,20 @@ always at hand.
 **Implemented so far.**  The first slice lands the core of stage 2
 (`workspace` records, threads, episodes, routing, the brief and the
 timeline), a local SQLite stand-in for the memory half of stages 0 and
-1 (`workspace-memory` notes, FTS recall and the memory tools), and the
+1 (`workspace-memory` notes, FTS recall and the memory tools), the
 Emacs UI (`ui-workspace`), and the Flutter `Workspace` tab with its
-responsive screen, concept periphery, computer takeover, and the
+responsive screen, concept periphery, real computer screen, and the
 Resources surface for the browser data, the wallet and the access the
-agent has to either (the harness answers the resources methods with
-`unavailable · box-staged` until the box and the broker exist).  It
-does not include the Logseq client, the embedding index, the
-scribe/curator/dream, the box, routines or voice; those keep their
-stage below.
+agent has to either.  It also lands the `local` half of stage 5:
+`workspace-box` starts a private Xvfb display, a window manager and a
+real x11vnc/noVNC endpoint, takes screenshots from the framebuffer,
+runs commands and input, keeps a Firefox profile, and enforces the
+takeover lock; the Flutter and Emacs clients draw and drive it.  The
+memory contract also gains `memory/get`, `memory/forget`,
+`memory/pages`, `memory/page`, `memory/sync` and `memory/reindex`, and
+`workspace/thread/merge` is implemented.  It does not include the
+Logseq client, the embedding index, the scribe/curator/dream, the
+container backend, routines or voice; those keep their stage below.
 
 ### Stage 0: embeddings and the Logseq client
 
@@ -1606,10 +1614,19 @@ is not stable, the client's `changes-since` falls back to page-level
 
 ### Stage 5: the box
 
+**Status.**  The `local` backend is implemented: private Xvfb display,
+window manager, x11vnc, the vendored noVNC page, the Python WebSocket
+bridge, command/input/screenshot/window methods, the Firefox profile
+and its metadata, the takeover lock, persistence across restarts and
+the Emacs and Flutter surfaces.  The container backend, mounts,
+image, CDP/BiDi browser tools, login form, snapshots and the wallet
+broker are still the work below.
+
 **Work**
 
 1. The image and the backend detection (rootless Docker/Podman/bwrap),
-   fail closed.
+   fail closed.  The `local` backend now exists as the first backend
+   and names its boundary.
 2. Lifecycle, labels, adoption, home volume, mounts, network, health.
 3. `workspace/box/exec`, screenshot, windows, input, clipboard, launch.
 4. Browser/CDP tools, downloads, login form.

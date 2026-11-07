@@ -19,6 +19,7 @@ import 'package:harness_client/src/ui/app_scope.dart';
 import 'package:harness_client/src/ui/screens/workspace_screen.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
 
+import 'support/fake_rfb.dart';
 import 'support/real_fonts.dart';
 
 WorkspaceController _controller() {
@@ -49,7 +50,17 @@ WorkspaceController _controller() {
   return WorkspaceController.preview(
     workspace: workspace,
     memory: const WorkspaceMemoryStatus(notes: 12, fullText: true),
-    computer: const WorkspaceComputerStatus(control: 'agent', preview: true),
+    computer: const WorkspaceComputerStatus(
+      available: true,
+      running: true,
+      state: 'running',
+      control: 'agent',
+      backend: 'local',
+      socket: 'ws://memory/websockify',
+      url: 'http://memory/vnc_lite.html',
+      width: 1280,
+      height: 800,
+    ),
     entries: const [
       WorkspaceEntry(
         kind: 'divider',
@@ -136,6 +147,8 @@ Future<(GlobalKey, WorkspaceController)> _show(
                 app: app,
                 controller: controller,
                 onOpenSession: (_) {},
+                vncTransportFactory: (_) =>
+                    FakeRfbTransport(width: 640, height: 400),
               ),
             ),
           ),
@@ -146,10 +159,20 @@ Future<(GlobalKey, WorkspaceController)> _show(
   for (var i = 0; i < 12; i++) {
     await tester.pump(const Duration(milliseconds: 100));
   }
+  // The RFB client decodes the frame off the test's clock; let that image
+  // arrive before a picture is taken, so the desk shows the screen.
+  await tester.runAsync(
+    () => Future<void>.delayed(const Duration(milliseconds: 120)),
+  );
+  await tester.pump();
   return (boundary, controller);
 }
 
-Future<void> _write(WidgetTester tester, GlobalKey boundary, String path) async {
+Future<void> _write(
+  WidgetTester tester,
+  GlobalKey boundary,
+  String path,
+) async {
   await tester.runAsync(() async {
     final object =
         boundary.currentContext!.findRenderObject()! as RenderRepaintBoundary;
@@ -172,15 +195,13 @@ void main() {
     final (boundary, _) = await _show(tester, width: 390, height: 844);
     expect(find.text('Kitchen renovation'), findsWidgets);
     expect(tester.takeException(), isNull);
-    if (shots != null) await _write(tester, boundary, '$shots/workspace-mobile.png');
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-mobile.png');
+    }
   });
 
   testWidgets('workspace computer on a phone', (tester) async {
-    final (boundary, controller) = await _show(
-      tester,
-      width: 390,
-      height: 844,
-    );
+    final (boundary, controller) = await _show(tester, width: 390, height: 844);
     await tester.tap(find.byTooltip('Computer'));
     for (var i = 0; i < 8; i++) {
       await tester.pump(const Duration(milliseconds: 80));
@@ -204,11 +225,17 @@ void main() {
     expect(find.text('Computer'), findsOneWidget);
     expect(find.text('Concepts'), findsOneWidget);
     expect(tester.takeException(), isNull);
-    if (shots != null) await _write(tester, boundary, '$shots/workspace-desktop.png');
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-desktop.png');
+    }
   });
 
   testWidgets('workspace takeover on a desktop', (tester) async {
-    final (boundary, controller) = await _show(tester, width: 1440, height: 900);
+    final (boundary, controller) = await _show(
+      tester,
+      width: 1440,
+      height: 900,
+    );
     await tester.tap(find.text('Take over'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 380));

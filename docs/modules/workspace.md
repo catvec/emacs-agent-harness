@@ -42,8 +42,6 @@ of `workspace/prompt`.
 ### Methods
 
 - `workspace/brief` (id &optional opts) — Return a compact digest of workspace ID for the chat or voice.
-- `workspace/browser/clear` (id scope &optional origin kinds) — Clear browser data in workspace ID and return the resources answer.
-- `workspace/browser/login/forget` (id login) — Forget the saved site LOGIN in workspace ID and return the resources.
 - `workspace/cancel` (id &optional thread) — Cancel the live turn of workspace ID, or of THREAD.
 - `workspace/context` (id &optional thread episode) — Return the last brief of workspace ID's THREAD.
 - `workspace/create` (&rest plist) — Create a workspace.  PLIST may set :name, :root, :project, :model,
@@ -58,6 +56,7 @@ of `workspace/prompt`.
 - `workspace/thread` (id thread) — Return THREAD of workspace ID with its episodes.
 - `workspace/thread/create` (id title &optional plist) — Create a thread TITLE in workspace ID and return it.
 - `workspace/thread/delete` (id thread &optional delete-sessions) — Remove THREAD from workspace ID; its page and episodes stay by default.
+- `workspace/thread/merge` (id from into) — Merge thread FROM of workspace ID into thread INTO.
 - `workspace/thread/park` (id thread) — Park THREAD of workspace ID at the next turn boundary.
 - `workspace/thread/revive` (id thread &optional opts) — Start a new episode of THREAD in workspace ID.
 - `workspace/thread/update` (id thread &rest plist) — Change THREAD of workspace ID.
@@ -117,6 +116,8 @@ of `workspace/prompt`.
 - `store/read-all` ([store](store.md))
 - `store/save` ([store](store.md))
 - `task/list` ([tasks](tasks.md)), when it is loaded
+- `workspace/box/browser` ([workspace-box](workspace-box.md)), when it is loaded
+- `workspace/box/status` ([workspace-box](workspace-box.md)), when it is loaded
 
 ### Events it handles
 

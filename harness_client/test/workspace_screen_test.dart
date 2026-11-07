@@ -11,9 +11,11 @@ import 'package:harness_client/src/ui/screens/workspace_screen.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
 import 'package:harness_client/src/ui/widgets/markdown_view.dart';
 import 'package:harness_client/src/ui/widgets/vnc_takeover.dart';
+import 'package:harness_client/src/vnc/rfb.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support/fake_harness.dart';
+import 'support/fake_rfb.dart';
 
 WorkspaceController _preview() {
   final workspace = WorkspaceSummary(
@@ -44,8 +46,15 @@ WorkspaceController _preview() {
     workspace: workspace,
     memory: const WorkspaceMemoryStatus(notes: 12, fullText: true),
     computer: const WorkspaceComputerStatus(
+      available: true,
+      running: true,
+      state: 'running',
       control: 'agent',
-      preview: true,
+      backend: 'local',
+      socket: 'ws://memory/websockify',
+      url: 'http://memory/vnc_lite.html',
+      width: 1280,
+      height: 800,
     ),
     entries: [
       const WorkspaceEntry(
@@ -91,6 +100,7 @@ Future<void> _pump(
   Size size = const Size(1440, 900),
   double textScale = 1,
   bool cupertino = false,
+  RfbTransport Function(String url)? vncTransportFactory,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -113,6 +123,9 @@ Future<void> _pump(
             app: _app(),
             controller: controller,
             onOpenSession: (_) {},
+            vncTransportFactory:
+                vncTransportFactory ??
+                (_) => FakeRfbTransport(width: 640, height: 400),
           ),
         ),
       ),
@@ -166,7 +179,11 @@ void main() {
     tester,
   ) async {
     final controller = _preview();
-    for (final size in const [Size(1024, 768), Size(1440, 900), Size(1920, 1080)]) {
+    for (final size in const [
+      Size(1024, 768),
+      Size(1440, 900),
+      Size(1920, 1080),
+    ]) {
       for (final scale in const [1.0, 1.5, 2.0]) {
         await _pump(tester, controller, size: size, textScale: scale);
         expect(tester.takeException(), isNull, reason: '$size at $scale');
@@ -245,9 +262,11 @@ void main() {
     await tester.pump(const Duration(milliseconds: 340));
     final moving = tester.getTopLeft(find.byKey(const ValueKey('vnc-pill')));
     expect(moving.dy, lessThan(idle.dy));
-    final painter = tester
-        .widget<CustomPaint>(find.byKey(const ValueKey('vnc-border')))
-        .painter! as VncBorderPainter;
+    final painter =
+        tester
+                .widget<CustomPaint>(find.byKey(const ValueKey('vnc-border')))
+                .painter!
+            as VncBorderPainter;
     expect(painter.progress, greaterThan(0.2));
     await tester.pumpAndSettle();
     expect(find.text('Return control'), findsOneWidget);
@@ -319,10 +338,10 @@ void main() {
       'You',
       'Agent',
       'Computer',
-      'Preview',
+      'Live',
       'Take over',
       'Control · agent',
-      'Sandbox staged · preview',
+      'Box · local',
       'Details',
       'Workspace message',
     ]) {
@@ -340,6 +359,23 @@ void main() {
     ]) {
       expect(find.byTooltip(tooltip), findsNWidgets(count), reason: tooltip);
     }
+  });
+
+  testWidgets('a computer that is off has no preview, only Start', (
+    tester,
+  ) async {
+    final controller = _preview();
+    controller.computer = const WorkspaceComputerStatus(
+      backend: 'local',
+      reason: 'Computer tools',
+    );
+    await _pump(tester, controller, size: const Size(1440, 900));
+    expect(find.text('Computer off'), findsOneWidget);
+    expect(find.text('Start'), findsOneWidget);
+    expect(find.text('Computer tools'), findsWidgets);
+    expect(find.text('Preview'), findsNothing);
+    expect(find.textContaining('Sandbox staged'), findsNothing);
+    expect(find.textContaining('Quartz'), findsNothing);
   });
 
   testWidgets('a chosen concept has its own words', (tester) async {

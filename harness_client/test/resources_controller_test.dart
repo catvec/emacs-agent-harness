@@ -39,21 +39,25 @@ void main() {
     expect(controller.canManage, isTrue);
   });
 
-  test('clearing a site sends its scope and kinds and takes the login', () async {
-    final (_, harness, controller) = await _rig();
-    await controller.clearSite('https://stoneco.example', const ['cookies']);
-    final site = controller.resources!.browser!.sites
-        .firstWhere((item) => item.host == 'stoneco.example');
-    expect(site.cookies, 0);
-    expect(site.auth, 'signed-out');
-    expect(controller.resources!.browser!.logins, isEmpty);
-    expect(controller.notice, 'Cleared');
-    final call = harness.resourcesCalls.last;
-    expect(call['method'], '_harness/workspace/browser/clear');
-    expect((call['params'] as Map)['scope'], 'site');
-    expect((call['params'] as Map)['origin'], 'https://stoneco.example');
-    expect((call['params'] as Map)['kinds'], ['cookies']);
-  });
+  test(
+    'clearing a site sends its scope and kinds and takes the login',
+    () async {
+      final (_, harness, controller) = await _rig();
+      await controller.clearSite('https://stoneco.example', const ['cookies']);
+      final site = controller.resources!.browser!.sites.firstWhere(
+        (item) => item.host == 'stoneco.example',
+      );
+      expect(site.cookies, 0);
+      expect(site.auth, 'signed-out');
+      expect(controller.resources!.browser!.logins, isEmpty);
+      expect(controller.notice, 'Cleared');
+      final call = harness.resourcesCalls.last;
+      expect(call['method'], '_harness/workspace/browser/clear');
+      expect((call['params'] as Map)['scope'], 'site');
+      expect((call['params'] as Map)['origin'], 'https://stoneco.example');
+      expect((call['params'] as Map)['kinds'], ['cookies']);
+    },
+  );
 
   test('forgetting a login removes only that login', () async {
     final (_, harness, controller) = await _rig();
@@ -61,7 +65,10 @@ void main() {
     expect(controller.resources!.browser!.logins, isEmpty);
     expect(controller.resources!.browser!.sites, isNotEmpty);
     expect(controller.notice, 'Login forgotten');
-    expect(harness.resourcesCalls.last['method'], '_harness/workspace/browser/login/forget');
+    expect(
+      harness.resourcesCalls.last['method'],
+      '_harness/workspace/browser/login/forget',
+    );
   });
 
   test('a bounded authorization is created with its cap and expiry', () async {
@@ -117,7 +124,10 @@ void main() {
   test('revoking removes the authorization access, not its history', () async {
     final (_, _, controller) = await _rig();
     await controller.revokeAuthorization('auth-1');
-    expect(controller.resources!.wallet!.authorizations.single.status, 'revoked');
+    expect(
+      controller.resources!.wallet!.authorizations.single.status,
+      'revoked',
+    );
     expect(controller.resources!.wallet!.purchases, isNotEmpty);
     expect(controller.notice, 'Authorization revoked');
   });
@@ -127,10 +137,7 @@ void main() {
     await controller.decidePurchase('buy-1', allow: true);
     expect(controller.resources!.wallet!.purchases.single.status, 'approved');
     expect(controller.notice, 'Allowed');
-    expect(
-      (harness.resourcesCalls.last['params'] as Map)['decision'],
-      'allow',
-    );
+    expect((harness.resourcesCalls.last['params'] as Map)['decision'], 'allow');
     await controller.decidePurchase('buy-1', allow: false);
     expect(controller.resources!.wallet!.purchases.single.status, 'declined');
     expect(controller.notice, 'Denied');
@@ -154,35 +161,42 @@ void main() {
   test('a harness without the contract opens on the blocked answer', () async {
     final (_, harness, controller) = await _rig(resources: false);
     expect(controller.resources!.status, 'unavailable');
-    expect(controller.resources!.reason, 'box-staged');
+    expect(controller.resources!.reason, 'box-tools-missing');
     expect(controller.canManage, isFalse);
     await controller.clearSite('https://stoneco.example', const ['cookies']);
     expect(harness.resourcesCalls, isEmpty);
   });
 
-  test('a credentials-only answer still opens, with its actions blocked', () async {
-    SharedPreferences.setMockInitialValues({});
-    final settings = SettingsController();
-    await settings.load();
-    final harness = FakeHarness(workspace: true, resources: true, resourcesCredentialsOnly: true);
-    final app = AppController(
-      settings: settings,
-      connector: harness.connector,
-      reconnectDelays: const [Duration(milliseconds: 5)],
-    );
-    addTearDown(app.dispose);
-    await app.connect('ws://memory/acp');
-    final controller = ResourcesController(app.harness, workspaceId: 'w1');
-    addTearDown(controller.dispose);
-    await controller.load();
-    expect(controller.resources!.credentialsReady, isTrue);
-    expect(controller.resources!.credentials.length, 2);
-    expect(controller.resources!.browser, isNull);
-    expect(controller.resources!.wallet, isNull);
-    expect(controller.resources!.statusLabel, 'Partial');
-    expect(controller.canManageBrowser, isFalse);
-    expect(controller.canManageWallet, isFalse);
-  });
+  test(
+    'a credentials-only answer still opens, with its actions blocked',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = SettingsController();
+      await settings.load();
+      final harness = FakeHarness(
+        workspace: true,
+        resources: true,
+        resourcesCredentialsOnly: true,
+      );
+      final app = AppController(
+        settings: settings,
+        connector: harness.connector,
+        reconnectDelays: const [Duration(milliseconds: 5)],
+      );
+      addTearDown(app.dispose);
+      await app.connect('ws://memory/acp');
+      final controller = ResourcesController(app.harness, workspaceId: 'w1');
+      addTearDown(controller.dispose);
+      await controller.load();
+      expect(controller.resources!.credentialsReady, isTrue);
+      expect(controller.resources!.credentials.length, 2);
+      expect(controller.resources!.browser, isNull);
+      expect(controller.resources!.wallet, isNull);
+      expect(controller.resources!.statusLabel, 'Partial');
+      expect(controller.canManageBrowser, isFalse);
+      expect(controller.canManageWallet, isFalse);
+    },
+  );
 
   test('a preview never reports a change', () async {
     final controller = ResourcesController.preview();

@@ -962,11 +962,7 @@ class HarnessApi {
 
   /// Send [text] to [id], continuing [thread] when it is given.  The request
   /// answers when the turn ends; the timeline events arrive while it runs.
-  Future<void> promptWorkspace(
-    String id,
-    String text, {
-    String? thread,
-  }) async {
+  Future<void> promptWorkspace(String id, String text, {String? thread}) async {
     await extensionRaw('workspace/prompt', {
       'id': id,
       'text': text,
@@ -974,16 +970,17 @@ class HarnessApi {
     });
   }
 
-  Future<WorkspaceThread> createWorkspaceThread(
-    String id,
-    String title,
-  ) async {
+  Future<WorkspaceThread> createWorkspaceThread(String id, String title) async {
     return WorkspaceThread.fromWire(
       await extension('workspace/thread/create', {'id': id, 'title': title}),
     );
   }
 
-  Future<void> updateWorkspace(String id, {String? model, String? title}) async {
+  Future<void> updateWorkspace(
+    String id, {
+    String? model,
+    String? title,
+  }) async {
     await extensionRaw('workspace/update', {
       'id': id,
       if (model != null) 'model': model,
@@ -1007,9 +1004,7 @@ class HarnessApi {
       'workspace': id,
       'opts': {'limit': limit},
     });
-    return [
-      for (final wire in asMapList(result)) MemoryNote.fromWire(wire),
-    ];
+    return [for (final wire in asMapList(result)) MemoryNote.fromWire(wire)];
   }
 
   Future<List<MemoryNote>> workspaceMemorySearch(
@@ -1023,9 +1018,7 @@ class HarnessApi {
       'query': query,
       'opts': {'limit': limit},
     });
-    return [
-      for (final wire in asMapList(result)) MemoryNote.fromWire(wire),
-    ];
+    return [for (final wire in asMapList(result)) MemoryNote.fromWire(wire)];
   }
 
   Future<WorkspaceMemoryStatus?> workspaceMemory(String id) async {
@@ -1051,12 +1044,23 @@ class HarnessApi {
     }
   }
 
-  Future<void> workspaceTakeOver(String id) async {
-    await extensionRaw('workspace/box/take-over', {'workspace': id});
+  Future<WorkspaceComputerStatus?> workspaceBoxStart(String id) async {
+    if (!can('workspace/box/start')) return null;
+    return WorkspaceComputerStatus.fromWire(
+      await extension('workspace/box/start', {'workspace': id}),
+    );
   }
 
-  Future<void> workspaceReturnControl(String id) async {
-    await extensionRaw('workspace/box/return-control', {'workspace': id});
+  Future<WorkspaceComputerStatus> workspaceTakeOver(String id) async {
+    return WorkspaceComputerStatus.fromWire(
+      await extension('workspace/box/take-over', {'workspace': id}),
+    );
+  }
+
+  Future<WorkspaceComputerStatus> workspaceReturnControl(String id) async {
+    return WorkspaceComputerStatus.fromWire(
+      await extension('workspace/box/return-control', {'workspace': id}),
+    );
   }
 
   // First-class resources: the workspace's browser, its wallet and the
@@ -1085,7 +1089,10 @@ class HarnessApi {
     );
   }
 
-  Future<WorkspaceResources> forgetWorkspaceLogin(String id, String login) async {
+  Future<WorkspaceResources> forgetWorkspaceLogin(
+    String id,
+    String login,
+  ) async {
     return WorkspaceResources.fromWire(
       await extension('workspace/browser/login/forget', {
         'id': id,

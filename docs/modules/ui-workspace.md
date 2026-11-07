@@ -27,6 +27,15 @@ session behind the thread when the user wants the full transcript.
 ### Commands
 
 - `harness-ui-workspace-clear` — Clear the compose box.
+- `harness-ui-workspace-computer` — Show the computer of WORKSPACE, or of the current workspace.
+- `harness-ui-workspace-computer-open-vnc` — Open the workspace computer's noVNC page.
+- `harness-ui-workspace-computer-refresh` — Read the computer of the buffer's workspace again.
+- `harness-ui-workspace-computer-restart` — Restart the workspace computer.
+- `harness-ui-workspace-computer-return-control` — Return control of the workspace computer to the agent.
+- `harness-ui-workspace-computer-screenshot` — Take a screenshot of the workspace computer and draw it here.
+- `harness-ui-workspace-computer-start` — Start the workspace computer.
+- `harness-ui-workspace-computer-stop` — Stop the workspace computer.
+- `harness-ui-workspace-computer-take-over` — Give the reviewer control of the workspace computer.
 - `harness-ui-workspace-new-thread` — Create a new thread and compose into it.
 - `harness-ui-workspace-open-board` — Open the task board of this workspace.
 - `harness-ui-workspace-open-episode` — Open the ordinary session behind the selected thread.
@@ -51,6 +60,7 @@ session behind the thread when the user wants the full transcript.
 
 ### Events it hears over ACP
 
+- `workspace/box-status` → `harness-ui-workspace--on-event`
 - `workspace/changed` → `harness-ui-workspace--on-event`
 - `workspace/deleted` → `harness-ui-workspace--on-event`
 - `workspace/episode-changed` → `harness-ui-workspace--on-event`

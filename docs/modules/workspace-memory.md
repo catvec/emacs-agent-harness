@@ -33,10 +33,17 @@ timeline, which this module can do with `workspace-memory/rebuild`.
 
 ### Methods
 
+- `memory/forget` (workspace id &optional opts) — Delete note ID of WORKSPACE and return what was removed.
+- `memory/get` (workspace id &optional opts) — Return note ID of WORKSPACE, or signal when it is not there.
 - `memory/notes` (workspace &optional opts) — Return the notes of WORKSPACE, newest first.
+- `memory/page` (workspace page &optional opts) — Return the note page of WORKSPACE's PAGE, newest first.
+- `memory/pages` (workspace &optional filter) — Return the pages of WORKSPACE, one per thread with its note count.
+- `memory/recall-test` (workspace query) — Return what a brief would recall for QUERY in WORKSPACE.
+- `memory/reindex` (workspace &optional opts) — Rebuild the full-text index of WORKSPACE and return its counts.
 - `memory/remember` (session-id text &optional thread) — Write TEXT as a note for SESSION-ID's workspace and THREAD.
 - `memory/search` (workspace query &optional opts) — Return notes of WORKSPACE that match QUERY, best first.
 - `memory/status` (&optional workspace) — Return what the memory holds for WORKSPACE, or for every workspace.
+- `memory/sync` (workspace &optional opts) — Bring the index of WORKSPACE up to date and return its counts.
 - `memory/write` (workspace thread role text &optional opts) — Write TEXT as a note of WORKSPACE's THREAD.
 
 ### Tools
@@ -58,6 +65,7 @@ timeline, which this module can do with `workspace-memory/rebuild`.
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
 - `store/sqlite` ([store](store.md))
+- `workspace/get` ([workspace](workspace.md)), when it is loaded
 
 ### Events it handles
 

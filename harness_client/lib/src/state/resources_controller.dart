@@ -38,7 +38,7 @@ class ResourcesController extends ChangeNotifier {
   bool busy = false;
 
   /// A resource's actions depend on its own section being there, not on the
-  /// page's status: credentials may be ready while the box is staged.
+  /// page's status: credentials may be ready while the box is off.
   bool get canManageBrowser => !preview && (resources?.browser != null);
   bool get canManageWallet => !preview && (resources?.wallet != null);
   bool get canManage => canManageBrowser || canManageWallet;
@@ -52,7 +52,10 @@ class ResourcesController extends ChangeNotifier {
     }
     final api = _api;
     if (api == null || !api.can('workspace/resources/status')) {
-      resources = WorkspaceResources.unavailable(workspaceId, 'box-staged');
+      resources = WorkspaceResources.unavailable(
+        workspaceId,
+        'box-tools-missing',
+      );
       error = null;
       notifyListeners();
       return;
@@ -66,7 +69,10 @@ class ResourcesController extends ChangeNotifier {
       resources = await api.workspaceResources(workspaceId);
     } on AcpException catch (failure) {
       if (failure.isMethodNotFound) {
-        resources = WorkspaceResources.unavailable(workspaceId, 'box-staged');
+        resources = WorkspaceResources.unavailable(
+          workspaceId,
+          'box-tools-missing',
+        );
       } else {
         error = failure.message;
       }
@@ -163,7 +169,9 @@ class ResourcesController extends ChangeNotifier {
     if (amount <= 0) return 'Amount';
     if (card.isEmpty) return 'Card';
     if (merchant.trim().isEmpty) return 'Merchant';
-    if (!api.can('workspace/wallet/authorization/create')) return 'Wallet provider';
+    if (!api.can('workspace/wallet/authorization/create')) {
+      return 'Wallet provider';
+    }
     busy = true;
     error = null;
     notice = null;
@@ -234,7 +242,11 @@ class ResourcesController extends ChangeNotifier {
     notice = null;
     notifyListeners();
     try {
-      resources = await api.decideWorkspacePurchase(workspaceId, id, allow: allow);
+      resources = await api.decideWorkspacePurchase(
+        workspaceId,
+        id,
+        allow: allow,
+      );
       notice = resources!.ready ? (allow ? 'Allowed' : 'Denied') : null;
     } on AcpException catch (failure) {
       error = failure.message;
@@ -252,5 +264,4 @@ class ResourcesController extends ChangeNotifier {
     error = null;
     notifyListeners();
   }
-
 }

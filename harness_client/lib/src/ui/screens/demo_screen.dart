@@ -543,9 +543,13 @@ class _DemoScreenState extends State<DemoScreen> {
         _app?.address ?? _app?.settings.address,
       );
       if (resolved == null) return null;
-      _transport = (widget.vncTransportFactory ?? WebSocketTransport.connect)(
-        resolved,
-      );
+      final factory = widget.vncTransportFactory;
+      _transport = factory != null
+          ? factory(resolved)
+          : WebSocketTransport.connect(
+              resolved,
+              token: _app?.sessionSecret ?? '',
+            );
       _transportGeneration = _generation;
     }
     return _transport;

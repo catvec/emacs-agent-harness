@@ -77,13 +77,13 @@ is `lost`, which the app shows rather than a stale screen.
 - `session/get` ([session](session.md))
 - `session/hint` ([session](session.md))
 - `task/for-session` ([tasks](tasks.md))
-- `workspace/box/exec`
-- `workspace/box/launch`, when it is loaded
-- `workspace/box/return-control`, when it is loaded
-- `workspace/box/screenshot`, when it is loaded
-- `workspace/box/status`, when it is loaded
-- `workspace/box/vnc`, when it is loaded
-- `workspace/browser/open`, when it is loaded
+- `workspace/box/exec` ([workspace-box](workspace-box.md))
+- `workspace/box/launch` ([workspace-box](workspace-box.md)), when it is loaded
+- `workspace/box/return-control` ([workspace-box](workspace-box.md)), when it is loaded
+- `workspace/box/screenshot` ([workspace-box](workspace-box.md)), when it is loaded
+- `workspace/box/status` ([workspace-box](workspace-box.md)), when it is loaded
+- `workspace/box/vnc` ([workspace-box](workspace-box.md)), when it is loaded
+- `workspace/browser/open` ([workspace-box](workspace-box.md)), when it is loaded
 - `workspace/get` ([workspace](workspace.md)), when it is loaded
 - `workspace/list` ([workspace](workspace.md)), when it is loaded
 

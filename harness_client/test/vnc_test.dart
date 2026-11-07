@@ -317,6 +317,26 @@ void main() {
       );
     });
 
+    test('a workspace socket goes through the harness tunnel', () {
+      // The box's own web port is loopback: a phone reaches the RFB bytes
+      // through the harness it is signed in to, naming the workspace rather
+      // than a port of this machine.  The box's page token stays behind.
+      expect(
+        VncEndpoint.resolve(
+          'ws://127.0.0.1:6080/websockify?token=box-token&workspace=w-1',
+          'ws://harness.test:9999/acp',
+        ),
+        'ws://harness.test:9999/workspace/vnc?workspace=w-1',
+      );
+      expect(
+        VncEndpoint.resolve(
+          'ws://127.0.0.1:6080/websockify?token=box-token&workspace=w-1',
+          'https://harness.test/acp',
+        ),
+        'wss://harness.test/workspace/vnc?workspace=w-1',
+      );
+    });
+
     test('a socket behind a TLS harness is reached over TLS', () {
       expect(
         VncEndpoint.resolve(

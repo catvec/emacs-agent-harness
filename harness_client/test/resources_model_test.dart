@@ -8,7 +8,12 @@ void main() {
       'status': 'ready',
       'metadata-only': true,
       'browser': {
-        'profile': {'label': 'Home', 'kind': 'Chromium', 'bytes': 2048, 'sites': 1},
+        'profile': {
+          'label': 'Home',
+          'kind': 'Chromium',
+          'bytes': 2048,
+          'sites': 1,
+        },
         'sites': [
           {
             'origin': 'https://stoneco.example',
@@ -39,7 +44,10 @@ void main() {
     expect(browser.sites.single.cookies, 12);
     expect(browser.sites.single.host, 'stoneco.example');
     expect(browser.sites.single.authLabel, 'Signed in');
-    expect(browser.sites.single.dataLabel, 'Cookies 12 · Site data 3.1 KB · Cache 6.3 KB');
+    expect(
+      browser.sites.single.dataLabel,
+      'Cookies 12 · Site data 3.1 KB · Cache 6.3 KB',
+    );
     expect(browser.logins.single.username, 'j•••@example.com');
     expect(browser.logins.single.stateLabel, 'Active');
     expect(browser.cookies, 12);
@@ -91,11 +99,19 @@ void main() {
   });
 
   test('an unavailable answer still says what is missing', () {
-    final resources = WorkspaceResources.unavailable('w1', 'box-staged');
+    final resources = WorkspaceResources.unavailable('w1', 'box-tools-missing');
     expect(resources.ready, isFalse);
     expect(resources.blocked, isTrue);
     expect(resources.statusLabel, 'Unavailable');
-    expect(resources.reasonLabel, 'Box staged');
+    expect(resources.reasonLabel, 'Computer tools');
+    expect(
+      WorkspaceResources.unavailable('w1', 'box-not-running').reasonLabel,
+      'Computer off',
+    );
+    expect(
+      WorkspaceResources.unavailable('w1', 'wallet-unavailable').reasonLabel,
+      'Wallet provider',
+    );
   });
 
   test('a cumulative authorization counts spent and reserved', () {
@@ -136,8 +152,24 @@ void main() {
       capKind: 'per-transaction',
     );
     expect(authorization.capLabel, 'Per transaction');
-    expect(authorization.refuse(charge: 1000, merchant: 'x', currency: 'USD', now: DateTime.now()), isNull);
-    expect(authorization.refuse(charge: 1001, merchant: 'x', currency: 'USD', now: DateTime.now()), 'Over cap');
+    expect(
+      authorization.refuse(
+        charge: 1000,
+        merchant: 'x',
+        currency: 'USD',
+        now: DateTime.now(),
+      ),
+      isNull,
+    );
+    expect(
+      authorization.refuse(
+        charge: 1001,
+        merchant: 'x',
+        currency: 'USD',
+        now: DateTime.now(),
+      ),
+      'Over cap',
+    );
   });
 
   test('the minimal model refuses what a \$10 authorization must refuse', () {
@@ -149,24 +181,63 @@ void main() {
       merchantScope: const ['stoneco.example'],
       expires: now.add(const Duration(hours: 1)),
     );
-    expect(base.refuse(charge: 0, merchant: 'stoneco.example', currency: 'USD', now: now), 'No amount');
-    expect(base.refuse(charge: 900, merchant: 'evil.example', currency: 'USD', now: now), 'Merchant');
-    expect(base.refuse(charge: 900, merchant: 'stoneco.example', currency: 'EUR', now: now), 'Currency');
-    expect(base.refuse(charge: 900, merchant: 'stoneco.example', currency: 'USD', now: now, duplicate: true), 'Duplicate');
+    expect(
+      base.refuse(
+        charge: 0,
+        merchant: 'stoneco.example',
+        currency: 'USD',
+        now: now,
+      ),
+      'No amount',
+    );
+    expect(
+      base.refuse(
+        charge: 900,
+        merchant: 'evil.example',
+        currency: 'USD',
+        now: now,
+      ),
+      'Merchant',
+    );
+    expect(
+      base.refuse(
+        charge: 900,
+        merchant: 'stoneco.example',
+        currency: 'EUR',
+        now: now,
+      ),
+      'Currency',
+    );
+    expect(
+      base.refuse(
+        charge: 900,
+        merchant: 'stoneco.example',
+        currency: 'USD',
+        now: now,
+        duplicate: true,
+      ),
+      'Duplicate',
+    );
     final expired = WalletAuthorization(
       id: 'a',
       card: 'c',
       amount: 1000,
       status: 'expired',
     );
-    expect(expired.refuse(charge: 100, merchant: 'x', currency: 'USD', now: now), 'Not active');
+    expect(
+      expired.refuse(charge: 100, merchant: 'x', currency: 'USD', now: now),
+      'Not active',
+    );
     final due = WalletAuthorization(
       id: 'a',
       card: 'c',
       amount: 1000,
       expires: now.subtract(const Duration(seconds: 1)),
     );
-    expect(due.refuse(charge: 100, merchant: 'x', currency: 'USD', now: now), 'Expired');
+    expect(
+      due.refuse(charge: 100, merchant: 'x', currency: 'USD', now: now),
+      'Expired',
+    );
     expect(due.statusLabel, 'Expired');
   });
 

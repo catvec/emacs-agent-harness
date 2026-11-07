@@ -27,11 +27,13 @@ the agent the use of it.
 | ![The resources page on a phone: the profile, its sites with cookie and storage counts, and the saved logins](media/resources-phone.png) | ![The wallet: a card, a proposed $9.40 purchase and a $10 cumulative authorization](media/resources-wallet.png) | ![Agent access to a site and an authorization, and the audit entries](media/resources-access.png) | ![The Emacs resources page with sample data: browser sites and saved logins, the wallet and its authorization, credentials from the secrets module, access and audit](media/resources-emacs.png) |
 
 This page is the design and the contract for the first slice.  The
-Flutter client draws the Resources surface; the harness answers with a
-documented blocked state until the box and the payment broker exist.
-The client never invents a success: a preview is labelled `Preview`,
-an operation without a backend is `Unavailable`, and no fixture holds
-a real card, cookie or token.
+Flutter client draws the Resources surface.  The browser section is
+real when a workspace computer runs: the `local` box's Firefox profile,
+read file by file, metadata only.  The wallet remains a blocked
+contract until a payment broker exists.  The client never invents a
+success: a preview is labelled `Preview`, an operation without a
+backend is `Unavailable`, and no fixture holds a real card, cookie or
+token.
 
 ## The resource model
 
@@ -64,9 +66,15 @@ do with my card this week", and it is never a place for a value.
 
 ## Browser resources
 
-The box has one Chromium profile per workspace (the design's
+The box has one Firefox profile per workspace (the design's
 [box section](workspace-mode.md#the-browser)).  The browser resources
-are that profile, the sites in it, and the logins it holds.
+are that profile, the sites in it, and the saved sessions it holds.
+The `local` backend reads the profile's files directly:
+`cookies.sqlite` for cookie hosts and expiry, `permissions.sqlite` for
+permission counts, `logins.json` for the origins of saved logins, and
+the `storage/` and `cache2/` directories for their sizes.  A cookie's
+value, a password and an encrypted username are never read into the
+answer.
 
 ### Scopes
 
@@ -148,7 +156,7 @@ button that pretends.  Chromium's cookie and login stores are
 encrypted with the OS keyring; a portable archive would need a
 passphrase, a versioned format, integrity protection and a policy for
 what may leave the box.  The UI shows `Export` and `Import` disabled
-with `Needs box · approval`, and the design defines the contract for
+with `Later stage`, and the design defines the contract for
 the stage that implements it:
 
 - export is user-initiated, passphrase-encrypted, written to a
@@ -176,20 +184,38 @@ to automation and to a data page:
 Firefox is preferred because it is a browser a person uses, its
 automation is a standard (BiDi), and its profile is a plain directory
 the box can own without a vendor account.  The contract and the UI say
-which browser is primary; a client never silently switches.  The box
-is staged, so all of this is blocked until it runs.
+which browser is primary; a client never silently switches.  The
+`local` backend starts Firefox with `--profile` in the workspace's own
+directory and reads that directory; it does not yet drive BiDi or CDP,
+so the page can show what the profile holds but cannot yet click
+inside a page.
 
 ### What the browser really offers
 
-The operations above are feasible with Chromium's DevTools protocol,
-which is why the design promises them: `Storage.getCookies` (metadata
-after stripping), `Storage.clearDataForOrigin` (cookies, local
-storage, indexedDB, cache storage, service workers),
-`Network.deleteCookies` and `Browser.grantPermissions` /
-`Browser.resetPermissions`.  The password manager, the keyring and
-the OS wallet are not exposed, and are not promised.  The box is
-staged; until it exists the methods answer `unavailable` with
-`:reason "box-staged"` and no data.
+The operations above are feasible with a browser's automation
+protocol, which is why the design promises them: BiDi
+`storage.getCookies` / `storage.deleteCookies` for Firefox, or
+`Storage.getCookies`, `Storage.clearDataForOrigin`,
+`Network.deleteCookies` and `Browser.resetPermissions` for Chromium.
+The `local` backend reaches the same stores through the profile files:
+`workspace/browser/clear` runs SQL `DELETE`s in `cookies.sqlite` and
+`permissions.sqlite` and removes `storage/` and `cache2/`.  `kinds` is
+a list of the strings `cookies`, `storage`, `cache` and `permissions`;
+omitted (or empty) means all of them, and an unknown kind is an error
+before the profile is touched.  A site clear is origin-scoped: only
+that origin's permissions and its directories under
+`storage/default`, `storage/permanent` and `storage/temporary` go,
+while another scheme, a subdomain or another port of the host stays.
+Cookies belong to a host rather than an origin, so the host's cookies
+and its domain cookie go, while a subdomain's own cookies stay.
+`workspace/browser/login/forget` stops the browser and removes only
+that origin's cookies and storage directories.  Both methods stop the
+box's browser first, so Firefox is not writing the profile while it is
+changed.  The password manager, the keyring and the OS wallet are not
+exposed, and are not promised.  Without a running box the browser
+methods refuse with `harness-error`, and `status` carries the box's
+reason (`box-not-running`, `box-tools-missing` or
+`backend-unavailable`).
 
 ## Wallet and bounded purchases
 
@@ -449,7 +475,7 @@ surface still opens and says what is unavailable.
 
 | Method | Params | Answer |
 |---|---|---|
-| `workspace/resources/status` | `id` | `(:status :reason :metadata-only :browser :wallet :access :audit)` |
+| `workspace/resources/status` | `id` | `(:status :reason :metadata-only :box :browser :wallet :access :audit :browser-status :browser-reason :wallet-status :wallet-reason :credentials :credentials-status)` |
 | `workspace/browser/clear` | `id scope origin kinds` | the new browser section, or `unavailable` |
 | `workspace/browser/login/forget` | `id login` | the new browser section, or `unavailable` |
 | `workspace/wallet/authorization/create` | `id card amount currency cap-kind merchant-scope expires fees tax shipping` | the new wallet section, or `unavailable` |
@@ -457,24 +483,30 @@ surface still opens and says what is unavailable.
 | `workspace/wallet/purchase/decide` | `id purchase decision idempotency` | the new wallet section, or `unavailable` |
 
 `status` is one of `ready`, `unavailable`, `needs-approval` or
-`failed`; `reason` names why (`box-staged`, `wallet-provider`,
+`failed`; `reason` names why (`box-not-running`, `box-tools-missing`,
+`backend-unavailable`, `wallet-unavailable`, `wallet-provider`,
 `payment-broker`, `permission`, `browser-stopped`).  Every answer is
-metadata-only and carries `:metadata-only t`.  The first slice's
-harness answers every method with:
+metadata-only and carries `:metadata-only t`.  With no running box the
+browser methods refuse, and the status answers:
 
 ```elisp
-(:status "unavailable" :reason "box-staged" :metadata-only t
- :browser nil :wallet nil :access nil :audit nil)
+(:status "unavailable" :reason "box-tools-missing" :metadata-only t
+ :box (:running :false :reason …) :browser nil :wallet nil
+ :access nil :audit nil :browser-status "unavailable"
+ :browser-reason (:code "box-tools-missing" :text "…")
+ :wallet-status "unavailable" :wallet-reason (:code "wallet-unavailable" :text "no payment broker"))
 ```
 
-and the create/clear/revoke/forget methods answer the same way with
-`:changed nil`.  That is a real answer to a real request, not a
-simulated success; the client renders `Unavailable · box staged`.
+With a running box the browser section is real and `status` is `ready`
+even while the wallet says `wallet-unavailable`; the page shows the
+browser and the wallet as separate sections.  That is a real answer to
+a real request, not a simulated success; the client renders
+`Unavailable · Computer tools` or `Unavailable · Computer off`.
 
 ### Wire shape (first slice)
 
 ```
-browser: (:profile (:label "Home" :kind "chromium" :bytes 412000000
+browser: (:profile (:label "Home" :kind "Firefox" :bytes 412000000
                     :sites 18 :last-used "2026-11-06T18:20:00Z")
           :sites ((:origin "https://stoneco.example" :cookies 12
                    :storage-bytes 320000 :cache-bytes 640000
@@ -484,6 +516,9 @@ browser: (:profile (:label "Home" :kind "chromium" :bytes 412000000
                     :username "j•••@example.com" :state "active"
                     :created "…" :last-used "…") …)
           :totals (:cookies 42 :bytes 412000000))
+          ;; the local backend's extra keys: :storage :cache :permissions
+          ;; :profile-path, and per-site :storage-bytes / :cache-bytes when
+          ;; the browser can break them down
 
 wallet:  (:cards ((:id "card-1" :label "Visa •••• 4242" :network "visa"
                    :last4 "4242" :exp-month 9 :exp-year 2028
@@ -529,7 +564,7 @@ changes`; its destructive actions are disabled.
 | `Signed in` / `Signed out` / `Unknown` | auth state |
 | `Saved logins` / `Forget login` / `Reveal` | login list and actions |
 | `Clear cookies` / `Clear site data` / `Clear cache` / `Clear all…` | actions |
-| `Export…` / `Import…` / `Needs box · approval` | transfer rows |
+| `Export…` / `Import…` / `Later stage` | transfer rows |
 | `Cards` / `Visa •••• 4242` / `09/2028` / `Active` | wallet cards |
 | `Authorizations` / `$10.00 · cumulative · Stone Co` / `Remaining $8.20` | authorizations |
 | `Per transaction` / `Cap excludes fees` | cap facts |
@@ -538,7 +573,7 @@ changes`; its destructive actions are disabled.
 | `Allow` / `Deny` / `Revoke` / `Cancel` | confirmations |
 | `Access` / `Allowed` / `Ask` / `None` / `Revoke` | access rows |
 | `Audit` / `Created` / `Revised` / `Revoked` / `Cleared` | history |
-| `Unavailable · box staged` / `Needs wallet provider` / `Needs approval` | states |
+| `Unavailable · Computer tools` / `Unavailable · Computer off` / `Needs wallet provider` / `Needs approval` | states |
 | `No sites` / `No logins` / `No cards` / `No authorizations` | empty states |
 
 The two dialogs carry a short factual body (`Site · stoneco.example ·
@@ -548,8 +583,8 @@ colour only.
 
 ### States the tests hold
 
-- loading, ready, preview, unavailable (`box-staged`), needs-approval,
-  failed with `Retry`;
+- loading, ready, preview, unavailable (`box-tools-missing` or
+  `box-not-running`), needs-approval, failed with `Retry`;
 - empty sites, empty logins, empty cards, empty authorizations;
 - a clear/forget/revoke that is cancelled changes nothing;
 - a clear/forget/revoke that fails keeps the previous state and says
@@ -572,7 +607,7 @@ colour only.
 | iOS / macOS | dialogs are `CupertinoAlertDialog`; the sheet is the platform sheet; no file picker for export until the contract exists |
 | Desktop | a two-column layout; Escape closes the detail; `Cmd/Ctrl+R` refreshes; the form is a dialog |
 | Narrow phone | one column, tabs above the list, the form a full-height sheet; the amount field uses the decimal keyboard |
-| No box | every tab renders `Unavailable · box staged`; no action pretends to work |
+| No box | every browser action renders `Unavailable · Computer tools` or `Unavailable · Computer off`; no action pretends to work |
 
 ## Tests and status
 
@@ -582,7 +617,7 @@ colour only.
 | `test/resources_controller_test.dart` | load/unavailable/error, clear/forget/revoke cancellation and failure, create validation, purchase decision, no optimistic success |
 | `test/resources_screen_test.dart` | phone and desktop rendering, tabs, redacted metadata, confirmations, disabled preview actions, a11y, text scale, empty states |
 | `test/resources_screenshots_test.dart` | the pictures: phone list, site detail, wallet, authorization form |
-| `test/harness-workspace-resources-test.el` | the methods exist and answer `unavailable · box-staged`; the answer has no value/secret keys; create/clear/revoke change nothing |
+| `test/harness-workspace-resources-test.el` | the methods exist; without a box the status names why and refuses browser mutations; with a box the browser metadata is real; no answer has a value or secret key |
 
 **The credentials are the built-in secrets module.**  The harness lists
 its declared secret sources through `secret-sandbox/secrets` and
@@ -596,10 +631,11 @@ is the whole credential store and the sandbox is the whole boundary.
 
 **Implemented now**: the Resources surface on both clients (the
 Flutter page and the Emacs `C-c w R` page), the models and invariants,
-the credentials from the secrets module, the confirmations and blocked
-states, the harness contract and its blocked answers, mock data in
-tests and screenshots, and this page.
-**Future**: the box's browser adapter (CDP), the OS/provider wallet,
-the payment broker that enforces the authorization, export/import,
-reveal, standing rules, budgets, refunds and multi-currency.  None of
-the future work is implied by a button that says it is done.
+the real Firefox profile metadata and the browser clear/forget paths
+from the `local` box, the credentials from the secrets module, the
+confirmations and blocked states, and this page.
+**Future**: the box's browser adapter (BiDi/CDP), the OS/provider
+wallet, the payment broker that enforces the authorization,
+export/import, reveal, standing rules, budgets, refunds and
+multi-currency.  None of the future work is implied by a button that
+says it is done.

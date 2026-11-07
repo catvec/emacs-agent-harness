@@ -2,9 +2,10 @@
 
 Design note, November 2026.  **First slice implemented.**  The core
 chat, threads, episodes, routing, the brief, a local SQLite memory with
-recall, the memory tools and the Emacs workspace buffer are implemented
-in `workspace`, `workspace-memory` and `ui-workspace`.  The Logseq
-graph, the scribe and dream, the sandboxed computer, routines and voice
+recall, the memory tools, the Emacs workspace buffer and the local
+computer with a real VNC screen are implemented in `workspace`,
+`workspace-memory`, `workspace-box` and `ui-workspace`.  The Logseq
+graph, the scribe and dream, the container backend, routines and voice
 are still the staged design below.  This page is the design for the
 whole mode: a persistent workspace chat with a long-term memory, a
 computer of its own, and the whole harness underneath it.  The module contracts, UI copy, tests and staged plan
@@ -37,6 +38,10 @@ the chat, so the same mode can run a life and run a task board.
   contract for building it: modules, storage, methods, events, options,
   tools, prompting, the detailed UI and copy inventory, tests, the
   staged plan, alternatives and open questions.
+- [The workspace computer](workspace-computer.md) records the real
+  computer that is implemented: the `local` X display, x11vnc, the
+  noVNC page and WebSocket bridge, the browser profile, the control
+  lock, its tools and its boundary.
 
 ## Contents
 
@@ -65,11 +70,11 @@ the chat, so the same mode can run a life and run a task board.
 | How does it pick a topic back up? | A router (heuristics first, a cheap model when ambiguous) chooses *continue*, *revive* or *new*, and the memory layer builds the brief from the thread's Logseq page, its linked pages, recent decisions and open tasks. |
 | What is the memory? | A local **Logseq DB graph** is the source of truth.  A SQLite index adds full-text search, int8 embeddings and the link graph; it is a rebuildable cache, never the authority. |
 | How is memory kept true? | A cheap **scribe** writes durable notes after turns; a **curator** maintains thread pages; a **dream** consolidates the day's notes, updates every page that needs it, finds contradictions and duplicates, and leaves a reviewable report.  Nothing durable is written without provenance. |
-| What is the computer? | A persistent, sandboxed **box** (rootless container first) with its own home volume, desktop (Xvfb + noVNC), browser (CDP), toolchains and servers.  The agent has broad rights *inside* the box.  Host mounts are explicit.  The user can take over over VNC and return control. |
+| What is the computer? | A persistent **box** with its own home, desktop (Xvfb + x11vnc + noVNC), browser profile, toolchains and servers.  The first implementation is the `local` backend: its own display and process tree on this machine, not a container; the status says `local display and process`, and the rootless-container backend remains the stronger design.  The agent has broad rights inside the box, the user can take over over VNC and return control, and host mounts are explicit. |
 | How does it work on non-code work? | The workspace root is an ordinary project; task mode already works outside git.  Daily-life tasks, routines, notes, decisions, people and projects all live in the graph; the box is where the results are used. |
 | How does voice fit? | A call attaches to a thread.  Live voice delegates each utterance to `workspace/prompt`; replies stream back to speech.  Voice turns are ordinary chat turns marked `voice`. |
 | Where does it run? | In the harness process, with the UI in Emacs and the ACP client (Flutter) as a remote front end.  The box is a separate sandbox; the memory graph is local. |
-| What is the implementation status? | The core chat, threads, episodes, local memory and Emacs UI are implemented; the Logseq graph, dreaming, the computer, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md). |
+| What is the implementation status? | The core chat, threads, episodes, local memory, Emacs UI, the local computer and its VNC screen are implemented; the Logseq graph, dreaming, the container backend, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md) and [the computer](workspace-computer.md). |
 
 ## Why this mode
 
@@ -1700,7 +1705,8 @@ A **box** is a long-lived sandbox created from a workspace image:
   mounted.
 - **Desktop**: Xvfb (or a headless compositor), a lightweight window
   manager, x11vnc and noVNC, so the user can see and take over the same
-  desktop the agent uses.
+  desktop the agent uses.  The `local` backend implements this on the
+  host; the container image is still the design.
 - **Browser**: Chromium (or Firefox) with a persistent profile per
   workspace, controlled over CDP by the `browser_*` tools.  Its
   sessions and cookies live in the box's home volume; signing in on
@@ -1852,19 +1858,27 @@ never directly:
 
 The **VNC** path is for the user, not the agent:
 
-- the box's x11vnc listens on loopback inside the container;
-- the host publishes a noVNC endpoint on `127.0.0.1` on a random port,
-  with a one-time token in the URL and a password in the state
-  directory (mode 600);
-- `workspace/box/vnc` returns the URL and the state
+- the box's x11vnc listens on loopback; in the implemented `local`
+  backend it is an Xvfb display of its own, bound to `127.0.0.1` and
+  protected by an xauth cookie in the state directory (mode 600);
+- a small Python WebSocket bridge (`scripts/workspace-box/websockify.py`)
+  publishes the noVNC page and the RFB socket on `127.0.0.1` on a
+  random port, with a per-box token in the URL; the same port serves
+  the page and `/websockify`, and the vendored noVNC 1.6.0 page is
+  under `scripts/workspace-box/novnc`;
+- `workspace/box/vnc` returns the URL, the socket and the state
   (`agent`/`user`), and the UI opens it;
-- `Take over` sets the state to `user`, pauses the agent's screen
-  tools, and focuses the window; `Return control` sets it back and
-  tells the episode in a hint.  The agent never types over the user
-  while the user has control;
-- the VNC port is not exposed to the network.  A remote client uses
-  the screenshot/input methods over ACP, or an SSH/Tailscale tunnel to
-  the noVNC endpoint; an authenticated reverse proxy is a later phase.
+- `Take over` sets the state to `user` and pauses the agent's screen
+  tools; `Return control` sets it back.  The agent never types over
+  the user while the user has control, and the state survives a
+  restart;
+- the VNC and web ports are not exposed to the network.  A remote
+  client uses the screenshot/input methods over ACP, or an
+  SSH/Tailscale tunnel to the noVNC endpoint; an authenticated reverse
+  proxy is a later phase.  The local backend is not a container: a
+  command in it runs as the harness user and can read what that user
+  can read.  [The computer](workspace-computer.md) records that
+  boundary and the container backend that replaces it.
 
 ### The browser
 

@@ -49,6 +49,7 @@ class WorkspaceController extends ChangeNotifier {
 
   int _loads = 0;
   Timer? _reloadTimer;
+  Timer? _computerTimer;
 
   /// Episode session id -> thread id, for routing the live episode's ACP
   /// chunks to the timeline entry they belong to.  It holds the entries a
@@ -93,9 +94,7 @@ class WorkspaceController extends ChangeNotifier {
   List<WorkspaceEntry> get visibleEntries {
     final tag = selectedTag;
     if (tag == null) return entries;
-    final ids = {
-      for (final thread in shownThreads) thread.id,
-    };
+    final ids = {for (final thread in shownThreads) thread.id};
     return [
       for (final entry in entries)
         if (ids.contains(entry.thread)) entry,
@@ -141,7 +140,8 @@ class WorkspaceController extends ChangeNotifier {
   /// Narrow the rail to a concept.  Selecting the one that is on clears it,
   /// so a tap on a node is both a way in and a way back.
   void selectTag(String? tag) {
-    final same = selectedTag != null &&
+    final same =
+        selectedTag != null &&
         tag != null &&
         selectedTag!.toLowerCase() == tag.toLowerCase();
     selectedTag = same ? null : tag;
@@ -201,6 +201,7 @@ class WorkspaceController extends ChangeNotifier {
       _learnTimeline(entries);
       memory = notes;
       computer = box ?? const WorkspaceComputerStatus();
+      _scheduleComputerPoll();
       final wanted = selectedThread;
       selectedThread = _hasThread(wanted) ? wanted : detail.active?.id;
       if (selectedTag != null &&
@@ -259,7 +260,12 @@ class WorkspaceController extends ChangeNotifier {
   void _appendPreview(String text) {
     entries = [
       ...entries,
-      WorkspaceEntry(kind: 'message', role: 'user', text: text, at: DateTime.now()),
+      WorkspaceEntry(
+        kind: 'message',
+        role: 'user',
+        text: text,
+        at: DateTime.now(),
+      ),
       WorkspaceEntry(
         kind: 'message',
         role: 'assistant',
@@ -322,39 +328,80 @@ class WorkspaceController extends ChangeNotifier {
     }
   }
 
-  /// Take the computer over, or give it back.  A harness without the box
-  /// methods still animates the panel as a preview, so the interaction can
-  /// be judged before the sandbox lands.
-  Future<void> takeOver() async {
-    if (!computer.userControl) {
-      final api = _api;
-      if (api != null && !_preview && computer.available &&
-          api.can('workspace/box/take-over')) {
-        try {
-          await api.workspaceTakeOver(current!.id);
-        } on AcpException {
-          // The panel still changes; the next /status corrects it.
-        }
-      }
-      computer = computer.copyWith(control: 'user');
+  /// Start the workspace computer.  A harness without the box leaves the
+  /// panel off and says why; nothing is animated in its place.
+  Future<void> startComputer() async {
+    final api = _api;
+    final workspace = current;
+    if (workspace == null || _preview || api == null) return;
+    if (!api.can('workspace/box/start')) return;
+    computer = computer.copyWith(state: 'starting', running: false);
+    error = null;
+    notifyListeners();
+    try {
+      final status = await api.workspaceBoxStart(workspace.id);
+      computer = status ?? computer;
+      _scheduleComputerPoll();
+    } on AcpException catch (failure) {
+      error = failure.message;
+      computer = computer.copyWith(state: 'failed', running: false);
+    } finally {
       notifyListeners();
+      await load(showSpinner: false);
     }
   }
 
-  Future<void> returnControl() async {
-    if (computer.userControl) {
-      final api = _api;
-      if (api != null && !_preview && computer.available &&
-          api.can('workspace/box/return-control')) {
-        try {
-          await api.workspaceReturnControl(current!.id);
-        } on AcpException {
-          // As above.
-        }
+  /// Take the computer over, or give it back.  The harness is the owner of
+  /// the control state: what it answers is what the panel shows.
+  Future<void> takeOver() async {
+    if (computer.userControl) return;
+    final api = _api;
+    final workspace = current;
+    if (api != null &&
+        !_preview &&
+        workspace != null &&
+        api.can('workspace/box/take-over')) {
+      try {
+        final status = await api.workspaceTakeOver(workspace.id);
+        computer = status;
+      } on AcpException catch (failure) {
+        error = failure.message;
+        return;
       }
-      computer = computer.copyWith(control: 'agent');
-      notifyListeners();
+    } else {
+      computer = computer.copyWith(control: 'user');
     }
+    notifyListeners();
+  }
+
+  Future<void> returnControl() async {
+    if (!computer.userControl) return;
+    final api = _api;
+    final workspace = current;
+    if (api != null &&
+        !_preview &&
+        workspace != null &&
+        api.can('workspace/box/return-control')) {
+      try {
+        final status = await api.workspaceReturnControl(workspace.id);
+        computer = status;
+      } on AcpException catch (failure) {
+        error = failure.message;
+        return;
+      }
+    } else {
+      computer = computer.copyWith(control: 'agent');
+    }
+    notifyListeners();
+  }
+
+  /// A box that is starting is asked about until it is running or failed.
+  void _scheduleComputerPoll() {
+    _computerTimer?.cancel();
+    if (_preview || !computer.starting) return;
+    _computerTimer = Timer(const Duration(milliseconds: 900), () {
+      if (!_preview) unawaited(load(showSpinner: false));
+    });
   }
 
   /// Follow the harness's workspace events, quietly.  A burst of entries
@@ -563,6 +610,7 @@ class WorkspaceController extends ChangeNotifier {
   @override
   void dispose() {
     _reloadTimer?.cancel();
+    _computerTimer?.cancel();
     super.dispose();
   }
 }

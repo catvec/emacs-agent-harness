@@ -82,6 +82,19 @@
         (should (string-match-p "Noted." text))
         (should (equal "Message…" (funcall harness-compose-placeholder-function)))))))
 
+(ert-deftest harness-ui-workspace-loading-draws-before-the-first-answer ()
+  "The loading state draws without a workspace root to list files from."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--state 'loading
+            harness-ui-workspace--data nil)
+      (harness-ui-workspace--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Workspace · loading" text))
+        (should (string-match-p "Loading…" text))))))
+
 (ert-deftest harness-ui-workspace-header-copy-and-tooltips ()
   "The header's exact words and the buttons' tooltips are the inventory's."
   (harness-ui-workspace-test-with
@@ -97,13 +110,16 @@
         (harness-ui-workspace--render))
       (goto-char (point-min))
       (should (equal (buffer-substring-no-properties (line-beginning-position) (line-end-position))
-                     "Workspace · Home   Thread · Kitchen renovation   Memory · ready   Tasks New thread Open episode Stop Refresh Resources"))
+                     "Workspace · Home   Thread · Kitchen renovation   Memory · ready   Computer · off   Tasks New thread Open episode Stop Refresh Computer Resources"))
       (search-forward "Tasks")
       (should (equal "The task board of this workspace" (get-text-property (1- (point)) 'help-echo)))
       (search-forward "New thread")
       (should (equal "Start a new topic" (get-text-property (1- (point)) 'help-echo)))
       (search-forward "Refresh")
-      (should (equal "Read the workspace again" (get-text-property (1- (point)) 'help-echo))))))
+      (should (equal "Read the workspace again" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "Computer")
+      (should (equal "The workspace computer's screen"
+                     (get-text-property (1- (point)) 'help-echo))))))
 
 (ert-deftest harness-ui-workspace-empty-and-error-states ()
   "The empty and failed workspace states say so in noun phrases."
@@ -234,11 +250,12 @@ client's does."
             harness-ui-workspace-resources--data
             (list :status "ready"
                   :metadata-only t
-                  :browser (list :profile (list :label "Home" :kind "Chromium" :sites 2)
+                  :browser (list :profile (list :label "browser" :kind "Firefox" :sites 2)
                                  :sites (list (list :origin "https://stoneco.example"
                                                     :cookies 12 :auth "signed-in"
                                                     :value "SESSION-VALUE"))
-                                 :logins nil)
+                                 :logins (list (list :origin "https://stoneco.example"
+                                                     :username "" :state "active")))
                   :wallet nil
                   :credentials (list (list :label "deploy-key"
                                            :fingerprint "4f9c2a1b" :usable t))
@@ -248,8 +265,11 @@ client's does."
       (let ((text (buffer-string)))
         (should (string-match-p "Workspace resources" text))
         (should (string-match-p "Metadata only" text))
+        (should (string-match-p "Profile · browser" text))
+        (should (string-match-p "Firefox · 2 sites" text))
         (should (string-match-p "stoneco.example" text))
         (should (string-match-p "12 cookies" text))
+        (should (string-match-p "site session · active" text))
         (should (string-match-p "deploy-key" text))
         (should (string-match-p "Locked run · ready" text))
         (should (string-match-p "Payment broker" text))
@@ -265,10 +285,15 @@ client's does."
             (list :status "unavailable"
                   :credentials nil
                   :credentials-status (list :status "unavailable" :why "Masking off")
-                  :browser nil :wallet nil :access nil :audit nil))
+                  :browser nil
+                  :browser-reason (list :code "box-tools-missing"
+                                        :text "workspace computer tools missing: Xvfb")
+                  :wallet nil :access nil :audit nil))
       (harness-ui-workspace-resources--render)
       (let ((text (buffer-string)))
         (should (string-match-p "Unavailable" text))
+        (should (string-match-p "box-tools-missing" text))
+        (should (string-match-p "No browser data" text))
         (should (string-match-p "Masking off" text))
         (should (string-match-p "No credentials" text))
         (should (string-match-p "g · refresh" text))
@@ -279,3 +304,67 @@ client's does."
   (harness-ui-workspace-test-with
     (should (eq (lookup-key harness-ui-workspace-mode-map (kbd "C-c w R"))
                 #'harness-ui-workspace-resources))))
+
+(ert-deftest harness-ui-workspace-computer-shows-the-real-box ()
+  "The computer page names the backend, the screen and the VNC endpoint."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-computer-mode)
+      (setq harness-ui-workspace-computer--workspace "w-1"
+            harness-ui-workspace-computer--data
+            (list :name "Home" :state "running" :running t :available t
+                  :backend "local" :isolation "local display and process"
+                  :control "agent" :display "127.0.0.1:90"
+                  :width 1280 :height 800
+                  :url "http://127.0.0.1:6080/vnc_lite.html"
+                  :socket "ws://127.0.0.1:6080/websockify"))
+      (harness-ui-workspace-computer--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Workspace computer  ·  Home  ·  Live" text))
+        (should (string-match-p "Backend  local" text))
+        (should (string-match-p "Control  Agent" text))
+        (should (string-match-p "Display  127.0.0.1:90" text))
+        (should (string-match-p "Screen  1280 × 800" text))
+        (should (string-match-p "VNC  http://127.0.0.1:6080/vnc_lite.html" text))
+        (should (string-match-p "Socket  ws://127.0.0.1:6080/websockify" text))
+        (dolist (label '("Start" "Stop" "Restart" "Take over" "Return control"
+                         "Open VNC" "Screenshot" "Refresh"))
+          (should (string-match-p label text)))
+        (should-not (string-match-p "Preview\\|staged\\|mock" text)))
+      (goto-char (point-min))
+      (dolist (pair '(("Start" . "Start the workspace computer")
+                      ("Stop" . "Stop the workspace computer")
+                      ("Restart" . "Restart the workspace computer")
+                      ("Take over" . "Reviewer control of the screen")
+                      ("Return control" . "Agent control of the screen")
+                      ("Open VNC" . "The computer's noVNC page")
+                      ("Screenshot" . "A picture of the current screen")
+                      ("Refresh" . "Read the computer again")))
+        (goto-char (point-min))
+        (search-forward (car pair))
+        (should (equal (cdr pair)
+                       (get-text-property (1- (point)) 'help-echo)))))))
+
+(ert-deftest harness-ui-workspace-computer-off-says-why ()
+  "A computer that cannot run names what is missing, never a picture."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-computer-mode)
+      (setq harness-ui-workspace-computer--workspace "w-1"
+            harness-ui-workspace-computer--data
+            (list :name "Home" :state "failed" :running :false :available :false
+                  :backend "local" :control "agent"
+                  :reason '(:code "box-tools-missing"
+                            :text "workspace computer tools missing: Xvfb x11vnc")
+                  :missing '(Xvfb x11vnc)))
+      (harness-ui-workspace-computer--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Workspace computer  ·  Home  ·  Unavailable" text))
+        (should (string-match-p "Reason  workspace computer tools missing: Xvfb x11vnc" text))
+        (should (string-match-p "Missing  Xvfb x11vnc" text))
+        (should-not (string-match-p "VNC  http" text))
+        (should-not (string-match-p "Preview\\|staged\\|mock" text)))
+      (let ((error (should-error (harness-ui-workspace-computer-open-vnc)
+                                :type 'user-error)))
+        (should (equal "No VNC page · computer off"
+                       (error-message-string error)))))))

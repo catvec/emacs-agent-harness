@@ -21,8 +21,19 @@ class WebSocketTransport implements RfbTransport {
   }
 
   /// Open the WebSocket at [url] (`ws://` or `wss://`).
-  factory WebSocketTransport.connect(String url) =>
-      WebSocketTransport(WebSocketChannel.connect(Uri.parse(url)));
+  ///
+  /// [token] is the harness's session secret when the endpoint is its
+  /// authenticated VNC tunnel; it travels in the `bearer.` subprotocol, the
+  /// one place a browser can put a credential, and never in the URL.  The
+  /// box's own bridge on this machine needs none and takes any subprotocol.
+  factory WebSocketTransport.connect(String url, {String token = ''}) {
+    final protocols = <String>['vnc.v1'];
+    final secret = token.trim();
+    if (secret.isNotEmpty) protocols.add('bearer.$secret');
+    return WebSocketTransport(
+      WebSocketChannel.connect(Uri.parse(url), protocols: protocols),
+    );
+  }
 
   final WebSocketChannel _channel;
   final _bytes = StreamController<Uint8List>.broadcast();
@@ -82,6 +93,13 @@ abstract final class VncEndpoint {
   /// `wss`; a `ws` endpoint goes to `wss` when the harness is reached over
   /// TLS (`https` or `wss`).  Anything that is not a loopback endpoint, or a
   /// harness that does not parse, is left as it came.
+  ///
+  /// A box on this machine publishes `/websockify?token=…&workspace=ID` on
+  /// its own loopback web port.  That port is not reachable from another
+  /// machine, so when the host and port are rewritten the path becomes the
+  /// harness's authenticated `/workspace/vnc?workspace=ID`: the same RFB
+  /// bytes, through the session the app is signed in to.  The box's page
+  /// token is not needed there and is not sent.
   static String? resolve(String socket, String? harnessAddress) {
     final vnc = Uri.tryParse(socket.trim());
     if (vnc == null || !vnc.hasScheme || vnc.host.isEmpty) return null;
@@ -89,6 +107,9 @@ abstract final class VncEndpoint {
     if (!_isLoopback(vnc.host)) return socket;
     final harness = _harness(harnessAddress);
     if (harness == null || harness.host.isEmpty) return socket;
+    final workspace = vnc.queryParameters['workspace'];
+    final tunnel =
+        vnc.path == '/websockify' && workspace != null && workspace.isNotEmpty;
     final secureHarness = harness.scheme == 'https' || harness.scheme == 'wss';
     final scheme = vnc.scheme == 'wss' || secureHarness ? 'wss' : 'ws';
     final port = harness.hasPort && !_isDefaultPort(scheme, harness.port)
@@ -99,8 +120,10 @@ abstract final class VncEndpoint {
       userInfo: vnc.userInfo.isEmpty ? null : vnc.userInfo,
       host: harness.host,
       port: port,
-      path: vnc.path,
-      query: vnc.hasQuery ? vnc.query : null,
+      path: tunnel ? '/workspace/vnc' : vnc.path,
+      query: tunnel
+          ? 'workspace=${Uri.encodeQueryComponent(workspace)}'
+          : (vnc.hasQuery ? vnc.query : null),
       fragment: vnc.hasFragment ? vnc.fragment : null,
     );
     return resolved.toString();

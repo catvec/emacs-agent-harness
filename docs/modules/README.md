@@ -60,6 +60,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;tool-slots-load    ; Fewer tool slots while this machine is loaded.
  ;;version            ; Whether the running harness is the latest: its commit against its…
  ;;workspace          ; Persistent workspace chat: one timeline over topic threads and episodes.
+ ;;workspace-box      ; The workspace's computer: a private desktop and a real VNC screen.
  ;;workspace-memory   ; Long-term notes and full-text recall for workspace mode.
  :providers
  ;;bedrock            ; AWS Bedrock provider: the Converse API, signed with SigV4 or an API key.
@@ -193,6 +194,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [usage](usage.md) | by default | [store](store.md), [session](session.md), [provider](provider.md) | Cost accounting, usage summaries, budgets, output rates and live token counts. |
 | [version](version.md) |  |  | Whether the running harness is the latest: its commit against its origins. |
 | [workspace](workspace.md) |  | [store](store.md), [session](session.md), [agent](agent.md), [project](project.md), [workspace-memory](workspace-memory.md) | Persistent workspace chat: one timeline over topic threads and episodes. |
+| [workspace-box](workspace-box.md) |  | [store](store.md) | The workspace's computer: a private desktop and a real VNC screen. |
 | [workspace-memory](workspace-memory.md) |  | [store](store.md), [session](session.md), [tools](tools.md) | Long-term notes and full-text recall for workspace mode. |
 | [worktree](worktree.md) | by default | [project](project.md) | Git worktree listing, creation, locking, removal and status. |
 
@@ -382,9 +384,10 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `usage/recorded` | [usage](usage.md) | [usage](usage.md) |  |  |
 | `usage/reported-changed` | [usage](usage.md) | [usage](usage.md) | [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `version/checked` | [version](version.md) | [version](version.md) | [ui-version](ui-version.md) | yes |
-| `workspace/changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
+| `workspace/box-status` | [workspace-box](workspace-box.md) | [workspace-box](workspace-box.md) | [ui-workspace](ui-workspace.md) | yes |
+| `workspace/changed` | [workspace](workspace.md) | [workspace](workspace.md), [workspace-box](workspace-box.md) | [ui-workspace](ui-workspace.md) | yes |
 | `workspace/context-built` | [workspace](workspace.md) |  |  | yes |
-| `workspace/deleted` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
+| `workspace/deleted` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [workspace-box](workspace-box.md) | yes |
 | `workspace/episode-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
 | `workspace/memory-changed` | [workspace](workspace.md) | [workspace-memory](workspace-memory.md) | [ui-workspace](ui-workspace.md) | yes |
 | `workspace/thread-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
