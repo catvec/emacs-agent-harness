@@ -19,6 +19,21 @@ class VoiceLevelEvent extends VoiceBackendEvent {
   final double level;
 }
 
+/// Low-latency speech activity from the capture path, before any
+/// transcription exists.  The screen uses it to hold assistant output.
+class VoiceSpeechEvent extends VoiceBackendEvent {
+  const VoiceSpeechEvent(this.active);
+  final bool active;
+}
+
+/// A reply the backend did not speak because the gate closed just as it
+/// arrived.  The controller adds it to its own held list so a false trigger
+/// can still release it, and the next transcript carries it as context.
+class VoiceHeldEvent extends VoiceBackendEvent {
+  const VoiceHeldEvent(this.text);
+  final String text;
+}
+
 class VoiceCaptionEvent extends VoiceBackendEvent {
   const VoiceCaptionEvent(this.speaker, this.text, {this.finalized = false});
   final VoiceSpeaker speaker;
@@ -67,6 +82,14 @@ abstract class VoiceBackend {
 
   /// Say [text], the agent's reply, in the voice provider's voice.
   Future<void> speak(String text);
+
+  /// Stop the microphone and the provider's audio while keeping the
+  /// conversation open.  A paused call resumes with [resume]; it is not
+  /// [stop].
+  Future<void> pause();
+
+  /// Resume a paused call with the same session and settings.
+  Future<void> resume();
 
   Future<void> stop();
 }

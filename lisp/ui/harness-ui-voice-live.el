@@ -79,12 +79,38 @@ One of nil, `starting', `listening', `speaking', `interrupted',
 (defvar harness-voice-live--order nil "Node ids in the order their text arrived.")
 (defvar harness-voice-live--heard ""
   "User transcript since the last delegation, for a delegation without text.")
+(defvar harness-voice-live--speech-active nil
+  "Non-nil while the sidecar hears a person speaking right now.")
+(defvar harness-voice-live--held nil
+  "Assistant text held while speech owns the floor.
+Each item is a plist of :id, :text and :turn, newest first.  It is
+reported with the next transcript and never spoken after a real
+utterance ends.")
+(defvar harness-voice-live--held-timer nil
+  "Timer that releases held text after a false trigger, or nil.")
+(defvar harness-voice-live--turn-id nil
+  "Id of the delegation whose output is arriving now.")
+(defvar harness-voice-live--seen (make-hash-table :test 'equal)
+  "Utterance keys already delivered to the session.")
+(defvar harness-voice-live--held-seq 0
+  "Counter for held pieces that came without an id.")
+
+(defcustom harness-voice-live-pending-release-delay 1.5
+  "Seconds to keep held output after a speech trigger with no utterance.
+
+A tap on the microphone can cross the onset threshold without becoming
+words.  Cancellation of such a trigger is reported as listening, and the
+held reply is released after this delay.  A real utterance sends
+transcribing instead, which cancels the timer; its reply becomes pending
+context and is never replayed blindly."
+  :type 'number
+  :group 'harness-voice)
 (defvar harness-voice-live--transcript nil "The live caption buffer, or nil.")
 (defvar harness-voice-live--speaker nil "Speaker of the caption line being written.")
 (defvar harness-voice-live--section nil "Section of the transcript being written.")
 (defvar harness-voice-live--stage nil
   "What the session is doing now.
-One of nil, `listening', `hearing', `transcribing', `thinking',
+One of nil, `listening', `hearing', `transcribing', `holding', `thinking',
 `speaking', `muted' or `failed'.  The stage is what the controls, the
 stage line and the timer read; the state is what the sidecar reported.")
 (defvar harness-voice-live--stage-since nil "Time the current stage began.")
@@ -127,6 +153,7 @@ flickers in and out is noise, and a wait that short needs no clock."
     ('listening "Listening")
     ('hearing "Hearing you")
     ('transcribing "Transcribing")
+    ('holding "Holding reply")
     ('thinking "Working")
     ('speaking "Speaking")
     ('muted "Muted")
@@ -144,6 +171,7 @@ Speaking has its own mark: the reply is arriving, not waited for."
     (aref harness-voice-live--spinner
           (mod harness-voice-live--stage-frame (length harness-voice-live--spinner))))
    ((eq harness-voice-live--stage 'speaking) "▷")
+   ((eq harness-voice-live--stage 'holding) "‖")
    ((eq harness-voice-live--stage 'muted) "⊘")
    ((eq harness-voice-live--stage 'failed) "✕")
    (t "●")))
@@ -193,6 +221,7 @@ Speaking has its own mark: the reply is arriving, not waited for."
                (when elapsed (format " · %.1fs" elapsed)))))
     ((eq harness-voice-live--state 'speaking) " · Speaking")
     ((eq harness-voice-live--stage 'speaking) " · Speaking")
+    ((eq harness-voice-live--stage 'holding) " · Holding reply")
     (harness-voice-live--working " · Working")
     ((and harness-voice-live--muted (harness-voice-live--active-p)) " · Muted")
     ((or (eq harness-voice-live--state 'listening)
@@ -305,6 +334,7 @@ local pipeline, the fixture or a custom sidecar."
         harness-voice-live--stage-timer nil
         harness-voice-live--stage nil
         harness-voice-live--stage-since nil)
+  (harness-voice-live--clear-gate)
   (let ((process harness-voice-live--process))
     (setq harness-voice-live--process nil
           harness-voice-live--tail "")
@@ -325,6 +355,139 @@ local pipeline, the fixture or a custom sidecar."
         harness-voice-live--order nil
         harness-voice-live--heard ""))
 
+(defun harness-voice-live--clear-gate ()
+  "Forget speech, held output and the release timer."
+  (when (timerp harness-voice-live--held-timer)
+    (cancel-timer harness-voice-live--held-timer))
+  (setq harness-voice-live--held-timer nil
+        harness-voice-live--speech-active nil
+        harness-voice-live--held nil
+        harness-voice-live--turn-id nil))
+
+(defun harness-voice-live--holding-output-p ()
+  "Non-nil while assistant text must not be sent to the sidecar."
+  (or harness-voice-live--speech-active
+      harness-voice-live--held
+      (memq harness-voice-live--stage '(hearing transcribing holding))))
+
+(defun harness-voice-live--cancel-held-timer ()
+  "Cancel a pending false-trigger release."
+  (when (timerp harness-voice-live--held-timer)
+    (cancel-timer harness-voice-live--held-timer))
+  (setq harness-voice-live--held-timer nil))
+
+(defun harness-voice-live--schedule-held-release ()
+  "Release held text after `harness-voice-live-pending-release-delay'.
+Only a trigger that produced no utterance schedules this; a real
+utterance sends transcribing first, which cancels it."
+  (harness-voice-live--cancel-held-timer)
+  (when (and harness-voice-live--held
+             (not harness-voice-live--speech-active))
+    (setq harness-voice-live--held-timer
+          (run-at-time harness-voice-live-pending-release-delay nil
+                       #'harness-voice-live--release-held))))
+
+(defun harness-voice-live--hold (id text)
+  "Hold assistant TEXT with ID until a transcript decides what to do."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (unless (and id (cl-find id harness-voice-live--held
+                             :key (lambda (item) (plist-get item :id))
+                             :test #'equal))
+      (setq harness-voice-live--held-seq (1+ harness-voice-live--held-seq))
+      (push (list :id (or id (format "held-%d" harness-voice-live--held-seq))
+                  :text text
+                  :turn harness-voice-live--turn-id)
+            harness-voice-live--held)
+      (when (> (length harness-voice-live--held) 40)
+        (setq harness-voice-live--held (seq-take harness-voice-live--held 40))))
+    (harness-voice-live--stage-set 'holding)))
+
+(defun harness-voice-live--release-held ()
+  "Send held output now; only a false trigger or an explicit resume does."
+  (harness-voice-live--cancel-held-timer)
+  (let ((items (reverse harness-voice-live--held)))
+    (setq harness-voice-live--held nil)
+    (dolist (item items)
+      (when (harness-voice-live--active-p)
+        (harness-voice-live--send
+         (list :event "commentary"
+               :id (plist-get item :id)
+               :text (plist-get item :text)))))
+    (unless harness-voice-live--speech-active
+      (harness-voice-live--stage-set
+       (cond ((not (harness-voice-live--active-p)) nil)
+             (harness-voice-live--muted 'muted)
+             ((harness-voice-live--holding-output-p) 'holding)
+             (t 'listening))))))
+
+(defun harness-voice-live--pending-items (event)
+  "Return held output items from EVENT and the client's own held list.
+EVENT's `pending' is the sidecar's unspoken queue, already bounded.  The
+merge is by id and then by text, so a piece the transport also saw is
+reported once."
+  (let ((items (append
+                (mapcar (lambda (item)
+                          (list :id (plist-get item :id)
+                                :text (or (plist-get item :text) "")))
+                        (append (plist-get event :pending) nil))
+                harness-voice-live--held))
+        (seen-ids nil)
+        (seen-texts nil)
+        (result nil))
+    (dolist (item items)
+      (let ((id (plist-get item :id))
+            (text (plist-get item :text)))
+        (unless (or (and id (member id seen-ids))
+                    (and text (member text seen-texts)))
+          (when id (push id seen-ids))
+          (when text (push text seen-texts))
+          (push item result))))
+    (setq harness-voice-live--held nil)
+    ;; A full turn result contains the sentence pieces that were held while
+    ;; it streamed; keep the larger text, not both.
+    (setq result
+          (cl-remove-if
+           (lambda (item)
+             (let ((text (plist-get item :text)))
+               (and text
+                    (cl-some
+                     (lambda (other)
+                       (let ((more (plist-get other :text)))
+                         (and more
+                              (> (length more) (length text))
+                              (string-match-p (regexp-quote text) more))))
+                     result))))
+           result))
+    (nreverse result)))
+
+(defun harness-voice-live--pending-context (items)
+  "Return the explicit pending-update context for ITEMS, or nil."
+  (when items
+    (concat "<voice-turn-context>\n"
+            "assistant_output: held (not spoken)\n"
+            "held_output:\n"
+            (mapconcat (lambda (item)
+                         (concat "- " (plist-get item :text) "\n"))
+                       items "")
+            "decision: answer the new speech; fold the held output in only "
+            "if it is still relevant; do not assume it was heard.\n"
+            "</voice-turn-context>\n")))
+
+(defun harness-voice-live--delegate-key (event)
+  "Return the exact-once key of delegation EVENT."
+  (or (plist-get event :utterance)
+      (plist-get event :id)
+      (plist-get event :text)))
+
+(defun harness-voice-live--delegate-seen-p (event)
+  "Return non-nil when EVENT's utterance already reached the session."
+  (let ((key (harness-voice-live--delegate-key event)))
+    (when key
+      (if (gethash key harness-voice-live--seen)
+          t
+        (puthash key t harness-voice-live--seen)
+        nil))))
+
 (defun harness-voice-live--fail (detail)
   "Fail the live session visibly with DETAIL."
   (let ((text (harness-ui-one-line detail)))
@@ -333,6 +496,7 @@ local pipeline, the fixture or a custom sidecar."
           harness-voice-live--error text
           harness-voice-live--closing nil)
     (harness-voice-live--stage-set 'failed)
+    (harness-voice-live--clear-gate)
     (harness-voice-live--clear-turn)
     (harness-voice-live--refresh)))
 
@@ -348,6 +512,7 @@ local pipeline, the fixture or a custom sidecar."
     (harness-voice-live--dispose)
     (setq harness-voice-live--state nil
           harness-voice-live--closing nil)
+    (harness-voice-live--clear-gate)
     (harness-voice-live--refresh)))
 
 (defun harness-voice-live--finished (process _status)
@@ -365,6 +530,7 @@ local pipeline, the fixture or a custom sidecar."
         (kill-buffer harness-voice-live--stderr))
       (setq harness-voice-live--stderr nil
             harness-voice-live--closing nil)
+      (harness-voice-live--clear-gate)
       (harness-voice-live--clear-turn)
       (cond
        (closing
@@ -548,12 +714,25 @@ not the whole path."
 
 ;;;; Speaking the agent's reply
 
-(defun harness-voice-live--speak (text)
-  "Send speakable TEXT to the sidecar as commentary."
-  (let ((speech (harness-voice--speech-text text)))
+(defun harness-voice-live--speak (text &optional id)
+  "Send speakable TEXT to the sidecar as commentary, or hold it.
+
+ID names the piece so a held one is not reported twice.  While speech is
+active, or until a transcript has decided what the held reply means, the
+text stays on this side of the pipe: the sidecar never gets a stale
+commentary to speak later."
+  (let ((speech (harness-voice--speech-text text))
+        (part 0))
     (while (and (not (string-empty-p speech)) (harness-voice-live--active-p))
-      (let ((piece (if (> (length speech) 1200) (substring speech 0 1200) speech)))
-        (harness-voice-live--send (list :event "commentary" :text piece))
+      (let* ((piece (if (> (length speech) 1200)
+                        (substring speech 0 1200)
+                      speech))
+             (piece-id (and id (format "%s:%d" id part))))
+        (setq part (1+ part))
+        (if (harness-voice-live--holding-output-p)
+            (harness-voice-live--hold piece-id piece)
+          (harness-voice-live--send
+           (list :event "commentary" :id piece-id :text piece)))
         (setq speech (if (> (length speech) 1200) (substring speech 1200) ""))))))
 
 (defun harness-voice-live--open-fence (text)
@@ -577,11 +756,13 @@ not the whole path."
                 (setq end (and (string-match "[.!?][ \t\n]+\\|\n\n" text scan)
                                (match-end 0)))
                 (<= end limit))
-      (harness-voice-live--speak (substring text scan end))
+      (harness-voice-live--speak (substring text scan end)
+                                 (format "%s:%d" id scan))
       (setq scan end))
     (when final
       (when (> (length text) scan)
-        (harness-voice-live--speak (substring text scan)))
+        (harness-voice-live--speak (substring text scan)
+                                   (format "%s:%d" id scan)))
       (setq scan (length text)))
     (puthash id (plist-put entry :sent scan) harness-voice-live--nodes)))
 
@@ -626,10 +807,13 @@ not the whole path."
              (harness-voice--context)))
       ""))
 
-(defun harness-voice-live--prompt (text)
-  "Return the agent prompt for delegated TEXT."
-  (let ((context (or (harness-voice-live--context) "")))
-    (if (string-empty-p context) text (concat context "\n" text))))
+(defun harness-voice-live--prompt (text &optional pending)
+  "Return the agent prompt for delegated TEXT and held PENDING items."
+  (let ((context (or (harness-voice-live--context) ""))
+        (block (harness-voice-live--pending-context pending)))
+    (concat (unless (string-empty-p context) (concat context "\n"))
+            text
+            (when block (concat "\n\n" block)))))
 
 (defun harness-voice-live--delegate-next ()
   "Send the next delegation to the agent, unless one is running."
@@ -643,6 +827,7 @@ not the whole path."
            (id (plist-get job :id))
            (text (plist-get job :text)))
       (setq harness-voice-live--delegation (list :id id)
+            harness-voice-live--turn-id id
             harness-voice-live--working t
             harness-voice-live--turn-active t
             harness-voice-live--nodes (make-hash-table :test 'equal)
@@ -655,7 +840,8 @@ not the whole path."
                                 (list :sessionId harness-voice-live--session
                                       :prompt (list (list :type "text"
                                                           :text (harness-voice-live--prompt
-                                                                 text))))
+                                                                 text
+                                                                 (plist-get job :pending)))))
                                 #'ignore
                                 (lambda (error)
                                   (harness-voice-live--delegate-error id error)))
@@ -666,6 +852,7 @@ not the whole path."
   "Report that delegation ID failed with ERROR."
   (when (and (equal id (plist-get harness-voice-live--delegation :id)))
     (setq harness-voice-live--delegation nil
+          harness-voice-live--turn-id nil
           harness-voice-live--working nil
           harness-voice-live--turn-active nil)
     (harness-voice-live--send
@@ -675,18 +862,27 @@ not the whole path."
     (harness-voice-live--delegate-next)))
 
 (defun harness-voice-live--delegate (event)
-  "Start a delegation from EVENT, or queue it behind the running turn."
+  "Start a delegation from EVENT, or queue it behind the running turn.
+
+The utterance key is delivered once.  Any assistant output held while
+the person spoke travels with this prompt as explicit context; it is
+never spoken afterwards merely because the transcript arrived."
   (let* ((id (or (plist-get event :id) (format "d-%s" (float-time))))
          (text (or (plist-get event :text) (plist-get event :prompt) ""))
          (text (if (string-empty-p text) harness-voice-live--heard text)))
-    (setq harness-voice-live--heard "")
-    (if (string-empty-p text)
-        (harness-voice-live--send
-         (list :event "delegate_result" :id id :text ""
-               :error t :message "Live voice delegation empty"))
-      (setq harness-voice-live--delegations
-            (nconc harness-voice-live--delegations (list (list :id id :text text))))
-      (harness-voice-live--delegate-next))))
+    (if (harness-voice-live--delegate-seen-p event)
+        (harness-voice-live--refresh)
+      (setq harness-voice-live--heard "")
+      (harness-voice-live--cancel-held-timer)
+      (let ((pending (harness-voice-live--pending-items event)))
+        (if (string-empty-p text)
+            (harness-voice-live--send
+             (list :event "delegate_result" :id id :text ""
+                   :error t :message "Live voice delegation empty"))
+          (setq harness-voice-live--delegations
+                (nconc harness-voice-live--delegations
+                       (list (list :id id :text text :pending pending))))
+          (harness-voice-live--delegate-next))))))
 
 (defun harness-voice-live--finish-turn (outcome)
   "Finish the agent turn that ended with OUTCOME."
@@ -700,6 +896,7 @@ not the whole path."
                 harness-voice-live--delegation nil
                 harness-voice-live--nodes nil
                 harness-voice-live--order nil)
+          (harness-voice-live--clear-gate)
           (when delegation
             (harness-voice-live--send
              (list :event "delegate_result"
@@ -713,9 +910,21 @@ not the whole path."
             harness-voice-live--turn-active nil
             harness-voice-live--delegation nil)
       (when delegation
-        (harness-voice-live--send
-         (list :event "delegate_result"
-               :id (plist-get delegation :id) :text text)))
+        (if (harness-voice-live--holding-output-p)
+            (progn
+              ;; Keep the full result as context only when no sentence of
+              ;; it was already held; otherwise the pieces are the truth.
+              (unless (cl-find (plist-get delegation :id) harness-voice-live--held
+                               :key (lambda (item) (plist-get item :turn))
+                               :test #'equal)
+                (harness-voice-live--hold
+                 (format "result:%s" (plist-get delegation :id)) text))
+              (harness-voice-live--send
+               (list :event "delegate_result"
+                     :id (plist-get delegation :id) :text text :held t)))
+          (harness-voice-live--send
+           (list :event "delegate_result"
+                 :id (plist-get delegation :id) :text text))))
       (setq harness-voice-live--nodes nil
             harness-voice-live--order nil))
     ;; A turn that ends while another delegation waits stays in Working:
@@ -725,6 +934,7 @@ not the whole path."
       (harness-voice-live--stage-set
        (cond ((not (harness-voice-live--active-p)) nil)
              (harness-voice-live--muted 'muted)
+             ((harness-voice-live--holding-output-p) 'holding)
              (t 'listening))))
     (harness-voice-live--refresh)
     (harness-voice-live--delegate-next)))
@@ -788,16 +998,32 @@ not the whole path."
              harness-voice-live--state 'listening)
        (harness-voice-live--stage-set 'listening)
        (harness-voice-live--refresh)))
+    ("speech"
+     (let ((active (plist-get event :active)))
+       (setq harness-voice-live--speech-active (and active t))
+       (harness-voice-live--cancel-held-timer)
+       (when active
+         (unless (eq harness-voice-live--stage 'thinking)
+           (harness-voice-live--stage-set 'hearing)))
+       (harness-voice-live--refresh)))
     ("listening"
      (setq harness-voice-live--state 'listening)
-     (unless (memq harness-voice-live--stage '(hearing transcribing thinking))
-       (harness-voice-live--stage-set (if harness-voice-live--muted 'muted 'listening)))
+     (if (and harness-voice-live--held
+              (not harness-voice-live--speech-active))
+         (progn
+           (harness-voice-live--stage-set 'holding)
+           (harness-voice-live--schedule-held-release))
+       (unless (memq harness-voice-live--stage
+                     '(hearing transcribing holding thinking))
+         (harness-voice-live--stage-set
+          (if harness-voice-live--muted 'muted 'listening))))
      (harness-voice-live--refresh))
     ("hearing"
      (setq harness-voice-live--state 'listening)
      (harness-voice-live--stage-set 'hearing)
      (harness-voice-live--refresh))
     ("transcribing"
+     (harness-voice-live--cancel-held-timer)
      (setq harness-voice-live--state 'listening)
      (harness-voice-live--stage-set 'transcribing)
      (harness-voice-live--refresh))
@@ -819,11 +1045,17 @@ not the whole path."
     ("backchannel"
      (harness-voice-live--backchannel (or (plist-get event :text) "mm-hmm")))
     ("delegation"
+     (harness-voice-live--cancel-held-timer)
      (harness-voice-live--stage-set 'thinking)
      (harness-voice-live--delegate event))
     ("interrupted"
+     (harness-voice-live--cancel-held-timer)
+     (setq harness-voice-live--held nil)
      (setq harness-voice-live--state 'interrupted)
-     (harness-voice-live--stage-set (if harness-voice-live--working 'thinking 'listening))
+     (harness-voice-live--stage-set
+      (cond (harness-voice-live--speech-active 'hearing)
+            (harness-voice-live--working 'thinking)
+            (t 'listening)))
      (harness-voice-live--refresh))
     ("error"
      (harness-voice-live--fail
@@ -874,7 +1106,10 @@ not the whole path."
           harness-voice-live--muted nil
           harness-voice-live--closing nil
           harness-voice-live--tail ""
-          harness-voice-live--speaker nil)
+          harness-voice-live--speaker nil
+          harness-voice-live--seen (make-hash-table :test 'equal)
+          harness-voice-live--held-seq 0)
+    (harness-voice-live--clear-gate)
     (harness-voice-live--clear-turn)
     (when (buffer-live-p harness-voice-live--transcript)
       (with-current-buffer harness-voice-live--transcript
@@ -941,8 +1176,13 @@ not the whole path."
   (unless (harness-voice-live--active-p)
     (user-error "Live voice inactive"))
   (harness-voice-live--send (list :event "interrupt"))
-  (setq harness-voice-live--state 'interrupted)
-  (harness-voice-live--stage-set (if harness-voice-live--working 'thinking 'listening))
+  (harness-voice-live--cancel-held-timer)
+  (setq harness-voice-live--held nil
+        harness-voice-live--state 'interrupted)
+  (harness-voice-live--stage-set
+   (cond (harness-voice-live--speech-active 'hearing)
+         (harness-voice-live--working 'thinking)
+         (t 'listening)))
   (harness-voice-live--refresh))
 
 ;;;###autoload
@@ -984,6 +1224,9 @@ not the whole path."
         harness-voice-live--section nil
         harness-voice-live--stage nil
         harness-voice-live--stage-since nil)
+  (harness-voice-live--clear-gate)
+  (setq harness-voice-live--seen (make-hash-table :test 'equal)
+        harness-voice-live--held-seq 0)
   (harness-voice-live--clear-turn)
   (when (buffer-live-p harness-voice-live--transcript)
     (kill-buffer harness-voice-live--transcript))

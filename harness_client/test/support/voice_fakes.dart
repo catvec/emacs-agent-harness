@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:harness_client/src/voice/voice_backend.dart';
 import 'package:harness_client/src/voice/voice_controller.dart';
+import 'package:harness_client/src/voice/voice_media_buttons.dart';
 import 'package:harness_client/src/voice/voice_models.dart';
 import 'package:harness_client/src/voice/voice_settings.dart';
 
@@ -69,6 +71,9 @@ class FakeBackend implements VoiceBackend {
   bool started = false;
   bool stopped = false;
   bool muted = false;
+  bool paused = false;
+  int pauses = 0;
+  int resumes = 0;
   int interrupts = 0;
   final List<String> spoken = <String>[];
 
@@ -98,6 +103,20 @@ class FakeBackend implements VoiceBackend {
   }
 
   @override
+  Future<void> pause() async {
+    paused = true;
+    pauses++;
+    emit(const VoicePhaseEvent(VoicePhase.paused));
+  }
+
+  @override
+  Future<void> resume() async {
+    paused = false;
+    resumes++;
+    emit(VoicePhaseEvent(muted ? VoicePhase.muted : VoicePhase.listening));
+  }
+
+  @override
   Future<void> speak(String text) async {
     spoken.add(text);
   }
@@ -109,12 +128,33 @@ class FakeBackend implements VoiceBackend {
   }
 }
 
+class FakeMediaButtons implements VoiceMediaButtons {
+  VoidCallback? toggle;
+  int starts = 0;
+  int stops = 0;
+
+  @override
+  Future<void> start(VoidCallback toggle) async {
+    starts++;
+    this.toggle = toggle;
+  }
+
+  @override
+  Future<void> stop() async {
+    stops++;
+    toggle = null;
+  }
+
+  void press() => toggle?.call();
+}
+
 class Rig {
   Rig({
     VoiceSettings settings = const VoiceSettings(
       clipDelivery: ClipDelivery.audioPrompt,
     ),
     String address = 'ws://harness.test:9999/acp',
+    Duration pendingReleaseDelay = const Duration(milliseconds: 1500),
   }) : session = FakeSession() {
     controller = VoiceController(
       settings: settings,
@@ -128,11 +168,14 @@ class Rig {
       onSettingsChanged: (next) async {
         saved.add(next);
       },
+      mediaButtons: media,
+      pendingReleaseDelay: pendingReleaseDelay,
     );
   }
 
   final FakeSession session;
   final FakeBackend backend = FakeBackend();
+  final FakeMediaButtons media = FakeMediaButtons();
   final List<VoiceSettings> saved = <VoiceSettings>[];
   VoiceSettings? builtWith;
   String? builtAt;

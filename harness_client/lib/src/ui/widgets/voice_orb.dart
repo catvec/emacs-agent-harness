@@ -16,6 +16,7 @@ Color voicePhaseColor(VoicePhase phase) => switch (phase) {
   VoicePhase.interrupted => const Color(0xFFC9A469),
   VoicePhase.approval => const Color(0xFFE2B85D),
   VoicePhase.muted => const Color(0xFF8B8B93),
+  VoicePhase.paused => const Color(0xFFC9A469),
   VoicePhase.ended => const Color(0xFF8B8B93),
   VoicePhase.failed => const Color(0xFFE0645B),
   VoicePhase.idle => const Color(0xFF8B8B93),

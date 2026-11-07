@@ -49,6 +49,7 @@ class LiveProtocol {
       'ready' || 'started' => const [VoicePhaseEvent(VoicePhase.listening)],
       'caption' => _caption(message),
       'phase' => _phase(message),
+      'speech' => _speech(message),
       'delegate' => _delegate(message),
       'error' => _error(message),
 
@@ -56,9 +57,11 @@ class LiveProtocol {
       'session.created' ||
       'session.updated' => const [VoicePhaseEvent(VoicePhase.listening)],
       'input_audio_buffer.speech_started' => const [
+        VoiceSpeechEvent(true),
         VoicePhaseEvent(VoicePhase.hearing),
       ],
       'input_audio_buffer.speech_stopped' => const [
+        VoiceSpeechEvent(false),
         VoicePhaseEvent(VoicePhase.thinking),
       ],
       'conversation.item.input_audio_transcription.delta' => _caption(
@@ -113,6 +116,12 @@ class LiveProtocol {
     ];
   }
 
+  List<VoiceBackendEvent> _speech(Map<String, Object?> message) {
+    final active = _bool(message['active']) ?? _bool(message['on']);
+    if (active == null) return const [];
+    return [VoiceSpeechEvent(active)];
+  }
+
   List<VoiceBackendEvent> _phase(Map<String, Object?> message) {
     final name = _string(message['phase']) ?? _string(message['state']);
     final phase = switch (name) {
@@ -128,7 +137,14 @@ class LiveProtocol {
       'failed' => VoicePhase.failed,
       _ => null,
     };
-    return phase == null ? const [] : [VoicePhaseEvent(phase)];
+    if (phase == null) return const [];
+    if (phase == VoicePhase.hearing) {
+      return [const VoiceSpeechEvent(true), VoicePhaseEvent(phase)];
+    }
+    if (phase == VoicePhase.transcribing || phase == VoicePhase.listening) {
+      return [const VoiceSpeechEvent(false), VoicePhaseEvent(phase)];
+    }
+    return [VoicePhaseEvent(phase)];
   }
 
   List<VoiceBackendEvent> _delegate(Map<String, Object?> message) {
@@ -223,7 +239,7 @@ class LiveProtocol {
         },
         'turn_detection': <String, Object?>{
           'type': 'server_vad',
-          'silence_duration_ms': 650,
+          'silence_duration_ms': 800,
           'prefix_padding_ms': 300,
         },
         'tools': <Object?>[

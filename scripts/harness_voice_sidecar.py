@@ -161,6 +161,19 @@ class Loop:
 #; Audio
 #; ------------------------------------------------------------------
 
+def pcm_energy(pcm):
+    """Return the mean absolute sample of PCM16 bytes, in [0, 1]."""
+    if not pcm:
+        return 0.0
+    count = len(pcm) // 2
+    if not count:
+        return 0.0
+    total = 0
+    for (sample,) in struct.iter_unpack("<h", pcm[:count * 2]):
+        total += sample if sample >= 0 else -sample
+    return total / (count * 32768.0)
+
+
 class Player:
     """Play raw PCM16 mono through a subprocess, cancellably.
 
@@ -178,6 +191,11 @@ class Player:
         self._until = 0.0
         self._lock = threading.Lock()
         self.played = 0
+        self._level = 0.0
+
+    def level(self):
+        """Return the level of the audio still playing, in [0, 1]."""
+        return self._level if self.busy() else 0.0
 
     def available(self):
         """Return nil, or why this player cannot start."""
@@ -201,6 +219,7 @@ class Player:
                 self._process = None
                 return
             self.played += len(pcm)
+            self._level = max(self._level * 0.6, pcm_energy(pcm))
             self._until = max(time.monotonic(), self._until) + len(pcm) / (2.0 * self.rate)
 
     def busy(self):
@@ -320,6 +339,9 @@ class NullAudio:
     def busy(self):
         return False
 
+    def level(self):
+        return 0.0
+
     def stop(self):
         pass
 
@@ -331,78 +353,285 @@ class NullAudio:
 #; Voice detection
 #; ------------------------------------------------------------------
 
-class Vad:
-    """Energy gate turning a continuous stream into utterances.
+class SpeechDetector:
+    """Frame-wise speech activity, for gating output before STT exists.
 
-    It keeps a short pre-roll so the first syllable is not cut, ends an
-    utterance after HANGOVER seconds under the threshold, and bounds an
-    utterance so a noisy room cannot record forever.
+    Energy alone calls a fan, a hum or the assistant's own speaker speech.
+    A frame therefore also has to look voiced (zero-crossing rate) and carry
+    change above a low hum (the first difference relative to its level).
+    While the player is speaking, the onset threshold rises above the
+    playback level and the hangover shortens, so a narrow-band echo cannot
+    gate the assistant against itself; a voice louder than that echo still
+    gets through.  This is not acoustic echo cancellation: an open speaker
+    at a level close to the voice needs headphones or a real AEC.
+
+    ``feed`` returns ``("start",)`` after ONSET_HOLD seconds of speech and
+    ``("end",)`` after HANGOVER seconds without it.  The onset is the
+    signal the gate uses; it is deliberately much earlier than a full
+    utterance or a transcription.
     """
 
-    def __init__(self, rate=LOCAL_RATE, threshold=0.02, frame=0.02,
-                 hangover=0.7, pre_roll=0.3, min_speech=0.15, max_speech=30.0):
+    def __init__(self, rate=LOCAL_RATE, threshold=0.02, frame=0.01,
+                 onset_hold=0.03, hangover=0.85, echo_hold=0.20,
+                 echo_margin=1.8):
         self.rate = rate
         self.threshold = threshold
+        self.frame_seconds = frame
         self.frame_bytes = max(2, int(rate * frame) * 2)
+        self.onset_hold = onset_hold
         self.hangover = hangover
-        self.pre_roll_bytes = int(rate * pre_roll) * 2
-        self.min_speech = min_speech
-        self.max_speech = max_speech
-        self._preroll = b""
-        self._speech = b""
-        self._silence = 0.0
-        self._spoke = False
+        self.echo_hold = echo_hold
+        self.echo_margin = echo_margin
+        self.active = False
+        self.last_loud = False
+        self.last_energy = 0.0
         self._pending = b""
+        self._loud_for = 0.0
+        self._quiet_for = 0.0
+        self._noise = 0.0
+        self._playback = 0.0
+
+    def set_playback(self, level):
+        """Tell the detector how loud the assistant's player is now."""
+        self._playback = max(0.0, float(level or 0.0))
+
+    def reset(self):
+        """Forget the current onset; keep what the room sounds like."""
+        self.active = False
+        self.last_loud = False
+        self._pending = b""
+        self._loud_for = 0.0
+        self._quiet_for = 0.0
 
     @staticmethod
     def energy(pcm):
         """Return the mean absolute sample of PCM16 bytes, in [0, 1]."""
-        if not pcm:
-            return 0.0
+        return pcm_energy(pcm)
+
+    @staticmethod
+    def zero_crossing_rate(pcm):
+        """Return sign changes per sample, ignoring exact zeroes."""
         count = len(pcm) // 2
-        if not count:
+        if count < 2:
             return 0.0
-        total = 0
+        previous = 0
+        crossings = 0
         for (sample,) in struct.iter_unpack("<h", pcm[:count * 2]):
+            sign = 1 if sample > 0 else (-1 if sample < 0 else 0)
+            if sign and previous and sign != previous:
+                crossings += 1
+            if sign:
+                previous = sign
+        return crossings / (count - 1.0)
+
+    @staticmethod
+    def change_ratio(pcm):
+        """Return mean sample-to-sample change relative to mean level.
+
+        A 50 Hz hum is a nearly constant slope; voiced speech has harmonics
+        and changes faster even at the same loudness.
+        """
+        count = len(pcm) // 2
+        if count < 2:
+            return 0.0
+        values = struct.unpack("<%dh" % count, pcm[:count * 2])
+        total = 0
+        change = 0
+        previous = values[0]
+        for sample in values:
             total += sample if sample >= 0 else -sample
-        return total / (count * 32768.0)
+            delta = sample - previous
+            change += delta if delta >= 0 else -delta
+            previous = sample
+        level = total / (count * 32768.0)
+        if level <= 0.0:
+            return 0.0
+        return (change / (count * 32768.0)) / level
+
+    def _threshold(self):
+        threshold = max(self.threshold, self._noise * 2.5)
+        if self._playback > 0.005:
+            threshold = max(threshold, self._playback * self.echo_margin)
+        return threshold
+
+    def _learn_noise(self, energy):
+        if energy <= 0:
+            return
+        if self._noise <= 0:
+            self._noise = min(0.05, energy)
+        else:
+            self._noise = min(0.05, (self._noise * 0.98) + (energy * 0.02))
+
+    def classify(self, frame):
+        """Return whether one PCM16 frame is likely human speech."""
+        energy = pcm_energy(frame)
+        self.last_energy = energy
+        loud = False
+        if energy >= self._threshold():
+            loud = (self.zero_crossing_rate(frame) <= 0.35
+                    and self.change_ratio(frame) >= 0.03)
+        if not loud and energy <= max(self.threshold, 0.03):
+            self._learn_noise(energy)
+        self.last_loud = loud
+        return loud
 
     def feed(self, pcm):
-        """Consume PCM bytes, returning [("start",), ("speech", pcm), ...]."""
+        """Consume PCM bytes, returning [("start",), ("end",), ...]."""
         output = []
         self._pending += pcm
         while len(self._pending) >= self.frame_bytes:
             frame = self._pending[:self.frame_bytes]
             self._pending = self._pending[self.frame_bytes:]
-            loud = self.energy(frame) >= self.threshold
-            if not self._speech:
+            loud = self.classify(frame)
+            if not self.active:
                 if loud:
-                    self._spoke = True
-                    self._speech = self._preroll + frame
-                    self._silence = 0.0
-                    output.append(("start",))
+                    self._loud_for += self.frame_seconds
+                    if self._loud_for + 1e-9 >= self.onset_hold:
+                        self.active = True
+                        self._quiet_for = 0.0
+                        output.append(("start",))
                 else:
-                    self._preroll = (self._preroll + frame)[-self.pre_roll_bytes:]
+                    self._loud_for = 0.0
                 continue
-            self._speech += frame
-            self._silence = 0.0 if loud else self._silence + self.frame_bytes / (2.0 * self.rate)
-            seconds = len(self._speech) / (2.0 * self.rate)
-            if self._silence >= self.hangover or seconds >= self.max_speech:
-                if seconds >= self.min_speech:
-                    output.append(("speech", self._speech))
-                else:
-                    output.append(("cancel",))
-                self._speech = b""
-                self._preroll = b""
-                self._silence = 0.0
+            if loud:
+                self._quiet_for = 0.0
+            else:
+                self._quiet_for += self.frame_seconds
+                hold = self.echo_hold if self._playback > 0.005 else self.hangover
+                if self._quiet_for + 1e-9 >= hold:
+                    self.active = False
+                    self._loud_for = 0.0
+                    self._quiet_for = 0.0
+                    output.append(("end",))
+        return output
+
+
+class Vad:
+    """Turn a continuous stream into utterances from speech activity.
+
+    ``SpeechDetector`` decides when a person is speaking; this keeps a
+    short pre-roll so the first syllable is not cut, ends an utterance
+    HANGOVER seconds after the detector lets go, and bounds one so a noisy
+    room cannot record forever.  Events are ``("start", ID)``,
+    ``("end", ID)``, then ``("speech", PCM, ID)`` or ``("cancel", ID)``.
+    A long dictation is one utterance up to MAX_SPEECH, not a prompt per
+    natural pause.
+    """
+
+    def __init__(self, rate=LOCAL_RATE, threshold=0.02, frame=0.01,
+                 hangover=0.85, pre_roll=0.3, min_speech=0.15,
+                 max_speech=120.0, onset_hold=0.03, echo_hold=0.20,
+                 echo_margin=1.8):
+        self.rate = rate
+        self.threshold = threshold
+        self.hangover = hangover
+        self.pre_roll_bytes = int(rate * pre_roll) * 2
+        self.min_speech = min_speech
+        self.max_speech = max_speech
+        self.detector = SpeechDetector(
+            rate=rate, threshold=threshold, frame=frame,
+            onset_hold=onset_hold, hangover=hangover,
+            echo_hold=echo_hold, echo_margin=echo_margin)
+        self.frame_bytes = self.detector.frame_bytes
+        self.frame_seconds = self.detector.frame_seconds
+        self._pending = b""
+        self._history = []
+        self._tail = b""
+        self._speech = b""
+        self._uid = 0
+        self._active_uid = None
+
+    @property
+    def gate_active(self):
+        """Non-nil while the detector says a person is speaking now."""
+        return self.detector.active
+
+    def set_playback(self, level):
+        """Tell the detector how loud the assistant's player is now."""
+        self.detector.set_playback(level)
+
+    @staticmethod
+    def energy(pcm):
+        """Return the mean absolute sample of PCM16 bytes, in [0, 1]."""
+        return pcm_energy(pcm)
+
+    def reset(self):
+        """Forget the current utterance, keeping the noise estimate."""
+        self.detector.reset()
+        self._pending = b""
+        self._history = []
+        self._tail = b""
+        self._speech = b""
+        self._active_uid = None
+
+    def _start(self, output):
+        self._uid += 1
+        self._active_uid = self._uid
+        self._speech = self._tail or b"".join(self._history)
+        self._history = []
+        output.append(("start", self._uid))
+
+    def _finish(self, output, final=False):
+        uid = self._active_uid
+        self._active_uid = None
+        speech, self._speech = self._speech, b""
+        self._history = []
+        if uid is None:
+            return
+        seconds = len(speech) / (2.0 * self.rate)
+        if seconds >= self.min_speech or (final and speech):
+            output.append(("speech", speech, uid))
+        else:
+            output.append(("cancel", uid))
+
+    def feed(self, pcm):
+        """Consume PCM bytes, returning the events above, oldest first."""
+        output = []
+        self._pending += pcm
+        while len(self._pending) >= self.frame_bytes:
+            frame = self._pending[:self.frame_bytes]
+            self._pending = self._pending[self.frame_bytes:]
+            events = self.detector.feed(frame)
+            for event in events:
+                if event[0] == "start":
+                    self._start(output)
+                elif event[0] == "end":
+                    uid = self._active_uid
+                    if uid is not None:
+                        output.append(("end", uid))
+                    self._finish(output)
+            if self._active_uid is not None:
+                self._speech += frame
+                self._tail = (self._tail + frame)[-self.pre_roll_bytes:]
+                if len(self._speech) / (2.0 * self.rate) >= self.max_speech:
+                    # A very long dictation is cut into another utterance
+                    # rather than held in memory or dropped.
+                    uid = self._active_uid
+                    output.append(("speech", self._speech, uid))
+                    self._uid += 1
+                    self._active_uid = self._uid
+                    self._speech = self._tail
+                    output.append(("start", self._uid))
+            else:
+                self._history.append(frame)
+                keep = max(1, int((self.pre_roll_bytes / 2.0)
+                                  / (self.frame_bytes / 2.0))) + 4
+                if len(self._history) > keep:
+                    self._history = self._history[-keep:]
+                self._tail = (self._tail + frame)[-self.pre_roll_bytes:]
         return output
 
     def flush(self):
         """End a speech still open when the session stops."""
-        speech, self._speech = self._speech, b""
-        if speech and len(speech) / (2.0 * self.rate) >= self.min_speech:
-            return [("speech", speech)]
-        return []
+        output = []
+        if self._active_uid is not None:
+            output.append(("end", self._active_uid))
+            self._finish(output, final=True)
+        self.detector.reset()
+        self._pending = b""
+        self._history = []
+        self._tail = b""
+        return output
 
 
 #; ------------------------------------------------------------------
@@ -636,6 +865,9 @@ class Sidecar:
         self.delegations = []
         self.caption = ""
         self.loop = None
+        self.speech_active = False
+        self.held = []
+        self.held_seq = 0
 
     # -- lifecycle ---------------------------------------------------
 
@@ -647,6 +879,8 @@ class Sidecar:
     def start_session(self, event):
         """Handle the harness's `start` command."""
         self.context = event.get("context") or ""
+        self.speech_active = False
+        self.held = []
         self.announce()
         self.on_start()
 
@@ -680,7 +914,7 @@ class Sidecar:
         elif kind == "stop":
             self.finish("sidecar stopped")
         elif kind == "commentary":
-            self.on_commentary(event.get("text") or "")
+            self.on_commentary(event.get("text") or "", event)
         elif kind == "thinking":
             self.on_thinking(event.get("text") or "")
         elif kind == "delegate_result":
@@ -688,10 +922,26 @@ class Sidecar:
         else:
             log("ignored %s" % kind)
 
+    def announce_speech(self, active, utterance=None, reason=None):
+        """Report the low-latency speech gate to Emacs.
+
+        ``active`` is true as soon as ONSET_HOLD seconds of speech were
+        heard, long before an utterance has ended or a transcription
+        exists.  It is false when the detector lets go.  Emacs uses the
+        edge, not the text, to hold assistant output.
+        """
+        active = bool(active)
+        if active == self.speech_active and reason is None:
+            return
+        self.speech_active = active
+        self.events.send("speech", active=active, utterance=utterance,
+                         reason=reason or ("onset" if active else "hangover"))
+
     def interrupt(self):
         """Stop playback now; the agent turn keeps running in Emacs."""
         if self.player:
             self.player.stop()
+        self.held = []
         self.speaking = False
         self.announce_listening()
         self.events.send("interrupted")
@@ -714,36 +964,88 @@ class Sidecar:
             self.announce_listening()
 
     def play(self, pcm):
-        """Play PCM bytes, reporting the speaker as busy."""
-        if not pcm or self.muted:
-            return
+        """Play PCM bytes, reporting the speaker as busy.
+
+        While the person is speaking no reply audio starts: the gate owns
+        the output.  A sidecar that already synthesized audio keeps the
+        text and reports it as held instead of replaying it later.
+        """
+        if not pcm or self.muted or self.speech_active:
+            return False
         if self.player is None:
-            return
+            return False
         self.player.play(pcm)
         self.announce_speaking()
+        return True
+
+    # -- held output -------------------------------------------------
+
+    def hold(self, text, item_id=None):
+        """Remember reply TEXT that was not spoken, for the pending context.
+
+        The id is the commentary piece's id when Emacs supplied one, so
+        the client can merge its own held pieces and this sidecar's
+        without counting one twice.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        if not item_id:
+            self.held_seq += 1
+            item_id = "held-%d" % self.held_seq
+        if any(item.get("id") == item_id for item in self.held):
+            return
+        if any(item.get("text") == text for item in self.held):
+            return
+        self.held.append({"id": item_id, "text": text[:4000]})
+        if len(self.held) > 20:
+            self.held = self.held[-20:]
+
+    def take_pending(self):
+        """Return and forget the held reply pieces."""
+        pending, self.held = self.held, []
+        return pending
 
     # -- delegations -------------------------------------------------
 
-    def delegation(self, text, delegation_id=None, final=True):
+    def delegation(self, text, delegation_id=None, final=True, pending=None,
+                   utterance=None):
         """Ask the harness's agent for work, with the spoken transcript."""
         text = (text or "").strip()
         if not text:
             return
         delegation_id = delegation_id or "d-%d" % int(time.time() * 1000)
         self.working = True
-        self.events.send("delegation", id=delegation_id, text=text, final=bool(final))
+        fields = {"id": delegation_id, "text": text, "final": bool(final)}
+        if pending:
+            fields["pending"] = list(pending)
+        if utterance is not None:
+            fields["utterance"] = utterance
+        fields["speech_active"] = bool(self.speech_active)
+        self.events.send("delegation", **fields)
 
     def on_delegate_result(self, event):
         """Handle the agent's answer: speak it and end the work state."""
         self.working = False
         delegation_id = event.get("id")
         text = event.get("text") or ""
+        held = bool(event.get("held"))
         if event.get("error"):
             message = event.get("message") or "delegation failed"
             self.events.send("assistant_delta", text=message, final=True)
-            self.on_result(delegation_id, message, message)
+            if held:
+                self.hold("result:%s" % (delegation_id or "error"), message)
+                self.on_held_result(delegation_id, message)
+            else:
+                self.on_result(delegation_id, message, message)
             return
         self.events.send("assistant_delta", text=text, final=True)
+        if held:
+            # The full result is the pending update; piece-level ids were
+            # already reported as commentary while speech was active.
+            self.hold(text, "result:%s" % (delegation_id or "held"))
+            self.on_held_result(delegation_id, text)
+            return
         self.on_result(delegation_id, text, None)
 
     # -- hooks -------------------------------------------------------
@@ -752,9 +1054,10 @@ class Sidecar:
     def on_start(self): pass
     def on_stop(self): pass
     def on_mute(self, muted): pass
-    def on_commentary(self, text): pass
+    def on_commentary(self, text, event=None): pass
     def on_thinking(self, text): pass
     def on_result(self, delegation_id, text, error): pass
+    def on_held_result(self, delegation_id, text): pass
     def on_speech(self, pcm): pass
 
 

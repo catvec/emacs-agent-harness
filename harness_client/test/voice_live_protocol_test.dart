@@ -112,11 +112,15 @@ void main() {
       }).single as VoiceCaptionEvent;
       expect(done.finalized, isTrue);
 
-      expect(
-        (protocol.decode({'type': 'input_audio_buffer.speech_started'})
-            .single as VoicePhaseEvent).phase,
-        VoicePhase.hearing,
-      );
+      final started = protocol.decode({
+        'type': 'input_audio_buffer.speech_started',
+      });
+      expect((started.first as VoiceSpeechEvent).active, isTrue);
+      expect((started.last as VoicePhaseEvent).phase, VoicePhase.hearing);
+      final stopped = protocol.decode({
+        'type': 'input_audio_buffer.speech_stopped',
+      });
+      expect((stopped.first as VoiceSpeechEvent).active, isFalse);
       expect(
         (protocol.decode({'type': 'response.audio.delta'}).single
             as VoicePhaseEvent).phase,

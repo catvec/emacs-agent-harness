@@ -211,8 +211,9 @@ player do, even when the harness server is elsewhere.
 
 The live status names what the session is doing now: **Live · Off**, **Live ·
 Starting**, **Live · Listening**, **Live · Hearing you**, **Live ·
-Transcribing**, **Live · Working**, **Live · Speaking**, **Live · Interrupted**,
-**Live · Muted**, **Live · Ending** or **Live · Failed**. A stage that runs
+Transcribing**, **Live · Working**, **Live · Holding reply**, **Live ·
+Speaking**, **Live · Interrupted**, **Live · Muted**, **Live · Ending** or
+**Live · Failed**. A stage that runs
 longer than a third of a second carries its elapsed time (**Live · Working ·
 1.4s**), so a slow turn reads as work rather than as a hang. The stage line at
 the top of the transcript spins while the session hears, transcribes or thinks,
@@ -274,9 +275,10 @@ without a microphone or model:
 | --- | --- | --- |
 | sidecar to Emacs | `ready` | Session connected; the microphone may start |
 | sidecar to Emacs | `listening` / `speaking` | Playback state for the indicator |
+| sidecar to Emacs | `speech` | Low-latency speech gate: `active`, before a transcript exists |
 | sidecar to Emacs | `user_delta` / `assistant_delta` | Caption text, with optional `final` |
 | sidecar to Emacs | `backchannel` | A brief listening sound |
-| sidecar to Emacs | `delegation` | Backend request with `id` and `text` |
+| sidecar to Emacs | `delegation` | Backend request with `id`, `text`, `utterance` and any `pending` held output |
 | sidecar to Emacs | `interrupted` | Playback stopped |
 | sidecar to Emacs | `error` / `closed` | Visible failure or clean end |
 | Emacs to sidecar | `start` | Session start, protocol version and context |
@@ -285,7 +287,9 @@ without a microphone or model:
 | Emacs to sidecar | `delegate_result` | Final text, or an error, for a delegation |
 
 [How realtime voice stays in the conversation](voice-realtime.md) has the
-full contract, the GPT-Live event mapping and the sidecar phases. The
+full contract, the GPT-Live event mapping and the sidecar phases.
+[Voice turn-taking](voice-turn-taking.md) has the early-speech gate, the
+pending-update context and the live-conversation controls. The
 bundled `scripts/harness-voice-live-fixture` is a working small sidecar for
 tests and demonstrations; it emits a scripted transcript and one delegation, so
 it needs no speech service.

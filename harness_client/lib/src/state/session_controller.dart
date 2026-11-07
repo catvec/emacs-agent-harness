@@ -354,8 +354,13 @@ class SessionController extends ChangeNotifier {
   /// a message that arrives during a turn for the turn's next step, which is
   /// what a spoken correction is.  It never answers a pending permission or
   /// question; those still wait for the person on screen.
-  Future<void> sendVoice({String? text, Uint8List? audio}) async {
+  Future<void> sendVoice({
+    String? text,
+    Uint8List? audio,
+    String? displayText,
+  }) async {
     final trimmed = text?.trim() ?? '';
+    final shown = displayText?.trim() ?? '';
     if (trimmed.isEmpty && audio == null) return;
     if (!canSend) {
       error = 'Not connected to the harness: the message was not sent.';
@@ -365,7 +370,9 @@ class SessionController extends ChangeNotifier {
     error = null;
     voicePromptInFlight = true;
     final echo = transcript.addLocalUser(
-      trimmed.isEmpty ? '(voice message)' : trimmed,
+      shown.isNotEmpty
+          ? shown
+          : (trimmed.isEmpty ? '(voice message)' : trimmed),
     );
     _notify();
     final blocks = <Map<String, Object?>>[
@@ -394,7 +401,8 @@ class SessionController extends ChangeNotifier {
     } on AcpException catch (failure) {
       if (failure.isTransport) {
         transcript.removeLocalEcho(echo);
-        error = trimmed.isEmpty
+        final what = shown.isNotEmpty ? shown : trimmed;
+        error = what.isEmpty
             ? 'The connection was lost before the voice message was sent.'
             : 'The connection was lost before this was sent.';
       } else {

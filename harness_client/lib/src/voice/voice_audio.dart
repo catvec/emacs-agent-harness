@@ -70,6 +70,10 @@ class VoiceActivityConfig {
     this.startThreshold = 0.018,
     this.endThreshold = 0.010,
     this.startHold = const Duration(milliseconds: 160),
+    this.gateHold = const Duration(milliseconds: 60),
+    this.gateEndSilence = const Duration(milliseconds: 320),
+    this.echoThreshold = 0.055,
+    this.echoHold = const Duration(milliseconds: 220),
     this.endSilence = const Duration(milliseconds: 850),
     this.preRoll = const Duration(milliseconds: 300),
     this.trailingKeep = const Duration(milliseconds: 200),
@@ -89,6 +93,24 @@ class VoiceActivityConfig {
 
   /// How much speech in a row starts an utterance.
   final Duration startHold;
+
+  /// How much speech in a row flips the low-latency gate.  This is much
+  /// shorter than [startHold]: the gate holds assistant output while the
+  /// first words arrive, before the utterance is complete or transcribed.
+  final Duration gateHold;
+
+  /// How much silence closes the gate when it never became an utterance,
+  /// such as a tap or a cough.
+  final Duration gateEndSilence;
+
+  /// The gate's threshold while the assistant's own speech may be in the
+  /// microphone.  A device without echo cancellation can otherwise hear
+  /// itself and interrupt itself.
+  final double echoThreshold;
+
+  /// How much speech in a row is needed to take the floor while assistant
+  /// audio is playing.
+  final Duration echoHold;
 
   /// How much silence ends one.
   final Duration endSilence;
@@ -126,12 +148,22 @@ class VoiceActivityDetector {
   final List<Int16List> _utterance = <Int16List>[];
   int _speechRun = 0;
   int _silenceRun = 0;
+  int _gateRun = 0;
+  int _gateSilence = 0;
   bool _speaking = false;
+  bool _gateActive = false;
   double _level = 0;
   double _peak = 0;
 
   /// Whether the detector is in the middle of an utterance.
   bool get speaking => _speaking;
+
+  /// Whether speech is active now, at the gate's shorter onset hold.
+  ///
+  /// This is the signal that must reach the assistant before a transcript
+  /// exists.  It is true while the first words are heard and false after a
+  /// short silence that never became an utterance.
+  bool get gateActive => _gateActive;
 
   /// The smoothed microphone level, 0..1, for the orb.  Updated on every
   /// frame whether there is speech or not.
@@ -141,10 +173,40 @@ class VoiceActivityDetector {
   bool get hearsSpeech => _level >= config.startThreshold;
 
   /// Feed one frame and return the utterances it completed (usually none).
-  List<VoiceUtterance> addFrame(Int16List frame) {
+  ///
+  /// [outputActive] is true while the assistant's own speech is playing;
+  /// the gate then needs a louder, longer signal, so speaker echo does not
+  /// stop the reply.
+  List<VoiceUtterance> addFrame(Int16List frame, {bool outputActive = false}) {
     if (frame.isEmpty) return const [];
     final rms = frameRms(frame);
     _level = (_level * 0.65) + (math.min(1, rms / 0.14) * 0.35);
+    final gateThreshold = outputActive
+        ? math.max(config.startThreshold, config.echoThreshold)
+        : config.startThreshold;
+    final gateHold = outputActive ? config.echoHold : config.gateHold;
+    if (rms >= gateThreshold) {
+      _gateRun++;
+    } else {
+      _gateRun = 0;
+    }
+    if (!_gateActive && _gateRun >= config.frames(gateHold)) {
+      _gateActive = true;
+      _gateSilence = 0;
+    }
+    if (_gateActive) {
+      if (rms < config.endThreshold) {
+        _gateSilence++;
+      } else {
+        _gateSilence = 0;
+      }
+      final gateEnd = outputActive ? config.echoHold : config.gateEndSilence;
+      if (!_speaking && _gateSilence >= config.frames(gateEnd)) {
+        _gateActive = false;
+        _gateSilence = 0;
+        _gateRun = 0;
+      }
+    }
     if (_speaking) {
       _addToUtterance(frame, rms);
       if (rms < config.endThreshold) {
@@ -204,7 +266,10 @@ class VoiceActivityDetector {
     _utterance.clear();
     _speechRun = 0;
     _silenceRun = 0;
+    _gateRun = 0;
+    _gateSilence = 0;
     _speaking = false;
+    _gateActive = false;
     _silenceRun = 0;
     _peak = 0;
     _level = 0;
@@ -212,6 +277,9 @@ class VoiceActivityDetector {
 
   VoiceUtterance? _finish() {
     _speaking = false;
+    _gateActive = false;
+    _gateRun = 0;
+    _gateSilence = 0;
     _speechRun = 0;
     final trailing = _silenceRun;
     _silenceRun = 0;

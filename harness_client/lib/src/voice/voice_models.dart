@@ -15,6 +15,7 @@ enum VoicePhase {
   thinking,
   speaking,
   muted,
+  paused,
   interrupted,
   approval,
   ended,
@@ -33,6 +34,7 @@ extension VoicePhaseLabel on VoicePhase {
     VoicePhase.thinking => 'Thinking',
     VoicePhase.speaking => 'Speaking',
     VoicePhase.muted => 'Muted',
+    VoicePhase.paused => 'Paused',
     VoicePhase.interrupted => 'Interrupted',
     VoicePhase.approval => 'Approval needed',
     VoicePhase.ended => 'Ended',
@@ -124,13 +126,46 @@ class VoiceProblem {
 /// One thing a voice backend asks the session to send.
 @immutable
 class VoicePrompt {
-  const VoicePrompt({this.text, this.audio});
+  const VoicePrompt({
+    this.text,
+    this.audio,
+    this.pending,
+    this.displayText,
+    this.id,
+  });
 
-  /// The words to send, if the provider transcribed the utterance.
+  /// The words to send, if the provider transcribed the utterance.  A
+  /// controller may append explicit pending-update context to this before
+  /// [VoiceSessionBridge.send]; [displayText] stays what the person said.
   final String? text;
 
   /// A WAV clip, when the provider sends the audio itself.
   final Uint8List? audio;
 
+  /// Assistant output that was held while the person spoke, if any.  Each
+  /// piece travels with the transcript as context, never as a stale replay.
+  final List<String>? pending;
+
+  /// The caption and local echo for the utterance, without context.
+  final String? displayText;
+
+  /// A stable id for the utterance, so a repeated provider event reaches the
+  /// session once.  Null when the provider has no id.
+  final String? id;
+
   bool get isEmpty => (text == null || text!.trim().isEmpty) && audio == null;
+
+  String? get spokenText => displayText ?? text;
+
+  VoicePrompt copyWith({
+    String? text,
+    String? displayText,
+    List<String>? pending,
+  }) => VoicePrompt(
+    text: text ?? this.text,
+    audio: audio,
+    pending: pending ?? this.pending,
+    displayText: displayText ?? this.displayText,
+    id: id,
+  );
 }

@@ -237,4 +237,203 @@ void main() {
       expect(rig.controller.phase, VoicePhase.ended);
     },
   );
+
+  int occurrences(String needle, String haystack) =>
+      needle.allMatches(haystack).length;
+
+  test('speech holds a reply before its transcript exists', () async {
+    final rig = Rig();
+    await rig.controller.start();
+    await settle();
+    rig.backend.emit(const VoiceSpeechEvent(true));
+    await settle();
+    rig.session.reply('All tests pass.');
+    await settle();
+    expect(rig.backend.spoken, isEmpty);
+    expect(rig.controller.holdingOutput, isTrue);
+
+    rig.backend.emit(
+      const VoicePromptEvent(
+        VoicePrompt(
+          text: 'open the merge queue',
+          id: 'u-1',
+          pending: ['The sidecar held this.'],
+        ),
+      ),
+    );
+    await settle();
+    await settle();
+    expect(rig.session.sent, hasLength(1));
+    final prompt = rig.session.sent.single;
+    expect(prompt.text, contains('open the merge queue'));
+    expect(prompt.text, contains('<voice-turn-context>'));
+    expect(prompt.text, contains('All tests pass.'));
+    expect(prompt.text, contains('The sidecar held this.'));
+    expect(occurrences('All tests pass.', prompt.text!), 1);
+    expect(occurrences('The sidecar held this.', prompt.text!), 1);
+    expect(rig.backend.spoken, isEmpty);
+
+    // The same provider event is not a second prompt.
+    rig.backend.emit(
+      const VoicePromptEvent(
+        VoicePrompt(text: 'open the merge queue', id: 'u-1'),
+      ),
+    );
+    await settle();
+    expect(rig.session.sent, hasLength(1));
+
+    // Consumed output is context, not a stale replay after speech ends.
+    rig.backend.emit(const VoiceSpeechEvent(false));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(rig.backend.spoken, isEmpty);
+    await rig.controller.stop();
+  });
+
+  test('a false trigger releases held output after its grace', () async {
+    final rig = Rig(pendingReleaseDelay: const Duration(milliseconds: 25));
+    await rig.controller.start();
+    await settle();
+    rig.backend.emit(const VoicePhaseEvent(VoicePhase.transcribing));
+    await settle();
+    rig.session.reply('The parser is ready.');
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    expect(rig.backend.spoken, isEmpty, reason: 'a transcript is pending');
+    rig.backend.emit(const VoiceSpeechEvent(false));
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    expect(rig.backend.spoken, isEmpty, reason: 'still transcribing');
+    rig.backend.emit(const VoicePhaseEvent(VoicePhase.listening));
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(rig.backend.spoken, ['The parser is ready.']);
+    await rig.controller.stop();
+  });
+
+  test(
+    'a real utterance consumes the held reply instead of replaying it',
+    () async {
+      final rig = Rig(pendingReleaseDelay: const Duration(milliseconds: 25));
+      await rig.controller.start();
+      await settle();
+      rig.backend.emit(const VoiceSpeechEvent(true));
+      await settle();
+      rig.session.reply('Stale update.');
+      await settle();
+      rig.backend.emit(const VoiceSpeechEvent(false));
+      rig.backend.emit(
+        const VoicePromptEvent(VoicePrompt(text: 'what changed', id: 'u-1')),
+      );
+      await settle();
+      expect(rig.session.sent.single.text, contains('Stale update.'));
+      rig.backend.emit(const VoicePhaseEvent(VoicePhase.listening));
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(rig.backend.spoken, isEmpty);
+      await rig.controller.stop();
+    },
+  );
+
+  test('pause and mute drop held output and never replay it', () async {
+    final rig = Rig(pendingReleaseDelay: const Duration(milliseconds: 25));
+    await rig.controller.start();
+    await settle();
+    rig.backend.emit(const VoiceSpeechEvent(true));
+    await settle();
+    rig.session.reply('During speech.');
+    await settle();
+    await rig.controller.pause();
+    expect(rig.controller.paused, isTrue);
+    expect(rig.backend.paused, isTrue);
+    expect(rig.controller.displayPhase, VoicePhase.paused);
+    rig.backend.emit(const VoiceSpeechEvent(false));
+    rig.backend.emit(const VoicePhaseEvent(VoicePhase.listening));
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(rig.backend.spoken, isEmpty);
+    await rig.controller.resume();
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(rig.backend.spoken, isEmpty, reason: 'resume replays nothing');
+    expect(rig.controller.displayPhase, VoicePhase.listening);
+
+    rig.backend.emit(const VoiceSpeechEvent(true));
+    await settle();
+    rig.session.reply('While muted.');
+    await settle();
+    await rig.controller.toggleMute();
+    rig.backend.emit(const VoiceSpeechEvent(false));
+    rig.backend.emit(const VoicePhaseEvent(VoicePhase.muted));
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(rig.backend.spoken, isEmpty);
+    expect(rig.controller.muted, isTrue);
+    await rig.controller.stop();
+  });
+
+  test('a backend-held reply follows the speech gate', () async {
+    final rig = Rig(pendingReleaseDelay: const Duration(milliseconds: 25));
+    await rig.controller.start();
+    await settle();
+    rig.backend.emit(const VoiceSpeechEvent(true));
+    await settle();
+    rig.backend.emit(const VoiceHeldEvent('Backend held.'));
+    await settle();
+    expect(rig.controller.holdingOutput, isTrue);
+    rig.backend.emit(const VoiceSpeechEvent(false));
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(rig.backend.spoken, ['Backend held.']);
+    await rig.controller.stop();
+  });
+
+  test('a media button toggles pause and stops with the screen', () async {
+    final rig = Rig();
+    await rig.controller.start();
+    await settle();
+    expect(rig.media.starts, 1);
+    rig.media.press();
+    await settle();
+    expect(rig.controller.paused, isTrue);
+    rig.media.press();
+    await settle();
+    expect(rig.controller.paused, isFalse);
+    await rig.controller.stop();
+    expect(rig.media.stops, 1);
+  });
+
+  test('pending context keeps the full result over its pieces', () async {
+    final rig = Rig();
+    await rig.controller.start();
+    await settle();
+    rig.backend.emit(const VoiceSpeechEvent(true));
+    await settle();
+    rig.backend.emit(
+      const VoicePromptEvent(
+        VoicePrompt(
+          text: 'what changed',
+          id: 'u-1',
+          pending: ['The parser is ready.', 'The parser is ready. Tests pass.'],
+        ),
+      ),
+    );
+    await settle();
+    final prompt = rig.session.sent.single;
+    expect(occurrences('The parser is ready.', prompt.text!), 1);
+    expect(occurrences('Tests pass.', prompt.text!), 1);
+    await rig.controller.stop();
+  });
+
+  test('a prompt id is sent once and late prompts still arrive', () async {
+    final rig = Rig();
+    await rig.controller.start();
+    await settle();
+    rig.backend.emit(
+      const VoicePromptEvent(VoicePrompt(text: 'second', id: 'u-2')),
+    );
+    rig.backend.emit(
+      const VoicePromptEvent(VoicePrompt(text: 'first', id: 'u-1')),
+    );
+    rig.backend.emit(
+      const VoicePromptEvent(VoicePrompt(text: 'first again', id: 'u-1')),
+    );
+    await settle();
+    expect(rig.session.sent.map((prompt) => prompt.displayText), [
+      'second',
+      'first',
+    ]);
+    await rig.controller.stop();
+  });
 }

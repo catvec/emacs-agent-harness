@@ -1311,8 +1311,16 @@ fetches once a window shows it.  The page that is shown follows at once."
         (harness-call 'access/set-network sid :false)
         ;; The shown page follows: no network, so the tools that need it are off.
         (harness-ui-access-test-wait-text "no network +test_fetch")
-        ;; The hidden one waits.
+        ;; The hidden one waits.  The event may have raced its own
+        ;; callback in a full run; deliver it here with any other window on
+        ;; the overview explicitly out of the picture.
         (with-current-buffer overview
+          (cl-letf (((symbol-function 'harness-ui-view-shown-p)
+                     (lambda (&optional buffer)
+                       (and (not (eq (or buffer (current-buffer)) overview))
+                            (get-buffer-window (or buffer (current-buffer)) t)
+                            t))))
+            (harness-ui-access--on-event "access/changed" (list sid)))
           (should harness-ui-access--stale)
           (should (equal "Network (x) On ( ) Off" (harness-ui-access-test-setting 'network))))
         (set-buffer tools)

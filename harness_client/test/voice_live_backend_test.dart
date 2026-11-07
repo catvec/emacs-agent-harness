@@ -1,4 +1,3 @@
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/voice/live_protocol.dart';
 import 'package:harness_client/src/voice/live_voice_backend.dart';
@@ -169,5 +168,102 @@ void main() {
     await connection.dispose();
     await _settle();
     expect(events.whereType<VoiceEndedEvent>(), isNotEmpty);
+  });
+
+  test('provider speech mutes its own audio until the person stops', () async {
+    final connection = ScriptedLiveConnection();
+    final backend = LiveVoiceBackend(
+      connection: connection,
+      protocol: const LiveProtocol(openAi: true),
+      config: _config(),
+    );
+    final events = <VoiceBackendEvent>[];
+    backend.events.listen(events.add);
+    await backend.start();
+    await _settle();
+    expect(connection.remoteAudio, isTrue);
+
+    connection.deliver(<String, Object?>{
+      'type': 'input_audio_buffer.speech_started',
+    });
+    await _settle();
+    expect(events.whereType<VoiceSpeechEvent>().last.active, isTrue);
+    expect(connection.remoteAudio, isFalse);
+
+    connection.deliver(<String, Object?>{
+      'type': 'input_audio_buffer.speech_stopped',
+    });
+    await _settle();
+    expect(events.whereType<VoiceSpeechEvent>().last.active, isFalse);
+    await Future<void>.delayed(const Duration(milliseconds: 280));
+    expect(connection.remoteAudio, isTrue);
+    await backend.stop();
+  });
+
+  test('a reply during speech is held for the next delegation', () async {
+    final connection = ScriptedLiveConnection();
+    final backend = LiveVoiceBackend(
+      connection: connection,
+      protocol: const LiveProtocol(openAi: true),
+      config: _config(),
+    );
+    final events = <VoiceBackendEvent>[];
+    backend.events.listen(events.add);
+    await backend.start();
+    await _settle();
+    connection.deliver(<String, Object?>{
+      'type': 'input_audio_buffer.speech_started',
+    });
+    await _settle();
+    await backend.speak('Held reply.');
+    await _settle();
+    expect(events.whereType<VoiceHeldEvent>().single.text, 'Held reply.');
+    expect(
+      connection.sent.map((message) => message['type']),
+      isNot(contains('conversation.item.create')),
+    );
+
+    connection.deliver(<String, Object?>{
+      'type': 'response.function_call_arguments.done',
+      'name': 'delegate_to_agent',
+      'call_id': 'call_10',
+      'arguments': '{"request":"run the tests"}',
+    });
+    await _settle();
+    final prompt = events.whereType<VoicePromptEvent>().single;
+    expect(prompt.prompt.text, 'run the tests');
+    expect(prompt.prompt.pending, ['Held reply.']);
+    expect(prompt.prompt.id, 'call_10');
+    await backend.stop();
+  });
+
+  test('pause silences the provider and resume reopens it', () async {
+    final connection = ScriptedLiveConnection();
+    final backend = LiveVoiceBackend(
+      connection: connection,
+      protocol: const LiveProtocol(openAi: true),
+      config: _config(),
+    );
+    final events = <VoiceBackendEvent>[];
+    backend.events.listen(events.add);
+    await backend.start();
+    await _settle();
+    await backend.pause();
+    await _settle();
+    expect(connection.muted, isTrue);
+    expect(connection.remoteAudio, isFalse);
+    expect(events.whereType<VoicePhaseEvent>().last.phase, VoicePhase.paused);
+    await backend.speak('During pause.');
+    await _settle();
+    expect(events.whereType<VoiceHeldEvent>().single.text, 'During pause.');
+    await backend.resume();
+    await _settle();
+    expect(connection.muted, isFalse);
+    expect(connection.remoteAudio, isTrue);
+    expect(
+      events.whereType<VoicePhaseEvent>().last.phase,
+      VoicePhase.listening,
+    );
+    await backend.stop();
   });
 }

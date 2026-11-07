@@ -49,11 +49,13 @@ class ClipVoiceBackend implements VoiceBackend {
   StreamSubscription<Uint8List>? _microphone;
   bool _started = false;
   bool _muted = false;
+  bool _paused = false;
   bool _closed = false;
   bool _speaking = false;
   bool _transcribing = false;
   int _generation = 0;
-  int _bargeFrames = 0;
+  int _utteranceSequence = 0;
+  final List<String> _heldReplies = <String>[];
 
   @override
   Stream<VoiceBackendEvent> get events => _events.stream;
@@ -93,19 +95,28 @@ class ClipVoiceBackend implements VoiceBackend {
   void _onBytes(Uint8List bytes) {
     if (_closed) return;
     for (final frame in _framer.add(bytes)) {
-      final utterances = _vad.addFrame(frame);
+      final wasActive = _vad.gateActive;
+      final utterances = _vad.addFrame(frame, outputActive: _speaking);
       _emit(VoiceLevelEvent(_vad.level));
-      if (_speaking && _vad.hearsSpeech) {
-        _bargeFrames++;
-        if (_bargeFrames >= 2) {
-          _bargeFrames = 0;
-          _speaking = false;
-          _generation++;
-          unawaited(speech.stop());
+      if (wasActive != _vad.gateActive) {
+        _emit(VoiceSpeechEvent(_vad.gateActive));
+        if (_vad.gateActive) {
           _emit(const VoicePhaseEvent(VoicePhase.hearing));
+        } else if (utterances.isEmpty) {
+          // A tap or a cough closed the gate without words; the screen can
+          // listen again and a held reply may be released after its grace.
+          _emit(
+            VoicePhaseEvent(_muted ? VoicePhase.muted : VoicePhase.listening),
+          );
         }
-      } else if (!_vad.hearsSpeech) {
-        _bargeFrames = 0;
+      }
+      if (_speaking && _vad.gateActive) {
+        // The gate already required a louder, longer signal while the
+        // assistant spoke; this is a real voice taking the floor, not its
+        // own echo.
+        _speaking = false;
+        _generation++;
+        unawaited(speech.stop());
       }
       for (final utterance in utterances) {
         _accept(utterance);
@@ -125,13 +136,21 @@ class ClipVoiceBackend implements VoiceBackend {
     if (!_transcribing) unawaited(_drain());
   }
 
+  List<String> _takeHeld() {
+    final held = List<String>.of(_heldReplies);
+    _heldReplies.clear();
+    return held;
+  }
+
   Future<void> _drain() async {
     if (_transcribing) return;
     _transcribing = true;
     try {
       while (_queue.isNotEmpty && !_closed) {
         final utterance = _queue.removeAt(0);
+        final promptId = 'u-${++_utteranceSequence}';
         if (delivery == ClipDelivery.audioPrompt) {
+          final pending = _takeHeld();
           _emit(
             const VoiceCaptionEvent(
               VoiceSpeaker.you,
@@ -139,7 +158,16 @@ class ClipVoiceBackend implements VoiceBackend {
               finalized: true,
             ),
           );
-          _emit(VoicePromptEvent(VoicePrompt(audio: utterance.wav)));
+          _emit(
+            VoicePromptEvent(
+              VoicePrompt(
+                audio: utterance.wav,
+                pending: pending.isEmpty ? null : pending,
+                displayText: 'Voice message',
+                id: promptId,
+              ),
+            ),
+          );
           _emit(const VoicePhaseEvent(VoicePhase.thinking));
           continue;
         }
@@ -163,8 +191,17 @@ class ClipVoiceBackend implements VoiceBackend {
           _emit(const VoicePhaseEvent(VoicePhase.listening));
           continue;
         }
+        final pending = _takeHeld();
         _emit(VoiceCaptionEvent(VoiceSpeaker.you, text, finalized: true));
-        _emit(VoicePromptEvent(VoicePrompt(text: text)));
+        _emit(
+          VoicePromptEvent(
+            VoicePrompt(
+              text: text,
+              pending: pending.isEmpty ? null : pending,
+              id: promptId,
+            ),
+          ),
+        );
         _emit(const VoicePhaseEvent(VoicePhase.thinking));
       }
     } finally {
@@ -177,13 +214,14 @@ class ClipVoiceBackend implements VoiceBackend {
     if (_closed || _muted == muted) return;
     _muted = muted;
     try {
-      await microphone.setMuted(muted);
+      await microphone.setMuted(muted || _paused);
     } catch (error) {
       _fail(VoiceProblem('Microphone unavailable', detail: _oneLine(error)));
       return;
     }
     if (muted) {
       _vad.reset();
+      _heldReplies.clear();
       _emit(const VoicePhaseEvent(VoicePhase.muted));
     } else {
       _emit(const VoicePhaseEvent(VoicePhase.listening));
@@ -194,8 +232,10 @@ class ClipVoiceBackend implements VoiceBackend {
   Future<void> interrupt() async {
     _generation++;
     _speaking = false;
+    _heldReplies.clear();
+    _vad.reset();
     await speech.stop();
-    if (!_closed && !_muted) {
+    if (!_closed && !_muted && !_paused) {
       _emit(const VoicePhaseEvent(VoicePhase.interrupted));
       // The agent may still be working; the next reply is spoken when it
       // arrives, so the screen goes back to listening rather than staying in
@@ -205,9 +245,54 @@ class ClipVoiceBackend implements VoiceBackend {
   }
 
   @override
+  Future<void> pause() async {
+    if (_closed || _paused) return;
+    _paused = true;
+    _generation++;
+    _speaking = false;
+    _heldReplies.clear();
+    _vad.reset();
+    await speech.stop();
+    try {
+      await microphone.setMuted(true);
+    } catch (error) {
+      _fail(VoiceProblem('Microphone unavailable', detail: _oneLine(error)));
+    }
+    if (!_closed) _emit(const VoicePhaseEvent(VoicePhase.paused));
+  }
+
+  @override
+  Future<void> resume() async {
+    if (_closed || !_paused) return;
+    _paused = false;
+    _vad.reset();
+    try {
+      await microphone.setMuted(_muted);
+    } catch (error) {
+      _fail(VoiceProblem('Microphone unavailable', detail: _oneLine(error)));
+      return;
+    }
+    if (!_closed) {
+      _emit(VoicePhaseEvent(_muted ? VoicePhase.muted : VoicePhase.listening));
+    }
+  }
+
+  @override
   Future<void> speak(String text) async {
     final trimmed = text.trim();
-    if (_closed || !speakReplies || trimmed.isEmpty) return;
+    _heldReplies.remove(trimmed);
+    if (_closed || !speakReplies || trimmed.isEmpty || _paused) {
+      if (trimmed.isNotEmpty && !_closed) {
+        _remember(trimmed);
+        _emit(VoiceHeldEvent(trimmed));
+      }
+      return;
+    }
+    if (_vad.gateActive) {
+      _remember(trimmed);
+      _emit(VoiceHeldEvent(trimmed));
+      return;
+    }
     final generation = ++_generation;
     _speaking = true;
     _emit(const VoicePhaseEvent(VoicePhase.speaking));
@@ -225,6 +310,12 @@ class ClipVoiceBackend implements VoiceBackend {
         );
       }
     }
+  }
+
+  void _remember(String text) {
+    if (_heldReplies.contains(text)) return;
+    _heldReplies.add(text.length > 4000 ? text.substring(0, 4000) : text);
+    if (_heldReplies.length > 40) _heldReplies.removeAt(0);
   }
 
   @override
@@ -247,6 +338,8 @@ class ClipVoiceBackend implements VoiceBackend {
     }
     _vad.reset();
     _queue.clear();
+    _heldReplies.clear();
+    _paused = false;
     await _events.close();
   }
 

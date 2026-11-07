@@ -29,6 +29,9 @@ class LiveVoiceBackend implements VoiceBackend {
   bool _started = false;
   bool _closed = false;
   bool _muted = false;
+  bool _paused = false;
+  bool _speechActive = false;
+  final List<String> _heldReplies = <String>[];
 
   @override
   Stream<VoiceBackendEvent> get events => _events.stream;
@@ -64,11 +67,31 @@ class LiveVoiceBackend implements VoiceBackend {
         if (event.callId != null && event.callId!.isNotEmpty) {
           _pendingCalls.add(event.callId!);
         }
-        _emit(VoicePromptEvent(VoicePrompt(text: event.text)));
+        final pending = _takeHeld();
+        _emit(
+          VoicePromptEvent(
+            VoicePrompt(
+              text: event.text,
+              pending: pending.isEmpty ? null : pending,
+              id: event.callId,
+            ),
+          ),
+        );
         _emit(const VoicePhaseEvent(VoicePhase.thinking));
+      } else if (event is VoiceSpeechEvent) {
+        _speechActive = event.active;
+        _audioBack?.cancel();
+        _audioBack = null;
+        if (event.active) {
+          unawaited(connection.setRemoteAudioEnabled(false));
+        } else if (!_paused) {
+          _audioBack = Timer(const Duration(milliseconds: 220), () {
+            unawaited(_resumeAudio());
+          });
+        }
+        _emit(event);
       } else if (event is VoicePhaseEvent) {
-        if (event.phase == VoicePhase.listening ||
-            event.phase == VoicePhase.hearing) {
+        if (event.phase == VoicePhase.listening && !_speechActive && !_paused) {
           unawaited(_resumeAudio());
         }
         _emit(event);
@@ -82,8 +105,9 @@ class LiveVoiceBackend implements VoiceBackend {
   Future<void> setMuted(bool muted) async {
     if (_closed || _muted == muted) return;
     _muted = muted;
+    if (muted) _heldReplies.clear();
     try {
-      await connection.setMuted(muted);
+      await connection.setMuted(muted || _paused);
       _emit(VoicePhaseEvent(muted ? VoicePhase.muted : VoicePhase.listening));
     } catch (error) {
       _fail('Microphone unavailable', error);
@@ -91,8 +115,42 @@ class LiveVoiceBackend implements VoiceBackend {
   }
 
   @override
+  Future<void> pause() async {
+    if (_closed || _paused) return;
+    _paused = true;
+    _speechActive = false;
+    _heldReplies.clear();
+    _audioBack?.cancel();
+    _audioBack = null;
+    try {
+      await connection.send(protocol.interrupt());
+      await connection.setMuted(true);
+      await connection.setRemoteAudioEnabled(false);
+    } catch (error) {
+      _fail('Live connection failed', error);
+      return;
+    }
+    _emit(const VoicePhaseEvent(VoicePhase.paused));
+  }
+
+  @override
+  Future<void> resume() async {
+    if (_closed || !_paused) return;
+    _paused = false;
+    try {
+      await connection.setMuted(_muted);
+      await connection.setRemoteAudioEnabled(true);
+    } catch (error) {
+      _fail('Live connection failed', error);
+      return;
+    }
+    _emit(VoicePhaseEvent(_muted ? VoicePhase.muted : VoicePhase.listening));
+  }
+
+  @override
   Future<void> interrupt() async {
     if (_closed) return;
+    _heldReplies.clear();
     try {
       await connection.send(protocol.interrupt());
       await connection.setRemoteAudioEnabled(false);
@@ -110,7 +168,7 @@ class LiveVoiceBackend implements VoiceBackend {
   Future<void> _resumeAudio() async {
     _audioBack?.cancel();
     _audioBack = null;
-    if (_closed) return;
+    if (_closed || _paused) return;
     try {
       await connection.setRemoteAudioEnabled(true);
     } catch (_) {
@@ -121,7 +179,13 @@ class LiveVoiceBackend implements VoiceBackend {
   @override
   Future<void> speak(String text) async {
     final trimmed = text.trim();
+    _heldReplies.remove(trimmed);
     if (_closed || trimmed.isEmpty) return;
+    if (_paused || _speechActive) {
+      _remember(trimmed);
+      _emit(VoiceHeldEvent(trimmed));
+      return;
+    }
     final callId = _pendingCalls.isEmpty ? null : _pendingCalls.removeAt(0);
     final reply = protocol.agentReply(trimmed, callId: callId);
     if (reply == null) return;
@@ -137,11 +201,24 @@ class LiveVoiceBackend implements VoiceBackend {
     }
   }
 
+  List<String> _takeHeld() {
+    final held = List<String>.of(_heldReplies);
+    _heldReplies.clear();
+    return held;
+  }
+
+  void _remember(String text) {
+    if (_heldReplies.contains(text)) return;
+    _heldReplies.add(text.length > 4000 ? text.substring(0, 4000) : text);
+    if (_heldReplies.length > 40) _heldReplies.removeAt(0);
+  }
+
   @override
   Future<void> stop() async {
     if (_closed) return;
     _emit(const VoiceEndedEvent());
     _closed = true;
+    _heldReplies.clear();
     _audioBack?.cancel();
     _audioBack = null;
     await _messages?.cancel();

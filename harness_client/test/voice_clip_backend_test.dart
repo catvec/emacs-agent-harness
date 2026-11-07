@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -226,6 +227,161 @@ void main() {
     final failure = events.whereType<VoiceFailureEvent>().single;
     expect(failure.problem.label, 'Transcription failed');
     expect(failure.problem.recoverable, isTrue);
+    expect(
+      events.whereType<VoicePhaseEvent>().last.phase,
+      VoicePhase.listening,
+    );
+    await backend.stop();
+  });
+
+  test('the gate fires before the utterance and holds the reply', () async {
+    const gateVad = VoiceActivityConfig(
+      gateHold: Duration(milliseconds: 20),
+      gateEndSilence: Duration(milliseconds: 80),
+      startHold: Duration(milliseconds: 100),
+      endSilence: Duration(milliseconds: 120),
+      preRoll: Duration(milliseconds: 60),
+      trailingKeep: Duration(milliseconds: 60),
+      minUtterance: Duration(milliseconds: 100),
+      maxUtterance: Duration(seconds: 10),
+    );
+    final mic = MemoryVoiceMicrophone();
+    final transcriber = ScriptedVoiceTranscriber(['open the task']);
+    final speech = RecordingVoiceSpeech();
+    final backend = ClipVoiceBackend(
+      microphone: mic,
+      transcriber: transcriber,
+      speech: speech,
+      delivery: ClipDelivery.transcript,
+      endpoint: 'https://speech.test/inference',
+      model: '',
+      token: '',
+      language: 'en',
+      speakReplies: true,
+      vadConfig: gateVad,
+    );
+    final events = <VoiceBackendEvent>[];
+    backend.events.listen(events.add);
+    await backend.start();
+    await _settle();
+
+    mic.hear(_bytes(voiceFrame(samples: 320, amplitude: 0.2)));
+    await _settle();
+    expect(events.whereType<VoiceSpeechEvent>().single.active, isTrue);
+    expect(transcriber.heard, isEmpty, reason: 'no full transcript yet');
+
+    await backend.speak('Held reply.');
+    await _settle();
+    expect(speech.spoken, isEmpty);
+    expect(events.whereType<VoiceHeldEvent>().single.text, 'Held reply.');
+
+    // The tap was not words: the gate lets go and the screen listens.
+    for (var i = 0; i < 4; i++) {
+      mic.hear(_bytes(voiceFrame(samples: 320, amplitude: 0.001)));
+    }
+    await _settle();
+    expect(events.whereType<VoiceSpeechEvent>().last.active, isFalse);
+    expect(
+      events.whereType<VoicePhaseEvent>().last.phase,
+      VoicePhase.listening,
+    );
+    expect(transcriber.heard, isEmpty);
+
+    // A real utterance arrives; its prompt carries the held reply as
+    // context instead of the reply being spoken first.
+    for (var i = 0; i < 6; i++) {
+      mic.hear(_bytes(voiceFrame(samples: 320, amplitude: 0.2)));
+    }
+    for (var i = 0; i < 8; i++) {
+      mic.hear(_bytes(voiceFrame(samples: 320, amplitude: 0.001)));
+    }
+    await _settle();
+    await _settle();
+    final prompt = events.whereType<VoicePromptEvent>().single;
+    expect(prompt.prompt.text, 'open the task');
+    expect(prompt.prompt.pending, ['Held reply.']);
+    expect(speech.spoken, isEmpty);
+    await backend.stop();
+  });
+
+  test('speaker echo does not interrupt, a louder voice does', () async {
+    const echoVad = VoiceActivityConfig(
+      gateHold: Duration(milliseconds: 20),
+      echoHold: Duration(milliseconds: 100),
+      echoThreshold: 0.055,
+      endSilence: Duration(milliseconds: 120),
+      preRoll: Duration(milliseconds: 60),
+      trailingKeep: Duration(milliseconds: 60),
+      minUtterance: Duration(milliseconds: 100),
+      maxUtterance: Duration(seconds: 10),
+    );
+    final mic = MemoryVoiceMicrophone();
+    final speech = RecordingVoiceSpeech();
+    final backend = ClipVoiceBackend(
+      microphone: mic,
+      transcriber: ScriptedVoiceTranscriber(['never']),
+      speech: speech,
+      delivery: ClipDelivery.transcript,
+      endpoint: 'https://speech.test/inference',
+      model: '',
+      token: '',
+      language: 'en',
+      speakReplies: true,
+      vadConfig: echoVad,
+    );
+    final events = <VoiceBackendEvent>[];
+    backend.events.listen(events.add);
+    await backend.start();
+    await _settle();
+    unawaited(backend.speak('A long spoken reply.'));
+    await _settle();
+    for (var i = 0; i < 8; i++) {
+      mic.hear(_bytes(voiceFrame(samples: 320, amplitude: 0.03)));
+    }
+    await _settle();
+    expect(
+      events.whereType<VoiceSpeechEvent>(),
+      isEmpty,
+      reason: 'speaker echo opened the gate',
+    );
+    expect(speech.stops, 0);
+    for (var i = 0; i < 8; i++) {
+      mic.hear(_bytes(voiceFrame(samples: 320, amplitude: 0.2)));
+    }
+    await _settle();
+    expect(events.whereType<VoiceSpeechEvent>().single.active, isTrue);
+    expect(speech.stops, greaterThan(0), reason: 'the person took the floor');
+    await backend.stop();
+  });
+
+  test('pause closes the microphone and resume opens it again', () async {
+    final mic = MemoryVoiceMicrophone();
+    final backend = ClipVoiceBackend(
+      microphone: mic,
+      transcriber: ScriptedVoiceTranscriber(['never']),
+      speech: RecordingVoiceSpeech(),
+      delivery: ClipDelivery.transcript,
+      endpoint: '',
+      model: '',
+      token: '',
+      language: '',
+      speakReplies: false,
+      vadConfig: _vad,
+    );
+    final events = <VoiceBackendEvent>[];
+    backend.events.listen(events.add);
+    await backend.start();
+    await _settle();
+    await backend.pause();
+    await _settle();
+    expect(mic.muted, isTrue);
+    expect(events.whereType<VoicePhaseEvent>().last.phase, VoicePhase.paused);
+    mic.hear(_bytes(voiceFrame(samples: 320, amplitude: 0.2)));
+    await _settle();
+    expect(events.whereType<VoiceSpeechEvent>(), isEmpty);
+    await backend.resume();
+    await _settle();
+    expect(mic.muted, isFalse);
     expect(
       events.whereType<VoicePhaseEvent>().last.phase,
       VoicePhase.listening,

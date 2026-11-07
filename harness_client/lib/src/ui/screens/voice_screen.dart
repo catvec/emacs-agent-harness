@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../voice/voice_controller.dart';
 import '../../voice/voice_models.dart';
@@ -103,99 +104,123 @@ class _VoiceScreenState extends State<VoiceScreen> {
       child: Builder(
         builder: (context) => Scaffold(
           backgroundColor: const Color(0xFF0D0D0F),
-          body: Container(
-            decoration: const BoxDecoration(
-              gradient: RadialGradient(
-                center: Alignment(0, -0.45),
-                radius: 1.1,
-                colors: [Color(0xFF1D1B1A), Color(0xFF0D0D0F)],
-              ),
-            ),
-            child: SafeArea(
-              child: Column(
-                children: [
-                  _Header(
-                    provider: _controller.settings.provider,
-                    onClose: _close,
-                    onSettings: _openSettings,
+          body: CallbackShortcuts(
+            bindings: <ShortcutActivator, VoidCallback>{
+              const SingleActivator(LogicalKeyboardKey.keyM): () =>
+                  unawaited(_controller.toggleMute()),
+              const SingleActivator(LogicalKeyboardKey.keyP): () =>
+                  unawaited(_controller.togglePause()),
+              const SingleActivator(LogicalKeyboardKey.keyE): () =>
+                  unawaited(_close()),
+              const SingleActivator(LogicalKeyboardKey.escape): () =>
+                  unawaited(_close()),
+              const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () =>
+                  unawaited(_controller.togglePause()),
+              const SingleActivator(LogicalKeyboardKey.mediaPlay): () =>
+                  unawaited(_controller.resume()),
+              const SingleActivator(LogicalKeyboardKey.mediaPause): () =>
+                  unawaited(_controller.pause()),
+            },
+            child: Focus(
+              autofocus: true,
+              child: Container(
+                decoration: const BoxDecoration(
+                  gradient: RadialGradient(
+                    center: Alignment(0, -0.45),
+                    radius: 1.1,
+                    colors: [Color(0xFF1D1B1A), Color(0xFF0D0D0F)],
                   ),
-                  Expanded(
-                    child: Center(
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 720),
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            final orb = math
-                                .min(
-                                  constraints.maxWidth * 0.62,
-                                  constraints.maxHeight * 0.34,
-                                )
-                                .clamp(112.0, 228.0);
-                            return Column(
-                              children: [
-                                Expanded(
-                                  flex: 5,
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      VoiceOrb(
-                                        phase: phase,
-                                        level: _controller.level,
-                                        size: orb,
-                                        animate: phase != VoicePhase.ended,
+                ),
+                child: SafeArea(
+                  child: Column(
+                    children: [
+                      _Header(
+                        provider: _controller.settings.provider,
+                        onClose: _close,
+                        onSettings: _openSettings,
+                      ),
+                      Expanded(
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 720),
+                            child: LayoutBuilder(
+                              builder: (context, constraints) {
+                                final orb = math
+                                    .min(
+                                      constraints.maxWidth * 0.62,
+                                      constraints.maxHeight * 0.34,
+                                    )
+                                    .clamp(112.0, 228.0);
+                                return Column(
+                                  children: [
+                                    Expanded(
+                                      flex: 5,
+                                      child: Column(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
+                                          VoiceOrb(
+                                            phase: phase,
+                                            level: _controller.level,
+                                            size: orb,
+                                            animate: phase != VoicePhase.ended,
+                                          ),
+                                          const SizedBox(height: 10),
+                                          Text(
+                                            phase.label,
+                                            key: const Key('voice-status'),
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(
+                                              color: const Color(0xFFF3F0EA)
+                                                  .withValues(alpha: 0.94),
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w500,
+                                              letterSpacing: 0.2,
+                                            ),
+                                          ),
+                                          if (phase == VoicePhase.approval)
+                                            _ApprovalNotice(onOpen: _close),
+                                          if (_controller.problem != null)
+                                            _ProblemNotice(
+                                              problem: _controller.problem!,
+                                              onRetry: _controller.retry,
+                                            ),
+                                        ],
                                       ),
-                                      const SizedBox(height: 10),
-                                      Text(
-                                        phase.label,
-                                        key: const Key('voice-status'),
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(
-                                          color: const Color(0xFFF3F0EA)
-                                              .withValues(alpha: 0.94),
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w500,
-                                          letterSpacing: 0.2,
-                                        ),
+                                    ),
+                                    Expanded(
+                                      flex: 4,
+                                      child: _Transcript(
+                                        captions: _controller.captions,
+                                        scroll: _captions,
+                                        color: color,
                                       ),
-                                      if (phase == VoicePhase.approval)
-                                        _ApprovalNotice(onOpen: _close),
-                                      if (_controller.problem != null)
-                                        _ProblemNotice(
-                                          problem: _controller.problem!,
-                                          onRetry: _controller.retry,
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                                Expanded(
-                                  flex: 4,
-                                  child: _Transcript(
-                                    captions: _controller.captions,
-                                    scroll: _captions,
-                                    color: color,
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
+                          ),
                         ),
                       ),
-                    ),
-                  ),
-                  Center(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 520),
-                      child: _Controls(
-                        phase: phase,
-                        muted: _controller.muted,
-                        onMute: _controller.toggleMute,
-                        onInterrupt: _controller.interrupt,
-                        onEnd: _close,
-                        onRetry: _controller.retry,
+                      Center(
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 520),
+                          child: _Controls(
+                            phase: phase,
+                            muted: _controller.muted,
+                            paused: _controller.paused,
+                            onMute: _controller.toggleMute,
+                            onPause: _controller.togglePause,
+                            onInterrupt: _controller.interrupt,
+                            onEnd: _close,
+                            onRetry: _controller.retry,
+                          ),
+                        ),
                       ),
-                    ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
           ),
@@ -550,7 +575,9 @@ class _Controls extends StatelessWidget {
   const _Controls({
     required this.phase,
     required this.muted,
+    required this.paused,
     required this.onMute,
+    required this.onPause,
     required this.onInterrupt,
     required this.onEnd,
     required this.onRetry,
@@ -558,7 +585,9 @@ class _Controls extends StatelessWidget {
 
   final VoicePhase phase;
   final bool muted;
+  final bool paused;
   final Future<void> Function() onMute;
+  final Future<void> Function() onPause;
   final Future<void> Function() onInterrupt;
   final Future<void> Function() onEnd;
   final Future<void> Function() onRetry;
@@ -566,37 +595,55 @@ class _Controls extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final finished = phase.finished;
+    final stopped = phase == VoicePhase.ended;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(28, 10, 28, 18),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 18),
+      child: Wrap(
+        alignment: WrapAlignment.spaceEvenly,
+        crossAxisAlignment: WrapCrossAlignment.start,
+        spacing: 8,
+        runSpacing: 10,
         children: [
           _Control(
             key: const Key('voice-mute'),
             icon: muted ? Icons.mic_off_rounded : Icons.mic_rounded,
             label: muted ? 'Unmute' : 'Mute',
-            onTap: finished ? null : onMute,
+            tooltip: muted ? 'Microphone · muted' : 'Microphone · live',
+            shortcut: 'M',
+            toggled: muted,
+            onTap: finished || paused ? null : onMute,
+          ),
+          _Control(
+            key: const Key('voice-pause'),
+            icon: paused ? Icons.play_arrow_rounded : Icons.pause_rounded,
+            label: paused ? 'Resume' : 'Pause',
+            tooltip: paused ? 'Conversation · paused' : 'Conversation · live',
+            shortcut: 'P',
+            toggled: paused,
+            onTap: finished ? null : onPause,
           ),
           _Control(
             key: const Key('voice-interrupt'),
             icon: Icons.stop_rounded,
             label: 'Interrupt',
-            onTap: finished ? null : onInterrupt,
+            tooltip: 'Playback · interruption',
+            onTap: finished || paused ? null : onInterrupt,
           ),
           _Control(
             key: const Key('voice-end'),
-            icon: Icons.call_end_rounded,
-            label: 'End',
+            icon: stopped ? Icons.refresh_rounded : Icons.call_end_rounded,
+            label: stopped ? 'Restart' : 'End',
+            tooltip: stopped ? 'Conversation · restart' : 'Conversation · end',
             color: const Color(0xFFD65A36),
             filled: true,
-            onTap: onEnd,
+            onTap: stopped ? onRetry : onEnd,
           ),
-          if (finished)
+          if (finished && !stopped)
             _Control(
               key: const Key('voice-retry'),
               icon: Icons.refresh_rounded,
               label: 'Retry',
+              tooltip: 'Conversation · retry',
               onTap: onRetry,
             ),
         ],
@@ -611,12 +658,18 @@ class _Control extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.onTap,
+    required this.tooltip,
+    this.shortcut,
+    this.toggled = false,
     this.color,
     this.filled = false,
   });
 
   final IconData icon;
   final String label;
+  final String tooltip;
+  final String? shortcut;
+  final bool toggled;
   final Future<void> Function()? onTap;
   final Color? color;
   final bool filled;
@@ -625,54 +678,75 @@ class _Control extends StatelessWidget {
   Widget build(BuildContext context) {
     final enabled = onTap != null;
     final accent = color ?? const Color(0xFFE9E5DE);
-    return Semantics(
-      button: true,
-      enabled: enabled,
-      label: label,
-      child: Opacity(
-        opacity: enabled ? 1 : 0.38,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: enabled ? () => unawaited(onTap!()) : null,
-                customBorder: const CircleBorder(),
-                child: Container(
-                  width: filled ? 62 : 54,
-                  height: filled ? 62 : 54,
-                  decoration: BoxDecoration(
-                    color: filled
-                        ? accent
-                        : Colors.white.withValues(alpha: 0.07),
-                    shape: BoxShape.circle,
-                    border: filled
-                        ? null
-                        : Border.all(
-                            color: Colors.white.withValues(alpha: 0.09),
-                          ),
-                  ),
-                  child: Icon(
-                    icon,
-                    size: filled ? 27 : 22,
-                    color: filled ? Colors.white : accent,
+    final size = filled ? 62.0 : 54.0;
+    return Tooltip(
+      message: tooltip,
+      child: Semantics(
+        container: true,
+        excludeSemantics: true,
+        button: true,
+        enabled: enabled,
+        toggled: toggled,
+        label: label,
+        hint: shortcut == null ? null : 'Shortcut $shortcut',
+        child: Opacity(
+          opacity: enabled ? 1 : 0.38,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: enabled ? () => unawaited(onTap!()) : null,
+                  customBorder: const CircleBorder(),
+                  canRequestFocus: enabled,
+                  hoverColor: Colors.white.withValues(alpha: 0.06),
+                  focusColor: Colors.white.withValues(alpha: 0.12),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeOut,
+                    width: size,
+                    height: size,
+                    decoration: BoxDecoration(
+                      color: filled
+                          ? accent
+                          : toggled
+                          ? accent.withValues(alpha: 0.18)
+                          : Colors.white.withValues(alpha: 0.07),
+                      shape: BoxShape.circle,
+                      border: filled
+                          ? null
+                          : Border.all(
+                              color: toggled
+                                  ? accent.withValues(alpha: 0.55)
+                                  : Colors.white.withValues(alpha: 0.09),
+                            ),
+                    ),
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 160),
+                      child: Icon(
+                        icon,
+                        key: ValueKey<IconData>(icon),
+                        size: filled ? 27 : 22,
+                        color: filled ? Colors.white : accent,
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
-            const SizedBox(height: 7),
-            Text(
-              label,
-              style: TextStyle(
-                color: const Color(0xFFB9B5AE)
-                    .withValues(alpha: enabled ? 0.9 : 0.5),
-                fontSize: 10.5,
-                fontWeight: FontWeight.w500,
-                letterSpacing: 0.2,
+              const SizedBox(height: 7),
+              Text(
+                label,
+                style: TextStyle(
+                  color: const Color(0xFFB9B5AE)
+                      .withValues(alpha: enabled ? 0.9 : 0.5),
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.2,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

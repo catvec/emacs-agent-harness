@@ -33,7 +33,11 @@ import base64
 import collections
 import json
 import os
+import queue
+import re
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -47,8 +51,21 @@ DEFAULT_STT_URL = "http://127.0.0.1:8000/v1/audio/transcriptions"
 DEFAULT_TTS_URL = "http://127.0.0.1:8000/v1/audio/speech"
 
 
+def _normal(text):
+    """Return TEXT with whitespace and case flattened, for a duplicate check."""
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
 class UnmuteSidecar(Sidecar):
-    """Local speech-to-text, delegation and text-to-speech."""
+    """Local speech-to-text, delegation and text-to-speech.
+
+    Capture, detection and playback run on the sidecar's loop; speech-to-text
+    and synthesis run on workers.  A long transcription or a slow speech
+    server therefore never stops the microphone or the gate from noticing
+    the next words.  Everything the assistant would say is held while a
+    person speaks, and a held reply is reported with the transcript that
+    interrupted it instead of being replayed afterwards.
+    """
 
     provider = "unmute"
 
@@ -58,32 +75,102 @@ class UnmuteSidecar(Sidecar):
                          rate=LOCAL_RATE)
         self.args = args
         self.recorder = recorder or Recorder(LOCAL_RATE)
-        self.vad = Vad(LOCAL_RATE, threshold=args.threshold)
+        self.vad = Vad(
+            LOCAL_RATE, threshold=args.threshold,
+            hangover=getattr(args, "hangover", 0.85),
+            max_speech=getattr(args, "max_speech", 120.0))
         self.post_multipart = post_multipart or http_multipart
         self.post_json = post_json or http_json
-        self.queue = collections.deque()
         self.started = False
         self.heard = ""
         self.failures = 0
         self.errors = 0
+        self.transcriptions = queue.Queue()
+        self.transcripts = queue.Queue()
+        self.speech_items = queue.Queue()
+        self.audio = queue.Queue()
+        self.ready = collections.deque()
+        self.workers = []
+        self.stopping = threading.Event()
+        self.awaiting = set()
+        self.next_utterance = 1
+        self.buffered = {}
+        self.release_at = None
+        self.commentary = []
+        self.said = []
 
     # -- lifecycle ---------------------------------------------------
 
+    def start_session(self, event):
+        self.vad.reset()
+        self.buffered.clear()
+        self.awaiting.clear()
+        self.next_utterance = self.vad._uid + 1
+        self.release_at = None
+        self.heard = ""
+        super().start_session(event)
+
     def on_start(self):
+        self.stopping.clear()
         self.started = True
+        self._start_workers()
+
+    def _start_workers(self):
+        if self.workers:
+            return
+        for name, target in (("voice-stt", self._transcribe_loop),
+                             ("voice-tts", self._synthesize_loop)):
+            worker = threading.Thread(target=target, name=name, daemon=True)
+            worker.start()
+            self.workers.append(worker)
 
     def on_stop(self):
+        self.stopping.set()
+        self.transcriptions.put(None)
+        self.speech_items.put(None)
+        for worker in self.workers:
+            worker.join(timeout=2)
+        self.workers = []
         self.recorder.close()
-        self.queue.clear()
+        self.vad.reset()
+        self.buffered.clear()
+        self.awaiting.clear()
+        self.next_utterance = self.vad._uid + 1
+        self.release_at = None
+        self.ready.clear()
+        self.held = []
+        self.speech_active = False
+        self._clear_queues()
+        self.started = False
+
+    def _clear_queues(self):
+        for work in (self.transcriptions, self.transcripts,
+                     self.speech_items, self.audio):
+            while True:
+                try:
+                    work.get_nowait()
+                except queue.Empty:
+                    break
+        self.ready.clear()
 
     def on_mute(self, muted):
         # A partial utterance from before the mute must not surface later.
-        self.vad = Vad(self.rate, threshold=self.args.threshold)
+        self.vad.reset()
+        self.awaiting.clear()
+        self.buffered.clear()
+        self.next_utterance = max(self.next_utterance, self.vad._uid + 1)
+        self.speech_active = False
+        self.held = []
+        self.announce_speech(False, reason="muted")
+        if muted and self.player:
+            self.player.stop()
+        self._clear_queues()
         log("microphone %s" % ("muted" if muted else "open"))
 
     def interrupt(self):
         """Silence the reply and drop what was queued behind it."""
-        self.queue.clear()
+        self.held = []
+        self._clear_queues()
         super().interrupt()
 
     def fail(self, message):
@@ -108,35 +195,148 @@ class UnmuteSidecar(Sidecar):
         if not self.started:
             return
         self.tick_playback()
-        self.pump()
-        chunk = self.recorder.read(800)  # 50 ms at 16 kHz
-        if not chunk:
-            return
-        if len(chunk) % 2:
-            chunk = chunk[:-1]
-        if self.muted:
-            return
-        for result in self.vad.feed(chunk):
-            if result[0] == "start":
-                self.events.send("hearing")
-            elif result[0] == "speech":
-                self.events.send("transcribing")
-                self.handle_speech(result[1])
-            elif result[0] == "cancel":
+        chunk = self.recorder.read(320)  # 20 ms at 16 kHz
+        if chunk:
+            if len(chunk) % 2:
+                chunk = chunk[:-1]
+            if not self.muted:
+                self.vad.set_playback(
+                    self.player.level() if self.player else 0.0)
+                self._consume(self.vad.feed(chunk))
+        self.drain_transcripts()
+        self.drain_audio()
+        self.maybe_release()
+
+    def _consume(self, events):
+        for result in events:
+            kind = result[0]
+            if kind == "start":
+                self.speech_active = True
+                self.cancel_release()
+                self.announce_speech(True, result[1], "onset")
+                self.events.send("hearing", utterance=result[1])
+                if self.player and self.player.busy():
+                    self.player.stop()
+            elif kind == "end":
+                self.speech_active = False
+                self.announce_speech(False, result[1], "utterance-end")
+            elif kind == "speech":
+                uid = result[2]
+                self.awaiting.add(uid)
+                self.events.send("transcribing", utterance=uid)
+                self.transcriptions.put((uid, result[1]))
+            elif kind == "cancel":
                 # Too short to transcribe: back to listening, not stuck
                 # in a stage that waits for text that will not come.
-                self.events.send("listening")
+                self.events.send("listening", utterance=result[1])
+                self.schedule_release(1.0)
 
-    def handle_speech(self, pcm):
-        """Transcribe one utterance and delegate it to the agent."""
-        text = self.transcribe(pcm)
-        if not text:
-            # Silence, noise or an empty STT result: nothing to delegate.
-            self.events.send("listening")
+    def gate_blocked(self):
+        """Non-nil while assistant audio must not start."""
+        return bool(self.muted or self.speech_active or self.awaiting)
+
+    def schedule_release(self, seconds):
+        """Release held output after SECONDS if no real utterance follows."""
+        if self.held:
+            self.release_at = time.monotonic() + seconds
+
+    def cancel_release(self):
+        self.release_at = None
+
+    def maybe_release(self):
+        """Let a false trigger's held reply go, but only with no transcript."""
+        if (not self.release_at or self.gate_blocked()
+                or time.monotonic() < self.release_at):
             return
-        self.heard = text
-        self.events.send("user_delta", text=text, final=True)
-        self.delegation(text)
+        pending, self.held = self.held, []
+        self.release_at = None
+        for item in pending:
+            self.speak(item.get("text") or "", item.get("id"))
+
+    # -- workers -----------------------------------------------------
+
+    def _transcribe_loop(self):
+        while not self.stopping.is_set():
+            item = self.transcriptions.get()
+            if item is None:
+                return
+            uid, pcm = item
+            text = self.transcribe(pcm)
+            if not self.stopping.is_set():
+                self.transcripts.put((uid, text))
+
+    def _synthesize_loop(self):
+        while not self.stopping.is_set():
+            item = self.speech_items.get()
+            if item is None:
+                return
+            item_id, text = item
+            pcm = self.synthesize(text)
+            if pcm and not self.stopping.is_set():
+                self.audio.put((item_id, text, pcm))
+
+    def drain_transcripts(self):
+        """Deliver completed transcripts in utterance order, exactly once."""
+        while True:
+            try:
+                uid, text = self.transcripts.get_nowait()
+            except queue.Empty:
+                break
+            if uid < self.next_utterance:
+                # Mute dropped this utterance while it was being transcribed.
+                continue
+            self.buffered[uid] = text
+        while self.next_utterance in self.buffered:
+            uid = self.next_utterance
+            text = self.buffered.pop(uid)
+            self.next_utterance += 1
+            self.awaiting.discard(uid)
+            if not text:
+                # Silence, noise or an empty STT result: nothing to delegate.
+                self.events.send("listening", utterance=uid)
+                self.schedule_release(1.0)
+                continue
+            self.heard = text
+            pending = self.take_pending()
+            self.events.send("user_delta", text=text, final=True, utterance=uid)
+            self.delegation(text, delegation_id="u-%d" % uid,
+                            pending=pending, utterance=uid)
+
+    def drain_audio(self):
+        """Play ready PCM only while the gate is open; hold everything else."""
+        if self.gate_blocked():
+            while self.ready:
+                item = self.ready.popleft()
+                self.hold(item[1], item[0])
+            while True:
+                try:
+                    item = self.audio.get_nowait()
+                except queue.Empty:
+                    break
+                self.hold(item[1], item[0])
+            return
+        if self.ready and not (self.player and self.player.busy()):
+            item = self.ready.popleft()
+            self._play_item(item)
+        while not self.ready:
+            try:
+                item = self.audio.get_nowait()
+            except queue.Empty:
+                break
+            if self.gate_blocked():
+                self.hold(item[1], item[0])
+                continue
+            if self.player and self.player.busy():
+                self.ready.append(item)
+                break
+            self._play_item(item)
+
+    def _play_item(self, item):
+        item_id, text, pcm = item
+        if self.play(pcm):
+            self.said.append(text)
+        else:
+            self.hold(text, item_id)
 
     # -- services ----------------------------------------------------
 
@@ -170,20 +370,18 @@ class UnmuteSidecar(Sidecar):
             return ""
         return text
 
-    def speak(self, text):
-        """Queue TEXT for speech; one utterance plays at a time."""
+    def speak(self, text, item_id=None):
+        """Speak TEXT, or hold it when speech or a transcript owns the floor."""
         text = (text or "").strip()
-        if text:
-            self.queue.append(text)
-
-    def pump(self):
-        """Speak the next queued reply when the speaker is free."""
-        if not self.queue or (self.player and self.player.busy()):
+        if not text or self.muted:
             return
-        text = self.queue.popleft()
-        pcm = self.synthesize(text)
-        if pcm:
-            self.play(pcm)
+        if self.gate_blocked():
+            self.hold(text, item_id)
+            return
+        if not item_id:
+            self.hold_seq += 1
+            item_id = "say-%d" % self.hold_seq
+        self.speech_items.put((item_id, text))
 
     def synthesize(self, text):
         """Return PCM16 for TEXT, or nil when synthesis fails."""
@@ -222,13 +420,29 @@ class UnmuteSidecar(Sidecar):
 
     # -- replies -----------------------------------------------------
 
+    def _unspoken(self, text):
+        """Return the sentences of TEXT that commentary has not covered."""
+        said = _normal(" ".join(self.commentary))
+        parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
+        return " ".join(part for part in parts
+                        if part and _normal(part) not in said).strip()
+
     def on_result(self, delegation_id, text, error):
         if error:
             return
-        self.speak(text)
+        remaining = self._unspoken(text)
+        self.commentary = []
+        if remaining:
+            self.speak(remaining, "result:%s" % (delegation_id or "voice"))
 
-    def on_commentary(self, text):
-        self.speak(text)
+    def on_held_result(self, delegation_id, text):
+        # The full held result is already in the pending context; the
+        # sentence pieces were reported when they arrived.
+        self.commentary = []
+
+    def on_commentary(self, text, event=None):
+        self.commentary.append(text)
+        self.speak(text, (event or {}).get("id"))
 
 
 def parse_args(argv):
@@ -239,9 +453,22 @@ def parse_args(argv):
     parser.add_argument("--tts-model", default="tts-1")
     parser.add_argument("--voice", default="unmute")
     parser.add_argument("--threshold", type=float, default=0.02)
+    parser.add_argument("--hangover", type=float, default=0.85)
+    parser.add_argument("--max-speech", type=float, default=120.0)
     parser.add_argument("--api-key-env", default="")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv[1:])
+
+
+def _self_test_tone(seconds, frequency=140.0, amplitude=0.25):
+    """Return a voiced-looking tone for the self-test, without a fixture."""
+    import math
+    import struct
+    count = int(seconds * LOCAL_RATE)
+    return b"".join(
+        struct.pack("<h", int(32767 * amplitude
+                              * math.sin(2.0 * math.pi * frequency * index / LOCAL_RATE)))
+        for index in range(count))
 
 
 def self_test(args):
@@ -263,24 +490,47 @@ def self_test(args):
     sidecar = UnmuteSidecar(args, events=events, player=player,
                             recorder=NullAudio(),
                             post_multipart=post_multipart, post_json=post_json)
+
+    def pump(timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            sidecar.drain_transcripts()
+            sidecar.drain_audio()
+            sidecar.maybe_release()
+            yield
+            time.sleep(0.01)
+
     sidecar.start_session({"event": "start", "protocol": 1})
-    # One utterance: a wave of speech crosses the threshold and ends.
-    speech = b"\x00\x20" * 8000  # 0.5 s of tone
-    for result in sidecar.vad.feed(speech + b"\x00\x00" * 12000):
-        if result[0] == "speech":
-            sidecar.handle_speech(result[1])
+    # One utterance: speech crosses the gate, then a pause ends it.
+    speech = _self_test_tone(1.2) + b"\x00\x00" * 24000
+    for result in sidecar.vad.feed(speech):
+        sidecar._consume([result])
+    for _ in pump():
+        if calls["stt"]:
+            break
     if not calls["stt"]:
         return self_test_failed("no transcription request")
+    for _ in pump():
+        if any(event.get("event") == "delegation" for event in events.sent):
+            break
     delegations = [event for event in events.sent if event.get("event") == "delegation"]
     if not delegations or delegations[0].get("text") != "add a docstring":
         return self_test_failed("delegation text")
+    if not any(event.get("event") == "speech" and event.get("active") is True
+               for event in events.sent):
+        return self_test_failed("no speech onset")
+    if not any(event.get("event") == "speech" and event.get("active") is False
+               for event in events.sent):
+        return self_test_failed("no speech end")
     captions = [event for event in events.sent if event.get("event") == "user_delta"]
     if not captions or captions[-1].get("final") is not True:
         return self_test_failed("user caption")
     # The agent's answer is spoken and reported as speaking.
     sidecar.handle({"event": "delegate_result", "id": delegations[0]["id"],
                     "text": "It is in place."})
-    sidecar.pump()
+    for _ in pump():
+        if calls["tts"] and player.played:
+            break
     if not calls["tts"]:
         return self_test_failed("no speech request")
     if calls["tts"][0]["payload"].get("input") != "It is in place.":
@@ -289,23 +539,41 @@ def self_test(args):
         return self_test_failed("nothing played")
     if "speaking" not in events.names():
         return self_test_failed("no speaking event")
-    # Commentary is queued the same way.
-    sidecar.handle({"event": "commentary", "text": "Working on it."})
-    sidecar.pump()
+    # Commentary is spoken the same way, unless speech owns the floor.
+    sidecar.handle({"event": "commentary", "text": "Working on it.", "id": "c-1"})
+    for _ in pump():
+        if len(calls["tts"]) >= 2:
+            break
     if calls["tts"][-1]["payload"].get("input") != "Working on it.":
         return self_test_failed("commentary not spoken")
+    sidecar.speech_active = True
+    sidecar.handle({"event": "commentary", "text": "Never mind.", "id": "c-2"})
+    for _ in pump(0.2):
+        pass
+    if len(calls["tts"]) != 2:
+        return self_test_failed("held commentary was synthesized")
+    if not any(item.get("id") == "c-2" for item in sidecar.held):
+        return self_test_failed("held commentary not recorded")
+    sidecar.speech_active = False
+    sidecar.awaiting.add(99)
+    pending = sidecar.take_pending()
+    if not pending:
+        return self_test_failed("pending context lost")
     # Interruption drops the queue and reports it.
-    sidecar.handle({"event": "commentary", "text": "Never mind."})
+    sidecar.handle({"event": "commentary", "text": "Never mind.", "id": "c-3"})
     sidecar.handle({"event": "interrupt"})
-    if sidecar.queue:
-        return self_test_failed("queue survived interrupt")
+    if sidecar.ready or sidecar.held:
+        return self_test_failed("output survived interrupt")
     if "interrupted" not in events.names():
         return self_test_failed("no interrupt event")
     # Stopping closes the recorder and player.
     sidecar.handle({"event": "stop"})
     if "closed" not in events.names():
         return self_test_failed("no closed event")
+    if sidecar.workers:
+        return self_test_failed("workers survived stop")
     return self_test_ok("harness-voice-live-unmute")
+
 
 
 def main(argv):
@@ -317,7 +585,7 @@ def main(argv):
     if reason:
         sidecar.events.send("error", message=reason)
         return 1
-    loop = Loop(sidecar.events)
+    loop = Loop(sidecar.events, tick=0.02)
     sidecar.loop = loop
     try:
         return loop.run(sidecar.handle, sidecar.on_tick)

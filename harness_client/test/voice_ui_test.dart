@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/ui/adaptive/platform_style.dart';
 import 'package:harness_client/src/ui/screens/voice_screen.dart';
@@ -29,31 +33,35 @@ Future<void> _open(WidgetTester tester, Rig rig) async {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets(
-    'the voice screen says what it is and offers the three controls',
-    (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      final rig = Rig();
-      await _open(tester, rig);
+  testWidgets('the voice screen says what it is and offers the live controls', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final rig = Rig();
+    await _open(tester, rig);
 
-      expect(find.text('Voice'), findsOneWidget);
-      expect(find.text('Clip'), findsOneWidget);
-      expect(find.text('Listening'), findsOneWidget);
-      expect(find.text('Transcript'), findsOneWidget);
-      expect(find.text('No speech yet'), findsOneWidget);
-      expect(find.text('Mute'), findsOneWidget);
-      expect(find.text('Interrupt'), findsOneWidget);
-      expect(find.text('End'), findsOneWidget);
-      expect(find.byTooltip('End'), findsOneWidget);
-      expect(find.byTooltip('Voice settings'), findsOneWidget);
-      expect(find.text('Retry'), findsNothing);
-      expect(find.byKey(const Key('composer-voice')), findsNothing);
-      expect(tester.takeException(), isNull);
-    },
-  );
+    expect(find.text('Voice'), findsOneWidget);
+    expect(find.text('Clip'), findsOneWidget);
+    expect(find.text('Listening'), findsOneWidget);
+    expect(find.text('Transcript'), findsOneWidget);
+    expect(find.text('No speech yet'), findsOneWidget);
+    expect(find.text('Mute'), findsOneWidget);
+    expect(find.text('Pause'), findsOneWidget);
+    expect(find.text('Interrupt'), findsOneWidget);
+    expect(find.text('End'), findsOneWidget);
+    expect(find.byTooltip('End'), findsOneWidget);
+    expect(find.byTooltip('Microphone · live'), findsOneWidget);
+    expect(find.byTooltip('Conversation · live'), findsOneWidget);
+    expect(find.byTooltip('Playback · interruption'), findsOneWidget);
+    expect(find.byTooltip('Conversation · end'), findsOneWidget);
+    expect(find.byTooltip('Voice settings'), findsOneWidget);
+    expect(find.text('Retry'), findsNothing);
+    expect(find.byKey(const Key('composer-voice')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('captions carry the speaker they belong to', (tester) async {
     tester.view.physicalSize = const Size(390, 900);
@@ -98,10 +106,23 @@ void main() {
       await tester.pump();
       expect(find.text('Muted'), findsOneWidget);
       expect(find.text('Unmute'), findsOneWidget);
+      expect(find.byTooltip('Microphone · muted'), findsOneWidget);
       await tester.tap(find.byKey(const Key('voice-mute')));
       await tester.pump();
       expect(find.text('Listening'), findsOneWidget);
       expect(find.text('Mute'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('voice-pause')));
+      await tester.pump();
+      expect(find.text('Paused'), findsOneWidget);
+      expect(find.text('Resume'), findsOneWidget);
+      expect(find.byTooltip('Conversation · paused'), findsOneWidget);
+      expect(rig.backend.pauses, 1);
+      await tester.tap(find.byKey(const Key('voice-pause')));
+      await tester.pump();
+      expect(find.text('Listening'), findsOneWidget);
+      expect(find.text('Pause'), findsOneWidget);
+      expect(rig.backend.resumes, 1);
 
       await tester.tap(find.byKey(const Key('voice-interrupt')));
       await tester.pump();
@@ -116,6 +137,7 @@ void main() {
       expect(find.text('Failed'), findsOneWidget);
       expect(find.text('Microphone unavailable'), findsOneWidget);
       expect(find.text('Retry'), findsWidgets);
+      expect(find.byTooltip('Conversation · retry'), findsOneWidget);
     },
   );
 
@@ -251,5 +273,96 @@ void main() {
     expect(find.byKey(const Key('composer-voice')), findsOneWidget);
     await tester.tap(find.byKey(const Key('composer-voice')));
     expect(tapped, 0);
+  });
+
+  testWidgets('keyboard and headset buttons reach mute and pause', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(900, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final rig = Rig();
+    await _open(tester, rig);
+    expect(rig.media.starts, 1);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyM);
+    await tester.pump();
+    expect(find.text('Unmute'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyM);
+    await tester.pump();
+    expect(find.text('Mute'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyP);
+    await tester.pump();
+    expect(find.text('Paused'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyP);
+    await tester.pump();
+    expect(find.text('Listening'), findsOneWidget);
+
+    rig.media.press();
+    await tester.pump();
+    expect(find.text('Paused'), findsOneWidget);
+    rig.media.press();
+    await tester.pump();
+    expect(find.text('Listening'), findsOneWidget);
+
+    unawaited(rig.controller.stop());
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(rig.media.stops, 1);
+    expect(rig.media.toggle, isNull);
+  });
+
+  testWidgets('each control has a screen-reader name and a shortcut hint', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final rig = Rig();
+    await _open(tester, rig);
+    final semantics = tester.ensureSemantics();
+
+    expect(find.bySemanticsLabel('Pause'), findsOneWidget);
+    final pause = tester.getSemantics(find.bySemanticsLabel('Pause'));
+    expect(pause.hint, 'Shortcut P');
+    expect(pause.hasFlag(SemanticsFlag.isButton), isTrue);
+    expect(find.bySemanticsLabel('Mute'), findsOneWidget);
+    final mute = tester.getSemantics(find.bySemanticsLabel('Mute'));
+    expect(mute.hint, 'Shortcut M');
+    expect(find.bySemanticsLabel('End'), findsOneWidget);
+    semantics.dispose();
+  });
+
+  testWidgets('all controls fit a phone and wrap on a narrow screen', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final rig = Rig();
+    await _open(tester, rig);
+    expect(tester.takeException(), isNull);
+    final pause = tester.getTopLeft(find.byKey(const Key('voice-pause')));
+    final interrupt = tester.getTopLeft(
+      find.byKey(const Key('voice-interrupt')),
+    );
+    expect(pause.dy, interrupt.dy);
+
+    tester.view.physicalSize = const Size(300, 844);
+    await tester.pump();
+    rig.backend.emit(
+      const VoiceFailureEvent(
+        VoiceProblem('Microphone unavailable', recoverable: false),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Retry'), findsWidgets);
+    expect(tester.takeException(), isNull);
+    final first = tester.getTopLeft(find.byKey(const Key('voice-pause')));
+    final retry = tester.getTopLeft(find.byKey(const Key('voice-retry')));
+    expect(retry.dy, greaterThan(first.dy), reason: 'the row wraps');
   });
 }

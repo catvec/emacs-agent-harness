@@ -17,6 +17,11 @@
 (defconst harness-ui-voice-live-test--fixture
   (expand-file-name "scripts/harness-voice-live-fixture" harness-test-root))
 
+(defvar harness-ui-voice-live-test--calls nil
+  "Session prompts recorded by the test sidecar.")
+(defvar harness-ui-voice-live-test--notifications nil)
+(defvar harness-ui-voice-live-test--inbox nil)
+
 (defun harness-ui-voice-live-test--draw ()
   "Redraw the compose host, preserving its draft and insertion offset."
   (harness-compose-capture)
@@ -82,6 +87,13 @@
            (harness-voice-live--delegation nil) (harness-voice-live--delegations nil)
            (harness-voice-live--nodes nil) (harness-voice-live--order nil)
            (harness-voice-live--heard "") (harness-voice-live--transcript nil)
+           (harness-voice-live--speech-active nil)
+           (harness-voice-live--held nil)
+           (harness-voice-live--held-timer nil)
+           (harness-voice-live--turn-id nil)
+           (harness-voice-live--seen (make-hash-table :test 'equal))
+           (harness-voice-live--held-seq 0)
+           (harness-voice-live-pending-release-delay 0.15)
            (harness-voice-live--speaker nil) (harness-voice-live--section nil)
            (harness-voice-live--stage nil) (harness-voice-live--stage-since nil)
            (harness-voice-live--stage-timer nil) (harness-voice-live--stage-frame 0)
@@ -119,6 +131,20 @@
   (if (buffer-live-p harness-voice-live--transcript)
       (with-current-buffer harness-voice-live--transcript (buffer-string))
     ""))
+
+(defun harness-ui-voice-live-test--occurrences (needle haystack)
+  "Return how many times NEEDLE appears in HAYSTACK."
+  (let ((start 0) (count 0))
+    (while (string-match (regexp-quote needle) haystack start)
+      (setq count (1+ count)
+            start (match-end 0)))
+    count))
+
+(defun harness-ui-voice-live-test--latest-prompt ()
+  "Return the text of the newest session prompt the test saw."
+  (let* ((call (car harness-ui-voice-live-test--calls))
+         (params (nth 2 call)))
+    (plist-get (car (plist-get params :prompt)) :text)))
 
 (defun harness-ui-voice-live-test--chunk (text &optional id)
   "Deliver assistant TEXT for node ID."
@@ -234,6 +260,12 @@
           (should (equal (concat " Live · Listening · [End] · [Interrupt C-c V] · [Mute C-c v]"
                                  " · [Transcript] · [Setup]")
                          (substring-no-properties line)))
+          (setq harness-voice-live--stage 'holding)
+          (should (equal "Live · Holding reply" (harness-voice-live--status)))
+          (should (equal (concat " Live · Holding reply · [End] · [Interrupt C-c V]"
+                                 " · [Mute C-c v] · [Transcript] · [Setup]")
+                         (substring-no-properties (harness-voice-live--controls))))
+          (setq harness-voice-live--stage 'listening)
           (dolist (spec '(("[End]" "Live session · end")
                           ("[Interrupt C-c V]" "Playback · interruption")
                           ("[Mute C-c v]" "Microphone · live session")
@@ -515,6 +547,8 @@
     (should-not (string-search "·" (harness-voice-live--stage-text)))
     (harness-voice-live--stage-set 'listening)
     (should (string-prefix-p "●" (harness-voice-live--stage-text)))
+    (harness-voice-live--stage-set 'holding)
+    (should (string-prefix-p "‖" (harness-voice-live--stage-text)))
     (harness-voice-live--stage-set 'muted)
     (should (string-prefix-p "⊘" (harness-voice-live--stage-text)))
     (harness-voice-live--stage-set 'failed)
@@ -545,6 +579,125 @@
      5 "the speakable commentary")
     (should-not (string-search "secret" (harness-ui-voice-live-test--file-text
                                          harness-ui-voice-live-test--inbox)))))
+
+;;;; Speech gating
+
+(ert-deftest harness-ui-voice-live-holds-output-before-transcript ()
+  "Speech holds assistant text; the transcript carries it once as context."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (harness-voice-live--handle (list :event "delegation" :id "d-1"
+                                      :text "Do the work." :utterance 1))
+    (harness-voice--on-event "agent/turn-started" '("live-session"))
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 2))
+    (harness-ui-voice-live-test--chunk "The parser is ready. " "n-1")
+    (should (eq harness-voice-live--stage 'holding))
+    (should (equal "Live · Holding reply" (harness-voice-live--status)))
+    (should harness-voice-live--held)
+    (should-not (cl-find "commentary"
+                         (harness-ui-voice-live-test--events
+                          harness-ui-voice-live-test--inbox)
+                         :key (lambda (e) (plist-get e :event)) :test #'equal))
+    (harness-voice-live--handle (list :event "speech" :active nil :utterance 2))
+    (harness-voice--on-event "agent/turn-ended" '("live-session" "end-turn"))
+    (harness-voice-live--handle
+     (list :event "delegation" :id "d-2" :utterance 2
+           :text "Wait, also check the tests."
+           :pending (list (list :id "sidecar-1" :text "The sidecar held this."))))
+    (should (= 2 (length harness-ui-voice-live-test--calls)))
+    (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
+      (should (string-search "Wait, also check the tests." prompt))
+      (should (string-search "<voice-turn-context>" prompt))
+      (should (string-search "The parser is ready." prompt))
+      (should (string-search "The sidecar held this." prompt))
+      (should (= 1 (harness-ui-voice-live-test--occurrences "The parser is ready." prompt)))
+      (should (= 1 (harness-ui-voice-live-test--occurrences "The sidecar held this." prompt))))
+    ;; The same utterance arriving twice is not a second prompt.
+    (harness-voice-live--handle
+     (list :event "delegation" :id "d-2" :utterance 2
+           :text "Wait, also check the tests."))
+    (should (= 2 (length harness-ui-voice-live-test--calls)))
+    ;; A new turn's text is released normally.
+    (harness-voice--on-event "agent/turn-ended" '("live-session" "end-turn"))
+    (harness-voice--on-event "agent/turn-started" '("live-session"))
+    (harness-ui-voice-live-test--chunk "The tests pass. " "n-2")
+    (harness-test-wait
+     (lambda ()
+       (cl-find "commentary"
+                (harness-ui-voice-live-test--events
+                 harness-ui-voice-live-test--inbox)
+                :key (lambda (e) (plist-get e :event)) :test #'equal))
+     3 "the released commentary")
+    (let ((commentary
+           (cl-find "commentary"
+                    (harness-ui-voice-live-test--events
+                     harness-ui-voice-live-test--inbox)
+                    :key (lambda (e) (plist-get e :event)) :test #'equal)))
+      (should (equal "The tests pass." (plist-get commentary :text))))))
+
+(ert-deftest harness-ui-voice-live-false-trigger-releases-held-output ()
+  "A tap that never becomes words does not hold a reply forever."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 1))
+    (harness-voice-live--hold "n-1:0" "Still useful.")
+    (harness-voice-live--handle (list :event "speech" :active nil :utterance 1))
+    (harness-voice-live--handle (list :event "listening" :utterance 1))
+    (harness-test-wait
+     (lambda ()
+       (cl-find "commentary"
+                (harness-ui-voice-live-test--events
+                 harness-ui-voice-live-test--inbox)
+                :key (lambda (e) (plist-get e :event)) :test #'equal))
+     3 "the false-trigger release")
+    (should-not harness-voice-live--held)))
+
+(ert-deftest harness-ui-voice-live-interrupt-clears-held-output ()
+  "An explicit interrupt drops held text; speech still owns the gate."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 1))
+    (harness-voice-live--hold "n-1:0" "Never mind.")
+    (harness-voice-live-interrupt)
+    (should-not harness-voice-live--held)
+    (should harness-voice-live--speech-active)
+    (harness-voice-live--handle (list :event "speech" :active nil :utterance 1))
+    (should-not harness-voice-live--speech-active)))
+
+(ert-deftest harness-ui-voice-live-reset-clears-the-gate ()
+  "Redaction or a reconnect cannot leave a stale speech gate or held text."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 1))
+    (harness-voice-live--hold "n-1:0" "Held.")
+    (harness-voice-live--handle (list :event "speech" :active nil :utterance 1))
+    (harness-voice-live--handle (list :event "listening"))
+    (should (timerp harness-voice-live--held-timer))
+    (harness-voice-live--reset)
+    (should-not harness-voice-live--speech-active)
+    (should-not harness-voice-live--held)
+    (should-not (timerp harness-voice-live--held-timer))
+    (should (= 0 (hash-table-count harness-voice-live--seen)))))
 
 ;;;; Redaction
 
@@ -602,6 +755,21 @@
     (harness-voice-toggle)
     (harness-test-wait (lambda () (null harness-voice-live--state)) 5 "toggle off")
     (should-not (harness-voice-live--active-p))))
+
+(ert-deftest harness-ui-voice-live-pending-keeps-the-full-result ()
+  "A held sentence and the full result that contains it are one context line."
+  (let ((harness-voice-live--held
+         (list (list :id "piece" :text "The parser is ready.")
+               (list :id "result:d" :text "The parser is ready. Tests pass.")))
+        (harness-voice-live--held-timer nil))
+    (let* ((items (harness-voice-live--pending-items (list :pending nil)))
+           (context (harness-voice-live--pending-context items)))
+      (should (= 1 (length items)))
+      (should (equal "The parser is ready. Tests pass."
+                     (plist-get (car items) :text)))
+      (should (= 1 (cl-count-if (lambda (line) (string-prefix-p "- " line))
+                                (split-string context "\n"))))
+      (should (string-search "Tests pass." context)))))
 
 (provide 'harness-ui-voice-live-test)
 ;;; harness-ui-voice-live-test.el ends here

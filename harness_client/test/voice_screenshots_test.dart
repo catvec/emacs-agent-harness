@@ -37,6 +37,7 @@ class _Case {
     this.phase,
     this.approval = false,
     this.settings = false,
+    this.paused = false,
   });
 
   final String file;
@@ -47,6 +48,7 @@ class _Case {
   final VoicePhase? phase;
   final bool approval;
   final bool settings;
+  final bool paused;
 }
 
 const _cases = [
@@ -96,6 +98,20 @@ const _cases = [
     captions: [
       (VoiceSpeaker.you, 'run the tests', true),
       (VoiceSpeaker.agent, 'I need your approval for the command.', true),
+    ],
+  ),
+  _Case(
+    'voice-paused',
+    390,
+    844,
+    paused: true,
+    captions: [
+      (VoiceSpeaker.you, 'pause while I answer the door', true),
+      (
+        VoiceSpeaker.agent,
+        'Paused. The merge queue has two tasks waiting.',
+        true,
+      ),
     ],
   ),
   _Case(
@@ -223,6 +239,11 @@ Future<void> main() async {
         }
         if (shot.phase != null) {
           rig.backend.emit(VoicePhaseEvent(shot.phase!));
+        }
+        if (shot.paused) {
+          await rig.controller.pause();
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pump(const Duration(milliseconds: 220));
         }
         if (shot.approval) {
           rig.session.blocked = true;

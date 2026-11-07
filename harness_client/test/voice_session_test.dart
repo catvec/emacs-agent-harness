@@ -132,6 +132,37 @@ void main() {
       );
     });
 
+    test(
+      'pending context travels, while the conversation shows what was said',
+      () async {
+        final rig = await _rig();
+        final controller = await _open(rig);
+        const shown = 'open the task';
+        const wire =
+            'open the task\n\n<voice-turn-context>\nheld_output:\n'
+            '- The tests pass.\n</voice-turn-context>';
+        final sending = controller.sendVoice(text: wire, displayText: shown);
+        expect(
+          controller.transcript.items.any(
+            (item) => item.isUser && item.text == shown,
+          ),
+          isTrue,
+          reason: 'the local echo is what the person said, not the context',
+        );
+        await sending;
+        expect(_prompts(rig).single, [
+          {'type': 'text', 'text': wire},
+        ]);
+        // The harness records the words the model read, context included.
+        expect(
+          controller.transcript.items.any(
+            (item) => item.isUser && item.text.contains('voice-turn-context'),
+          ),
+          isTrue,
+        );
+      },
+    );
+
     test('it is sent while the agent works, where typing would wait', () async {
       final rig = await _rig();
       final controller = await _open(rig);

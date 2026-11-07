@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness_voice_sidecar import (  # noqa: E402
     GPT_RATE, PROTOCOL, FakeConnection, FakeEvents, NullAudio, Player, Recorder,
-    Sidecar, WebSocket, log, self_test_failed, self_test_ok,
+    Sidecar, Vad, WebSocket, log, self_test_failed, self_test_ok,
 )
 
 DEFAULT_URL = "wss://api.openai.com/v1/live/sessions"
@@ -104,6 +104,8 @@ class GptSidecar(Sidecar):
         self.session_id = None
         self.finished = False
         self.key_override = None
+        self.vad = Vad(GPT_RATE, threshold=0.02, hangover=0.85,
+                       max_speech=120.0)
 
     # -- lifecycle ---------------------------------------------------
 
@@ -160,6 +162,11 @@ class GptSidecar(Sidecar):
             pass
 
     def on_mute(self, muted):
+        self.vad.reset()
+        self.speech_active = False
+        self.announce_speech(False, reason="muted")
+        if muted and self.player:
+            self.player.stop()
         log("microphone %s" % ("muted" if muted else "open"))
 
     # -- audio -------------------------------------------------------
@@ -187,6 +194,7 @@ class GptSidecar(Sidecar):
             return
         if len(chunk) % 2:
             chunk = chunk[:-1]
+        self.gate(chunk)
         try:
             self.connection.send_json({
                 "type": "session.input_audio.append",
@@ -194,6 +202,34 @@ class GptSidecar(Sidecar):
             })
         except Exception as error:  # noqa: BLE001 - reported to Emacs
             self.events.send("error", message="ChatGPT Live send failed · %s" % error)
+
+    def gate(self, chunk):
+        """Feed microphone PCM to the local gate before the server hears it.
+
+        GPT-Live decides its own turns, but its audio arrives with the
+        model's latency.  The local detector is the signal that stops the
+        speaker as soon as a person starts, and it keeps the player silent
+        until the server's next response rather than replaying stale audio.
+        """
+        self.vad.set_playback(self.player.level() if self.player else 0.0)
+        for result in self.vad.feed(chunk):
+            kind = result[0]
+            if kind == "start":
+                self.speech_active = True
+                self.announce_speech(True, reason="onset")
+                self.events.send("hearing")
+                if self.player:
+                    self.player.stop()
+                self.steer("session.thinking.append",
+                           "The person is speaking. Stop talking and listen.")
+            elif kind == "end":
+                self.speech_active = False
+                self.announce_speech(False, reason="utterance-end")
+                if not self.player or not self.player.busy():
+                    # No transcript from this client; let a held reply go
+                    # after its grace instead of waiting for a turn that
+                    # may never be delegated.
+                    self.announce_listening()
 
     # -- server events -----------------------------------------------
 
@@ -265,7 +301,10 @@ class GptSidecar(Sidecar):
 
     # -- Emacs to GPT-Live -------------------------------------------
 
-    def on_commentary(self, text):
+    def on_commentary(self, text, event=None):
+        if self.speech_active:
+            self.hold(text, (event or {}).get("id"))
+            return
         self.steer("session.commentary.append", text)
 
     def on_thinking(self, text):
@@ -283,7 +322,14 @@ class GptSidecar(Sidecar):
         if error:
             self.steer("session.thinking.append", "The backend could not finish: %s" % error)
             return
+        if self.speech_active:
+            self.hold(text, "result:%s" % (delegation_id or "voice"))
+            return
         self.steer("session.commentary.append", text)
+
+    def on_held_result(self, delegation_id, text):
+        self.steer("session.thinking.append",
+                   "The backend result is held while the person speaks.")
 
 
 def parse_args(argv):

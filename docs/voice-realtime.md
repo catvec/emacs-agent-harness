@@ -296,11 +296,12 @@ model, and the test sidecars do exactly that.
 | --- | --- | --- | --- |
 | sidecar → Emacs | `ready` | `provider`, `voice` | Session connected; microphone may start |
 | sidecar → Emacs | `listening` / `speaking` | — | Audio state for the indicator |
-| sidecar → Emacs | `hearing` | — | The user started speaking |
-| sidecar → Emacs | `transcribing` | — | Speech is being transcribed |
+| sidecar → Emacs | `hearing` | — | The user started speaking (a stage, not the gate) |
+| sidecar → Emacs | `speech` | `active`, `utterance`, `reason` | The low-latency gate: true at speech onset, before any transcript; false at speech end |
+| sidecar → Emacs | `transcribing` | `utterance` | A completed utterance is being transcribed |
 | sidecar → Emacs | `user_delta` / `assistant_delta` | `text`, `final` | Caption fragments; `final` ends the caption line |
 | sidecar → Emacs | `backchannel` | `text` | Brief listening sound |
-| sidecar → Emacs | `delegation` | `id`, `text` | Backend request and the transcript to act on |
+| sidecar → Emacs | `delegation` | `id`, `text`, `utterance`, `pending`, `speech_active` | Backend request, the transcript, and assistant output held while the person spoke |
 | sidecar → Emacs | `interrupted` | — | Playback stopped |
 | sidecar → Emacs | `error` | `message` | Visible failure |
 | sidecar → Emacs | `closed` | `reason` | Clean end |
@@ -352,6 +353,7 @@ Live · Listening
 Live · Hearing you
 Live · Transcribing
 Live · Working
+Live · Holding reply
 Live · Speaking
 Live · Interrupted
 Live · Muted
@@ -363,7 +365,13 @@ The indicator follows the sidecar's audio state, not text generation. A
 microphone on/off control and a visible **End** control remain mandatory.
 **Interrupt** is reachable without a keyboard. **Speaking** is reported by the
 sidecar when its own player is playing, so generation finishing early does not
-claim the agent is still talking.
+claim the agent is still talking. **Holding reply** is the gate: assistant
+text is waiting for the person to finish, and it will travel with the next
+transcript rather than being spoken late.
+
+[Voice turn-taking](voice-turn-taking.md) covers the speech signal, the
+pending-update context, the live-conversation controls and their latency
+budget.
 
 ### What is implemented and tested
 
