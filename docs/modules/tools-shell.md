@@ -21,10 +21,13 @@ Two ways for a model to run things:
   with `sandbox/wrap` so it runs confined; a `required` policy
   without a backend, or without the sandbox module, turns into a
   tool error rather than an unconfined run.  The session's own temporary directory
-  (`session/tmp-dir`) is writable in there too, at its real path:
-  the sandbox's /tmp is private and empty for every command, so
-  that directory is where commands leave files for later ones and
-  for the other tools.  So is every other directory the session may
+  (`session/tmp-dir`) is the command's /tmp in there, writable, and
+  TMPDIR says /tmp, so that a command leaves its files for later
+  ones and for the other tools whether it honors TMPDIR or goes to
+  /tmp without asking; it stays visible at its real path as well,
+  where `session_info` and the file tools name it, and a command
+  that changes nothing keeps a /tmp of its own instead
+  (`sandbox/wrap`).  So is every other directory the session may
   touch (`permission/dirs`): its working directory and worktree, the
   configured directories and those granted to it, so a directory the
   user granted reaches bash as it reaches the other tools; the tool
@@ -94,9 +97,11 @@ Two ways for a model to run things:
   sockets of the instances scripts/dev.sh runs -- and the Emacs it
   runs, where that is not in /usr; and it writes the call's own io/
   directory, where its code waits and it leaves its result, even when
-  a filter makes it read-only (the sandbox's `:scratch`).  The child
-  always runs on this machine, where a remote session has no
-  directory, so a remote session's code runs in the call's own.
+  a filter makes it read-only (the sandbox's `:scratch`).  That
+  directory is made in the session's own temporary directory when it
+  has one, and deleted when the call ends.  The child always runs on
+  this machine, where a remote session has no directory, so a remote
+  session's code runs in the call's own.
   The result is read back only from a regular file, since a child in
   the sandbox could leave a link there to a file only the harness
   can read.
@@ -121,7 +126,7 @@ Two ways for a model to run things:
 
 ### Tools
 
-- `bash` — Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer "Operation not permitted": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine.
+- `bash` — Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. In that sandbox /tmp is the session's temporary directory and TMPDIR is /tmp, so a script that writes /tmp leaves its files where the next command and the file tools find them. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer "Operation not permitted": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine.
 - `elisp` — Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename; it may run in the same sandbox as bash commands, and sees what they see and has what they have (no Linux capability unless the user gave this session some: request_escalation, attribute capability). Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation. With snapshot the process starts from a copy of the user's Emacs: the values of its variables and its buffers (name, mode, file, directory, point, text), to compute over. The code can change the copy and never the user's Emacs; the process then runs read-only and offline, whatever the session otherwise has, and is refused where no sandbox can give that. Credentials are left out of the copy by the names of variables and buffers, and the copy says what it left out: (harness-snapshot-info). The variables the process needs for itself, hooks and every variable that holds a function keep the process's own value: read the user's with (harness-user-value 'load-path).
 
 ### Filter chains it runs

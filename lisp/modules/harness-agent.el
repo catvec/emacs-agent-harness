@@ -512,8 +512,8 @@ activity replaces it once it starts, and its end clears it."
   (concat "- Working directory: this session's own, where its tools run -- a worktree of the"
           " project, when it works in one%s\n"
           "- Scratch files: this session's own temporary directory, which is yours alone and"
-          " already allowed, bash included; put them there rather than in the working directory"
-          " or /tmp%s\n")
+          " already allowed, bash included; put them there rather than in the working"
+          " directory%s\n")
   "System prompt lines about where the session works, with no path in them.
 A prompt cache matches a request only as far as it starts like the one
 that wrote it, so a prompt that names the session's own directories --

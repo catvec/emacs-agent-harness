@@ -23,7 +23,8 @@
 ;;
 ;; What the sandbox sees on GNU/Linux: read-only /usr and /etc (plus
 ;; the usual /lib, /lib64, /bin, /sbin as symlinks or read-only binds),
-;; a fresh /proc, /dev and /tmp, and the session's working directory
+;; a fresh /proc and /dev, a /tmp of its own (the caller's, when it
+;; gives one: `:tmp' below), and the session's working directory
 ;; read-write.  The home directory's contents are *not* mounted
 ;; (credentials such as ~/.npmrc or ~/.aws stay out of reach).  With
 ;; bwrap $HOME keeps its path, but an empty tmpfs covers it, so ~/x
@@ -43,6 +44,23 @@
 ;; inside as outside.  Network access stays on by default because
 ;; hosted providers and most build tools need it; pass `:network nil'
 ;; to cut it, which is only correct for local models.
+;;
+;; `:tmp' makes the session's temporary directory the command's /tmp,
+;; writable, instead of an empty tmpfs of its own: programs that go to
+;; /tmp without asking (most of them do; `$TMPDIR' is often ignored)
+;; then leave their files where the next command, the file tools and
+;; the harness find them, instead of in a place thrown away with the
+;; command.  TMPDIR is set to /tmp as well, so the two agree, and
+;; anything the command makes there is the session's to clean up.  It
+;; is shown at its own path too, so that the path `session_info' and the
+;; file tools name leads to the same files; a directory in /tmp cannot
+;; be shown that way, and keeps the private /tmp.
+;; A command that changes nothing (`:read-only') and one that must not
+;; see what the session left behind (the `locked' profile) keep a
+;; private empty /tmp.  bwrap and systemd-run give it; MXC has no
+;; mount namespace and cannot write /tmp at all, and OpenShell's /tmp
+;; is the image's, so both keep their own and a command there leaves
+;; nothing to find.
 ;;
 ;; A confined command has HARNESS_SANDBOX set to the backend's name,
 ;; `bwrap', `systemd', `mxc' or `openshell', so a script can tell it
@@ -928,6 +946,92 @@ or keeps read-only."
             (push (cons real dest) mounts))))))
     (nreverse mounts)))
 
+(defconst harness-sandbox--tmp "/tmp"
+  "The path a command's temporary directory is shown at, when `:tmp' gives one.
+The library and the programs a command runs know it without being told:
+`mkstemp' and the shell's own `mktemp' go there when nothing says
+otherwise.")
+
+(defun harness-sandbox--tmp-directory (tmp)
+  "Return the directory a command's /tmp shows for the `:tmp' option TMP, or nil.
+TMP is that option's value: a local directory the caller keeps files in
+from one command to the next, the session's own temporary directory.
+Nil for anything else -- no local directory, the root directory, one
+that is or lies in /tmp, one that holds the home directory, or one that
+is, holds or lies in a directory the sandbox mounts its own
+\\(`harness-sandbox--system-paths') -- with a line in the log saying
+why: shown writable at /tmp, such a directory would show more than the
+caller meant to give, or undo what the sandbox keeps out of the
+command's sight, and one in /tmp would lose its own path inside the
+sandbox, where /tmp is the directory itself and what the file tools
+name would no longer reach it.  A command given none keeps the
+sandbox's own private /tmp, as it had before there was one to show."
+  (when (and (stringp tmp) (not (file-remote-p tmp)))
+    (let* ((named (expand-file-name tmp))
+           (real (and (file-directory-p named)
+                      (directory-file-name (file-truename named))))
+           (home (getenv "HOME"))
+           (why (cond
+                 ((null real) "it is no local directory")
+                 ((equal real "/") "it is the root directory")
+                 ((harness-path-within-p harness-sandbox--tmp real)
+                  "it is or lies in /tmp, where showing it would leave its own path unreachable")
+                 ((and (stringp home) (file-name-absolute-p home)
+                       (harness-path-within-p real home))
+                  "it holds the home directory")
+                 ((cl-some (lambda (system)
+                             (or (harness-path-within-p system real)
+                                 (harness-path-within-p real system)))
+                           harness-sandbox--system-paths)
+                  "it is, holds or lies in a directory the sandbox mounts its own"))))
+      (when why
+        (harness-log 'warn "sandbox: not showing %s as /tmp: %s" tmp why))
+      (unless why real))))
+
+(defun harness-sandbox--tmp-path-mounts (mounts tmp)
+  "Return MOUNTS with TMP shown at its own path, unless it is there already.
+A command's /tmp shows TMP (`sandbox/wrap'); the session's other tools
+name that directory at its own path -- `session_info' tells a session
+where it is -- so that path has to lead to it as well, whether the
+caller listed it or not."
+  (if (or (null tmp)
+          (cl-find tmp mounts :key (lambda (mount) (directory-file-name (nth 2 mount)))
+                   :test #'equal))
+      mounts
+    (append mounts (list (list 'rw tmp tmp)))))
+
+(defun harness-sandbox--hide-paths (hide tmp)
+  "Return the paths of HIDE the sandbox must hide, as (PATH . DIRECTORY-P).
+TMP is the directory the sandbox's /tmp shows, or nil.  Each path is
+made absolute and its symbolic links followed; one that does not exist,
+or that lies under /proc, /dev or /sys, is left out.
+
+With TMP, a path under /tmp names what TMP holds at the same place:
+one in TMP is hidden where it is named and at /tmp/REL alike, since
+both show it; one that is not in TMP is left out, since /tmp does not
+lead to it, and hiding it there would make an empty file or directory
+in TMP."
+  (cl-loop for path in hide
+           for named = (and (stringp path) (not (file-remote-p path))
+                            (expand-file-name path))
+           for real = (and named (file-exists-p named)
+                           (directory-file-name (file-truename named)))
+           for directory = (and real (file-directory-p real))
+           when (and real
+                     (not (cl-some (lambda (system) (harness-path-within-p system real))
+                                   '("/proc" "/dev" "/sys"))))
+           append
+           (cond
+            ((null tmp) (list (cons real directory)))
+            ((harness-path-within-p tmp real)
+             (delete-dups
+              (list (cons real directory)
+                    (cons (concat harness-sandbox--tmp
+                                  (substring real (length tmp)))
+                          directory))))
+            ((harness-path-within-p harness-sandbox--tmp real) nil)
+            (t (list (cons real directory))))))
+
 (defun harness-sandbox--systemd-path-p (path)
   "Non-nil when PATH can be written in a systemd mount setting as it is.
 Whitespace, colons, quotes and backslashes are separators or escapes
@@ -1218,26 +1322,21 @@ when set."
    (cl-loop for (name . value) in env
             when (and (stringp name) (stringp value)) collect (cons name value))))
 
-(defun harness-sandbox--hide-args (hide)
-  "Return bwrap arguments that hide each path in HIDE.
+(defun harness-sandbox--hide-args (hide &optional tmp)
+  "Return bwrap arguments that hide each path of HIDE.
+TMP is the directory the sandbox's /tmp shows, or nil
+\\(`harness-sandbox--hide-paths' says where each path is hidden then).
 A file is bound to `/dev/null', a directory covered by a tmpfs, after
 every other mount, so a path shown by a mount below it is hidden too.
 A path under /proc, /dev or /sys is left alone: covering one of those
 would break the sandbox itself."
-  (cl-loop for path in hide
-           for named = (and (stringp path) (not (file-remote-p path))
-                            (expand-file-name path))
-           for real = (and named (file-exists-p named)
-                           (directory-file-name (file-truename named)))
-           when (and real
-                     (not (cl-some (lambda (system) (harness-path-within-p system real))
-                                   '("/proc" "/dev" "/sys"))))
-           append (if (file-directory-p real)
-                      (list "--tmpfs" real)
-                    (list "--ro-bind" "/dev/null" real))))
+  (cl-loop for (path . directory) in (harness-sandbox--hide-paths hide tmp)
+           append (if directory
+                      (list "--tmpfs" path)
+                    (list "--ro-bind" "/dev/null" path))))
 
 (cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable read-only
-                                                   scratch capabilities env profile hide)
+                                                   scratch capabilities env profile hide tmp)
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
 namespace; WRITABLE and READABLE list extra directories or files to
@@ -1246,6 +1345,13 @@ CWD, the git directories and every WRITABLE entry with `--ro-bind', so
 that the command writes nothing but the sandbox's private /tmp and the
 SCRATCH directories, which are bound with `--bind' after everything
 else (see `harness-sandbox--scratch-mounts').
+
+TMP is the directory the command's /tmp shows, writable, instead of the
+empty tmpfs it has without one (see `harness-sandbox--tmp-directory',
+which says which directories may be shown there); TMPDIR names /tmp
+either way.  READ-ONLY and the locked profile keep the empty tmpfs: a
+command that changes nothing, and one that must not see what the
+session left behind, write only what they throw away.
 
 CAPABILITIES, names of `harness-sandbox-capabilities', each get a
 `--cap-add' after the flags that make the namespaces, and before the
@@ -1259,9 +1365,9 @@ PROFILE, when `locked', is the secret-file sandbox: no capability, a
 minimal environment built from ENV (an alist of NAME . VALUE, which adds
 to PATH, HOME, TMPDIR, LANG, TERM and HARNESS_SANDBOX; the harness's
 own environment is cleared with `--clearenv'), and HIDE, paths bound to
-`/dev/null' (a file) or a tmpfs (a directory) after every other mount so
-that nothing shows them.  For any other profile ENV adds to the
-environment the command inherits, and HIDE still hides.
+`/dev/null' (a file) or covered by a tmpfs (a directory) after every
+other mount so that nothing shows them.  For any other profile ENV adds
+to the environment the command inherits, and HIDE still hides.
 
 $HOME keeps its path: an empty tmpfs covers the home directory, so
 ~/x names the same path inside as outside and shows only what is
@@ -1274,20 +1380,31 @@ under it too."
          (real-home (and (not inside) (harness-sandbox--real-home)))
          (private (and (not inside) (not real-home) harness-sandbox--home))
          (locked (eq profile 'locked))
+         ;; A command that changes nothing, and one that must not see
+         ;; the session's scratch, keep a /tmp of their own.
+         (tmp (and (not read-only) (not locked)
+                   (harness-sandbox--tmp-directory tmp)))
          ;; Worked out once: the mounts show what the registrations of
          ;; the other worktrees must be kept from.
-         (mounts (harness-sandbox--mounts readable writable cwd (unless locked private)))
+         (mounts (harness-sandbox--tmp-path-mounts
+                  (harness-sandbox--mounts readable writable cwd (unless locked private))
+                  tmp))
          (scratch-mounts (harness-sandbox--scratch-mounts scratch cwd))
          (registry (unless (or read-only locked)
-                     (harness-sandbox--hidden-registrations cwd mounts scratch-mounts))))
+                     (harness-sandbox--hidden-registrations
+                      cwd (if tmp (append mounts (list (list 'rw tmp harness-sandbox--tmp)))
+                            mounts)
+                      scratch-mounts))))
     (append
      (list program
            "--ro-bind" "/usr" "/usr"
            "--ro-bind" "/etc" "/etc")
      (harness-sandbox--system-dir-args)
      (list "--proc" "/proc"
-           "--dev" "/dev"
-           "--tmpfs" "/tmp")
+           "--dev" "/dev")
+     (if tmp
+         (list "--bind" tmp harness-sandbox--tmp)
+       (list "--tmpfs" harness-sandbox--tmp))
      ;; The home directory after /tmp, which may hold it; binds after
      ;; both, so neither hides them.
      (cond (real-home (list "--tmpfs" real-home))
@@ -1305,7 +1422,7 @@ under it too."
      (cl-loop for (source . dest) in scratch-mounts
               append (list "--bind" source dest))
      ;; The paths kept from the command, after every mount that could show them.
-     (harness-sandbox--hide-args hide)
+     (harness-sandbox--hide-args hide tmp)
      (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
            "--die-with-parent" "--new-session")
      ;; Only the registry's own names, none for a command that changes nothing.
@@ -1319,6 +1436,10 @@ under it too."
                           append (list "--setenv" name value)))
        (append (list "--setenv" "HARNESS_SANDBOX" "bwrap")
                (and private (list "--setenv" "HOME" private))
+               ;; The library and the shell go to /tmp without being
+               ;; asked; what is asked is told the same, so that a
+               ;; script honoring TMPDIR and one ignoring it agree.
+               (list "--setenv" "TMPDIR" harness-sandbox--tmp)
                (cl-loop for (name . value) in env
                         append (list "--setenv" (format "%s" name) (format "%s" value)))))
      (unless network (list "--unshare-net"))
@@ -1326,12 +1447,13 @@ under it too."
      command)))
 
 (cl-defun harness-sandbox--systemd-command (program cwd command &key (network t) writable readable read-only
-                                                     scratch env hide)
+                                                     scratch env hide tmp)
   "Build the systemd-run command line running COMMAND in CWD.
 PROGRAM is the systemd-run executable; NETWORK, WRITABLE, READABLE,
-READ-ONLY, SCRATCH and ENV are as for `harness-sandbox--bwrap-command'.
-HIDE lists paths made inaccessible with `InaccessiblePaths=', after
-every mount that could show them.
+READ-ONLY, SCRATCH, ENV and TMP are as for
+`harness-sandbox--bwrap-command'.  HIDE lists paths made inaccessible
+with `InaccessiblePaths=', after every mount that could show them, at
+the path each is on this machine.
 READ-ONLY binds CWD, the git directories and every WRITABLE entry with
 `BindReadOnlyPaths=', sets no `ReadWritePaths=' but for the SCRATCH
 directories, and makes the rest of the file system read-only with
@@ -1342,24 +1464,43 @@ to write.  The SCRATCH directories are bound writable as CWD is when it
 is, whatever READ-ONLY says; one whose path a setting cannot hold as
 written signals an error.
 
+TMP is bound at /tmp in place of the unit's own private one
+\(`PrivateTmp=yes'), which a READ-ONLY command keeps; a path a setting
+cannot hold as written keeps it too, with a line in the log, and
+TMPDIR names /tmp either way.
+
 Home directories are hidden with `ProtectHome=tmpfs' rather than
 `ProtectHome=yes': with the latter systemd cannot mount anything
 beneath /home, so a working directory in the user's home would be
 unreachable (systemd-run fails with status 200).  That tmpfs is
-read-only, so $HOME is the private /tmp, and the directories shown
-under the real home directory are shown at the same place under it
-too, so ~/x reaches them."
+read-only, so $HOME is /tmp, and the directories shown under the real
+home directory are shown at the same place under it too, so ~/x
+reaches them."
   (let* ((cwd (directory-file-name (expand-file-name cwd)))
-         (mounts (harness-sandbox--mounts readable writable cwd
-                                          (unless (harness-sandbox--home-inside-p cwd) "/tmp")))
+         (tmp (and (not read-only) (harness-sandbox--tmp-directory tmp)))
+         (tmp (if (and tmp (not (harness-sandbox--systemd-path-p tmp)))
+                  (progn
+                    (harness-log 'debug "sandbox: systemd cannot bind %s at /tmp; the unit keeps its own" tmp)
+                    nil)
+                tmp))
+         (mounts (harness-sandbox--tmp-path-mounts
+                  (harness-sandbox--mounts readable writable cwd
+                                           (unless (harness-sandbox--home-inside-p cwd) "/tmp"))
+                  tmp))
          (scratch-mounts (harness-sandbox--scratch-mounts scratch cwd))
          (registry (unless read-only
-                     (harness-sandbox--hidden-registrations cwd mounts scratch-mounts))))
+                     (harness-sandbox--hidden-registrations
+                      cwd (if tmp (append mounts (list (list 'rw tmp harness-sandbox--tmp)))
+                            mounts)
+                      scratch-mounts))))
     (append
      (list program "--user" "--quiet" "--pipe" "--wait" "--collect"
-           (concat "--working-directory=" cwd)
-           "-p" "PrivateTmp=yes"
-           "-p" "ProtectHome=tmpfs")
+           (concat "--working-directory=" cwd))
+     (if tmp
+         (list "-p" (concat "BindPaths=" tmp ":" harness-sandbox--tmp)
+               "-p" (concat "ReadWritePaths=" harness-sandbox--tmp))
+       (list "-p" "PrivateTmp=yes"))
+     (list "-p" "ProtectHome=tmpfs")
      (if read-only
          (list "-p" "ProtectSystem=strict"
                "-p" (concat "BindReadOnlyPaths=" cwd))
@@ -1373,11 +1514,9 @@ too, so ~/x reaches them."
                                         source (if (equal source dest) "" (concat ":" dest))))
               else do (harness-log 'debug "sandbox: systemd cannot show %s at %s" source dest))
      (harness-sandbox--systemd-git-args cwd read-only registry)
-     (cl-loop for path in hide
-              for named = (and (stringp path) (not (file-remote-p path))
-                               (expand-file-name path))
-              when (and named (harness-sandbox--systemd-path-p named))
-              append (list "-p" (concat "InaccessiblePaths=" named)))
+     (cl-loop for (path . _directory) in (harness-sandbox--hide-paths hide tmp)
+              when (harness-sandbox--systemd-path-p path)
+              append (list "-p" (concat "InaccessiblePaths=" path)))
      (cl-loop for (source . dest) in scratch-mounts
               do (unless (and (harness-sandbox--systemd-path-p source) (harness-sandbox--systemd-path-p dest))
                    (error "Sandbox scratch directory %s cannot be written in a systemd setting" dest))
@@ -1386,7 +1525,10 @@ too, so ~/x reaches them."
      (unless network (list "-p" "PrivateNetwork=yes"))
      (unless (harness-sandbox--home-inside-p cwd)
        (list "--setenv=HOME=/tmp"))
-     (list "--setenv=HARNESS_SANDBOX=systemd")
+     (list "--setenv=HARNESS_SANDBOX=systemd"
+           ;; A script honoring TMPDIR and one going to /tmp without
+           ;; asking write the same place.
+           "--setenv=TMPDIR=/tmp")
      (cl-loop for (name . value) in env
               collect (format "--setenv=%s=%s" name value))
      (list "--")
@@ -2268,7 +2410,24 @@ directories granted to a session) and `:readable' (extra directories
 or files mounted read-only).  Both are shown where they are named,
 where their symbolic links lead and, under a sandbox $HOME that is not
 the real one's path, where they are under the real one; see
-`harness-sandbox--mounts'.  `:read-only' non-nil mounts read-only the
+`harness-sandbox--mounts'.
+
+`:tmp' names the caller's temporary directory (a session's own,
+`session/tmp-dir'), which the command's /tmp shows, writable, instead of
+an empty tmpfs of its own, and TMPDIR names /tmp as well: a script that
+goes to /tmp without asking, as most do, leaves its files where the next
+command and the harness's other tools find them.  It is shown at its
+own path too.  `harness-sandbox--tmp-directory' says which directories
+may be shown there; one that may not is left out with a line in the log
+and the command keeps its private /tmp.  A `:read-only' command keeps it
+too, as does the `locked' profile, which refuses `:tmp': a command that
+must change nothing, and one that must not see what the session left
+behind, write only what they throw away.  MXC and OpenShell show none
+(the first has no mount namespace, the second's /tmp is the image's); a
+command there finds its `:writable' directory at its real path, and the
+private `$TMPDIR' under MXC.
+
+`:read-only' non-nil mounts read-only the
 working directory, the git directories and every `:writable' entry as
 well, so that the command can write nothing but the sandbox's private
 /tmp and the `:scratch' directories: those the caller made for the one
@@ -2288,8 +2447,8 @@ unchanged.
 
 `:profile' is `default' or `locked'.  `locked' is the secret-file
 sandbox: the network off, `:read-only' always, no capability, the
-`:scratch' and `:writable' options refused, and `:env' the command's
-whole environment rather than an addition to the harness's.  It fails
+`:scratch', `:tmp' and `:writable' options refused, and `:env' the
+command's whole environment rather than an addition to the harness's.  It fails
 closed for every case in which it cannot be given, whatever the policy:
 the `off' policy, a remote CWD, no backend, systemd-run and OpenShell
 signal `harness-sandbox-unavailable'.  bwrap and MXC give it.
@@ -2322,15 +2481,16 @@ the debug log."
          (readable (plist-get opts :readable))
          (read-only (harness-json-true-p (plist-get opts :read-only)))
          (scratch (plist-get opts :scratch))
+         (tmp (plist-get opts :tmp))
          (env (plist-get opts :env))
          (locked (eq profile 'locked))
          ;; A command that changes nothing is given no capability.
          (capabilities (and (not read-only) (plist-get opts :capabilities))))
     (unless (memq profile '(default locked))
       (error "Sandbox profile %S is neither `default' nor `locked'" profile))
-    (when (and locked (or (plist-get opts :writable) (plist-get opts :scratch)
+    (when (and locked (or (plist-get opts :writable) (plist-get opts :scratch) tmp
                           (plist-get opts :capabilities)))
-      (error "A locked command takes no writable directory, no scratch directory and no capability"))
+      (error "A locked command takes no temporary directory of its own, no writable directory, no scratch directory and no capability"))
     (cond
      (locked
       (cond
@@ -2377,7 +2537,7 @@ the debug log."
         (harness-sandbox--bwrap-command program cwd command
                                         :network network :writable writable :readable readable
                                         :read-only read-only :scratch scratch
-                                        :env env :profile profile :hide hide
+                                        :env env :profile profile :hide hide :tmp tmp
                                         :capabilities (and capabilities
                                                            (harness-sandbox--bwrap-capabilities
                                                             command capabilities program)))))
@@ -2388,12 +2548,15 @@ the debug log."
          "systemd-run --user cannot give a unit a capability, it can only lower its own"))
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
                                         :network network :writable writable :readable readable
-                                        :read-only read-only :scratch scratch :env env :hide hide))
+                                        :read-only read-only :scratch scratch :env env :hide hide
+                                        :tmp tmp))
      ((eq harness-sandbox--backend 'openshell)
       (when capabilities
         (harness-sandbox--refuse-capabilities
          command capabilities
          "OpenShell runs commands as a non-root user with no Linux capability, and has no way to give one"))
+      (when tmp
+        (harness-log 'debug "sandbox: OpenShell's sandbox has a /tmp of the image; %s shows at its own path" tmp))
       (harness-sandbox--openshell-command (alist-get 'openshell harness-sandbox--programs) cwd command
                                           :network network :writable writable :readable readable
                                           :read-only read-only :scratch scratch :env env))
@@ -2403,6 +2566,8 @@ the debug log."
          command capabilities "MXC confines with macOS's Seatbelt, which has no Linux capabilities"))
       ;; The command's own $TMPDIR, private as bwrap's /tmp is: MXC
       ;; shows no shared temporary directory.
+      (when tmp
+        (harness-log 'debug "sandbox: MXC cannot show %s as /tmp; a command there uses $TMPDIR" tmp))
       (let ((tmp (with-file-modes #o700 (make-temp-file "harness-sandbox-" t))))
         (condition-case err
             (harness-sandbox--mxc-command (alist-get 'mxc harness-sandbox--programs) cwd command

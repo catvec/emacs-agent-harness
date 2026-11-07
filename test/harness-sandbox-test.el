@@ -72,9 +72,9 @@ re-detected before BODY and restored afterwards."
             (should at)
             (should (< (cl-position "/tmp" cmd :test #'equal) at))
             (should (< at (cl-position "--bind" cmd :test #'equal))))
-          ;; The only variable set is the sandbox's marker: $HOME keeps
-          ;; its value.
-          (should (equal '(("HARNESS_SANDBOX" "bwrap"))
+          ;; The variables set are the sandbox's marker and the temporary
+          ;; directory, which is /tmp: $HOME keeps its value.
+          (should (equal '(("HARNESS_SANDBOX" "bwrap") ("TMPDIR" "/tmp"))
                          (cl-loop for tail on (seq-take-while (lambda (a) (not (equal a "--"))) cmd)
                                   when (equal (car tail) "--setenv")
                                   collect (list (cadr tail) (caddr tail)))))
@@ -106,6 +106,140 @@ re-detected before BODY and restored afterwards."
       (harness-sandbox-detect)
       (delete-directory cwd t)
       (delete-directory extra t))))
+
+(defun harness-sandbox-test--dir-outside-tmp ()
+  "Return a fresh directory outside /tmp, or nil where there is none.
+A session's temporary directory is not in /tmp by default, and the one
+in /tmp cannot be shown as /tmp (`harness-sandbox--tmp-directory')."
+  (let ((dir (if (and (file-directory-p "/var/tmp") (file-writable-p "/var/tmp"))
+                 "/var/tmp/"
+               temporary-file-directory)))
+    (unless (equal dir "/tmp/")
+      (let ((temporary-file-directory dir))
+        (file-name-as-directory (make-temp-file "sandbox-tmp-" t))))))
+
+(ert-deftest harness-sandbox-bwrap-shows-the-tmp-dir-at-tmp ()
+  "`:tmp' makes the caller's temporary directory the command's /tmp,
+writable and in place of the empty tmpfs, keeps it at its own path too,
+and names it TMPDIR.  A directory the sandbox must not show there, one
+the command only reads, and the locked profile keep the empty tmpfs."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (ignore home)
+    (let* ((cwd (harness-test-temp-dir))
+           (tmp (harness-sandbox-test--dir-outside-tmp))
+           (real (and tmp (directory-file-name (file-truename tmp))))
+           (harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto))
+      (unless tmp (ert-skip "no directory outside /tmp"))
+      (unwind-protect
+          (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+            (let ((cmd (harness-call 'sandbox/wrap cwd '("true") :tmp tmp)))
+              (should (harness-sandbox-test--subseq-p (list "--bind" real "/tmp") cmd))
+              (should-not (harness-sandbox-test--subseq-p '("--tmpfs" "/tmp") cmd))
+              (should (harness-sandbox-test--subseq-p '("--setenv" "TMPDIR" "/tmp") cmd))
+              ;; Its own path still names it.
+              (should (harness-sandbox-test--subseq-p (list "--bind" real real) cmd)))
+            ;; An environment the caller gives still says otherwise.
+            (should (member '("TMPDIR" "/elsewhere/")
+                            (cl-loop for tail on (harness-call 'sandbox/wrap cwd '("true") :tmp tmp
+                                                               :env (list (cons "TMPDIR" "/elsewhere/")))
+                                     when (equal (car tail) "--setenv")
+                                     collect (list (cadr tail) (caddr tail)))))
+            ;; Nothing the sandbox must not show there: the private /tmp.
+            (dolist (bad (list "/" "/tmp" (expand-file-name "in-tmp" "/tmp")
+                               "/usr" (expand-file-name "missing" cwd)))
+              (let ((cmd (harness-call 'sandbox/wrap cwd '("true") :tmp bad)))
+                (should (harness-sandbox-test--subseq-p '("--tmpfs" "/tmp") cmd))
+                (should (harness-sandbox-test--subseq-p '("--setenv" "TMPDIR" "/tmp") cmd))))
+            ;; A command that changes nothing keeps a /tmp of its own.
+            (let ((cmd (harness-call 'sandbox/wrap cwd '("true") :tmp tmp :read-only t)))
+              (should (harness-sandbox-test--subseq-p '("--tmpfs" "/tmp") cmd))
+              (should-not (cl-find-if (lambda (bind) (equal (cadr bind) real))
+                                      (harness-sandbox-test--binds cmd))))
+            ;; The locked profile refuses it.
+            (should-error (harness-call 'sandbox/wrap cwd '("true") :profile 'locked :tmp tmp)))
+        (delete-directory cwd t)
+        (delete-directory tmp t)))))
+
+(ert-deftest harness-sandbox-systemd-shows-the-tmp-dir-at-tmp ()
+  "systemd-run binds the caller's temporary directory at /tmp in place of
+the unit's own, names it TMPDIR, keeps it for a command that only reads
+and for a path its setting cannot hold as written."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (tmp (harness-sandbox-test--dir-outside-tmp))
+         (spaced (expand-file-name "with space" cwd))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto))
+    (unless tmp (ert-skip "no directory outside /tmp"))
+    (unwind-protect
+        (progn
+          (make-directory spaced)
+          (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+            (let* ((real (directory-file-name (file-truename tmp)))
+                   (cmd (harness-call 'sandbox/wrap cwd '("true") :tmp tmp)))
+              (should (harness-sandbox-test--subseq-p (list "-p" (concat "BindPaths=" real ":/tmp")) cmd))
+              (should (harness-sandbox-test--subseq-p '("-p" "ReadWritePaths=/tmp") cmd))
+              (should-not (member "PrivateTmp=yes" cmd))
+              (should (member "--setenv=TMPDIR=/tmp" cmd)))
+            ;; Read-only: the unit keeps its own.
+            (let ((cmd (harness-call 'sandbox/wrap cwd '("true") :tmp tmp :read-only t)))
+              (should (member "PrivateTmp=yes" cmd))
+              (should-not (cl-find-if (lambda (a) (string-search ":/tmp" a)) cmd)))
+            ;; A path a setting cannot hold as written: the unit keeps its own.
+            (let ((cmd (harness-call 'sandbox/wrap cwd '("true") :tmp spaced)))
+              (should (member "PrivateTmp=yes" cmd))
+              (should (member "--setenv=TMPDIR=/tmp" cmd))))
+        (delete-directory cwd t)
+        (delete-directory tmp t)))))
+
+(ert-deftest harness-sandbox-hides-under-tmp ()
+  "A path the command must not see, under /tmp, is hidden where the
+sandbox's /tmp shows it, at its own path and at /tmp/REL; one /tmp does
+not lead to is not hidden at all, since hiding it would make an empty
+file in the caller's directory."
+  (harness-sandbox-test--setup)
+  (let* ((tmp (harness-sandbox-test--dir-outside-tmp))
+         (under-tmp (make-temp-file "sandbox-under-tmp-")))
+    (unless tmp (ert-skip "no directory outside /tmp"))
+    (unwind-protect
+        (let* ((secret (expand-file-name "secret.txt" tmp))
+               (inside (expand-file-name "private" tmp))
+               (real (harness-sandbox--tmp-directory tmp))
+               (hidden nil))
+          (with-temp-file secret (insert "s\n"))
+          (make-directory inside)
+          (with-temp-file under-tmp (insert "s\n"))
+          (setq hidden (harness-sandbox--hide-paths (list secret inside under-tmp) real))
+          ;; The file in the caller's directory: where it is and at /tmp's.
+          (should (member (cons secret nil) hidden))
+          (should (member (cons "/tmp/secret.txt" nil) hidden))
+          ;; A directory is covered by a tmpfs, at both places too.
+          (should (member (cons inside t) hidden))
+          (should (member (cons "/tmp/private" t) hidden))
+          ;; Under /tmp but not there: /tmp does not lead to it, so nothing
+          ;; is hidden, and no empty file is made in the caller's directory.
+          (should-not (member (cons (directory-file-name (file-truename under-tmp)) nil) hidden))
+          (should-not (cl-find-if (lambda (p) (string-search "sandbox-under-tmp" (car p))) hidden))
+          ;; bwrap binds each from /dev/null, or covers it, after every mount.
+          (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+            (let* ((harness-sandbox-policy 'preferred)
+                   (harness-sandbox-backend 'auto)
+                   (cwd (harness-test-temp-dir))
+                   (cmd (harness-call 'sandbox/wrap cwd '("true") :tmp tmp
+                                      :hide (list secret inside under-tmp))))
+              (should (harness-sandbox-test--subseq-p (list "--ro-bind" "/dev/null" secret) cmd))
+              (should (harness-sandbox-test--subseq-p '("--ro-bind" "/dev/null" "/tmp/secret.txt") cmd))
+              (should (harness-sandbox-test--subseq-p (list "--tmpfs" inside) cmd))
+              (should (harness-sandbox-test--subseq-p '("--tmpfs" "/tmp/private") cmd))
+              (should-not (member under-tmp cmd))
+              ;; After the bind that shows them.
+              (should (< (cl-position "/tmp" cmd :test #'equal)
+                         (cl-position secret cmd :test #'equal)))
+              (delete-directory cwd t))))
+      (delete-directory tmp t)
+      (delete-file under-tmp))))
 
 (ert-deftest harness-sandbox-systemd-arguments ()
   (harness-sandbox-test--setup)
@@ -2459,7 +2593,10 @@ and nothing else."
         (should-error (harness-call 'sandbox/wrap cwd command :profile 'locked)
                       :type 'harness-sandbox-unavailable))
       (should-error (harness-call 'sandbox/wrap cwd command :profile 'locked
-                                  :writable (list cwd))))
+                                  :writable (list cwd)))
+      ;; Nor one that must not see what the session left behind.
+      (should-error (harness-call 'sandbox/wrap cwd command :profile 'locked
+                                  :tmp cwd)))
     (harness-sandbox-detect)
     (delete-directory cwd t)))
 

@@ -11,10 +11,13 @@
 ;;   with `sandbox/wrap' so it runs confined; a `required' policy
 ;;   without a backend, or without the sandbox module, turns into a
 ;;   tool error rather than an unconfined run.  The session's own temporary directory
-;;   (`session/tmp-dir') is writable in there too, at its real path:
-;;   the sandbox's /tmp is private and empty for every command, so
-;;   that directory is where commands leave files for later ones and
-;;   for the other tools.  So is every other directory the session may
+;;   (`session/tmp-dir') is the command's /tmp in there, writable, and
+;;   TMPDIR says /tmp, so that a command leaves its files for later
+;;   ones and for the other tools whether it honors TMPDIR or goes to
+;;   /tmp without asking; it stays visible at its real path as well,
+;;   where `session_info' and the file tools name it, and a command
+;;   that changes nothing keeps a /tmp of its own instead
+;;   (`sandbox/wrap').  So is every other directory the session may
 ;;   touch (`permission/dirs'): its working directory and worktree, the
 ;;   configured directories and those granted to it, so a directory the
 ;;   user granted reaches bash as it reaches the other tools; the tool
@@ -84,9 +87,11 @@
 ;;   sockets of the instances scripts/dev.sh runs -- and the Emacs it
 ;;   runs, where that is not in /usr; and it writes the call's own io/
 ;;   directory, where its code waits and it leaves its result, even when
-;;   a filter makes it read-only (the sandbox's `:scratch').  The child
-;;   always runs on this machine, where a remote session has no
-;;   directory, so a remote session's code runs in the call's own.
+;;   a filter makes it read-only (the sandbox's `:scratch').  That
+;;   directory is made in the session's own temporary directory when it
+;;   has one, and deleted when the call ends.  The child always runs on
+;;   this machine, where a remote session has no directory, so a remote
+;;   session's code runs in the call's own.
 ;;   The result is read back only from a regular file, since a child in
 ;;   the sandbox could leave a link there to a file only the harness
 ;;   can read.
@@ -244,7 +249,7 @@ restrictions than it meant."
       (error "The handlers of tools/sandbox-options gave %S, not a plist of sandbox options" options))
     options))
 
-(defun harness-tools-shell--wrap-options (writable readable options &optional scratch env)
+(defun harness-tools-shell--wrap-options (writable readable options &optional scratch env tmp)
   "Return the `sandbox/wrap' options for the directories WRITABLE and READABLE.
 OPTIONS, the plist of extra ones, go with them, and its own `:writable',
 `:readable' and `:scratch' directories join the lists.  With
@@ -255,7 +260,10 @@ and deleted after it, go as `:scratch', which the command writes
 whatever OPTIONS say, and only when there are any.  ENV is an alist of
 variables the sandbox passes to the command itself, for a backend that
 does not give it its caller's environment; it wins over an `:env' in
-OPTIONS."
+OPTIONS.  TMP, the session's own temporary directory, goes as `:tmp',
+the directory the command's /tmp shows (see `sandbox/wrap'); a handler
+of `tools/sandbox-options' cannot give another, which a command of a
+session must not ask for behind its back."
   (let ((writable (append writable (plist-get options :writable)))
         (readable (append readable (plist-get options :readable)))
         (scratch (append scratch (plist-get options :scratch))))
@@ -263,10 +271,11 @@ OPTIONS."
       (setq readable (delete-dups (append writable readable))
             writable nil))
     (append (list :writable writable :readable readable)
+            (and tmp (list :tmp tmp))
             (and scratch (list :scratch scratch))
             (and env (list :env env))
             (cl-loop for (key value) on options by #'cddr
-                     unless (memq key '(:writable :readable :scratch)) append (list key value)))))
+                     unless (memq key '(:writable :readable :scratch :tmp)) append (list key value)))))
 
 (defun harness-tools-shell--refuse-unconfined (options why)
   "Signal an error: a command that needs sandbox OPTIONS cannot have the sandbox.
@@ -274,20 +283,22 @@ WHY says what stands in the way."
   (error "A command that needs the sandbox options %S cannot run unconfined, but %s"
          options why))
 
-(defun harness-tools-shell--wrap (cwd command &optional writable readable options scratch env)
+(defun harness-tools-shell--wrap (cwd command &optional writable readable options scratch env tmp)
   "Return COMMAND wrapped by the sandbox for CWD when the sandbox module is loaded.
 WRITABLE lists other directories the command may write to, READABLE
 directories it may read, and SCRATCH directories made for this command
 alone, which it may write whatever OPTIONS say.  OPTIONS are the extra
 `sandbox/wrap' options asked for (see
 `harness-tools-shell--sandbox-options'); they are given to it with the
-directories (see `harness-tools-shell--wrap-options').  Without the
-sandbox module a `required' `harness-sandbox-policy' signals an error
-rather than letting COMMAND run unconfined, as the sandbox does when it
-has no backend.  OPTIONS ask for the sandbox whatever the policy: the
-error comes too when the module is not loaded or CWD is remote.
-SCRATCH asks for nothing: unwrapped, COMMAND reaches it anyway.
-Unwrapped, COMMAND comes back itself, the very list given."
+directories (see `harness-tools-shell--wrap-options').  TMP is the
+session's own temporary directory, which the command's /tmp shows.
+Without the sandbox module a `required' `harness-sandbox-policy'
+signals an error rather than letting COMMAND run unconfined, as the
+sandbox does when it has no backend.  OPTIONS ask for the sandbox
+whatever the policy: the error comes too when the module is not loaded
+or CWD is remote.  SCRATCH asks for nothing: unwrapped, COMMAND
+reaches it anyway.  Unwrapped, COMMAND comes back itself, the very list
+given."
   (cond
    ((and options (file-remote-p cwd))
     (harness-tools-shell--refuse-unconfined
@@ -295,7 +306,7 @@ Unwrapped, COMMAND comes back itself, the very list given."
    ((file-remote-p cwd) command)
    ((harness-method-exists-p 'sandbox/wrap)
     (apply #'harness-call 'sandbox/wrap cwd command
-           (harness-tools-shell--wrap-options writable readable options scratch env)))
+           (harness-tools-shell--wrap-options writable readable options scratch env tmp)))
    (options
     (harness-tools-shell--refuse-unconfined options "the sandbox module is not loaded"))
    ((harness-tools-shell--sandbox-required-p cwd)
@@ -309,8 +320,9 @@ It is what a bash command of the session is shown, as data: `:cwd',
 directory and worktree, the configured and granted directories, and
 the WRITABLE ones given), `:readable' (the skills directories, the
 read-only directories of the session, and the READABLE ones given),
-`:scratch' (SCRATCH, directories made for the one process, which it
-writes whatever else is read-only) and `:options' (what the
+`:tmp' (the session's own temporary directory, which the process's /tmp
+shows), `:scratch' (SCRATCH, directories made for the one process, which
+it writes whatever else is read-only) and `:options' (what the
 `tools/sandbox-options' filter makes of nil, see
 `harness-tools-shell--sandbox-options').  `harness-tools-shell-wrap-profile'
 wraps a command in it.  The MCP host (lisp/modules/harness-mcp.el)
@@ -323,6 +335,7 @@ plist of options."
           :writable (delete-dups (delq nil (append writable
                                                    (cons (harness-tools-shell--tmp-dir ctx) (car dirs)))))
           :readable (delete-dups (append readable (harness-tools-shell--skill-dirs ctx) (cdr dirs)))
+          :tmp (harness-tools-shell--tmp-dir ctx)
           :scratch scratch
           :env env
           :options options)))
@@ -337,7 +350,7 @@ list given, when it runs unwrapped."
   (harness-tools-shell--wrap (plist-get profile :cwd) command
                              (plist-get profile :writable) (plist-get profile :readable)
                              (plist-get profile :options) (plist-get profile :scratch)
-                             (plist-get profile :env)))
+                             (plist-get profile :env) (plist-get profile :tmp)))
 
 (defun harness-tools-shell--format-output (r timeout)
   "Format the result plist R of `harness-run-command' run with TIMEOUT seconds."
@@ -408,7 +421,7 @@ opens the latest line under that."
                              cwd (list harness-tools-shell--program "-c" command)
                              (delete-dups (delq nil (cons (harness-tools-shell--tmp-dir ctx) (car dirs))))
                              (append (harness-tools-shell--skill-dirs ctx) (cdr dirs))
-                             options))))
+                             options nil nil (harness-tools-shell--tmp-dir ctx)))))
                     (error (list :error (harness-error-message err))))))
         (if (and (consp cmd) (eq (car cmd) :error))
             (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))
@@ -440,7 +453,7 @@ opens the latest line under that."
 
 (harness-define-tool "bash"
   :label "Bash"
-  :description "Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer \"Operation not permitted\": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine."
+  :description "Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. In that sandbox /tmp is the session's temporary directory and TMPDIR is /tmp, so a script that writes /tmp leaves its files where the next command and the file tools find them. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer \"Operation not permitted\": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine."
   :schema '(:type "object"
             :properties (:command (:type "string" :description "The command line to run")
                          :timeout (:type "integer" :description "Seconds before the command is killed. Default 120")
@@ -743,7 +756,7 @@ can give that."
                    (delete-dups (delq nil (cons (harness-tools-shell--tmp-dir ctx) (car dirs))))
                    (append (harness-tools-shell--skill-dirs ctx) (cdr dirs)
                            (harness-tools-shell--harness-files) (harness-tools-shell--emacs-dirs))
-                   options (list io))))
+                   options (list io) nil (harness-tools-shell--tmp-dir ctx))))
     (if (eq wrapped in-env) child wrapped)))
 
 (defun harness-tools-shell--elisp-batch (code input ctx &optional snapshot)
@@ -765,7 +778,14 @@ result.  The child runs on this machine whatever the session's
 directory is, so a remote session's code runs in the call's own
 directory."
   (let* ((cwd (harness-tools-shell--bash-cwd input ctx))
-         (dir (file-name-as-directory (make-temp-file "harness-elisp-" t)))
+         ;; In the session's own temporary directory when it has one, so
+         ;; that the mount the sandbox makes for it -- `:scratch' -- is
+         ;; not under /tmp, where it shows the session's directory and
+         ;; would leave the mount point there (see `sandbox/wrap').
+         (session-tmp (let ((tmp (harness-tools-shell--tmp-dir ctx)))
+                        (and tmp (file-directory-p tmp) (file-name-as-directory tmp))))
+         (dir (let ((temporary-file-directory (or session-tmp temporary-file-directory)))
+                (file-name-as-directory (make-temp-file "harness-elisp-" t))))
          (io (expand-file-name "io/" dir))
          (cwd (if (file-remote-p cwd) dir cwd))
          (code-file (expand-file-name "code.el" io))

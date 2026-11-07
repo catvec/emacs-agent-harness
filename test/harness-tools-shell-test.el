@@ -208,7 +208,8 @@ sandbox module is not loaded, rather than run it unconfined."
 
 (ert-deftest harness-tools-shell-bash-lets-the-sandbox-write-the-tmp-dir ()
   "bash asks the sandbox to let the command write the session's own
-temporary directory, and asks for nothing more without a session."
+temporary directory, and to make it the command's /tmp, and asks for
+nothing more without a session."
   (harness-tools-shell-test--setup)
   (let ((saved (mapcar (lambda (m) (cons m (gethash m harness--methods))) '(session/tmp-dir sandbox/wrap)))
         (seen nil))
@@ -221,15 +222,32 @@ temporary directory, and asks for nothing more without a session."
                                                             20)
                                              :content)))
           (should (equal '("/tmp/harness-0/s1/") (plist-get (cdar seen) :writable)))
+          (should (equal "/tmp/harness-0/s1/" (plist-get (cdar seen) :tmp)))
           (harness-tools-shell-test--call "bash" :command "true")
-          (should-not (plist-get (cdar seen) :writable)))
+          (should-not (plist-get (cdar seen) :writable))
+          (should-not (plist-get (cdar seen) :tmp)))
       (dolist (m saved)
         (if (cdr m) (puthash (car m) (cdr m) harness--methods) (remhash (car m) harness--methods))))))
+
+(defun harness-tools-shell-test--tmp-root-outside-tmp ()
+  "Return a fresh root for the sessions' temporary directories outside /tmp, or nil.
+The test state's is in /tmp, where the sandbox does not show a
+command's temporary directory as /tmp: showing it there would leave its
+own path unreachable (`harness-sandbox--tmp-directory').  A test of the
+showing needs a root elsewhere, as a session's has by default."
+  (let ((dir (if (and (file-directory-p "/var/tmp") (file-writable-p "/var/tmp"))
+                 "/var/tmp/"
+               temporary-file-directory)))
+    (unless (equal dir "/tmp/")
+      (let ((temporary-file-directory dir))
+        (file-name-as-directory (make-temp-file "harness-shell-tmp-root-" t))))))
 
 (ert-deftest harness-tools-shell-bwrap-keeps-files-in-the-session-tmp-dir ()
   "Under the real bwrap a command writes the session's own temporary
 directory at its real path, where the next command and the harness
-find the file, while the rest of /tmp stays private to the command."
+find the file, while the rest of /tmp stays private to the command.
+A temporary directory in /tmp keeps that private /tmp: the sandbox
+does not show it as /tmp, where its own path would reach nothing."
   (harness-tools-shell-test--setup)
   (skip-unless (executable-find "bwrap"))
   (dolist (m '(store project config provider session sandbox)) (harness-test-load-module m))
@@ -244,17 +262,65 @@ find the file, while the rest of /tmp stays private to the command."
                   (harness-await (harness-call 'tools/execute sid (list :id (harness-short-id) :name "bash"
                                                                         :input (list :command command)))
                                  20)))
-           (r (funcall run (format "echo made > %s; touch %s"
+           (r (funcall run (format "echo made > %s; touch %s; echo \"TMPDIR=$TMPDIR\""
                                    (shell-quote-argument (concat tmp "note.txt")) stray))))
       (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
         (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
       (should-not (plist-get r :is-error))
       (should (plist-get (plist-get r :meta) :sandboxed))
+      ;; In /tmp, so the command has a /tmp of its own.
+      (should (string-search "TMPDIR=/tmp" (plist-get r :content)))
       (should (equal "made\n" (with-temp-buffer (insert-file-contents (concat tmp "note.txt")) (buffer-string))))
       (should-not (file-exists-p stray))
       (should (string-search "made" (plist-get (funcall run (format "cat %s" (shell-quote-argument (concat tmp "note.txt"))))
                                                :content)))
       (harness-call 'session/delete sid))))
+
+(ert-deftest harness-tools-shell-bwrap-makes-tmp-the-session-tmp-dir ()
+  "Under the real bwrap /tmp is the session's own temporary directory:
+a command that writes /tmp without asking leaves its file where the
+next command and the harness find it, at the directory's own path, and
+the machine's /tmp never sees it.  TMPDIR names /tmp too."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (dolist (m '(store project config provider session sandbox)) (harness-test-load-module m))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let ((tmp-root (harness-tools-shell-test--tmp-root-outside-tmp)))
+      (unless tmp-root (ert-skip "no temporary directory outside /tmp"))
+      (let* ((harness-session--tmp-root tmp-root)
+             (harness-sandbox-policy 'required)
+             (sid (plist-get (harness-call 'session/create :cwd root) :id))
+             (tmp (harness-call 'session/tmp-dir sid))
+             (stray (format "/tmp/harness-stray-%s" (harness-short-id)))
+             (run (lambda (command)
+                    (harness-await (harness-call 'tools/execute sid (list :id (harness-short-id) :name "bash"
+                                                                          :input (list :command command)))
+                                   20))))
+        (unwind-protect
+            (let ((r (funcall run (format "echo \"TMPDIR=$TMPDIR\"; echo hardcoded > /tmp/by-tmp.txt; echo named > %s; touch %s"
+                                          (shell-quote-argument (concat tmp "by-path.txt")) stray))))
+              (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
+                (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+              (should-not (plist-get r :is-error))
+              (should (plist-get (plist-get r :meta) :sandboxed))
+              (should (string-search "TMPDIR=/tmp" (plist-get r :content)))
+              ;; What the command wrote at /tmp is the session's file, where
+              ;; the harness and the next command find it, and its own path
+              ;; names the same directory.
+              (should (equal "hardcoded\n"
+                             (with-temp-buffer (insert-file-contents (concat tmp "by-tmp.txt")) (buffer-string))))
+              (should (equal "named\n"
+                             (with-temp-buffer (insert-file-contents (concat tmp "by-path.txt")) (buffer-string))))
+              (should-not (file-exists-p stray))
+              ;; The next command reads both ways.
+              (should (string-search "hardcoded"
+                                     (plist-get (funcall run (format "cat /tmp/by-tmp.txt %s"
+                                                                     (shell-quote-argument (concat tmp "by-tmp.txt"))))
+                                                 :content))))
+          (ignore-errors (harness-call 'session/delete sid))
+          (delete-directory tmp-root t))))))
 
 (defmacro harness-tools-shell-test-with-methods (methods &rest body)
   "Run BODY with the bus METHODS, an alist of name to function, registered.
@@ -414,6 +480,7 @@ rest of the home directory stays hidden."
         (delete-directory home t)))))
 
 (defvar harness-sandbox-policy)
+(defvar harness-session--tmp-root)
 
 (ert-deftest harness-tools-shell-bash-timeout-kills-the-process-tree ()
   "A timed-out command takes its children with it."
@@ -537,10 +604,12 @@ handler's own, are readable, once each."
               (list (cons 10 (lambda (options _sid)
                                (append (and (not (eq read-only :unset)) (list :read-only read-only))
                                        extra options))))
-            ;; Not read-only: the directories as they were.
+            ;; Not read-only: the directories as they were, and the
+            ;; session's temporary directory, which is the command's /tmp.
             (harness-tools-shell-test--as "s1" "bash" :command "true")
             (should (equal '(:writable ("/tmp/harness-0/s1/" "/work/proj/" "/home/u/shared/")
-                             :readable ("/skills/mine/" "/state/outputs/"))
+                             :readable ("/skills/mine/" "/state/outputs/")
+                             :tmp "/tmp/harness-0/s1/")
                            (cdar seen)))
             ;; An explicit off is not read-only either; the handler's
             ;; directories join the others.
@@ -549,14 +618,18 @@ handler's own, are readable, once each."
             (harness-tools-shell-test--as "s1" "bash" :command "true")
             (should (equal '(:writable ("/tmp/harness-0/s1/" "/work/proj/" "/home/u/shared/" "/handler/rw/")
                              :readable ("/skills/mine/" "/state/outputs/" "/handler/ro/" "/work/proj/")
+                             :tmp "/tmp/harness-0/s1/"
                              :read-only :false)
                            (cdar seen)))
             ;; Read-only: all of them readable, once each, none writable.
             (setq read-only t)
             (harness-tools-shell-test--as "s1" "bash" :command "true")
+            ;; A command that changes nothing keeps a /tmp of its own;
+            ;; the directory is still named, for the sandbox to decide.
             (should (equal '(:writable nil
                              :readable ("/tmp/harness-0/s1/" "/work/proj/" "/home/u/shared/" "/handler/rw/"
                                         "/skills/mine/" "/state/outputs/" "/handler/ro/")
+                             :tmp "/tmp/harness-0/s1/"
                              :read-only t)
                            (cdar seen)))
             ;; Without a session there is no more to show than the skills.
@@ -1002,6 +1075,7 @@ call, and the background Emacs, unwrapped, runs as it always did."
         (pcase-let ((`(,cwd ,command ,opts) (car seen)))
           (should (equal root cwd))
           (should (equal '("/tmp/harness-0/s1/") (plist-get opts :writable)))
+          (should (equal "/tmp/harness-0/s1/" (plist-get opts :tmp)))
           (let ((io (car (plist-get opts :scratch))))
             (should (equal (list io) (plist-get opts :scratch)))
             (should (string-suffix-p "/io/" io))
@@ -1014,7 +1088,30 @@ call, and the background Emacs, unwrapped, runs as it always did."
             (should-not (file-exists-p io))))
         (harness-tools-shell-test--call "elisp" :code "(+ 1 2)")
         (should-not (plist-get (nth 2 (car seen)) :writable))
+        (should-not (plist-get (nth 2 (car seen)) :tmp))
         (should (plist-get (nth 2 (car seen)) :scratch))))))
+
+(ert-deftest harness-tools-shell-elisp-writes-its-call-dir-in-the-session-tmp-dir ()
+  "The elisp call's own directory, whose io/ the background Emacs writes,
+is made in the session's temporary directory when it has one: the
+sandbox mounts that directory as /tmp, so a mount point in /tmp would
+leave a directory behind there.  Without one it is the harness's own
+temporary directory, as it always was."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (make-directory (expand-file-name "s1" root) t)
+    (let ((seen nil))
+      (harness-tools-shell-test-with-methods
+          (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command))
+                (cons 'session/tmp-dir (lambda (sid) (and (equal sid "s1") (expand-file-name "s1/" root))))
+                (cons 'permission/dirs (lambda (_sid) nil)))
+        (should (equal "=> 3" (plist-get (harness-tools-shell-test--as "s1" "elisp" :code "(+ 1 2)") :content)))
+        (let ((io (car (plist-get (cdar seen) :scratch))))
+          (should (string-prefix-p (expand-file-name "s1/" root) io))
+          (should (string-suffix-p "/io/" io)))
+        (harness-tools-shell-test--call "elisp" :code "(+ 1 2)")
+        (let ((io (car (plist-get (cdar seen) :scratch))))
+          (should (string-prefix-p (file-name-as-directory temporary-file-directory) io)))))))
 
 (ert-deftest harness-tools-shell-elisp-shows-the-skills-to-the-sandbox ()
   "elisp shows its background Emacs the skills directories bash shows a
@@ -1153,6 +1250,7 @@ directories join it."
                                    :readable (append '("/tmp/harness-0/s1/" "/work/proj/" "/home/u/shared/"
                                                        "/skills/mine/" "/state/outputs/")
                                                      (harness-tools-shell-test--elisp-reads))
+                                   :tmp "/tmp/harness-0/s1/"
                                    :scratch (list io)
                                    :read-only t)
                              opts)))

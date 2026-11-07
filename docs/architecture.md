@@ -1561,8 +1561,10 @@ redact).
   own, in a root of the user's own, is handed out; a symbolic link or
   somebody else's directory gives nil and one warning in the log.
   Remote sessions have none (nothing is made on their host).  The perms
-  jail lists it (source `tmp`), bash binds it writable in the sandbox,
-  and the system prompt and `session_info` name it.
+  jail lists it (source `tmp`), bash binds it writable in the sandbox
+  and gives it as `:tmp`, so the command's `/tmp` is that directory with
+  `TMPDIR=/tmp` (see the sandbox above), and the system prompt and
+  `session_info` name it.
 - Where the sessions' temporary directories go.  `/tmp` is a RAM disk
   on many systems (a tmpfs, often with a quota), and what agents leave
   there -- Go and Flutter caches of their builds above all -- ate the
@@ -4427,7 +4429,7 @@ decisions.
 
 ### sandbox
 
-- `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…) :read-only nil :scratch (…) :capabilities (…))` →
+- `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…) :read-only nil :scratch (…) :tmp DIR :capabilities (…))` →
   command list (bwrap / systemd-run / mxc-exec-mac / the OpenShell
   wrapper / plain).
   `sandbox/status` → `(:backend bwrap|systemd|mxc|openshell|none
@@ -4448,6 +4450,32 @@ decisions.
   Without the sandbox module the bash and elisp tools fail closed for
   `required` too (`harness-tools-shell--wrap`), rather than running the command
   unconfined.
+- `:tmp DIR` makes DIR, the caller's own temporary directory
+  (`session/tmp-dir`, `/var/tmp/harness-UID/ID` by default), the
+  command's `/tmp`, writable, and sets `TMPDIR=/tmp`: a script that
+  goes to `/tmp` without asking -- most do, honoring `$TMPDIR` or not --
+  then leaves its files where the next command, the file tools and the
+  harness find them, instead of in a place thrown away with the command.
+  bwrap binds it over the entry's `/tmp` in place of the empty tmpfs
+  (`--bind DIR /tmp`); systemd-run binds it at `/tmp` in place of the
+  unit's own (`BindPaths=DIR:/tmp`, `ReadWritePaths=/tmp`, no
+  `PrivateTmp=yes`), and keeps the private `/tmp` of `PrivateTmp=yes`
+  when a path its setting cannot hold as written leaves it nowhere to
+  bind.  DIR is shown at its own path too, where `session_info` and the
+  file tools name it, since other tools of the session reach it there.
+  `harness-sandbox--tmp-directory` refuses, with a line in the log and
+  no error, a DIR the sandbox must not show there -- no local
+  directory, `/`, one that is or lies in `/tmp` (its own path would
+  then lead nowhere inside, where `/tmp` is the directory), one that
+  holds the home directory, or one that is, holds or lies in `/usr`,
+  `/etc`, `/proc`, `/dev` or `/sys` -- and the command keeps its private
+  `/tmp`.  A `:read-only` command keeps it too, as does the `locked`
+  profile, which refuses `:tmp`: a command that must change nothing and
+  one that must not see what the session left behind write only what
+  they throw away.  MXC has no mount namespace and cannot write `/tmp`
+  at all, and OpenShell's `/tmp` is the image's, so neither shows it;
+  a command there finds the directory at its real path and, under MXC,
+  its private `$TMPDIR`.
 - `:read-only`, for a caller that needs a command to change nothing (a
   supervising session's shell, which only looks), mounts the working
   directory, the git directories and every `:writable` entry read-only
@@ -4563,8 +4591,8 @@ decisions.
   what the sandbox hides or keeps read-only.  They ask for no
   confinement: where the command runs unconfined it reaches them
   anyway.
-- `$HOME`: bwrap keeps its path, covered by an empty tmpfs (after the
-  one on /tmp, which may hold it, and before every bind), so `~/x`
+- `$HOME`: bwrap keeps its path, covered by an empty tmpfs (after
+  /tmp, which may hold it, and before every bind), so `~/x`
   names the same path inside as outside and shows only what is mounted
   there; the credentials in the rest of the home directory stay out of
   reach, and nothing written there outside a mount survives the
@@ -4573,7 +4601,8 @@ decisions.
   `/etc`, `/proc`, `/dev`, `/sys`; `harness-sandbox--real-home`) gives
   way to `/tmp/harness-home` (`harness-sandbox--home`, set as `$HOME`).
   systemd-run hides the home directories with a read-only tmpfs and
-  sets `$HOME` to its private /tmp.  A home directory inside CWD shows
+  sets `$HOME` to /tmp (the unit's own, or the session's temporary
+  directory when `:tmp' gives one).  A home directory inside CWD shows
   as it is.  It used to be `/tmp/harness-home` always, so `~` in a
   command named another place than in every other tool.
 - The bash tool passes the directories the session may use
@@ -4585,10 +4614,14 @@ decisions.
   no session, a remote cwd or a command for a host passes none.  They
   used to reach every tool but bash, which saw only its cwd, so a user
   granting a directory saw the agent's commands fail there and was
-  asked again.  The temporary directory is bound at its real path,
-  after the private tmpfs on /tmp, so a command can leave files there
-  for the next command and the other tools, while the rest of /tmp
-  stays private to each command.
+  asked again.  The temporary directory is bound at its real path and
+  given as `:tmp`, so it is the command's `/tmp` too: a command leaves
+  its files there for the next command and the other tools whether it
+  honors `$TMPDIR` or writes `/tmp` without asking, and the machine's
+  `/tmp` is never shown.  The elisp tool gives it as `:tmp` as well,
+  and makes the call's own directory -- its `:scratch` -- there, so
+  that the mount it needs is not a path in `/tmp`, where it would leave
+  a mount point in the session's directory.
 - The bash tool passes the skills directories every read may read (the
   `:contained` ones of `skills/directories`) as `:readable`, so `cat
   ~/.claude/skills/x/SKILL.md` works in the sandbox as outside it.

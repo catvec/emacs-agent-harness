@@ -33,7 +33,8 @@ happens when no backend exists:
 
 What the sandbox sees on GNU/Linux: read-only /usr and /etc (plus
 the usual /lib, /lib64, /bin, /sbin as symlinks or read-only binds),
-a fresh /proc, /dev and /tmp, and the session's working directory
+a fresh /proc and /dev, a /tmp of its own (the caller's, when it
+gives one: `:tmp` below), and the session's working directory
 read-write.  The home directory's contents are *not* mounted
 (credentials such as ~/.npmrc or ~/.aws stay out of reach).  With
 bwrap $HOME keeps its path, but an empty tmpfs covers it, so ~/x
@@ -53,6 +54,23 @@ at the same place under it, so ~/.claude/skills reads the same
 inside as outside.  Network access stays on by default because
 hosted providers and most build tools need it; pass `:network nil`
 to cut it, which is only correct for local models.
+
+`:tmp` makes the session's temporary directory the command's /tmp,
+writable, instead of an empty tmpfs of its own: programs that go to
+/tmp without asking (most of them do; `$TMPDIR` is often ignored)
+then leave their files where the next command, the file tools and
+the harness find them, instead of in a place thrown away with the
+command.  TMPDIR is set to /tmp as well, so the two agree, and
+anything the command makes there is the session's to clean up.  It
+is shown at its own path too, so that the path `session_info` and the
+file tools name leads to the same files; a directory in /tmp cannot
+be shown that way, and keeps the private /tmp.
+A command that changes nothing (`:read-only`) and one that must not
+see what the session left behind (the `locked` profile) keep a
+private empty /tmp.  bwrap and systemd-run give it; MXC has no
+mount namespace and cannot write /tmp at all, and OpenShell's /tmp
+is the image's, so both keep their own and a command there leaves
+nothing to find.
 
 A confined command has HARNESS_SANDBOX set to the backend's name,
 `bwrap`, `systemd`, `mxc` or `openshell`, so a script can tell it
