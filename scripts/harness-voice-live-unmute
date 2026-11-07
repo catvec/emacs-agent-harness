@@ -5,29 +5,30 @@ Emacs starts this script as the ``unmute`` voice provider.  It listens
 on the microphone, cuts the audio into utterances with an energy voice
 detector, transcribes each one, delegates the text to the harness agent
 in the current chat, and speaks the reply.  Everything runs on this
-machine: the script only talks to a local, OpenAI-compatible speech
-server, by default [Kyutai Unmute](https://github.com/kyutai-labs/unmute)
-on port 8000.
+machine: the script only talks to local, OpenAI-compatible speech
+servers -- the bundled voice-local stack's whisper.cpp for speech to
+text and Kokoro for text to speech.
 
     scripts/harness-voice-live-unmute [--stt-url URL] [--tts-url URL]
-                                      [--voice unmute] [--threshold 0.02]
+                                      [--voice af_heart] [--threshold 0.02]
                                       [--self-test]
 
 The two endpoints follow the OpenAI audio API, so whisper.cpp's server,
-Piper behind a small HTTP wrapper, or any compatible service can replace
-Unmute without changing Emacs:
+Kokoro, a Piper server behind a small HTTP wrapper, or any compatible
+service can replace the stack without changing Emacs:
 
     POST /v1/audio/transcriptions   multipart: file, model, response_format=json
                                     -> {"text": "add a docstring"}
     POST /v1/audio/speech           {"model", "voice", "input", "response_format": "wav"}
                                     -> WAV bytes
 
-Audio is PCM16 mono at 16 kHz, captured and played through the
+Audio is captured and played as PCM16 mono at 16 kHz through the
 machine's audio backend -- PipeWire's ``pw-record`` and ``pw-play``,
 PulseAudio's ``parec`` and ``paplay``, ALSA's ``arecord`` and ``aplay``,
 or ``ffmpeg`` -- and ``--audio`` names one instead of taking the first
-installed.  No audio leaves the machine, and the sidecar needs no API
-key unless ``--api-key-env`` names a variable holding one for a
+installed.  A speech reply is resampled from the rate its server
+returns to 16 kHz.  No audio leaves the machine, and the sidecar needs
+no API key unless ``--api-key-env`` names a variable holding one for a
 protected endpoint.
 """
 
@@ -50,8 +51,8 @@ from harness_voice_sidecar import (  # noqa: E402
     pcm_from_wav, self_test_audio, self_test_failed, self_test_ok, wav_from_pcm,
 )
 
-DEFAULT_STT_URL = "http://127.0.0.1:8000/v1/audio/transcriptions"
-DEFAULT_TTS_URL = "http://127.0.0.1:8000/v1/audio/speech"
+DEFAULT_STT_URL = "http://127.0.0.1:8080/inference"
+DEFAULT_TTS_URL = "http://127.0.0.1:8880/v1/audio/speech"
 
 
 def _normal(text):
@@ -464,7 +465,7 @@ def parse_args(argv):
     parser.add_argument("--tts-url", default=DEFAULT_TTS_URL)
     parser.add_argument("--stt-model", default="whisper-1")
     parser.add_argument("--tts-model", default="tts-1")
-    parser.add_argument("--voice", default="unmute")
+    parser.add_argument("--voice", default="af_heart")
     parser.add_argument("--threshold", type=float, default=0.02)
     parser.add_argument("--hangover", type=float, default=0.85)
     parser.add_argument("--max-speech", type=float, default=120.0)

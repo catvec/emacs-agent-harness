@@ -25,6 +25,7 @@ against fake audio and a fake service, print one line and exit zero, so
 CI can check them without a microphone, a key or a network.
 """
 
+import array
 import base64
 import io
 import json
@@ -936,10 +937,54 @@ def wav_from_pcm(pcm, rate=LOCAL_RATE, channels=1, width=2):
     return buffer.getvalue()
 
 
-def pcm_from_wav(data):
-    """Return the raw frames of a WAV file."""
+def pcm_from_wav(data, rate=LOCAL_RATE):
+    """Return a WAV file's frames as PCM16 mono at RATE.
+
+    Speech services answer at their own rate -- Kokoro and OpenAI at
+    24 kHz, Piper at 16 or 22.05 kHz -- while the local sidecar plays
+    at ``LOCAL_RATE``.  The frames are therefore downmixed to mono and
+    resampled when RATE differs, so a reply keeps its speed and pitch.
+
+    A streamed reply carries a RIFF and data size of 0xffffffff; the
+    wave module then reads every frame to the end of the body, which is
+    what a chunked OpenAI-compatible server sends.
+    """
     with wave.open(io.BytesIO(data), "rb") as handle:
-        return handle.readframes(handle.getnframes())
+        channels = handle.getnchannels()
+        width = handle.getsampwidth()
+        source = handle.getframerate()
+        raw = handle.readframes(handle.getnframes())
+    if width != 2:
+        raise ValueError("WAV sample width %d" % width)
+    if channels < 1 or source <= 0 or rate <= 0:
+        raise ValueError("WAV audio format")
+    samples = array.array("h")
+    samples.frombytes(raw[:len(raw) - len(raw) % 2])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    if channels > 1:
+        samples = array.array(
+            "h", (int(round(sum(samples[start:start + channels]) / channels))
+                  for start in range(0, len(samples) - channels + 1, channels)))
+    if source != rate and samples:
+        count = int(round(len(samples) * rate / source))
+        resampled = array.array("h", bytes(2 * count))
+        last = len(samples) - 1
+        ratio = source / float(rate)
+        for index in range(count):
+            position = index * ratio
+            before = int(position)
+            if before >= last:
+                resampled[index] = samples[last]
+            else:
+                fraction = position - before
+                first = samples[before]
+                resampled[index] = int(round(
+                    first + (samples[before + 1] - first) * fraction))
+        samples = resampled
+    if sys.byteorder == "big":
+        samples.byteswap()
+    return samples.tobytes()
 
 
 def http_json(url, payload=None, headers=None, timeout=60, method=None):

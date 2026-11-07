@@ -288,6 +288,51 @@ used to be reported back straight into another redraw."
                          "Local voice stack  ✕ failed  \\[Start\\]" text)))))
         (kill-buffer buffer)))))
 
+(ert-deftest harness-ui-voice-providers-setup-reads-a-fresh-stack-state ()
+  "The provider row sees the ports a redraw just asked for.
+A stack started outside Emacs can leave a cached state without the
+text-to-speech service; the setup list asks again before it renders."
+  (skip-unless (featurep 'harness-stacks))
+  (let ((harness-voice-providers (make-hash-table :test 'eq))
+        (harness-voice-provider 'local)
+        (harness-stacks--stacks (make-hash-table :test 'eq))
+        (harness-stacks--states (make-hash-table :test 'eq))
+        (harness-container-runtimes (make-hash-table :test 'eq)))
+    (harness-define-voice-provider 'local
+      :label "Local voice" :capability 'live :command '("true")
+      :stack 'test-local
+      :needs (list (lambda ()
+                     (unless (harness-compose-stack-endpoint
+                              'test-local 'tts "v1/audio/speech")
+                       "Text to speech endpoint unset"))))
+    (harness-define-compose-stack 'test-local
+      :label "Test voice"
+      :directory temporary-file-directory
+      :project "test-local"
+      :network "voice"
+      :endpoints '((whisper 8080) (tts 8880)))
+    ;; What the cache holds after a stack started outside Emacs, before
+    ;; the tts service existed.
+    (puthash 'test-local '(:state running :detail "1 of 1 service"
+                           :ports (("whisper" (8080 . 32768))))
+             harness-stacks--states)
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) '(pipewire "PipeWire" "pw-record" "pw-play")))
+              ((symbol-function 'harness-compose-stack-status)
+               (lambda (id &optional callback)
+                 (let ((state '(:state running :detail "2 of 2 services"
+                                :ports (("whisper" (8080 . 32768))
+                                        ("tts" (8880 . 32770))))))
+                   (puthash id state harness-stacks--states)
+                   (when callback (funcall callback state))
+                   state))))
+      (with-temp-buffer
+        (harness-voice-setup--insert)
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should (string-match-p "^  ● Local voice  live  selected$" text))
+          (should-not (string-match-p "Text to speech endpoint unset" text))
+          (should (string-match-p "Local voice stack  ● running  \\[Stop\\]" text)))))))
+
 (ert-deftest harness-ui-voice-providers-effort-fragments ()
   "An effort picks the provider's fragment and the local whisper model."
   (let ((harness-voice-providers (make-hash-table :test 'eq)))
@@ -314,13 +359,19 @@ used to be reported back straight into another redraw."
   "The local provider points at the bundled compose stack and its effort."
   (skip-unless (featurep 'harness-stacks))
   (should (eq 'voice-local (plist-get (harness-voice-provider-get 'unmute) :stack)))
+  (should (equal "Local whisper.cpp and Kokoro speech pipeline · no hosted model, no key."
+                 (plist-get (harness-voice-provider-get 'unmute) :doc)))
+  (should (equal "af_heart" harness-voice-unmute-voice))
   (let ((stack (harness-compose-stack-get 'voice-local)))
     (should stack)
     (should (equal "voice-local" (plist-get stack :project)))
+    (should (equal "whisper.cpp for speech to text and Kokoro for text to speech, on loopback."
+                   (plist-get stack :doc)))
     (should (equal '(8080) (cdr (assq 'whisper (plist-get stack :endpoints)))))
-    (should (equal '(8000) (cdr (assq 'unmute (plist-get stack :endpoints)))))
-    ;; Only whisper.cpp starts: the optional Unmute service has no
-    ;; published image, so enabling its profile made every start fail.
+    (should (equal '(8880) (cdr (assq 'tts (plist-get stack :endpoints)))))
+    (should-not (assq 'unmute (plist-get stack :endpoints)))
+    ;; No profile: both services have published images, so a start
+    ;; runs whisper.cpp and Kokoro together.
     (should-not (plist-get stack :profiles))
     (dolist (case '((low . "ggml-tiny.en.bin") (medium . "ggml-base.en.bin")
                     (high . "ggml-small.en.bin")))
@@ -330,7 +381,7 @@ used to be reported back straight into another redraw."
                                    (funcall (plist-get stack :env))))))))))
 
 (ert-deftest harness-ui-voice-providers-local-stack-urls ()
-  "The local provider reads speech to text from the running stack."
+  "The local provider reads speech to text and text to speech from the running stack."
   (skip-unless (featurep 'harness-stacks))
   (let ((harness-voice-unmute-stt-url nil)
         (harness-voice-unmute-tts-url nil)
@@ -340,19 +391,20 @@ used to be reported back straight into another redraw."
                  (push (list id service path) calls)
                  (pcase service
                    ('whisper (format "http://127.0.0.1:32768/%s" path))
-                   ('unmute (format "http://127.0.0.1:32769/%s" path))))))
+                   ('tts (format "http://127.0.0.1:32770/%s" path))))))
       (let ((command (harness-voice-unmute-command)))
         (should (equal "http://127.0.0.1:32768/inference"
                        (cadr (member "--stt-url" command))))
-        (should (equal "http://127.0.0.1:32769/v1/audio/speech"
+        (should (equal "http://127.0.0.1:32770/v1/audio/speech"
                        (cadr (member "--tts-url" command))))
+        (should (equal "af_heart" (cadr (member "--voice" command))))
         (should (equal '((voice-local whisper "inference")
-                         (voice-local unmute "v1/audio/speech"))
+                         (voice-local tts "v1/audio/speech"))
                        (nreverse calls))))
       (setq calls nil)
       (should-not (harness-voice-unmute-need))
       (should (equal '((voice-local whisper "inference")
-                       (voice-local unmute "v1/audio/speech"))
+                       (voice-local tts "v1/audio/speech"))
                      (delete-dups (nreverse calls)))))
     ;; A configured URL works without a stack.
     (let ((harness-voice-unmute-stt-url "http://127.0.0.1:9000/stt")
@@ -361,7 +413,9 @@ used to be reported back straight into another redraw."
                  (lambda (&rest _) nil)))
         (should-not (harness-voice-unmute-need))
         (should (equal "http://127.0.0.1:9000/stt"
-                       (cadr (member "--stt-url" (harness-voice-unmute-command)))))))
+                       (cadr (member "--stt-url" (harness-voice-unmute-command)))))
+        (should (equal "http://127.0.0.1:9000/tts"
+                       (cadr (member "--tts-url" (harness-voice-unmute-command)))))))
     ;; With neither, the sidecar would get nil arguments: say what is missing.
     (let ((harness-voice-unmute-stt-url nil)
           (harness-voice-unmute-tts-url nil))
@@ -372,8 +426,8 @@ used to be reported back straight into another redraw."
                        (error-message-string
                         (should-error (harness-voice-unmute-command)
                                       :type 'user-error))))))
-    ;; Speech to text from whisper.cpp is enough for the stack; text to
-    ;; speech is a service of its own and is named when it is missing.
+    ;; Speech to text from whisper.cpp is not enough: text to speech is
+    ;; its own service and is named when it is missing.
     (let ((harness-voice-unmute-stt-url nil)
           (harness-voice-unmute-tts-url nil))
       (cl-letf (((symbol-function 'harness-compose-stack-endpoint)
@@ -385,6 +439,29 @@ used to be reported back straight into another redraw."
                        (error-message-string
                         (should-error (harness-voice-unmute-command)
                                       :type 'user-error))))))))
+
+(ert-deftest harness-ui-voice-providers-local-choice-copy ()
+  "The selected local provider reads ready only when both speech services answer."
+  (skip-unless (featurep 'harness-stacks))
+  (let ((harness-voice-unmute-stt-url nil)
+        (harness-voice-unmute-tts-url nil))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) '(pipewire "PipeWire" "pw-record" "pw-play")))
+              ((symbol-function 'harness-compose-stack-endpoint)
+               (lambda (_id service _path)
+                 (pcase service
+                   ('whisper "http://127.0.0.1:32768/inference")
+                   ('tts "http://127.0.0.1:32770/v1/audio/speech")))))
+      (should (equal "Local pipeline · live · ready"
+                     (harness-voice-provider-choice 'unmute))))
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) '(pipewire "PipeWire" "pw-record" "pw-play")))
+              ((symbol-function 'harness-compose-stack-endpoint)
+               (lambda (_id service _path)
+                 (when (eq service 'whisper)
+                   "http://127.0.0.1:32768/inference"))))
+      (should (equal "Local pipeline · live · Text to speech endpoint unset"
+                     (harness-voice-provider-choice 'unmute))))))
 
 (ert-deftest harness-ui-voice-providers-stack-result-copy ()
   "A failed stack start keeps its one-line detail in the echo text."

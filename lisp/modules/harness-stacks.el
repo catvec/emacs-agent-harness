@@ -12,11 +12,11 @@
 ;;
 ;;   (harness-define-compose-stack 'voice-local
 ;;     :label "Local voice"
-;;     :doc "whisper.cpp for speech to text, on loopback."
+;;     :doc "whisper.cpp for speech to text and Kokoro for text to speech, on loopback."
 ;;     :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
 ;;     :project "voice-local"
 ;;     :network "voice"
-;;     :endpoints '((whisper 8080) (unmute 8000))
+;;     :endpoints '((whisper 8080) (tts 8880))
 ;;     :env (lambda () '(("WHISPER_MODEL" . "ggml-base.en.bin"))))
 ;;
 ;; The stack's services publish their ports on loopback with no fixed

@@ -16,8 +16,8 @@
 ;; The live capability runs a JSON-lines sidecar that owns the
 ;; microphone, speaker and speech model, while Emacs keeps the captions,
 ;; the agent turn and every permission decision.  The bundled live
-;; providers are ChatGPT Live (GPT-Live over the API), a local Kyutai
-;; Unmute pipeline and a scripted fixture; a sidecar delegation becomes a
+;; providers are ChatGPT Live (GPT-Live over the API), a local whisper.cpp
+;; and Kokoro pipeline and a scripted fixture; a sidecar delegation becomes a
 ;; normal prompt in the chat, and assistant text streams back as
 ;; commentary.  Audio never crosses the control pipe.
 ;;

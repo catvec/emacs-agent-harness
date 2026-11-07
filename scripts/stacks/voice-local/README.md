@@ -2,8 +2,8 @@
 
 A docker compose stack for the harness's `unmute` voice provider: speech
 to text with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), and
-an optional [Kyutai Unmute](https://github.com/kyutai-labs/unmute)
-service for text to speech.
+text to speech with [Kokoro](https://github.com/hexgrad/kokoro) behind
+[Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI).
 
 The harness starts it from `M-x harness-stacks`, or the voice setup
 page; by hand:
@@ -17,34 +17,19 @@ docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local u
 | Service | Port | Image | Purpose |
 | --- | --- | --- | --- |
 | `whisper` | container 8080, random loopback | `ghcr.io/ggml-org/whisper.cpp:main` | `/inference` for speech to text |
-| `unmute` | container 8000, random loopback | a local build (the `unmute` profile) | `/v1/audio/speech` for text to speech |
+| `tts` | container 8880, random loopback | `ghcr.io/remsky/kokoro-fastapi-cpu:v0.8.2` | `/v1/audio/speech` for text to speech |
 
-The compose file publishes each port as `"127.0.0.1::8080"`, so the
-runtime picks a free loopback port: two stacks, or anything already on
-8080, never collide. `docker compose ... port SERVICE PORT` prints the
-one this stack got.
+The compose file publishes each port as `"127.0.0.1::8080"` or
+`"127.0.0.1::8880"`, so the runtime picks a free loopback port: two
+stacks, or anything already on 8080 or 8880, never collide. `docker
+compose ... port SERVICE PORT` prints the one this stack got.
 
-Only `whisper` starts by default, and `[Start]` in the harness runs it
-alone.  Kyutai Unmute has no published image: upstream builds
-`unmute-backend:latest` from its own compose file, needs a GPU and
-serves a websocket protocol rather than the OpenAI audio routes.  The
-`unmute` service is therefore behind the `unmute` profile and starts
-only by hand, with an image of your own:
+Both services start with the stack. whisper.cpp runs on the CPU and
+downloads its model into the `whisper-models` volume on first start;
+Kokoro-FastAPI's CPU image has the Kokoro-82M model baked in and is
+ready after its first model load, about twenty seconds.
 
-```sh
-HARNESS_UNMUTE_IMAGE=unmute-backend:latest \
-docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local \
-  --profile unmute up -d
-```
-
-The voice provider does not need it when whisper.cpp runs: set
-`harness-voice-unmute-tts-url` to any OpenAI-compatible text-to-speech
-endpoint, such as a Piper server.  With both options nil the provider
-reads the random loopback port this stack published for speech to text,
-and, when the `unmute` service runs, for text to speech.  Speech to text
-needs no configuration at all.
-
-## Models and effort
+## Speech to text
 
 `WHISPER_MODEL` chooses the whisper.cpp model file, downloaded into the
 `whisper-models` volume on first start. The harness sets it from the
@@ -65,13 +50,38 @@ machine with more CPU. Set any of them by hand:
 WHISPER_MODEL=ggml-small.en.bin docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
 ```
 
+## Text to speech
+
+The `tts` service is Kokoro-FastAPI's CPU image: an OpenAI-compatible
+`/v1/audio/speech` route with the Kokoro-82M model baked in. It accepts
+the model name `tts-1`, answers WAV, and needs no key. `DEFAULT_VOICE`
+names the voice it warms at startup; the image defaults to `af_heart`,
+and the harness's `harness-voice-unmute-voice` names the same voice. Set
+another voice from the shell:
+
+```sh
+HARNESS_TTS_VOICE=af_bella docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
+```
+
+The provider posts the reply text to `/v1/audio/speech` and resamples
+the WAV to 16 kHz before playback. If you point
+`harness-voice-unmute-tts-url` at a service of your own, set
+`harness-voice-unmute-voice` to a voice that service knows, such as
+OpenAI's `alloy`.
+
+Kokoro-FastAPI is not part of this repository. Its wrapper is Apache
+2.0 and the Kokoro-82M weights are Apache 2.0; the image is pulled from
+GitHub Container Registry. Check the image's own notices before
+redistributing it.
+
 ## Images
 
-The whisper image is overridable, so a pinned tag or a local build works
-without editing the file:
+The whisper and text-to-speech images are overridable, so a pinned tag
+or a local build works without editing the file:
 
 ```sh
 HARNESS_WHISPER_IMAGE=ghcr.io/ggml-org/whisper.cpp:main \
+HARNESS_TTS_IMAGE=ghcr.io/remsky/kokoro-fastapi-cpu:v0.8.2 \
 docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
 ```
 
@@ -83,14 +93,12 @@ the entrypoint, not the sidecar: the sidecar only speaks HTTP.
 
 ## GPU and CPU
 
-whisper.cpp runs on the CPU: speech to text with `ggml-base.en.bin` is
-real-time on a modern laptop, and larger models are not.  Kyutai Unmute
-is the GPU-only part. The upstream project documents its CUDA and Apple
-Silicon setups, and its image needs the NVIDIA container toolkit
-(`--gpus all`, or `deploy.resources.reservations.devices` in a compose
-file) to use one. On a CPU-only machine, leave the `unmute` profile
-alone and point `harness-voice-unmute-tts-url` at a CPU text-to-speech
-service instead.
+Both services run on the CPU. whisper.cpp with `ggml-base.en.bin` is
+real-time on a modern laptop, and larger models are not; Kokoro-82M is
+small enough for CPU use. Kokoro-FastAPI also publishes a GPU image; set
+`HARNESS_TTS_IMAGE=ghcr.io/remsky/kokoro-fastapi-gpu:v0.8.2` and give
+the container a GPU (`--gpus all`, or the compose `deploy` reservation
+for an NVIDIA device) when you want one.
 
 ## Network
 
@@ -99,7 +107,7 @@ network per stack. A harness running on this machine reaches them
 through the published loopback ports. A harness server running inside a
 container is attached to that network by the `stacks` module (the
 selected container runtime's `network connect`), so it can also reach
-`http://whisper:8080` and `http://unmute:8000` by name; name the
+`http://whisper:8080` and `http://tts:8880` by name; name the
 server's container with `HARNESS_SERVER_CONTAINER`, or let it find
 itself inside the container.
 
@@ -108,8 +116,10 @@ itself inside the container.
 ```sh
 stack="docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local"
 curl -fsS "http://$($stack port whisper 8080)/"          # whisper.cpp answers
-curl -fsS -F file=@samples/jfk.wav -F response_format=text \
-     "http://$($stack port whisper 8080)/inference"      # and transcribes
+curl -fsS "http://$($stack port tts 8880)/health"        # Kokoro answers
+curl -fsS -o reply.wav -H 'Content-Type: application/json' \
+     -d '{"model":"tts-1","voice":"af_heart","input":"The merge queue is empty.","response_format":"wav"}' \
+     "http://$($stack port tts 8880)/v1/audio/speech"    # and speaks
 $stack ps
 ```
 

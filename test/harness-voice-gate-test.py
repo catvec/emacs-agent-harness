@@ -10,6 +10,7 @@ separate manual step; these tests do not claim it.
 from __future__ import annotations
 
 import argparse
+import array
 import importlib.machinery
 import importlib.util
 import json
@@ -31,9 +32,9 @@ sys.path.insert(0, os.path.join(ROOT, "test"))
 
 import voice_fixtures as fixtures  # noqa: E402
 from harness_voice_sidecar import (  # noqa: E402
-    AUDIO_BACKENDS, FakeEvents, NullAudio, Player, Recorder, SpeechDetector, Vad,
-    audio_backend, audio_backend_names, audio_backends, audio_missing_reason,
-    self_test_audio, wav_from_pcm,
+    AUDIO_BACKENDS, LOCAL_RATE, FakeEvents, NullAudio, Player, Recorder,
+    SpeechDetector, Vad, audio_backend, audio_backend_names, audio_backends,
+    audio_missing_reason, pcm_from_wav, self_test_audio, wav_from_pcm,
 )
 
 SCRIPT = os.path.join(ROOT, "scripts", "harness-voice-live-unmute")
@@ -735,6 +736,59 @@ class SidecarAudioTest(unittest.TestCase):
         self.assertIn("playback · pw-play", log)
         with open(self.played, "rb") as handle:
             self.assertGreaterEqual(len(handle.read()), 1600)
+
+
+class TtsWavTest(unittest.TestCase):
+    """A speech reply is PCM16 mono at the rate the local pipeline plays."""
+
+    def test_resamples_the_service_rate(self):
+        source = tone(0.1, rate=24000)
+        pcm = pcm_from_wav(wav_from_pcm(source, 24000))
+        self.assertEqual(round(len(source) / 2 * LOCAL_RATE / 24000),
+                         len(pcm) // 2)
+        samples = array.array("h")
+        samples.frombytes(pcm)
+        self.assertGreater(max(abs(sample) for sample in samples), 1000)
+
+    def test_keeps_the_pipeline_rate(self):
+        source = tone(0.1)
+        pcm = pcm_from_wav(wav_from_pcm(source, LOCAL_RATE))
+        self.assertEqual(source, pcm)
+
+    def test_downmixes_stereo(self):
+        frames = array.array("h", [1000, -1000] * 100)
+        pcm = pcm_from_wav(wav_from_pcm(frames.tobytes(), LOCAL_RATE, channels=2))
+        mono = array.array("h")
+        mono.frombytes(pcm)
+        self.assertEqual(100, len(mono))
+        self.assertTrue(all(abs(sample) <= 1 for sample in mono))
+
+    def test_reads_a_streamed_wav_to_the_end(self):
+        # OpenAI-compatible servers stream a WAV whose RIFF and data sizes
+        # are 0xffffffff; every frame is in the body.
+        data = bytearray(wav_from_pcm(tone(0.1)))
+        data[4:8] = b"\xff\xff\xff\xff"
+        data[40:44] = b"\xff\xff\xff\xff"
+        pcm = pcm_from_wav(bytes(data))
+        self.assertEqual(int(0.1 * LOCAL_RATE) * 2, len(pcm))
+
+    def test_rejects_a_width_it_cannot_play(self):
+        with self.assertRaises(ValueError):
+            pcm_from_wav(wav_from_pcm(b"\x00" * 100, LOCAL_RATE, width=1))
+
+    def test_synthesize_plays_at_the_pipeline_rate(self):
+        rig = SidecarRig()
+        rig.sidecar.post_json = lambda *args, **kwargs: wav_from_pcm(
+            tone(0.1, rate=24000), 24000)
+        pcm = rig.sidecar.synthesize("Hello.")
+        self.assertEqual(int(rig.sidecar.rate * 0.1) * 2, len(pcm))
+
+    def test_defaults_match_the_bundled_stack(self):
+        options = unmute.parse_args(["harness-voice-live-unmute"])
+        self.assertEqual("af_heart", options.voice)
+        self.assertEqual("tts-1", options.tts_model)
+        self.assertTrue(options.tts_url.endswith("/v1/audio/speech"))
+        self.assertTrue(options.stt_url.endswith("/inference"))
 
 
 if __name__ == "__main__":

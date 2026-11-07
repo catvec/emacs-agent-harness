@@ -11,11 +11,11 @@ Podman.
 
 (harness-define-compose-stack 'voice-local
   :label "Local voice"
-  :doc "whisper.cpp for speech to text, on loopback."
+  :doc "whisper.cpp for speech to text and Kokoro for text to speech, on loopback."
   :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
   :project "voice-local"
   :network "voice"
-  :endpoints '((whisper 8080) (unmute 8000))
+  :endpoints '((whisper 8080) (tts 8880))
   :env (lambda () '(("WHISPER_MODEL" . "ggml-base.en.bin"))))
 ```
 
@@ -70,33 +70,29 @@ network counts as success.
 | Service | Image | Port | What |
 | --- | --- | --- | --- |
 | `whisper` | `ghcr.io/ggml-org/whisper.cpp:main` | container 8080, random loopback | whisper-server, its model in a named volume |
-| `unmute` | `kyutai/unmute:latest` (the `unmute` profile, by hand only) | container 8000, random loopback | Kyutai Unmute, built locally; needs a GPU |
+| `tts` | `ghcr.io/remsky/kokoro-fastapi-cpu:v0.8.2` | container 8880, random loopback | Kokoro-FastAPI, an OpenAI-compatible `/v1/audio/speech` route on the CPU |
 
 ```sh
 docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
-docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local --profile unmute up -d
 ```
 
 The harness starts it from the voice setup list (**Local voice stack**,
-`[Start]`), or from `M-x harness-stacks`; `[Start]` runs whisper.cpp
-alone. The `unmute` service is opt-in because it has no published
-image: upstream builds `unmute-backend:latest` from its own compose file
-and wants a GPU. The stack therefore starts on a machine with neither.
-Set `HARNESS_UNMUTE_IMAGE` to such a build and start the profile by hand
-if you want it.
+`[Start]`), or from `M-x harness-stacks`; `[Start]` runs whisper.cpp and
+Kokoro together. Both images are published, so the stack starts without
+a local build, a GPU or a key. The first pull is the large part of a
+first start, and Kokoro needs about twenty seconds to load its model.
 
 The `unmute` voice provider takes its speech-to-text URL from the
 running stack's whisper.cpp service, so the random port is never typed
-by hand, and its text-to-speech URL from
-`harness-voice-unmute-tts-url`, or from a running `unmute` service. Set
-that option to a local OpenAI-compatible text-to-speech server, such as
-Piper, because whisper.cpp only transcribes. The whisper model is the
-one `harness-voice-effort` picks: `ggml-tiny.en.bin` at **low**,
-`ggml-base.en.bin` at **medium**, `ggml-small.en.bin` at **high**. The
-whisper image tag is an assumption that the upstream project may change;
-override it with `HARNESS_WHISPER_IMAGE`, and see the stack's README for
-the CPU-only case and how to point the `unmute` voice provider at
-whisper.cpp and a TTS service of your own.
+by hand, and its text-to-speech URL from the stack's `tts` service, or
+from `harness-voice-unmute-tts-url` when you point it at a service of
+your own. The whisper model is the one `harness-voice-effort` picks:
+`ggml-tiny.en.bin` at **low**, `ggml-base.en.bin` at **medium**,
+`ggml-small.en.bin` at **high**. `harness-voice-unmute-voice` names the
+Kokoro voice (`af_heart` by default); `DEFAULT_VOICE` in the stack does
+the same. The whisper and Kokoro image tags are overridable with
+`HARNESS_WHISPER_IMAGE` and `HARNESS_TTS_IMAGE`; see the stack's README
+for the CPU and GPU cases and for a service of your own.
 
 The stack is a plugin: the voice module requires `harness-stacks` when it is
 there, registers its stack, and shows the state in its setup list. A client
@@ -113,6 +109,8 @@ the network join, the endpoints and the page's copy are covered by
 `compose config`, which shows the empty published ports and the per-stack
 network. A real stack on Docker was run by hand: it published a random loopback
 port, answered through it, and a probe container reached its service by name
-over the stack's network. The bundled voice stack's whisper service was started
-through the module the same way and transcribed whisper.cpp's `jfk.wav` sample.
-Pulling the speech images and running the models is not part of the suite.
+over the stack's network. The bundled voice stack was started through the
+module the same way: whisper.cpp transcribed its `jfk.wav` sample, and
+Kokoro's CPU image answered `/health` and an OpenAI-shaped
+`/v1/audio/speech` request on its random loopback port. Pulling the speech
+images and running the models is not part of the suite.

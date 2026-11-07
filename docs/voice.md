@@ -19,7 +19,7 @@ model providers have capabilities of their own:
 | --- | --- | --- |
 | `wav` (the default) | `wav` | Local push-to-talk dictation and spoken replies |
 | `chatgpt` | `live` | GPT-Live over the API, delegating work to this chat |
-| `unmute` | `live` | A local pipeline: whisper.cpp for speech to text and an OpenAI-compatible text-to-speech service |
+| `unmute` | `live` | A local pipeline: whisper.cpp for speech to text and Kokoro for text to speech |
 | `fixture` | `live` | The scripted sidecar: the whole loop without a microphone, key or model |
 | `custom` | `live` | Any sidecar in `harness-voice-live-command` |
 
@@ -142,20 +142,19 @@ to, so the harness agent still runs the workspace.
 ### Local pipeline
 
 `unmute` runs `scripts/harness-voice-live-unmute`, a local pipeline around two
-OpenAI-compatible endpoints: whisper.cpp for speech to text, and a
-text-to-speech server with the same request shape. It records with an energy
-voice detector, posts each utterance to the speech-to-text endpoint, delegates
-the text, and posts the answer to the text-to-speech endpoint for playback. No
-hosted model and no API key are involved; audio goes only to the loopback
-addresses below unless changed.
+OpenAI-compatible endpoints: whisper.cpp for speech to text, and Kokoro for
+text to speech. It records with an energy voice detector, posts each utterance
+to the speech-to-text endpoint, delegates the text, and posts the answer to the
+text-to-speech endpoint for playback. No hosted model and no API key are
+involved; audio goes only to the loopback addresses below unless changed.
 
 ```elisp
 (setq harness-voice-provider 'unmute
       ;; nil: the running voice-local stack's whisper.cpp service
       harness-voice-unmute-stt-url nil
-      ;; nil: the optional unmute service; set a Piper endpoint instead
+      ;; nil: the running voice-local stack's Kokoro service
       harness-voice-unmute-tts-url nil
-      harness-voice-unmute-voice "unmute"
+      harness-voice-unmute-voice "af_heart"
       harness-voice-unmute-threshold 0.02)
 ```
 
@@ -165,22 +164,27 @@ random loopback port the stack published for whisper.cpp and posts to its
 `harness-voice-unmute-stt-url` to point at a whisper.cpp server you run
 yourself.
 
-Text to speech is not part of the default start. Kyutai Unmute publishes no
-image (upstream builds it locally and wants a GPU), so the stack starts
-whisper.cpp alone and `harness-voice-unmute-tts-url` must name a local
-OpenAI-compatible TTS, such as a Piper server. The optional `unmute` compose
-service is used when it runs; see the stack's README for building it. Without
-either, the setup list says `Text to speech endpoint unset`.
+Text to speech defaults to the same stack's `tts` service: Kokoro-FastAPI's CPU
+image, whose `/v1/audio/speech` route takes the OpenAI request shape and
+answers WAV. The provider reads its random loopback port the same way, so
+starting the stack from the voice setup list is all it takes. Set
+`harness-voice-unmute-tts-url` to point at a service you run yourself, such as
+a Piper server behind a small OpenAI-compatible wrapper; `alloy` is a
+convenient voice name for OpenAI's own endpoint. Without any endpoint, the
+setup list says `Text to speech endpoint unset`. The sidecar resamples the
+reply WAV -- Kokoro and OpenAI answer at 24 kHz -- to the pipeline's 16 kHz
+before playback, so speech keeps its speed and pitch.
 
 A whisper.cpp server (see below) and a Piper server with the same request shape
-work too, so the local provider needs no Unmute installation. The sidecar
+work too, so the local provider needs no particular speech service. The sidecar
 records and plays through the same audio backend as the WAV recorder. The
 energy detector is not acoustic echo cancellation: use headphones when the
 speaker is open.
 
-The local stack in `scripts/stacks/voice-local/` runs whisper.cpp in a
-container on a network of its own, published on a random loopback port;
-`M-x harness-stacks` starts it ([compose stacks](stacks.md)) on the
+The local stack in `scripts/stacks/voice-local/` runs whisper.cpp and
+Kokoro-FastAPI in containers on a network of its own, each published on a
+random loopback port; `M-x harness-stacks` starts both
+([compose stacks](stacks.md)) on the
 [selected container runtime](container-runtime.md). `harness-voice-effort`
 picks the whisper model the stack loads:
 **low** is `ggml-tiny.en.bin`, **medium** (the default) is

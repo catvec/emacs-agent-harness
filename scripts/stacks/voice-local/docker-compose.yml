@@ -1,20 +1,13 @@
-# Local voice stack: whisper.cpp for speech to text, with an optional
-# Kyutai Unmute service for text to speech.  The harness's `stacks'
-# module starts it (`M-x harness-stacks'), or run it by hand:
+# Local voice stack: whisper.cpp for speech to text and Kokoro for text
+# to speech.  The harness's `stacks' module starts it (`M-x
+# harness-stacks'), or run it by hand:
 #
 #   docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
 #
 # The stack gets a container network of its own, and each service a
-# random loopback port, so two stacks never fight over 8080.  Only
-# whisper.cpp runs by default; `[Start]` in the harness runs it alone.
-# Kyutai Unmute publishes no image (upstream builds it locally and wants
-# a GPU), so its service is opt-in: point HARNESS_UNMUTE_IMAGE at a
-# build of your own and name the profile by hand:
-#
-#   docker compose ... --profile unmute up -d
-#
+# random loopback port, so two stacks never fight over 8080 or 8880.
 # The harness's local voice provider reads the whisper service's random
-# port for speech to text and the unmute service's for text to speech.
+# port for speech to text and the tts service's for text to speech.
 name: ${COMPOSE_PROJECT_NAME:-voice-local}
 
 services:
@@ -33,23 +26,18 @@ services:
     networks:
       - voice
 
-  unmute:
-    # No published image: upstream builds `unmute-backend:latest' from
-    # its compose file, needing a GPU.  Set HARNESS_UNMUTE_IMAGE to such
-    # a build and start this profile by hand.
-    image: ${HARNESS_UNMUTE_IMAGE:-kyutai/unmute:latest}
-    profiles:
-      - unmute
-    depends_on:
-      - whisper
+  tts:
+    # Kokoro-FastAPI: an OpenAI-compatible /v1/audio/speech route on the
+    # CPU, with the Kokoro-82M model baked into the image.  It accepts
+    # the OpenAI model name tts-1 and answers WAV; the default voice is
+    # warmed at startup.  A pinned release keeps a first start
+    # reproducible; set HARNESS_TTS_IMAGE to run another build.
+    image: ${HARNESS_TTS_IMAGE:-ghcr.io/remsky/kokoro-fastapi-cpu:v0.8.2}
     environment:
-      STT_URL: http://whisper:8080/inference
-      HOST: 0.0.0.0
-      PORT: "8000"
+      DEFAULT_VOICE: ${HARNESS_TTS_VOICE:-af_heart}
+      API_LOG_LEVEL: WARNING
     ports:
-      - "127.0.0.1::8000"
-    # Kyutai Unmute wants a GPU by default; see the README for a CPU-only
-    # run, which is slower but needs nothing but docker.
+      - "127.0.0.1::8880"
     restart: unless-stopped
     networks:
       - voice
