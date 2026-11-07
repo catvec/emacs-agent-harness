@@ -6349,19 +6349,31 @@ setting's command with this buffer's session."
                               :face (or (plist-get spec :face) 'harness-dim-face))))
 
 (defun harness-chat--figure-items (session)
-  "Return the header segments of SESSION's figures: context, tokens and cost.
-Each leads with the space that separates it from the one before, as a
-header segment does.  The cost is the shared display with the plan's
-quota windows, its percentages escaped for the header line
-\(`harness-ui-spend-segment'); a narrow header shortens it to the plan's
-name, or its share of the quota, before it goes, as it did before the
-settings line.  The cost goes first, then the tokens, which shorten to
-the number before they go; the context goes last of them (see
+  "Return the header segments of SESSION's figures.
+They are its context, cache, total tokens and cost.  Each leads with
+the space that separates it from the one before, as a
+header segment does.  The cache rate is the observed one of the last
+completed request (`harness-ui-format-cache-rate'), beside the context
+it is a share of, and is absent until a request completes; it goes
+before the context in a narrow header rather than shorten to a
+percentage with no subject.  The cost is the shared
+display with the plan's quota windows, its percentages escaped for the
+header line (`harness-ui-spend-segment'); a narrow header shortens it to
+the plan's name, or its share of the quota, before it goes, as it did
+before the settings line.  The cost goes first, then the tokens, which
+shorten to the number before they go; the context goes last of them (see
 `harness-ui-fit-items').  Each names the command a click runs, for the
 overflow menu too.  They are information, not settings: the header
 carries them, above the compose box and its settings line."
   (let ((context (list (concat "  " (harness-ui-format-context session)) 30
                        nil #'harness-set-context-limit))
+        ;; The observed cache rate sits beside the context it is a share
+        ;; of.  It makes room after the tokens and the cost when the
+        ;; line is narrow, and goes whole rather than as a bare
+        ;; percentage that would read as part of the context figure.
+        (cache (when-let* ((text (harness-ui-format-cache-rate session t)))
+                 ;; The rate's % is a header-line construct otherwise.
+                 (list (concat "  " (harness-ui-mode-line-escape text)) 25 nil)))
         (tokens (when-let* ((text (harness-ui-format-total-tokens session)))
                   (list (concat "  " text) 15
                         (concat "  " (harness-ui-format-total-tokens session t)))))
@@ -6369,7 +6381,7 @@ carries them, above the compose box and its settings line."
                     10
                     (concat "  " (harness-ui-spend-segment (harness-ui-format-spend session)))
                     #'harness-ui-show-usage)))
-    (delq nil (list context tokens cost))))
+    (delq nil (list context cache tokens cost))))
 
 (defun harness-chat--extra-items ()
   "Return the items `harness-chat-settings-functions' add, in order."
@@ -6757,8 +6769,9 @@ dropped as before."
   "Return the header line, fitted to WIDTH, its window's by default.
 It names the buffer and leads out of it: the session's name, the
 session it was started from, then what the session used -- the context,
-the total tokens and the cost, the plan's quota windows for a
-subscription -- then [menu] and the newer-messages notice.  The model,
+its observed cache rate once a request has completed, the total tokens
+and the cost, the plan's quota windows for a subscription -- then
+[menu] and the newer-messages notice.  The model,
 the thinking level, the permission mode and whether it waits for you
 are settings that change what the session does: they stand above the
 compose box (`harness-chat--settings-line'), with a task's queue.  The

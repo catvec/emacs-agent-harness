@@ -826,6 +826,30 @@ at most every `harness-bedrock--progress-interval' seconds."
         ;; Plain text replies leave nothing to remember.
         (should (zerop (hash-table-count harness-bedrock--responses)))))))
 
+(ert-deftest harness-provider-bedrock-cache-reading-needs-a-token-count ()
+  "Only a nonnegative number is a cache reading; null and junk are unknown.
+The input leaves cached tokens out, so the context is input plus the
+parts the provider did report; a reported zero stays a reading."
+  (should (equal '(:type usage :input 100 :output 20 :cache-read 50 :cache-write 10
+                   :cost nil :billing api :context 160)
+                 (harness-bedrock--usage-event
+                  '(:inputTokens 100 :outputTokens 20
+                    :cacheReadInputTokens 50 :cacheWriteInputTokens 10))))
+  (should (equal '(:type usage :input 100 :output 20 :cache-read 0 :cache-write 0
+                   :cost nil :billing api :context 100)
+                 (harness-bedrock--usage-event
+                  '(:inputTokens 100 :outputTokens 20
+                    :cacheReadInputTokens 0 :cacheWriteInputTokens 0))))
+  (dolist (usage '((:inputTokens 100 :outputTokens 20)
+                   (:inputTokens 100 :outputTokens 20
+                    :cacheReadInputTokens nil :cacheWriteInputTokens nil)
+                   (:inputTokens 100 :outputTokens 20
+                    :cacheReadInputTokens "50" :cacheWriteInputTokens -1)))
+    (let ((event (harness-bedrock--usage-event usage)))
+      (should-not (plist-member event :cache-read))
+      (should-not (plist-member event :cache-write))
+      (should (= 100 (plist-get event :context))))))
+
 (ert-deftest harness-provider-bedrock-stop-reasons-and-errors ()
   (harness-bedrock-test-with-keys
     (cl-flet ((run (response)

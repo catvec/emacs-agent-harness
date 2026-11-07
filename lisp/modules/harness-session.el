@@ -2792,6 +2792,42 @@ hosted loop's turn) gives, else its `:output', else 0."
           ((numberp output) output)
           (t 0))))
 
+(defun harness-session--usage-with-last-cache (usage record model cache-reset)
+  "Return USAGE with the cache figures of RECORD's completed request.
+RECORD is a `session/usage-add' record, MODEL the model it went to and
+CACHE-RESET non-nil when it starts the conversation over.  A record with
+a `:context' is one completed request whose prompt the provider sized;
+the value kept as USAGE's `:last-cache' is the provider-reported reading
+of it:
+
+  (:prompt N :cache-read N :cache-write N :model MODEL :at TIME)
+
+PROMPT is RECORD's `:context', the provider's own total prompt with the
+cached part included, so `:cache-read' over it counts no token twice
+whichever provider reported it.  `:cache-read' and `:cache-write' are
+kept only when they are token counts (`harness-token-count-p': zero is
+one, a miss); nil, null or anything else is an unknown reading, not a
+zero one.  A hosted loop's record covers a whole turn -- its `:context'
+is the last request's prompt but its cache counts sum every request's --
+so it carries `:hosted' and no request-level rate can be had from it.
+A record without `:context' (a cache refresh, say) leaves the reading
+as it was, and one with `:cache-reset' clears it: the conversation
+starts over and has no completed request."
+  (cond
+   (cache-reset (harness-plist-remove usage :last-cache))
+   ((not (numberp (plist-get record :context))) usage)
+   (t
+    (let ((read (plist-get record :cache-read))
+          (write (plist-get record :cache-write)))
+      (plist-put usage :last-cache
+                 (append (list :prompt (plist-get record :context)
+                               :cache-read (and (harness-token-count-p read) read)
+                               :cache-write (and (harness-token-count-p write) write)
+                               :model model
+                               :at (float-time))
+                         (and (harness-session--hosted-loop-p model)
+                              (list :hosted t))))))))
+
 (harness-defmethod session/usage-add (id record)
   "Add usage RECORD to session ID.
 RECORD keys: :input :output :cache-read :cache-write :cost :list-cost
@@ -2813,7 +2849,12 @@ request that read or wrote the cache stamps the totals' `:cache-at',
 Whatever changes that stamp -- such a request, one that used no cache,
 `:cache-reset' -- also clears `:cache-dropped', the moment a redaction
 dropped the cache (see `session/reset-provider'); a record of a turn
-counted leaves both.
+counted leaves both.  A record with `:context' also leaves the totals'
+`:last-cache', the provider-reported cache read of that completed
+request over the prompt it sized (see
+`harness-session--usage-with-last-cache'); it is what the chat header
+shows as the conversation's observed cache rate, `:cache-reset' clearing
+it with the rest of the conversation.
 A missing `:cost' is priced from the model catalogue; a missing
 `:list-cost', the call at API prices, is the cost, or priced when a
 subscription paid.  The totals may also hold `:stream-output' and
@@ -2850,6 +2891,7 @@ Return the totals."
       (setq u (plist-put u :billing (harness-billing-of record)))
       (setq u (plist-put u :plan (plist-get record :plan))))
     (setq u (harness-session--cache-stamp u record (harness-session-model s)))
+    (setq u (harness-session--usage-with-last-cache u record record-model cache-reset))
     (when (or (numberp (plist-get record :input)) (numberp (plist-get record :output)))
       (setq u (plist-put u :last-model record-model)))
     (setf (harness-session-usage s) u)
@@ -3735,7 +3777,12 @@ is written at once and announced."
                             id))))
     ;; First, so that what the reset announces below already says the
     ;; cache is gone.  A new usage plist: whoever holds the old one
-    ;; (`session/get', the last `session/usage') keeps what it saw.
+    ;; (`session/get', the last `session/usage') keeps what it saw.  The
+    ;; last completed request's reading goes with the provider
+    ;; conversation the reset drops: the conversation is another one
+    ;; from here on, whose first request has not been made.
+    (setf (harness-session-usage s)
+          (harness-plist-remove (copy-sequence (harness-session-usage s)) :last-cache))
     (when (harness-session--reset-drops-cache-p s)
       (setq drops-cache t)
       (setf (harness-session-usage s)

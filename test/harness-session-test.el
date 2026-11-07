@@ -1798,6 +1798,139 @@ context leaves both."
       (harness-session--load-all)
       (should (= 20 (plist-get (funcall usage) :last-output))))))
 
+(ert-deftest harness-session-usage-last-cache-is-one-request-over-its-prompt ()
+  "The last completed request's cache read is kept over the prompt it sized.
+Every provider's `:context' is its own total prompt with the cached part
+included: one whose input count leaves cached tokens out (Claude,
+Bedrock) and one whose input count includes them (Responses, OpenAI)
+both give that prompt, so the cache read is no token of it counted
+twice.  The raw counts, model and time stay with the session."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (last (lambda ()
+                   (plist-get (plist-get (harness-call 'session/get id) :usage) :last-cache))))
+      ;; Input leaves cached tokens out: the three parts are the prompt.
+      (harness-call 'session/usage-add id
+                    '(:input 10000 :cache-read 85000 :cache-write 5000 :context 100000))
+      (should (= 100000 (plist-get (funcall last) :prompt)))
+      (should (= 85000 (plist-get (funcall last) :cache-read)))
+      (should (= 5000 (plist-get (funcall last) :cache-write)))
+      (should (equal (plist-get (harness-call 'session/get id) :model)
+                     (plist-get (funcall last) :model)))
+      (should (numberp (plist-get (funcall last) :at)))
+      ;; Input already holds the cached tokens: the prompt is that input,
+      ;; not it plus the cache read again.
+      (harness-call 'session/usage-add id
+                    '(:input 100000 :cache-read 80000 :context 100000))
+      (should (= 100000 (plist-get (funcall last) :prompt)))
+      (should (= 80000 (plist-get (funcall last) :cache-read)))
+      ;; DeepSeek's prompt_tokens is hit and miss split: context is both.
+      (harness-call 'session/usage-add id
+                    '(:input 20000 :cache-read 80000 :context 100000))
+      (should (= 100000 (plist-get (funcall last) :prompt)))
+      (should (= 80000 (plist-get (funcall last) :cache-read)))
+      ;; It is kept with the session, as the provider reported it.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (= 100000 (plist-get (funcall last) :prompt)))
+      (should (= 80000 (plist-get (funcall last) :cache-read))))))
+
+(ert-deftest harness-session-usage-last-cache-unknown-is-not-zero ()
+  "A missing, null or unusable cache reading is unknown; a reported 0 is a miss.
+A request that sized a prompt is still the last completed one, and its
+sample says the reading is unavailable rather than inventing a hit rate
+of zero.  Zero itself, when the provider reports it, is kept."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (last (lambda ()
+                   (plist-get (plist-get (harness-call 'session/get id) :usage) :last-cache))))
+      ;; The provider said nothing of the cache.
+      (harness-call 'session/usage-add id '(:input 1000 :output 10 :context 1000))
+      (should (plist-member (funcall last) :cache-read))
+      (should-not (plist-get (funcall last) :cache-read))
+      (should-not (plist-get (funcall last) :cache-write))
+      ;; Null and no-token-count values are no reading either.
+      (harness-call 'session/usage-add id
+                    '(:input 1000 :output 10 :cache-read nil :cache-write nil :context 1000))
+      (should-not (plist-get (funcall last) :cache-read))
+      (harness-call 'session/usage-add id
+                    '(:input 1000 :output 10 :cache-read -5 :cache-write "10" :context 1000))
+      (should-not (plist-get (funcall last) :cache-read))
+      (should-not (plist-get (funcall last) :cache-write))
+      ;; A provider-reported zero is a miss, not an unknown.
+      (harness-call 'session/usage-add id
+                    '(:input 1000 :output 10 :cache-read 0 :cache-write 0 :context 1000))
+      (should (eql 0 (plist-get (funcall last) :cache-read)))
+      (should (eql 0 (plist-get (funcall last) :cache-write))))))
+
+(ert-deftest harness-session-usage-last-cache-zero-prompt-has-no-rate ()
+  "A completed request that sized no prompt keeps the zero, not a rate.
+The denominator is what the provider sized, so a sample with no prompt
+is unknown to the reader rather than a 0% hit."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (last (lambda ()
+                   (plist-get (plist-get (harness-call 'session/get id) :usage) :last-cache))))
+      (harness-call 'session/usage-add id '(:input 0 :output 0 :cache-read 0 :context 0))
+      (should (eql 0 (plist-get (funcall last) :prompt)))
+      (should (eql 0 (plist-get (funcall last) :cache-read))))))
+
+(ert-deftest harness-session-usage-last-cache-follows-the-last-request ()
+  "Repeated requests replace the sample; a tokenless record leaves it.
+A cache refresh counts usage but no conversation prompt, and cannot make
+the last completed request look older than it is."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (last (lambda ()
+                   (plist-get (plist-get (harness-call 'session/get id) :usage) :last-cache))))
+      (harness-call 'session/usage-add id '(:input 50000 :cache-read 50000 :context 100000))
+      (should (= 50000 (plist-get (funcall last) :cache-read)))
+      (harness-call 'session/usage-add id '(:input 80000 :cache-read 20000 :context 100000))
+      (should (= 20000 (plist-get (funcall last) :cache-read)))
+      (harness-call 'session/usage-add id '(:input 10 :output 5 :cost 0.1))
+      (should (= 20000 (plist-get (funcall last) :cache-read)))
+      (should (= 100000 (plist-get (funcall last) :prompt))))))
+
+(ert-deftest harness-session-usage-last-cache-clears-on-a-reset ()
+  "A conversation that starts over has no completed request to report.
+A compaction or a reverted compaction clears the sample with the cache
+stamp; a redaction's provider reset clears it too."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (usage (lambda () (plist-get (harness-call 'session/get id) :usage))))
+      (harness-call 'session/usage-add id '(:input 10000 :cache-read 90000 :context 100000))
+      (should (plist-get (funcall usage) :last-cache))
+      (harness-call 'session/usage-add id '(:input 10 :output 5 :context 100 :cache-reset t))
+      (should-not (plist-member (funcall usage) :last-cache))
+      ;; A request after the reset is a new conversation's first.
+      (harness-call 'session/usage-add id '(:input 100 :cache-read 0 :context 100))
+      (should (eql 0 (plist-get (plist-get (funcall usage) :last-cache) :cache-read)))
+      ;; The redaction reset drops the provider conversation, so the
+      ;; completed request that went before it says nothing of this one.
+      (harness-call 'session/reset-provider id)
+      (should-not (plist-member (funcall usage) :last-cache)))))
+
+(ert-deftest harness-session-usage-last-cache-marks-a-hosted-turn ()
+  "A hosted loop's turn total is no request-level rate, and says so.
+Its `:context' is the last request's prompt while its cache count sums
+the turn's requests, so the sample keeps the raw reading and `:hosted'
+for the reader to refuse.  A provider that reports each request keeps
+the ordinary sample even when its model is a hosted loop."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (last (lambda ()
+                   (plist-get (plist-get (harness-call 'session/get id) :usage) :last-cache))))
+      (cl-letf (((symbol-function 'harness-session--hosted-loop-p)
+                 (lambda (_model) t)))
+        (harness-call 'session/usage-add id '(:input 1000 :cache-read 900 :context 2000))
+        (should (harness-json-true-p (plist-get (funcall last) :hosted)))
+        (should (= 900 (plist-get (funcall last) :cache-read)))
+        (should (= 2000 (plist-get (funcall last) :prompt)))
+        ;; A record that sizes no prompt leaves it.
+        (harness-call 'session/usage-add id '(:input 5 :output 2))
+        (should (harness-json-true-p (plist-get (funcall last) :hosted)))))))
+
 (ert-deftest harness-session-usage-note-adds-the-streamed-totals ()
   "`session/usage-note' adds the two streamed totals and nothing else, in a
 new plist each time.  Usage records keep them as they find them, a restart

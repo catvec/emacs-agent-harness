@@ -1223,6 +1223,135 @@ state as the tooltip."
           (should (string-match-p "never waits for you.*mouse-1: make it interactive"
                                   (get-text-property pos 'help-echo line))))))))
 
+(ert-deftest harness-ui-chat-header-shows-the-observed-cache-rate ()
+  "The header shows the last completed request's cache read over its prompt.
+It updates with each request, names the window in its text and the
+counts in its tooltip.  A session with no completed request has no
+figure -- not a zero rate -- and one whose request cannot give a rate
+reads `cache · last —'; a reset starts the conversation over."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Cache rate"))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let ((line (substring-no-properties (harness-chat--header most-positive-fixnum))))
+          (should-not (string-search "cache" line))
+          (should-not (string-search "0%" line))))
+      ;; One request: provider-reported cache read over the prompt it sized.
+      (harness-call 'session/usage-add sid
+                    '(:input 10000 :cache-read 85000 :cache-write 5000 :context 100000))
+      (harness-test-wait
+       (lambda () (with-current-buffer buf
+                    (string-search "cache · last 85%" (harness-chat--header most-positive-fixnum))))
+       5 "the observed cache rate")
+      (with-current-buffer buf
+        (let* ((line (harness-chat--header most-positive-fixnum))
+               (pos (string-search "cache · last 85%" (substring-no-properties line)))
+               (help (get-text-property pos 'help-echo line))
+               (help (if (functionp help) (funcall help nil nil pos) help)))
+          ;; The % is escaped for the header line and renders once.
+          (should (string-search "cache · last 85%%" (substring-no-properties line)))
+          ;; The segment carries the header-line escape, so its % is one
+          ;; literal, not a construct that would eat what follows.
+          (should (equal "cache · last 85%%"
+                         (harness-ui-mode-line-escape "cache · last 85%")))
+          (should (memq 'harness-context-ok-face (ensure-list (get-text-property pos 'face line))))
+          (should (string-match-p "85\\.0k of 100k prompt tokens" help))
+          (should (string-match-p "last completed request" help))
+          ;; It is the header's, beside the context, not the settings line.
+          (should (string-match-p "100k/" line))
+          (should-not (string-match-p "cache" (harness-ui-chat-test-settings-text)))))
+      ;; A repeated request replaces it, with the face of the new rate.
+      (harness-call 'session/usage-add sid '(:input 90000 :cache-read 10000 :context 100000))
+      (harness-test-wait
+       (lambda () (with-current-buffer buf
+                    (string-search "cache · last 10%" (harness-chat--header most-positive-fixnum))))
+       5 "the next cache rate")
+      (with-current-buffer buf
+        (let* ((line (harness-chat--header most-positive-fixnum))
+               (pos (string-search "cache · last 10%" (substring-no-properties line))))
+          (should (memq 'harness-context-critical-face
+                        (ensure-list (get-text-property pos 'face line))))))
+      ;; Zero prompt: no denominator, so no rate.
+      (harness-call 'session/usage-add sid '(:context 0 :cache-read 0))
+      (harness-test-wait
+       (lambda () (with-current-buffer buf
+                    (let ((line (substring-no-properties
+                                 (harness-chat--header most-positive-fixnum))))
+                      (and (string-search "cache · last —" line)
+                           (not (string-search "0%" line))))))
+       5 "the no-prompt state")
+      ;; A reset starts the conversation over: no completed request, and
+      ;; so no figure, never a zero one.
+      (harness-call 'session/usage-add sid '(:context 100 :cache-reset t))
+      (harness-test-wait
+       (lambda () (with-current-buffer buf
+                    (let ((line (substring-no-properties
+                                 (harness-chat--header most-positive-fixnum))))
+                      (and (not (string-search "cache" line))
+                           (not (string-search "0%" line))))))
+       5 "the cache sample to clear"))))
+
+(ert-deftest harness-ui-chat-header-keeps-the-cache-label-whole ()
+  "A narrow header drops the cache figure whole, never leaving a bare percentage.
+The label names its window and subject; what will not fit goes to the
+overflow control with its full text and tooltip.  The context stays.
+The same holds at every width, as the text-scaled header measures."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Cache widths"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-call 'session/usage-add sid '(:input 10000 :cache-read 85000 :context 100000))
+      (harness-test-wait
+       (lambda () (with-current-buffer buf
+                    (string-search "cache · last 85%" (harness-chat--header most-positive-fixnum))))
+       5 "the observed cache rate")
+      (with-current-buffer buf
+        (dolist (width '(200 80 60 50 40 30 20))
+          (let ((line (substring-no-properties (harness-chat--header width))))
+            (if (string-search "cache" line)
+                (should (string-search "cache · last 85%" line))
+              ;; No partial figure: the whole segment went.
+              (should-not (string-search "85%" line)))
+            (when (>= width 40)
+              (should (string-search "100k/" line)))))
+        ;; The segment is beside the context, in one order however wide.
+        (let ((line (substring-no-properties (harness-chat--header most-positive-fixnum))))
+          (should (< (string-search "100k/" line)
+                     (string-search "cache · last 85%" line))))))))
+
+(ert-deftest harness-ui-chat-header-cache-rate-follows-its-own-session ()
+  "Two chats keep their own rate; updating one leaves the other as it was.
+The figure is read from the session the buffer shows, so switching what
+the window displays can never leave the other session's rate behind."
+  (harness-ui-chat-test-with
+    (let* ((first (harness-ui-chat-test-session "Cache first"))
+           (second (harness-ui-chat-test-session "Cache second"))
+           (one (harness-ui-chat-test-open first))
+           (two (harness-ui-chat-test-open second)))
+      (harness-call 'session/usage-add first '(:input 10000 :cache-read 90000 :context 100000))
+      (harness-call 'session/usage-add second '(:input 70000 :cache-read 30000 :context 100000))
+      (harness-test-wait
+       (lambda () (and (with-current-buffer one
+                         (string-search "cache · last 90%" (harness-chat--header most-positive-fixnum)))
+                       (with-current-buffer two
+                         (string-search "cache · last 30%" (harness-chat--header most-positive-fixnum)))))
+       5 "both cache rates")
+      ;; Show each in turn: each header is its buffer's session's.
+      (save-window-excursion
+        (delete-other-windows)
+        (switch-to-buffer one)
+        (should (string-search "cache · last 90%" (harness-chat--header most-positive-fixnum)))
+        (switch-to-buffer two)
+        (should (string-search "cache · last 30%" (harness-chat--header most-positive-fixnum))))
+      ;; A new request in the first moves only the first.
+      (harness-call 'session/usage-add first '(:input 60000 :cache-read 40000 :context 100000))
+      (harness-test-wait
+       (lambda () (with-current-buffer one
+                    (string-search "cache · last 40%" (harness-chat--header most-positive-fixnum))))
+       5 "the first cache rate")
+      (with-current-buffer two
+        (should (string-search "cache · last 30%" (harness-chat--header most-positive-fixnum)))
+        (should-not (string-search "cache · last 40%" (harness-chat--header most-positive-fixnum)))))))
+
 (ert-deftest harness-ui-chat-settings-line-fits-the-window ()
   "In a narrow window the line drops its least important settings, the mode last.
 It is fitted to the narrowest window showing the buffer, one column

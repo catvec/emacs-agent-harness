@@ -204,6 +204,14 @@ in a request.  Anything else compares with `equal'."
     (dolist (k path v)
       (setq v (and (listp v) (plist-get v k))))))
 
+(defun harness-token-count-p (value)
+  "Non-nil when VALUE is a token count a provider reported.
+That is a nonnegative number: zero is a reading (a miss, or a prompt
+with nothing cached), while a missing, null or other value is no
+reading at all -- unknown, which is not zero.  Providers use this to
+decide whether to put a cache field on a usage event."
+  (and (numberp value) (>= value 0)))
+
 (defun harness-plist-merge (&rest plists)
   "Merge PLISTS left to right; later keys win.  Return a fresh plist."
   (let (out)

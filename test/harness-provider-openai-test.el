@@ -678,6 +678,50 @@ not take `none' is asked for its weakest effort instead of failing."
                      :cost nil :billing api :context 100)
                    usage))))
 
+(ert-deftest harness-provider-openai-cache-reading-needs-a-token-count ()
+  "Only a nonnegative number is a cache reading; null and junk are unknown.
+DeepSeek's own sum says the total is the hits plus the misses, so a
+numeric miss and total give the hits when the hit field itself is
+unusable.  An ordinary endpoint gets no such arithmetic; a reported zero
+stays a reading, the miss it is."
+  (let ((endpoint '(:id testcache :base-url "https://chatgpt.example/backend-api/codex/v1"))
+        (deepseek '(:id testcache-ds :base-url "https://llm.example/v1" :flavor deepseek)))
+    ;; Total and miss, no hit: DeepSeek's arithmetic gives the hits.
+    (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
+                     :cost nil :billing api :context 100)
+                   (harness-openai--usage-event
+                    '(:prompt_tokens 100 :completion_tokens 7
+                      :prompt_cache_hit_tokens nil :prompt_cache_miss_tokens 20)
+                    deepseek)))
+    ;; Null and no-token-count fields on an ordinary endpoint: no reading,
+    ;; and no arithmetic from a miss field that endpoint does not bill by.
+    (dolist (usage '((:prompt_tokens 100 :completion_tokens 7
+                      :prompt_tokens_details (:cached_tokens nil))
+                     (:prompt_tokens 100 :completion_tokens 7
+                      :prompt_tokens_details (:cached_tokens "80"))
+                     (:prompt_tokens 100 :completion_tokens 7
+                      :prompt_cache_hit_tokens nil)
+                     (:prompt_tokens 100 :completion_tokens 7
+                      :prompt_cache_hit_tokens -5)))
+      (let ((event (harness-openai--usage-event usage endpoint)))
+        (should-not (plist-member event :cache-read))
+        (should-not (plist-member event :cache-write))))
+    ;; A DeepSeek endpoint that reports no usable hit, miss or total half
+    ;; invents nothing either.
+    (let ((event (harness-openai--usage-event
+                  '(:prompt_tokens 100 :completion_tokens 7
+                    :prompt_cache_hit_tokens nil :prompt_cache_miss_tokens "20")
+                  deepseek)))
+      (should-not (plist-member event :cache-read))
+      (should (= 100 (plist-get event :input))))
+    ;; A reported zero is a miss, not an unknown.
+    (should (equal '(:type usage :input 100 :output 7 :cache-read 0 :cache-write 0
+                     :cost nil :billing api :context 100)
+                   (harness-openai--usage-event
+                    '(:prompt_tokens 100 :completion_tokens 7
+                      :prompt_cache_hit_tokens 0 :prompt_cache_miss_tokens 100)
+                    deepseek)))))
+
 (ert-deftest harness-provider-openai-text-answer-with-usage ()
   (harness-openai-test-with-fake
       `(("chat/completions"
@@ -1295,7 +1339,7 @@ never reported a plan keeps the per-token billing it had."
   (let ((endpoint '(:id testplanpaid :base-url "https://chatgpt.example/backend-api/codex/v1"))
         (usage '(:prompt_tokens 100 :completion_tokens 7)))
     (harness-provider-quota-forget 'testplanpaid)
-    (should (equal '(:type usage :input 100 :output 7 :cache-read 0 :cache-write 0
+    (should (equal '(:type usage :input 100 :output 7
                      :cost nil :billing api :context 100)
                    (harness-openai--usage-event usage endpoint)))
     (harness-provider-quota-publish
@@ -1304,7 +1348,7 @@ never reported a plan keeps the per-token billing it had."
       '(("x-codex-primary-used-percent" . "41")
         ("x-codex-primary-window-minutes" . "300")
         ("x-codex-plan-type" . "plus"))))
-    (should (equal '(:type usage :input 100 :output 7 :cache-read 0 :cache-write 0
+    (should (equal '(:type usage :input 100 :output 7
                      :cost 0.0 :billing subscription :plan "plus" :context 100)
                    (harness-openai--usage-event usage endpoint)))
     (harness-provider-quota-forget 'testplanpaid)))

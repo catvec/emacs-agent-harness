@@ -969,6 +969,25 @@ redacted.  A request that stamps a cache, one that used none, and a
 compaction (`:cache-reset`) clear `:cache-dropped`; a record without
 tokens leaves it.
 
+`:last-cache` is how much of its prompt the session's last completed
+request read from the provider's cache: (:prompt N :cache-read N
+:cache-write N :model MODEL :at TIME), from the usage record that sized
+that prompt (`harness-session--usage-with-last-cache`).  `:prompt` is
+the record's `:context`, the provider's own total with cached tokens
+included, so a provider counted its input one way or the other no token
+is twice in the share; a reading that is missing, null or no token
+count is nil, not zero.  A hosted loop's turn record covers several
+requests -- its `:cache-read` sums them while its `:context` is the last
+one's prompt -- so the value carries `:hosted`, and no request-level
+rate is read from it.  A record without a context (a cache refresh)
+leaves it, a `:cache-reset` (compaction, revert) clears it, and so does
+`session/reset-provider`, whose next conversation has made no request.
+The chat header shows it beside the context figure (`ui`, the observed
+cache rate); the `cache` module's health watcher and the cold-cache
+panel read other things -- `cache/reuse` compares a request with the
+previous prompt, and `:cache` is when the cache lapses -- so this is
+neither a warmth inference nor an expiry heuristic.
+
 `:context-window` is looked up in the model catalogue (`provider/model`)
 each time the session is described, so it follows the catalogue; only
 `:context-window-override` is stored.  A copy of the catalogue's window

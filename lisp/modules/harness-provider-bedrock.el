@@ -2257,18 +2257,24 @@ The next request of the tool loop must send that reasoning back."
 
 (defun harness-bedrock--usage-event (usage)
   "Build the usage event from a Converse USAGE object.
-Bedrock bills per token; its input count leaves out cached tokens."
-  (let ((input (or (plist-get usage :inputTokens) 0))
-        (cache-read (or (plist-get usage :cacheReadInputTokens) 0))
-        (cache-write (or (plist-get usage :cacheWriteInputTokens) 0)))
-    (list :type 'usage
-          :input input
-          :output (or (plist-get usage :outputTokens) 0)
-          :cache-read cache-read
-          :cache-write cache-write
-          :cost nil
-          :billing 'api
-          :context (+ input cache-read cache-write))))
+Bedrock bills per token; its input count leaves out cached tokens.  A
+model or gateway whose cache fields are missing, null or no token count
+leaves `:cache-read' and `:cache-write' out: the reading is unknown,
+which is no zero."
+  (let* ((input (or (plist-get usage :inputTokens) 0))
+         (reported-read (plist-get usage :cacheReadInputTokens))
+         (reported-write (plist-get usage :cacheWriteInputTokens))
+         (cache-read (and (harness-token-count-p reported-read) reported-read))
+         (cache-write (and (harness-token-count-p reported-write) reported-write)))
+    (append
+     (list :type 'usage
+           :input input
+           :output (or (plist-get usage :outputTokens) 0))
+     (and cache-read (list :cache-read cache-read))
+     (and cache-write (list :cache-write cache-write))
+     (list :cost nil
+           :billing 'api
+           :context (+ input (or cache-read 0) (or cache-write 0))))))
 
 (defun harness-bedrock--finish (stream reason &optional error)
   "End STREAM with stop REASON and optional ERROR text, emitting once.

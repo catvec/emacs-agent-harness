@@ -863,30 +863,55 @@ and say `subscription', as Claude Code's do
 the cached tokens, so they are split: `:input' counts the cache misses,
 `:cache-read' the hits, and `:context' both.  A DeepSeek endpoint is
 recognized by its flavor, by an official host, or by the cache fields
-the server reports."
-  (let* ((input (or (plist-get usage :prompt_tokens) 0))
-         (hit (or (plist-get usage :prompt_cache_hit_tokens)
-                  (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens))
-                  0))
-         (miss (or (plist-get usage :prompt_cache_miss_tokens)
-                   (max 0 (- input hit))))
+the server reports.  Only a nonnegative number is a reading: a cache
+field that is missing, null or otherwise unusable leaves `:cache-read'
+and `:cache-write' out -- unknown, which is no zero, as a reader can
+tell (`harness-provider-check' asks for it the same way).  DeepSeek's
+own sum says `prompt_tokens' is the hits plus the misses, so a numeric
+miss and total give the hits when the hit field itself is unusable;
+nothing is inferred on an endpoint that is not billed that way."
+  (let* ((raw-input (plist-get usage :prompt_tokens))
+         (input (if (harness-token-count-p raw-input) raw-input 0))
+         (details (plist-get usage :prompt_tokens_details))
+         (cached (and (listp details) (plist-get details :cached_tokens)))
+         (hit-field (plist-get usage :prompt_cache_hit_tokens))
+         (miss-field (plist-get usage :prompt_cache_miss_tokens))
          (cost (plist-get usage :cost))
          (plan (harness-openai--plan-status endpoint))
          (deepseek (or (harness-openai--deepseek-p endpoint)
-                       (harness-openai--deepseek-usage-p usage))))
+                       (harness-openai--deepseek-usage-p usage)))
+         (hit (cond ((harness-token-count-p hit-field) hit-field)
+                    ((harness-token-count-p cached) cached)
+                    ;; DeepSeek's arithmetic, and only its: the total is
+                    ;; the hits plus the misses, both reported.
+                    ((and deepseek
+                          (harness-token-count-p miss-field)
+                          (harness-token-count-p raw-input)
+                          (<= miss-field raw-input))
+                     (- raw-input miss-field))
+                    (t nil)))
+         (miss (cond ((harness-token-count-p miss-field) miss-field)
+                     ((and (harness-token-count-p hit)
+                           (harness-token-count-p raw-input)
+                           (<= hit raw-input))
+                      (- raw-input hit))
+                     ;; No hit reading at all: every counted token missed,
+                     ;; as the endpoint bills them.
+                     ((harness-token-count-p raw-input) raw-input)
+                     (t 0))))
     (append
      (list :type 'usage
            :input (if deepseek miss input)
-           :output (or (plist-get usage :completion_tokens) 0)
-           :cache-read (if deepseek hit (or (harness-plist-get-in usage '(:prompt_tokens_details :cached_tokens)) 0))
-           :cache-write 0)
+           :output (or (plist-get usage :completion_tokens) 0))
+     (and (harness-token-count-p hit)
+          (list :cache-read hit :cache-write 0))
      (if plan
          ;; The plan pays, as it does for Claude Code: the call is not
          ;; billed, and its value at API prices is priced from the
          ;; catalogue (`session/usage-add').
          (list :cost 0.0 :billing 'subscription :plan (plist-get plan :plan))
        (list :cost (and (numberp cost) cost) :billing 'api))
-     (list :context (if deepseek (+ miss hit) input)))))
+     (list :context (if deepseek (+ miss (or hit 0)) input)))))
 
 (defconst harness-openai--transport-patterns
   (concat "connection reset\\|recv failure\\|send failure\\|empty reply\\|broken pipe"

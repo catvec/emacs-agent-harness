@@ -3090,6 +3090,118 @@ marks the figures that are partly estimated."
     (should (equal "1.8k/200k" (substring-no-properties (harness-ui-format-context session))))
     (should (equal "860 out" (substring-no-properties (harness-ui-format-output session))))))
 
+;;;; Observed cache rate
+
+(defun harness-ui-test--cache-session (sample &optional status)
+  "Return a session plist whose usage holds cache SAMPLE, in STATUS."
+  (list :id "cache-test" :model "deepseek-chat" :status (or status "idle")
+        :usage (and sample (list :last-cache sample))))
+
+(defun harness-ui-test--cache-help (text)
+  "Return the whole `help-echo' of the cache figure TEXT."
+  (let ((help (get-text-property 0 'help-echo text)))
+    (if (functionp help) (funcall help nil nil 0) help)))
+
+(ert-deftest harness-ui-cache-rate-figure-is-the-last-request-over-its-prompt ()
+  "The figure reads the last completed request's cache read over its prompt.
+The label names the window and the number; the tooltip names the
+provider-reported counts, the model and the moment, with no sentence."
+  (let* ((at (float-time))
+         (text (harness-ui-format-cache-rate
+                (harness-ui-test--cache-session
+                 (list :prompt 100000 :cache-read 85000 :cache-write 5000
+                       :model "deepseek-chat" :at at))))
+         (help (harness-ui-test--cache-help text)))
+    (should (equal "cache · last 85%" (substring-no-properties text)))
+    (should (memq 'harness-context-ok-face (ensure-list (get-text-property 0 'face text))))
+    (should (string-match-p "Provider-reported cache read 85%" help))
+    (should (string-match-p "last completed request" help))
+    (should (string-match-p "85\\.0k of 100k prompt tokens" help))
+    (should (string-match-p "5\\.0k prompt tokens written to cache" help))
+    (should (string-match-p "model deepseek-chat" help))
+    (should (string-match-p (regexp-quote (harness-ui-format-clock at)) help))
+    ;; Noun phrases one line: no sentence punctuation and no newline.
+    (should-not (string-match-p "\n" help))
+    (should-not (string-match-p "\\. \\|\\.\\'" help)))
+  ;; The exact rendered copy, with no clock to vary it.
+  (let* ((text (harness-ui-format-cache-rate
+                (harness-ui-test--cache-session
+                 (list :prompt 100000 :cache-read 85000 :model "m"))))
+         (help (harness-ui-test--cache-help text)))
+    (should (equal "Provider-reported cache read 85% · last completed request · 85.0k of 100k prompt tokens · model m"
+                   help)))
+  ;; A rate the provider over-reports is shown clamped, the raw counts kept.
+  (let* ((text (harness-ui-format-cache-rate
+                (harness-ui-test--cache-session
+                 (list :prompt 100000 :cache-read 120000 :model "m" :at (float-time)))))
+         (help (harness-ui-test--cache-help text)))
+    (should (equal "cache · last 100%" (substring-no-properties text)))
+    (should (string-match-p "120k of 100k prompt tokens" help))
+    (should (string-match-p "cache read above prompt" help))))
+
+(ert-deftest harness-ui-cache-rate-figure-says-which-unknown-it-is ()
+  "An unavailable rate is a dash, never a zero: the tooltip says why.
+A session with no completed request has nothing measured and no figure,
+as one that wrote nothing has none.  A hosted loop's turn total, a
+request that sized no prompt and one that reported no cache tokens are
+all unavailable; each has its own words and the dim face."
+  (should-not (harness-ui-format-cache-rate (harness-ui-test--cache-session nil)))
+  (dolist (case (list (list '(:prompt 100000 :cache-read 90000 :hosted t)
+                            "Hosted provider turn totals · no request-level cache rate")
+                      (list '(:prompt 0 :cache-read 0)
+                            "Last completed request without prompt tokens · cache rate unavailable")
+                      (list '(:prompt 1000 :cache-read nil)
+                            "Last completed request without cache tokens · cache rate unavailable")
+                      (list '(:prompt 1000 :cache-read -1)
+                            "Last completed request without cache tokens · cache rate unavailable")))
+    (let* ((session (harness-ui-test--cache-session (nth 0 case)))
+           (text (harness-ui-format-cache-rate session))
+           (help (harness-ui-test--cache-help text)))
+      (should (equal "cache · last —" (substring-no-properties text)))
+      (should (memq 'harness-dim-face (ensure-list (get-text-property 0 'face text))))
+      (should (equal (nth 1 case) help))
+      (should-not (string-match-p "0%" (substring-no-properties text))))))
+
+(ert-deftest harness-ui-cache-rate-faces-watch-the-shown-percentage ()
+  "The cache threshold bands are judged on the percentage the header shows.
+A high hit is calm, a low one urgent; near a boundary the number and the
+colour agree.  An unknown rate has no fraction and no band."
+  (dolist (case '((0 . harness-context-critical-face)
+                  (0.19 . harness-context-critical-face)
+                  (0.20 . harness-context-urgent-face)
+                  (0.49 . harness-context-urgent-face)
+                  (0.50 . harness-context-warning-face)
+                  (0.79 . harness-context-warning-face)
+                  (0.80 . harness-context-ok-face)
+                  (1.0 . harness-context-ok-face)))
+    (should (eq (cdr case) (harness-ui-cache-rate-face (car case)))))
+  ;; Rounded to the shown percentage first: 79.5% reads as 80% and takes
+  ;; the 80% face, so no figure says 80% in the warning colour.
+  (should (eq 'harness-context-ok-face (harness-ui-cache-rate-face 0.795)))
+  (should (eq 'harness-context-urgent-face (harness-ui-cache-rate-face 0.195)))
+  (should (eq 'harness-context-warning-face (harness-ui-cache-rate-face 0.495))))
+
+(ert-deftest harness-ui-cache-rate-figure-stays-the-last-completed-request ()
+  "While a turn runs, the figure is still the last completed request's.
+The tooltip says a request is in flight, so the number does not read as
+the running one's; the label itself does not move."
+  (let* ((session (harness-ui-test--cache-session
+                   (list :prompt 100000 :cache-read 90000 :model "m")
+                   "running"))
+         (text (harness-ui-format-cache-rate session))
+         (help (harness-ui-test--cache-help text)))
+    (should (equal "cache · last 90%" (substring-no-properties text)))
+    (should (equal "Provider-reported cache read 90% · last completed request · 90.0k of 100k prompt tokens · model m · turn in progress"
+                   help))
+    (should (string-match-p "turn in progress\\'" help))
+    ;; A prompt this UI sent, not yet answered, counts too.
+    (let ((harness-ui--prompts (make-hash-table :test 'equal)))
+      (puthash "cache-test" t harness-ui--prompts)
+      (let* ((idle (harness-ui-test--cache-session
+                    (list :prompt 100000 :cache-read 90000 :model "m")))
+             (help (harness-ui-test--cache-help (harness-ui-format-cache-rate idle))))
+        (should (string-match-p "turn in progress\\'" help))))))
+
 (ert-deftest harness-ui-context-limit-state-names-the-cap ()
   "How the token figure's window is limited, and by what.
 A sub-agent's kind says a sub-agent's cap, the tasks module's own cap

@@ -2154,6 +2154,36 @@ there, which estimates fall back to.")
           ((>= f 0.70) 'harness-context-warning-face)
           (t 'harness-context-ok-face))))
 
+(defconst harness-ui-cache-rate-good 0.80
+  "Cache read share from which the header calls a request a healthy hit.
+A conversation that goes on reuses its cached prefix almost whole, so
+four fifths of the prompt read from the cache is the ordinary case.  The
+bands below are the context indicator's faces, turned the other way
+round: a high hit is never dressed as high context pressure.")
+
+(defconst harness-ui-cache-rate-fair 0.50
+  "Cache read share below which the header warns about the rate.
+Half the prompt read from the cache is a partial reuse: the request
+changed early, or part of the prefix was gone.")
+
+(defconst harness-ui-cache-rate-poor 0.20
+  "Cache read share below which the header marks the rate urgent.
+Little of the prompt came from the cache, a near miss rather than a
+conversation carrying its prefix along.")
+
+(defun harness-ui-cache-rate-face (fraction)
+  "Return the face for FRACTION of a request's prompt read from the cache.
+The bands are `harness-ui-cache-rate-good', `-fair' and `-poor'; they
+are judged on the percentage the header shows, so the number and the
+colour never disagree at a boundary.  A rate is not a pressure: the
+higher it is, the calmer the face.  An unknown rate has no fraction and
+belongs to `harness-dim-face', never to the zero rate's face."
+  (let ((percent (round (* 100 (max 0 (min 1 (or fraction 0)))))))
+    (cond ((>= percent 80) 'harness-context-ok-face)
+          ((>= percent 50) 'harness-context-warning-face)
+          ((>= percent 20) 'harness-context-urgent-face)
+          (t 'harness-context-critical-face))))
+
 (defun harness-ui-mode-line-escape (string)
   "Return a copy of STRING for a mode or header line, every % doubled.
 Those lines read % as the start of a construct such as %b, so a literal
@@ -2482,6 +2512,126 @@ asked for (`harness-ui-session-help-function')."
                 'mouse-face 'highlight
                 'keymap harness-ui-context-limit-map
                 'harness-context-session (plist-get session :id))))
+
+;;;; The observed cache rate
+;;
+;; The header shows what the provider said of the session's last
+;; completed request: the cache-read tokens of that request over its
+;; prompt (both provider-reported, in the session's `:usage'
+;; `:last-cache').  The prompt is the provider's own total, cached tokens
+;; included, so a provider whose input count already holds the cached
+;; part is not counted twice (Responses) and one whose input leaves it
+;; out is not undercounted (Claude, Bedrock).  Nothing here infers a
+;; rate from the cache's lifetime, from the `cache/reuse' event's
+;; previous-prompt ratio, or from warmth: no completed request has no
+;; figure, while a hosted loop's turn total and a request that reported
+;; no cache tokens are unknown, shown as a dash and never as 0%.
+
+(defun harness-ui-session-cache-rate (session)
+  "Return SESSION's last completed request's cache reading, or nil.
+The value is the session usage's `:last-cache'
+\(see `harness-session--usage-with-last-cache'):
+\(:prompt N :cache-read N :cache-write N :model MODEL :at TIME), with
+`:hosted' for a hosted loop's turn total.  It is provider-reported
+usage, kept raw; nil means no completed request has been recorded."
+  (plist-get (plist-get session :usage) :last-cache))
+
+(defun harness-ui-cache-rate-state (sample)
+  "Return (STATE . FRACTION) for cache reading SAMPLE.
+STATE is `known' with the request's cache-read share as FRACTION, or
+why no rate can be had: `none' for no completed request, `hosted' for a
+hosted loop's turn total, `no-prompt' for a request that sized no
+prompt, and `no-cache' for one that reported no cache tokens."
+  (cond
+   ((null sample) (cons 'none nil))
+   ((harness-json-true-p (plist-get sample :hosted)) (cons 'hosted nil))
+   ((not (harness-token-count-p (plist-get sample :prompt))) (cons 'no-prompt nil))
+   ((zerop (plist-get sample :prompt)) (cons 'no-prompt nil))
+   ((not (harness-token-count-p (plist-get sample :cache-read))) (cons 'no-cache nil))
+   (t (cons 'known
+            (max 0.0 (min 1.0 (/ (float (plist-get sample :cache-read))
+                                 (plist-get sample :prompt))))))))
+
+(defun harness-ui-session-turning-p (session)
+  "Non-nil when SESSION runs a turn, or has an unanswered prompt here."
+  (or (equal (plist-get session :status) "running")
+      (and (harness-ui-prompt-in-flight-p (plist-get session :id)) t)))
+
+(defun harness-ui-cache-rate-help (sample state fraction &optional turning)
+  "Return the one-line tooltip of cache reading SAMPLE.
+STATE and FRACTION are what `harness-ui-cache-rate-state' returned.
+TURNING says the session has a request in flight: the figure stays that
+of the last completed request, and the tooltip says so instead of
+letting it read as the running one's.  The parts are noun phrases; an
+unknown reading says which one it is, never that it was zero."
+  (harness-ui-one-line
+   (string-join
+    (append
+     (pcase state
+       ('known
+        (append
+         (list (format "Provider-reported cache read %d%%"
+                       (round (* 100 fraction))))
+         (list "last completed request")
+         (list (format "%s of %s prompt tokens"
+                       (harness-format-tokens (plist-get sample :cache-read))
+                       (harness-format-tokens (plist-get sample :prompt))))
+         (let ((write (plist-get sample :cache-write)))
+           (and (numberp write) (> write 0)
+                (list (format "%s prompt tokens written to cache"
+                              (harness-format-tokens write)))))
+         (and (> (plist-get sample :cache-read) (plist-get sample :prompt))
+              (list "cache read above prompt"))
+         (let ((model (plist-get sample :model)))
+           (and (stringp model) (not (string-empty-p model))
+                (list (format "model %s" model))))
+         (let ((at (plist-get sample :at)))
+           (and (numberp at) (list (harness-ui-format-clock at))))))
+       ('none (list "No completed request" "cache rate unavailable"))
+       ('hosted (list "Hosted provider turn totals"
+                      "no request-level cache rate"))
+       ('no-prompt (list "Last completed request without prompt tokens"
+                         "cache rate unavailable"))
+       ('no-cache (list "Last completed request without cache tokens"
+                        "cache rate unavailable")))
+     (and turning (list "turn in progress")))
+    " \N{U+00B7} ")))
+
+(defun harness-ui--cache-rate-help (session)
+  "Return the tooltip of SESSION's cache rate figure."
+  (let* ((sample (harness-ui-session-cache-rate session))
+         (state (harness-ui-cache-rate-state sample)))
+    (harness-ui-cache-rate-help sample (car state) (cdr state)
+                                (harness-ui-session-turning-p session))))
+
+(defun harness-ui-format-cache-rate (session &optional lazy)
+  "Return SESSION's observed cache rate as \"cache · last 82%\", or nil.
+The rate is the provider-reported cache read of the last completed
+request over its prompt, both from the session's usage
+\(`harness-ui-session-cache-rate'); the face is
+`harness-ui-cache-rate-face'.  A session with no completed request has
+nothing measured and no figure, as one that wrote nothing has no output
+figure; one whose completed request cannot give a request-level rate --
+a hosted loop's turn total, no cache tokens, no prompt -- reads
+\"cache · last —\" in the dim face.  Unknown is not a zero rate.  With
+LAZY the tooltip is made when it is asked for
+\(`harness-ui-session-help-function')."
+  (let* ((sample (harness-ui-session-cache-rate session))
+         (state (harness-ui-cache-rate-state sample))
+         (known (eq (car state) 'known)))
+    (unless (eq (car state) 'none)
+      (propertize
+       (if known
+           (format "cache \N{U+00B7} last %d%%" (round (* 100 (cdr state))))
+         "cache \N{U+00B7} last \N{U+2014}")
+       'face (if known
+                 (harness-ui-cache-rate-face (cdr state))
+               'harness-dim-face)
+       'help-echo (if lazy
+                      (harness-ui-session-help-function session #'harness-ui--cache-rate-help)
+                    (harness-ui-cache-rate-help
+                     sample (car state) (cdr state)
+                     (harness-ui-session-turning-p session)))))))
 
 (defun harness-ui--output-help (session)
   "Return the tooltip of SESSION's output figure."

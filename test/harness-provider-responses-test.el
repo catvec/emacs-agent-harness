@@ -890,6 +890,25 @@ the record from the catalogue, and a plan-covered call is free either way."
       ;; prompt as it is, not the prompt plus the part that was cached.
       (should (= 120 (plist-get usage :context))))))
 
+(ert-deftest harness-provider-responses-cache-reading-needs-a-token-count ()
+  "Only a nonnegative number is a cache reading; null and junk are unknown.
+The context stays the route's `input_tokens', with the cached part
+already in it, whether the details report it or not."
+  (let ((usage (lambda (details)
+                 (harness-responses--usage-event
+                  (list :input_tokens 120 :output_tokens 30 :input_tokens_details details)))))
+    (should (equal '(:type usage :input 120 :output 30 :cache-read 64
+                     :cost 0.0 :billing subscription :context 120 :last-output 30)
+                   (funcall usage '(:cached_tokens 64))))
+    (should (equal '(:type usage :input 120 :output 30 :cache-read 0
+                     :cost 0.0 :billing subscription :context 120 :last-output 30)
+                   (funcall usage '(:cached_tokens 0))))
+    (dolist (details '((:cached_tokens nil) (:cached_tokens "64") (:cached_tokens -1) ()))
+      (let ((event (funcall usage details)))
+        (should-not (plist-member event :cache-read))
+        (should-not (plist-member event :cache-write))
+        (should (= 120 (plist-get event :context)))))))
+
 (ert-deftest harness-provider-responses-completed-without-a-call-ends-the-turn ()
   "A response that called nothing ends the turn, having streamed its text."
   (harness-responses-test-with-fake

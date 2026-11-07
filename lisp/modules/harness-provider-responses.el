@@ -1290,22 +1290,31 @@ not bill it but the session's own accounting wants to know.  This route
 counts the cached tokens in `input_tokens' -- `cached_tokens' is a part
 of them, not an addition -- so `:context' is `input_tokens' as it is:
 adding the cached tokens would read a session as up to twice as full as
-it is and compact it at half its window."
-  (let ((input (or (plist-get usage :input_tokens) 0))
-        (output (or (plist-get usage :output_tokens) 0))
-        (cached (or (harness-plist-get-in usage '(:input_tokens_details :cached_tokens)) 0)))
-    (list :type 'usage
-          :input input
-          :output output
-          :cache-read cached
-          :cache-write (or (harness-plist-get-in usage '(:input_tokens_details :cache_write_tokens)) 0)
-          :cost 0.0
-          ;; Nothing is invented for the list price: `session/usage-add'
-          ;; prices the record from the model catalogue, which has no rates
-          ;; for this route, and a plan-covered call is free either way.
-          :billing 'subscription
-          :context input
-          :last-output output)))
+it is and compact it at half its window.  A response whose cache
+details are missing, null or no token count leaves `:cache-read' and
+`:cache-write' out: unknown, which is no zero."
+  (let* ((input (or (plist-get usage :input_tokens) 0))
+         (output (or (plist-get usage :output_tokens) 0))
+         (details (plist-get usage :input_tokens_details))
+         (cached (and (listp details) (plist-get details :cached_tokens))))
+    (append
+     (list :type 'usage
+           :input input
+           :output output)
+     ;; A route that says nothing of the cache -- or says null or
+     ;; something no token count -- has an unknown reading, not a zero
+     ;; one: the key is left out.
+     (and (harness-token-count-p cached)
+          (list :cache-read cached))
+     (let ((write (and (listp details) (plist-get details :cache_write_tokens))))
+       (and (harness-token-count-p write) (list :cache-write write)))
+     (list :cost 0.0
+           ;; Nothing is invented for the list price: `session/usage-add'
+           ;; prices the record from the model catalogue, which has no rates
+           ;; for this route, and a plan-covered call is free either way.
+           :billing 'subscription
+           :context input
+           :last-output output))))
 
 (defun harness-responses--finish (stream reason &optional error kind)
   "End STREAM with stop REASON and optional ERROR of kind KIND, once.
