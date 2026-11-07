@@ -21,6 +21,7 @@ import '../state/quota_controller.dart';
 import '../state/session_controller.dart';
 import '../state/settings_controller.dart';
 import '../state/task_controller.dart';
+import '../state/workspace_controller.dart';
 import '../state/usage_controller.dart';
 import '../state/quick_search_history.dart';
 
@@ -173,6 +174,11 @@ class AppController extends ChangeNotifier {
   String? selectedProject;
   bool _projectChosen = false;
   TaskController? tasks;
+
+  /// The persistent workspace chat, when the harness offers it.  It is a
+  /// major surface of its own on desktop and on the phone; the shell adds
+  /// its tab only when [hasWorkspace].
+  WorkspaceController? workspace;
   UsageController? usage;
 
   /// Each provider's billing and plan quota, for the providers that report
@@ -284,6 +290,9 @@ class AppController extends ChangeNotifier {
       sessions.where((session) => needsAttention(session.id)).length;
 
   bool get hasTasks => capabilities?.tasks == true && tasks != null;
+
+  bool get hasWorkspace =>
+      capabilities?.workspace == true && workspace != null;
   bool get hasUsage => capabilities?.usage == true && usage != null;
   bool get hasQuota => capabilities?.quota == true && quota != null;
 
@@ -608,6 +617,10 @@ class AppController extends ChangeNotifier {
     if (capabilities?.tasks == true) {
       tasks = TaskController(api!);
       unawaited(tasks!.load(showSpinner: false));
+    }
+    if (capabilities?.workspace == true) {
+      workspace = WorkspaceController(api!);
+      unawaited(workspace!.load(showSpinner: false));
     }
     if (capabilities?.usage == true) {
       usage = UsageController(api!, roots: () => _roots);
@@ -1003,6 +1016,7 @@ class AppController extends ChangeNotifier {
     final event = asStringOr(notification.params['event'], '');
     final args = asList(notification.params['args']);
     tasks?.applyEvent(event, args);
+    workspace?.applyEvent(event, args);
     usage?.applyEvent(event, args);
     quota?.applyEvent(event, args);
     switch (event) {
@@ -1492,6 +1506,9 @@ class AppController extends ChangeNotifier {
     if (tasks != null) {
       unawaited(tasks!.reload(showSpinner: false));
     }
+    if (workspace != null) {
+      unawaited(workspace!.reload(showSpinner: false));
+    }
     if (usage != null) {
       unawaited(usage!.load(project: selectedProject, showSpinner: false));
     }
@@ -1510,6 +1527,9 @@ class AppController extends ChangeNotifier {
     if (service == null) return;
     if (capabilities?.tasks == true && tasks == null) {
       tasks = TaskController(service);
+    }
+    if (capabilities?.workspace == true && workspace == null) {
+      workspace = WorkspaceController(service);
     }
     if (capabilities?.usage == true && usage == null) {
       usage = UsageController(service);
@@ -1662,6 +1682,7 @@ class AppController extends ChangeNotifier {
     _resolvedMains.clear();
     _askedMains.clear();
     tasks = null;
+    workspace = null;
     usage = null;
     _stopQuota();
     server = null;

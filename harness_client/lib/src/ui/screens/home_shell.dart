@@ -18,6 +18,7 @@ import 'sessions_screen.dart';
 import 'settings_screen.dart';
 import 'tasks_screen.dart';
 import 'usage_screen.dart';
+import 'workspace_screen.dart';
 import 'server_screen.dart';
 
 class HomeShell extends StatefulWidget {
@@ -39,6 +40,13 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
       Icons.forum_outlined,
       CupertinoIcons.chat_bubble_2,
     ),
+    if (app.hasWorkspace)
+      const _Tab(
+        'workspace',
+        'Workspace',
+        Icons.workspaces_outline,
+        CupertinoIcons.square_grid_2x2,
+      ),
     if (app.hasTasks)
       const _Tab(
         'tasks',
@@ -152,6 +160,7 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
   Widget _screen(String id) {
     final app = widget.app;
     return switch (id) {
+      'workspace' => WorkspaceScreen(app: app, onOpenSession: _openSession),
       'tasks' => TasksScreen(app: app, onOpenSession: _openSession),
       'usage' => UsageScreen(app: app, onOpenSession: _openSession),
       'server' => ServerScreen(app: app),

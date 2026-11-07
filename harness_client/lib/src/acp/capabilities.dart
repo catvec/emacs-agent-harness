@@ -87,6 +87,25 @@ class HarnessCapabilities {
   bool get activity =>
       has('agent/activity') || hasEvent('agent/activity-changed');
   bool get tasks => has('task/list');
+
+  /// The persistent workspace chat: its list, one workspace, its timeline
+  /// and prompts.  A harness with only some of the workspace modules still
+  /// shows the tab when the core four are there.
+  bool get workspace =>
+      has('workspace/list') &&
+      has('workspace/get') &&
+      has('workspace/timeline') &&
+      has('workspace/prompt');
+
+  /// The workspace's computer.  The sandboxed box is staged; without this
+  /// the workspace shows a drawn preview and says so.
+  bool get workspaceComputer => has('workspace/box/status');
+
+  /// The workspace's first-class resources: its browser, wallet and access.
+  /// The methods answer `unavailable · box-staged` until the box and the
+  /// payment broker exist, so the surface shows what is blocked rather than
+  /// hiding it.
+  bool get workspaceResources => has('workspace/resources/status');
   bool get taskActions => has('task/start') && has('task/verify');
   bool get taskSubmit => has('task/submit');
   bool get usage => has('usage/totals') || has('usage/summary');
@@ -156,6 +175,16 @@ class HarnessCapabilities {
       'Task board',
       'Start, review and verify harness tasks',
       tasks,
+    ),
+    CapabilityFeature(
+      'Workspace',
+      'One persistent chat over threads and memory',
+      workspace,
+    ),
+    CapabilityFeature(
+      'Workspace computer',
+      'A desktop and browser the agent can use',
+      workspaceComputer,
     ),
     CapabilityFeature(
       'Usage',

@@ -7,6 +7,7 @@ An Emacs native harness for agentic development.
 - [Connect To A Harness Server Elsewhere](#connect-to-a-harness-server-elsewhere)
 - [Install](#install)
 - [Modules](#modules)
+- [Workspace mode (first slice)](#workspace-mode-first-slice)
 
 # Overview
 A powerful agentic LLM harness built in Emacs. 
@@ -262,6 +263,34 @@ A non-comprehensive list of all the different functionality offered by modules s
 - Configuration via customize
   - Global overridden by per-project (via `.dir-locals.el`)
   - Corporate policy profiles
+- Workspace mode (first slice)
+  - One persistent chat over topic threads, with fresh episodes instead of a compacted transcript
+  - A local SQLite memory of the turns, with full-text recall into the next brief
+  - The same compose box, tasks, sessions and sub-agents as a chat
+  - A `Workspace` tab in the Flutter client (a thread rail and a computer desk on a desktop, sheets on a phone), with a concept rail prototype and the VNC takeover motion
+  - A `Memory` page for the workspace's notes and recall search, and a smaller `Resources` page for browser data, wallet and bounded authorizations ([the model](docs/workspace-resources.md))
+  - Enable with `(harness-enable-modules :features workspace :ui ui-workspace)`; open with `M-x harness-workspace` or `C-c h Y`
+  - The Logseq graph, dreaming, the sandboxed computer, routines and voice are the staged design: [the design](docs/workspace-mode.md), [the implementation contract](docs/workspace-mode-implementation.md)
+
+# Workspace mode (first slice)
+
+Workspace mode is the persistent layer above task mode: one chat for
+daily life and harness work.  Messages route to a thread; a thread's
+live stretch is an ordinary session whose fresh brief comes from the
+workspace's memory, so context clears by topic rather than by
+compacting one window forever.  The first slice implements the chat,
+threads, episodes, routing, the brief, a local SQLite note memory with
+full-text recall, the memory tools, the Emacs workspace buffer, and the
+Flutter client's `Workspace` tab and its `Resources` page.  The full
+design is in
+[docs/workspace-mode.md](docs/workspace-mode.md); the modules, methods,
+events, UI copy, tests and staged plan are in
+[docs/workspace-mode-implementation.md](docs/workspace-mode-implementation.md).
+
+The Logseq graph, the scribe and dream, the sandboxed computer with its
+desktop and browser, the browser/wallet resources behind the client's
+`Resources` page, routines and voice are not implemented yet; they
+are the staged remainder of the design.
 
 # Private commit attribution
 

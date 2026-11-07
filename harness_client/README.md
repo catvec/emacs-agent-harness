@@ -1,5 +1,13 @@
 # Harness
 
+The client follows Hermes Desktop: a deep Nous-blue canvas (`#0A0B2E`),
+warm cream text (`#F4ECDD`), blue and cream accents, heavy tight headings,
+flat panels with square corners and 1 px rules, no shadows, and a halftone
+**dither** field instead of gradients.
+The palette is in `lib/src/ui/theme/harness_theme.dart`; `DitherPanel` in
+`lib/src/ui/widgets/dither.dart` draws the dot screen used by the memory and
+resources headers.
+
 A native, adaptive [Agent Client Protocol](https://agentclientprotocol.com)
 (ACP) client for the **emacs-agent-harness**. It is a standalone Flutter app:
 nothing here imports the Lisp tree, and the whole client is a normal ACP
@@ -120,6 +128,37 @@ time it opens. It asks again only when the harness does.
   | A clip conversation | The settings of either provider | The way in |
   |---|---|---|
   | ![The voice screen listening: the orb, what was said and what the agent answered, and Mute, Interrupt and End](screenshots/voice-listening.png) | ![Voice settings: Clip or Live, the delivery, and the fields of the chosen provider](screenshots/voice-settings.png) | ![A conversation, with the microphone in the message box](screenshots/voice-entry.png) |
+- **Keeps a workspace.** A `Workspace` tab appears when the harness has workspace
+  mode: one chat over threads that park and revive, its memory count, and the
+  agent's computer at the chat's edge. The page is the chat at every size -- a
+  thread rail and a computer desk with it on a desktop, sheets on a phone --
+  and a concept strip or rail shows the tags the workspace's threads share, so
+  a tap can narrow the chat to the threads a theme connects. See
+  [Workspace](#workspace).
+
+  | The workspace on a desktop | The workspace on a phone |
+  |---|---|
+  | ![The workspace: the thread rail, the chat with its brief and messages, the concept rail and the computer desk](screenshots/workspace-desktop.png) | ![The workspace on a phone: the concept strip, the timeline and the message box](screenshots/workspace-mobile.png) |
+- **Remembers.** The workspace's `Memory` page shows what the assistant kept:
+  the notes, the thread each came from, who said it and when, and a recall
+  search that highlights the matched words in place.  It is the long-lasting
+  knowledge side of the workspace, not a settings page.  See
+  [Memory](#memory).
+
+  | Memory on a phone | Memory on a desktop |
+  |---|---|
+  | ![The memory page: the notes with their threads and a recall search](screenshots/memory-phone.png) | ![The same on a desktop](screenshots/memory-desktop.png) |
+- **Keeps its resources in sight.** The desk's *Resources* page shows the box's
+  browser profile, its sites and saved logins (metadata and authenticated
+  state, never a cookie), the wallet's cards and the bounded purchase
+  authorizations, and what the agent may use of either, with an audit.  A
+  clear, a forgotten login or a revocation asks first; a box or payment
+  broker that is not there is said, not simulated.  See
+  [Resources](#resources).
+
+  | Resources on a phone | The wallet on a desktop |
+  |---|---|
+  | ![The resources page on a phone: the profile, its sites and the saved logins](screenshots/resources-phone.png) | ![The wallet: a card, a proposed $9.40 purchase and a $10 authorization](screenshots/resources-wallet-desktop.png) |
 - **Starts a demo where it runs.** A report's *Start demo* asks the
   harness to run that demo as the review knows it: the task's last report,
   the demo in it, and the workspace the demo belongs to. On a workspace it
@@ -1090,6 +1129,89 @@ entitlement on macOS.
 | The live provider | A wide screen |
 |---|---|
 | ![The voice screen on a live provider: Live at the top, the call listening](screenshots/voice-live.png) | ![The voice screen on a wide screen: the orb, the transcript and the controls in one column](screenshots/voice-wide.png) |
+
+## Workspace
+
+A `Workspace` tab appears beside Sessions when the harness advertises
+`workspace/*` (`HarnessCapabilities.workspace`, and `workspaceComputer` for the
+desk); against any other ACP agent the tab is not there. It is the client half
+of the harness's [workspace mode](../docs/workspace-mode.md): one chat over
+threads that park and revive, a brief that starts a new episode instead of a
+compaction, and memory behind it, all read through the same ACP connection as
+the rest of the app.
+
+The page is the chat, at every size:
+
+- **Phone**: a `Near` strip of the tags the workspace's threads share, the
+  timeline, the message box; threads and the computer open as sheets.
+- **Tablet**: the thread rail beside the chat and the strip above it.
+- **Desktop**: the thread rail, the chat (at most 920 wide), the concept rail,
+  and the computer desk side by side. A larger text scale widens the side
+  columns by a bounded amount, so the chat keeps a readable width.
+
+The computer desk draws the browser preview, the takeover pill and the footer.
+While the agent has control, a *Take over* pill sits at the window's foot; a
+tap moves it to the window's top edge and wraps a stroke around the window as
+it travels, and *Return control* unwinds it. The motion is disabled where the
+platform asks for reduced motion, and the state is in the pill's words and the
+control caption, not the green alone. *Call* opens the voice screen on the
+thread's live session, so a call is attached to the thread rather than to a
+session picked by hand.
+
+| The workspace on a desktop | The takeover, mid-motion | The workspace on a phone | The computer sheet, taken over |
+|---|---|---|---|
+| ![The workspace: the thread rail, the chat with its brief and messages, the concept rail and the computer desk](screenshots/workspace-desktop.png) | ![The takeover pill part-way up the window, a green stroke wrapping the window behind it](screenshots/workspace-desktop-takeover.png) | ![The workspace on a phone: the concept strip, the timeline and the message box](screenshots/workspace-mobile.png) | ![The computer in a sheet on a phone, the pill over the window](screenshots/workspace-mobile-takeover.png) |
+
+The concept rail is a prototype, and the app says so: a concept is a tag at
+the level of threads, not a node for every page or bullet. Choosing one
+narrows the thread rail and the timeline to the threads that carry it; that is
+the question the prototype asks -- whether the graph helps a person move
+between threads that belong together. The taxonomy itself is the dreaming
+process's to maintain; the client only draws the tags the workspace carries.
+
+## Memory
+
+The workspace's `Memory` page (the `Memory` action in the workspace header)
+shows the notes the assistant kept for the workspace, newest first, each with
+its thread, its author and its time.  The search is recall over the memory:
+a query returns the notes that match, best first, with the matched words
+marked in place.  `Clear` goes back to the newest.  The page is read-only;
+the memory itself is written by the turns and by the memory tools, and the
+dreaming process will curate it.
+
+It is the product's long-lasting knowledge side: the point is that the
+assistant can pick a thread back up after the context is gone.  The resources
+below are supporting material for computer use, not the centre of the page.
+
+## Resources
+
+The computer desk's *Resources* (and the same action in its sheet on a phone)
+opens the workspace's first-class resources, the same on both:
+
+- **Browser**: the box's Chromium profile, its sites with cookie, storage and
+  cache counts and whether they are signed in, and the saved logins.  Clearing
+  cookies or site data and forgetting a login name the site and ask first;
+  `Export…` and `Import…` are shown as the blocked contract they are.  No
+  cookie value, password or token is in the wire, the model or the page.
+- **Wallet**: cards as references (`Visa •••• 4242`, `09/2028`, never a
+  number), bounded purchase authorizations (amount and currency, cumulative or
+  per transaction, merchant scope, expiry, whether fees are inside the cap,
+  remaining and reserved) and a proposed purchase that needs `Allow` or
+  `Deny`.  The page says `Advisory · no broker`: there is no trusted payment
+  broker in this slice, so the bound is the person's rule, not an enforced
+  charge.
+- **Access**: what the agent may use of a site or an authorization, who owns
+  it, its scope and state, a revoke action where the contract exists, and the
+  audit history.
+
+The harness answers the resources methods with `unavailable · box-staged`
+until the box and the payment broker land; the page then says `Unavailable`
+and disables every action.  A preview says `Preview · no changes` and disables
+them too.  The `Credentials` tab is the harness's built-in secrets module:
+labels and fingerprints from `secret-sandbox`, a locked-run state, and never
+a value.  The model, the wallet invariants and the contract are in
+[workspace resources](../docs/workspace-resources.md); the Emacs client draws
+the same page with `C-c w R` from the workspace buffer.
 
 ## Markdown
 

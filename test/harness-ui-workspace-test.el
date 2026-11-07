@@ -1,0 +1,208 @@
+;;; harness-ui-workspace-test.el --- Tests for the workspace UI  -*- lexical-binding: t; -*-
+;;; Code:
+
+(require 'harness-test-helpers)
+
+(defvar harness-acp--server-enabled)
+(defvar harness-acp-token)
+(defvar harness-ui-map)
+(defvar harness-ui-event-functions)
+(defvar harness-ui-workspace--data)
+(defvar harness-ui-workspace--entries)
+(defvar harness-ui-workspace--id)
+(defvar harness-ui-workspace--memory)
+(defvar harness-ui-workspace--state)
+(defvar harness-ui-workspace--thread)
+
+(defmacro harness-ui-workspace-test-with (&rest body)
+  "Load the UI and the workspace front end, then run BODY."
+  (declare (indent 0))
+  `(harness-test-with-temp-state
+     (harness-test-reset-bus)
+     (let ((harness-acp--server-enabled nil)
+           (harness-acp-token nil))
+       (harness-test-load-module 'acp)
+       (harness-test-load-module 'ui)
+       (harness-test-load-module 'ui-chat)
+       (harness-test-load-module 'ui-compose)
+       (harness-test-load-module 'ui-workspace)
+       (unwind-protect (progn ,@body)
+         (harness-ui-workspace--shutdown)))))
+
+(defun harness-ui-workspace-test-data ()
+  "Return a workspace plist for the tests."
+  '(:id "w-1"
+    :name "Home"
+    :root "/tmp/workspace/"
+    :last-thread "th-1"
+    :threads ((:id "th-1" :title "Kitchen renovation" :state "live"
+                    :live "s-1" :episodes ("s-1") :pinned t :last-at 20.0)
+              (:id "th-2" :title "Harness memory" :state "parked"
+                    :live nil :episodes ("s-0") :pinned nil :last-at 10.0))))
+
+(defun harness-ui-workspace-test-entries ()
+  "Return timeline entries for the tests."
+  '((:kind "divider" :thread "th-1" :title "Kitchen renovation" :reason "new-thread")
+    (:kind "brief" :thread "th-1" :tokens 120)
+    (:kind "message" :thread "th-1" :role "user" :text "The tile is matte.")
+    (:kind "message" :thread "th-1" :role "assistant" :text "Noted.")))
+
+(defun harness-ui-workspace-test-render ()
+  "Render a test workspace in the current buffer and return its text."
+  (harness-ui-workspace-mode)
+  (setq harness-ui-workspace--id "w-1"
+        harness-ui-workspace--thread "th-1"
+        harness-ui-workspace--state 'ready
+        harness-ui-workspace--data (harness-ui-workspace-test-data)
+        harness-ui-workspace--entries (harness-ui-workspace-test-entries)
+        harness-ui-workspace--memory nil)
+  (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+    (harness-ui-workspace--render))
+  (buffer-string))
+
+(ert-deftest harness-ui-workspace-shows-the-one-chat ()
+  "The header, thread list, divider and messages render as one chat."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (let ((text (harness-ui-workspace-test-render)))
+        (should (string-match-p "Workspace · Home" text))
+        (should (string-match-p "Thread · Kitchen renovation" text))
+        (should (string-match-p "Tasks" text))
+        (should (string-match-p "New thread" text))
+        (should (string-match-p "Refresh" text))
+        (should (string-match-p "Threads" text))
+        (should (string-match-p "Kitchen renovation" text))
+        (should (string-match-p "Harness memory" text))
+        (should (string-match-p "New thread · Kitchen renovation" text))
+        (should (string-match-p "Brief · 120 tokens" text))
+        (should (string-match-p "You" text))
+        (should (string-match-p "The tile is matte." text))
+        (should (string-match-p "Agent" text))
+        (should (string-match-p "Noted." text))
+        (should (equal "Message…" (funcall harness-compose-placeholder-function)))))))
+
+(ert-deftest harness-ui-workspace-header-copy-and-tooltips ()
+  "The header's exact words and the buttons' tooltips are the inventory's."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--thread "th-1"
+            harness-ui-workspace--state 'ready
+            harness-ui-workspace--data (harness-ui-workspace-test-data)
+            harness-ui-workspace--entries nil
+            harness-ui-workspace--memory '(:notes 2))
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+        (harness-ui-workspace--render))
+      (goto-char (point-min))
+      (should (equal (buffer-substring-no-properties (line-beginning-position) (line-end-position))
+                     "Workspace · Home   Thread · Kitchen renovation   Memory · ready   Tasks New thread Open episode Stop Refresh Resources"))
+      (search-forward "Tasks")
+      (should (equal "The task board of this workspace" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "New thread")
+      (should (equal "Start a new topic" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "Refresh")
+      (should (equal "Read the workspace again" (get-text-property (1- (point)) 'help-echo))))))
+
+(ert-deftest harness-ui-workspace-empty-and-error-states ()
+  "The empty and failed workspace states say so in noun phrases."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--state 'ready
+            harness-ui-workspace--data (list :id "w-1" :name "Home" :threads nil)
+            harness-ui-workspace--entries nil)
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+        (harness-ui-workspace--render))
+      (should (string-match-p "No threads" (buffer-string)))
+      (should (string-match-p "No messages" (buffer-string)))
+      (setq harness-ui-workspace--state 'error
+            harness-ui-workspace--error "The harness is out of reach.")
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+        (harness-ui-workspace--render))
+      (should (string-match-p "Workspace · unavailable" (buffer-string)))
+      (should (string-match-p "Retry" (buffer-string))))))
+
+(ert-deftest harness-ui-workspace-sends-the-box-text ()
+  "Sending the compose box calls workspace/prompt with the thread."
+  (harness-ui-workspace-test-with
+    (let (sent)
+      (with-temp-buffer
+        (harness-ui-workspace-test-render)
+        (let ((inhibit-read-only t))
+          (harness-compose-insert "Please remember the matte tile."))
+        (cl-letf (((symbol-function 'harness-ui-call)
+                   (lambda (method params callback &optional _on-error)
+                     (push (list method params) sent)
+                     (funcall callback nil)))
+                  ((symbol-function 'harness-compose-fetch-completions) #'ignore))
+          (harness-ui-workspace-send))
+        (should (equal "_harness/workspace/prompt" (caar sent)))
+        (should (equal "w-1" (plist-get (cadar sent) :id)))
+        (should (equal "th-1" (plist-get (plist-get (cadar sent) :opts) :thread)))
+        (should (string-match-p "matte tile" (plist-get (cadar sent) :text)))))))
+
+(ert-deftest harness-ui-workspace-refuses-an-empty-message ()
+  "An empty send is a user error, not a turn."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (let ((inhibit-read-only t))
+        (harness-compose-insert ""))
+      (should-error (harness-ui-workspace-send) :type 'user-error))))
+
+(ert-deftest harness-ui-workspace-resources-render-shows-metadata-only ()
+  "The resources page shows labels and counts, never a value."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-resources-mode)
+      (setq harness-ui-workspace-resources--id "w-1"
+            harness-ui-workspace-resources--data
+            (list :status "ready"
+                  :metadata-only t
+                  :browser (list :profile (list :label "Home" :kind "Chromium" :sites 2)
+                                 :sites (list (list :origin "https://stoneco.example"
+                                                    :cookies 12 :auth "signed-in"
+                                                    :value "SESSION-VALUE"))
+                                 :logins nil)
+                  :wallet nil
+                  :credentials (list (list :label "deploy-key"
+                                           :fingerprint "4f9c2a1b" :usable t))
+                  :credentials-status (list :status "ready")
+                  :access nil :audit nil))
+      (harness-ui-workspace-resources--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Workspace resources" text))
+        (should (string-match-p "Metadata only" text))
+        (should (string-match-p "stoneco.example" text))
+        (should (string-match-p "12 cookies" text))
+        (should (string-match-p "deploy-key" text))
+        (should (string-match-p "Locked run · ready" text))
+        (should (string-match-p "Payment broker" text))
+        (should-not (string-match-p "SESSION-VALUE" text))))))
+
+(ert-deftest harness-ui-workspace-resources-render-says-what-is-missing ()
+  "An unavailable answer names the missing module, not a blank page."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-resources-mode)
+      (setq harness-ui-workspace-resources--id "w-1"
+            harness-ui-workspace-resources--data
+            (list :status "unavailable"
+                  :credentials nil
+                  :credentials-status (list :status "unavailable" :why "Masking off")
+                  :browser nil :wallet nil :access nil :audit nil))
+      (harness-ui-workspace-resources--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Unavailable" text))
+        (should (string-match-p "Masking off" text))
+        (should (string-match-p "No credentials" text))
+        (should (string-match-p "g · refresh" text))
+        (should (string-match-p "q · bury" text))))))
+
+(ert-deftest harness-ui-workspace-resources-has-a-key ()
+  "The workspace buffer opens the resources page with C-c w R."
+  (harness-ui-workspace-test-with
+    (should (eq (lookup-key harness-ui-workspace-mode-map (kbd "C-c w R"))
+                #'harness-ui-workspace-resources))))

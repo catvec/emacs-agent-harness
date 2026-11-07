@@ -110,6 +110,26 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-threads` | The session of the slow-request task after `[Keep working]`, `C-c T` pressed: the threads of its review -- one heading with the filter, `[New thread]` and `[Compose]`, the keys in one line, each comment with the `[Reply]` and `[Close]` buttons its header has elsewhere, one the user made, and a draft waiting with `[Send replies]` and `C-c C-c` -- where its compose box was. The board beside it has the task waiting for the reply that goes on with it. Taken last: it opens the thread if the review has none, gives it the draft, and the task waits for the reply | `harness-media-shot-chat-threads` |
 | `new-thread` | That threads view after `[New thread]`: the compose box back with a card that says "a new thread", no quote above the words, and the question typed under it, point in the box. Sent, it is the message the agent answers in the thread it starts | `harness-media-shot-new-thread` |
 
+## Pictures of the client
+
+The Flutter client's pictures are not drawn by `scripts/media.sh`.  Each
+area has a test that draws its screen with the real fonts, checks that
+nothing overflowed, and writes a PNG when `HARNESS_SHOTS` names a
+directory:
+
+```sh
+cd harness_client
+HARNESS_SHOTS=screenshots flutter test test/voice_screenshots_test.dart
+HARNESS_SHOTS=/tmp/shots flutter test test/workspace_screenshots_test.dart
+HARNESS_SHOTS=/tmp/shots flutter test test/resources_screenshots_test.dart
+```
+
+The client keeps its pictures in `harness_client/screenshots`, copied
+from such a run; `docs/media/workspace-client.png`,
+`workspace-client-phone.png` and the `resources-*.png` pictures, which
+the workspace pages show, are copied from those tests' output too.  Look at the file
+before committing it, as with the Emacs ones.
+
 ## How the pictures are made
 
 `scripts/media.sh` starts the display, makes a scratch HOME, and runs

@@ -4,6 +4,7 @@ import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../acp/capabilities.dart';
 import '../models/demo_session.dart';
+import '../models/memory.dart';
 import '../models/picture.dart';
 import '../models/quota.dart';
 import '../models/server_info.dart';
@@ -11,6 +12,8 @@ import '../models/session.dart';
 import '../models/task.dart';
 import '../models/tool_catalogue.dart';
 import '../models/usage.dart';
+import '../models/resources.dart';
+import '../models/workspace.dart';
 
 class SessionPage {
   const SessionPage(this.sessions, this.nextCursor);
@@ -827,5 +830,229 @@ class HarnessApi {
   void forgetTools() {
     _catalogue = null;
     _catalogueGeneration++;
+  }
+
+  // Workspace mode.  The harness's workspace methods are read through the
+  // same `_harness` extension as every other feature; a harness without them
+  // never offers the tab (see `HarnessCapabilities.workspace`).
+
+  Future<WorkspaceSummary> createWorkspace(String name) async {
+    return WorkspaceSummary.fromWire(
+      await extension('workspace/create', {'name': name}),
+    );
+  }
+
+  Future<List<WorkspaceSummary>> workspaces() async {
+    final result = await extensionRaw('workspace/list', const {});
+    return [
+      for (final wire in asMapList(result)) WorkspaceSummary.fromWire(wire),
+    ];
+  }
+
+  Future<WorkspaceSummary> workspace(String id) async {
+    return WorkspaceSummary.fromWire(
+      await extension('workspace/get', {'id': id}),
+    );
+  }
+
+  Future<List<WorkspaceEntry>> workspaceTimeline(
+    String id, {
+    int limit = 400,
+    String? thread,
+  }) async {
+    final result = await extensionRaw('workspace/timeline', {
+      'id': id,
+      'opts': {
+        'limit': limit,
+        if (thread != null && thread.isNotEmpty) 'thread': thread,
+      },
+    });
+    return [
+      for (final wire in asMapList(result)) WorkspaceEntry.fromWire(wire),
+    ];
+  }
+
+  /// Send [text] to [id], continuing [thread] when it is given.  The request
+  /// answers when the turn ends; the timeline events arrive while it runs.
+  Future<void> promptWorkspace(
+    String id,
+    String text, {
+    String? thread,
+  }) async {
+    await extensionRaw('workspace/prompt', {
+      'id': id,
+      'text': text,
+      if (thread != null && thread.isNotEmpty) 'opts': {'thread': thread},
+    });
+  }
+
+  Future<WorkspaceThread> createWorkspaceThread(
+    String id,
+    String title,
+  ) async {
+    return WorkspaceThread.fromWire(
+      await extension('workspace/thread/create', {'id': id, 'title': title}),
+    );
+  }
+
+  Future<void> updateWorkspace(String id, {String? model, String? title}) async {
+    await extensionRaw('workspace/update', {
+      'id': id,
+      if (model != null) 'model': model,
+      if (title != null) 'name': title,
+    });
+  }
+
+  Future<void> cancelWorkspace(String id, {String? thread}) async {
+    await extensionRaw('workspace/cancel', {
+      'id': id,
+      if (thread != null && thread.isNotEmpty) 'thread': thread,
+    });
+  }
+
+  Future<List<MemoryNote>> workspaceMemoryNotes(
+    String id, {
+    int limit = 40,
+  }) async {
+    if (!can('memory/notes')) return const [];
+    final result = await extensionRaw('memory/notes', {
+      'workspace': id,
+      'opts': {'limit': limit},
+    });
+    return [
+      for (final wire in asMapList(result)) MemoryNote.fromWire(wire),
+    ];
+  }
+
+  Future<List<MemoryNote>> workspaceMemorySearch(
+    String id,
+    String query, {
+    int limit = 20,
+  }) async {
+    if (!can('memory/search') || query.trim().isEmpty) return const [];
+    final result = await extensionRaw('memory/search', {
+      'workspace': id,
+      'query': query,
+      'opts': {'limit': limit},
+    });
+    return [
+      for (final wire in asMapList(result)) MemoryNote.fromWire(wire),
+    ];
+  }
+
+  Future<WorkspaceMemoryStatus?> workspaceMemory(String id) async {
+    if (!can('memory/status')) return null;
+    try {
+      return WorkspaceMemoryStatus.fromWire(
+        await extension('memory/status', {'workspace': id}),
+      );
+    } on AcpException {
+      return null;
+    }
+  }
+
+  /// The computer panel's state, or null when the box is not implemented.
+  Future<WorkspaceComputerStatus?> workspaceComputer(String id) async {
+    if (!can('workspace/box/status')) return null;
+    try {
+      return WorkspaceComputerStatus.fromWire(
+        await extension('workspace/box/status', {'workspace': id}),
+      );
+    } on AcpException {
+      return null;
+    }
+  }
+
+  Future<void> workspaceTakeOver(String id) async {
+    await extensionRaw('workspace/box/take-over', {'workspace': id});
+  }
+
+  Future<void> workspaceReturnControl(String id) async {
+    await extensionRaw('workspace/box/return-control', {'workspace': id});
+  }
+
+  // First-class resources: the workspace's browser, its wallet and the
+  // access the agent has to either.  Every answer is metadata-only; a card,
+  // a cookie or a token value has no field to travel in.
+
+  Future<WorkspaceResources> workspaceResources(String id) async {
+    return WorkspaceResources.fromWire(
+      await extension('workspace/resources/status', {'id': id}),
+    );
+  }
+
+  Future<WorkspaceResources> clearWorkspaceBrowser(
+    String id, {
+    required String scope,
+    String? origin,
+    List<String> kinds = const [],
+  }) async {
+    return WorkspaceResources.fromWire(
+      await extension('workspace/browser/clear', {
+        'id': id,
+        'scope': scope,
+        if (origin != null) 'origin': origin,
+        'kinds': kinds,
+      }),
+    );
+  }
+
+  Future<WorkspaceResources> forgetWorkspaceLogin(String id, String login) async {
+    return WorkspaceResources.fromWire(
+      await extension('workspace/browser/login/forget', {
+        'id': id,
+        'login': login,
+      }),
+    );
+  }
+
+  Future<WorkspaceResources> createWorkspaceAuthorization(
+    String id, {
+    required String card,
+    required int amount,
+    required String currency,
+    required String capKind,
+    required List<String> merchants,
+    required String expires,
+    required String fees,
+  }) async {
+    return WorkspaceResources.fromWire(
+      await extension('workspace/wallet/authorization/create', {
+        'id': id,
+        'card': card,
+        'amount': amount,
+        'currency': currency,
+        'cap-kind': capKind,
+        'merchant-scope': merchants,
+        'expires': expires,
+        'fees': fees,
+      }),
+    );
+  }
+
+  Future<WorkspaceResources> revokeWorkspaceAuthorization(
+    String id,
+    String authorization,
+  ) async {
+    return WorkspaceResources.fromWire(
+      await extension('workspace/wallet/authorization/revoke', {
+        'id': id,
+        'authorization': authorization,
+      }),
+    );
+  }
+
+  Future<WorkspaceResources> decideWorkspacePurchase(
+    String id,
+    String purchase, {
+    required bool allow,
+  }) async {
+    return WorkspaceResources.fromWire(
+      await extension('workspace/wallet/purchase/decide', {
+        'id': id,
+        'purchase': purchase,
+        'decision': allow ? 'allow' : 'deny',
+      }),
+    );
   }
 }

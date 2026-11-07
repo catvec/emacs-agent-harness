@@ -8,7 +8,7 @@ Project roots and non-blocking file lists (harness-files.el).
 - **Source:** [lisp/modules/harness-project.el](../../lisp/modules/harness-project.el)
 - **Loaded:** by default
 - **Requires:** nothing
-- **Required by:** [config](config.md), [session](session.md), [tasks](tasks.md), [worktree](worktree.md)
+- **Required by:** [config](config.md), [session](session.md), [tasks](tasks.md), [workspace](workspace.md), [worktree](worktree.md)
 
 ## About
 

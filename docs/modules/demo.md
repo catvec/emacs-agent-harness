@@ -84,6 +84,6 @@ is `lost`, which the app shows rather than a stale screen.
 - `workspace/box/status`, when it is loaded
 - `workspace/box/vnc`, when it is loaded
 - `workspace/browser/open`, when it is loaded
-- `workspace/get`, when it is loaded
-- `workspace/list`, when it is loaded
+- `workspace/get` ([workspace](workspace.md)), when it is loaded
+- `workspace/list` ([workspace](workspace.md)), when it is loaded
 

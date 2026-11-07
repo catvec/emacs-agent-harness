@@ -1,20 +1,23 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
-/// The app's visual identity: warm paper, ink, and a single oxide accent.
+/// The app's visual identity after Hermes Desktop: a deep Nous-blue canvas,
+/// warm cream text, blue and cream accents, flat panels with square corners,
+/// thin rules, and a halftone/dither field rather than gradients and shadows.
 /// Android and desktop get Material 3; Apple platforms get Cupertino
-/// typography, controls and page transitions in the same palette.
+/// typography and controls in the same palette.
 class HarnessColors {
-  static const oxide = Color(0xFFD65A36);
-  static const oxideDark = Color(0xFFFF8A65);
-  static const ink = Color(0xFF151517);
-  static const paper = Color(0xFFF8F6F2);
-  static const paperRaised = Color(0xFFFFFFFF);
-  static const night = Color(0xFF101012);
-  static const nightRaised = Color(0xFF1A1A1D);
-  static const moss = Color(0xFF2F7D5B);
+  static const oxide = Color(0xFF4D5CFF); // electric blue, the accent
+  static const oxideDark = Color(0xFF8D97FF);
+  static const ink = Color(0xFFF4ECDD); // warm cream, the text
+  static const paper = Color(0xFF0A0B2E); // deep Nous blue
+  static const paperRaised = Color(0xFF10123A);
+  static const night = Color(0xFF0A0B2E);
+  static const nightRaised = Color(0xFF141743);
+  static const moss = Color(0xFF58C79B);
   static const amber = Color(0xFFC2871B);
-  static const slate = Color(0xFF6B6B73);
+  static const slate = Color(0xFFA9A4B8);
+  static const line = Color(0xFF2C3170);
 
   static Color status(String? status, Brightness brightness) =>
       switch (status) {
@@ -94,25 +97,25 @@ class HarnessText {
       Theme.of(context).colorScheme.onSurfaceVariant;
 
   static TextStyle pageTitle(BuildContext context) => TextStyle(
-    fontSize: 22,
-    fontWeight: FontWeight.w700,
-    letterSpacing: -0.3,
-    height: 1.2,
+    fontSize: 24,
+    fontWeight: FontWeight.w900,
+    letterSpacing: -0.9,
+    height: 1.12,
     color: Theme.of(context).colorScheme.onSurface,
   );
 
   static TextStyle sheetTitle(BuildContext context) => TextStyle(
-    fontSize: 20,
-    fontWeight: FontWeight.w700,
-    letterSpacing: -0.3,
-    height: 1.25,
+    fontSize: 22,
+    fontWeight: FontWeight.w900,
+    letterSpacing: -0.8,
+    height: 1.15,
     color: Theme.of(context).colorScheme.onSurface,
   );
 
   static TextStyle rowTitle(BuildContext context) => TextStyle(
     fontSize: 15,
-    fontWeight: FontWeight.w600,
-    letterSpacing: -0.1,
+    fontWeight: FontWeight.w700,
+    letterSpacing: -0.2,
     height: 1.3,
     color: Theme.of(context).colorScheme.onSurface,
   );
@@ -145,7 +148,7 @@ class HarnessText {
   static TextStyle label(BuildContext context) => TextStyle(
     fontSize: 11,
     fontWeight: FontWeight.w700,
-    letterSpacing: 1.0,
+    letterSpacing: 1.3,
     height: 1.3,
     color: _muted(context).withValues(alpha: 0.85),
   );
@@ -174,31 +177,31 @@ class HarnessTheme {
     final scheme =
         ColorScheme.fromSeed(
           seedColor: HarnessColors.oxide,
-          brightness: brightness,
+          brightness: Brightness.dark,
           dynamicSchemeVariant: DynamicSchemeVariant.fidelity,
         ).copyWith(
-          surface: dark ? HarnessColors.night : HarnessColors.paper,
-          onSurface: dark ? const Color(0xFFF2F0EC) : HarnessColors.ink,
-          surfaceContainerLowest: dark
-              ? HarnessColors.night
-              : HarnessColors.paperRaised,
-          surfaceContainerLow: dark
-              ? HarnessColors.nightRaised
-              : HarnessColors.paperRaised,
-          surfaceContainer: dark
-              ? const Color(0xFF1F1F23)
-              : const Color(0xFFF1EEE8),
-          surfaceContainerHigh: dark
-              ? const Color(0xFF26262B)
-              : const Color(0xFFEAE6DF),
-          outline: dark ? const Color(0xFF3B3B40) : const Color(0xFFD9D4CC),
-          outlineVariant: dark
-              ? const Color(0xFF2A2A2F)
-              : const Color(0xFFE8E3DB),
+          surface: HarnessColors.paper,
+          onSurface: HarnessColors.ink,
+          primary: HarnessColors.oxide,
+          onPrimary: const Color(0xFFFFFFFF),
+          primaryContainer: const Color(0xFF232A7A),
+          onPrimaryContainer: const Color(0xFFF4ECDD),
+          secondary: const Color(0xFFE8D9B5),
+          onSecondary: const Color(0xFF0A0B2E),
+          surfaceContainerLowest: const Color(0xFF07081F),
+          surfaceContainerLow: HarnessColors.paperRaised,
+          surfaceContainer: const Color(0xFF141743),
+          surfaceContainerHigh: const Color(0xFF1A1E52),
+          surfaceContainerHighest: const Color(0xFF1E2258),
+          surfaceDim: const Color(0xFF07081F),
+          surfaceBright: const Color(0xFF242A6E),
+          outline: HarnessColors.line,
+          outlineVariant: const Color(0xFF222756),
+          error: const Color(0xFFFF8A80),
         );
     final base = ThemeData(
       useMaterial3: true,
-      brightness: brightness,
+      brightness: Brightness.dark,
       colorScheme: scheme,
       scaffoldBackgroundColor: scheme.surface,
       splashFactory: InkSparkle.splashFactory,
@@ -226,7 +229,7 @@ class HarnessTheme {
         color: scheme.surfaceContainerLow,
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(2),
           side: BorderSide(color: scheme.outlineVariant),
         ),
       ),
@@ -256,15 +259,15 @@ class HarnessTheme {
           vertical: 14,
         ),
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(2),
           borderSide: BorderSide(color: scheme.outlineVariant),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(2),
           borderSide: BorderSide(color: scheme.outlineVariant),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(2),
           borderSide: BorderSide(color: scheme.primary, width: 1.6),
         ),
         hintStyle: TextStyle(
@@ -276,9 +279,12 @@ class HarnessTheme {
           minimumSize: const Size(0, 50),
           padding: const EdgeInsets.symmetric(horizontal: 22),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(2),
           ),
-          textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+          textStyle: base.textTheme.labelLarge?.copyWith(
+            fontWeight: FontWeight.w600,
+            fontSize: 15,
+          ),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
@@ -286,15 +292,22 @@ class HarnessTheme {
           minimumSize: const Size(0, 48),
           padding: const EdgeInsets.symmetric(horizontal: 18),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(2),
           ),
           side: BorderSide(color: scheme.outline),
-          textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+          textStyle: base.textTheme.labelLarge?.copyWith(
+            fontWeight: FontWeight.w600,
+            fontSize: 15,
+          ),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
-          textStyle: const TextStyle(fontWeight: FontWeight.w600),
+          // The family too: a style that names none is drawn in the test
+          // engine's font, as squares, in every picture of a button.
+          textStyle: base.textTheme.labelLarge?.copyWith(
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ),
       segmentedButtonTheme: SegmentedButtonThemeData(

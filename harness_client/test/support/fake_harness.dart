@@ -86,6 +86,9 @@ class FakeHarness {
     this.quota = true,
     this.toolCatalogue = true,
     this.sessionPictures = true,
+    this.workspace = false,
+    this.resources = false,
+    this.resourcesCredentialsOnly = false,
     this.demo = true,
     Set<String>? knownSecrets,
   }) : knownSecrets = knownSecrets ?? <String>{} {
@@ -110,6 +113,25 @@ class FakeHarness {
         'question/image',
         'question/cancel',
         if (sessionPictures) 'session/image',
+        if (workspace) ...[
+          'workspace/list',
+          'workspace/get',
+          'workspace/timeline',
+          'workspace/prompt',
+          'workspace/thread/create',
+          'workspace/cancel',
+          'memory/status',
+          'memory/notes',
+          'memory/search',
+          if (resources) ...[
+            'workspace/resources/status',
+            'workspace/browser/clear',
+            'workspace/browser/login/forget',
+            'workspace/wallet/authorization/create',
+            'workspace/wallet/authorization/revoke',
+            'workspace/wallet/purchase/decide',
+          ],
+        ],
         'task/list',
         'task/get',
         'task/for-session',
@@ -256,6 +278,19 @@ class FakeHarness {
   /// (`session/image`): the screenshots a task handed in, the image a
   /// `read_file` call read.  An older harness does not.
   final bool sessionPictures;
+
+  /// A harness whose workspace modules are loaded: the workspace tab is
+  /// offered and its four methods answer a small scripted workspace.
+  final bool workspace;
+
+  /// A harness that also answers the resources contract: the browser and
+  /// wallet sections hold mock metadata (never a value) and the mutations
+  /// change the fake's lists.  Without it the page is unavailable.
+  final bool resources;
+
+  /// A harness whose secrets module is loaded while the box and wallet are
+  /// not: the credentials are real metadata, the other sections are empty.
+  final bool resourcesCredentialsOnly;
 
   /// Whether the harness runs the demos a report hands in (`demo/start`,
   /// `demo/status`, `demo/stop`, `demo/control`).  An older harness does not,
@@ -2004,6 +2039,118 @@ class FakeHarness {
         _respond(id, answer);
         return;
       }
+      if (method == '_harness/workspace/list') {
+        _respond(id, [ _workspaceFixture() ]);
+        return;
+      }
+      if (method == '_harness/workspace/get') {
+        _respond(id, _workspaceFixture());
+        return;
+      }
+      if (method == '_harness/workspace/timeline') {
+        _respond(id, _workspaceTimeline());
+        return;
+      }
+      if (method == '_harness/workspace/prompt') {
+        workspacePrompts.add(asStringOr(params['text'], ''));
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/workspace/thread/create') {
+        final title = asStringOr(params['title'], 'New thread');
+        _respond(id, {
+          'id': 'th-${workspaceThreads.length + 1}',
+          'title': title,
+          'state': 'parked',
+          'tags': _workspaceTags(title),
+        });
+        return;
+      }
+      if (method == '_harness/workspace/cancel') {
+        _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/workspace/resources/status' ||
+          method == '_harness/workspace/browser/clear' ||
+          method == '_harness/workspace/browser/login/forget' ||
+          method == '_harness/workspace/wallet/authorization/create' ||
+          method == '_harness/workspace/wallet/authorization/revoke' ||
+          method == '_harness/workspace/wallet/purchase/decide') {
+        if (resourcesFail) {
+          _respondError(id, -32000, 'The box refused');
+          return;
+        }
+        if (method != '_harness/workspace/resources/status') {
+          resourcesCalls.add({'method': method, 'params': params});
+        }
+        if (method == '_harness/workspace/browser/clear') {
+          _clearBrowser(params);
+        } else if (method == '_harness/workspace/browser/login/forget') {
+          resourcesLogins.removeWhere(
+            (login) => login['id'] == asString(params['login']),
+          );
+        } else if (method == '_harness/workspace/wallet/authorization/create') {
+          final amount = asInt(params['amount']) ?? 0;
+          resourcesAuthorizations.add({
+            'id': 'auth-${resourcesAuthorizations.length + 1}',
+            'card': asStringOr(params['card'], 'card-1'),
+            'amount': amount,
+            'currency': asStringOr(params['currency'], 'USD'),
+            'cap-kind': asStringOr(params['cap-kind'], 'cumulative'),
+            'merchant-scope': params['merchant-scope'] ?? const <String>[],
+            'fees': asStringOr(params['fees'], 'included'),
+            'tax': 'included',
+            'shipping': 'included',
+            'expires': DateTime.now()
+                .add(const Duration(hours: 24))
+                .toUtc()
+                .toIso8601String(),
+            'status': 'active',
+            'spent': 0,
+            'reserved': 0,
+            'advisory': true,
+            'created': DateTime.now().toUtc().toIso8601String(),
+          });
+        } else if (method == '_harness/workspace/wallet/authorization/revoke') {
+          final wanted = asString(params['authorization']);
+          for (final authorization in resourcesAuthorizations) {
+            if (authorization['id'] == wanted) authorization['status'] = 'revoked';
+          }
+        } else if (method == '_harness/workspace/wallet/purchase/decide') {
+          final wanted = asString(params['purchase']);
+          for (final purchase in resourcesPurchases) {
+            if (purchase['id'] == wanted) {
+              purchase['status'] =
+                  asStringOr(params['decision'], 'deny') == 'allow'
+                  ? 'approved'
+                  : 'declined';
+            }
+          }
+        }
+        _respond(id, _resourcesFixture());
+        return;
+      }
+      if (method == '_harness/memory/status') {
+        _respond(id, {'notes': 12, 'fts': true});
+        return;
+      }
+      if (method == '_harness/memory/notes') {
+        _respond(id, memoryNotes);
+        return;
+      }
+      if (method == '_harness/memory/search') {
+        final query = asStringOr(params['query'], '').toLowerCase();
+        memorySearches.add(query);
+        _respond(id, [
+          for (final note in memoryNotes)
+            if ((note['text'] as String).toLowerCase().contains(query))
+              {
+                ...note,
+                'snippet': _snippet(note['text'] as String, query),
+              },
+        ]);
+        return;
+      }
       if (method == '_harness/task/list') {
         // As the harness answers it: the tasks of one project when it is
         // given a `cwd`, every task of every project without.
@@ -2421,6 +2568,237 @@ class FakeHarness {
       _respondError(id, -32601, 'Method not found: $method');
     } catch (error) {
       _respondError(id, -32603, '$error');
+    }
+  }
+
+  final List<String> workspacePrompts = <String>[];
+  final List<Map<String, Object?>> workspaceThreads = [
+    {'id': 'th-1', 'title': 'Kitchen renovation', 'state': 'live',
+     'live': 's1', 'tags': ['Kitchen', 'Budget']},
+    {'id': 'th-2', 'title': 'Harness memory', 'state': 'parked',
+     'tags': ['Harness', 'Memory']},
+    {'id': 'th-3', 'title': 'Kitchen budget', 'state': 'parked',
+     'tags': ['Kitchen']},
+  ];
+
+  List<String> _workspaceTags(String title) => [
+    for (final word in title.split(RegExp(r'[^A-Za-z0-9]+')))
+      if (word.length > 3)
+        word[0].toUpperCase() + word.substring(1),
+  ];
+
+  Map<String, Object?> _workspaceFixture() => {
+    'id': 'w1',
+    'name': 'Home',
+    'root': '/Users/noah/workspace/',
+    'project': '/Users/noah/workspace/',
+    'last-thread': 'th-1',
+    'threads': workspaceThreads,
+  };
+
+  List<Map<String, Object?>> _workspaceTimeline() => [
+    {'kind': 'divider', 'thread': 'th-1', 'title': 'Kitchen renovation',
+     'reason': 'new-thread'},
+    {'kind': 'brief', 'thread': 'th-1', 'tokens': 120},
+    {'kind': 'message', 'thread': 'th-1', 'role': 'user',
+     'text': 'The tile is matte.'},
+    {'kind': 'message', 'thread': 'th-1', 'role': 'assistant',
+     'text': 'Noted. The quote is open.'},
+  ];
+
+  final List<String> memorySearches = <String>[];
+  final List<Map<String, Object?>> memoryNotes = [
+    {'id': 'n1', 'thread': 'Kitchen renovation', 'role': 'user',
+     'text': 'Let us go with quartz for the countertop.',
+     'ts': DateTime.now()
+         .subtract(const Duration(minutes: 12))
+         .toUtc()
+         .toIso8601String()},
+    {'id': 'n2', 'thread': 'Harness memory', 'role': 'assistant',
+     'text': 'The recall index keeps the thread and the page it came from.',
+     'ts': DateTime.now()
+         .subtract(const Duration(hours: 5))
+         .toUtc()
+         .toIso8601String()},
+  ];
+
+  String _snippet(String text, String query) {
+    final at = text.toLowerCase().indexOf(query);
+    if (at < 0) return text;
+    return '${text.substring(0, at)}<<${text.substring(at, at + query.length)}>>'
+        '${text.substring(at + query.length)}';
+  }
+
+  /// When true the resources methods answer an error, for the failure path.
+  bool resourcesFail = false;
+
+  /// Every resources request, in order, for the tests that hold the
+  /// contract (scope, kinds, decision) without a real box.
+  final List<Map<String, Object?>> resourcesCalls = [];
+
+  final List<Map<String, Object?>> resourcesSites = [
+    {'origin': 'https://stoneco.example', 'cookies': 12,
+     'storage-bytes': 320000, 'cache-bytes': 640000, 'permissions': 2,
+     'auth': 'signed-in', 'value': 'SESSION-SECRET',
+     'last-used': DateTime.now()
+         .subtract(const Duration(minutes: 12))
+         .toUtc()
+         .toIso8601String()},
+    {'origin': 'https://github.com', 'cookies': 4,
+     'storage-bytes': 110000, 'cache-bytes': 210000, 'permissions': 0,
+     'auth': 'signed-out',
+     'last-used': DateTime.now()
+         .subtract(const Duration(hours: 5))
+         .toUtc()
+         .toIso8601String()},
+  ];
+
+  final List<Map<String, Object?>> resourcesLogins = [
+    {'id': 'lg-1', 'origin': 'https://stoneco.example',
+     'username': 'j•••@example.com', 'state': 'active',
+     'password': 'hunter2', 'cookie': 'SESSION-SECRET',
+     'created': DateTime.now()
+         .subtract(const Duration(days: 20))
+         .toUtc()
+         .toIso8601String(),
+     'last-used': DateTime.now()
+         .subtract(const Duration(minutes: 12))
+         .toUtc()
+         .toIso8601String()},
+  ];
+
+  final List<Map<String, Object?>> resourcesCards = [
+    {'id': 'card-1', 'label': 'Visa •••• 4242', 'network': 'Visa',
+     'last4': '4242', 'exp-month': 9, 'exp-year': 2028, 'state': 'active',
+     'added': DateTime.now()
+         .subtract(const Duration(days: 30))
+         .toUtc()
+         .toIso8601String(),
+     'last-used': DateTime.now()
+         .subtract(const Duration(minutes: 12))
+         .toUtc()
+         .toIso8601String()},
+  ];
+
+  final List<Map<String, Object?>> resourcesAuthorizations = [
+    {'id': 'auth-1', 'card': 'card-1', 'amount': 1000, 'currency': 'USD',
+     'cap-kind': 'cumulative', 'merchant-scope': ['stoneco.example'],
+     'fees': 'included', 'tax': 'included', 'shipping': 'included',
+     'expires': DateTime.now()
+         .add(const Duration(hours: 20))
+         .toUtc()
+         .toIso8601String(),
+     'status': 'active', 'spent': 0, 'reserved': 940, 'advisory': true,
+     'created': DateTime.now()
+         .subtract(const Duration(hours: 4))
+         .toUtc()
+         .toIso8601String()},
+  ];
+
+  final List<Map<String, Object?>> resourcesPurchases = [
+    {'id': 'buy-1', 'authorization': 'auth-1',
+     'merchant': 'stoneco.example', 'amount': 940, 'currency': 'USD',
+     'status': 'proposed',
+     'at': DateTime.now()
+         .subtract(const Duration(minutes: 12))
+         .toUtc()
+         .toIso8601String()},
+  ];
+
+  Map<String, Object?> _resourcesFixture() => {
+    'workspace': 'w1',
+    'status': 'ready',
+    'metadata-only': true,
+    if (!resourcesCredentialsOnly) 'browser': {
+      'profile': {
+        'label': 'Home', 'kind': 'Firefox', 'bytes': 412 * 1024 * 1024,
+        'sites': resourcesSites.length,
+        'last-used': DateTime.now()
+            .subtract(const Duration(minutes: 4))
+            .toUtc()
+            .toIso8601String(),
+      },
+      'sites': resourcesSites,
+      'logins': resourcesLogins,
+      'browsers': [
+        {'id': 'firefox', 'label': 'Firefox', 'primary': true, 'available': true, 'support': 'primary'},
+        {'id': 'chromium', 'label': 'Chromium', 'primary': false, 'available': true, 'support': 'secondary'},
+      ],
+      'totals': {
+        'cookies': resourcesSites.fold<int>(
+            0, (sum, site) => sum + (asInt(site['cookies']) ?? 0)),
+        'bytes': 412 * 1024 * 1024,
+      },
+    },
+    if (!resourcesCredentialsOnly) 'wallet': {
+      'cards': resourcesCards,
+      'authorizations': resourcesAuthorizations,
+      'purchases': resourcesPurchases,
+    },
+    'access': [
+      for (final site in resourcesSites.take(1))
+        {'kind': 'site', 'label': site['origin'], 'scope': 'site',
+         'owner': 'user', 'state': 'active', 'availability': 'ready',
+         'access': 'allowed', 'detail': 'Signed in'},
+      for (final authorization in resourcesAuthorizations)
+        {'kind': 'authorization', 'label': r'$10.00 · Visa •••• 4242',
+         'scope': 'authorization', 'owner': 'user',
+         'state': asStringOr(authorization['status'], 'active'),
+         'availability': 'ready', 'access': 'ask',
+         'detail': 'Per purchase'},
+      {'kind': 'permission', 'label': 'Browser · stoneco.example',
+       'scope': 'global', 'owner': 'user', 'state': 'active',
+       'availability': 'ready', 'access': 'ask', 'detail': 'Every tool'},
+    ],
+    'browser-status': resourcesCredentialsOnly ? 'unavailable' : 'ready',
+    'wallet-status': resourcesCredentialsOnly ? 'unavailable' : 'ready',
+    'credentials': [
+      {'label': 'deploy-key', 'fingerprint': '4f9c2a1b', 'usable': true,
+       'value': 'SECRET-VALUE'},
+      {'label': 'npm-token', 'fingerprint': 'b81e7d20', 'usable': false,
+       'error': 'Masking off', 'value': 'SECRET-VALUE'},
+    ],
+    'credentials-status': {
+      'status': 'ready', 'mask': true, 'locked': true, 'count': 2,
+    },
+    'audit': [
+      {'at': DateTime.now()
+          .subtract(const Duration(minutes: 12))
+          .toUtc()
+          .toIso8601String(),
+       'action': 'Created', 'resource': r'Authorization · $10',
+       'actor': 'user', 'scope': 'authorization'},
+      {'at': DateTime.now()
+          .subtract(const Duration(hours: 3))
+          .toUtc()
+          .toIso8601String(),
+       'action': 'Used', 'resource': 'Site · stoneco.example',
+       'actor': 'agent', 'scope': 'site'},
+    ],
+  };
+
+  void _clearBrowser(Map<String, Object?> params) {
+    final scope = asStringOr(params['scope'], 'profile');
+    final origin = asString(params['origin']);
+    final kinds = [
+      for (final kind in asList(params['kinds'])) asString(kind) ?? '',
+    ];
+    for (final site in resourcesSites) {
+      if (scope == 'site' && site['origin'] != origin) continue;
+      for (final kind in kinds) {
+        switch (kind) {
+          case 'cookies':
+            site['cookies'] = 0;
+            site['auth'] = 'signed-out';
+            resourcesLogins.removeWhere((login) => login['origin'] == site['origin']);
+          case 'storage':
+            site['storage-bytes'] = 0;
+          case 'cache':
+            site['cache-bytes'] = 0;
+          case 'permissions':
+            site['permissions'] = 0;
+        }
+      }
     }
   }
 

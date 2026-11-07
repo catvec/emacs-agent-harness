@@ -113,7 +113,7 @@ class HarnessPage extends StatelessWidget {
           );
     final line = subtitle == null
         ? null
-        : DefaultTextStyle(
+        : DefaultTextStyle.merge(
             style: HarnessText.subtitle(context),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
