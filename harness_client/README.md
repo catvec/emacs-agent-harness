@@ -687,6 +687,7 @@ The client never assumes a method because the agent calls itself a harness.
 | Project picker | `insights/projects` (and `project/mains`, to fold worktrees and scratch directories) |
 | Rename, fork, delete | `session/update`, `session/fork`, `session/delete` |
 | Priority | `priority/set` |
+| Permission mode | the session's ACP modes (`modes` in `session/new` and `session/load`); a session that offers none shows its mode only |
 | Model catalogue | `provider/list`, `provider/models` |
 
 A method that disappears at runtime (`-32601`) is marked unavailable for that
@@ -700,7 +701,10 @@ initialize · authenticate · logout · session/new · session/load · session/l
 session/prompt · session/cancel · session/set_mode · session/set_model
 ```
 
-Everything beyond that is under `_harness/` and is optional.
+Everything beyond that is under `_harness/` and is optional. Session modes
+are standard ACP state, never an entry of `_harness.methods`: the picker
+offers what the session's `modes` object says it has. See
+[flutter-session-modes](../docs/flutter-session-modes.md).
 
 ### The extension shapes this client understands
 

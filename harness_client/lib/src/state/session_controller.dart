@@ -8,6 +8,7 @@ import '../acp/acp_message.dart';
 import '../models/activity.dart';
 import '../models/chat_thread.dart';
 import '../models/session.dart';
+import '../models/session_modes.dart';
 import '../models/tool_catalogue.dart';
 import '../models/transcript.dart';
 import '../services/harness_api.dart';
@@ -39,6 +40,33 @@ class SessionController extends ChangeNotifier {
   final DraftStore? drafts;
   SessionSummary? summary;
   late final TranscriptState transcript = TranscriptState(sessionId: sessionId);
+
+  /// ACP's session modes, from `session/new` or `session/load`: what the
+  /// conversation offers and which mode it is in.  Null for an agent that
+  /// offers none, where no mode picker is shown.
+  SessionModes? modes;
+
+  /// Whether this conversation offers a permission-mode choice: the agent
+  /// listed modes for it and it is a real session, not one of the harness's
+  /// virtual pages.
+  bool get canChangeMode =>
+      summary?.virtual != true && (modes?.available.isNotEmpty ?? false);
+
+  /// The mode the session is in, when the agent listed it.
+  SessionMode? get currentMode => modes?.current;
+
+  /// The id of the mode the session is in, from the agent's mode state.
+  String? get currentModeId => modes?.currentModeId;
+
+  /// Take [raw], a `modes` object of `session/new` or `session/load`, as the
+  /// modes this conversation offers.  An answer that names none leaves what
+  /// is known as it is (an agent that does not send them at all).
+  void adoptModes(Object? raw) {
+    final next = SessionModes.fromWire(raw);
+    if (next == null) return;
+    modes = next;
+    _notify();
+  }
 
   /// The harness's tools: what people call them, and the allow list of the
   /// calls that fold into a run in the transcript.  Empty until the harness
@@ -154,7 +182,9 @@ class SessionController extends ChangeNotifier {
       // into the runs it folds and not into cards that fold a moment later.
       await _loadTools();
       // ACP's session/load resumes the session and replays the transcript.
-      await api.loadSession(sessionId, cwd: summary?.cwd);
+      // Its answer carries the session's modes, as session/new's does.
+      final loaded = await api.loadSession(sessionId, cwd: summary?.cwd);
+      adoptModes(loaded['modes']);
       // Read again: what a lost connection may have left behind is made up
       // for.  (One lost from here on marks it stale again.)
       _stale = false;
@@ -515,11 +545,26 @@ class SessionController extends ChangeNotifier {
   Future<void> setMode(String mode) async {
     try {
       await api.setMode(sessionId, mode);
+      // The agent took it: show what was asked.  A mode it announces later
+      // (`current_mode_update`) is the authority, and may name another.
+      _setCurrentMode(mode);
+      _notify();
       await refreshInfo();
     } on AcpException catch (failure) {
       error = _friendlyError(failure);
       _notify();
+    } catch (failure) {
+      error = '$failure';
+      _notify();
     }
+  }
+
+  /// Show [id] as the mode the session is in, keeping the modes it offers.
+  void _setCurrentMode(String id) {
+    final known = modes;
+    modes = known == null
+        ? SessionModes(currentModeId: id, available: const [])
+        : known.withCurrent(id);
   }
 
   Future<void> setNonInteractive(bool on) async {
@@ -1043,6 +1088,8 @@ class SessionController extends ChangeNotifier {
         case '_harness/session_deleted':
           deleted = true;
         case 'current_mode_update':
+          final current = asString(update['currentModeId']);
+          if (current != null && current.isNotEmpty) _setCurrentMode(current);
           unawaited(refreshInfo());
         default:
           transcript.apply(update);

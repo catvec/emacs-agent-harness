@@ -66,6 +66,15 @@ class FakeTransport implements AcpTransport {
   }
 }
 
+/// The modes the harness's ACP server offers (`harness-acp--modes`), in the
+/// shape `session/new` and `session/load` answer with.
+const _defaultModes = <Map<String, Object?>>[
+  {'id': 'ask', 'name': 'Ask'},
+  {'id': 'accept-edits', 'name': 'Accept edits'},
+  {'id': 'auto', 'name': 'Auto'},
+  {'id': 'yolo', 'name': 'YOLO'},
+];
+
 /// A small, scripted harness that speaks real ACP JSON-RPC over [FakeTransport].
 /// It mirrors the shapes of the emacs-agent-harness closely enough to exercise
 /// every client flow, and can pretend to be a plain ACP agent with
@@ -92,8 +101,11 @@ class FakeHarness {
     this.resources = false,
     this.resourcesCredentialsOnly = false,
     this.demo = true,
+    List<Map<String, Object?>>? availableModes,
+    this.failSetMode = false,
     Set<String>? knownSecrets,
-  }) : knownSecrets = knownSecrets ?? <String>{} {
+  })  : availableModes = availableModes ?? _defaultModes,
+        knownSecrets = knownSecrets ?? <String>{} {
     if (enhanced) {
       methods.addAll({
         'session/list',
@@ -327,6 +339,13 @@ class FakeHarness {
   /// `demo/status`, `demo/stop`, `demo/control`).  An older harness does not,
   /// and a report page then offers no *Start demo*.
   final bool demo;
+
+  /// The modes `session/new`, `session/load` and `session/set_mode` speak.
+  /// A plain agent may offer other ones ([_defaultModes] otherwise).
+  final List<Map<String, Object?>> availableModes;
+
+  /// Refuse `session/set_mode` as an agent that does not take the mode does.
+  final bool failSetMode;
 
   /// The answers `demo/start` gives, in order: each is one start's answer,
   /// and the last repeats.  A test sets the state, the screen and the
@@ -1683,7 +1702,7 @@ class FakeHarness {
           return;
         }
         _replay(sid);
-        _respond(id, const <String, Object?>{});
+        _respond(id, {'modes': _modesFor(sessions[sid]!)});
         return;
       }
       if (method == 'session/new') {
@@ -1709,15 +1728,7 @@ class FakeHarness {
         nodes[sid] = [];
         _respond(id, {
           'sessionId': sid,
-          'modes': {
-            'currentModeId': 'ask',
-            'availableModes': [
-              {'id': 'ask', 'name': 'Ask'},
-              {'id': 'accept-edits', 'name': 'Accept edits'},
-              {'id': 'auto', 'name': 'Auto'},
-              {'id': 'yolo', 'name': 'YOLO'},
-            ],
-          },
+          'modes': _modesFor(sessions[sid]!),
         });
         return;
       }
@@ -1741,9 +1752,16 @@ class FakeHarness {
       if (method == 'session/set_mode') {
         final sid = asString(params['sessionId']);
         final mode = asString(params['modeId']);
+        if (failSetMode) {
+          _respondError(id, -32602, 'Invalid params: unknown mode $mode');
+          return;
+        }
         if (sid != null && sessions[sid] != null && mode != null) {
-          sessions[sid]!['permissionMode'] = mode;
-          _pushSession(sid);
+          if (!availableModes.any((m) => m['id'] == mode)) {
+            _respondError(id, -32602, 'Invalid params: unknown mode $mode');
+            return;
+          }
+          _pushMode(sid, mode);
         }
         _respond(id, const <String, Object?>{});
         return;
@@ -3538,6 +3556,34 @@ class FakeHarness {
       'sessionId': sid,
       'update': {'sessionUpdate': '_harness/session', 'session': session},
     });
+  }
+
+  /// ACP's mode state for [session], as `session/new` and `session/load`
+  /// answer it: the mode it is in, and every mode this agent offers.
+  Map<String, Object?> _modesFor(Map<String, Object?> session) {
+    final modes = [
+      for (final mode in availableModes) Map<String, Object?>.from(mode),
+    ];
+    return {
+      'currentModeId':
+          session['permissionMode'] ?? (modes.isEmpty ? null : modes.first['id']),
+      'availableModes': modes,
+    };
+  }
+
+  /// Announce that [sid] is in [mode] now, as an agent that changes its own
+  /// mode does (`current_mode_update`).
+  void pushMode(String sid, String mode) => _pushMode(sid, mode);
+
+  void _pushMode(String sid, String mode) {
+    final session = sessions[sid];
+    if (session == null) return;
+    session['permissionMode'] = mode;
+    _send('session/update', {
+      'sessionId': sid,
+      'update': {'sessionUpdate': 'current_mode_update', 'currentModeId': mode},
+    });
+    _pushSession(sid);
   }
 
   /// The agent of session [sid] calls `ask_user`: the harness holds the

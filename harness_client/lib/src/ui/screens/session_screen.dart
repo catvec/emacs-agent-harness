@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../../models/activity.dart';
 import '../../models/chat_thread.dart';
 import '../../models/session.dart';
+import '../../models/session_modes.dart';
 import '../../models/task_chat.dart';
 import '../../models/transcript.dart';
 import '../../models/usage.dart';
@@ -33,6 +34,15 @@ import '../widgets/transcript_view.dart';
 import 'review_file_screen.dart';
 import 'review_thread_screen.dart';
 import 'voice_screen.dart';
+
+/// The icon a mode's id is known by; a mode of another agent gets the shield.
+IconData _modeIcon(String id) => switch (id) {
+  'ask' => Icons.help_outline_rounded,
+  'accept-edits' => Icons.edit_outlined,
+  'auto' => Icons.auto_awesome_rounded,
+  'yolo' => Icons.bolt_rounded,
+  _ => Icons.shield_outlined,
+};
 
 class SessionScreen extends StatefulWidget {
   const SessionScreen({
@@ -427,30 +437,18 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   Future<void> _chooseMode() async {
+    final modes = _controller.modes?.available ?? const <SessionMode>[];
+    if (modes.isEmpty) return;
     final chosen = await showHarnessMenu<String>(
       context: context,
       title: 'Permission mode',
-      items: const [
-        HarnessMenuItem(
-          value: 'ask',
-          label: 'Ask · reads allowed, the rest asks',
-          icon: Icons.help_outline_rounded,
-        ),
-        HarnessMenuItem(
-          value: 'accept-edits',
-          label: 'Accept edits · reads and writes allowed',
-          icon: Icons.edit_outlined,
-        ),
-        HarnessMenuItem(
-          value: 'auto',
-          label: 'Auto · a judge decides each call',
-          icon: Icons.auto_awesome_rounded,
-        ),
-        HarnessMenuItem(
-          value: 'yolo',
-          label: 'YOLO · everything inside the project',
-          icon: Icons.bolt_rounded,
-        ),
+      items: [
+        for (final mode in modes)
+          HarnessMenuItem(
+            value: mode.id,
+            label: mode.name,
+            icon: _modeIcon(mode.id),
+          ),
       ],
     );
     if (chosen != null) await _controller.setMode(chosen);
@@ -542,7 +540,7 @@ class _SessionScreenState extends State<SessionScreen> {
                 label: 'Change model',
                 icon: Icons.memory_rounded,
               ),
-              if (caps?.setMode == true)
+              if (_controller.canChangeMode)
                 const HarnessMenuItem(
                   value: 'mode',
                   label: 'Permission mode',
@@ -829,8 +827,13 @@ class _SessionScreenState extends State<SessionScreen> {
                     key: const Key('session-footer'),
                     app: _app,
                     summary: summary,
+                    mode:
+                        _controller.currentMode?.name ??
+                        permissionLabel(
+                          _controller.currentModeId ?? summary?.permissionMode,
+                        ),
                     onModel: _chooseModel,
-                    onMode: _chooseMode,
+                    onMode: _controller.canChangeMode ? _chooseMode : null,
                     onInteractive: _toggleInteractive,
                   ),
             // What is typed outlives this screen: see DraftStore.
@@ -985,6 +988,7 @@ class _SessionFooter extends StatelessWidget {
     super.key,
     required this.app,
     required this.summary,
+    required this.mode,
     required this.onModel,
     required this.onMode,
     required this.onInteractive,
@@ -992,8 +996,13 @@ class _SessionFooter extends StatelessWidget {
 
   final AppController app;
   final SessionSummary? summary;
+
+  /// What the permission-mode picker reads: the session's current mode.
+  final String mode;
   final VoidCallback onModel;
-  final VoidCallback onMode;
+
+  /// Null: the session offers no modes, and the value is shown only.
+  final VoidCallback? onMode;
   final VoidCallback onInteractive;
 
   @override
@@ -1011,8 +1020,9 @@ class _SessionFooter extends StatelessWidget {
         final ruled = constraints.maxWidth >= 400;
         return Row(
           children: [
-            // The pickers take what the figures at the other end leave, the
-            // model first: its name gives way after the mode's.
+            // The pickers take what the figures at the other end leave.  The
+            // model takes the larger share, and the mode still has the room
+            // its name needs, with the mark that it opens a choice.
             Expanded(
               child: Row(
                 children: [
@@ -1025,11 +1035,11 @@ class _SessionFooter extends StatelessWidget {
                     ),
                   ),
                   Flexible(
-                    flex: 2,
+                    flex: 3,
                     child: HarnessPicker(
                       icon: Icons.shield_outlined,
-                      label: permissionLabel(s?.permissionMode),
-                      onTap: app.capability?.setMode == true ? onMode : null,
+                      label: mode,
+                      onTap: onMode,
                     ),
                   ),
                   // Only while it is on: the footer has no room for a third

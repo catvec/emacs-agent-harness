@@ -976,7 +976,10 @@ class AppController extends ChangeNotifier {
         throw const AcpException(-32603, 'The agent created no session.');
       }
       await refreshSessions();
-      openSession(id);
+      final controller = openSession(id);
+      // The new session's modes come with its creation answer; opening it
+      // reads them again when the agent sends them with `session/load`.
+      controller.adoptModes(result['modes']);
       return id;
     } on AcpException catch (failure) {
       lastActionError = failure.message;

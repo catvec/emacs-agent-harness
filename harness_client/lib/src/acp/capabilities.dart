@@ -72,6 +72,11 @@ class HarnessCapabilities {
   final bool embeddedContext;
   final JsonMap raw;
 
+  /// Whether the harness's extension object listed [method].  Only its bus
+  /// methods appear there (`_harness.methods`); standard ACP methods such as
+  /// `session/set_mode` never do, and asking a session what it offers is the
+  /// authority for them (see `SessionModes`, from `session/new` and
+  /// `session/load`).
   bool has(String method) => methods.contains(method);
   bool hasEvent(String event) => events.contains(event);
 
@@ -148,8 +153,6 @@ class HarnessCapabilities {
   bool get sessionImages => has('session/image');
   bool get harnessInfo => has('harness/version') || has('harness/api');
   bool get modules => has('harness/modules');
-  bool get setMode => has('session/set_mode');
-  bool get setModel => has('session/set_model');
   bool get priority => has('priority/set');
   bool get setNonInteractive => has('session/update');
   bool get setAllNonInteractive => has('session/set-all');

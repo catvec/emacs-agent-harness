@@ -239,6 +239,19 @@
       (harness-acp-test-request conn "session/set_model" (list :sessionId sid :modelId "demo:other"))
       (should (equal "demo:other" (plist-get (harness-call 'session/get sid) :model))))))
 
+(ert-deftest harness-acp-local-load-advertises-the-current-mode ()
+  "An existing session's modes come with `session/load', as with `session/new'."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (harness-acp-test-request conn "session/set_mode" (list :sessionId sid :modeId "accept-edits"))
+      (let* ((loaded (harness-acp-test-request conn "session/load" (list :sessionId sid)))
+             (modes (plist-get loaded :modes)))
+        (should (equal "accept-edits" (plist-get modes :currentModeId)))
+        (should (equal '("ask" "accept-edits" "auto" "yolo")
+                       (mapcar (lambda (mode) (plist-get mode :id))
+                               (plist-get modes :availableModes))))))))
+
 (ert-deftest harness-acp-local-set-all-sessions-model ()
   "One call retargets every session and can set the default for new ones."
   (harness-acp-test-with
@@ -292,7 +305,11 @@ extension data, for a client that reads chunks rather than nodes."
       (let* ((seen nil)
              (other (harness-acp-connect)))
         (harness-acp-set-handler other (lambda (method params _respond) (push (list method params) seen)))
-        (should (null (harness-acp-test-request other "session/load" (list :sessionId sid))))
+        (let ((loaded (harness-acp-test-request other "session/load" (list :sessionId sid))))
+          (should (equal "ask" (plist-get (plist-get loaded :modes) :currentModeId)))
+          (should (equal '("ask" "accept-edits" "auto" "yolo")
+                         (mapcar (lambda (m) (plist-get m :id))
+                                 (plist-get (plist-get loaded :modes) :availableModes)))))
         (let* ((nodes (harness-call 'session/nodes sid))
                (kinds (harness-acp-test-kinds seen)))
           (should (equal '(user thinking assistant tool-call tool-result assistant)

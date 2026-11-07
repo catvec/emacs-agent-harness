@@ -1445,7 +1445,10 @@ machine: a device elsewhere may not use it (see
                                           (list :sessionId sid
                                                 :update (list :sessionUpdate "_harness/session" :session session))))
           (harness-acp--replay-end client sid))
-        :empty))))
+        ;; ACP's LoadSessionResponse carries the session's mode state, as
+        ;; `session/new' does: a client that opens an existing conversation
+        ;; offers the modes it has, and shows the one it is in.
+        (list :modes (harness-acp--modes-plist session))))))
 
 ;; ACP's `session/list' (https://agentclientprotocol.com/protocol/v1/session-list)
 ;; is how a client that did not make a session finds it to load: the
