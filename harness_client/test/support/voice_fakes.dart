@@ -14,6 +14,10 @@ class FakeSession implements VoiceSessionBridge {
   bool blocked = false;
   @override
   String? model = 'demo:model';
+
+  /// A test can hold the send of a prompt open to exercise End while the
+  /// transcript is on its way.
+  Completer<void>? sendGate;
   final List<VoicePrompt> sent = <VoicePrompt>[];
   final List<void Function()> sessions = <void Function()>[];
   final List<void Function(String)> replies = <void Function(String)>[];
@@ -45,6 +49,7 @@ class FakeSession implements VoiceSessionBridge {
       throw Exception(message);
     }
     sent.add(prompt);
+    if (sendGate != null) await sendGate!.future;
     if (hold) {
       final done = Completer<void>();
       pending.add(done);
@@ -84,6 +89,12 @@ class FakeBackend implements VoiceBackend {
   FakeBackend({this.autoStart = true});
 
   final bool autoStart;
+
+  /// A test can hold a start or a stop open to exercise the race between a
+  /// call opening and End, or between End and the microphone being released.
+  Completer<void>? startGate;
+  Completer<void>? stopGate;
+
   final _events = StreamController<VoiceBackendEvent>.broadcast();
   bool started = false;
   bool stopped = false;
@@ -105,6 +116,7 @@ class FakeBackend implements VoiceBackend {
   @override
   Future<void> start() async {
     started = true;
+    if (startGate != null) await startGate!.future;
     if (autoStart) emit(const VoicePhaseEvent(VoicePhase.listening));
   }
 
@@ -143,6 +155,7 @@ class FakeBackend implements VoiceBackend {
   @override
   Future<void> stop() async {
     stopped = true;
+    if (stopGate != null) await stopGate!.future;
     if (!_events.isClosed) unawaited(_events.close());
   }
 }

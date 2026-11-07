@@ -19,7 +19,12 @@ import 'package:harness_client/src/ui/adaptive/platform_style.dart';
 import 'package:harness_client/src/ui/app_scope.dart';
 import 'package:harness_client/src/ui/screens/workspace_screen.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
+import 'package:harness_client/src/ui/widgets/workspace_buddy.dart';
+import 'package:harness_client/src/ui/widgets/workspace_call_bar.dart';
+import 'package:harness_client/src/voice/voice_backend.dart';
+import 'package:harness_client/src/voice/voice_models.dart';
 
+import 'support/buddy_fakes.dart';
 import 'support/fake_rfb.dart';
 import 'support/real_fonts.dart';
 
@@ -168,6 +173,10 @@ Future<(GlobalKey, WorkspaceController)> _show(
   required double width,
   required double height,
   double textScale = 1,
+  bool disableAnimations = false,
+  BuddyRig? buddy,
+  bool callBar = false,
+  bool awayCard = true,
   WorkspaceController? controller,
 }) async {
   tester.view.physicalSize = Size(width, height);
@@ -183,7 +192,26 @@ Future<(GlobalKey, WorkspaceController)> _show(
   final boundary = GlobalKey();
   final settings = SettingsController();
   final app = AppController(settings: settings);
+  if (buddy != null) app.workspaceBuddy = buddy.controller;
   final shown = controller ?? _controller();
+  Widget page = WorkspaceScreen(
+    app: app,
+    controller: shown,
+    onOpenSession: (_) {},
+    vncTransportFactory: (_) => FakeRfbTransport(width: 640, height: 400),
+  );
+  if (callBar && buddy != null) {
+    page = Column(
+      children: [
+        WorkspaceCallBar(
+          controller: buddy.controller,
+          visible: true,
+          onOpenCallView: () {},
+        ),
+        Expanded(child: page),
+      ],
+    );
+  }
   await tester.pumpWidget(
     RepaintBoundary(
       key: boundary,
@@ -199,13 +227,20 @@ Future<(GlobalKey, WorkspaceController)> _show(
               data: MediaQueryData(
                 size: Size(width, height),
                 textScaler: TextScaler.linear(textScale),
+                disableAnimations: disableAnimations,
               ),
-              child: WorkspaceScreen(
-                app: app,
-                controller: shown,
-                onOpenSession: (_) {},
-                vncTransportFactory: (_) =>
-                    FakeRfbTransport(width: 640, height: 400),
+              child: Stack(
+                children: [
+                  page,
+                  if (buddy != null && awayCard)
+                    Positioned.fill(
+                      child: WorkspaceBuddyLayer(
+                        controller: buddy.controller,
+                        onOpenWorkspace: () {},
+                        onOpenSettings: () {},
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
@@ -373,6 +408,195 @@ void main() {
     if (shots != null) {
       await _write(tester, scaled, '$shots/workspace-scale-150.png');
     }
+  });
+
+  testWidgets('the in-call bar is the focused desktop call surface', (
+    tester,
+  ) async {
+    final rig = BuddyRig();
+    await rig.controller.enable();
+    await rig.controller.start();
+    final (boundary, _) = await _show(
+      tester,
+      width: 1440,
+      height: 900,
+      buddy: rig,
+      callBar: true,
+      awayCard: false,
+    );
+    expect(find.byKey(const Key('workspace-call-bar')), findsOneWidget);
+    expect(find.text('In a call'), findsOneWidget);
+    expect(find.text('Listening'), findsOneWidget);
+    expect(find.text('Mic live'), findsOneWidget);
+    expect(find.byKey(const Key('workspace-buddy')), findsNothing);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-call-bar-desktop.png');
+    }
+    rig.controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('the compact away buddy on a desktop, with its real level', (
+    tester,
+  ) async {
+    final rig = BuddyRig();
+    await rig.controller.enable();
+    await rig.controller.start();
+    final backend = rig.backends.single;
+    backend.emit(const VoiceLevelEvent(0.62));
+    final (boundary, _) = await _show(
+      tester,
+      width: 1024,
+      height: 768,
+      buddy: rig,
+      callBar: true,
+    );
+    expect(find.byKey(const Key('workspace-buddy')), findsOneWidget);
+    expect(find.byKey(const Key('workspace-call-bar')), findsOneWidget);
+    expect(find.text('Listening'), findsWidgets);
+    expect(find.text('Mic live'), findsWidgets);
+    expect(find.byKey(const Key('buddy-level')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-buddy-away.png');
+    }
+    rig.controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets(
+    'the compact buddy at 150% text hears a person while a reply plays',
+    (tester) async {
+      final rig = BuddyRig();
+      await rig.controller.enable();
+      await rig.controller.start();
+      final backend = rig.backends.single;
+      backend.emit(const VoiceLevelEvent(0.55));
+      backend.emit(const VoiceSpeechEvent(true));
+      backend.emit(const VoicePhaseEvent(VoicePhase.speaking));
+      final (boundary, _) = await _show(
+        tester,
+        width: 1440,
+        height: 900,
+        textScale: 1.5,
+        buddy: rig,
+        callBar: true,
+      );
+      expect(find.text('Hearing you'), findsWidgets);
+      expect(find.text('Speaking'), findsWidgets);
+      expect(find.text('Mic live'), findsWidgets);
+      expect(tester.takeException(), isNull);
+      if (shots != null) {
+        await _write(tester, boundary, '$shots/workspace-buddy-scale-150.png');
+      }
+      rig.controller.dispose();
+      await tester.pump();
+    },
+  );
+
+  testWidgets('the compact buddy says a permission denial and offers Retry', (
+    tester,
+  ) async {
+    final rig = BuddyRig();
+    await rig.controller.enable();
+    await rig.controller.start();
+    rig.backends.single.emit(
+      const VoiceFailureEvent(
+        VoiceProblem(
+          'Microphone permission denied',
+          detail: 'NotAllowedError: permission denied',
+          recoverable: false,
+        ),
+      ),
+    );
+    final (boundary, _) = await _show(
+      tester,
+      width: 1280,
+      height: 800,
+      buddy: rig,
+      callBar: true,
+    );
+    expect(find.text('Failed'), findsWidgets);
+    expect(find.text('Microphone permission denied'), findsOneWidget);
+    expect(find.text('Retry'), findsWidgets);
+    expect(find.byKey(const Key('buddy-level')), findsNothing);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-buddy-problem.png');
+    }
+    rig.controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('the compact buddy honours reduced motion', (tester) async {
+    final rig = BuddyRig();
+    await rig.controller.enable();
+    await rig.controller.start();
+    final (boundary, _) = await _show(
+      tester,
+      width: 1024,
+      height: 768,
+      disableAnimations: true,
+      buddy: rig,
+      callBar: true,
+    );
+    for (final switcher in tester.widgetList<AnimatedSwitcher>(
+      find.byType(AnimatedSwitcher),
+    )) {
+      expect(switcher.duration, Duration.zero);
+    }
+    expect(find.byType(AnimatedSwitcher), findsWidgets);
+    expect(tester.binding.transientCallbackCount, 0);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(
+        tester,
+        boundary,
+        '$shots/workspace-buddy-reduced-motion.png',
+      );
+    }
+    rig.controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('a phone keeps Call and gets the in-call bar instead of a card', (
+    tester,
+  ) async {
+    final (boundary, _) = await _show(tester, width: 390, height: 844);
+    expect(find.byKey(const Key('workspace-buddy')), findsNothing);
+    expect(find.byKey(const Key('workspace-buddy-action')), findsNothing);
+    expect(find.byKey(const Key('workspace-call-bar')), findsNothing);
+    expect(find.byTooltip('Call'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-phone.png');
+    }
+  });
+
+  testWidgets('the in-call bar on a phone', (tester) async {
+    final rig = BuddyRig();
+    await rig.controller.enable();
+    await rig.controller.start();
+    final (boundary, _) = await _show(
+      tester,
+      width: 390,
+      height: 844,
+      buddy: rig,
+      callBar: true,
+      awayCard: false,
+    );
+    expect(find.byKey(const Key('workspace-call-bar')), findsOneWidget);
+    expect(find.text('In a call'), findsOneWidget);
+    expect(find.text('Listening'), findsOneWidget);
+    expect(find.text('Mic live'), findsOneWidget);
+    expect(find.byKey(const Key('workspace-buddy')), findsNothing);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-call-bar-phone.png');
+    }
+    rig.controller.dispose();
+    await tester.pump();
   });
 
   testWidgets('workspace on a desktop with the computer hidden', (

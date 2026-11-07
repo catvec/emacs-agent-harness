@@ -406,7 +406,11 @@ transcript rather than being spoken late.
 
 [Voice turn-taking](voice-turn-taking.md) covers the speech signal, the
 pending-update context, the live-conversation controls and their latency
-budget.
+budget.  The Flutter client's compact workspace buddy draws this same list
+from the same `VoiceController`, plus the app's real `Paused`, `Approval
+needed`, `Ended` and an honest `Status unknown`; it keeps a separate
+microphone line so a muted or paused call is never drawn as listening.  See
+[the buddy design](design/workspace-voice-buddy.md).
 
 ### What is implemented and tested
 

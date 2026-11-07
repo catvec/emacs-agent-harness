@@ -7,6 +7,7 @@ import '../../models/resources.dart';
 import '../../models/workspace.dart';
 import '../../state/app_controller.dart';
 import '../../state/session_controller.dart';
+import '../../state/workspace_buddy_controller.dart';
 import '../../state/workspace_controller.dart';
 import '../../services/voice_runtime.dart';
 import '../../voice/voice_controller.dart';
@@ -20,6 +21,7 @@ import '../theme/harness_theme.dart';
 import '../widgets/interaction_card.dart';
 import '../widgets/markdown_view.dart';
 import '../widgets/message_composer.dart';
+import '../widgets/workspace_buddy.dart';
 import '../widgets/vnc_takeover.dart';
 import '../widgets/workspace_graph.dart';
 import 'memory_screen.dart';
@@ -78,6 +80,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
 
   WorkspaceController? get _controller =>
       widget.controller ?? widget.app.workspace;
+
+  WorkspaceBuddyController? get _buddy => widget.app.workspaceBuddy;
 
   @override
   void initState() {
@@ -271,6 +275,25 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   Future<void> _openCall() async {
     final live = _controller?.activeThread?.live;
     if (live == null) return;
+    // One workspace call, whatever the buddy's opt-in: the in-call bar
+    // shows it and the full call view is the same call, not a second one.
+    // A workspace call that has nothing to open with (no connection, no
+    // voice setup) leaves Call to the screen that owns its own call and
+    // shows its setup or failure, as it did before.
+    final buddy = widget.app.workspaceBuddy;
+    if (buddy != null && (buddy.inCall || buddy.canStart)) {
+      if (!buddy.inCall) {
+        await buddy.start();
+        if (!mounted) return;
+      }
+      if (buddy.voice == null) return;
+      await openWorkspaceCallView(
+        context: context,
+        navigator: Navigator.of(context),
+        buddy: buddy,
+      );
+      return;
+    }
     final session = await widget.app.openSessionById(live);
     if (!mounted || session == null) return;
     final bridge = SessionVoiceBridge(session);
@@ -369,6 +392,11 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         final workspace = controller.current;
         final thread = controller.activeThread;
         final compact = MediaQuery.sizeOf(context).width < 720;
+        final buddy = _buddy;
+        final buddyHere =
+            buddy != null &&
+            workspace != null &&
+            MediaQuery.sizeOf(context).width >= 920;
         final actions = <Widget>[
           HarnessIconButton(
             icon: Icons.add_comment_outlined,
@@ -380,6 +408,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             label: 'Threads',
             onPressed: _showThreads,
           ),
+          if (buddyHere) _BuddyAction(buddy: buddy),
           if (thread?.live != null)
             HarnessIconButton(
               icon: Icons.call_outlined,
@@ -870,6 +899,66 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         constraints: BoxConstraints(maxWidth: maxWidth),
         child: column,
       ),
+    );
+  }
+}
+
+/// The workspace-scoped opt-in.  On a desktop the buddy is this workspace's
+/// call surface; turning it on shows the compact card and starts no call.
+class _BuddyAction extends StatefulWidget {
+  const _BuddyAction({required this.buddy});
+
+  final WorkspaceBuddyController buddy;
+
+  @override
+  State<_BuddyAction> createState() => _BuddyActionState();
+}
+
+class _BuddyActionState extends State<_BuddyAction> {
+  final FocusNode _focus = FocusNode();
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AnimatedBuilder(
+      animation: widget.buddy,
+      builder: (context, _) {
+        final on = widget.buddy.enabled;
+        final tooltip = on ? 'Workspace buddy · on' : 'Workspace buddy · off';
+        return Tooltip(
+          message: tooltip,
+          child: Semantics(
+            container: true,
+            button: true,
+            toggled: on,
+            label: 'Buddy',
+            tooltip: tooltip,
+            onTap: () => unawaited(widget.buddy.toggle()),
+            onFocus: () => _focus.requestFocus(),
+            focusable: true,
+            excludeSemantics: true,
+            child: IconButton(
+              key: const Key('workspace-buddy-action'),
+              focusNode: _focus,
+              onPressed: () => unawaited(widget.buddy.toggle()),
+              tooltip: null,
+              icon: Icon(
+                on
+                    ? Icons.record_voice_over_rounded
+                    : Icons.record_voice_over_outlined,
+                size: 22,
+                color: on ? theme.colorScheme.primary : null,
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

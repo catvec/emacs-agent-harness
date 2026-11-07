@@ -2264,7 +2264,9 @@ A new `Workspace` tab:
 
 - the timeline, with thread dividers and the thread sheet;
 - the header's box, memory and dream states;
-- `Call` (the existing voice screen, attached to the thread);
+- `Call` (the existing voice screen, attached to the thread), or, at a
+  desktop width and when the workspace opts in, the compact
+  [voice buddy](design/workspace-voice-buddy.md) in the shell's corner;
 - `Computer`: a screenshot view with tap/keyboard input over ACP, and
   an `Open desktop` WebView for noVNC when reachable;
 - `Memory`: search, cards, pages, provenance and the dream review;
@@ -2284,10 +2286,11 @@ a graceful fallback.
 The first client slice is in the tree: the tab at three widths, the
 thread rail, the timeline and brief, the concept rail as a prototype,
 the computer desk with the takeover motion, the call attached to a
-thread, and the Resources surface for the browser, the wallet and the
-access the agent has to either.  The memory browser, the Work panel
-and the `Open desktop` WebView are still to come; the implementation
-contract's [Flutter
+thread, the optional desktop [voice
+buddy](design/workspace-voice-buddy.md), and the Resources surface for
+the browser, the wallet and the access the agent has to either.  The
+memory browser, the Work panel and the `Open desktop` WebView are still
+to come; the implementation contract's [Flutter
 client](workspace-mode-implementation.md#the-flutter-client) section
 says what the slice draws and the words it uses.
 

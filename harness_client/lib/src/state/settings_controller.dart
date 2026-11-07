@@ -97,6 +97,15 @@ class SettingsController extends ChangeNotifier {
   bool _loaded = false;
   Object? _loadError;
 
+  /// The workspaces whose compact buddy this device has opted into.  It is
+  /// workspace-scoped on purpose: one workspace may have a buddy while
+  /// another does not, and signing out does not forget it.
+  final Set<String> _workspaceBuddies = <String>{};
+
+  /// Whether a workspace buddy choice was made since the app started: what
+  /// [load] reads late must not overwrite it.
+  bool _buddyChanged = false;
+
   /// Whether the address and secret, or [reconnectOnLaunch], were set or
   /// forgotten since the app started: what [load] reads late must not
   /// overwrite them.
@@ -140,6 +149,15 @@ class SettingsController extends ChangeNotifier {
   /// the device's, whichever harness it talks to, and signing out does not
   /// forget it.
   VoiceSettings get voiceSettings => _voiceSettings;
+
+  /// The workspaces whose compact voice buddy is on for this device.
+  Set<String> get workspaceBuddies =>
+      Set<String>.unmodifiable(_workspaceBuddies);
+
+  /// Whether [workspaceId] has its compact buddy on.  The choice is the
+  /// device's and it never starts a call by itself.
+  bool isWorkspaceBuddyEnabled(String workspaceId) =>
+      workspaceId.isNotEmpty && _workspaceBuddies.contains(workspaceId);
 
   /// Whether the app connects again by itself when it opens.  It does, unless
   /// the person left the harness on purpose ("Disconnect"): that is
@@ -299,6 +317,14 @@ class SettingsController extends ChangeNotifier {
         if (raw == null || raw.isEmpty) return;
         _voiceSettings = VoiceSettings.fromJson(jsonDecode(raw));
       });
+      read('workspaceBuddies', () {
+        if (_buddyChanged) return;
+        final stored = prefs.getStringList('workspaceBuddies');
+        if (stored == null) return;
+        _workspaceBuddies
+          ..clear()
+          ..addAll(stored.map((id) => id.trim()).where((id) => id.isNotEmpty));
+      });
     }
     _loaded = true;
     if (!_ready.isCompleted) _ready.complete();
@@ -360,6 +386,24 @@ class SettingsController extends ChangeNotifier {
     return _enqueue(
       () => _setString('voiceSettings', jsonEncode(_voiceSettings.toJson())),
     );
+  }
+
+  /// Opt [workspaceId] into, or out of, the compact voice buddy.  The write
+  /// is the store's; a store that refuses it leaves the in-memory choice
+  /// working for this run (see [persistenceProblem]).
+  Future<void> setWorkspaceBuddyEnabled(String workspaceId, bool enabled) {
+    final id = workspaceId.trim();
+    if (id.isEmpty) return Future.value();
+    final changed = enabled
+        ? _workspaceBuddies.add(id)
+        : _workspaceBuddies.remove(id);
+    if (!changed) return Future.value();
+    _buddyChanged = true;
+    notifyListeners();
+    return _enqueue(() {
+      final ids = _workspaceBuddies.toList()..sort();
+      return _setStringList('workspaceBuddies', ids);
+    });
   }
 
   /// Turn remembering the harness on or off.  Off forgets what was kept; on
@@ -438,6 +482,9 @@ class SettingsController extends ChangeNotifier {
 
   Future<void> _setBool(String key, bool value) =>
       _write('save', key, (prefs) => prefs.setBool(key, value));
+
+  Future<void> _setStringList(String key, List<String> value) =>
+      _write('save', key, (prefs) => prefs.setStringList(key, value));
 
   Future<void> _remove(String key) =>
       _write('forget', key, (prefs) => prefs.remove(key));

@@ -956,12 +956,18 @@ class HarnessStatusPill extends StatelessWidget {
     required this.color,
     this.icon,
     this.compact = true,
+    this.flexible = false,
   });
 
   final String label;
   final Color color;
   final IconData? icon;
   final bool compact;
+
+  /// Whether the label may ellipsize when the pill is given a bounded width.
+  /// The compact buddy header uses it so a long connection word never
+  /// overflows the card at 150% text.
+  final bool flexible;
 
   @override
   Widget build(BuildContext context) {
@@ -989,15 +995,30 @@ class HarnessStatusPill extends StatelessWidget {
             ),
             const SizedBox(width: 5),
           ],
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: compact ? 10.5 : 12,
-              fontWeight: FontWeight.w600,
-              decoration: TextDecoration.none,
-              color: color,
+          if (flexible)
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: compact ? 10.5 : 12,
+                  fontWeight: FontWeight.w600,
+                  decoration: TextDecoration.none,
+                  color: color,
+                ),
+              ),
+            )
+          else
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: compact ? 10.5 : 12,
+                fontWeight: FontWeight.w600,
+                decoration: TextDecoration.none,
+                color: color,
+              ),
             ),
-          ),
         ],
       ),
     );

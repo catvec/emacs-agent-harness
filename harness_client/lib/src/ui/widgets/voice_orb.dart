@@ -20,6 +20,7 @@ Color voicePhaseColor(VoicePhase phase) => switch (phase) {
   VoicePhase.ended => const Color(0xFF8B8B93),
   VoicePhase.failed => const Color(0xFFE0645B),
   VoicePhase.idle => const Color(0xFF8B8B93),
+  VoicePhase.unknown => const Color(0xFF8B8B93),
 };
 
 /// A quiet mark of the voice: a soft core whose rings answer the microphone,

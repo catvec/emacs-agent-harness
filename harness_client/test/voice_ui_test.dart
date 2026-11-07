@@ -31,6 +31,67 @@ Future<void> _open(WidgetTester tester, Rig rig) async {
 }
 
 void main() {
+  testWidgets('an attached call minimizes and ends through its owner', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final rig = Rig();
+    // The owner starts the call before it shows the view; the start awaits
+    // the session bridge, which a widget test's fake time does not run.
+    await tester.runAsync(() => rig.controller.start());
+    var ended = 0;
+    final navigator = GlobalKey<NavigatorState>();
+    Future<void> open() async {
+      navigator.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => VoiceScreen(
+            controller: rig.controller,
+            attached: true,
+            onEnd: () async => ended++,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        navigatorKey: navigator,
+        home: const Scaffold(body: Center(child: Text('Behind'))),
+      ),
+    );
+    await open();
+    expect(find.text('Voice'), findsOneWidget);
+    expect(find.byTooltip('Minimize'), findsOneWidget);
+    expect(find.byTooltip('End'), findsNothing);
+    expect(rig.backend.started, isTrue);
+
+    // The close control minimizes: the call and its microphone stay, and
+    // the owner is not asked to end anything.
+    await tester.tap(find.byKey(const Key('voice-close')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Behind'), findsOneWidget);
+    expect(rig.backend.stopped, isFalse);
+    expect(ended, 0);
+
+    // End pops the view and goes back through the owner, and the screen
+    // itself never stopped or disposed the controller.
+    await open();
+    await tester.tap(find.byKey(const Key('voice-end')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Behind'), findsOneWidget);
+    expect(ended, 1);
+    expect(rig.backend.stopped, isFalse);
+
+    rig.controller.dispose();
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('the voice screen says what it is and offers the live controls', (

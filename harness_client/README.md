@@ -1241,11 +1241,76 @@ it travels, and *Return control* unwinds it. The motion is disabled where the
 platform asks for reduced motion, and the state is in the pill's words and the
 control caption, not the green alone. *Call* opens the voice screen on the
 thread's live session, so a call is attached to the thread rather than to a
-session picked by hand.
+session picked by hand.  Leaving the voice screen minimizes the call to the
+bar at the top of the app; `End` is what ends it.
 
 | The workspace on a desktop | The takeover, mid-motion | The workspace on a phone | The computer sheet, taken over |
 |---|---|---|---|
 | ![The workspace: the thread rail, the chat with its brief and messages, the concept rail and the computer desk](screenshots/workspace-desktop.png) | ![The takeover pill part-way up the window, a green stroke wrapping the window behind it](screenshots/workspace-desktop-takeover.png) | ![The workspace on a phone: the concept strip, the timeline and the message box](screenshots/workspace-mobile.png) | ![The computer in a sheet on a phone, the pill over the window](screenshots/workspace-mobile-takeover.png) |
+
+### Workspace calls: the bar, the view and the away buddy
+
+A workspace has one voice call, whatever surface is showing it.  `Call` in
+the workspace header starts it on the active thread's live session and opens
+the full voice screen: the orb, the transcript, mute, pause, interrupt,
+settings and `End`.  Leaving that screen does not end the call.  It
+minimizes to the **in-call bar** at the top of the app, on every page and on
+a phone as well: `In a call`, the workspace and thread, the status the
+backend reports (`Listening`, `Hearing you`, `Transcribing`, `Working`,
+`Holding reply`, `Speaking`, `Interrupted`, `Muted`, `Paused`, `Approval
+needed`, `Ending`, `Failed`, `Status unknown`), the microphone line (`Mic
+live`, `Mic muted`, `Mic paused`, `Mic starting`, `Mic closing`, `Mic off`),
+`Mute`/`Unmute`, `End`, `Retry` when there is a retryable problem, and
+`Call view` to open the large screen again.  The status and microphone lines
+are live regions; the icon controls name themselves; the bar takes the
+status bar into its own top padding.  `End` in the bar or the view stops the
+microphone, the player and the provider connection; the agent's work keeps
+running.  A phone gets the bar, never the compact card.
+
+On a desktop 920 px wide or wider, the workspace header also has a *Buddy*
+action.  It is an opt-in for one workspace, kept on the device
+(`workspaceBuddies` in SharedPreferences): one workspace can have it while
+another does not, and the next run of the app restores it.  The opt-in is
+for the **away card** only: a compact card that shows while the window is
+not the one in use -- behind another window, or minimized -- and no call
+view is open.  The in-call bar stays above the pages while it is shown, so
+a call is never without its microphone line and `End`.  While the window is
+in use, the card is not built at all.  Turning the buddy on shows the card
+(when away) and starts no call.  Turning it off, or the card's own
+`off` control, removes the card; it does not end a running call, whose bar
+keeps the microphone state and `End` in sight.  Opening the card's `Start`
+starts the workspace call; `End`, `Mute`/`Unmute`, `Pause`/`Resume`,
+`Interrupt`, `Voice settings` and `Retry` are the same call's controls in a
+smaller place.  Narrowing the window below 920 px removes the card without
+ending the call; the bar is there at every width.  On a phone the card is
+never built.
+
+The in-app card says only what the call reports.  Its microphone line is
+separate from the status, so a muted or paused call cannot look like it is
+recording.  A level meter appears only after the provider reports a level;
+there is no upload, transfer or transcoding stage to invent.  The status and
+microphone lines are live regions; every control has a label and a tooltip;
+`Tab` reaches all of them, and the status transition is `Duration.zero`
+under reduced motion.  The card lives in the app's own window (no native
+always-on-top window, tray icon or global shortcut), is dragged by its
+header and is clamped to the window.
+
+An in-app surface cannot be drawn while the operating system has minimized
+the window.  The call keeps its identity and its state, the OS's own
+microphone indicator stays on, and the in-call bar with `Mic live` and `End`
+is there the moment the window is shown again.  A small always-on-top window
+that survives a minimize is a native companion, a separate feature that
+needs explicit approval and a platform build.
+
+The design, the event-to-copy mapping and the limits are in
+[docs/design/workspace-voice-buddy.md](../docs/design/workspace-voice-buddy.md).
+The pictures below use a scripted backend and no microphone, speaker or
+provider key; see [docs/screenshots.md](../docs/screenshots.md).
+
+| The in-call bar on a desktop | The same bar on a phone | The compact away card, listening | Hearing a person while a reply plays, at 150% text |
+|---|---|---|---|
+| ![The desktop workspace under a bar reading In a call, Home and Kitchen renovation, Listening, Mic live, with mute, End and Call view controls](screenshots/workspace-call-bar-desktop.png) | ![The same bar on a phone: In a call, Home, Listening, Mic live, mute, End and Call view](screenshots/workspace-call-bar-phone.png) | ![The away card in the corner: Buddy, Connected, Home and Kitchen renovation, Listening, Mic live with a level meter, Start disabled, End, Mute, Pause, Interrupt, Voice settings](screenshots/workspace-buddy-away.png) | ![The same card at 150% text: Hearing you, Mic live with a level meter, a Speaking chip, Start disabled, End, Mute, Pause, Interrupt and Voice settings](screenshots/workspace-buddy-scale-150.png) |
+| ![The card in Failed state: Mic off, Start enabled, End to dismiss, Microphone permission denied with its NotAllowedError detail and Retry](screenshots/workspace-buddy-problem.png) | ![The card with motion disabled](screenshots/workspace-buddy-reduced-motion.png) | ![The workspace on a phone with Call in the header and no call bar while no call runs](screenshots/workspace-phone.png) | |
 
 The concept rail is a prototype, and the app says so: a concept is a tag at
 the level of threads, not a node for every page or bullet. Choosing one

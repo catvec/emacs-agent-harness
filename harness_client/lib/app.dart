@@ -6,11 +6,14 @@ import 'package:flutter/material.dart';
 
 import 'src/state/app_controller.dart';
 import 'src/state/settings_controller.dart';
+import 'src/state/workspace_buddy_controller.dart';
 import 'src/ui/adaptive/platform_style.dart';
 import 'src/ui/app_scope.dart';
 import 'src/ui/screens/connect_screen.dart';
 import 'src/ui/screens/home_shell.dart';
 import 'src/ui/theme/harness_theme.dart';
+import 'src/ui/widgets/workspace_buddy.dart';
+import 'src/ui/widgets/workspace_call_bar.dart';
 
 class HarnessApp extends StatefulWidget {
   const HarnessApp({
@@ -66,11 +69,30 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
     _inSession = inSession;
   }
 
+  /// The in-call bar's way into the full call view.  It is the same call,
+  /// shown large; the view is pushed on this app's navigator, above every
+  /// page but below the app's own chrome.
+  void _openCallView(WorkspaceBuddyController buddy) {
+    final navigator = _navigator.currentState;
+    if (navigator == null) return;
+    unawaited(
+      openWorkspaceCallView(
+        context: navigator.context,
+        navigator: navigator,
+        buddy: buddy,
+      ),
+    );
+  }
+
   /// A phone puts a connection to sleep without a word while the app is
   /// away, and the person who comes back should not be the first to find
   /// out: check it, and connect again if it died.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // The away buddy is for a window that is not the one in use, and an
+    // in-call bar for one that is.  A phone or browser reports the same
+    // states; the buddy is only built at a desktop width.
+    _app.windowActive.value = state == AppLifecycleState.resumed;
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(_app.resumed());
@@ -156,13 +178,18 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
                 DefaultCupertinoLocalizations.delegate,
               ],
               builder: (context, child) {
+                final content = WorkspaceCallBarHost(
+                  app: _app,
+                  onOpenCallView: _openCallView,
+                  child: child ?? const SizedBox.shrink(),
+                );
                 if (style == HarnessPlatformStyle.cupertino) {
                   return CupertinoTheme(
                     data: HarnessTheme.cupertino(Theme.of(context).brightness),
-                    child: child ?? const SizedBox.shrink(),
+                    child: content,
                   );
                 }
-                return child ?? const SizedBox.shrink();
+                return content;
               },
               home: _RootGate(app: _app),
             ),

@@ -141,6 +141,19 @@ from such a run; `docs/media/workspace-client.png`,
 the workspace pages show, are copied from those tests' output too.  Look at the file
 before committing it, as with the Emacs ones.
 
+The workspace call pictures (`screenshots/workspace-call-bar-*.png` and
+`screenshots/workspace-buddy-*.png`) come from the same
+`workspace_screenshots_test.dart` run: they are driven by a scripted voice
+backend, so the picture is the real widget and the real font, with no
+microphone, speaker, provider key or device.  `workspace-call-bar-desktop`
+is the desktop in-call bar over the workspace, `workspace-call-bar-phone` is
+the same bar on a phone, `workspace-buddy-away` is the compact away card
+listening with a reported level, `workspace-buddy-scale-150` is `Hearing you`
+with a `Speaking` reply at 150% text, `workspace-buddy-problem` is a
+permission denial with `Retry`, `workspace-buddy-reduced-motion` is the same
+desktop with motion disabled, and `workspace-phone` shows the phone's `Call`
+and no call bar when no call runs.
+
 ## How the pictures are made
 
 `scripts/media.sh` starts the display, makes a scratch HOME, and runs

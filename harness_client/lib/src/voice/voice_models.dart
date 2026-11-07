@@ -20,6 +20,10 @@ enum VoicePhase {
   approval,
   ended,
   failed,
+
+  /// A provider named a phase this client does not know.  The honest
+  /// answer is that the state is unknown, not the last state it saw.
+  unknown,
 }
 
 extension VoicePhaseLabel on VoicePhase {
@@ -39,6 +43,7 @@ extension VoicePhaseLabel on VoicePhase {
     VoicePhase.approval => 'Approval needed',
     VoicePhase.ended => 'Ended',
     VoicePhase.failed => 'Failed',
+    VoicePhase.unknown => 'Status unknown',
   };
 
   /// Whether the microphone may be open in this phase.

@@ -11,6 +11,8 @@ import '../format.dart';
 import '../navigation.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
+import '../widgets/voice_settings_sheet.dart';
+import '../widgets/workspace_buddy.dart';
 import '../widgets/quick_search_entry.dart';
 import 'quick_search_screen.dart';
 import 'session_screen.dart';
@@ -32,6 +34,45 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
   String _tab = 'sessions';
+
+  /// The compact buddy's settings use the same voice sheet as the full
+  /// voice screen; a change is saved and applied to a running call.
+  Future<void> _openBuddySettings() async {
+    final buddy = widget.app.workspaceBuddy;
+    if (buddy == null) return;
+    final next = await showVoiceSettingsSheet(
+      context,
+      settings: widget.app.settings.voiceSettings,
+      harnessAddress: widget.app.address ?? widget.app.settings.address,
+    );
+    if (next != null) await buddy.applyVoiceSettings(next);
+  }
+
+  /// The away buddy floats over whichever shell is showing, only while the
+  /// window is not the one in use.  While it is, the in-call bar and the
+  /// full call view are the call's surfaces; below the desktop breakpoint
+  /// the bar is, so no microphone is left behind an absent card.
+  Widget _withBuddy(Widget child) {
+    final buddy = widget.app.workspaceBuddy;
+    if (buddy == null) return child;
+    return ValueListenableBuilder<bool>(
+      valueListenable: widget.app.windowActive,
+      builder: (context, active, _) => Stack(
+        fit: StackFit.expand,
+        children: [
+          child,
+          Positioned.fill(
+            child: WorkspaceBuddyLayer(
+              controller: buddy,
+              away: !active,
+              onOpenWorkspace: () => _select('workspace'),
+              onOpenSettings: _openBuddySettings,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   List<_Tab> _tabs(AppController app) => [
     const _Tab(
@@ -230,37 +271,39 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
     if (wide) {
       return Scaffold(
         backgroundColor: Theme.of(context).colorScheme.surface,
-        body: Row(
-          children: [
-            _Sidebar(
-              tabs: tabs,
-              selected: _tab,
-              onSelect: _select,
-              onSearch: _openQuickSearch,
-              app: app,
-            ),
-            VerticalDivider(
-              width: 1,
-              color: Theme.of(context).colorScheme.outlineVariant,
-            ),
-            Expanded(
-              child: Column(
-                children: [
-                  ConnectionBanner(app: app, safeTop: true),
-                  // The banner, when it shows, has kept clear of the status
-                  // bar: the page below it need not.  (Always wrapped, so
-                  // that the screens are not rebuilt when it comes and goes.)
-                  Expanded(
-                    child: MediaQuery.removePadding(
-                      context: context,
-                      removeTop: app.isReconnecting,
-                      child: body,
-                    ),
-                  ),
-                ],
+        body: _withBuddy(
+          Row(
+            children: [
+              _Sidebar(
+                tabs: tabs,
+                selected: _tab,
+                onSelect: _select,
+                onSearch: _openQuickSearch,
+                app: app,
               ),
-            ),
-          ],
+              VerticalDivider(
+                width: 1,
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
+              Expanded(
+                child: Column(
+                  children: [
+                    ConnectionBanner(app: app, safeTop: true),
+                    // The banner, when it shows, has kept clear of the status
+                    // bar: the page below it need not.  (Always wrapped, so
+                    // that the screens are not rebuilt when it comes and goes.)
+                    Expanded(
+                      child: MediaQuery.removePadding(
+                        context: context,
+                        removeTop: app.isReconnecting,
+                        child: body,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -269,7 +312,7 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
       return CupertinoPageScaffold(
         child: Column(
           children: [
-            Expanded(child: body),
+            Expanded(child: _withBuddy(body)),
             ConnectionBanner(app: app),
             CupertinoTabBar(
               currentIndex: index < 0 ? 0 : index,
@@ -297,7 +340,7 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
     }
 
     return Scaffold(
-      body: body,
+      body: _withBuddy(body),
       // Above the navigation bar, in the layout: a banner that stays for as
       // long as the harness cannot be reached must not cover the buttons of
       // the screen above it.

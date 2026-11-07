@@ -985,6 +985,16 @@ a call is attached to the thread rather than to a session picked by
 hand.  The controls of the call are the voice task's; the client only
 attaches the call to the thread.
 
+At a desktop width the header also offers the per-workspace `Buddy` opt-in
+(the [compact buddy design](design/workspace-voice-buddy.md)).  It is kept in the
+device's `workspaceBuddies` preference, restores after a restart without
+starting a call, and turns the page's `Call` over to the card.  The card
+owns at most one `VoiceController` -- `WorkspaceBuddyController` --
+and ends its call on the way out; a phone never creates it.  The desktop
+card and its tests are `lib/src/ui/widgets/workspace_buddy.dart`,
+`lib/src/voice/voice_buddy.dart` and
+`lib/src/state/workspace_buddy_controller.dart`.
+
 `Memory` opens the workspace's knowledge page: the notes the assistant
 kept, newest first, with their thread, author and time, and a recall
 search over `memory/search` that marks the matched words; the

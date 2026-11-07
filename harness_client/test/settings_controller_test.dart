@@ -521,6 +521,67 @@ void main() {
     });
   });
 
+  group('which workspaces keep a compact buddy', () {
+    test('starts off, and is remembered for each workspace', () async {
+      SharedPreferences.setMockInitialValues({});
+      var settings = SettingsController();
+      await settings.load();
+      expect(settings.workspaceBuddies, isEmpty);
+      expect(settings.isWorkspaceBuddyEnabled('w1'), isFalse);
+      expect(settings.isWorkspaceBuddyEnabled(''), isFalse);
+
+      await settings.setWorkspaceBuddyEnabled('w1', true);
+      await settings.setWorkspaceBuddyEnabled('w2', true);
+      await settings.setWorkspaceBuddyEnabled('w2', false);
+      expect(settings.isWorkspaceBuddyEnabled('w1'), isTrue);
+      expect(settings.isWorkspaceBuddyEnabled('w2'), isFalse);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getStringList('workspaceBuddies'), ['w1']);
+
+      // The next run of the app.
+      SharedPreferences.setMockInitialValues(await _onDiskNow());
+      settings = SettingsController();
+      await settings.load();
+      expect(settings.workspaceBuddies, {'w1'});
+      expect(settings.isWorkspaceBuddyEnabled('w1'), isTrue);
+      expect(settings.isWorkspaceBuddyEnabled('w2'), isFalse);
+      expect(settings.loadError, isNull);
+    });
+
+    test('keeps a choice made while the store is still being read', () async {
+      final store = _SlowStore()..readGate = Completer<void>();
+      await store.setValue('StringList', 'flutter.workspaceBuddies', ['old']);
+      SharedPreferencesStorePlatform.instance = store;
+      SharedPreferences.resetStatic();
+      final settings = SettingsController();
+      final loading = settings.load();
+      final saved = settings.setWorkspaceBuddyEnabled('w1', true);
+      expect(settings.isWorkspaceBuddyEnabled('w1'), isTrue);
+      store.readGate!.complete();
+      await loading;
+      await saved;
+      expect(
+        settings.isWorkspaceBuddyEnabled('old'),
+        isFalse,
+        reason: 'what was chosen since the app started wins over the store',
+      );
+      expect(settings.isWorkspaceBuddyEnabled('w1'), isTrue);
+      expect((await _onDisk(store))['flutter.workspaceBuddies'], ['w1']);
+    });
+
+    test('takes no empty workspace id', () async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = SettingsController();
+      await settings.load();
+      await settings.setWorkspaceBuddyEnabled('   ', true);
+      expect(settings.workspaceBuddies, isEmpty);
+      expect(
+        (await _onDiskNow()).containsKey('flutter.workspaceBuddies'),
+        isFalse,
+      );
+    });
+  });
+
   group('when the device cannot keep what it learns', () {
     // The app goes on without a store that does not work, but it then forgets
     // the harness's address and the device's secret each time it closes, and

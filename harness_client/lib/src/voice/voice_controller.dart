@@ -190,8 +190,11 @@ class VoiceController extends ChangeNotifier {
   bool _followSession = false;
   bool _disposed = false;
   bool _stopping = false;
+  bool _stopInProgress = false;
   bool _mediaButtonsStarted = false;
+  bool _levelReported = false;
   int _sequence = 0;
+  int _lifecycle = 0;
   DateTime _lastLevel = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// The address of the harness this device is signed in to, which the
@@ -200,6 +203,33 @@ class VoiceController extends ChangeNotifier {
 
   /// Whether the settings can start a session at all.
   bool get configured => _settings.configuredFor(_harnessAddress);
+
+  /// Whether a stop is in progress.  Its own state, so a compact view can
+  /// say `Ending` while the backend and the microphone are being released.
+  /// It is false again once the call has ended; [_stopping] stays true as
+  /// the guard that keeps stopped calls stopped.
+  bool get stopping => _stopInProgress;
+
+  /// Whether the backend has reported a microphone level in this call.  A
+  /// provider that reports none (the live stream) is not given an invented
+  /// meter.
+  bool get levelReported => _levelReported;
+
+  /// Whether assistant output is actually held for the next transcript.
+  /// [holdingOutput] also covers a person who is speaking; this is only
+  /// output waiting to be said.
+  bool get holdingReply => _heldReplies.isNotEmpty;
+
+  /// Whether the call holds the microphone open right now, by the backend's
+  /// contract: started, not muted, not paused, not stopping and not
+  /// finished.  `connecting` is still opening it.
+  bool get microphoneOpen =>
+      started &&
+      !_stopping &&
+      !muted &&
+      !paused &&
+      !phase.finished &&
+      phase != VoicePhase.connecting;
 
   /// Whether assistant output must wait for the person to finish.
   bool get holdingOutput =>
@@ -242,8 +272,11 @@ class VoiceController extends ChangeNotifier {
 
   Future<void> start() async {
     if (_disposed || started) return;
+    _lifecycle++;
     started = true;
     _stopping = false;
+    _stopInProgress = false;
+    _levelReported = false;
     captions.clear();
     problem = null;
     muted = false;
@@ -280,29 +313,56 @@ class VoiceController extends ChangeNotifier {
   }
 
   Future<void> _openBackend() async {
+    final life = _lifecycle;
     final backend = _backendFactory(_settings, _harnessAddress);
-    _backend = backend;
+    // A stop or a new start may have run while the factory resolved (it is
+    // synchronous today, but a test or a platform seam need not keep it so).
+    if (_disposed || _stopping || life != _lifecycle) return;
     final epoch = ++_backendEpoch;
-    _events = backend.events.listen((event) {
+    final events = backend.events.listen((event) {
       // A backend that was closed, replaced or restarted must not advance
       // the pipe of the one that replaced it.
       if (_disposed || epoch != _backendEpoch) return;
       _onEvent(event);
     });
+    _backend = backend;
+    _events = events;
     try {
       await backend.start();
     } catch (error) {
-      _setPhase(VoicePhase.failed);
-      _setProblem(
-        VoiceProblem('Voice unavailable', detail: '$error', recoverable: false),
+      if (!_disposed && !_stopping && life == _lifecycle) {
+        _setPhase(VoicePhase.failed);
+        _setProblem(
+          VoiceProblem(
+            'Voice unavailable',
+            detail: '$error',
+            recoverable: false,
+          ),
+        );
+        _syncPipeline();
+        notifyListeners();
+      }
+      return;
+    }
+    if (!_disposed && !_stopping && life == _lifecycle) return;
+    // Stop (or a newer call) superseded this start while the backend was
+    // opening.  Close what was just opened, so a microphone cannot be left
+    // capturing after End.
+    await events.cancel();
+    if (identical(_events, events)) _events = null;
+    if (identical(_backend, backend)) _backend = null;
+    try {
+      await backend.stop().timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {},
       );
-      _syncPipeline();
-      notifyListeners();
+    } catch (_) {
+      // The backend that was superseded is already gone; it is still stopped.
     }
   }
 
   void _onEvent(VoiceBackendEvent event) {
-    if (_disposed) return;
+    if (_disposed || _stopping) return;
     switch (event) {
       case VoiceSpeechEvent(:final active):
         speechActive = active;
@@ -332,6 +392,7 @@ class VoiceController extends ChangeNotifier {
         }
         if (phase == VoicePhase.paused) paused = true;
       case VoiceLevelEvent(:final level):
+        _levelReported = true;
         this.level = level.clamp(0.0, 1.0);
         pipeline.level(this.level);
         final now = DateTime.now();
@@ -693,6 +754,7 @@ class VoiceController extends ChangeNotifier {
 
   Future<void> retry() async {
     if (_disposed) return;
+    _lifecycle++;
     _heldTimer?.cancel();
     _heldTimer = null;
     _dropHeld('restart');
@@ -705,6 +767,7 @@ class VoiceController extends ChangeNotifier {
     pipeline.end(state: VoiceInputState.off);
     started = false;
     _stopping = false;
+    _stopInProgress = false;
     problem = null;
     await start();
   }
@@ -727,6 +790,7 @@ class VoiceController extends ChangeNotifier {
     await onSettingsChanged(next);
     if (!_disposed) notifyListeners();
     if (!restart || !wasRunning) return;
+    _lifecycle++;
     _cancelPending();
     await _closeBackend();
     pipeline.end(state: VoiceInputState.off);
@@ -759,6 +823,8 @@ class VoiceController extends ChangeNotifier {
   Future<void> stop() async {
     if (_disposed || _stopping) return;
     _stopping = true;
+    _stopInProgress = true;
+    _lifecycle++;
     _unexpectedEnd = false;
     _heldTimer?.cancel();
     _heldTimer = null;
@@ -776,6 +842,7 @@ class VoiceController extends ChangeNotifier {
     await _closeBackend();
     pipeline.end();
     _setPhase(VoicePhase.ended);
+    _stopInProgress = false;
     if (!_disposed) notifyListeners();
   }
 
@@ -789,6 +856,7 @@ class VoiceController extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _lifecycle++;
     _heldTimer?.cancel();
     _heldTimer = null;
     _heldReplies.clear();

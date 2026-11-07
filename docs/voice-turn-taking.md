@@ -180,6 +180,18 @@ microphone and no playback, a muted call keeps listening to the
 conversation's turns but does not capture), and neither is `Ended`
 (`Restart` is offered instead of `End`).
 
+### A second, compact view
+
+The workspace desktop buddy
+([design](design/workspace-voice-buddy.md)) is a second view of the same
+`VoiceController`, not a second implementation of this gate.  It reuses the
+four controls above, the held-output state and the stop lifecycle: its
+`Start` is a guarded new call, its `Ending` is the controller's stop in
+progress, and its `End` stops the backend before the card goes away.  The
+gate's states are drawn as `Holding reply` and `Reply held`, `Speaking` and
+`Hearing you`; a muted or paused microphone is `Mic muted` or `Mic paused`,
+never recording, and there is no transfer or transcoding stage to draw.
+
 ### Headset and media buttons
 
 This is a best-effort platform seam, not a promise.  A headset button

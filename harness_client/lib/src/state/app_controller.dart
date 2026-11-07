@@ -13,8 +13,10 @@ import '../models/quota.dart';
 import '../models/server_info.dart';
 import '../models/session.dart';
 import '../models/task.dart';
+import '../models/workspace.dart';
 import '../services/harness_api.dart';
 import '../services/device_name.dart';
+import '../services/voice_runtime.dart';
 import '../state/drafts.dart';
 import '../state/pictures.dart';
 import '../state/quota_controller.dart';
@@ -22,9 +24,14 @@ import '../state/review_controller.dart';
 import '../state/session_controller.dart';
 import '../state/settings_controller.dart';
 import '../state/task_controller.dart';
+import '../state/workspace_buddy_controller.dart';
 import '../state/workspace_controller.dart';
 import '../state/usage_controller.dart';
 import '../state/quick_search_history.dart';
+import '../voice/voice_backend.dart';
+import '../voice/voice_buddy.dart';
+import '../voice/voice_controller.dart';
+import '../voice/voice_settings.dart';
 
 enum ConnectionPhase {
   disconnected,
@@ -82,7 +89,7 @@ enum _Attempt {
   superseded,
 }
 
-class AppController extends ChangeNotifier {
+class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   AppController({
     required this.settings,
     AcpConnector? connector,
@@ -90,6 +97,7 @@ class AppController extends ChangeNotifier {
     this.reconnectDelays = defaultReconnectDelays,
     this.handshakeTimeout = const Duration(seconds: 12),
     this.probeTimeout = const Duration(seconds: 5),
+    this.workspaceBuddyBackendFactory,
   }) : _connector = connector,
        _openUrl = urlOpener ?? _launchInBrowser;
 
@@ -108,6 +116,11 @@ class AppController extends ChangeNotifier {
   /// How long a connection that looks open has to answer a probe, when the
   /// app returns to the foreground.
   final Duration probeTimeout;
+
+  /// What the workspace buddy opens its microphone and provider with.  The
+  /// app leaves null for the real voice backends; a test passes a scripted
+  /// factory so no platform channel is loaded.
+  final WorkspaceBuddyBackendFactory? workspaceBuddyBackendFactory;
 
   /// What was typed and not sent yet, which outlives the screens: see
   /// [DraftStore].
@@ -225,6 +238,18 @@ class AppController extends ChangeNotifier {
   /// major surface of its own on desktop and on the phone; the shell adds
   /// its tab only when [hasWorkspace].
   WorkspaceController? workspace;
+
+  /// The optional compact voice presence of the selected workspace, once
+  /// the workspace exists.  It owns no audio itself: it drives the existing
+  /// voice controller and session bridge.
+  WorkspaceBuddyController? workspaceBuddy;
+
+  /// Whether the app's window is the one the person is working in.  A
+  /// desktop window behind another window, or minimized, is not: the away
+  /// buddy is drawn then, and the in-call bar is not.  Set from the app's
+  /// lifecycle, and readable in a test.
+  final ValueNotifier<bool> windowActive = ValueNotifier<bool>(true);
+
   UsageController? usage;
 
   /// Each provider's billing and plan quota, for the providers that report
@@ -339,6 +364,69 @@ class AppController extends ChangeNotifier {
 
   bool get hasWorkspace => capabilities?.workspace == true && workspace != null;
   bool get hasUsage => capabilities?.usage == true && usage != null;
+
+  // The compact workspace buddy's host: the selected workspace, what a call
+  // would attach to, the connection it depends on, and the existing bridge.
+  // The controller reads these on every change; none of them starts audio.
+
+  @override
+  WorkspaceSummary? get buddyWorkspace => workspace?.current;
+
+  @override
+  WorkspaceThread? get buddyThread => workspace?.activeThread;
+
+  @override
+  BuddyConnection get buddyConnection => switch (phase) {
+    ConnectionPhase.connected => BuddyConnection.connected,
+    ConnectionPhase.reconnecting => BuddyConnection.reconnecting,
+    _ => BuddyConnection.offline,
+  };
+
+  @override
+  String get buddyHarnessAddress => address ?? settings.address;
+
+  @override
+  VoiceSettings get buddyVoiceSettings => settings.voiceSettings;
+
+  @override
+  Listenable? get buddyContextListenable => workspace;
+
+  @override
+  bool get buddyEnabled {
+    final id = workspace?.current?.id;
+    return id != null && settings.isWorkspaceBuddyEnabled(id);
+  }
+
+  @override
+  Future<void> setBuddyEnabled(bool enabled) {
+    final id = workspace?.current?.id;
+    if (id == null) return Future<void>.value();
+    return settings.setWorkspaceBuddyEnabled(id, enabled);
+  }
+
+  @override
+  VoiceSessionBridge? openBuddyBridge(String sessionId) {
+    if (api == null) return null;
+    final controller = sessionController(sessionId);
+    unawaited(controller.open());
+    return SessionVoiceBridge(controller);
+  }
+
+  @override
+  Future<void> saveBuddyVoiceSettings(VoiceSettings next) =>
+      settings.setVoiceSettings(next);
+
+  /// The buddy exists only while the workspace does.  It is created once,
+  /// after the workspace is first built and after a reconnect that brings
+  /// it back.
+  void _ensureWorkspaceBuddy() {
+    if (workspace == null || workspaceBuddy != null) return;
+    workspaceBuddy = WorkspaceBuddyController(
+      host: this,
+      backendFactory: workspaceBuddyBackendFactory ?? createVoiceBackend,
+    );
+  }
+
   bool get hasQuota => capabilities?.quota == true && quota != null;
 
   /// The ways the harness lets this device sign in (ACP's `authMethods`),
@@ -665,6 +753,7 @@ class AppController extends ChangeNotifier {
     }
     if (capabilities?.workspace == true) {
       workspace = WorkspaceController(api!);
+      _ensureWorkspaceBuddy();
       unawaited(workspace!.load(showSpinner: false));
     }
     if (capabilities?.usage == true) {
@@ -1585,6 +1674,7 @@ class AppController extends ChangeNotifier {
     if (capabilities?.workspace == true && workspace == null) {
       workspace = WorkspaceController(service);
     }
+    if (capabilities?.workspace == true) _ensureWorkspaceBuddy();
     if (capabilities?.usage == true && usage == null) {
       usage = UsageController(service);
     }
@@ -1722,6 +1812,8 @@ class AppController extends ChangeNotifier {
     pictures.clear();
     capabilities = null;
     signingInWith = null;
+    workspaceBuddy?.dispose();
+    workspaceBuddy = null;
     for (final controller in _sessions.values) {
       controller.dispose();
     }
@@ -1736,6 +1828,8 @@ class AppController extends ChangeNotifier {
     _resolvedMains.clear();
     _askedMains.clear();
     tasks = null;
+    workspaceBuddy?.dispose();
+    workspaceBuddy = null;
     workspace = null;
     usage = null;
     _disposeReviews();
@@ -1799,6 +1893,9 @@ class AppController extends ChangeNotifier {
     _wakeReconnect();
     _subscription?.cancel();
     _degradedSubscription?.cancel();
+    workspaceBuddy?.dispose();
+    workspaceBuddy = null;
+    windowActive.dispose();
     for (final controller in _sessions.values) {
       controller.dispose();
     }

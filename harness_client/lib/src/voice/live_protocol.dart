@@ -174,6 +174,7 @@ class LiveProtocol {
 
   List<VoiceBackendEvent> _phase(Map<String, Object?> message) {
     final name = _string(message['phase']) ?? _string(message['state']);
+    if (name == null || name.isEmpty) return const [];
     final phase = switch (name) {
       'listening' => VoicePhase.listening,
       'hearing' => VoicePhase.hearing,
@@ -185,9 +186,10 @@ class LiveProtocol {
       'approval' => VoicePhase.approval,
       'ended' => VoicePhase.ended,
       'failed' => VoicePhase.failed,
-      _ => null,
+      // A phase this client does not know is reported as unknown rather
+      // than silently leaving the previous word on screen.
+      _ => VoicePhase.unknown,
     };
-    if (phase == null) return const [];
     if (phase == VoicePhase.hearing) {
       return [
         VoiceSpeechEvent(true, id: _itemId(message)),

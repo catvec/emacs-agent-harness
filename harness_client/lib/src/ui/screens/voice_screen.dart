@@ -19,9 +19,24 @@ import '../widgets/voice_settings_sheet.dart';
 /// It is deliberately dark in both themes: a voice screen is a place apart
 /// from the conversation behind it, and the orb is easier to read on it.
 class VoiceScreen extends StatefulWidget {
-  const VoiceScreen({super.key, required this.controller});
+  const VoiceScreen({
+    super.key,
+    required this.controller,
+    this.attached = false,
+    this.onEnd,
+  });
 
   final VoiceController controller;
+
+  /// A view of a call that belongs to someone else, such as the workspace's
+  /// one call: this screen must not start it again, stop it or dispose it.
+  /// Closing the screen minimizes the call to the in-call bar; [onEnd] is
+  /// the owner's way to end it.
+  final bool attached;
+
+  /// End the call that this attached screen shows.  The screen pops first,
+  /// so the owner can let go of the controller under it.
+  final Future<void> Function()? onEnd;
 
   @override
   State<VoiceScreen> createState() => _VoiceScreenState();
@@ -38,6 +53,10 @@ class _VoiceScreenState extends State<VoiceScreen> {
   void initState() {
     super.initState();
     _controller.addListener(_changed);
+    if (widget.attached) {
+      _started = true;
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && !_started) {
         _started = true;
@@ -49,14 +68,23 @@ class _VoiceScreenState extends State<VoiceScreen> {
   @override
   void dispose() {
     _controller.removeListener(_changed);
-    unawaited(_controller.stop());
-    _controller.dispose();
+    if (!widget.attached) {
+      unawaited(_controller.stop());
+      _controller.dispose();
+    }
     _captions.dispose();
     super.dispose();
   }
 
   void _changed() {
     if (!mounted) return;
+    // An attached call can be ended by its owner or lost while this screen
+    // is open; it then has nothing to show.
+    if (widget.attached && _controller.phase == VoicePhase.ended) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) Navigator.of(context).maybePop();
+      });
+    }
     setState(() {});
     final last = _controller.captions.isEmpty
         ? null
@@ -78,12 +106,28 @@ class _VoiceScreenState extends State<VoiceScreen> {
     });
   }
 
+  /// Leave the call screen.  A screen of its own ends the call, as it always
+  /// did; an attached one minimizes it to the in-call bar, and End is the
+  /// control that ends it.
   Future<void> _close() async {
-    // The screen goes at once; the microphone and the provider are let go
-    // behind it, so a platform channel that is slow to answer never makes
-    // the person wait to leave.
-    unawaited(_controller.stop());
+    if (!widget.attached) {
+      // The screen goes at once; the microphone and the provider are let go
+      // behind it, so a platform channel that is slow to answer never makes
+      // the person wait to leave.
+      unawaited(_controller.stop());
+    }
     if (mounted) Navigator.of(context).maybePop();
+  }
+
+  /// End the call.  An attached call is ended by its owner, after this
+  /// screen has gone, so the owner's controller is not let go under it.
+  Future<void> _end() async {
+    if (!widget.attached) {
+      await _close();
+      return;
+    }
+    if (mounted) Navigator.of(context).maybePop();
+    await widget.onEnd?.call();
   }
 
   Future<void> _openSettings() async {
@@ -112,7 +156,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
               const SingleActivator(LogicalKeyboardKey.keyP): () =>
                   unawaited(_controller.togglePause()),
               const SingleActivator(LogicalKeyboardKey.keyE): () =>
-                  unawaited(_close()),
+                  unawaited(_end()),
               const SingleActivator(LogicalKeyboardKey.escape): () =>
                   unawaited(_close()),
               const SingleActivator(LogicalKeyboardKey.mediaPlayPause): () =>
@@ -137,6 +181,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
                     children: [
                       _Header(
                         provider: _controller.settings.provider,
+                        closeTooltip: widget.attached ? 'Minimize' : 'End',
                         onClose: _close,
                         onSettings: _openSettings,
                       ),
@@ -252,7 +297,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
                             onMute: _controller.toggleMute,
                             onPause: _controller.togglePause,
                             onInterrupt: _controller.interrupt,
-                            onEnd: _close,
+                            onEnd: _end,
                             onRetry: _controller.retry,
                           ),
                         ),
@@ -272,11 +317,16 @@ class _VoiceScreenState extends State<VoiceScreen> {
 class _Header extends StatelessWidget {
   const _Header({
     required this.provider,
+    required this.closeTooltip,
     required this.onClose,
     required this.onSettings,
   });
 
   final VoiceProvider provider;
+
+  /// `Minimize` for an attached call, whose close keeps it in the in-call
+  /// bar; `End` for a screen that owns its call.
+  final String closeTooltip;
   final VoidCallback onClose;
   final VoidCallback onSettings;
 
@@ -289,7 +339,7 @@ class _Header extends StatelessWidget {
           IconButton(
             key: const Key('voice-close'),
             onPressed: onClose,
-            tooltip: 'End',
+            tooltip: closeTooltip,
             icon: const Icon(
               Icons.keyboard_arrow_down_rounded,
               color: Color(0xFFE9E5DE),
