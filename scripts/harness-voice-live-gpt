@@ -204,6 +204,7 @@ class GptSidecar(Sidecar):
             return
         if len(chunk) % 2:
             chunk = chunk[:-1]
+        self.announce_level(self.level_meter.measure(chunk))
         self.gate(chunk)
         try:
             self.connection.send_json({
@@ -240,6 +241,16 @@ class GptSidecar(Sidecar):
                     # after its grace instead of waiting for a turn that
                     # may never be delegated.
                     self.announce_listening()
+            elif kind == "speech":
+                # The local gate kept this burst.  GPT-Live does its own
+                # transcription, so this is the filter's own decision, not
+                # a claim about what the provider did with it.
+                self.announce_segment("accepted", result[2],
+                                      len(result[1]) / (2.0 * self.rate))
+            elif kind == "cancel":
+                self.announce_segment("dropped", result[1],
+                                      result[2] if len(result) > 2 else None,
+                                      "too short")
 
     # -- server events -----------------------------------------------
 

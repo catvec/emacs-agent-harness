@@ -229,11 +229,21 @@ follows the sidecar's playback, not the agent's text generation, so
 interrupting sound is visible immediately.
 
 The transcript (`*harness voice*`, **Transcript**) is not a plain log. Its
-header line stays in view while you scroll and animates the current step, and
-each part is a section with its own label and time:
+first lines are the voice pipeline: the microphone's level before the speech
+filter, the bursts the filter kept and dropped with the reason, the newest
+burst's transcription, the agent turn and the speaker, with a summary line in
+words and **Pipeline details** (`d`) for every marker by id.  Its header line
+stays in view while you scroll and animates the current step, and each part is
+a section with its own label and time:
 
 ```text
-⠹ Working · 1.4s   Voice · Local pipeline          (header line, always in view)
+▷ Speaking   Voice · Local pipeline                (header line, always in view)
+Pipeline
+Input                     Filter            Words          Turn         Speaker
+████▃··· Level · 56%      ● 1 accepted      ≡ in turn      ✓ done       ▷ speaking
+Mic · live                × 1 dropped                      1 utterance
+Mic · live · Level · 56% · 1 accepted · 1 dropped · Turn · done · Speaker · speaking
+[Pipeline details]
 ──────────────────────────────────────────────────────────
 
 You · 12:04
@@ -271,6 +281,22 @@ transcript is a separate, read-only buffer: the compose draft stays editable
 and nothing is sent from it automatically. Session redaction, UI reload and
 closing the session stop the sidecar and discard its transcript.
 
+### The pipeline in the Flutter client
+
+The client's voice screen (the `harness_client/` app, reached from a
+conversation's microphone or from a workspace thread's call) draws the pipe
+from microphone to speaker: the level before the speech filter, the bursts the
+filter kept and dropped with the reason, their transcript, the agent turn they
+were sent in, and what the speaker is doing -- ready, held for turn-taking,
+handed to the provider, or actually playing.  Every stage carries the name of
+the event it comes from, a marker moves only when that event arrives, and a
+stage with no telemetry says `no data` rather than showing silence.  The same
+state is a compact strip a desktop buddy can show.  Emacs draws the same
+pipe in its voice transcript and under a live chat's controls, fed by the
+sidecar's own `level` and `segment` events.  [The voice pipeline the client
+draws](voice-pipeline-visualization.md) has the stage-to-event tables for both
+surfaces, the pictures, the limits and the buddy contract.
+
 ### Sidecar protocol
 
 The sidecar speaks one JSON object per line on stdin and stdout; diagnostics
@@ -281,7 +307,9 @@ without a microphone or model:
 | --- | --- | --- |
 | sidecar to Emacs | `ready` | Session connected; the microphone may start |
 | sidecar to Emacs | `listening` / `speaking` | Playback state for the indicator |
+| sidecar to Emacs | `level` | The microphone's level before the speech filter, `input` 0..1 |
 | sidecar to Emacs | `speech` | Low-latency speech gate: `active`, before a transcript exists |
+| sidecar to Emacs | `segment` | One burst's decision: `accepted`, `dropped` with `too short` or `no words`, `failed` |
 | sidecar to Emacs | `user_delta` / `assistant_delta` | Caption text, with optional `final` |
 | sidecar to Emacs | `backchannel` | A brief listening sound |
 | sidecar to Emacs | `delegation` | Backend request with `id`, `text`, `utterance` and any `pending` held output |

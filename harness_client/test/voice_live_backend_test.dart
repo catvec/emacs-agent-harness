@@ -60,7 +60,7 @@ void main() {
       final prompt = events.whereType<VoicePromptEvent>().single;
       expect(prompt.prompt.text, 'run the tests');
 
-      await backend.speak('they all pass');
+      await backend.speak('they all pass', replyId: 'n-1');
       await _settle();
       expect(
         connection.sent.map((message) => message['type']),
@@ -71,17 +71,26 @@ void main() {
       );
       expect((result['item']! as Map)['call_id'], 'call_9');
       expect((result['item']! as Map)['output'], 'they all pass');
+      // Handed over is not spoken: the provider has the text and starts its
+      // own audio later.
+      expect(events.whereType<VoiceReplyHandedEvent>().single.replyId, 'n-1');
+      expect(
+        events.whereType<VoicePhaseEvent>().last.phase,
+        VoicePhase.thinking,
+        reason: 'text generation is not playback',
+      );
+      expect(events.whereType<VoicePlaybackEvent>(), isEmpty);
+
+      // The provider's own player is what reports speech.
+      connection.deliver(<String, Object?>{'type': 'response.audio.delta'});
+      await _settle();
       expect(
         events.whereType<VoicePhaseEvent>().last.phase,
         VoicePhase.speaking,
-        reason: events
-            .map(
-              (event) =>
-                  event.runtimeType.toString() +
-                  (event is VoicePhaseEvent ? ':${event.phase.name}' : ''),
-            )
-            .join(', '),
       );
+      final playing = events.whereType<VoicePlaybackEvent>().last;
+      expect(playing.playing, isTrue);
+      expect(playing.replyId, 'n-1');
 
       connection.deliver(<String, Object?>{'type': 'response.done'});
       await _settle();
@@ -89,6 +98,7 @@ void main() {
         events.whereType<VoicePhaseEvent>().last.phase,
         VoicePhase.listening,
       );
+      expect(events.whereType<VoicePlaybackEvent>().last.playing, isFalse);
 
       await backend.setMuted(true);
       await _settle();

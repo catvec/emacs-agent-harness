@@ -56,24 +56,24 @@ class LiveProtocol {
       // OpenAI Realtime.
       'session.created' ||
       'session.updated' => const [VoicePhaseEvent(VoicePhase.listening)],
-      'input_audio_buffer.speech_started' => const [
-        VoiceSpeechEvent(true),
-        VoicePhaseEvent(VoicePhase.hearing),
+      'input_audio_buffer.speech_started' => [
+        VoiceSpeechEvent(true, id: _itemId(message)),
+        const VoicePhaseEvent(VoicePhase.hearing),
       ],
-      'input_audio_buffer.speech_stopped' => const [
-        VoiceSpeechEvent(false),
-        VoicePhaseEvent(VoicePhase.thinking),
+      'input_audio_buffer.speech_stopped' => [
+        VoiceSpeechEvent(false, id: _itemId(message)),
+        const VoicePhaseEvent(VoicePhase.thinking),
       ],
       'conversation.item.input_audio_transcription.delta' => _caption(
         message,
         speaker: VoiceSpeaker.you,
         textKey: 'delta',
       ),
-      'conversation.item.input_audio_transcription.completed' => _caption(
+      'conversation.item.input_audio_transcription.completed' => _userFinal(
         message,
-        speaker: VoiceSpeaker.you,
-        textKey: 'transcript',
-        finalized: true,
+      ),
+      'conversation.item.input_audio_transcription.failed' => _segmentFailure(
+        message,
       ),
       'response.audio_transcript.delta' || 'response.text.delta' => _caption(
         message,
@@ -112,14 +112,64 @@ class LiveProtocol {
         who,
         text,
         finalized: finalized || _bool(message['final']) == true,
+        segmentId: _itemId(message),
       ),
     ];
+  }
+
+  /// The person's transcription for one item: a final caption, or, when the
+  /// provider finished with no words at all, the drop that really happened.
+  /// An empty final is not silence; it is a kept burst with no transcript.
+  List<VoiceBackendEvent> _userFinal(Map<String, Object?> message) {
+    final id = _itemId(message);
+    final text =
+        _string(message['transcript']) ?? _string(message['text']) ?? '';
+    if (text.trim().isEmpty) {
+      if (id == null || id.isEmpty) return const [];
+      return [
+        VoiceSegmentEvent(
+          id: id,
+          stage: VoiceSegmentStage.dropped,
+          drop: VoiceSegmentDrop.noWords,
+        ),
+      ];
+    }
+    return [
+      VoiceCaptionEvent(VoiceSpeaker.you, text, finalized: true, segmentId: id),
+    ];
+  }
+
+  List<VoiceBackendEvent> _segmentFailure(Map<String, Object?> message) {
+    final id = _itemId(message);
+    if (id == null || id.isEmpty) return const [];
+    final error = message['error'];
+    final detail = error is Map
+        ? _string(error['message']) ?? _string(error['code'])
+        : _string(message['message']);
+    return [
+      VoiceSegmentEvent(
+        id: id,
+        stage: VoiceSegmentStage.failed,
+        detail: detail,
+      ),
+    ];
+  }
+
+  /// The provider's own name for the input item a message is about.
+  String? _itemId(Map<String, Object?> message) {
+    final item = _string(message['item_id']) ?? _string(message['itemId']);
+    if (item != null && item.isNotEmpty) return item;
+    final utterance = message['utterance'];
+    if (utterance is num) return 'u-$utterance';
+    if (utterance is String && utterance.isNotEmpty) return utterance;
+    final id = _string(message['id']);
+    return id != null && id.isNotEmpty ? id : null;
   }
 
   List<VoiceBackendEvent> _speech(Map<String, Object?> message) {
     final active = _bool(message['active']) ?? _bool(message['on']);
     if (active == null) return const [];
-    return [VoiceSpeechEvent(active)];
+    return [VoiceSpeechEvent(active, id: _itemId(message))];
   }
 
   List<VoiceBackendEvent> _phase(Map<String, Object?> message) {
@@ -139,10 +189,16 @@ class LiveProtocol {
     };
     if (phase == null) return const [];
     if (phase == VoicePhase.hearing) {
-      return [const VoiceSpeechEvent(true), VoicePhaseEvent(phase)];
+      return [
+        VoiceSpeechEvent(true, id: _itemId(message)),
+        VoicePhaseEvent(phase),
+      ];
     }
     if (phase == VoicePhase.transcribing || phase == VoicePhase.listening) {
-      return [const VoiceSpeechEvent(false), VoicePhaseEvent(phase)];
+      return [
+        VoiceSpeechEvent(false, id: _itemId(message)),
+        VoicePhaseEvent(phase),
+      ];
     }
     return [VoicePhaseEvent(phase)];
   }

@@ -9,6 +9,7 @@ import '../../voice/voice_models.dart';
 import '../../voice/voice_settings.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/voice_orb.dart';
+import '../widgets/voice_pipeline.dart';
 import '../widgets/voice_settings_sheet.dart';
 
 /// The full-screen voice conversation: what the person and the agent are
@@ -145,47 +146,85 @@ class _VoiceScreenState extends State<VoiceScreen> {
                             constraints: const BoxConstraints(maxWidth: 720),
                             child: LayoutBuilder(
                               builder: (context, constraints) {
-                                final orb = math
-                                    .min(
-                                      constraints.maxWidth * 0.62,
-                                      constraints.maxHeight * 0.34,
-                                    )
-                                    .clamp(112.0, 228.0);
                                 return Column(
                                   children: [
                                     Expanded(
                                       flex: 5,
-                                      child: Column(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.center,
-                                        children: [
-                                          VoiceOrb(
-                                            phase: phase,
-                                            level: _controller.level,
-                                            size: orb,
-                                            animate: phase != VoicePhase.ended,
-                                          ),
-                                          const SizedBox(height: 10),
-                                          Text(
-                                            phase.label,
-                                            key: const Key('voice-status'),
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                              color: const Color(0xFFF3F0EA)
-                                                  .withValues(alpha: 0.94),
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.w500,
-                                              letterSpacing: 0.2,
-                                            ),
-                                          ),
-                                          if (phase == VoicePhase.approval)
-                                            _ApprovalNotice(onOpen: _close),
-                                          if (_controller.problem != null)
-                                            _ProblemNotice(
-                                              problem: _controller.problem!,
-                                              onRetry: _controller.retry,
-                                            ),
-                                        ],
+                                      child: LayoutBuilder(
+                                        builder: (context, room) {
+                                          // The orb takes what the status
+                                          // and the notices leave, so a
+                                          // short screen -- or large text --
+                                          // shrinks it instead of pushing
+                                          // them out.
+                                          final scaler =
+                                              MediaQuery.textScalerOf(context)
+                                                  .scale(1)
+                                                  .clamp(1.0, 2.0);
+                                          final reserved =
+                                              10.0 +
+                                              24.0 * scaler +
+                                              (phase == VoicePhase.approval
+                                                  ? 44.0 * scaler
+                                                  : 0.0) +
+                                              (_controller.problem != null
+                                                  ? 40.0 * scaler
+                                                  : 0.0);
+                                          final orb = math
+                                              .min(
+                                                room.maxWidth * 0.62,
+                                                (room.maxHeight - reserved) *
+                                                    0.92,
+                                              )
+                                              .clamp(56.0, 228.0);
+                                          return Column(
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.center,
+                                            children: [
+                                              VoiceOrb(
+                                                phase: phase,
+                                                level: _controller.level,
+                                                size: orb,
+                                                animate:
+                                                    phase != VoicePhase.ended,
+                                              ),
+                                              const SizedBox(height: 10),
+                                              Text(
+                                                phase.label,
+                                                key: const Key('voice-status'),
+                                                textAlign: TextAlign.center,
+                                                style: TextStyle(
+                                                  color: const Color(0xFFF3F0EA)
+                                                      .withValues(alpha: 0.94),
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w500,
+                                                  letterSpacing: 0.2,
+                                                ),
+                                              ),
+                                              if (phase == VoicePhase.approval)
+                                                _ApprovalNotice(onOpen: _close),
+                                              if (_controller.problem != null)
+                                                _ProblemNotice(
+                                                  problem: _controller.problem!,
+                                                  onRetry: _controller.retry,
+                                                ),
+                                            ],
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        18,
+                                        2,
+                                        18,
+                                        6,
+                                      ),
+                                      child: VoicePipelineView(
+                                        snapshot: _controller.pipelineState,
+                                        compact:
+                                            constraints.maxHeight < 560 ||
+                                            constraints.maxWidth < 330,
                                       ),
                                     ),
                                     Expanded(

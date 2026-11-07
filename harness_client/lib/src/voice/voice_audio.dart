@@ -23,6 +23,31 @@ class VoiceUtterance {
   Uint8List get wav => encodeWav(samples, sampleRate: sampleRate);
 }
 
+/// Why the capture path did not keep a burst of audio.
+enum VoiceUtteranceDrop {
+  /// Shorter than [VoiceActivityConfig.minUtterance]: a tap, a cough, a door.
+  tooShort,
+}
+
+/// A burst the detector ended and did not keep, with what it measured.
+///
+/// It is reported rather than discarded so the screen can show what the
+/// speech filter rejected; it carries no audio and no words.
+class VoiceUtteranceRejection {
+  const VoiceUtteranceRejection({
+    required this.duration,
+    required this.level,
+    this.reason = VoiceUtteranceDrop.tooShort,
+  });
+
+  final Duration duration;
+
+  /// The loudest frame of the burst, 0..1, on the meter's scale.
+  final double level;
+
+  final VoiceUtteranceDrop reason;
+}
+
 /// Cuts a stream of arbitrary-size PCM16 chunks into frames of a fixed
 /// duration, which is what the detector can judge.  A chunk that ends in the
 /// middle of a sample is carried to the next one.
@@ -140,9 +165,16 @@ class VoiceActivityConfig {
 /// echo cancellation and the provider its own turn detection), but the clip
 /// provider needs both ends of an utterance to make a WAV.
 class VoiceActivityDetector {
-  VoiceActivityDetector({this.config = const VoiceActivityConfig()});
+  VoiceActivityDetector({
+    this.config = const VoiceActivityConfig(),
+    this.onDrop,
+  });
 
   final VoiceActivityConfig config;
+
+  /// Called when a burst ends and is too short to keep.  The screen shows it
+  /// as a rejected segment; it is not audio that reached a model.
+  final void Function(VoiceUtteranceRejection rejection)? onDrop;
 
   final List<Int16List> _preRoll = <Int16List>[];
   final List<Int16List> _utterance = <Int16List>[];
@@ -301,7 +333,15 @@ class VoiceActivityDetector {
     _utterance.clear();
     _peak = 0;
     _level = 0;
-    if (length < config.minUtterance) return null;
+    if (length < config.minUtterance) {
+      onDrop?.call(
+        VoiceUtteranceRejection(
+          duration: length,
+          level: math.min(1, peak / 0.14),
+        ),
+      );
+      return null;
+    }
     return VoiceUtterance(
       samples: samples,
       sampleRate: config.sampleRate,

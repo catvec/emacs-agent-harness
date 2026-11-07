@@ -97,6 +97,12 @@
            (harness-voice-live--speaker nil) (harness-voice-live--section nil)
            (harness-voice-live--stage nil) (harness-voice-live--stage-since nil)
            (harness-voice-live--stage-timer nil) (harness-voice-live--stage-frame 0)
+           (harness-voice-live-motion t)
+           (harness-voice-live--pipeline (harness-voice-pipeline-create 'off))
+           (harness-voice-live--pipeline-timer nil) (harness-voice-live--pipeline-stale-timer nil)
+           (harness-voice-live--pipeline-controls-at nil)
+           (harness-voice-live--utterance nil) (harness-voice-live--utterance-done nil)
+           (harness-voice-live--caption-seq 0) (harness-voice-live--reply-seq 0)
            (harness-compose-controls-functions nil)
            (harness-ui-voice-live-test--calls nil)
            (harness-ui-voice-live-test--notifications nil)
@@ -125,6 +131,10 @@
          (when (buffer-live-p harness-voice-live--transcript)
            (kill-buffer harness-voice-live--transcript))
          (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(defun harness-ui-voice-live-test--control-lines ()
+  "Return the controls' lines, the settings line first."
+  (split-string (substring-no-properties (harness-voice-live--controls)) "\n"))
 
 (defun harness-ui-voice-live-test--transcript ()
   "Return the live transcript text."
@@ -256,15 +266,21 @@
         (setq harness-voice-live--state 'listening
               harness-voice-live--working nil
               harness-voice-live--muted nil)
-        (let ((line (harness-voice-live--controls)))
+        (let* ((line (harness-voice-live--controls))
+               (lines (split-string (substring-no-properties line) "\n")))
           (should (equal (concat " Live · Listening · [End] · [Interrupt C-c V] · [Mute C-c v]"
                                  " · [Transcript] · [Setup]")
-                         (substring-no-properties line)))
+                         (nth 0 lines)))
+          (should (equal " Pipeline · ···· Level · no data · Speaker · silent"
+                         (nth 1 lines)))
+          (should (equal 2 (length lines)))
           (setq harness-voice-live--stage 'holding)
           (should (equal "Live · Holding reply" (harness-voice-live--status)))
           (should (equal (concat " Live · Holding reply · [End] · [Interrupt C-c V]"
                                  " · [Mute C-c v] · [Transcript] · [Setup]")
-                         (substring-no-properties (harness-voice-live--controls))))
+                         (nth 0 (split-string (substring-no-properties
+                                               (harness-voice-live--controls))
+                                              "\n"))))
           (setq harness-voice-live--stage 'listening)
           (dolist (spec '(("[End]" "Live session · end")
                           ("[Interrupt C-c V]" "Playback · interruption")
@@ -277,15 +293,17 @@
         (setq harness-voice-live--working t)
         (should (equal (concat " Live · Working · [End] · [Interrupt C-c V] · [Cancel work]"
                                " · [Mute C-c v] · [Transcript] · [Setup]")
-                       (substring-no-properties (harness-voice-live--controls))))
+                       (nth 0 (harness-ui-voice-live-test--control-lines))))
         (setq harness-voice-live--muted t)
         (should (equal (concat " Live · Working · [End] · [Interrupt C-c V] · [Cancel work]"
                                " · [Unmute C-c v] · [Transcript] · [Setup]")
-                       (substring-no-properties (harness-voice-live--controls))))
+                       (nth 0 (harness-ui-voice-live-test--control-lines))))
+        (should (equal " Pipeline · ···· Level · no data · Speaker · silent"
+                       (nth 1 (harness-ui-voice-live-test--control-lines))))
         (setq harness-voice-live--working nil harness-voice-live--muted nil)
         (should (equal (concat " Live · Listening · [End] · [Interrupt C-c V] · [Mute C-c v]"
                                " · [Transcript] · [Setup]")
-                       (substring-no-properties (harness-voice-live--controls))))))))
+                       (nth 0 (harness-ui-voice-live-test--control-lines))))))))
 
 (ert-deftest harness-ui-voice-live-validation-copy ()
   "A missing command or executable is a visible, exact failure."
@@ -529,7 +547,8 @@ which used to leave the line reading Off after a rejected Start."
     (harness-voice-live--handle (list :event "assistant_delta" :text "Ready." :final t))
     (harness-voice-live--handle (list :event "backchannel" :text "mm-hmm"))
     (let ((text (harness-ui-voice-live-test--transcript)))
-      (should (string-match-p "\\`─" text))
+      (should (string-prefix-p "Pipeline\n" text))
+      (should (string-search "─" text))
       (should (string-search "You · " text))
       (should (string-search "  Hello" text))
       (should (string-search "Voice · " text))
@@ -742,6 +761,142 @@ which used to leave the line reading Off after a rejected Start."
     (should-not (buffer-live-p harness-voice-live--transcript))
     (should-not harness-voice-live--state)
     (should-not (get-buffer "*harness voice*"))))
+
+;;;; The pipeline
+
+(defun harness-ui-voice-live-test--pipeline ()
+  "Return the live pipeline model."
+  harness-voice-live--pipeline)
+
+(defun harness-ui-voice-live-test--strip ()
+  "Return the transcript's pipeline block as plain text."
+  (harness-voice-live--transcript-buffer)
+  (with-current-buffer harness-voice-live--transcript
+    (harness-voice-live--pipeline-draw)
+    (substring-no-properties
+     (buffer-substring-no-properties (point-min)
+                                     (marker-position harness-voice-live--pipeline-end)))))
+
+(ert-deftest harness-ui-voice-live-pipeline-follows-the-sidecar ()
+  "The sidecar's levels and segments reach the strip, in their own words."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "pipeline"))
+    (harness-voice-live-start)
+    (harness-test-wait
+     (lambda () (equal 1 (harness-voice-pipeline-dropped
+                          (harness-ui-voice-live-test--pipeline))))
+     5 "the dropped segment")
+    (let ((pipeline (harness-ui-voice-live-test--pipeline)))
+      (should (equal 1 (harness-voice-pipeline-accepted pipeline)))
+      (should (equal 1 (harness-voice-pipeline-dropped pipeline)))
+      (should (equal 'transcribed
+                     (plist-get (harness-voice-pipeline--segment pipeline "u-1") :stage)))
+      (should (equal 'dropped
+                     (plist-get (harness-voice-pipeline--segment pipeline "u-2") :stage)))
+      (should (equal 'too-short
+                     (plist-get (harness-voice-pipeline--segment pipeline "u-2") :reason)))
+      (should (harness-voice-pipeline-level-seen pipeline)))
+    (let ((strip (harness-ui-voice-live-test--strip)))
+      (dolist (word '("Pipeline" "Input" "Filter" "Words" "Turn" "Speaker"
+                      "Mic · live" "1 accepted" "1 dropped" "≡ transcribed"))
+        (should (string-search word strip)))
+      (should (string-search "Level · " strip)))))
+
+(ert-deftest harness-ui-voice-live-pipeline-details-and-motion ()
+  "The details toggle lists every marker; motion off keeps every fact."
+  (harness-ui-voice-live-test-with
+    (let ((pipeline (harness-ui-voice-live-test--pipeline)))
+      (harness-voice-live--pipeline-bump 'live)
+      (harness-voice-live--pipeline-segment
+       (list :event "segment" :state "accepted" :id "u-1" :seconds 1.4))
+      (harness-voice-live--pipeline-segment
+       (list :event "segment" :state "dropped" :id "u-2" :seconds 0.08
+             :reason "too short"))
+      (harness-voice-live--pipeline-turn-sent "d-1")
+      (let ((strip (harness-ui-voice-live-test--strip)))
+        (should (string-search "[Pipeline details]" strip))
+        (should-not (string-search "u-2 · dropped" strip)))
+      (with-current-buffer harness-voice-live--transcript
+        (harness-voice-live-pipeline-details))
+      (let ((strip (harness-ui-voice-live-test--strip)))
+        (should (string-search "[Hide details]" strip))
+        (should (string-search "Pipeline details" strip))
+        (should (string-search "u-2 · dropped · 80ms · too short" strip))
+        (should (string-search "d-1 · working" strip)))
+      (should (equal 'too-short
+                     (plist-get (harness-voice-pipeline--segment pipeline "u-2") :reason))))
+    ;; The busy stage's spinner is motion; with it off the stage still
+    ;; says what it is.
+    (harness-voice-live--transcript-buffer)
+    (let ((harness-voice-live-motion nil))
+      (harness-voice-live--stage-set 'hearing)
+      (should (equal "● Hearing you" (harness-voice-live--stage-text))))
+    (let ((harness-voice-live-motion t))
+      (harness-voice-live--stage-set 'transcribing)
+      (should (eq ?⠋ (aref (harness-voice-live--stage-text) 0))))))
+
+(ert-deftest harness-ui-voice-live-pipeline-mute-and-end ()
+  "Mute and end close the meter, and keep the markers that really happened."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "pipeline"))
+    (harness-voice-live-start)
+    (harness-test-wait
+     (lambda () (>= (harness-voice-pipeline-accepted
+                     (harness-ui-voice-live-test--pipeline))
+                    1))
+     5 "the kept segment")
+    (harness-voice-live-mute)
+    (should (eq 'muted (harness-voice-pipeline-capture
+                        (harness-ui-voice-live-test--pipeline))))
+    (should (equal "Level · no data"
+                   (harness-voice-pipeline-level-label
+                    (harness-ui-voice-live-test--pipeline))))
+    (should (string-search "Mic · muted" (harness-ui-voice-live-test--strip)))
+    (harness-voice-live-stop)
+    (should (eq 'ended (harness-voice-pipeline-capture
+                        (harness-ui-voice-live-test--pipeline))))
+    (let ((strip (harness-ui-voice-live-test--strip)))
+      (should (string-search "Mic · ended" strip))
+      ;; The bursts stay as the last true picture of the session.
+      (should (string-search "1 accepted" strip)))))
+
+(ert-deftest harness-ui-voice-live-pipeline-handoff-is-not-playback ()
+  "Commentary handed to the sidecar is handed; speaking needs its event."
+  (harness-ui-voice-live-test-with
+    (harness-voice-live--pipeline-bump 'live)
+    (let ((pipeline (harness-ui-voice-live-test--pipeline)))
+      (harness-voice-live--pipeline-reply-ready "n-1" "The docstring is in place.")
+      (should (equal "Speaker · ready" (harness-voice-pipeline-speaker-label pipeline)))
+      (harness-voice-live--pipeline-reply-handed "n-1:0")
+      (should (equal "Speaker · handed" (harness-voice-pipeline-speaker-label pipeline)))
+      ;; Text generation finishing is not speaking.
+      (harness-voice-live--pipeline-playback 'listening)
+      (should (equal "Speaker · handed" (harness-voice-pipeline-speaker-label pipeline)))
+      (harness-voice-live--pipeline-playback 'speaking)
+      (should (equal "Speaker · speaking" (harness-voice-pipeline-speaker-label pipeline)))
+      (harness-voice-live--pipeline-playback 'listening)
+      (should (equal "Speaker · silent" (harness-voice-pipeline-speaker-label pipeline))))))
+
+(ert-deftest harness-ui-voice-live-pipeline-held-then-released ()
+  "Held output is held, not spoken, and is handed when it is released."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
+    (setq harness-voice-live--speech-active t)
+    (harness-voice-live--speak "A held sentence." "n-2:0")
+    (should (equal "Speaker · held" (harness-voice-pipeline-speaker-label
+                                     (harness-ui-voice-live-test--pipeline))))
+    (setq harness-voice-live--speech-active nil)
+    (harness-voice-live--release-held)
+    (should (equal "Speaker · handed" (harness-voice-pipeline-speaker-label
+                                       (harness-ui-voice-live-test--pipeline))))))
 
 ;;;; The shipped fixture and entry points
 

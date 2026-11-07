@@ -18,6 +18,14 @@ class FakeSession implements VoiceSessionBridge {
   final List<void Function()> sessions = <void Function()>[];
   final List<void Function(String)> replies = <void Function(String)>[];
 
+  /// When set, the next send fails with this message instead of arriving.
+  String? failNext;
+
+  /// When true, a send waits for its completer in [pending] to finish, so a
+  /// test can keep a turn open and decide when it ends.
+  bool hold = false;
+  final List<Completer<void>> pending = <Completer<void>>[];
+
   @override
   String get cwd => '/tmp/project';
 
@@ -32,7 +40,16 @@ class FakeSession implements VoiceSessionBridge {
 
   @override
   Future<void> send(VoicePrompt prompt) async {
+    if (failNext case final message?) {
+      failNext = null;
+      throw Exception(message);
+    }
     sent.add(prompt);
+    if (hold) {
+      final done = Completer<void>();
+      pending.add(done);
+      await done.future;
+    }
   }
 
   @override
@@ -76,6 +93,7 @@ class FakeBackend implements VoiceBackend {
   int resumes = 0;
   int interrupts = 0;
   final List<String> spoken = <String>[];
+  final List<String> handed = <String>[];
 
   @override
   Stream<VoiceBackendEvent> get events => _events.stream;
@@ -117,8 +135,9 @@ class FakeBackend implements VoiceBackend {
   }
 
   @override
-  Future<void> speak(String text) async {
+  Future<void> speak(String text, {String? replyId}) async {
     spoken.add(text);
+    handed.add(replyId ?? '');
   }
 
   @override

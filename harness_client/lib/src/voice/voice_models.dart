@@ -132,6 +132,7 @@ class VoicePrompt {
     this.pending,
     this.displayText,
     this.id,
+    this.segmentId,
   });
 
   /// The words to send, if the provider transcribed the utterance.  A
@@ -153,6 +154,11 @@ class VoicePrompt {
   /// session once.  Null when the provider has no id.
   final String? id;
 
+  /// The pipeline segment that carried these words, when the backend names
+  /// one.  It is the same id its [VoiceSegmentEvent]s use, which need not be
+  /// the provider's id (a live provider names a delegation, not an onset).
+  final String? segmentId;
+
   bool get isEmpty => (text == null || text!.trim().isEmpty) && audio == null;
 
   String? get spokenText => displayText ?? text;
@@ -167,5 +173,6 @@ class VoicePrompt {
     pending: pending ?? this.pending,
     displayText: displayText ?? this.displayText,
     id: id,
+    segmentId: segmentId,
   );
 }

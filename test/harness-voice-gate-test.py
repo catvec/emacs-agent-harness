@@ -34,7 +34,7 @@ import voice_fixtures as fixtures  # noqa: E402
 from harness_voice_sidecar import (  # noqa: E402
     AUDIO_BACKENDS, LOCAL_RATE, FakeEvents, NullAudio, Player, Recorder,
     SpeechDetector, Vad, audio_backend, audio_backend_names, audio_backends,
-    audio_missing_reason, pcm_from_wav, self_test_audio, wav_from_pcm,
+    audio_missing_reason, pcm_energy, pcm_from_wav, self_test_audio, wav_from_pcm,
 )
 
 SCRIPT = os.path.join(ROOT, "scripts", "harness-voice-live-unmute")
@@ -106,6 +106,20 @@ def args():
         self_test=False)
 
 
+class ChunkRecorder(NullAudio):
+    """A recorder returning the chunks a test hands it, then silence."""
+
+    def __init__(self, chunks):
+        super().__init__()
+        self.chunks = list(chunks)
+
+    def read(self, frames, timeout=0.2):
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def exhausted(self):
+        return False
+
+
 class SidecarRig:
     """An UnmuteSidecar with workers and fake speech services."""
 
@@ -159,6 +173,102 @@ class SidecarRig:
 
     def stop(self):
         self.sidecar.handle({"event": "stop"})
+
+
+class TelemetryTest(unittest.TestCase):
+    """The sidecar's level and segment events come from real decisions."""
+
+    def test_level_is_the_capture_chunk_before_the_filter(self):
+        rig = SidecarRig()
+        try:
+            pcm = fixtures.voiced(0.02)
+            rig.sidecar.recorder = ChunkRecorder([pcm])
+            rig.sidecar.tick()
+            levels = rig.find("level")
+            self.assertEqual(len(levels), 1, "no level reported for the chunk")
+            measured = pcm_energy(pcm)
+            self.assertAlmostEqual(levels[0]["input"], round(measured, 3),
+                                   places=3)
+            # The level is the microphone's, not the filter's: the same
+            # chunk is noise for the gate and still has a level.
+            self.assertNotIn("segment", rig.names())
+        finally:
+            rig.stop()
+
+    def test_levels_are_bounded_and_stop_while_muted(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.recorder = ChunkRecorder([fixtures.voiced(0.02)] * 3)
+            rig.sidecar.tick()
+            rig.sidecar.tick()
+            self.assertEqual(len(rig.find("level")), 1,
+                             "levels are not rate limited")
+            rig.sidecar.handle({"event": "mute", "on": True})
+            rig.sidecar.tick()
+            self.assertEqual(len(rig.find("level")), 1,
+                             "a muted microphone still reported a level")
+        finally:
+            rig.stop()
+
+    def test_a_kept_burst_is_accepted_with_its_measured_length(self):
+        rig = SidecarRig()
+        try:
+            audio = fixtures.voiced(0.6) + fixtures.silence(1.0)
+            rig.feed(audio)
+            segments = rig.find("segment")
+            self.assertEqual([item["state"] for item in segments], ["accepted"])
+            self.assertEqual(segments[0]["id"], "u-1")
+            # The burst is what the gate recorded: the speech and the
+            # hangover it keeps before it lets go, not a made-up figure.
+            self.assertGreater(segments[0]["seconds"], 0.6)
+            self.assertLess(segments[0]["seconds"], 1.6)
+        finally:
+            rig.stop()
+
+    def test_a_short_blip_is_kept_and_measured_as_recorded(self):
+        # The gate's hangover is part of the recording, so a blip in a
+        # quiet room is a kept burst of about a second, not a "too short"
+        # drop.  The strip must show what the path did, not a guess.
+        rig = SidecarRig()
+        try:
+            rig.feed(fixtures.voiced(0.08) + fixtures.silence(1.0))
+            segments = rig.find("segment")
+            self.assertEqual([item["state"] for item in segments], ["accepted"])
+            self.assertGreater(segments[0]["seconds"], 0.8)
+        finally:
+            rig.stop()
+
+    def test_an_empty_transcript_is_dropped_as_no_words(self):
+        rig = SidecarRig()
+        try:
+            rig.transcript = ""
+            rig.feed(fixtures.voiced(0.6) + fixtures.silence(1.0))
+            self.assertTrue(rig.pump(until=lambda: rig.find("delegation") or
+                                     len(rig.find("segment")) > 1))
+            states = [(item["state"], item.get("reason"))
+                      for item in rig.find("segment")]
+            self.assertEqual(states, [("accepted", None), ("dropped", "no words")])
+        finally:
+            rig.stop()
+
+    def test_a_failed_transcription_is_failed_not_dropped(self):
+        rig = SidecarRig()
+
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("speech service down")
+
+        try:
+            rig.sidecar.post_multipart = broken
+            rig.feed(fixtures.voiced(0.6) + fixtures.silence(1.0))
+            self.assertTrue(rig.pump(
+                until=lambda: rig.find("segment") and
+                rig.find("segment")[-1]["state"] == "failed",
+                timeout=6.0))
+            states = [item["state"] for item in rig.find("segment")]
+            self.assertEqual(states, ["accepted", "failed"])
+            self.assertTrue(rig.find("error"))
+        finally:
+            rig.stop()
 
 
 class DetectorTest(unittest.TestCase):

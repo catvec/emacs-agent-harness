@@ -638,6 +638,34 @@ class NullAudio:
 
 
 #; ------------------------------------------------------------------
+#; Telemetry
+#; ------------------------------------------------------------------
+
+class LevelMeter:
+    """Report the microphone's level at a bounded rate.
+
+    The level is measured on the PCM the capture loop just read, before
+    the speech filter sees it, so it answers "is the microphone reaching
+    the app" rather than "did the filter keep anything".  One event per
+    captured chunk would flood the control pipe, and a timer would report
+    a level nobody measured in between: the capture loop offers each
+    chunk and this keeps the ones that are due.
+    """
+
+    def __init__(self, interval=0.1):
+        self.interval = interval
+        self._last = None
+
+    def measure(self, pcm, now=None):
+        """Return the level to report for PCM, or None when it is not due."""
+        now = time.monotonic() if now is None else now
+        if self._last is not None and now - self._last < self.interval:
+            return None
+        self._last = now
+        return pcm_energy(pcm)
+
+
+#; ------------------------------------------------------------------
 #; Voice detection
 #; ------------------------------------------------------------------
 
@@ -896,7 +924,7 @@ class Vad:
         if seconds >= self.min_speech or (final and speech):
             output.append(("speech", speech, uid))
         else:
-            output.append(("cancel", uid))
+            output.append(("cancel", uid, seconds))
 
     def feed(self, pcm):
         """Consume PCM bytes, returning the events above, oldest first."""
@@ -1226,6 +1254,7 @@ class Sidecar:
         self.speech_active = False
         self.held = []
         self.held_seq = 0
+        self.level_meter = LevelMeter()
 
     # -- lifecycle ---------------------------------------------------
 
@@ -1279,6 +1308,20 @@ class Sidecar:
             self.on_delegate_result(event)
         else:
             log("ignored %s" % kind)
+
+    def announce_level(self, level):
+        """Report the microphone's level before the speech filter."""
+        if level is not None:
+            self.events.send("level", input=round(float(level), 3))
+
+    def announce_segment(self, state, uid, seconds=None, reason=None):
+        """Report one burst's own decision: accepted, or dropped."""
+        fields = {"state": state, "id": "u-%s" % uid}
+        if seconds is not None:
+            fields["seconds"] = round(float(seconds), 2)
+        if reason:
+            fields["reason"] = reason
+        self.events.send("segment", **fields)
 
     def announce_speech(self, active, utterance=None, reason=None):
         """Report the low-latency speech gate to Emacs.

@@ -3410,6 +3410,153 @@ No microphone or speech service is used for the documentation picture."
         (with-current-buffer buffer (harness-voice-mode -1))
         (harness-call 'session/delete (buffer-local-value 'harness-ui-session-id buffer))))))
 
+(defun harness-media--voice-pipeline-session ()
+  "Feed one scripted session through the live voice pipeline's handlers.
+The events are the sidecar protocol's own with fixture values: no
+microphone measured them, and the sidecar process is not started.  The
+handlers, the model and the drawing are the ones a real session uses."
+  (harness-voice-live--pipeline-bump 'live)
+  (dolist (event '((:event "level" :input 0.19)
+                   (:event "level" :input 0.56)
+                   (:event "speech" :active t :utterance 1 :reason "onset")
+                   (:event "segment" :state "accepted" :id "u-1" :seconds 1.4)
+                   (:event "transcribing" :utterance 1)
+                   (:event "speech" :active nil :utterance 1 :reason "hangover")
+                   (:event "level" :input 0.11)
+                   (:event "segment" :state "dropped" :id "u-2" :seconds 0.08
+                           :reason "too short")
+                   (:event "user_delta" :final t :utterance 1
+                           :text "Add a comment to TokenBucket.take about its refill and retry behavior.")
+                   (:event "segment" :state "transcribed" :id "u-1")
+                   (:event "delegation" :id "d-1"
+                           :text "Add a comment to TokenBucket.take about its refill and retry behavior.")))
+    (harness-voice-live--handle event))
+  (harness-voice-live--pipeline-turn-sent "d-1")
+  (harness-voice-live--pipeline-reply-ready
+   "n-1" "Refill and retry are documented on TokenBucket.take now.")
+  (harness-voice-live--handle
+   '(:event "assistant_delta" :final t
+            :text "Refill and retry are documented on TokenBucket.take now."))
+  (harness-voice-live--pipeline-reply-handed "n-1:0")
+  (harness-voice-live--pipeline-playback 'speaking)
+  (harness-voice-live--pipeline-turn-ended 'done)
+  (harness-voice-live--transcript-buffer)
+  (harness-voice-live--pipeline-draw))
+
+(defun harness-media--voice-pipeline-fresh ()
+  "Show the stage as playing and feed a level as a live session would.
+The level is a measurement that keeps arriving while the microphone is
+open; the picture is taken while it is fresh, so the meter is lit.  The
+turn is done and the reply is playing, as the scripted events say."
+  (setq harness-voice-live--stage 'speaking
+        harness-voice-live--stage-since nil
+        harness-voice-live--state 'speaking)
+  (setq harness-voice-live--pipeline-controls-at nil)
+  (harness-voice-live--pipeline-level 0.56)
+  (harness-voice-live--pipeline-draw))
+
+(defun harness-media--voice-pipeline-frame ()
+  "Fit the frame to the voice transcript and scroll it to its top."
+  (harness-media--fit (harness-media--text-lines (selected-window)))
+  (set-window-start nil (with-current-buffer (window-buffer) (point-min)))
+  (harness-media--settle 0.5))
+
+(defun harness-media-shot-voice-pipeline ()
+  "The voice pipeline in Emacs: the strip in the voice transcript.
+The level before the speech filter, the burst the filter kept and the
+one it dropped, their transcript, the agent turn and the speaker.  The
+session's events are scripted through the live handlers -- no
+microphone was opened -- and the picture is of the real drawing."
+  (harness-media--reset-layout)
+  (let ((harness-voice-provider 'fixture)
+        (harness-voice-live--buffer nil)
+        (harness-voice-live--session "media-live")
+        (harness-voice-live--turn-id "d-1")
+        (harness-voice-live--state 'speaking)
+        (harness-voice-live--stage 'speaking)
+        (harness-voice-live--muted nil)
+        (harness-voice-live--working nil)
+        (harness-voice-live--transcript nil))
+    (harness-media--view
+     (lambda ()
+       (harness-media--voice-pipeline-session)
+       (switch-to-buffer harness-voice-live--transcript))
+     #'harness-media--voice-pipeline-fresh)
+    (harness-media--voice-pipeline-fresh)
+    (harness-media--voice-pipeline-frame)
+    (harness-media--capture "voice-pipeline")))
+
+(defun harness-media-shot-voice-pipeline-details ()
+  "The voice pipeline with every marker listed.
+The same scripted session as `harness-media-shot-voice-pipeline', the
+details control open: each burst by its id, stage, measured length and
+drop reason, then the turn and the reply."
+  (harness-media--reset-layout)
+  (let ((harness-voice-provider 'fixture)
+        (harness-voice-live--buffer nil)
+        (harness-voice-live--session "media-live")
+        (harness-voice-live--turn-id "d-1")
+        (harness-voice-live--state 'speaking)
+        (harness-voice-live--stage 'speaking)
+        (harness-voice-live--muted nil)
+        (harness-voice-live--working nil)
+        (harness-voice-live--transcript nil))
+    (harness-media--view
+     (lambda ()
+       (harness-media--voice-pipeline-session)
+       (switch-to-buffer harness-voice-live--transcript))
+     #'harness-media--voice-pipeline-fresh)
+    (with-current-buffer harness-voice-live--transcript
+      (setq harness-voice-live--pipeline-details t))
+    (harness-media--voice-pipeline-fresh)
+    (harness-media--voice-pipeline-frame)
+    (harness-media--capture "voice-pipeline-details")))
+
+(defun harness-media-shot-voice-pipeline-compose ()
+  "The pipeline's compact line under a live voice chat's controls.
+No microphone or speech service is used for the documentation picture:
+the line is drawn from the same scripted events as the strip."
+  (harness-media--reset-layout)
+  (harness-media--show-file "acme/ratelimit.py" "^    def take")
+  (let ((previous harness-voice--owner)
+        (listed nil)
+        (harness-voice-provider 'fixture)
+        (harness-voice-live--buffer nil)
+        (harness-voice-live--session "media-live")
+        (harness-voice-live--turn-id nil)
+        (harness-voice-live--state 'listening)
+        (harness-voice-live--stage 'listening)
+        (harness-voice-live--muted nil)
+        (harness-voice-live--working nil)
+        (harness-voice-live--transcript nil))
+    (harness-ui-refresh-sessions (lambda (_) (setq listed t)))
+    (harness-media--wait (lambda () listed) 10 "voice context sessions")
+    (harness-voice)
+    (let ((buffer (harness-media--wait
+                   (lambda () (and (buffer-live-p harness-voice--owner)
+                                   (not (eq previous harness-voice--owner))
+                                   (not (buffer-local-value 'harness-chat--loading harness-voice--owner))
+                                   harness-voice--owner))
+                   20 "the quick voice chat")))
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (goto-char harness-compose-end)
+              (insert "Add a comment to TokenBucket.take about its refill and retry behavior.")
+              (setq harness-voice-live--buffer buffer)
+              (setq-local harness-compose-controls-functions (list #'harness-voice--controls))
+              (harness-media--voice-pipeline-session)
+              (harness-voice-live--pipeline-turn-queued "d-2")
+              (harness-media--voice-pipeline-fresh)
+              (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t)))
+                (harness-voice--refresh)))
+            (window-resize (get-buffer-window buffer) (- 20 (window-body-height (get-buffer-window buffer))))
+            (harness-media--settle 0.5)
+            (harness-media--to-bottom buffer)
+            (harness-media--capture "voice-pipeline-compose"))
+        (with-current-buffer buffer (harness-voice-mode -1))
+        (harness-call 'session/delete (buffer-local-value 'harness-ui-session-id buffer))))))
+
 (defun harness-media-shot-sessions ()
   "The session list, in a frame wide enough for its last column, the project.
 Its columns take about 156 of `harness-media-columns'; the first
@@ -4766,6 +4913,9 @@ names."
     ("chat-queue" . harness-media-shot-chat-queue)
     ("prompt-region" . harness-media-shot-prompt-region)
     ("voice" . harness-media-shot-voice)
+    ("voice-pipeline" . harness-media-shot-voice-pipeline)
+    ("voice-pipeline-details" . harness-media-shot-voice-pipeline-details)
+    ("voice-pipeline-compose" . harness-media-shot-voice-pipeline-compose)
     ;; After every picture of usage: its session's usage would count there.
     ("chat-cowboy" . harness-media-shot-chat-cowboy)
     ;; Last: an "Always deny" and an "always" cold-cache answer, both

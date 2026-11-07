@@ -214,6 +214,7 @@ class UnmuteSidecar(Sidecar):
             if len(chunk) % 2:
                 chunk = chunk[:-1]
             if not self.muted:
+                self.announce_level(self.level_meter.measure(chunk))
                 self.vad.set_playback(
                     self.player.level() if self.player else 0.0)
                 self._consume(self.vad.feed(chunk))
@@ -236,12 +237,17 @@ class UnmuteSidecar(Sidecar):
                 self.announce_speech(False, result[1], "utterance-end")
             elif kind == "speech":
                 uid = result[2]
+                self.announce_segment("accepted", uid,
+                                      len(result[1]) / (2.0 * self.rate))
                 self.awaiting.add(uid)
                 self.events.send("transcribing", utterance=uid)
                 self.transcriptions.put((uid, result[1]))
             elif kind == "cancel":
                 # Too short to transcribe: back to listening, not stuck
                 # in a stage that waits for text that will not come.
+                self.announce_segment("dropped", result[1],
+                                      result[2] if len(result) > 2 else None,
+                                      "too short")
                 self.events.send("listening", utterance=result[1])
                 self.schedule_release(1.0)
 
@@ -305,8 +311,16 @@ class UnmuteSidecar(Sidecar):
             text = self.buffered.pop(uid)
             self.next_utterance += 1
             self.awaiting.discard(uid)
+            if text is None:
+                # The transcription itself failed; the error event says
+                # why, and the burst's marker says it never became words.
+                self.announce_segment("failed", uid)
+                self.events.send("listening", utterance=uid)
+                self.schedule_release(1.0)
+                continue
             if not text:
                 # Silence, noise or an empty STT result: nothing to delegate.
+                self.announce_segment("dropped", uid, reason="no words")
                 self.events.send("listening", utterance=uid)
                 self.schedule_release(1.0)
                 continue
@@ -373,12 +387,12 @@ class UnmuteSidecar(Sidecar):
         except Exception as error:  # noqa: BLE001 - shown in Emacs
             self.failures += 1
             self.events.send("error", message="Local transcription failed · %s" % error)
-            return ""
+            return None
         try:
             payload = json.loads(body.decode("utf-8")) if body else {}
         except ValueError:
             self.events.send("error", message="Local transcription · invalid response")
-            return ""
+            return None
         text = (payload.get("text") or "").strip()
         if not text:
             return ""

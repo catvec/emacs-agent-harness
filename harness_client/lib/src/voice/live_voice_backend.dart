@@ -33,6 +33,13 @@ class LiveVoiceBackend implements VoiceBackend {
   bool _speechActive = false;
   final List<String> _heldReplies = <String>[];
 
+  /// The pipeline segment of the utterance being heard now, and the reply
+  /// last handed to the provider, so its own playback state can be named.
+  String? _segment;
+  int _segmentSequence = 0;
+  String? _handedReply;
+  int _generation = 0;
+
   @override
   Stream<VoiceBackendEvent> get events => _events.stream;
 
@@ -67,6 +74,16 @@ class LiveVoiceBackend implements VoiceBackend {
         if (event.callId != null && event.callId!.isNotEmpty) {
           _pendingCalls.add(event.callId!);
         }
+        final segment = _segment ??= _newSegment();
+        // The delegation is the transcript this provider made of the
+        // utterance; the pipeline showed it as speech before any words.
+        _emit(
+          VoiceSegmentEvent(
+            id: segment,
+            stage: VoiceSegmentStage.transcribed,
+            text: event.text,
+          ),
+        );
         final pending = _takeHeld();
         _emit(
           VoicePromptEvent(
@@ -74,32 +91,98 @@ class LiveVoiceBackend implements VoiceBackend {
               text: event.text,
               pending: pending.isEmpty ? null : pending,
               id: event.callId,
+              segmentId: segment,
             ),
           ),
         );
         _emit(const VoicePhaseEvent(VoicePhase.thinking));
       } else if (event is VoiceSpeechEvent) {
-        _speechActive = event.active;
-        _audioBack?.cancel();
-        _audioBack = null;
-        if (event.active) {
-          unawaited(connection.setRemoteAudioEnabled(false));
-        } else if (!_paused) {
-          _audioBack = Timer(const Duration(milliseconds: 220), () {
-            unawaited(_resumeAudio());
-          });
-        }
-        _emit(event);
+        _onSpeech(event);
+      } else if (event is VoiceSegmentEvent || event is VoiceCaptionEvent) {
+        _onUtterance(event);
       } else if (event is VoicePhaseEvent) {
-        if (event.phase == VoicePhase.listening && !_speechActive && !_paused) {
-          unawaited(_resumeAudio());
-        }
-        _emit(event);
+        _onPhase(event);
       } else {
         _emit(event);
       }
     }
   }
+
+  /// The provider's own speech gate.  Its onset opens a segment; a later
+  /// event for the same item adopts the provider's id instead of adding a
+  /// second segment for one utterance.
+  void _onSpeech(VoiceSpeechEvent event) {
+    final wasActive = _speechActive;
+    _speechActive = event.active;
+    _audioBack?.cancel();
+    _audioBack = null;
+    if (event.active) {
+      if (!wasActive || _segment == null) {
+        _segment = event.id ?? _newSegment();
+        _emit(
+          VoiceSegmentEvent(id: _segment!, stage: VoiceSegmentStage.accepted),
+        );
+      }
+      unawaited(connection.setRemoteAudioEnabled(false));
+    } else if (!_paused) {
+      _audioBack = Timer(const Duration(milliseconds: 220), () {
+        unawaited(_resumeAudio());
+      });
+    }
+    _emit(event);
+  }
+
+  /// A transcript for the utterance being heard, or the provider's report
+  /// that it found no words in it.  Its segment id is the provider's own,
+  /// else the onset's.
+  void _onUtterance(VoiceBackendEvent event) {
+    if (event is VoiceCaptionEvent) {
+      if (event.speaker != VoiceSpeaker.you) {
+        _emit(event);
+        return;
+      }
+      final id = event.segmentId ?? _segment ?? (_segment = _newSegment());
+      _emit(
+        VoiceSegmentEvent(
+          id: id,
+          stage: event.finalized
+              ? VoiceSegmentStage.transcribed
+              : VoiceSegmentStage.transcribing,
+          text: event.text,
+        ),
+      );
+    }
+    _emit(event);
+  }
+
+  void _onPhase(VoicePhaseEvent event) {
+    if (event.phase == VoicePhase.speaking) {
+      // The provider's player is playing its reply; this is the real speech,
+      // not the text that was handed to it.
+      _emit(
+        VoicePlaybackEvent(
+          playing: true,
+          replyId: _handedReply,
+          generation: _generation,
+        ),
+      );
+    } else if (event.phase == VoicePhase.listening ||
+        event.phase == VoicePhase.interrupted) {
+      _emit(
+        VoicePlaybackEvent(
+          playing: false,
+          replyId: _handedReply,
+          generation: _generation,
+        ),
+      );
+    }
+    if (event.phase == VoicePhase.listening && !_speechActive && !_paused) {
+      unawaited(_resumeAudio());
+    }
+    _emit(event);
+  }
+
+  String _newSegment() => 'live-${++_segmentSequence}';
 
   @override
   Future<void> setMuted(bool muted) async {
@@ -122,6 +205,7 @@ class LiveVoiceBackend implements VoiceBackend {
     _heldReplies.clear();
     _audioBack?.cancel();
     _audioBack = null;
+    _generation++;
     try {
       await connection.send(protocol.interrupt());
       await connection.setMuted(true);
@@ -130,6 +214,7 @@ class LiveVoiceBackend implements VoiceBackend {
       _fail('Live connection failed', error);
       return;
     }
+    _emit(VoicePlaybackEvent(playing: false, generation: _generation));
     _emit(const VoicePhaseEvent(VoicePhase.paused));
   }
 
@@ -151,6 +236,7 @@ class LiveVoiceBackend implements VoiceBackend {
   Future<void> interrupt() async {
     if (_closed) return;
     _heldReplies.clear();
+    _generation++;
     try {
       await connection.send(protocol.interrupt());
       await connection.setRemoteAudioEnabled(false);
@@ -158,6 +244,7 @@ class LiveVoiceBackend implements VoiceBackend {
       _audioBack = Timer(const Duration(seconds: 2), () {
         unawaited(_resumeAudio());
       });
+      _emit(VoicePlaybackEvent(playing: false, generation: _generation));
       _emit(const VoicePhaseEvent(VoicePhase.interrupted));
       _emit(const VoicePhaseEvent(VoicePhase.listening));
     } catch (error) {
@@ -177,13 +264,13 @@ class LiveVoiceBackend implements VoiceBackend {
   }
 
   @override
-  Future<void> speak(String text) async {
+  Future<void> speak(String text, {String? replyId}) async {
     final trimmed = text.trim();
     _heldReplies.remove(trimmed);
     if (_closed || trimmed.isEmpty) return;
     if (_paused || _speechActive) {
       _remember(trimmed);
-      _emit(VoiceHeldEvent(trimmed));
+      _emit(VoiceHeldEvent(trimmed, id: replyId));
       return;
     }
     final callId = _pendingCalls.isEmpty ? null : _pendingCalls.removeAt(0);
@@ -195,7 +282,10 @@ class LiveVoiceBackend implements VoiceBackend {
         final follow = protocol.continuation();
         if (follow != null) await connection.send(follow);
       }
-      _emit(const VoicePhaseEvent(VoicePhase.speaking));
+      // Handed over, not spoken: the provider starts its own audio, and its
+      // `speaking` event is what says that playback began.
+      _handedReply = replyId;
+      if (replyId != null) _emit(VoiceReplyHandedEvent(replyId));
     } catch (error) {
       _fail('Live connection failed', error);
     }
@@ -218,6 +308,7 @@ class LiveVoiceBackend implements VoiceBackend {
     if (_closed) return;
     _emit(const VoiceEndedEvent());
     _closed = true;
+    _generation++;
     _heldReplies.clear();
     _audioBack?.cancel();
     _audioBack = null;

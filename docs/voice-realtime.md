@@ -296,8 +296,10 @@ model, and the test sidecars do exactly that.
 | --- | --- | --- | --- |
 | sidecar → Emacs | `ready` | `provider`, `voice` | Session connected; microphone may start |
 | sidecar → Emacs | `listening` / `speaking` | — | Audio state for the indicator |
-| sidecar → Emacs | `hearing` | — | The user started speaking (a stage, not the gate) |
+| sidecar → Emacs | `level` | `input` | The microphone's level before the speech filter, 0..1, at most ten times a second; the capture loop measures it on the PCM it just read |
+| sidecar → Emacs | `hearing` | `utterance` | The user started speaking (a stage, not the gate) |
 | sidecar → Emacs | `speech` | `active`, `utterance`, `reason` | The low-latency gate: true at speech onset, before any transcript; false at speech end |
+| sidecar → Emacs | `segment` | `id`, `state`, `seconds`, `reason` | One burst's own decision: `accepted` when the gate kept it, `dropped` with `too short` or `no words`, `failed` when its transcription failed |
 | sidecar → Emacs | `transcribing` | `utterance` | A completed utterance is being transcribed |
 | sidecar → Emacs | `user_delta` / `assistant_delta` | `text`, `final` | Caption fragments; `final` ends the caption line |
 | sidecar → Emacs | `backchannel` | `text` | Brief listening sound |
@@ -315,9 +317,12 @@ model, and the test sidecars do exactly that.
 | Emacs → sidecar | `delegate_result` | `id`, `text`, `error`, `message` | Final answer or failure for a delegation |
 
 The protocol version is 1. Unknown events are ignored, so a sidecar can add
-fields without breaking the client. A sidecar must not print anything but its
-JSON lines to stdout; diagnostics go to stderr, which the UI shows, shortened,
-when the process fails or exits unexpectedly.
+fields without breaking the client.  A sidecar that reports `level` and
+`segment` fills the pipeline the Emacs voice transcript draws; one that sends
+neither leaves the meter at `Level · no data` rather than drawing silence.  A
+sidecar must not print anything but its JSON lines to stdout; diagnostics go
+to stderr, which the UI shows, shortened, when the process fails or exits
+unexpectedly.
 
 ### Mapping to the harness
 
@@ -341,6 +346,36 @@ The implemented loop:
    keeps the animated stage and the provider in view while the transcript
    scrolls. The editable compose draft is untouched. Redaction and UI reload
    stop the sidecar and clear the transcript.
+
+### The pipeline in Emacs
+
+The stage line says what the session is doing; the pipeline under it says what
+reached the microphone, what the speech filter kept and dropped, what was
+transcribed, and what the speaker is doing.  It is fed by the events above and
+drawn by `harness-ui-voice-pipeline.el`:
+
+```text
+Pipeline
+Input                     Filter            Words          Turn         Speaker
+████▃··· Level · 56%      ● 1 accepted      ≡ in turn      ✓ done       ▷ speaking
+Mic · live                × 1 dropped                      1 utterance
+                                                           1 reply
+Mic · live · Level · 56% · 1 accepted · 1 dropped · Turn · done · Speaker · speaking
+[Pipeline details]
+```
+
+The transcript shows the wide strip, its summary and a control that lists
+every marker by id (`d`); a live chat's controls carry the compact line under
+them, which keeps the speaker and the turn when the window is narrow.  The
+words, the states and the reasons are the Flutter client's
+([Voice pipeline](voice-pipeline-visualization.md)), with `Speaker ·` for the
+output because the transcript's header already says `Voice · <provider>`.  No
+part of the strip moves on a clock: it redraws when an event arrives, and a
+stage that has not reported says it is waiting.  The meter moves with the
+sound because that is the measurement; the stage line's spinner is decoration,
+and `harness-voice-live-motion` nil stops it while every fact stays.
+
+[How the pictures are made and what they do not show](voice-pipeline-visualization.md#in-emacs).
 
 ### UI states
 

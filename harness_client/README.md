@@ -1192,6 +1192,25 @@ ask for the microphone when the screen starts: `RECORD_AUDIO` on Android,
 `NSMicrophoneUsageDescription` on iOS and macOS, and the audio-input
 entitlement on macOS.
 
+The screen also draws the pipe from microphone to speaker, under the status:
+the level before the speech filter, the bursts the filter kept (and the ones it
+dropped, with the reason), their transcript, the agent turn they were sent in,
+and the speaker -- `ready`, `held` for turn-taking, `handed` to the provider,
+`speaking` only while its player plays, `interrupted`, `failed`.  A marker
+moves only when the stage it waits on reports; a stage with no telemetry (the
+live provider's stream, a muted microphone) says `Level · no data`, never
+silence.  The same strip folds to one row and one summary line for a desktop
+buddy.  `docs/voice-pipeline-visualization.md` has the stage-to-event table and
+the limits.
+
+| The pipe, in flow | The compact form a buddy shows |
+|---|---|
+| ![The pipeline from microphone to speaker: level bars, a dropped burst and an accepted one, transcription, the answered turn, and the speaker speaking](screenshots/voice-pipeline-flow.png) | ![The compact pipeline: level bars, markers in one row and one summary line](screenshots/voice-pipeline-compact.png) |
+
+| A held reply | At large text |
+|---|---|
+| ![The pipeline with the microphone muted and the reply held for turn-taking](screenshots/voice-pipeline-held.png) | ![The pipeline folded to the compact form at double the text size](screenshots/voice-pipeline-large-text.png) |
+
 | The live provider | A wide screen |
 |---|---|
 | ![The voice screen on a live provider: Live at the top, the call listening](screenshots/voice-live.png) | ![The voice screen on a wide screen: the orb, the transcript and the controls in one column](screenshots/voice-wide.png) |

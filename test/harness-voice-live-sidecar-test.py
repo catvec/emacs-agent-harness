@@ -8,6 +8,7 @@ per line.  MODE selects what the sidecar does after `start`:
 
   quiet     ready and listening; no spontaneous events
   delegate  ready, listening, one user_delta and one delegation
+  pipeline  ready, listening, levels, a kept burst and a dropped one
   error     ready, then an error event
   exit      ready, a diagnostic on stderr, then a nonzero exit
   silent    no output at all, so startup times out
@@ -71,6 +72,17 @@ def main(argv):
                 if mode == "delegate":
                     send("user_delta", text="Add a docstring to parse.", final=True)
                     send("delegation", id="d-1", text="Add a docstring to parse.")
+                elif mode == "pipeline":
+                    send("level", input=0.56)
+                    send("speech", active=True, utterance=1, reason="onset")
+                    send("segment", state="accepted", id="u-1", seconds=1.4)
+                    send("transcribing", utterance=1)
+                    send("user_delta", text="Add a docstring.", final=True, utterance=1)
+                    send("segment", state="transcribed", id="u-1")
+                    send("speech", active=False, utterance=1, reason="hangover")
+                    send("level", input=0.08)
+                    send("segment", state="dropped", id="u-2", seconds=0.08,
+                         reason="too short")
         elif kind == "stop":
             send("closed", reason="test sidecar")
             return 0

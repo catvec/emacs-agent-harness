@@ -6,6 +6,7 @@ import '../state/session_controller.dart';
 import 'voice_backend.dart';
 import 'voice_media_buttons.dart';
 import 'voice_models.dart';
+import 'voice_pipeline.dart';
 import 'voice_settings.dart';
 
 /// The session side of a voice screen: sends what was heard, and hears what
@@ -156,9 +157,29 @@ class VoiceController extends ChangeNotifier {
   /// Replies that arrived while speech or a pause owned the floor.  They are
   /// attached to the next transcript as explicit context, or released when
   /// the trigger was only a tap; they are never replayed as a stale answer.
-  final List<String> _heldReplies = <String>[];
+  final List<({String text, String id})> _heldReplies =
+      <({String text, String id})>[];
   Timer? _heldTimer;
   final Set<String> _sentPrompts = <String>{};
+
+  /// The pipe from microphone to speaker, as the screen and the compact
+  /// presentation show it.  It is fed only by events and decisions that
+  /// really happened; nothing in it moves on a clock.
+  final VoicePipelineTracker pipeline = VoicePipelineTracker();
+  VoicePipelineSnapshot get pipelineState => pipeline.snapshot;
+
+  /// Turns the session has been given and not finished, oldest first.  A
+  /// reply belongs to the turn the session is answering, which is the oldest.
+  final List<String> _openTurns = <String>[];
+  int _turnSequence = 0;
+
+  /// Bumped whenever the backend is replaced, so an event from a backend that
+  /// is gone cannot advance the pipe of the one that replaced it.
+  int _backendEpoch = 0;
+
+  /// Whether the backend ended on its own, rather than by the screen's stop:
+  /// a closed connection is not the same as a conversation someone ended.
+  bool _unexpectedEnd = false;
 
   /// How long a reply held by a trigger that produced no words waits before
   /// it is spoken.  A transcript cancels the wait; a pause does not speak it.
@@ -232,6 +253,8 @@ class VoiceController extends ChangeNotifier {
     _sentPrompts.clear();
     _heldTimer?.cancel();
     _heldTimer = null;
+    pipeline.begin();
+    _unexpectedEnd = false;
     if (!configured) {
       _setPhase(VoicePhase.failed);
       _setProblem(
@@ -241,11 +264,13 @@ class VoiceController extends ChangeNotifier {
           recoverable: false,
         ),
       );
+      _syncPipeline();
       notifyListeners();
       return;
     }
     follow();
     _setPhase(VoicePhase.connecting);
+    _syncPipeline();
     if (!_mediaButtonsStarted) {
       _mediaButtonsStarted = true;
       unawaited(_mediaButtons.start(togglePause));
@@ -257,7 +282,13 @@ class VoiceController extends ChangeNotifier {
   Future<void> _openBackend() async {
     final backend = _backendFactory(_settings, _harnessAddress);
     _backend = backend;
-    _events = backend.events.listen(_onEvent);
+    final epoch = ++_backendEpoch;
+    _events = backend.events.listen((event) {
+      // A backend that was closed, replaced or restarted must not advance
+      // the pipe of the one that replaced it.
+      if (_disposed || epoch != _backendEpoch) return;
+      _onEvent(event);
+    });
     try {
       await backend.start();
     } catch (error) {
@@ -265,6 +296,7 @@ class VoiceController extends ChangeNotifier {
       _setProblem(
         VoiceProblem('Voice unavailable', detail: '$error', recoverable: false),
       );
+      _syncPipeline();
       notifyListeners();
     }
   }
@@ -274,6 +306,7 @@ class VoiceController extends ChangeNotifier {
     switch (event) {
       case VoiceSpeechEvent(:final active):
         speechActive = active;
+        pipeline.gate(active);
         if (active) {
           _heldTimer?.cancel();
           _heldTimer = null;
@@ -297,15 +330,54 @@ class VoiceController extends ChangeNotifier {
             _heldReplies.isNotEmpty) {
           _scheduleHeldRelease();
         }
+        if (phase == VoicePhase.paused) paused = true;
       case VoiceLevelEvent(:final level):
         this.level = level.clamp(0.0, 1.0);
+        pipeline.level(this.level);
         final now = DateTime.now();
         if (now.difference(_lastLevel) < const Duration(milliseconds: 80)) {
           return;
         }
         _lastLevel = now;
-      case VoiceHeldEvent(:final text):
-        _holdReply(text);
+      case VoiceSegmentEvent(
+        :final id,
+        :final stage,
+        :final duration,
+        :final level,
+        :final text,
+        :final drop,
+        :final detail,
+      ):
+        switch (stage) {
+          case VoiceSegmentStage.accepted:
+            pipeline.accept(id, duration: duration, level: level);
+          case VoiceSegmentStage.transcribing:
+            pipeline.transcribing(id);
+          case VoiceSegmentStage.transcribed:
+            pipeline.transcript(id, text ?? '', finalized: true);
+          case VoiceSegmentStage.dropped:
+            pipeline.drop(
+              id,
+              drop: drop ?? VoiceSegmentDrop.cancelled,
+              detail: detail,
+            );
+          case VoiceSegmentStage.failed:
+            pipeline.fail(id, detail: detail);
+        }
+      case VoicePlaybackEvent(
+        :final playing,
+        :final replyId,
+        :final generation,
+      ):
+        pipeline.playback(
+          playing: playing,
+          replyId: replyId,
+          generation: generation,
+        );
+      case VoiceReplyHandedEvent(:final replyId):
+        pipeline.replyHanded(replyId);
+      case VoiceHeldEvent(:final text, :final id):
+        _holdReply(text, id: id);
       case VoiceCaptionEvent(:final speaker, :final text, :final finalized):
         _addCaption(speaker, text, finalized: finalized);
       case VoicePromptEvent(:final prompt):
@@ -313,18 +385,57 @@ class VoiceController extends ChangeNotifier {
         unawaited(_sendPrompt(prompt));
       case VoiceFailureEvent(:final problem):
         _setProblem(problem);
+        pipeline.problem(problem);
         if (!problem.recoverable) {
+          _cancelPending();
           _setPhase(VoicePhase.failed);
           unawaited(_closeBackend());
         }
       case VoiceProblemCleared():
         problem = null;
+        pipeline.problem(null);
       case VoiceEndedEvent():
+        _unexpectedEnd = !_stopping;
+        pipeline.end(
+          state: _unexpectedEnd
+              ? VoiceInputState.disconnected
+              : VoiceInputState.ended,
+        );
         _setPhase(VoicePhase.ended);
       case VoiceDelegateEvent():
         break;
     }
+    _syncPipeline();
     notifyListeners();
+  }
+
+  /// The microphone and the pipe's other inputs, from the screen's own state.
+  void _syncPipeline() {
+    final state = switch (phase) {
+      VoicePhase.ended =>
+        _unexpectedEnd ? VoiceInputState.disconnected : VoiceInputState.ended,
+      VoicePhase.failed => VoiceInputState.failed,
+      VoicePhase.connecting => VoiceInputState.connecting,
+      VoicePhase.idle => VoiceInputState.off,
+      _ when paused => VoiceInputState.paused,
+      _ when muted => VoiceInputState.muted,
+      _ => VoiceInputState.live,
+    };
+    pipeline.input(state);
+    pipeline.problem(problem);
+  }
+
+  /// Audio that was still waiting to become a request when the conversation
+  /// stopped.  It will not be sent, and the pipe says so.
+  void _cancelPending() {
+    for (final segment in pipelineState.segments) {
+      if (segment.stage.terminal) continue;
+      pipeline.drop(
+        segment.id,
+        drop: VoiceSegmentDrop.cancelled,
+        detail: 'cancelled',
+      );
+    }
   }
 
   Future<void> _sendPrompt(VoicePrompt prompt) async {
@@ -333,11 +444,20 @@ class VoiceController extends ChangeNotifier {
     }
     _heldTimer?.cancel();
     _heldTimer = null;
-    final held = <String>[...?prompt.pending, ..._heldReplies];
+    final held = <String>[
+      ...?prompt.pending,
+      for (final piece in _heldReplies) piece.text,
+    ];
+    for (final piece in _heldReplies) {
+      pipeline.replyDropped(piece.id, detail: 'context');
+    }
     _heldReplies.clear();
     final context = _pendingContext(held);
     final text = _withContext(prompt.text, context);
     final display = prompt.spokenText;
+    final turnId = 't-${++_turnSequence}';
+    _openTurns.add(turnId);
+    pipeline.turnSent(turnId, segmentId: prompt.segmentId ?? prompt.id);
     try {
       if (display case final shown? when shown.trim().isNotEmpty) {
         _addCaption(VoiceSpeaker.you, shown.trim(), finalized: true);
@@ -348,10 +468,15 @@ class VoiceController extends ChangeNotifier {
           audio: prompt.audio,
           displayText: display,
           id: prompt.id,
+          segmentId: prompt.segmentId,
         ),
       );
+      _openTurns.remove(turnId);
+      pipeline.turnDone(turnId);
       if (!_disposed) notifyListeners();
     } catch (error) {
+      _openTurns.remove(turnId);
+      pipeline.turnFailed(turnId, detail: '$error');
       _setProblem(
         VoiceProblem('Send failed', detail: '$error', recoverable: true),
       );
@@ -406,24 +531,38 @@ class VoiceController extends ChangeNotifier {
 
   Future<void> _releaseHeld() async {
     if (_disposed || paused || speechActive || _heldReplies.isEmpty) return;
-    final held = List<String>.of(_heldReplies);
+    final held = List<({String text, String id})>.of(_heldReplies);
     _heldReplies.clear();
     final backend = _backend;
     if (backend == null) return;
-    for (final text in held) {
-      await backend.speak(text);
+    for (final piece in held) {
+      pipeline.replyReleased(piece.id);
+      pipeline.replyHanded(piece.id);
+      await backend.speak(piece.text, replyId: piece.id);
     }
     if (!_disposed) notifyListeners();
   }
 
-  void _holdReply(String text) {
+  void _holdReply(String text, {String? id}) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
-    if (_heldReplies.contains(trimmed)) return;
-    _heldReplies.add(
-      trimmed.length > 4000 ? trimmed.substring(0, 4000) : trimmed,
-    );
+    if (_heldReplies.any((piece) => piece.text == trimmed)) return;
+    final replyId = id ?? _replyForHeld(trimmed);
+    pipeline.replyHeld(replyId);
+    _heldReplies.add((
+      text: trimmed.length > 4000 ? trimmed.substring(0, 4000) : trimmed,
+      id: replyId,
+    ));
     if (_heldReplies.length > 40) _heldReplies.removeAt(0);
+  }
+
+  /// A backend that reports held text without an id still gets a marker: the
+  /// reply the screen decided to speak, or a new one for text it never saw.
+  String _replyForHeld(String text) {
+    for (final reply in pipelineState.replies) {
+      if (reply.text == text && reply.stage.audible) return reply.id;
+    }
+    return pipeline.replyReady(text, turnId: _turnForReply());
   }
 
   void _sessionChanged() {
@@ -435,19 +574,26 @@ class VoiceController extends ChangeNotifier {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
     _addCaption(VoiceSpeaker.agent, trimmed, finalized: true);
-    if (_settings.speakReplies) {
-      if (paused) {
-        // A reply that arrives while the conversation is paused is shown,
-        // not queued for a stale replay when it resumes.
-      } else if (holdingOutput) {
-        _holdReply(trimmed);
+    if (_settings.speakReplies && !paused) {
+      final turnId = _turnForReply();
+      final replyId = pipeline.replyReady(trimmed, turnId: turnId);
+      if (holdingOutput) {
+        _holdReply(trimmed, id: replyId);
       } else {
         final backend = _backend;
-        if (backend != null) unawaited(backend.speak(trimmed));
+        if (backend != null) {
+          pipeline.replyHanded(replyId);
+          unawaited(backend.speak(trimmed, replyId: replyId));
+        }
       }
     }
     notifyListeners();
   }
+
+  /// The turn the session is answering: the oldest one it has not finished.
+  /// Several utterances that reached one turn are shown as its sources, and
+  /// a turn with several replies shows them all.
+  String? _turnForReply() => _openTurns.isEmpty ? null : _openTurns.first;
 
   void _addCaption(
     VoiceSpeaker speaker,
@@ -487,11 +633,20 @@ class VoiceController extends ChangeNotifier {
     if (muted) {
       _heldTimer?.cancel();
       _heldTimer = null;
-      _heldReplies.clear();
+      _dropHeld('muted');
     }
     _setPhase(muted ? VoicePhase.muted : VoicePhase.listening);
+    _syncPipeline();
     notifyListeners();
     await backend.setMuted(muted);
+  }
+
+  /// Held replies will not be spoken; the pipe says why.
+  void _dropHeld(String reason) {
+    for (final piece in _heldReplies) {
+      pipeline.replyDropped(piece.id, detail: reason);
+    }
+    _heldReplies.clear();
   }
 
   /// Pause the conversation without ending it: microphone off, provider
@@ -501,10 +656,11 @@ class VoiceController extends ChangeNotifier {
     paused = true;
     _heldTimer?.cancel();
     _heldTimer = null;
-    _heldReplies.clear();
+    _dropHeld('paused');
     final backend = _backend;
     if (backend != null) await backend.pause();
     _setPhase(VoicePhase.paused);
+    _syncPipeline();
     notifyListeners();
   }
 
@@ -515,6 +671,7 @@ class VoiceController extends ChangeNotifier {
     final backend = _backend;
     if (backend != null) await backend.resume();
     _setPhase(muted ? VoicePhase.muted : VoicePhase.listening);
+    _syncPipeline();
     notifyListeners();
   }
 
@@ -524,11 +681,13 @@ class VoiceController extends ChangeNotifier {
     if (_disposed || phase.finished) return;
     _heldTimer?.cancel();
     _heldTimer = null;
-    _heldReplies.clear();
+    _dropHeld('interrupted');
     final backend = _backend;
     if (backend == null) return;
+    pipeline.interrupted();
     await backend.interrupt();
     _setPhase(paused ? VoicePhase.paused : VoicePhase.interrupted);
+    _syncPipeline();
     notifyListeners();
   }
 
@@ -536,11 +695,14 @@ class VoiceController extends ChangeNotifier {
     if (_disposed) return;
     _heldTimer?.cancel();
     _heldTimer = null;
-    _heldReplies.clear();
+    _dropHeld('restart');
     _sentPrompts.clear();
+    _openTurns.clear();
     speechActive = false;
     paused = false;
+    _cancelPending();
     await _closeBackend();
+    pipeline.end(state: VoiceInputState.off);
     started = false;
     _stopping = false;
     problem = null;
@@ -565,9 +727,13 @@ class VoiceController extends ChangeNotifier {
     await onSettingsChanged(next);
     if (!_disposed) notifyListeners();
     if (!restart || !wasRunning) return;
+    _cancelPending();
     await _closeBackend();
+    pipeline.end(state: VoiceInputState.off);
     started = true;
     _setPhase(VoicePhase.connecting);
+    pipeline.begin();
+    _syncPipeline();
     await _openBackend();
   }
 
@@ -580,6 +746,8 @@ class VoiceController extends ChangeNotifier {
   }
 
   Future<void> _closeBackend() async {
+    // Anything the backend still has queued belongs to a pipe that is over.
+    _backendEpoch++;
     final events = _events;
     _events = null;
     await events?.cancel();
@@ -591,9 +759,11 @@ class VoiceController extends ChangeNotifier {
   Future<void> stop() async {
     if (_disposed || _stopping) return;
     _stopping = true;
+    _unexpectedEnd = false;
     _heldTimer?.cancel();
     _heldTimer = null;
-    _heldReplies.clear();
+    _dropHeld('ended');
+    _openTurns.clear();
     speechActive = false;
     paused = false;
     if (_followSession) {
@@ -602,7 +772,9 @@ class VoiceController extends ChangeNotifier {
       bridge.removeSessionListener(_sessionChanged);
     }
     _stopMediaButtons();
+    _cancelPending();
     await _closeBackend();
+    pipeline.end();
     _setPhase(VoicePhase.ended);
     if (!_disposed) notifyListeners();
   }
@@ -626,6 +798,7 @@ class VoiceController extends ChangeNotifier {
       bridge.removeSessionListener(_sessionChanged);
     }
     _stopMediaButtons();
+    pipeline.end();
     unawaited(_closeBackend());
     super.dispose();
   }

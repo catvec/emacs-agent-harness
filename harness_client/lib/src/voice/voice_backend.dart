@@ -22,23 +22,39 @@ class VoiceLevelEvent extends VoiceBackendEvent {
 /// Low-latency speech activity from the capture path, before any
 /// transcription exists.  The screen uses it to hold assistant output.
 class VoiceSpeechEvent extends VoiceBackendEvent {
-  const VoiceSpeechEvent(this.active);
+  const VoiceSpeechEvent(this.active, {this.id});
   final bool active;
+
+  /// The provider's own name for the utterance, when its event carries one
+  /// (OpenAI Realtime's `item_id`); a backend uses it as the segment id.
+  final String? id;
 }
 
 /// A reply the backend did not speak because the gate closed just as it
 /// arrived.  The controller adds it to its own held list so a false trigger
 /// can still release it, and the next transcript carries it as context.
 class VoiceHeldEvent extends VoiceBackendEvent {
-  const VoiceHeldEvent(this.text);
+  const VoiceHeldEvent(this.text, {this.id});
   final String text;
+
+  /// The screen's id for the reply, when the backend was given one.
+  final String? id;
 }
 
 class VoiceCaptionEvent extends VoiceBackendEvent {
-  const VoiceCaptionEvent(this.speaker, this.text, {this.finalized = false});
+  const VoiceCaptionEvent(
+    this.speaker,
+    this.text, {
+    this.finalized = false,
+    this.segmentId,
+  });
   final VoiceSpeaker speaker;
   final String text;
   final bool finalized;
+
+  /// The utterance the caption belongs to, when the backend knows it: a
+  /// partial and its final share it, and so does the pipeline segment.
+  final String? segmentId;
 }
 
 class VoicePromptEvent extends VoiceBackendEvent {
@@ -67,6 +83,107 @@ class VoiceEndedEvent extends VoiceBackendEvent {
   const VoiceEndedEvent();
 }
 
+/// What the capture path's speech filter did with one burst of audio, as the
+/// backend reports it.  A backend that cannot see its own filter sends no
+/// such event rather than guessing from a timer.
+enum VoiceSegmentStage {
+  /// The filter kept it; it is waiting to be transcribed.
+  accepted,
+
+  /// Speech to text is running on it.
+  transcribing,
+
+  /// Its words arrived.
+  transcribed,
+
+  /// It did not continue: too short, no words, cancelled or broken.
+  dropped,
+
+  /// Its transcription or delivery failed.
+  failed,
+}
+
+/// Why a segment stopped at the capture or transcription stage.
+enum VoiceSegmentDrop {
+  /// The speech filter judged the burst too short to be a request.
+  tooShort,
+
+  /// It was kept, but no words came back for it.
+  noWords,
+
+  /// Mute, pause, stop or a restart dropped it before it was sent.
+  cancelled,
+
+  /// Transcription or delivery failed.
+  failed,
+}
+
+/// One burst of audio, as the pipeline's own capture path judged it.  A
+/// burst is reported here even when the filter rejected it, so the screen can
+/// show what did not survive; a rejected event is not audio a model heard.
+class VoiceSegmentEvent extends VoiceBackendEvent {
+  const VoiceSegmentEvent({
+    required this.id,
+    required this.stage,
+    this.duration,
+    this.level,
+    this.text,
+    this.drop,
+    this.detail,
+  });
+
+  /// A stable id for one utterance within a conversation, given by the
+  /// backend that made the decision.  Two events with the same id are the
+  /// same utterance, even when one arrives twice.
+  final String id;
+  final VoiceSegmentStage stage;
+
+  /// How much audio the segment holds; null when the event is not about a
+  /// finished burst (a live provider's speech onset).
+  final Duration? duration;
+
+  /// The loudest level of the burst, 0..1, as the meter reports it.
+  final double? level;
+
+  /// The words so far.  Partial transcripts replace it, finals complete it.
+  final String? text;
+
+  final VoiceSegmentDrop? drop;
+
+  /// The failure's own words, for the detail line.  Data, not interface copy.
+  final String? detail;
+}
+
+/// The voice output device: whether audio is playing now, and for which
+/// reply when the backend knows.
+///
+/// This is playback, not text generation and not "the provider was handed
+/// text": a backend emits it where its own player starts and stops.
+class VoicePlaybackEvent extends VoiceBackendEvent {
+  const VoicePlaybackEvent({
+    required this.playing,
+    this.replyId,
+    this.generation = 0,
+  });
+
+  final bool playing;
+
+  /// The reply whose audio this is, when the backend can name it.
+  final String? replyId;
+
+  /// The backend's generation counter, which interruption and stop change, so
+  /// a completion from an earlier playback is recognisable as stale.
+  final int generation;
+}
+
+/// The agent's reply was handed to the voice provider, which has not said
+/// that it is playing it.  A live provider answers in its own time; claiming
+/// `speaking` here would report text generation as speech.
+class VoiceReplyHandedEvent extends VoiceBackendEvent {
+  const VoiceReplyHandedEvent(this.replyId);
+  final String replyId;
+}
+
 /// How the voice screen talks to one agent turn at a time.
 abstract class VoiceBackend {
   Stream<VoiceBackendEvent> get events;
@@ -81,7 +198,10 @@ abstract class VoiceBackend {
   Future<void> interrupt();
 
   /// Say [text], the agent's reply, in the voice provider's voice.
-  Future<void> speak(String text);
+  ///
+  /// [replyId] is the screen's stable id for it, which the backend returns on
+  /// its playback events so the screen can tell which reply is playing.
+  Future<void> speak(String text, {String? replyId});
 
   /// Stop the microphone and the provider's audio while keeping the
   /// conversation open.  A paused call resumes with [resume]; it is not

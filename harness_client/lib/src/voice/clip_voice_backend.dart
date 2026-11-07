@@ -41,10 +41,11 @@ class ClipVoiceBackend implements VoiceBackend {
   final VoiceActivityConfig vadConfig;
 
   final _events = StreamController<VoiceBackendEvent>.broadcast();
-  final _queue = <VoiceUtterance>[];
+  final _queue = <({String id, VoiceUtterance utterance})>[];
   final _framer = PcmFramer();
   late final VoiceActivityDetector _vad = VoiceActivityDetector(
     config: vadConfig,
+    onDrop: _droppedByFilter,
   );
   StreamSubscription<Uint8List>? _microphone;
   bool _started = false;
@@ -55,6 +56,7 @@ class ClipVoiceBackend implements VoiceBackend {
   bool _transcribing = false;
   int _generation = 0;
   int _utteranceSequence = 0;
+  int _dropSequence = 0;
   final List<String> _heldReplies = <String>[];
 
   @override
@@ -114,9 +116,7 @@ class ClipVoiceBackend implements VoiceBackend {
         // The gate already required a louder, longer signal while the
         // assistant spoke; this is a real voice taking the floor, not its
         // own echo.
-        _speaking = false;
-        _generation++;
-        unawaited(speech.stop());
+        _takeFloor();
       }
       for (final utterance in utterances) {
         _accept(utterance);
@@ -124,15 +124,60 @@ class ClipVoiceBackend implements VoiceBackend {
     }
   }
 
+  /// The person's voice takes the floor from the reply: stop the playback and
+  /// say so, so the pipeline does not keep showing audio that stopped.
+  void _takeFloor() {
+    if (!_speaking) return;
+    _speaking = false;
+    _generation++;
+    _emit(VoicePlaybackEvent(playing: false, generation: _generation));
+    unawaited(speech.stop());
+  }
+
+  /// The speech filter ended a burst it did not keep.  It is reported with
+  /// the duration and level it measured, and the audio is dropped here.
+  void _droppedByFilter(VoiceUtteranceRejection rejection) {
+    if (_closed) return;
+    _emit(
+      VoiceSegmentEvent(
+        id: 'r-${++_dropSequence}',
+        stage: VoiceSegmentStage.dropped,
+        duration: rejection.duration,
+        level: rejection.level,
+        drop: rejection.reason == VoiceUtteranceDrop.tooShort
+            ? VoiceSegmentDrop.tooShort
+            : VoiceSegmentDrop.failed,
+      ),
+    );
+  }
+
   void _accept(VoiceUtterance utterance) {
-    if (utterance.duration < vadConfig.minUtterance) return;
+    if (utterance.duration < vadConfig.minUtterance) {
+      _emit(
+        VoiceSegmentEvent(
+          id: 'r-${++_dropSequence}',
+          stage: VoiceSegmentStage.dropped,
+          duration: utterance.duration,
+          level: utterance.level,
+          drop: VoiceSegmentDrop.tooShort,
+        ),
+      );
+      return;
+    }
     if (_speaking) {
       // The person took the floor: stop the reply, do not cancel the work.
-      _speaking = false;
-      _generation++;
-      unawaited(speech.stop());
+      _takeFloor();
     }
-    _queue.add(utterance);
+    final id = 'u-${++_utteranceSequence}';
+    _emit(
+      VoiceSegmentEvent(
+        id: id,
+        stage: VoiceSegmentStage.accepted,
+        duration: utterance.duration,
+        level: utterance.level,
+      ),
+    );
+    _queue.add((id: id, utterance: utterance));
     if (!_transcribing) unawaited(_drain());
   }
 
@@ -147,15 +192,17 @@ class ClipVoiceBackend implements VoiceBackend {
     _transcribing = true;
     try {
       while (_queue.isNotEmpty && !_closed) {
-        final utterance = _queue.removeAt(0);
-        final promptId = 'u-${++_utteranceSequence}';
+        final queued = _queue.removeAt(0);
+        final utterance = queued.utterance;
+        final promptId = queued.id;
         if (delivery == ClipDelivery.audioPrompt) {
           final pending = _takeHeld();
           _emit(
-            const VoiceCaptionEvent(
+            VoiceCaptionEvent(
               VoiceSpeaker.you,
               'Voice message',
               finalized: true,
+              segmentId: promptId,
             ),
           );
           _emit(
@@ -165,6 +212,7 @@ class ClipVoiceBackend implements VoiceBackend {
                 pending: pending.isEmpty ? null : pending,
                 displayText: 'Voice message',
                 id: promptId,
+                segmentId: promptId,
               ),
             ),
           );
@@ -172,6 +220,12 @@ class ClipVoiceBackend implements VoiceBackend {
           continue;
         }
         _emit(const VoicePhaseEvent(VoicePhase.transcribing));
+        _emit(
+          VoiceSegmentEvent(
+            id: promptId,
+            stage: VoiceSegmentStage.transcribing,
+          ),
+        );
         String text;
         try {
           text = (await transcriber.transcribe(
@@ -182,23 +236,54 @@ class ClipVoiceBackend implements VoiceBackend {
             language: language,
           )).trim();
         } catch (error) {
+          _emit(
+            VoiceSegmentEvent(
+              id: promptId,
+              stage: VoiceSegmentStage.failed,
+              detail: _oneLine(error),
+            ),
+          );
           _fail(VoiceProblem('Transcription failed', detail: _oneLine(error)));
           _emit(const VoicePhaseEvent(VoicePhase.listening));
           continue;
         }
         if (text.isEmpty) {
+          // The burst was kept by the filter and no words came back: it is
+          // reported as dropped for having no words, not as silence.
+          _emit(
+            VoiceSegmentEvent(
+              id: promptId,
+              stage: VoiceSegmentStage.dropped,
+              drop: VoiceSegmentDrop.noWords,
+            ),
+          );
           _fail(const VoiceProblem('Empty transcript'));
           _emit(const VoicePhaseEvent(VoicePhase.listening));
           continue;
         }
         final pending = _takeHeld();
-        _emit(VoiceCaptionEvent(VoiceSpeaker.you, text, finalized: true));
+        _emit(
+          VoiceSegmentEvent(
+            id: promptId,
+            stage: VoiceSegmentStage.transcribed,
+            text: text,
+          ),
+        );
+        _emit(
+          VoiceCaptionEvent(
+            VoiceSpeaker.you,
+            text,
+            finalized: true,
+            segmentId: promptId,
+          ),
+        );
         _emit(
           VoicePromptEvent(
             VoicePrompt(
               text: text,
               pending: pending.isEmpty ? null : pending,
               id: promptId,
+              segmentId: promptId,
             ),
           ),
         );
@@ -235,6 +320,7 @@ class ClipVoiceBackend implements VoiceBackend {
     _heldReplies.clear();
     _vad.reset();
     await speech.stop();
+    _emit(VoicePlaybackEvent(playing: false, generation: _generation));
     if (!_closed && !_muted && !_paused) {
       _emit(const VoicePhaseEvent(VoicePhase.interrupted));
       // The agent may still be working; the next reply is spoken when it
@@ -253,6 +339,7 @@ class ClipVoiceBackend implements VoiceBackend {
     _heldReplies.clear();
     _vad.reset();
     await speech.stop();
+    _emit(VoicePlaybackEvent(playing: false, generation: _generation));
     try {
       await microphone.setMuted(true);
     } catch (error) {
@@ -278,33 +365,56 @@ class ClipVoiceBackend implements VoiceBackend {
   }
 
   @override
-  Future<void> speak(String text) async {
+  Future<void> speak(String text, {String? replyId}) async {
     final trimmed = text.trim();
     _heldReplies.remove(trimmed);
     if (_closed || !speakReplies || trimmed.isEmpty || _paused) {
       if (trimmed.isNotEmpty && !_closed) {
         _remember(trimmed);
-        _emit(VoiceHeldEvent(trimmed));
+        _emit(VoiceHeldEvent(trimmed, id: replyId));
       }
       return;
     }
     if (_vad.gateActive) {
       _remember(trimmed);
-      _emit(VoiceHeldEvent(trimmed));
+      _emit(VoiceHeldEvent(trimmed, id: replyId));
       return;
     }
     final generation = ++_generation;
     _speaking = true;
     _emit(const VoicePhaseEvent(VoicePhase.speaking));
+    // The player starts here: the speech engine is asked to say this reply,
+    // and a real engine resolves when the audio has played.
+    _emit(
+      VoicePlaybackEvent(
+        playing: true,
+        replyId: replyId,
+        generation: generation,
+      ),
+    );
     try {
       await speech.speak(trimmed);
     } catch (error) {
       if (generation == _generation) {
         _fail(VoiceProblem('Speech unavailable', detail: _oneLine(error)));
+        _emit(
+          VoicePlaybackEvent(
+            playing: false,
+            replyId: replyId,
+            generation: generation,
+          ),
+        );
       }
     } finally {
       if (generation == _generation && !_closed) {
         _speaking = false;
+        _emit(
+          VoicePlaybackEvent(
+            playing: false,
+            replyId: replyId,
+            generation: generation,
+          ),
+        );
         _emit(
           VoicePhaseEvent(_muted ? VoicePhase.muted : VoicePhase.listening),
         );

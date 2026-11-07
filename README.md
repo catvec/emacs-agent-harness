@@ -252,6 +252,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Effort levels (low, medium, high) pick the local whisper model and the provider's own fragments
   - [Voice audio backends](docs/voice-audio.md): PipeWire, PulseAudio, ALSA or ffmpeg, newest first, with failover
   - [Realtime voice research](docs/voice-realtime.md): GPT-Live, backchannels, delegation, the sidecar protocol and open-source pipelines
+  - [The voice pipeline in the client](docs/voice-pipeline-visualization.md): the level before the filter, the bursts it kept, transcript, turn and speaker, from the real events, in the voice screen and in a compact form a buddy can show
 - [Compose stacks](docs/stacks.md) (`stacks`, optional) on a [container runtime](docs/container-runtime.md) (`container-runtime`, optional)
   - Docker over its socket or rootless Podman, chosen automatically or by hand; a stack never calls either directly
   - A module or plugin declares the services it needs; the harness starts and stops the stack and joins its network to the harness server's

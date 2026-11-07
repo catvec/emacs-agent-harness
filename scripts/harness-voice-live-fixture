@@ -7,13 +7,20 @@ controls, to show them in documentation, or as the starting point for a
 real GPT-Live or local pipeline adapter.
 
 Usage:
-    harness-voice-live-fixture [--demo]
+    harness-voice-live-fixture [--demo [--hold-speaking]]
 
 The harness starts this process and writes one JSON object per line on
 stdin.  This process writes one JSON object per line on stdout and
 diagnostics on stderr.  With --demo it also simulates a user asking for
-work, so the whole delegation round trip is visible.  Without --demo it
-only answers the harness's lifecycle commands.
+work, and the capture path's scripted measurements: levels, a burst the
+speech filter kept and one it dropped.  Without --demo it only answers
+the harness's lifecycle commands.
+
+The demo's audio events are scripted -- no microphone measured them --
+but they carry the same fields a real sidecar's `level' and `segment'
+events do.  --hold-speaking keeps the last playback report at speaking
+until the session stops, so a picture of a session in progress does not
+depend on how long a screenshot takes; every other event is the same.
 """
 
 import json
@@ -35,17 +42,41 @@ def log(text):
     sys.stderr.flush()
 
 
+DEMO_UTTERANCE = "Add a docstring to the parse function in file.py."
+
+
+def demo_pipeline():
+    """Emit the capture path a real sidecar would report, scripted.
+
+    Left to right: levels before the filter, a burst the filter kept and
+    transcribed, and a short burst it dropped.  The numbers are made up;
+    the events are the sidecar's own, so the harness draws them the way it
+    draws a real session's.
+    """
+    for level in (0.18, 0.34, 0.56):
+        send("level", input=level)
+    send("speech", active=True, utterance=1, reason="onset")
+    send("segment", state="accepted", id="u-1", seconds=1.4)
+    send("hearing", utterance=1)
+    send("speech", active=False, utterance=1, reason="hangover")
+    send("level", input=0.21)
+    send("speech", active=True, utterance=2, reason="onset")
+    send("speech", active=False, utterance=2, reason="hangover")
+    send("segment", state="dropped", id="u-2", seconds=0.08, reason="too short")
+    send("transcribing", utterance=1)
+    send("user_delta", text=DEMO_UTTERANCE, final=True, utterance=1)
+    send("segment", state="transcribed", id="u-1")
+    send("delegation", id="fixture-1", text=DEMO_UTTERANCE)
+
+
 def demo_delegation():
     """Ask the harness for a small piece of work, as a voice user would."""
-    utterance = "Add a docstring to the parse function in file.py."
-    send("hearing")
-    send("user_delta", text=utterance, final=True)
-    send("transcribing")
-    send("delegation", id="fixture-1", text=utterance)
+    demo_pipeline()
 
 
 def main(argv):
     demo = "--demo" in argv[1:]
+    hold_speaking = "--hold-speaking" in argv[1:]
     log("fixture ready" + (" (demo)" if demo else ""))
     for line in sys.stdin:
         line = line.strip()
@@ -72,6 +103,8 @@ def main(argv):
             send("listening")
         elif kind == "commentary":
             send("speaking")
+            if hold_speaking:
+                continue
             time.sleep(0.3)
             send("listening")
         elif kind == "delegate_result":
