@@ -29,13 +29,45 @@
 (defvar harness-provider-check-test--cache-read nil
   "The `:cache-read' the fake provider's usage events report, when a number.")
 
-(defun harness-provider-check-test--usage ()
-  "Return the usage event of the fake provider.
-It carries `:cache-read' when `harness-provider-check-test--cache-read'
-is a number; a provider that reports no cache tokens says nothing of them."
+(defvar harness-provider-check-test--cache-simulate nil
+  "Non-nil makes the fake provider simulate a prefix cache.
+A request whose system prompt and first message were already seen reads
+1000 cached tokens; a new prefix reads none.  The key deliberately
+ignores a message appended after the first, as a prefix cache does.")
+
+(defvar harness-provider-check-test--cache-prefixes nil
+  "Prefixes the fake provider has seen in a simulated cache.")
+
+(defun harness-provider-check-test--cache-key (request)
+  "Return the prefix key of REQUEST, or nil."
+  (let ((messages (plist-get request :messages)))
+    (and messages
+         (list (plist-get request :system)
+               (plist-get (car messages) :content)))))
+
+(defun harness-provider-check-test--cache-read-for (request)
+  "Return the cache-read count the fake provider reports for REQUEST."
+  (cond
+   ((numberp harness-provider-check-test--cache-read)
+    harness-provider-check-test--cache-read)
+   (harness-provider-check-test--cache-simulate
+    (let* ((key (harness-provider-check-test--cache-key request))
+           (seen (and key (gethash key harness-provider-check-test--cache-prefixes))))
+      (when (and key (not seen))
+        (puthash key t harness-provider-check-test--cache-prefixes))
+      (if seen 1000 0)))
+   (t nil)))
+
+(defun harness-provider-check-test--usage (&optional cache-read)
+  "Return the usage event of the fake provider with CACHE-READ.
+A nil CACHE-READ says nothing of cache tokens, as a provider with no
+telemetry does."
   (append '(:type usage :input 42 :output 5)
-          (and (numberp harness-provider-check-test--cache-read)
-               (list :cache-read harness-provider-check-test--cache-read))))
+          (and (numberp cache-read) (list :cache-read cache-read))))
+
+(defun harness-provider-check-test--usage-for (request)
+  "Return the usage event of REQUEST from the fake provider."
+  (harness-provider-check-test--usage (harness-provider-check-test--cache-read-for request)))
 
 (defun harness-provider-check-test--complete (request)
   "Fake completion of REQUEST, including tool continuation and cancellation."
@@ -63,7 +95,7 @@ is a number; a provider that reports no cache tokens says nothing of them."
            (let* ((tool (car (plist-get (car (last (plist-get request :messages))) :content)))
                   (receipt (plist-get tool :content)))
              (funcall emit (list :type 'text :delta receipt))
-             (funcall emit (harness-provider-check-test--usage))
+             (funcall emit (harness-provider-check-test--usage-for request))
              (setq done t)
              (funcall emit '(:type done :stop-reason end-turn))))
           ((and (plist-get request :tools)
@@ -91,6 +123,7 @@ is a number; a provider that reports no cache tokens says nothing of them."
                               (funcall emit '(:type done :stop-reason end-turn)))))))
           ((and (plist-get request :tools)
                 harness-provider-check-test--tool-use-without-call)
+           (funcall emit (harness-provider-check-test--usage-for request))
            (setq done t)
            (funcall emit '(:type done :stop-reason tool-use)))
           ((and (plist-get request :tools)
@@ -109,12 +142,14 @@ is a number; a provider that reports no cache tokens says nothing of them."
                           label)))
              (funcall emit (list :type 'tool-call :id "call-resubmit"
                                  :name "resubmit" :input (list :note note)))
+             (funcall emit (harness-provider-check-test--usage-for request))
              (setq done t)
              (funcall emit '(:type done :stop-reason tool-use))))
           ((and (plist-get request :tools)
                 (not harness-provider-check-test--no-tools))
            (funcall emit '(:type tool-call :id "call-1"
                            :name "check_echo" :input (:value "ping")))
+           (funcall emit (harness-provider-check-test--usage-for request))
            (setq done t)
            (funcall emit '(:type done :stop-reason tool-use)))
           (t
@@ -128,7 +163,7 @@ is a number; a provider that reports no cache tokens says nothing of them."
              (funcall emit (list :type 'text :delta (or (and vision "red") "hello")))
              (unless (plist-get request :ephemeral)
                (funcall emit '(:type provider-state :state (:id "fake-state"))))
-             (funcall emit (harness-provider-check-test--usage))
+             (funcall emit (harness-provider-check-test--usage-for request))
              (setq done t)
              (funcall emit '(:type done :stop-reason end-turn))))))))
     (list :cancel
@@ -196,6 +231,9 @@ the test can read back."
            (harness-provider-check-test--error-text nil)
            (harness-provider-check-test--events nil)
            (harness-provider-check-test--cache-read nil)
+           (harness-provider-check-test--cache-simulate nil)
+           (harness-provider-check-test--cache-prefixes (make-hash-table :test #'equal))
+           (harness-provider-check-cache-persistence-wait 0)
            (harness-provider-check-timeout 1))
        (harness-on 'provider-check/started
                    (lambda (&rest args)
@@ -251,13 +289,13 @@ the test can read back."
 (ert-deftest harness-provider-check-both-suites-pass-offline ()
   (harness-provider-check-test-with
     (let ((results (harness-provider-check-test-run "checkfake:model" 'all)))
-      (should (= 14 (cl-count 'provider results
+      (should (= 16 (cl-count 'provider results
                               :key (lambda (r) (plist-get r :suite)))))
       (should (= 4 (cl-count 'model results
                              :key (lambda (r) (plist-get r :suite)))))
       (should (= 12 (cl-count 'pass results
                               :key (lambda (r) (plist-get r :status)))))
-      (should (= 6 (cl-count 'skip results
+      (should (= 8 (cl-count 'skip results
                              :key (lambda (r) (plist-get r :status)))))
       (should (cl-some
                (lambda (request)
@@ -315,17 +353,17 @@ model behavior checks that ask for a tool call could never pass."
     (let* ((job (harness-provider-check-start "checkfake:model" 'provider))
            (started (car (harness-provider-check-test-events 'started))))
       (should (equal (nth 0 started) (harness-provider-check-job-id job)))
-      (should (= 14 (nth 3 started)))
+      (should (= 16 (nth 3 started)))
       (should (null (harness-provider-check-test-events 'result)))
       (harness-await (harness-provider-check-job-promise job) 10)
       (let ((results (harness-provider-check-test-events 'result)))
-        (should (= 14 (length results)))
+        (should (= 16 (length results)))
         (should (equal (mapcar (lambda (event) (nth 2 event)) results)
-                       (number-sequence 1 14)))
-        (should (= 14 (nth 3 (car (last results)))))
+                       (number-sequence 1 16)))
+        (should (= 16 (nth 3 (car (last results)))))
         (let ((finished (car (harness-provider-check-test-events 'finished))))
-          (should (= 14 (length (nth 2 finished))))
-          (should (= 14 (plist-get (nth 3 finished) :completed))))))))
+          (should (= 16 (length (nth 2 finished))))
+          (should (= 16 (plist-get (nth 3 finished) :completed))))))))
 
 (ert-deftest harness-provider-check-continues-after-effort-rejection ()
   (harness-provider-check-test-with
@@ -397,25 +435,67 @@ model behavior checks that ask for a tool call could never pass."
         (should (eq 'pass (plist-get (harness-provider-check-test-by-name
                                       results name) :status)))))))
 
-(ert-deftest harness-provider-check-prompt-caching-needs-a-second-hit ()
-  "The check sends the same prompt twice and reads the second's cache tokens.
-A provider that reports them passes when the second reads some, fails
-when it reads none, and is skipped when it reports no cache tokens at
-all: nothing is known of its cache either way."
+(ert-deftest harness-provider-check-prompt-caching-is-conservative ()
+  "The cache check reports observations, not a guarantee.
+With a simulated prefix cache, repeated probes and keep-warm requests
+read it while isolated controls stay cold.  Repeated misses with clean
+controls are unverified in one run, not a provider failure, and no
+telemetry is unknown rather than zero."
   (harness-provider-check-test-with
-    (let ((harness-provider-check-test--cache-read 1000))
-      (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
-        (should (eq 'pass (plist-get (harness-provider-check-test-by-name
-                                      results "Prompt caching") :status)))))
-    (setq harness-provider-check-test--cache-read 0)
-    (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
-           (cache (harness-provider-check-test-by-name results "Prompt caching")))
-      (should (eq 'fail (plist-get cache :status)))
-      (should (string-match-p "uncached rate" (plist-get cache :advice))))
-    (setq harness-provider-check-test--cache-read nil)
-    (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
-      (should (eq 'skip (plist-get (harness-provider-check-test-by-name
-                                    results "Prompt caching") :status))))))
+    (let ((harness-provider-check-test--cache-simulate t))
+      (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+             (cache (harness-provider-check-test-by-name
+                     results "Exact-prefix cache reuse and keep-warm"))
+             (evidence (plist-get cache :evidence)))
+        (should (eq 'pass (plist-get cache :status)))
+        (should (= 2 (plist-get evidence :repeat-hits)))
+        (should (= 2 (plist-get (plist-get evidence :keep-warm) :refresh-hits)))
+        (should (plist-get evidence :controls-clean))
+        (should (plist-get evidence :distinct-sessions))
+        (should (string-match-p "TTL unverified" (plist-get cache :detail)))))
+    ;; Repeated misses with cold controls are still unverified in one run.
+    (let ((harness-provider-check-test--cache-read 0))
+      (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+             (cache (harness-provider-check-test-by-name
+                     results "Exact-prefix cache reuse and keep-warm")))
+        (should (eq 'skip (plist-get cache :status)))
+        (should (string-match-p "not unsupported" (plist-get cache :detail)))))
+    ;; No telemetry is unknown, not zero.
+    (let ((harness-provider-check-test--cache-read nil))
+      (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+             (cache (harness-provider-check-test-by-name
+                     results "Exact-prefix cache reuse and keep-warm")))
+        (should (eq 'skip (plist-get cache :status)))
+        (should (string-match-p "unknown, not zero" (plist-get cache :detail)))))))
+
+(ert-deftest harness-provider-check-cache-detail-reports-tokens-and-cost ()
+  "The detail names prompt, cached and output tokens and how the cost was had."
+  (let ((detail (harness-provider-check--cache-detail
+                 '(:telemetry present :repeats (1000 1000) :repeat-hits 2
+                   :repeat-samples 2 :controls-clean t
+                   :context 5000 :cache-read 2000 :output 40
+                   :persistence (:wait 2)
+                   :keep-warm (:refresh (1000 1000) :refresh-hits 2
+                                        :refresh-samples 2 :resume 1000)
+                   :cost (:observed nil :estimated 0.002 :source catalogue)))))
+    (should (string-match-p "prompt 5000 · cached 2000 · output 40" detail))
+    (should (string-match-p "cost \$0\\.0020 estimated (catalogue)" detail)))
+  (let ((detail (harness-provider-check--independent-detail
+                 '(:prefix-count 4 :cached-count 4 :baseline-hits 4
+                   :round-1-hits 4 :round-2-hits 4
+                   :control-samples 2 :control-hits 0
+                   :sessions ("a" "b" "c" "d") :requested-sessions 4
+                   :distinct-sessions t :peak-concurrency 4 :throttled 0
+                   :errors 0 :median-seconds 1.2
+                   :context 9000 :cache-read 7000 :output 120
+                   :cost (:observed 0.5 :estimated nil :source provider)))))
+    (should (string-match-p "independent prefixes 4/4 cached" detail))
+    (should (string-match-p "baseline 4/4" detail))
+    (should (string-match-p "round 1 4/4 · round 2 4/4" detail))
+    (should (string-match-p "controls 0/2 cached" detail))
+    (should (string-match-p "sessions 4/4 (all distinct)" detail))
+    (should (string-match-p "prompt 9000 · cached 7000 · output 120" detail))
+    (should (string-match-p "cost \$0\\.5000 observed (provider)" detail))))
 
 (ert-deftest harness-provider-check-tier-models-resolve ()
   "Every tier the provider declares must name a model of its catalogue.
@@ -642,7 +722,7 @@ Only account and network conditions turn a check into a SKIP."
         (should (string-match-p "Timed out" (plist-get basic :detail))))
       (should (eq 'skip (plist-get (harness-provider-check-test-by-name
                                     results "Usage accounting") :status)))
-      (should (= 14 (length results))))))
+      (should (= 16 (length results))))))
 
 (ert-deftest harness-provider-check-cancellation-needs-a-cancel-function ()
   "A completion handle without :cancel fails the cancellation check."
@@ -660,7 +740,7 @@ Only account and network conditions turn a check into a SKIP."
       (should (string-match-p ":cancel" (plist-get cancellation :detail))))))
 
 (ert-deftest harness-provider-check-cancel-stops-the-job ()
-  "Cancelling a request in flight ends the job with the results it has."
+  "Cancelling every request in flight ends the job with the results it has."
   (harness-provider-check-test-with
     (setq harness-provider-check-timeout 5)
     (harness-define-provider 'checkfake
@@ -669,18 +749,25 @@ Only account and network conditions turn a check into a SKIP."
     (let* ((job (harness-provider-check-start "checkfake:model" 'provider))
            (id (harness-provider-check-job-id job))
            (deadline (+ (float-time) 5)))
-      ;; The catalogue and tier checks settle first; the completion then hangs.
-      (while (and (null (harness-provider-check-test-events 'result))
+      ;; Wait for a live request, which the cache check makes first.
+      (while (and (zerop (harness-provider-check-job-request-count job))
                   (< (float-time) deadline))
         (accept-process-output nil 0.02)
         (sit-for 0.01))
-      (should (harness-provider-check-test-events 'result))
-      (let ((so-far (length (harness-provider-check-test-events 'result))))
-        (should (harness-provider-check-cancel id))
-        (harness-await (harness-provider-check-job-promise job) 5)
-        (let ((finished (car (harness-provider-check-test-events 'finished))))
-          (should (harness-json-true-p (plist-get (nth 3 finished) :cancelled)))
-          (should (= so-far (length (nth 2 finished))))))
+      (should (> (harness-provider-check-job-request-count job) 0))
+      (should (harness-provider-check-cancel id))
+      (harness-await (harness-provider-check-job-promise job) 5)
+      (let ((finished (car (harness-provider-check-test-events 'finished))))
+        (should (harness-json-true-p (plist-get (nth 3 finished) :cancelled)))
+        ;; The checks that settled before the cancel keep their results;
+        ;; none that was in flight does, and the cache experiment, which
+        ;; waits to run alone, never started.
+        (should (< (length (nth 2 finished)) 16))
+        (should (cl-every (lambda (result) (null (plist-get result :sessions)))
+                          (nth 2 finished)))
+        (should-not (cl-find "cache" (nth 2 finished)
+                             :key (lambda (result) (plist-get result :id))
+                             :test #'equal)))
       (should-not (gethash id harness-provider-check--jobs)))))
 
 (ert-deftest harness-provider-check-methods-start-and-cancel-a-job ()
@@ -695,8 +782,8 @@ Only account and network conditions turn a check into a SKIP."
            (id (plist-get answer :job))
            (job (gethash id harness-provider-check--jobs)))
       (should (equal id "test-job"))
-      (should (= 14 (plist-get answer :total)))
-      (should (= 14 (length (plist-get answer :checks))))
+      (should (= 16 (plist-get answer :total)))
+      (should (= 16 (length (plist-get answer :checks))))
       (should job)
       (should (harness-call 'provider/check-cancel id))
       (harness-await (harness-provider-check-job-promise job) 5)
@@ -791,6 +878,639 @@ the check links to says how the call ended."
                               (string-match-p "secret-password"
                                               (plist-get node :content))))
                        (harness-call 'session/nodes session-id))))))
+
+
+;;;; Bounded concurrency, dependencies and cancellation
+
+(defun harness-provider-check-test--entry (id fn &rest keys)
+  "Return a plan entry for check ID running FN with KEYS."
+  (append (list :suite 'provider :id id :name id :requests 1 :fn fn) keys))
+
+(ert-deftest harness-provider-check-independent-checks-run-together ()
+  "Independent checks overlap, and their results still come back in plan order."
+  (harness-provider-check-test-with
+    (let ((order nil) (active 0) (peak 0) (finished 0))
+      (cl-letf (((symbol-function 'harness-provider-check--plan)
+                 (lambda (&rest _)
+                   (list
+                    (harness-provider-check-test--entry
+                     "first" (lambda (job run)
+                               (push 'first-start order)
+                               (harness-then
+                                (harness-provider-check--complete
+                                 run (harness-provider-check--request
+                                      (harness-provider-check-job-model job)
+                                      "concurrency-first" "Reply ok."))
+                                (lambda (_) '(pass . "first")))))
+                    (harness-provider-check-test--entry
+                     "second" (lambda (job run)
+                                (push 'second-start order)
+                                (harness-then
+                                 (harness-provider-check--complete
+                                  run (harness-provider-check--request
+                                       (harness-provider-check-job-model job)
+                                       "concurrency-second" "Reply ok."))
+                                 (lambda (_) '(pass . "second")))))
+                    (harness-provider-check-test--entry
+                     "third" (lambda (job run)
+                               (push 'third-start order)
+                               (harness-then
+                                (harness-provider-check--complete
+                                 run (harness-provider-check--request
+                                      (harness-provider-check-job-model job)
+                                      "concurrency-third" "Reply ok."))
+                                (lambda (_) '(pass . "third")))))))))
+        (harness-define-provider 'checkfake
+          :models #'harness-provider-check-test--models
+          :complete (lambda (request)
+                      (cl-incf active)
+                      (setq peak (max peak active))
+                      (let ((emit (plist-get request :on-event)))
+                        (funcall emit '(:type start))
+                        (run-at-time 0.05 nil
+                                     (lambda ()
+                                       (cl-decf active)
+                                       (cl-incf finished)
+                                       (funcall emit '(:type usage :input 1 :output 1))
+                                       (funcall emit '(:type done :stop-reason end-turn))))
+                        (list :cancel #'ignore))))
+        (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
+          (should (= 3 (length results)))
+          (should (= 3 peak))
+          (should (= 3 finished))
+          (should (equal (mapcar (lambda (result) (plist-get result :id)) results)
+                         '("first" "second" "third"))))))))
+
+(ert-deftest harness-provider-check-dependencies-wait-for-their-result ()
+  "A check listed first but marked `:after' runs only once its dependency settled."
+  (harness-provider-check-test-with
+    (let (order)
+      (cl-letf (((symbol-function 'harness-provider-check--plan)
+                 (lambda (&rest _)
+                   (list
+                    (harness-provider-check-test--entry
+                     "second" (lambda (_job _run)
+                                (push 'second order)
+                                (cons 'pass "second"))
+                     :after '("first"))
+                    (harness-provider-check-test--entry
+                     "first" (lambda (_job _run)
+                               (push 'first order)
+                               (cons 'pass "first")))))))
+        (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
+          (should (equal (nreverse order) '(first second)))
+          (should (equal (mapcar (lambda (result) (plist-get result :id)) results)
+                         '("second" "first"))))))))
+
+(ert-deftest harness-provider-check-cache-probes-wait-for-the-catalogue ()
+  "The cache probes carry the model's advertised identity, so the catalogue comes first."
+  (let ((plan (harness-provider-check--plan 'provider)))
+    (dolist (id '("cache" "cache-parallel"))
+      (let ((entry (cl-find id plan :key (lambda (one) (plist-get one :id))
+                            :test #'equal)))
+        (should entry)
+        (should (member "catalogue" (plist-get entry :after)))))))
+
+(ert-deftest harness-provider-check-cost-is-observed-or-estimated ()
+  "A reported cost wins; without one the catalogue prices estimate it."
+  (harness-provider-check-test-with
+    (let ((job (make-harness-provider-check-job
+                :metadata (harness-call 'provider/model "checkfake:model"))))
+      ;; The fake model has no prices: the cost is unknown, not zero.
+      (should-not (harness-provider-check--usage-cost
+                   job '(:input 1000000 :output 1000000)))
+      ;; A cost the provider reports is used as observed.
+      (should (equal (harness-provider-check--usage-cost
+                      job '(:input 1000000 :output 1000000 :cost 0.5))
+                     '(0.5 . provider))))
+    (harness-define-provider 'checkfake
+      :models (lambda ()
+                (harness-resolved
+                 '((:name "model" :context-window 100000
+                    :pricing (:input 1.0 :output 2.0 :cache-read 0.1)))))
+      :complete #'harness-provider-check-test--complete)
+    (let ((job (make-harness-provider-check-job
+                :metadata (harness-call 'provider/model "checkfake:model"))))
+      (should (equal (harness-provider-check--usage-cost
+                      job '(:input 1000000 :output 1000000 :cache-read 1000000))
+                     '(3.1 . catalogue))))))
+
+(ert-deftest harness-provider-check-cache-experiments-run-alone ()
+  "A solo cache experiment starts nothing else while it measures concurrency."
+  (harness-provider-check-test-with
+    (let (order)
+      (cl-letf (((symbol-function 'harness-provider-check--plan)
+                 (lambda (&rest _)
+                   (list
+                    (harness-provider-check-test--entry
+                     "solo" (lambda (_job _run)
+                              (harness-then
+                               (harness-provider-check--delay 0.2)
+                               (lambda (_)
+                                 (push 'solo order)
+                                 (cons 'pass "solo"))))
+                     :solo t)
+                    (harness-provider-check-test--entry
+                     "ordinary" (lambda (_job _run)
+                                  (push 'ordinary order)
+                                  (cons 'pass "ordinary")))))))
+        (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
+          (should (equal (nreverse order) '(solo ordinary)))
+          (should (equal (mapcar (lambda (result) (plist-get result :id)) results)
+                         '("solo" "ordinary"))))))))
+
+(ert-deftest harness-provider-check-cancels-every-request-in-flight ()
+  "Cancelling a job cancels every live request, not one shared handle."
+  (harness-provider-check-test-with
+    (setq harness-provider-check-timeout 5)
+    (let (cancelled)
+      (cl-letf (((symbol-function 'harness-provider-check--plan)
+                 (lambda (&rest _)
+                   (list
+                    (harness-provider-check-test--entry
+                     "one" (lambda (job run)
+                             (harness-provider-check--complete
+                              run (harness-provider-check--request
+                                   (harness-provider-check-job-model job)
+                                   "cancel-one" "Reply ok."))))
+                    (harness-provider-check-test--entry
+                     "two" (lambda (job run)
+                             (harness-provider-check--complete
+                              run (harness-provider-check--request
+                                   (harness-provider-check-job-model job)
+                                   "cancel-two" "Reply ok."))))))))
+        (harness-define-provider 'checkfake
+          :models #'harness-provider-check-test--models
+          :complete (lambda (request)
+                      (let ((emit (plist-get request :on-event)))
+                        (funcall emit '(:type start))
+                        (list :cancel (lambda ()
+                                        (push (plist-get (plist-get request :session) :id)
+                                              cancelled)
+                                        (funcall emit '(:type done :stop-reason cancelled)))))))
+        (let* ((job (harness-provider-check-start "checkfake:model" 'provider))
+               (deadline (+ (float-time) 5)))
+          (while (and (< (harness-provider-check-job-request-count job) 2)
+                      (< (float-time) deadline))
+            (accept-process-output nil 0.02)
+            (sit-for 0.01))
+          (should (= 2 (harness-provider-check-job-request-count job)))
+          (should (harness-provider-check-cancel (harness-provider-check-job-id job)))
+          (harness-await (harness-provider-check-job-promise job) 5)
+          (should (= 2 (length cancelled)))
+          (should (= 2 (length (delete-dups (copy-sequence cancelled)))))
+          (let ((finished (car (harness-provider-check-test-events 'finished))))
+            (should (harness-json-true-p (plist-get (nth 3 finished) :cancelled)))))))))
+
+(ert-deftest harness-provider-check-request-budget-bounds-a-job ()
+  "A job past its request bound starts no request and reports SKIP, not FAIL."
+  (harness-provider-check-test-with
+    (let ((harness-provider-check-max-requests 1))
+      (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
+        (should (= 1 (length harness-provider-check-test--calls)))
+        (should-not (cl-find 'fail results :key (lambda (result)
+                                                   (plist-get result :status))))
+        (should (string-match-p
+                 "Request budget"
+                 (mapconcat (lambda (result) (or (plist-get result :detail) ""))
+                            results " ")))))))
+
+(ert-deftest harness-provider-check-total-timeout-stops-a-job ()
+  "A job has a whole-run bound too, and reports what it completed."
+  (harness-provider-check-test-with
+    (setq harness-provider-check-timeout 30
+          harness-provider-check-total-timeout 1)
+    (harness-define-provider 'checkfake
+      :models #'harness-provider-check-test--models
+      :complete #'harness-provider-check-test--hang)
+    (let* ((job (harness-provider-check-start "checkfake:model" 'provider))
+           (results (harness-await (harness-provider-check-job-promise job) 6))
+           (finished (car (harness-provider-check-test-events 'finished))))
+      (should (listp results))
+      (should (harness-json-true-p (plist-get (nth 3 finished) :timed-out)))
+      (should (harness-json-true-p (plist-get (nth 3 finished) :cancelled))))))
+
+;;;; Cache evidence and independent-prefix identity
+
+(defun harness-provider-check-test--independent-cross (&optional cached baseline)
+  "Return independent-prefix evidence of four prefixes.
+CACHED of them hit in both concurrent rounds and BASELINE of them hit in
+the serial baseline.  The controls are cold and every other guard is
+clean, so a test can change one field and watch the classification."
+  (let* ((cached (or cached 4))
+         (baseline (or baseline 4))
+         (prefixes (cl-loop for i below 4
+                            collect (list :index i
+                                          :prefix (format "prefix-%d" i)
+                                          :session-id (format "session-%d" i)
+                                          :baseline-hit (< i baseline)
+                                          :round-1-hit (< i cached)
+                                          :round-2-hit (< i cached)
+                                          :cached (< i cached)))))
+    (list :telemetry 'present
+          :prefixes prefixes
+          :controls (cl-loop for i below 2
+                             collect (list :index i
+                                           :prefix (format "control-%d" i)
+                                           :session-id (format "control-session-%d" i)
+                                           :cache-read 0))
+          :control-samples 2
+          :control-hits 0
+          :controls-clean t
+          :requested-sessions 4
+          :prefix-count 4
+          :cached-count cached
+          :baseline-hits baseline
+          :round-1-hits cached
+          :round-2-hits cached
+          :peak-concurrency 4
+          :distinct-sessions t
+          :identity-mismatches 0
+          :throttled 0
+          :errors 0
+          :environment nil)))
+
+(defun harness-provider-check-test--finding (findings key capability)
+  "Return the finding of CAPABILITY at KEY in FINDINGS."
+  (cl-find capability (plist-get findings key)
+           :key (lambda (finding) (plist-get finding :capability))))
+
+(ert-deftest harness-provider-check-cache-findings-are-conservative ()
+  "One hit is an observation; repeated misses need two runs to say unsupported."
+  (let* ((cache '(:telemetry present :repeat-samples 2 :repeat-hits 2
+                  :controls-clean t :repeat-seconds (0.1 0.2)
+                  :keep-warm (:refresh-samples 2 :refresh-hits 2 :resume 1000)
+                  :persistence (:wait 2 :sample 1000)
+                  :control (:resume 1000)))
+         (findings (harness-provider-check--cache-findings cache nil nil)))
+    (should (harness-provider-check-test--finding
+             findings :observed 'prompt-cache-exact-prefix))
+    (should (harness-provider-check-test--finding
+             findings :observed 'prompt-cache-keep-warm-reuse))
+    (should (harness-provider-check-test--finding
+             findings :unverified 'prompt-cache-ttl)))
+  ;; One run of repeated misses with cold controls is unverified.
+  (let* ((cache '(:telemetry present :repeat-samples 2 :repeat-hits 0
+                  :controls-clean t :environment nil
+                  :keep-warm (:refresh-samples 2 :refresh-hits 0 :resume 0)
+                  :persistence (:wait 2 :sample 0)
+                  :control (:resume 0)))
+         (findings (harness-provider-check--cache-findings cache nil nil)))
+    (should (harness-provider-check-test--finding
+             findings :unverified 'prompt-cache-exact-prefix))
+    (should-not (plist-get findings :unsupported))
+    ;; The same miss in a second independent run makes it unsupported.
+    (let ((again (harness-provider-check--cache-findings
+                  cache nil (list :cache-miss-runs 1))))
+      (should (harness-provider-check-test--finding
+               again :unsupported 'prompt-cache-exact-prefix))))
+  ;; Missing telemetry is unknown, not zero.
+  (let ((findings (harness-provider-check--cache-findings
+                   '(:telemetry missing :repeat-samples 2 :repeat-hits 0) nil nil)))
+    (should (harness-provider-check-test--finding
+             findings :unverified 'prompt-cache-exact-prefix))))
+
+(ert-deftest harness-provider-check-independent-findings-are-conservative ()
+  "Independent-prefix reuse is observed only when every own prefix hits.
+A partial batch, a warm control, a throttle, missing telemetry, identity
+mixing or a single run is unverified; repeated misses need two runs."
+  (let* ((findings (harness-provider-check--cache-findings
+                    nil (harness-provider-check-test--independent-cross) nil)))
+    (should (harness-provider-check-test--finding
+             findings :observed 'independent-prefix-cache-reuse))
+    (should (equal "fresh never-primed prefixes cold"
+                   (plist-get (harness-provider-check-test--finding
+                               findings :observed 'independent-prefix-cache-reuse)
+                              :controls))))
+  ;; Some prefixes hit, some did not: partial reuse is not an observation.
+  (let* ((findings (harness-provider-check--cache-findings
+                    nil (harness-provider-check-test--independent-cross 2) nil)))
+    (should (harness-provider-check-test--finding
+             findings :unverified 'independent-prefix-cache-reuse))
+    (should (string-match-p
+             "partial"
+             (plist-get (harness-provider-check-test--finding
+                         findings :unverified 'independent-prefix-cache-reuse)
+                        :reason)))
+    (should-not (plist-get findings :unsupported)))
+  ;; One run of misses is unverified; the same miss in a second run is not.
+  (let* ((cross (harness-provider-check-test--independent-cross 0 0))
+         (first (harness-provider-check--cache-findings nil cross nil)))
+    (should (harness-provider-check-test--finding
+             first :unverified 'independent-prefix-cache-reuse))
+    (should-not (plist-get first :unsupported))
+    (let ((again (harness-provider-check--cache-findings
+                  nil cross (list :cross-miss-runs 1))))
+      (should (harness-provider-check-test--finding
+               again :unsupported 'independent-prefix-cache-reuse))))
+  ;; A throttle is no capability verdict, and neither is missing telemetry.
+  (dolist (change '((:throttled 2) (:telemetry missing) (:identity-mismatches 1)
+                    (:control-hits 1) (:peak-concurrency 1) (:discard t)))
+    (let* ((cross (harness-provider-check-test--independent-cross))
+           (cross (if (equal change '(:discard t))
+                      (plist-put (copy-sequence cross) :distinct-sessions nil)
+                    (let ((copy (copy-sequence cross)))
+                      (while change
+                        (setq copy (plist-put copy (car change) (cadr change)))
+                        (setq change (cddr change)))
+                      copy)))
+           (findings (harness-provider-check--cache-findings nil cross nil)))
+      (should (harness-provider-check-test--finding
+               findings :unverified 'independent-prefix-cache-reuse))
+      (should-not (harness-provider-check-test--finding
+                   findings :observed 'independent-prefix-cache-reuse))
+      (should-not (plist-get findings :unsupported))))
+  ;; The serial baseline can hit while the concurrent rounds miss: that is
+  ;; a concurrency effect, which is unverified, not a hit.
+  (let* ((findings (harness-provider-check--cache-findings
+                    nil (harness-provider-check-test--independent-cross 0 4) nil)))
+    (should (harness-provider-check-test--finding
+             findings :unverified 'independent-prefix-cache-reuse))
+    (should (string-match-p
+             "concurrent"
+             (plist-get (harness-provider-check-test--finding
+                         findings :unverified 'independent-prefix-cache-reuse)
+                        :reason)))))
+
+(ert-deftest harness-provider-check-independent-prefixes-are-distinct-and-stable ()
+  "Every independent session has its own early prefix and one session id.
+This is the regression that a single shared prefix would fail: each
+prefix is the very first thing in its system prompt, differs from every
+other prefix, and keeps one session id through prime, baseline and both
+concurrent rounds."
+  (let* ((job (make-harness-provider-check-job :model "checkfake:model"))
+         (specs (harness-provider-check--independent-session-specs job 4))
+         (primed (cl-remove-if (lambda (spec) (plist-get spec :control)) specs))
+         (controls (cl-remove-if-not (lambda (spec) (plist-get spec :control)) specs))
+         (prefixes (delete-dups (mapcar (lambda (spec) (plist-get spec :prefix)) primed)))
+         (systems (delete-dups
+                   (mapcar (lambda (spec) (plist-get (plist-get spec :request) :system))
+                           primed))))
+    (should (= 18 (length specs)))
+    (should (= 4 (length prefixes)))
+    (should (= 4 (length systems)))
+    (should (= 2 (length controls)))
+    ;; The serial primes and baselines come first, one prefix at a time;
+    ;; only then do the concurrent rounds and the controls run.
+    (should (equal (mapcar (lambda (spec) (plist-get spec :phase))
+                           (cl-subseq specs 0 8))
+                   '(prime baseline prime baseline prime baseline prime baseline)))
+    (should (eq 'round-1 (plist-get (nth 8 specs) :phase)))
+    (should (eq 'round-2 (plist-get (nth 12 specs) :phase)))
+    (should (eq 'control (plist-get (nth 16 specs) :phase)))
+    ;; One system prompt per prefix, and each begins with that prefix.
+    (dotimes (i 4)
+      (let* ((group (cl-remove-if-not
+                     (lambda (spec)
+                       (and (not (plist-get spec :control))
+                            (eql (plist-get spec :index) i)))
+                     specs))
+             (group-systems (mapcar (lambda (spec)
+                                      (plist-get (plist-get spec :request) :system))
+                                    group))
+             (sessions (delete-dups
+                        (mapcar (lambda (spec) (plist-get spec :session-id)) group)))
+             (firsts (delete-dups
+                      (mapcar (lambda (spec)
+                                (plist-get (car (plist-get (plist-get spec :request)
+                                                           :messages))
+                                           :content))
+                              group))))
+        (should (= 4 (length group)))
+        (should (= 1 (length (delete-dups group-systems))))
+        (should (string-prefix-p (plist-get (car group) :prefix)
+                                 (car group-systems)))
+        (should (= 1 (length sessions)))
+        (should (= 1 (length firsts)))))
+    ;; The four prefixes are distinct, each starts its own system prompt (the
+    ;; assertion above), and no control shares one.
+    (should-not (cl-some (lambda (control)
+                           (member (plist-get control :prefix) prefixes))
+                         controls))
+    ;; Round 2 asks for the same prefixes in the reverse order.
+    (let ((round-1 (cl-remove-if-not (lambda (spec)
+                                       (eq (plist-get spec :phase) 'round-1))
+                                     specs))
+          (round-2 (cl-remove-if-not (lambda (spec)
+                                       (eq (plist-get spec :phase) 'round-2))
+                                     specs)))
+      (should (equal (mapcar (lambda (spec) (plist-get spec :index)) round-1)
+                     (reverse (mapcar (lambda (spec) (plist-get spec :index))
+                                      round-2))))
+      (should (equal (sort (mapcar (lambda (spec) (plist-get spec :prefix))
+                                   round-1)
+                           #'string<)
+                     (sort (mapcar (lambda (spec) (plist-get spec :prefix))
+                                   round-2)
+                           #'string<))))))
+
+(ert-deftest harness-provider-check-independent-prefixes-are-primed-and-concurrent ()
+  "Each session primes its own prefix, then reuses that same prefix.
+The fake provider's prefix cache hits only a system prompt and first
+message it has seen, so a shared prefix, a swapped session or an
+unprimed round would show up as a miss or as identity mixing."
+  (harness-provider-check-test-with
+    (let ((harness-provider-check-test--cache-simulate t))
+      (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+             (cross (harness-provider-check-test-by-name
+                     results "Independent-prefix cache reuse"))
+             (evidence (plist-get cross :evidence)))
+        (should (eq 'pass (plist-get cross :status)))
+        (should (= 4 (plist-get evidence :prefix-count)))
+        (should (= 4 (plist-get evidence :cached-count)))
+        (should (= 4 (plist-get evidence :baseline-hits)))
+        (should (= 4 (plist-get evidence :round-1-hits)))
+        (should (= 4 (plist-get evidence :round-2-hits)))
+        (should (= 2 (plist-get evidence :control-samples)))
+        (should (zerop (plist-get evidence :control-hits)))
+        (should (plist-get evidence :distinct-sessions))
+        (should (zerop (plist-get evidence :identity-mismatches)))
+        (should (= 4 (plist-get evidence :peak-concurrency)))
+        (should (string-match-p "independent-prefix reuse observed"
+                                (plist-get cross :detail)))
+        (let* ((requests
+                (cl-remove-if-not
+                 (lambda (request)
+                   (string-prefix-p
+                    "provider-check-independent-"
+                    (or (plist-get (plist-get request :session) :id) "")))
+                 harness-provider-check-test--calls))
+               (primed (cl-remove-if
+                        (lambda (request)
+                          (string-match-p
+                           "-control-[0-9]+\\'"
+                           (plist-get (plist-get request :session) :id)))
+                        requests)))
+          (should (= 18 (length requests)))
+          (should (= 16 (length primed)))
+          ;; Each prefix's four requests share one system and one session.
+          (dolist (prefix (plist-get evidence :prefixes))
+            (let* ((session-id (plist-get prefix :session-id))
+                   (own (cl-remove-if-not
+                         (lambda (request)
+                           (equal (plist-get (plist-get request :session) :id)
+                                  session-id))
+                         requests)))
+              (should (= 4 (length own)))
+              (should (= 1 (length (delete-dups
+                                    (mapcar (lambda (request)
+                                              (plist-get request :system))
+                                            own)))))
+              (should (string-prefix-p
+                       (plist-get prefix :prefix)
+                       (plist-get (car own) :system)))))
+          ;; Four different primed prefixes, not one shared prefix.
+          (should (= 4 (length (delete-dups
+                                (mapcar (lambda (request)
+                                          (plist-get request :system))
+                                        primed)))))
+          ;; The controls were never primed: their systems are new.
+          (should (= 2 (length (delete-dups
+                                (mapcar (lambda (request)
+                                          (plist-get request :system))
+                                        (cl-set-difference requests primed)))))))))))
+
+(ert-deftest harness-provider-check-independent-prefixes-reject-shared-and-mixed ()
+  "One shared prefix, or one session used for two prefixes, is not evidence.
+The old shared-only experiment would pass one prefix to every session;
+the editor's usual desktop has different early content in every session,
+so the classification must not call that independent-prefix reuse."
+  (let* ((job (make-harness-provider-check-job :model "checkfake:model"))
+         (specs (harness-provider-check--independent-session-specs job 4))
+         (primed (cl-remove-if (lambda (spec) (plist-get spec :control)) specs))
+         (first (car primed))
+         ;; The old shape: every primed request carries one prefix and one
+         ;; session id.
+         (shared (mapcar (lambda (spec)
+                           (let ((copy (copy-sequence spec)))
+                             (setf (plist-get copy :prefix) (plist-get first :prefix)
+                                   (plist-get copy :session-id)
+                                   (plist-get first :session-id))
+                             copy))
+                         specs))
+         (results-of
+          (lambda (specs)
+            (mapcar (lambda (spec)
+                      (list :phase (plist-get spec :phase)
+                            :prefix (plist-get spec :prefix)
+                            :index (plist-get spec :index)
+                            :control (plist-get spec :control)
+                            :session-id (plist-get spec :session-id)
+                            :cache-read 1000 :input 100 :output 5
+                            :seconds 1.0 :started-at 0.0
+                            :telemetry 'present))
+                    specs))))
+    ;; Shared prefix and session: the evidence says the sessions repeat.
+    (let* ((evidence (harness-provider-check--independent-evidence
+                      job shared (funcall results-of shared)))
+           (findings (harness-provider-check--cache-findings nil evidence nil)))
+      (should-not (plist-get evidence :distinct-sessions))
+      (should (harness-provider-check-test--finding
+               findings :unverified 'independent-prefix-cache-reuse))
+      (should-not (harness-provider-check-test--finding
+                   findings :observed 'independent-prefix-cache-reuse)))
+    ;; One session's result carrying another prefix's session is mixing.
+    (let* ((results (funcall results-of specs))
+           (other (plist-get (cadr primed) :session-id))
+           (moved (mapcar (lambda (result)
+                            (if (eq (plist-get result :phase) 'round-1)
+                                (plist-put result :session-id other)
+                              result))
+                          results))
+           (evidence (harness-provider-check--independent-evidence
+                      job specs moved))
+           (findings (harness-provider-check--cache-findings nil evidence nil)))
+      (should (> (plist-get evidence :identity-mismatches) 0))
+      (should (harness-provider-check-test--finding
+               findings :unverified 'independent-prefix-cache-reuse))
+      (should-not (harness-provider-check-test--finding
+                   findings :observed 'independent-prefix-cache-reuse)))))
+
+(ert-deftest harness-provider-check-cache-stress-is-bounded-and-opt-in ()
+  "The ordinary run uses 4 sessions; the stress option asks for 12, bounded.
+The stress runs the cache checks only, so the bounded plan stays under
+the request bound without raising it."
+  (harness-provider-check-test-with
+    (let ((harness-provider-check-test--cache-simulate t))
+      (let* ((job (harness-provider-check-start
+                   "checkfake:model" 'provider nil nil '(:cache-stress t)))
+             (results (harness-await (harness-provider-check-job-promise job) 30))
+             (cross (harness-provider-check-test-by-name
+                     results "Independent-prefix cache reuse")))
+        (should (= 4 (length results)))
+        (should (= 12 (plist-get (plist-get cross :evidence) :requested-sessions)))
+        (should (= 12 (plist-get (plist-get cross :evidence) :prefix-count)))
+        (should (= 12 (plist-get (plist-get cross :evidence) :cached-count)))
+        (should (= 12 (plist-get (plist-get cross :evidence) :peak-concurrency)))
+        (should (= 3 (harness-provider-check-job-concurrency job)))
+        (should (= 12 (harness-provider-check-job-request-concurrency job)))
+        (should (= 59 (harness-provider-check-job-request-count job)))
+        (should (<= (harness-provider-check-job-request-count job)
+                    harness-provider-check-max-requests))))))
+
+(ert-deftest harness-provider-check-cache-evidence-is-kept-and-scoped ()
+  "Evidence is persisted, read back, and stale when the provider configuration changes."
+  (harness-test-with-temp-state
+    (harness-provider-check-test-with
+      (let ((harness-provider-check-test--cache-simulate t))
+        (harness-provider-check-test-run "checkfake:model" 'provider)
+        (let* ((answer (harness-call 'provider/cache-evidence "checkfake:model"))
+               (record (plist-get answer :record))
+               (findings (plist-get record :findings)))
+          (should answer)
+          (should-not (plist-get answer :stale))
+          (should (harness-provider-check-test--finding
+                   findings :observed 'prompt-cache-exact-prefix))
+          (should (harness-provider-check-test--finding
+                   findings :observed 'independent-prefix-cache-reuse))
+          (should (harness-provider-check-test--finding
+                   findings :unverified 'prompt-cache-ttl))
+          (should (equal (plist-get record :model) "checkfake:model"))
+          (should (= 2 (plist-get record :schema))))
+        ;; A changed capability scope invalidates the old record.
+        (harness-define-provider 'checkfake
+          :models #'harness-provider-check-test--models
+          :complete #'harness-provider-check-test--complete
+          :capabilities '(:cache-ttl 999))
+        (should (plist-get (harness-call 'provider/cache-evidence "checkfake:model")
+                           :stale))))))
+
+(ert-deftest harness-provider-check-estimate-bounds-before-a-paid-run ()
+  "The estimate gives request and output bounds, and says when cost is unknown."
+  (harness-provider-check-test-with
+    (let ((estimate (harness-call 'provider/check-estimate "checkfake:model" "provider")))
+      (should (= 16 (plist-get estimate :checks)))
+      (should (= 35 (plist-get estimate :requests)))
+      (should (= harness-provider-check-max-output-tokens
+                 (plist-get estimate :max-output)))
+      (should-not (plist-get estimate :cost))
+      (should (string-match-p "unknown" (plist-get estimate :basis))))
+    (let ((stress (harness-call 'provider/check-estimate
+                               "checkfake:model" "provider" '(:cache-stress t))))
+      (should (= 4 (plist-get stress :checks)))
+      (should (= 59 (plist-get stress :requests))))
+    (harness-define-provider 'checkfake
+      :models (lambda ()
+                (harness-resolved
+                 '((:name "model" :context-window 100000
+                    :pricing (:input 1.0 :output 2.0 :cache-read 0.1)))))
+      :complete #'harness-provider-check-test--complete)
+    (let ((estimate (harness-call 'provider/check-estimate "checkfake:model" "provider")))
+      (should (numberp (plist-get estimate :cost)))
+      (should (> (plist-get estimate :cost) 0)))))
+
+(ert-deftest harness-provider-check-rate-limit-does-not-become-a-verdict ()
+  "A throttled cache probe is unverified, and no fail is reported."
+  (harness-provider-check-test-with
+    (setq harness-provider-check-test--error-kind 'rate-limit)
+    (let ((results (harness-provider-check-test-run "checkfake:model" 'provider)))
+      (should-not (cl-find 'fail results :key (lambda (result)
+                                                 (plist-get result :status))))
+      (dolist (name '("Exact-prefix cache reuse and keep-warm"
+                      "Independent-prefix cache reuse"))
+        (let ((result (harness-provider-check-test-by-name results name)))
+          (should (eq 'skip (plist-get result :status)))
+          (should (string-match-p "unavailable" (plist-get result :detail))))))))
 
 (provide 'harness-provider-check-test)
 ;;; harness-provider-check-test.el ends here

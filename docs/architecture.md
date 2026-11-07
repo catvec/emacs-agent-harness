@@ -2435,29 +2435,76 @@ more specific is configured is `harness-model`.
 
 The live checks of the provider-check module use the same surface from
 inside the harness.  `provider/check-start MODEL &optional SUITE
-EMBEDDING-MODEL JOB` starts a background job: SUITE is `provider`,
-`model` or `all`, EMBEDDING-MODEL adds the optional embed check, and JOB
-is an id the caller chooses so events that arrive before the answer
-still name it.  It returns `(:job :model :suite :total :checks)`, the
-plan without the functions.  `provider/check-cancel JOB` ends the job,
-cancels the request in flight and keeps the results it already has.
+EMBEDDING-MODEL JOB OPTIONS` starts a background job: SUITE is
+`provider`, `model` or `all`, EMBEDDING-MODEL adds the optional embed
+check, JOB is an id the caller chooses so events that arrive before the
+answer still name it, and OPTIONS takes `:checks` (the ids to run),
+`:cache-sessions` and `:cache-stress` (the opt-in twelve-session
+independent-prefix experiment; without `:checks` it runs the cache
+checks only).  It returns `(:job :model :suite :total
+:options :estimate :checks)`, the plan without the functions and the
+estimate below.  `provider/check-estimate MODEL &optional SUITE OPTIONS`
+answers the same estimate without starting anything: `:checks`,
+`:requests` (an upper bound), `:input-per-request`, `:max-output`,
+`:cost` in USD or nil when the catalogue gives no prices, `:currency`,
+`:basis` and `:plan`.  `provider/check-cancel JOB` ends the job,
+cancels every request in flight and keeps the results it already has.
+
+Checks that do not depend on one another run together, up to
+`harness-provider-check-concurrency` checks at once and at most as many
+requests, raised to the independent-prefix session count
+(`harness-provider-check-max-concurrency` bounds it) so that experiment
+can hold its whole batch in flight; the dependencies are the catalogue
+before its readers, completion before usage, the tool turn before the
+model checks, and the phases inside a cache experiment, and a cache
+experiment runs alone so its concurrency measurement is not taken while
+ordinary probes compete for slots.  A
+job stops issuing requests past `harness-provider-check-max-requests`,
+cuts every request to `harness-provider-check-max-output-tokens`, times
+each check out with `harness-provider-check-timeout`, and the whole run
+with `harness-provider-check-total-timeout`.
+
 Each check settles incrementally, and is announced as
 `provider-check/result JOB RESULT COMPLETED TOTAL`;
-`provider-check/started JOB MODEL SUITE TOTAL CHECKS` comes first and
-`provider-check/finished JOB MODEL RESULTS SUMMARY` last.  A result is
-`(:id :suite :name :status :detail :advice :sessions)`, its status
-`pass`, `fail` or `skip`; advice is for a failure, and a skip means
-unverified.  Each model request the check makes is recorded as an
-internal session named `Provider check: NAME`, and `:sessions` names
-them, in call order, for the page to open: the prompt, the reply and
-the provider's own error are there, never in the result's detail.  A
-check that makes no request names none.  A provider that does not
+`provider-check/started JOB MODEL SUITE TOTAL CHECKS ESTIMATE` comes
+first and `provider-check/finished JOB MODEL RESULTS SUMMARY` last.  A
+result is `(:id :suite :name :status :detail :advice :sessions
+:evidence)`, its status `pass`, `fail` or `skip`; advice is for a
+failure, a skip means unverified, and a cache check also carries the
+evidence it measured.  Each model request the check makes is recorded
+as an internal session named `Provider check: NAME`, and `:sessions`
+names them, in call order, for the page to open: the prompt, the reply
+and the provider's own error are there, never in the result's detail.
+A check that makes no request names none.  A provider that does not
 answer within `harness-provider-check-timeout`,
 one whose request does not end, and one that signals are failures of
-their own check, and the checks after them still run.  The checks make
-real model requests, so only the UI command `harness-provider-check`
-starts a job; they are not part of the ordinary test suite.  The UI half,
-ui-provider-check, draws the report page and forwards these events.
+their own check, and the checks after them still run.  A rate-limited,
+quota-exhausted, refused or unreachable account is a skip, never a
+contract verdict.
+
+The cache experiments are synthetic and isolated per probe.  One
+measures exact-prefix reuse: a prime, an immediate repeat, a repeat
+after a bounded wait, two keep-warm pings and a resumed request, an
+unrefreshed control prefix and a mismatched one.  The other gives every
+session its own early prefix (four by default, twelve with
+`:cache-stress`), primes each prefix and asks for it again serially in
+that same session, then reuses all of those same prefixes concurrently
+in two rounds, with fresh never-primed controls kept separate.  A
+session's requests share their own prefix and its own session id, and no
+prefix or session is shared with another session, so reuse can only
+come from that prefix's cache.  The evidence keeps advertised, observed,
+unsupported and unverified findings apart:
+missing telemetry is unknown, not zero, one hit is an observation, and
+unsupported needs repeated misses in two independent runs with working
+controls.  `provider/cache-evidence MODEL` answers `(:model :stale
+:scope :record)` from the record a run saved, with `:stale` non-nil
+when the provider, model, advertised capabilities, cache lifetime,
+prices or the synthetic request identity changed since; a record is
+evidence, not a guarantee, a cache lifetime or permission to start
+automatic keep-warm requests.  The checks make real model requests, so
+only the UI command `harness-provider-check` starts a job; they are not
+part of the ordinary test suite.  The UI half, ui-provider-check, draws
+the report page and forwards these events.
 
 `harness-allowed-models` keeps the harness to some models: glob
 patterns of model ids (`"claude:*"`; one without a colon names a

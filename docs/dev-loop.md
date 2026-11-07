@@ -154,32 +154,74 @@ chat's model, or the model of the task at point on a board.  With `C-u`
 it asks the model catalogue for any model instead, so a provider a
 plugin author has just imported can be checked without leaving Emacs.
 The command asks before it spends anything, because the checks make
-several real model requests.  It never asks for or echoes an API key:
-the provider reads its key or signs in as it always does.  A plugin
-must already be loaded (and trusted) for its provider to appear in the
-catalogue; loading arbitrary Lisp is Emacs's business, not this
-command's.
+several real model requests.  The question carries the harness's own
+estimate: how many checks, the upper bound on paid requests, the output
+cap of one request and, when the catalogue gives input and output
+prices, the worst-case cost -- or that the cost is unknown, which an
+estimate with no prices says rather than showing zero.  It never asks
+for or echoes an API key: the provider reads its key or signs in as it
+always does.  A plugin must already be loaded (and trusted) for its
+provider to appear in the catalogue; loading arbitrary Lisp is Emacs's
+business, not this command's.
 
 The report page fills in as each check settles, one line at a time,
-and keeps the earlier lines when a later check fails.  A run can be
-cancelled with `c`; `g` runs the same model and scope again, `p` runs
-the provider contract only, `m` the model behavior only, `M` chooses
-another model, and `E` asks for an embedding model and runs the
-provider contract with its optional embedding check.  The page is a
-harness view: `q` buries it, `?` opens the harness menu.
+and keeps the earlier lines when a later check fails.  It shows the
+run's estimate above the checks.  A run can be cancelled with `c`; `g`
+runs the same model and scope again, `p` runs the provider contract
+only, `m` the model behavior only, `M` chooses another model, `E` asks
+for an embedding model and runs the provider contract with its optional
+embedding check, and `S` runs the opt-in cache stress: the cache checks
+with the independent-prefix experiment at twelve independent sessions
+instead of the ordinary four.  The page is a harness view: `q`
+buries it, `?` opens the harness menu.  When the run recorded cache
+capability evidence, the page lists what it observed, what it left
+unsupported and what it left unverified, with the record's scope.
 
-The **provider contract** checks, in order: model listing/id/context
-window, text streaming and exactly one terminal event, nonnegative
-usage, `:no-thinking` (the OpenAI-family `none`/`minimal` rejection
+Independent checks run together, up to a bound; only a genuine
+dependency keeps its order.  The catalogue comes before the checks that
+read it, a completion before the usage it accounts, a tool turn before
+the model checks that read it, and the phases inside a cache experiment
+keep the order that makes their measurements mean something.  A cache
+experiment runs alone, so ordinary probes do not compete with the
+concurrency it measures.  The bounds are
+`harness-provider-check-concurrency` (checks at once, and their
+requests), `harness-provider-check-max-concurrency` (the request
+ceiling, which the independent-prefix batch may reach),
+`harness-provider-check-max-requests` (requests one job may start; past
+it the check that needed one is SKIP, not FAIL),
+`harness-provider-check-max-output-tokens` (the cap every request is
+cut to) and `harness-provider-check-total-timeout` (the whole run).
+Every request in flight can be cancelled, and a rate-limited or
+otherwise unavailable request is a SKIP, never a verdict about the
+provider.
+
+The **provider contract** checks: model listing/id/context window, text
+streaming and exactly one terminal event, nonnegative usage,
+`:no-thinking` (the OpenAI-family `none`/`minimal` rejection
 regression), the model's advertised thinking level, advertised image
 input, a tool-call/result round trip, quota's generic shape if
 reported, state/fork when advertised, optional embeddings (with an
-embedding model id), and cancellation/cleanup.  The **separate model
-behavior** checks test following a resubmit tool's exact label in its
-structured argument (tool descriptions carry the formats hand-in and
-resubmit rely on), identifying a red image when vision is advertised,
-choosing a harness tool with structured arguments, and using its result
-rather than inventing one.
+embedding model id), cancellation/cleanup, and two cache experiments.
+The **exact-prefix cache** check primes one synthetic prefix and asks
+for it again at once, after a measured wait, with two keep-warm pings
+and a resumed request, and against a prefix that is never refreshed and
+a deliberate mismatch: it reports cached and uncached input, output,
+timings, samples, cost and its source, the telemetry it had, and that
+the provider's TTL remains unverified.  The **independent-prefix
+cache** check gives every session its own early prefix and its own
+session id, primes each prefix and asks for it again serially in that
+same session, then reuses all of those same prefixes concurrently in
+two rounds and compares with fresh never-primed controls kept separate;
+it reports per-prefix and per-request cache reads, latency, tokens and
+cost, the requested and measured concurrency, throttling, errors and
+whether any prefix or session was mixed up.  Both experiments are synthetic: each probe carries a fresh
+nonce first, so ordinary probes cannot warm one another, and neither
+carries a user's conversation.  **The separate model behavior** checks
+test following a resubmit tool's exact label in its structured argument
+(tool descriptions carry the formats hand-in and resubmit rely on),
+identifying a red image when vision is advertised, choosing a harness
+tool with structured arguments, and using its result rather than
+inventing one.
 They deliberately use a fresh tool receipt that the model has not seen
 in the prompt.  A refusal to call the tool is **SKIP** (unobserved
 transport) in the provider suite and **FAIL** in the model suite; the
@@ -214,11 +256,29 @@ assert particular prose for protocol checks, cannot prove that an API
 honored a reasoning effort if it silently ignores it, and cannot
 exercise an optional feature the account does not expose.
 
+The cache checks say what one or two runs observed, and no more.  A hit
+is an observation, not a guarantee; a missing telemetry field is
+unknown, not zero; a single run of misses is not unsupported (the
+record needs a second independent run); and a request that returns
+inside a provider's cache lifetime neither measures that lifetime nor
+extends it.  The record keeps advertised, observed, unsupported and
+unverified findings apart, and `provider/cache-evidence` returns it
+with `:stale` when the provider, model, advertised capabilities, cache
+lifetime, prices or the synthetic request identity changed since it was
+made.  Nothing in the harness acts on the record: it starts no keep-warm
+request and disables no cache safeguard.  What would be a capability
+finding for the harness is a decision left to a later change with its
+own review.
+
 These are **not** part of `scripts/test.sh`: that suite must stay
 offline and free.  The runner's own behavior -- incremental results,
-continuation after a failure, cancellation, timeouts, the separation of
-transport from model behavior, and the report page -- is tested with a
-fake provider there (`test/harness-provider-check-test.el`,
+continuation after a failure, bounded concurrency of independent
+checks, dependency order, cancellation of every request in flight,
+timeouts, request and output bounds, rate limits, the separation of
+transport from model behavior, cache evidence classification and scope
+staleness, independent session ids, the opt-in stress bound, and the
+report page -- is tested with a fake provider there
+(`test/harness-provider-check-test.el`,
 `test/harness-ui-provider-check-test.el`).  The ordinary mocked provider
 suites still cover deterministic wire formats and error responses
 without a key.

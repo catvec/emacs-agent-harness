@@ -57,27 +57,66 @@ provider's own events.  The UI half follows the job's events over ACP
 (`provider-check/started`, `provider-check/result` and
 `provider-check/finished`).
 
+Checks run together where nothing joins them.  Each check owns its
+sessions, its live handles and its cancellation; the job owns the bounds
+-- how many checks and requests run at once, how many requests a run may
+start, how many output tokens a request may ask for, and how long the
+whole run may take -- and keeps the results in plan order.  Only genuine
+dependencies keep their order: the catalogue before the checks that read
+it, a completion before the usage it accounts, a tool turn before the
+model checks that read it, and the phases inside a cache experiment.  A
+cache experiment runs alone, so ordinary probes do not compete with the
+concurrency it measures.
+
+The cache experiments are synthetic.  One check measures exact-prefix
+reuse, refresh during a wait and a no-refresh control with a fresh nonce
+per probe; the other gives each independent session its own early prefix,
+primes every prefix in that same session, then reuses all of them
+concurrently in two rounds with fresh never-primed controls kept apart:
+four sessions by default and twelve in the opt-in stress run, which runs
+the cache checks only.  No prefix or session is shared, and no probe
+carries a user's conversation.  A hit is an observation, not a
+guarantee; missing telemetry is unknown, not zero; one miss is not proof
+that a provider lacks a cache; and no request waits out a provider's
+cache lifetime.  `provider/cache-evidence` reads back the conservative
+record those runs saved, and says when a changed provider, model,
+configuration or request identity made it stale.  The record changes no
+setting and starts no automatic keep-warm request.
+
 ## Provides
 
 ### Methods
 
+- `provider/cache-evidence` (model) — Return the conservative cache evidence recorded for MODEL, or nil.
 - `provider/check-cancel` (job) — Cancel the live provider check JOB; non-nil when it was running.
-- `provider/check-start` (model &optional suite embedding-model job) — Start live provider and model checks of MODEL; return the job.
+- `provider/check-estimate` (model &optional suite options) — Return the bounds of a live check of MODEL without starting it.
+- `provider/check-start` (model &optional suite embedding-model job options) — Start live provider and model checks of MODEL; return the job.
 
 ### Events
 
 - `provider-check/finished` — (JOB MODEL RESULTS SUMMARY) when JOB ends, cancelled or done.
 - `provider-check/result` — (JOB RESULT COMPLETED TOTAL) after each check of JOB settles.
-- `provider-check/started` — (JOB MODEL SUITE TOTAL CHECKS) before the first check of JOB runs.
+- `provider-check/started` — (JOB MODEL SUITE TOTAL CHECKS ESTIMATE) before the first check of JOB runs.
 
 ### Options
 
+- `harness-provider-check-cache-max-wait` — Most seconds one cache persistence wait may take.
+- `harness-provider-check-cache-min-samples` — Fewest repeat requests that can support a cache finding.
+- `harness-provider-check-cache-persistence-wait` — Seconds between the cache probes that measure persistence.
+- `harness-provider-check-cache-sessions` — Independent sessions in the ordinary independent-prefix cache experiment.
+- `harness-provider-check-cache-stress-sessions` — Independent sessions the opt-in cache stress run uses.
+- `harness-provider-check-concurrency` — Most live checks that run at once.
+- `harness-provider-check-max-concurrency` — Most requests one check job may have in flight at once.
+- `harness-provider-check-max-output-tokens` — Most output tokens one check request may ask for.
+- `harness-provider-check-max-requests` — Most live model requests one check job may start.
 - `harness-provider-check-timeout` — Seconds to wait for one live request or one provider answer.
+- `harness-provider-check-total-timeout` — Seconds a whole check job may run before it stops with what it has.
 
 ## Uses
 
 ### Methods it calls
 
+- `provider/cache-ttl` ([provider](provider.md))
 - `provider/cached-models` ([provider](provider.md))
 - `provider/close` ([provider](provider.md))
 - `provider/complete` ([provider](provider.md))

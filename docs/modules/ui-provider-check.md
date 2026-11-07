@@ -32,21 +32,30 @@ failure in one says nothing about the other, and neither stops the
 checks after it.  A SKIP is unverified, never support.
 
 These checks make real, paid model requests, so the command asks
-first unless `harness-ui-provider-check-confirm` is nil.  A rerun
-from the page is as explicit as the next command: it starts at once.
+first unless `harness-ui-provider-check-confirm` is nil.  The
+question carries the harness's estimate of the run: how many checks,
+the upper bound on paid requests, the output cap and, when the
+catalogue gives input and output prices, the worst case cost -- or
+that the cost is unknown.  A rerun from the page is as explicit as
+the next command: it starts at once.
 
 Keys on the page: g runs the same scope again, p checks the provider
 contract only, m the model behavior only, M chooses another model, E
-adds an embedding model's check, c cancels a run in flight.  A click
-or RET on a check's line, or on its [Session] button, opens the
-internal session of the calls it made: what the page can only say
-failed -- a provider's error above all -- the session spells out.
+adds an embedding model's check, S runs the opt-in cache stress (the
+cache checks with twelve independent sessions, each priming and
+reusing its own prefix), c cancels a run in flight.  A click or RET on a check's
+line, or on its [Session] button, opens the internal session of the
+calls it made: what the page can only say failed -- a provider's
+error above all -- the session spells out.  When the capability
+record was made, the page lists what the cache experiments observed,
+left unsupported and left unverified.
 
 ## Provides
 
 ### Commands
 
 - `harness-provider-check` — Run live checks of a model's provider and of the model itself.
+- `harness-ui-provider-check-cache-stress` — Run the cache checks with the opt-in twelve-session stress.
 - `harness-ui-provider-check-cancel` — Cancel the check job running in this page.
 - `harness-ui-provider-check-embedding-model` — Ask for an embedding model and run the provider contract checks with it.
 - `harness-ui-provider-check-model-suite` — Run the model behavior checks only.
@@ -63,6 +72,7 @@ failed -- a provider's error above all -- the session spells out.
 ### Methods it calls
 
 - `provider/check-cancel` ([provider-check](provider-check.md))
+- `provider/check-estimate` ([provider-check](provider-check.md))
 - `provider/check-start` ([provider-check](provider-check.md))
 
 ### Events it hears over ACP

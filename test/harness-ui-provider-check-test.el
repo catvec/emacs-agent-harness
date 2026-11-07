@@ -21,6 +21,7 @@
 (defvar harness-ui-provider-check--buffer-name)
 
 (declare-function harness-provider-check "harness-ui-provider-check")
+(declare-function harness-ui-provider-check-cache-stress "harness-ui-provider-check")
 (declare-function harness-ui-provider-check-cancel "harness-ui-provider-check")
 (declare-function harness-ui-provider-check-embedding-model "harness-ui-provider-check")
 (declare-function harness-ui-provider-check-model-suite "harness-ui-provider-check")
@@ -85,6 +86,10 @@ read."
                                    :model (plist-get params :model)
                                    :suite (plist-get params :suite)
                                    :total (length harness-ui-provider-check-test--checks)
+                                   :options (or (plist-get params :options)
+                                                '(:cache-sessions 4))
+                                   :estimate '(:checks 3 :requests 9
+                                               :max-output 512 :cost nil)
                                    :checks harness-ui-provider-check-test--checks)))
                   (when (equal method "_harness/provider/check-cancel")
                     (funcall callback t))
@@ -396,6 +401,111 @@ with several calls offers one button each, oldest first."
             (should (equal (plist-get (cadr (car (last starts))) :embedding-model)
                            "checkfake:embed"))))))))
 
+(ert-deftest harness-ui-provider-check-confidence-carries-the-estimate ()
+  "The paid-run question names the bounds, and a no starts nothing."
+  (harness-ui-provider-check-test-with
+    (harness-ui-provider-check-test-session "s1" "checkfake:model")
+    (with-temp-buffer
+      (setq-local harness-ui-session-id "s1")
+      (let ((harness-ui-provider-check-confirm t)
+            (asked nil)
+            (started nil))
+        (cl-letf (((symbol-function 'harness-ui-call)
+                   (lambda (method _params callback &optional _on-error)
+                     (when (equal method "_harness/provider/check-estimate")
+                       (funcall callback '(:checks 16 :requests 29
+                                           :max-output 512 :cost 0.03)))
+                     nil))
+                  ((symbol-function 'harness-ui-display-view) #'ignore)
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (prompt) (setq asked prompt) nil))
+                  ((symbol-function 'harness-ui-provider-check--start)
+                   (lambda (&rest args) (setq started args))))
+          (harness-ui-provider-check--ask-and-open "checkfake:model" "Checkfake")
+          (should (harness-test-wait (lambda () asked) 2 "the question"))
+          (should (equal asked
+                         (concat "Run live checks of Checkfake? up to 29 paid requests"
+                                 " · output ≤512 tokens · cost ≤$0.03")))
+          (should-not started)
+          ;; Answering yes starts the same checks, on the same model.
+          (setq asked nil)
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (prompt) (setq asked prompt) t)))
+            (harness-ui-provider-check--ask-and-open "checkfake:model" "Checkfake")
+            (should (harness-test-wait (lambda () started) 2 "the start")))
+          (should (equal (nth 1 started) "checkfake:model"))
+          (should (eq (nth 3 started) 'all)))))))
+
+(ert-deftest harness-ui-provider-check-cache-stress-is-explicit ()
+  "S runs the cache checks with the opt-in stress, and the page says so."
+  (harness-ui-provider-check-test-with
+    (harness-ui-provider-check-test-session "s1" "checkfake:model")
+    (with-temp-buffer
+      (setq-local harness-ui-session-id "s1")
+      (let ((harness-ui-provider-check-confirm nil))
+        (harness-ui-provider-check-test-recording (harness-provider-check)))
+      (with-current-buffer (harness-ui-provider-check-test-buffer)
+        (harness-ui-provider-check-test-recording
+          (harness-ui-provider-check-cache-stress))
+        (let ((start (harness-ui-provider-check-test-call
+                      "_harness/provider/check-start")))
+          (should (equal (plist-get (cadr start) :suite) "provider"))
+          (should (plist-get (cadr start) :options)))
+        (should (string-match-p
+                 "cache stress 12 sessions"
+                 (harness-ui-provider-check-test-text)))))))
+
+(ert-deftest harness-ui-provider-check-cache-stress-button-is-offered ()
+  "The page offers the stress run as a button, with its scope in the tooltip."
+  (harness-ui-provider-check-test-with
+    (let ((buffer (get-buffer-create harness-ui-provider-check--buffer-name)))
+      (with-current-buffer buffer
+        (harness-ui-provider-check-mode)
+        (harness-ui-provider-check--reset "checkfake:model" "Checkfake" 'provider nil)
+        (setq harness-ui-provider-check--state 'finished)
+        (harness-ui-provider-check--render)
+        (goto-char (point-min))
+        (should (search-forward "[Cache stress]" nil t))
+        (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                       (concat "Cache stress run: twelve independent sessions"
+                               ", each with its own prefix")))))))
+
+(ert-deftest harness-ui-provider-check-cache-evidence-is-drawn ()
+  "The page lists the capabilities the record observed and left unverified."
+  (harness-ui-provider-check-test-with
+    (harness-ui-provider-check-test-session "s1" "checkfake:model")
+    (with-temp-buffer
+      (setq-local harness-ui-session-id "s1")
+      (let ((harness-ui-provider-check-confirm nil))
+        (harness-ui-provider-check-test-recording (harness-provider-check)))
+      (with-current-buffer (harness-ui-provider-check-test-buffer)
+        (harness-ui-provider-check-test-dispatch
+         "provider-check/result" harness-ui-provider-check--job
+         (list :id "cache-evidence" :suite "provider"
+               :name "Cache capability evidence" :status "pass"
+               :detail "observed prompt-cache-exact-prefix · record saved"
+               :evidence
+               (list :kind "prompt-cache" :provider "checkfake"
+                     :model "checkfake:model" :checked-at 1730000000.0
+                     :findings
+                     (list :observed
+                           (list (list :capability "prompt-cache-exact-prefix"
+                                       :state "observed")
+                                 (list :capability "independent-prefix-cache-reuse"
+                                       :state "observed"))
+                           :unsupported nil
+                           :unverified
+                           (list (list :capability "prompt-cache-ttl"
+                                       :state "unverified")))))
+         1 3)
+        (let ((text (harness-ui-provider-check-test-text)))
+          (should (string-match-p "Cache capabilities" text))
+          (should (string-match-p "exact-prefix reuse +observed" text))
+          (should (string-match-p "independent-prefix reuse +observed" text))
+          (should (string-match-p "cache lifetime +unverified" text))
+          (should (string-match-p "scope checkfake:model" text))
+          (should (string-match-p "checked " text)))))))
+
 (ert-deftest harness-ui-provider-check-page-keys-and-menu ()
   "The mode binds every command its menu group names."
   (harness-ui-provider-check-test-with
@@ -404,6 +514,7 @@ with several calls offers one button each, oldest first."
                      ("m" . harness-ui-provider-check-model-suite)
                      ("M" . harness-ui-provider-check-other-model)
                      ("E" . harness-ui-provider-check-embedding-model)
+                     ("S" . harness-ui-provider-check-cache-stress)
                      ("c" . harness-ui-provider-check-cancel)))
       (should (eq (lookup-key harness-ui-provider-check-mode-map
                               (kbd (car entry)))

@@ -24,15 +24,23 @@
 ;; checks after it.  A SKIP is unverified, never support.
 ;;
 ;; These checks make real, paid model requests, so the command asks
-;; first unless `harness-ui-provider-check-confirm' is nil.  A rerun
-;; from the page is as explicit as the next command: it starts at once.
+;; first unless `harness-ui-provider-check-confirm' is nil.  The
+;; question carries the harness's estimate of the run: how many checks,
+;; the upper bound on paid requests, the output cap and, when the
+;; catalogue gives input and output prices, the worst case cost -- or
+;; that the cost is unknown.  A rerun from the page is as explicit as
+;; the next command: it starts at once.
 ;;
 ;; Keys on the page: g runs the same scope again, p checks the provider
 ;; contract only, m the model behavior only, M chooses another model, E
-;; adds an embedding model's check, c cancels a run in flight.  A click
-;; or RET on a check's line, or on its [Session] button, opens the
-;; internal session of the calls it made: what the page can only say
-;; failed -- a provider's error above all -- the session spells out.
+;; adds an embedding model's check, S runs the opt-in cache stress (the
+;; cache checks with twelve independent sessions, each priming and
+;; reusing its own prefix), c cancels a run in flight.  A click or RET on a check's
+;; line, or on its [Session] button, opens the internal session of the
+;; calls it made: what the page can only say failed -- a provider's
+;; error above all -- the session spells out.  When the capability
+;; record was made, the page lists what the cache experiments observed,
+;; left unsupported and left unverified.
 
 ;;; Code:
 
@@ -98,6 +106,15 @@ an explicit request and does not ask again."
 (defvar-local harness-ui-provider-check--started-at nil
   "Time the job started.")
 
+(defvar-local harness-ui-provider-check--options nil
+  "Options the job runs with, as the harness answered: `:cache-sessions',
+`:cache-stress' and what else the plan took.")
+
+(defvar-local harness-ui-provider-check--estimate nil
+  "Bounds the harness announced for the job, or nil.
+It holds `:checks', `:requests', `:max-output' and `:cost', the last nil
+when the catalogue gives no prices.")
+
 ;;;; Reading the harness's values
 ;;
 ;; A result crosses ACP as JSON: symbols arrive as strings.  Keep one
@@ -131,6 +148,78 @@ an explicit request and does not ask again."
         (setcdr cell result)
       (push (cons id result) harness-ui-provider-check--results))))
 
+;;;; Reading the estimate and the capability record
+
+(defun harness-ui-provider-check--estimate-summary (estimate)
+  "Return the noun-phrase bounds of ESTIMATE.
+That is the paid requests, the output cap and the cost the harness
+announced, a cost of unknown when its catalogue gives no prices, or
+several paid API requests when no estimate could be had."
+  (let ((requests (and estimate (plist-get estimate :requests)))
+        (output (and estimate (plist-get estimate :max-output)))
+        (cost (and estimate (plist-get estimate :cost))))
+    (if (not (or (numberp requests) (numberp output) (numberp cost)))
+        "Several paid API requests"
+      (string-join
+       (delq nil
+             (list (and (numberp requests)
+                        (format "up to %d paid requests" requests))
+                   (and (numberp output)
+                        (format "output ≤%d tokens" output))
+                   (if (numberp cost)
+                       (format "cost ≤$%.2f" cost)
+                     "cost unknown")))
+       " · "))))
+
+(defconst harness-ui-provider-check--capability-labels
+  '((prompt-cache-exact-prefix . "exact-prefix reuse")
+    (prompt-cache-keep-warm-reuse . "keep-warm reuse")
+    (prompt-cache-keep-warm-benefit . "keep-warm benefit")
+    (prompt-cache-persistence . "persistence")
+    (prompt-cache-ttl . "cache lifetime")
+    (prompt-cache-keep-warm-extension . "keep-warm extension")
+    (independent-prefix-cache-reuse . "independent-prefix reuse"))
+  "Capability symbols of the evidence record, and the label the page draws.")
+
+(defun harness-ui-provider-check--capability-label (capability)
+  "Return the page's label for CAPABILITY."
+  (or (cdr (assq capability harness-ui-provider-check--capability-labels))
+      (and capability
+           (replace-regexp-in-string "-" " " (format "%s" capability)))))
+
+(defun harness-ui-provider-check--cache-evidence ()
+  "Return the evidence record of the page's cache check, or nil."
+  (plist-get (harness-ui-provider-check--result-at "cache-evidence") :evidence))
+
+(defun harness-ui-provider-check--insert-cache-capabilities ()
+  "Insert what the cache evidence record observed, and what it did not."
+  (when-let* ((record (harness-ui-provider-check--cache-evidence))
+              (findings (plist-get record :findings)))
+    (insert (propertize "Cache capabilities\n" 'face 'harness-label-face))
+    (dolist (state '((:observed . "observed") (:unsupported . "unsupported")
+                     (:unverified . "unverified")))
+      (dolist (finding (append (plist-get findings (car state)) nil))
+        (let ((label (harness-ui-provider-check--capability-label
+                      (harness-ui-provider-check--symbol
+                       (plist-get finding :capability)))))
+          (when label
+            (insert (format "  %-24s %s\n" label (cdr state)))))))
+    (let ((model (plist-get record :model))
+          (checked (plist-get record :checked-at)))
+      (when (or model (numberp checked))
+        (insert "  "
+                (propertize
+                 (string-join
+                  (delq nil
+                        (list (and model (format "scope %s" model))
+                              (and (numberp checked)
+                                   (format-time-string "checked %H:%M:%S"
+                                                       (seconds-to-time checked)))))
+                  " · ")
+                 'face 'harness-dim-face)
+                "\n")))
+    (insert "\n")))
+
 ;;;; Drawing
 
 (defun harness-ui-provider-check--suite-label (suite)
@@ -156,10 +245,10 @@ an explicit request and does not ask again."
 (defun harness-ui-provider-check--insert-buttons ()
   "Insert the actions that make sense where the page is now."
   (let ((first t))
-    (cl-labels ((button (label command)
+    (cl-labels ((button (label command &optional help)
                   (unless first (insert "  "))
                   (setq first nil)
-                  (harness-ui-button label command)))
+                  (harness-ui-button label command :help help)))
       (if (memq harness-ui-provider-check--state '(starting running))
           (button "[Cancel]" #'harness-ui-provider-check-cancel)
         (button "[Run again]" #'harness-ui-provider-check-rerun)
@@ -168,7 +257,9 @@ an explicit request and does not ask again."
         (insert "\n")
         (setq first t)
         (button "[Other model…]" #'harness-ui-provider-check-other-model)
-        (button "[Embeddings]" #'harness-ui-provider-check-embedding-model)))))
+        (button "[Embeddings]" #'harness-ui-provider-check-embedding-model)
+        (button "[Cache stress]" #'harness-ui-provider-check-cache-stress
+                "Cache stress run: twelve independent sessions, each with its own prefix")))))
 
 (defun harness-ui-provider-check--result-sessions (result)
   "Return the internal session ids RESULT names, in the order they were made."
@@ -306,13 +397,25 @@ call gets one button each, in call order."
                           harness-ui-provider-check--model)
                       harness-ui-provider-check--model)))
     (when harness-ui-provider-check--started-at
-      (insert (format "Started %s · %s checks · %s\n"
+      (insert (format "Started %s · %s checks · %s%s\n"
                       (format-time-string "%H:%M:%S"
                                           harness-ui-provider-check--started-at)
                       (max harness-ui-provider-check--total
                            (length harness-ui-provider-check--plan))
                       (harness-ui-provider-check--suite-label
-                       harness-ui-provider-check--suite))))
+                       harness-ui-provider-check--suite)
+                      (if (plist-get harness-ui-provider-check--options :cache-stress)
+                          (format " · cache stress %s sessions"
+                                  (or (plist-get harness-ui-provider-check--options
+                                                 :cache-sessions)
+                                      12))
+                        ""))))
+    (when harness-ui-provider-check--estimate
+      (insert (propertize
+               (format "Estimate: %s\n"
+                       (harness-ui-provider-check--estimate-summary
+                        harness-ui-provider-check--estimate))
+               'face 'harness-dim-face)))
     (when harness-ui-provider-check--embedding-model
       (insert (format "Embedding model: %s\n" harness-ui-provider-check--embedding-model)))
     (insert "\n")
@@ -336,6 +439,7 @@ call gets one button each, in call order."
     (when (and (null harness-ui-provider-check--plan)
                (eq harness-ui-provider-check--state 'starting))
       (insert (propertize "Starting…\n" 'face 'harness-dim-face)))
+    (harness-ui-provider-check--insert-cache-capabilities)
     (insert (harness-ui-provider-check--footer))
     (goto-char (min (max 1 position) (point-max)))))
 
@@ -347,14 +451,16 @@ call gets one button each, in call order."
 
 ;;;; Starting, following and stopping a job
 
-(defun harness-ui-provider-check--reset (model label suite embedding-model)
+(defun harness-ui-provider-check--reset (model label suite embedding-model &optional options)
   "Forget the last job and prepare to check MODEL, shown as LABEL.
-SUITE and EMBEDDING-MODEL are the new run's scope."
+SUITE, EMBEDDING-MODEL and OPTIONS are the new run's scope and bounds."
   (setq harness-ui-provider-check--job nil
         harness-ui-provider-check--model model
         harness-ui-provider-check--model-label label
         harness-ui-provider-check--suite suite
         harness-ui-provider-check--embedding-model embedding-model
+        harness-ui-provider-check--options options
+        harness-ui-provider-check--estimate nil
         harness-ui-provider-check--plan nil
         harness-ui-provider-check--results nil
         harness-ui-provider-check--completed 0
@@ -373,18 +479,21 @@ real money."
     (harness-ui-notify "_harness/provider/check-cancel"
                        (list :job harness-ui-provider-check--job))))
 
-(defun harness-ui-provider-check--start (buffer model label suite &optional embedding-model)
+(defun harness-ui-provider-check--start (buffer model label suite
+                                                 &optional embedding-model options)
   "Start a check job for MODEL in BUFFER, drawn as LABEL.
 SUITE is `provider', `model' or `all'; EMBEDDING-MODEL checks the
-optional embedding hook.  A job already running in BUFFER is cancelled
-first, so its events cannot land in the new report."
+optional embedding hook, and OPTIONS takes `:cache-stress' and
+`:cache-sessions' as the harness's start method does.  A job already
+running in BUFFER is cancelled first, so its events cannot land in the
+new report."
   (with-current-buffer buffer
     (when (and harness-ui-provider-check--job
                (memq harness-ui-provider-check--state '(starting running)))
       (harness-ui-call "_harness/provider/check-cancel"
                        (list :job harness-ui-provider-check--job)
                        #'ignore))
-    (harness-ui-provider-check--reset model label suite embedding-model)
+    (harness-ui-provider-check--reset model label suite embedding-model options)
     (add-hook 'kill-buffer-hook #'harness-ui-provider-check--on-kill nil t)
     (let ((job (format "provider-check-%s" (harness-uuid))))
       (setq harness-ui-provider-check--job job)
@@ -394,7 +503,8 @@ first, so its events cannot land in the new report."
        (list :model model
              :suite (symbol-name suite)
              :embedding-model embedding-model
-             :job job)
+             :job job
+             :options options)
        (lambda (answer)
          (when (and (buffer-live-p buffer)
                     (equal job (buffer-local-value 'harness-ui-provider-check--job buffer)))
@@ -404,6 +514,10 @@ first, so its events cannot land in the new report."
                      (or harness-ui-provider-check--plan (plist-get answer :checks))
                      harness-ui-provider-check--total
                      (or (plist-get answer :total) harness-ui-provider-check--total)
+                     harness-ui-provider-check--options
+                     (or (plist-get answer :options) harness-ui-provider-check--options)
+                     harness-ui-provider-check--estimate
+                     (or (plist-get answer :estimate) harness-ui-provider-check--estimate)
                      harness-ui-provider-check--state 'running)
                (harness-ui-provider-check--render)))))
        (lambda (error)
@@ -431,7 +545,10 @@ first, so its events cannot land in the new report."
              (let ((model (nth 1 args))
                    (suite (nth 2 args))
                    (total (nth 3 args))
-                   (checks (nth 4 args)))
+                   (checks (nth 4 args))
+                   (estimate (nth 5 args)))
+               (when estimate
+                 (setq harness-ui-provider-check--estimate estimate))
                (when (stringp model)
                  (setq harness-ui-provider-check--model model
                        harness-ui-provider-check--model-label
@@ -491,7 +608,8 @@ first, so its events cannot land in the new report."
                                     harness-ui-provider-check--model
                                     harness-ui-provider-check--model-label
                                     harness-ui-provider-check--suite
-                                    harness-ui-provider-check--embedding-model))
+                                    harness-ui-provider-check--embedding-model
+                                    harness-ui-provider-check--options))
 
 (defun harness-ui-provider-check-provider-suite ()
   "Run the provider contract checks only."
@@ -502,7 +620,8 @@ first, so its events cannot land in the new report."
                                     harness-ui-provider-check--model
                                     harness-ui-provider-check--model-label
                                     'provider
-                                    harness-ui-provider-check--embedding-model))
+                                    harness-ui-provider-check--embedding-model
+                                    harness-ui-provider-check--options))
 
 (defun harness-ui-provider-check-model-suite ()
   "Run the model behavior checks only."
@@ -543,6 +662,23 @@ first, so its events cannot land in the new report."
                                       'provider
                                       harness-ui-provider-check--embedding-model)))
 
+(defun harness-ui-provider-check-cache-stress ()
+  "Run the cache checks with the opt-in twelve-session stress.
+The independent-prefix experiment gives each of twelve sessions its own
+synthetic prefix, primes every prefix in its own session, then reuses
+all of them concurrently in two rounds with fresh never-primed controls.
+Only the cache checks run, and the page's estimate names the extra
+requests before the run starts."
+  (interactive)
+  (unless (derived-mode-p 'harness-ui-provider-check-mode)
+    (user-error "Not in the provider check page"))
+  (harness-ui-provider-check--start (current-buffer)
+                                    harness-ui-provider-check--model
+                                    harness-ui-provider-check--model-label
+                                    'provider
+                                    harness-ui-provider-check--embedding-model
+                                    (list :cache-stress t)))
+
 (defun harness-ui-provider-check-cancel ()
   "Cancel the check job running in this page."
   (interactive)
@@ -563,6 +699,7 @@ first, so its events cannot land in the new report."
     (define-key map (kbd "m") #'harness-ui-provider-check-model-suite)
     (define-key map (kbd "M") #'harness-ui-provider-check-other-model)
     (define-key map (kbd "E") #'harness-ui-provider-check-embedding-model)
+    (define-key map (kbd "S") #'harness-ui-provider-check-cache-stress)
     (define-key map (kbd "c") #'harness-ui-provider-check-cancel)
     (define-key map (kbd "?") #'harness-menu)
     map)
@@ -583,6 +720,7 @@ first, so its events cannot land in the new report."
         (". m" "Model behavior only" harness-ui-provider-check-model-suite)
         (". M" "Check another model…" harness-ui-provider-check-other-model)
         (". E" "Check an embedding model…" harness-ui-provider-check-embedding-model)
+        (". S" "Cache stress · 12 sessions" harness-ui-provider-check-cache-stress)
         (". c" "Cancel the running checks" harness-ui-provider-check-cancel)]))
 
 ;;;; The command
@@ -597,19 +735,44 @@ first, so its events cannot land in the new report."
       (plist-get (car target) :model))
      (t nil))))
 
+(defun harness-ui-provider-check--open (model label)
+  "Open the report page for MODEL, shown as LABEL, and check it."
+  (let ((buffer (get-buffer-create harness-ui-provider-check--buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'harness-ui-provider-check-mode)
+        (harness-ui-provider-check-mode)))
+    (harness-ui-display-view buffer)
+    (harness-ui-provider-check--start buffer model label 'all)))
+
+(defun harness-ui-provider-check--confirm (model label estimate)
+  "Ask to spend the requests ESTIMATE names, then check MODEL as LABEL.
+The question is asked from the command loop: a harness answer arrives in
+a process filter, where a prompt must not read input."
+  (harness-run-soon
+   (lambda ()
+     (if (and harness-ui-provider-check-confirm
+              (not (y-or-n-p
+                    (format "Run live checks of %s? %s"
+                            (or label model)
+                            (harness-ui-provider-check--estimate-summary estimate)))))
+         (message "Provider check cancelled")
+       (harness-ui-provider-check--open model label)))))
+
 (defun harness-ui-provider-check--ask-and-open (model label)
-  "Ask to spend the requests, then check MODEL, shown as LABEL."
-  (if (and harness-ui-provider-check-confirm
-           (not (y-or-n-p
-                 (format "Run live checks of %s?  They make several paid API requests.  Continue?"
-                         (or label model)))))
-      (message "Provider check cancelled")
-    (let ((buffer (get-buffer-create harness-ui-provider-check--buffer-name)))
-      (with-current-buffer buffer
-        (unless (derived-mode-p 'harness-ui-provider-check-mode)
-          (harness-ui-provider-check-mode)))
-      (harness-ui-display-view buffer)
-      (harness-ui-provider-check--start buffer model label 'all))))
+  "Ask to spend the requests, then check MODEL, shown as LABEL.
+The question carries the harness's own estimate of the run, so the
+paid requests, the output cap and the worst-case cost are known before
+the answer.  When no estimate can be had, it says that the cost is
+unknown rather than naming a number."
+  (if (not harness-ui-provider-check-confirm)
+      (harness-ui-provider-check--open model label)
+    (harness-ui-call
+     "_harness/provider/check-estimate"
+     (list :model model :suite "all")
+     (lambda (estimate)
+       (harness-ui-provider-check--confirm model label estimate))
+     (lambda (_error)
+       (harness-ui-provider-check--confirm model label nil)))))
 
 ;;;###autoload
 (defun harness-provider-check (&optional arg)
@@ -626,7 +789,8 @@ first unless `harness-ui-provider-check-confirm' is nil.
 
 The report fills in as each check settles.  On it, g runs the same
 checks again, p or m runs one suite, M checks another model, E adds an
-embedding model's check, and c cancels the run."
+embedding model's check, S runs the opt-in twelve-session cache stress,
+and c cancels the run."
   (interactive "p")
   (if (>= (or arg 1) 4)
       (harness-ui-choose-model

@@ -345,6 +345,20 @@
      :variables nil
      :template
      "You are a coding agent resubmitting finished work.")
+    (:name provider-check-cache-probe
+     :module provider-check
+     :purpose "One synthetic cache probe message, isolated by its nonce."
+     :used-by "harness-provider-check--cache-specs"
+     :variables ((:name "nonce" :description "The synthetic prefix's fresh identifier."))
+     :template
+     "Synthetic cache probe {{nonce}}: reply with the single word ok.")
+    (:name provider-check-cache-resume
+     :module provider-check
+     :purpose "The short resumed request after a synthetic keep-warm message."
+     :used-by "harness-provider-check--cache-specs"
+     :variables ((:name "nonce" :description "The synthetic prefix's fresh identifier."))
+     :template
+     "Synthetic cache resume {{nonce}}: reply with ok.")
     (:name memory-consolidate-system
      :module memory
      :purpose "Tells a judge how to merge and tidy the memories of one scope."

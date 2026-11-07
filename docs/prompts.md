@@ -313,6 +313,8 @@ that does not use it gains no hooks, options or timers from it.
 | `provider-check-vision` | Asks for the colour of the red image in the vision check. | none | harness-provider-check--check-vision |
 | `provider-check-instructions` | Asks the model to resubmit, to check it follows a tool description's label. | none | harness-provider-check--check-instructions |
 | `provider-check-instructions-system` | The system prompt of the check that the model follows a tool's instructions. | none | harness-provider-check--check-instructions |
+| `provider-check-cache-probe` | One synthetic cache probe message, isolated by its nonce. | `{{nonce}}` The synthetic prefix's fresh identifier. | harness-provider-check--cache-specs |
+| `provider-check-cache-resume` | The short resumed request after a synthetic keep-warm message. | `{{nonce}}` The synthetic prefix's fresh identifier. | harness-provider-check--cache-specs |
 
 ### secret-sandbox
 
