@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
 import '../../models/workspace.dart';
 import '../../state/app_controller.dart';
+import '../../state/session_controller.dart';
 import '../../state/workspace_controller.dart';
 import '../../services/voice_runtime.dart';
 import '../../voice/voice_controller.dart';
@@ -14,6 +16,7 @@ import '../navigation.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/interaction_card.dart';
 import '../widgets/markdown_view.dart';
 import '../widgets/message_composer.dart';
 import '../widgets/vnc_takeover.dart';
@@ -62,6 +65,12 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   bool _retrying = false;
   final _composerText = TextEditingController();
 
+  /// The conversation of the active thread's live episode: its requests are
+  /// the cards above the composer, answered the way a chat answers them.
+  SessionController? _pending;
+  String? _pendingLive;
+  bool _wasConnected = false;
+
   WorkspaceController? get _controller =>
       widget.controller ?? widget.app.workspace;
 
@@ -69,8 +78,11 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   void initState() {
     super.initState();
     _controller?.addListener(_changed);
+    widget.app.addListener(_onAppChanged);
+    _wasConnected = widget.app.isConnected;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _controller?.load(showSpinner: false);
+      _syncPending(_controller?.activeThread?.live);
       _scrollToEnd(immediate: true);
     });
   }
@@ -84,24 +96,77 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       before?.removeListener(_changed);
       after?.addListener(_changed);
     }
+    if (oldWidget.app != widget.app) {
+      oldWidget.app.removeListener(_onAppChanged);
+      widget.app.addListener(_onAppChanged);
+      _detachPending();
+      _wasConnected = widget.app.isConnected;
+    }
   }
 
   @override
   void dispose() {
+    widget.app.removeListener(_onAppChanged);
+    _detachPending();
     _controller?.removeListener(_changed);
     _scroll.dispose();
     _composerText.dispose();
     super.dispose();
   }
 
+  /// The conversation of the live episode [live], when this screen may read
+  /// one: a preview or a disconnected app has no harness to ask.
+  bool get _mayReadSessions =>
+      widget.app.harness != null && widget.app.isConnected;
+
+  void _syncPending(String? live) {
+    if (live == _pendingLive) {
+      if (live == null || _pending != null || !_mayReadSessions) return;
+    }
+    _detachPending();
+    _pendingLive = live;
+    if (live == null || !_mayReadSessions) return;
+    final session = widget.app.sessionController(live);
+    _pending = session;
+    session.addListener(_onPendingChanged);
+    unawaited(session.refreshPending());
+  }
+
+  void _detachPending() {
+    _pending?.removeListener(_onPendingChanged);
+    _pending = null;
+    _pendingLive = null;
+  }
+
+  void _onPendingChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onAppChanged() {
+    if (!mounted) return;
+    final connected = widget.app.isConnected;
+    if (connected && !_wasConnected && _pending != null) {
+      // The requests the connection went away with are read again.
+      unawaited(_pending!.refreshPending());
+    }
+    _wasConnected = connected;
+    _syncPending(_controller?.activeThread?.live);
+    setState(() {});
+  }
+
   void _changed() {
     if (!mounted) return;
+    _syncPending(_controller?.activeThread?.live);
     final nearBottom = _scroll.hasClients &&
         (_scroll.position.maxScrollExtent - _scroll.position.pixels) < 80;
     final entries = _controller?.visibleEntries ?? const <WorkspaceEntry>[];
-    final key = entries.isEmpty
+    final pending = _pending?.currentInteraction ?? _controller?.previewRequest;
+    final pendingKey = pending == null
         ? ''
-        : '${entries.length}:${entries.last.text.length}';
+        : '${pending.method}:${pending.harnessId}:${pending.title}';
+    final key = entries.isEmpty
+        ? ':$pendingKey'
+        : '${entries.length}:${entries.last.text.length}:$pendingKey';
     final grew = key != _lastMessageKey;
     _lastMessageKey = key;
     setState(() {
@@ -348,7 +413,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     return HarnessMetaLine(
       parts: [
         thread?.title,
-        thread == null ? null : _stateWord(thread.state),
+        thread?.statusLabel,
         notes == null ? null : '$notes notes',
         controller.selectedTag == null
             ? null
@@ -358,14 +423,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     );
   }
 
-  String _stateWord(String state) => switch (state) {
-    'live' => 'Live',
-    'waiting' => 'Waiting',
-    'done' => 'Done',
-    _ => 'Parked',
-  };
-
   Widget _compact(BuildContext context, WorkspaceController controller) {
+    final thread = controller.activeThread;
     return Column(
       children: [
         if (controller.concepts.isNotEmpty)
@@ -374,9 +433,42 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             selected: controller.selectedTag,
             onSelect: controller.selectTag,
           ),
-        Expanded(child: _timeline(context, controller)),
+        // A phone's header has no room for the subtitle: the episode says
+        // what it is doing above its chat instead, where it cannot fall off.
+        if (thread != null && thread.live != null)
+          _compactStatus(context, thread),
+        Expanded(
+          child: _timeline(context, controller),
+        ),
+        _pendingCard(context, controller),
         _composer(context, controller),
       ],
+    );
+  }
+
+  Widget _compactStatus(BuildContext context, WorkspaceThread thread) {
+    final color = _threadStatusColor(thread, Theme.of(context));
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        HarnessSpace.gutter,
+        2,
+        HarnessSpace.gutter,
+        0,
+      ),
+      child: Row(
+        children: [
+          HarnessDot(color: color, size: 7),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              thread.statusLabel,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: HarnessText.meta(context).copyWith(color: color),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -410,6 +502,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
                   onSelect: controller.selectTag,
                 ),
               Expanded(child: _timeline(context, controller, maxWidth: 900)),
+              _pendingCard(context, controller, maxWidth: 900),
               _composer(context, controller, maxWidth: 900),
             ],
           ),
@@ -435,6 +528,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           child: Column(
             children: [
               Expanded(child: _timeline(context, controller, maxWidth: 920)),
+              _pendingCard(context, controller, maxWidth: 920),
               _composer(context, controller, maxWidth: 920),
             ],
           ),
@@ -528,6 +622,110 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       if (thread.id == id) return thread;
     }
     return null;
+  }
+
+  /// The card of what the active thread's live episode waits on, above the
+  /// composer: a permission prompt or a question, answered here with the
+  /// same card a conversation uses.  A card is bound to the request it was
+  /// built for and to the conversation that showed it; a tap after a thread
+  /// switch, an episode change or an answer elsewhere does nothing.
+  Widget _pendingCard(
+    BuildContext context,
+    WorkspaceController controller, {
+    double? maxWidth,
+  }) {
+    final live = controller.activeThread?.live;
+    final session = live != null && live == _pendingLive ? _pending : null;
+    final request =
+        session?.currentInteraction ??
+        (session == null ? controller.previewRequestFor(live) : null);
+    if (request == null) return const SizedBox.shrink();
+    Future<void> none() => Future<void>.value();
+    final card = PendingActionCard(
+      key: ValueKey(
+        '${controller.current?.id}:${controller.activeThread?.id}:'
+        '${pendingRequestKey(request)}',
+      ),
+      request: request,
+      onPermission: (optionId, {pattern}) {
+        if (session == null) {
+          controller.resolvePreview(request);
+          return none();
+        }
+        if (!identical(session, _pending) ||
+            !identical(session.currentInteraction, request)) {
+          return none();
+        }
+        return session.answerPermission(optionId, pattern: pattern);
+      },
+      onQuestion: (answer) {
+        if (session == null) {
+          controller.resolvePreview(request);
+          return none();
+        }
+        if (!identical(session, _pending) ||
+            !identical(session.currentInteraction, request)) {
+          return none();
+        }
+        return session.answerQuestion(answer);
+      },
+      onDismissPermission: () {
+        if (session == null) {
+          controller.resolvePreview(request);
+          return none();
+        }
+        if (!identical(session, _pending) ||
+            !identical(session.currentInteraction, request)) {
+          return none();
+        }
+        return session.dismissPermission();
+      },
+      onCancelQuestion: () {
+        if (session == null) {
+          controller.resolvePreview(request);
+          return none();
+        }
+        if (!identical(session, _pending) ||
+            !identical(session.currentInteraction, request)) {
+          return none();
+        }
+        return session.cancelQuestion();
+      },
+      questionImage: (index) {
+        if (session == null || !identical(session, _pending)) {
+          return Future<Uint8List?>.value();
+        }
+        return session.questionImage(index);
+      },
+    );
+    // A request may be answered on any size; the card scrolls inside this
+    // room rather than push the composer out of the window or under the
+    // keyboard.
+    final room = MediaQuery.sizeOf(context).height -
+        MediaQuery.viewInsetsOf(context).bottom;
+    final padded = Padding(
+      padding: const EdgeInsets.fromLTRB(
+        HarnessSpace.gutter,
+        0,
+        HarnessSpace.gutter,
+        0,
+      ),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: (room * 0.34).clamp(140.0, 340.0)),
+        child: Align(
+          alignment: AlignmentDirectional.topCenter,
+          child: card,
+        ),
+      ),
+    );
+    if (maxWidth == null) return padded;
+    return Align(
+      alignment: AlignmentDirectional.topCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: padded,
+      ),
+    );
   }
 
   Widget _composer(
@@ -745,6 +943,20 @@ class _ThreadRail extends StatelessWidget {
   }
 }
 
+/// The colour a thread's state shows in, in its row and on a phone's status
+/// line.
+Color _threadStatusColor(WorkspaceThread thread, ThemeData theme) =>
+    switch (thread.statusKey) {
+      'running' => HarnessColors.moss,
+      'live' => HarnessColors.moss,
+      'blocked' => HarnessColors.amber,
+      'stopped' => HarnessColors.amber,
+      'idle' => HarnessColors.moss.withValues(alpha: 0.55),
+      'failed' => theme.colorScheme.error,
+      'inactive' || 'done' => theme.colorScheme.outline,
+      _ => theme.colorScheme.outlineVariant,
+    };
+
 class _ThreadTile extends StatelessWidget {
   const _ThreadTile({
     required this.thread,
@@ -759,18 +971,15 @@ class _ThreadTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final color = switch (thread.state) {
-      'waiting' => HarnessColors.amber,
-      'live' => HarnessColors.moss,
-      'done' => theme.colorScheme.outline,
-      _ => theme.colorScheme.outlineVariant,
-    };
+    final color = _threadStatusColor(thread, theme);
+    final showsStatus =
+        thread.statusKey != 'parked' && thread.statusKey != 'done';
     return Padding(
       padding: const EdgeInsets.only(bottom: 2),
       child: Semantics(
         button: true,
         selected: selected,
-        label: 'Thread ${thread.title}, ${thread.state}',
+        label: 'Thread ${thread.title}, ${thread.statusLabel}',
         child: InkWell(
           borderRadius: BorderRadius.circular(10),
           onTap: onTap,
@@ -809,6 +1018,19 @@ class _ThreadTile extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (showsStatus)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 5),
+                    child: Text(
+                      thread.statusWord,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HarnessText.meta(context).copyWith(
+                        fontSize: 10.5,
+                        color: color,
+                      ),
+                    ),
+                  ),
                 if (thread.pinned)
                   Padding(
                     padding: const EdgeInsets.only(left: 4),

@@ -243,6 +243,16 @@ class SessionController extends ChangeNotifier {
     }
   }
 
+  /// Read what the harness waits on this conversation for, without opening
+  /// its transcript.  A workspace shows an episode it has not opened and
+  /// must not load a long transcript to show its requests; it gets the same
+  /// recovered requests, answers and reconciliation as a chat.
+  Future<void> refreshPending() async {
+    if (api.client.isClosed) return;
+    await refreshInfo();
+    await _syncPending(force: true);
+  }
+
   /// Take [record], the harness's own record of this session as it stands
   /// (`session/get`, or its entry in `session/list`), as what is known of
   /// it, in place of what was.

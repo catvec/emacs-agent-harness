@@ -59,6 +59,9 @@
 (defvar-local harness-ui-workspace--rendered-key nil
   "What the last drawing depended on.")
 
+(defvar harness-ui-workspace--syncing-p nil
+  "Non-nil while the pending store is being read, so no redraw loops.")
+
 (defvar harness-ui-workspace-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'harness-ui-workspace-send)
@@ -92,23 +95,77 @@ Letters type into the compose box; these chords act on the workspace.")
   (or harness-ui-workspace--thread
       (plist-get (harness-ui-workspace--current-thread) :id)))
 
+(defun harness-ui-workspace--live-session (&optional thread)
+  "Return the live episode of THREAD, or of the selected thread."
+  (plist-get (or thread (harness-ui-workspace--current-thread)) :live))
+
+(defun harness-ui-workspace--episode-of-p (session-id)
+  "Non-nil when SESSION-ID is the live episode of a thread here."
+  (and (stringp session-id)
+       (cl-some (lambda (thread) (equal session-id (plist-get thread :live)))
+                (plist-get harness-ui-workspace--data :threads))))
+
 (defun harness-ui-workspace--insert-button (label action &optional help)
   "Insert a clickable LABEL that runs ACTION."
   (harness-ui-button label action :help help))
 
-(defun harness-ui-workspace--state-glyph (thread)
-  "Return the state glyph of THREAD."
-  (pcase (plist-get thread :state)
-    ("live" "●")
-    ("waiting" "?")
-    (_ "○")))
+(defun harness-ui-workspace--episode-status (thread)
+  "Return THREAD's episode status as a string.
+That is `:episode-status' from the harness (running, blocked, idle,
+failed, stopped, inactive or parked) or, from a harness that does not
+send it, the coarser `:state' and the cached session's own status."
+  (let ((status (plist-get thread :episode-status)))
+    (if (and (stringp status) (not (string-empty-p status)))
+        status
+      (pcase (format "%s" (or (plist-get thread :state) "parked"))
+        ("waiting" "blocked")
+        ("live"
+         (let ((session (harness-ui-session (plist-get thread :live))))
+           (if (and session
+                    (equal "running" (format "%s" (plist-get session :status))))
+               "running"
+             "live")))
+        (_ "parked")))))
 
-(defun harness-ui-workspace--state-face (thread)
-  "Return the face of THREAD's state."
-  (pcase (plist-get thread :state)
-    ("live" 'harness-status-running-face)
-    ("waiting" 'harness-status-blocked-face)
+(defun harness-ui-workspace--pending-kind (thread)
+  "Return question, permission or nil: what THREAD waits on."
+  (when-let* ((item (car (harness-ui-pending-items (plist-get thread :live)))))
+    (if (equal "question" (format "%s" (plist-get item :kind)))
+        "question"
+      "permission")))
+
+(defun harness-ui-workspace--status-label (thread)
+  "Return the words THREAD's episode status shows."
+  (pcase (harness-ui-workspace--episode-status thread)
+    ("running" "Running")
+    ("blocked" (if (equal (harness-ui-workspace--pending-kind thread) "question")
+                   "Blocked · Question"
+                 "Blocked · Permission"))
+    ("idle" "Idle")
+    ("failed" "Failed")
+    ("stopped" "Stopped")
+    ("inactive" "Inactive")
+    ("live" "Live")
+    (_ "Parked")))
+
+(defun harness-ui-workspace--status-face (status)
+  "Return the face STATUS shows in."
+  (pcase status
+    ("running" 'harness-status-running-face)
+    ("blocked" 'harness-status-blocked-face)
+    ("failed" 'harness-failure-face)
+    ("stopped" 'harness-caution-face)
+    ((or "idle" "live" "inactive") 'harness-status-idle-face)
     (_ 'harness-dim-face)))
+
+(defun harness-ui-workspace--status-icon (status)
+  "Return the icon STATUS shows."
+  (pcase status
+    ("running" (harness-ui-icon 'harness-icon-running))
+    ("blocked" (harness-ui-icon 'harness-icon-blocked))
+    ("failed" (harness-ui-icon 'harness-icon-failure))
+    ("stopped" (harness-ui-icon 'harness-icon-caution))
+    (_ (harness-ui-icon 'harness-icon-idle))))
 
 (defun harness-ui-workspace--insert-header ()
   "Insert the header line of the workspace."
@@ -116,6 +173,7 @@ Letters type into the compose box; these chords act on the workspace.")
          (name (or (plist-get workspace :name) "Workspace"))
          (thread (harness-ui-workspace--current-thread))
          (thread-title (or (plist-get thread :title) "All threads"))
+         (status (harness-ui-workspace--episode-status thread))
          (memory (if (eq harness-ui-workspace--state 'error)
                      "Memory · unavailable"
                    (if harness-ui-workspace--memory
@@ -127,7 +185,10 @@ Letters type into the compose box; these chords act on the workspace.")
                          (t "Computer · off"))))
     (insert (propertize "Workspace" 'face 'harness-header-face)
             " · " (propertize name 'face 'harness-header-face)
-            "   " (propertize (format "Thread · %s" thread-title) 'face 'harness-dim-face)
+            "   " (propertize "Thread · " 'face 'harness-dim-face)
+            (propertize thread-title 'face 'harness-dim-face)
+            " · " (propertize (harness-ui-workspace--status-label thread)
+                              'face (harness-ui-workspace--status-face status))
             "   " (propertize memory 'face 'harness-dim-face)
             "   " (propertize computer 'face 'harness-dim-face)
             "   ")
@@ -164,16 +225,23 @@ Letters type into the compose box; these chords act on the workspace.")
       (dolist (thread threads)
         (let* ((id (plist-get thread :id))
                (active (equal id (harness-ui-workspace--selected-thread)))
-               (line (concat (harness-ui-workspace--state-glyph thread) " "
-                             (or (plist-get thread :title) "Thread")))
-               (start (point)))
-          (insert-text-button line
-                              'action (lambda (_button)
-                                        (harness-ui-workspace--select-thread id))
-                              'follow-link t
-                              'face (if active 'harness-user-label-face 'harness-dim-face)
-                              'help-echo (format "Open %s" (or (plist-get thread :title) "thread")))
+               (title (or (plist-get thread :title) "Thread"))
+               (status (harness-ui-workspace--episode-status thread))
+               (face (harness-ui-workspace--status-face status))
+               (label (harness-ui-workspace--status-label thread))
+               (start (point))
+               (title-end (+ start (length (harness-ui-workspace--status-icon status))
+                             1 (length title) 2)))
+          (insert-text-button
+           (concat (propertize (harness-ui-workspace--status-icon status) 'face face)
+                   " " title "  " label)
+           'action (lambda (_button) (harness-ui-workspace--select-thread id))
+           'follow-link t
+           'face (if active 'harness-user-label-face 'harness-dim-face)
+           'help-echo (format "Open %s · %s" title label))
           (put-text-property start (point) 'harness-workspace-thread id)
+          ;; The status word keeps its own colour over the row's.
+          (add-face-text-property title-end (point) face)
           (insert "  ")
           (when (plist-get thread :pinned)
             (insert (propertize "★ " 'face 'harness-caution-face)))
@@ -232,12 +300,31 @@ Letters type into the compose box; these chords act on the workspace.")
         ('message (harness-ui-workspace--insert-message entry))
         (_ nil)))))
 
+(defun harness-ui-workspace--insert-pending ()
+  "Insert the requests the selected thread's live episode waits on.
+They are the shared pending module's panels, drawn as the chat draws
+them, so the answers and their tooltips are the ones every view has."
+  (let ((session (harness-ui-workspace--live-session)))
+    (when (and session (harness-ui-pending-items session))
+      (insert (propertize "Pending requests" 'face 'harness-label-face) "\n")
+      (harness-ui-pending-insert-panels session)
+      (insert "\n"))))
+
 (defun harness-ui-workspace--render ()
   "Draw the workspace buffer."
   (when (derived-mode-p 'harness-ui-workspace-mode)
     (let* ((inhibit-read-only t)
            (draft (and (harness-compose-live-p) (harness-compose-text)))
-           (selected (harness-ui-workspace--selected-thread)))
+           (selected (harness-ui-workspace--selected-thread))
+           (session (harness-ui-workspace--live-session))
+           (in-compose (and (harness-compose-live-p)
+                            (integerp harness-compose-start)
+                            (harness-compose-in-p)
+                            (- (point) harness-compose-start)))
+           (panel (get-text-property (point) 'harness-ui-pending)))
+      ;; The panel keys answer the request of the episode this buffer
+      ;; shows; a thread switch or a new episode rebinds it here.
+      (setq harness-ui-pending-session-id session)
       (harness-compose-hide)
       (erase-buffer)
       (pcase harness-ui-workspace--state
@@ -255,15 +342,27 @@ Letters type into the compose box; these chords act on the workspace.")
          (insert "\n")
          (harness-ui-workspace--insert-threads)
          (insert "\n")
-         (harness-ui-workspace--insert-timeline)))
+         (harness-ui-workspace--insert-timeline)
+         (insert "\n")
+         (harness-ui-workspace--insert-pending)))
       (insert "\n")
       (harness-compose-insert (or draft "") "Workspace message")
       (when (and harness-compose-start harness-compose-end)
         (put-text-property (point-min) (1- harness-compose-start) 'read-only t)
         (put-text-property (1+ harness-compose-end) (point-max) 'read-only t))
+      ;; A redraw for a pending change must not take the box from under
+      ;; the person typing in it, nor point from the panel being read.
+      (cond
+       ((and (integerp in-compose) harness-compose-start harness-compose-end)
+        (goto-char (min (+ harness-compose-start in-compose) harness-compose-end)))
+       (panel
+        (when-let* ((pos (text-property-any (point-min) (point-max)
+                                            'harness-ui-pending panel)))
+          (goto-char pos))))
       (setq harness-ui-workspace--rendered-key
             (list harness-ui-workspace--id selected harness-ui-workspace--state
-                  (length harness-ui-workspace--entries)))
+                  (length harness-ui-workspace--entries)
+                  (and session (length (harness-ui-pending-items session)))))
       ;; Before the first answer there is no root to list, and a file
       ;; listing without one is an error, not an empty list.
       (when (plist-get harness-ui-workspace--data :root)
@@ -278,6 +377,18 @@ Letters type into the compose box; these chords act on the workspace.")
   "Make this buffer's `default-directory' the root of WORKSPACE."
   (when-let* ((root (plist-get workspace :root)))
     (setq default-directory (file-name-as-directory (expand-file-name root)))))
+
+(defun harness-ui-workspace--sync-pending (workspace)
+  "Read the pending requests WORKSPACE's threads name into the shared store.
+A harness that sends `:pending' with the view is the word of what its
+episodes wait on, and reconciles a request answered elsewhere; one that
+does not send it is read from the session cache."
+  (let ((harness-ui-workspace--syncing-p t))
+    (dolist (thread (plist-get workspace :threads))
+      (when-let* ((session (plist-get thread :live)))
+        (if (plist-member thread :pending)
+            (harness-ui-pending-sync session (plist-get thread :pending))
+          (harness-ui-pending-sync-session session))))))
 
 (defun harness-ui-workspace--set-data (workspace entries memory &optional box)
   "Take WORKSPACE, its ENTRIES, MEMORY and BOX as this buffer's state."
@@ -294,6 +405,7 @@ Letters type into the compose box; these chords act on the workspace.")
     (setq harness-ui-workspace--thread
           (or (plist-get workspace :last-thread)
               (plist-get (car (plist-get workspace :threads)) :id))))
+  (harness-ui-workspace--sync-pending workspace)
   (harness-ui-workspace--render))
 
 (defun harness-ui-workspace--fetch ()
@@ -359,11 +471,26 @@ Letters type into the compose box; these chords act on the workspace.")
   (harness-ui-workspace--render))
 
 (defun harness-ui-workspace-send ()
-  "Send the compose box's text to the workspace."
+  "Send the compose box's text to the workspace.
+When the selected thread's live episode waits on a question, the text
+is the answer to it, as it is in a chat: the harness keeps the turn
+blocked otherwise, and a message sent beside it would only queue."
   (interactive)
-  (let ((text (string-trim (harness-compose-text))))
-    (if (string-blank-p text)
-        (user-error "Empty message")
+  (let* ((text (string-trim (harness-compose-text)))
+         (session (harness-ui-workspace--live-session))
+         (question (and session (harness-ui-pending-question session))))
+    (cond
+     ((and question (or (not (string-blank-p text))
+                        (harness-ui-pending-picked-any-p session)))
+      (let ((inhibit-read-only t))
+        (harness-compose-insert ""))
+      (harness-ui-pending-answer-question
+       session (plist-get question :id)
+       (harness-ui-pending-compose-answer session question text))
+      (harness-ui-workspace--render))
+     ((string-blank-p text)
+      (user-error "Empty message"))
+     (t
       (let ((workspace harness-ui-workspace--id)
             (thread (harness-ui-workspace--selected-thread))
             (buffer (current-buffer)))
@@ -383,7 +510,7 @@ Letters type into the compose box; these chords act on the workspace.")
              (with-current-buffer buffer
                (message "Workspace · %s" (harness-error-message err))
                (harness-ui-workspace--fetch)))))
-        (harness-ui-workspace--schedule-fetch)))))
+        (harness-ui-workspace--schedule-fetch))))))
 
 (defun harness-ui-workspace-clear ()
   "Clear the compose box."
@@ -452,23 +579,90 @@ Letters type into the compose box; these chords act on the workspace.")
             (derived-mode-p 'harness-ui-workspace-mode))))
    (buffer-list)))
 
+(defun harness-ui-workspace--drawn-p (session-id)
+  "Non-nil when a workspace buffer draws the requests of SESSION-ID.
+The pending module then owns its ACP request, and this view answers it
+with the same panels and keys as a chat."
+  (cl-some (lambda (buffer)
+             (with-current-buffer buffer
+               (and (derived-mode-p 'harness-ui-workspace-mode)
+                    (equal session-id (harness-ui-workspace--live-session)))))
+           (harness-ui-workspace--buffers)))
+
+(defun harness-ui-workspace--set-thread (session-id changes)
+  "Merge CHANGES into the thread of SESSION-ID in this buffer's data."
+  (when (harness-ui-workspace--episode-of-p session-id)
+    (setf (plist-get harness-ui-workspace--data :threads)
+          (mapcar (lambda (thread)
+                    (if (equal session-id (plist-get thread :live))
+                        (harness-plist-merge thread changes)
+                      thread))
+                  (plist-get harness-ui-workspace--data :threads)))))
+
+(defun harness-ui-workspace--on-pending-changed (session-id)
+  "Redraw the buffers showing SESSION-ID, whose requests changed."
+  (unless harness-ui-workspace--syncing-p
+    (dolist (buffer (harness-ui-workspace--buffers))
+      (with-current-buffer buffer
+        (when (equal session-id (harness-ui-workspace--live-session))
+          (harness-ui-workspace--render))))))
+
 (defun harness-ui-workspace--on-event (event args)
-  "Refresh the workspace buffers an EVENT with ARGS is about."
+  "Refresh the workspace buffers an EVENT with ARGS is about.
+A workspace event refetches the view; a session event of a live episode
+refetches its status, and its pending list is brought in at once, so
+that a request answered elsewhere leaves no stale card."
   (let ((event (if (symbolp event) (symbol-name event) event)))
-    (when (member event '("workspace/changed" "workspace/deleted"
-                          "workspace/timeline-appended" "workspace/thread-changed"
-                          "workspace/episode-changed" "workspace/memory-changed"
-                          "workspace/box-status"))
+    (cond
+     ((member event '("workspace/changed" "workspace/deleted"
+                      "workspace/timeline-appended" "workspace/thread-changed"
+                      "workspace/episode-changed" "workspace/memory-changed"
+                      "workspace/box-status"))
       (let ((id (car-safe args)))
-      (dolist (buffer (harness-ui-workspace--buffers))
-        (with-current-buffer buffer
+        (dolist (buffer (harness-ui-workspace--buffers))
+          (with-current-buffer buffer
             (when (or (null id) (equal id harness-ui-workspace--id))
-              (harness-ui-workspace--schedule-fetch))))))))
+              (harness-ui-workspace--schedule-fetch))))))
+     ((equal event "session/pending-changed")
+      (pcase-let ((`(,session ,items) args))
+        (when (and (stringp session) (listp items))
+          (dolist (buffer (harness-ui-workspace--buffers))
+            (with-current-buffer buffer
+              (when (harness-ui-workspace--episode-of-p session)
+                (let ((harness-ui-workspace--syncing-p t))
+                  (harness-ui-pending-sync session items))
+                ;; A request that still waits blocks the episode; one
+                ;; that went does not say the episode is idle, which a
+                ;; running turn is not.  The fetch that follows answers.
+                (harness-ui-workspace--set-thread
+                 session (append
+                          (list :pending items)
+                          (and items (list :episode-status "blocked"))))
+                (when (equal session (harness-ui-workspace--live-session))
+                  (harness-ui-workspace--render))
+                (harness-ui-workspace--schedule-fetch)))))))
+     ((member event '("session/status" "agent/turn-started"
+                      "agent/turn-ended" "session/deleted"))
+      (pcase-let ((`(,session . ,rest) args))
+        (when (stringp session)
+          (dolist (buffer (harness-ui-workspace--buffers))
+            (with-current-buffer buffer
+              (when (harness-ui-workspace--episode-of-p session)
+                (when (and (equal event "session/status") (car rest))
+                  (harness-ui-workspace--set-thread
+                   session (list :episode-status
+                                 (format "%s" (car rest)))))
+                (harness-ui-workspace--schedule-fetch))))))))))
 
 (defun harness-ui-workspace--on-redraw ()
-  "Refresh every workspace buffer after a reload or a reconnect."
+  "Refresh every workspace buffer after a reload or a reconnect.
+What the selected episode waits on is read from the session cache
+first, so its cards are there even before the workspace answers."
   (dolist (buffer (harness-ui-workspace--buffers))
     (with-current-buffer buffer
+      (when-let* ((session (harness-ui-workspace--live-session)))
+        (harness-ui-pending-sync-session session))
+      (harness-ui-workspace--render)
       (harness-ui-workspace--fetch))))
 
 (defun harness-ui-workspace--buffer-name (workspace)
@@ -558,7 +752,10 @@ the `C-c w' keys act on the workspace."
   (setq buffer-read-only nil)
   (setq-local truncate-lines nil
               word-wrap t
-              truncate-partial-width-windows nil)
+              truncate-partial-width-windows nil
+              ;; [Send answer] on a question that allows several options
+              ;; sends this box, as the chat's sends its own.
+              harness-ui-pending-send-function #'harness-ui-workspace-send)
   (harness-compose-setup
    ;; Before the first answer from the harness there is no workspace plist:
    ;; the box still completes and attaches from the buffer's directory,
@@ -590,6 +787,8 @@ the `C-c w' keys act on the workspace."
   (add-hook 'harness-ui-event-functions #'harness-ui-workspace--on-event)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-workspace--on-redraw)
   (add-hook 'harness-ui-connected-hook #'harness-ui-workspace--on-redraw)
+  (add-hook 'harness-ui-pending-drawn-predicates #'harness-ui-workspace--drawn-p)
+  (add-hook 'harness-ui-pending-changed-hook #'harness-ui-workspace--on-pending-changed)
   (define-key harness-ui-map (kbd "Y") #'harness-workspace))
 
 (defun harness-ui-workspace--shutdown ()
@@ -597,6 +796,8 @@ the `C-c w' keys act on the workspace."
   (remove-hook 'harness-ui-event-functions #'harness-ui-workspace--on-event)
   (remove-hook 'harness-ui-redraw-hook #'harness-ui-workspace--on-redraw)
   (remove-hook 'harness-ui-connected-hook #'harness-ui-workspace--on-redraw)
+  (remove-hook 'harness-ui-pending-drawn-predicates #'harness-ui-workspace--drawn-p)
+  (remove-hook 'harness-ui-pending-changed-hook #'harness-ui-workspace--on-pending-changed)
   (define-key harness-ui-map (kbd "Y") nil))
 
 (harness-define-module 'ui-workspace

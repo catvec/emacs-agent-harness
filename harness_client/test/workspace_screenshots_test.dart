@@ -12,6 +12,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/models/workspace.dart';
 import 'package:harness_client/src/state/app_controller.dart';
+import 'package:harness_client/src/state/interaction.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/state/workspace_controller.dart';
 import 'package:harness_client/src/ui/adaptive/platform_style.dart';
@@ -22,25 +23,74 @@ import 'package:harness_client/src/ui/theme/harness_theme.dart';
 import 'support/fake_rfb.dart';
 import 'support/real_fonts.dart';
 
-WorkspaceController _controller() {
+/// What a screenshot shows the live episode waiting on.
+InteractionRequest _pendingPermission() => InteractionRequest(
+  method: 'session/request_permission',
+  params: {
+    'sessionId': 's1',
+    'toolCall': {
+      'toolCallId': 'c-p1',
+      'title': 'Read tasks.json',
+      'kind': 'read',
+      'rawInput': {
+        'path': '/home/noah/documents/ai/emacs-agent-harness/.git/harness/tasks.json',
+      },
+    },
+    'options': const [
+      {'optionId': 'allow-once', 'name': 'Allow once', 'kind': 'allow_once'},
+      {'optionId': 'deny-once', 'name': 'Deny', 'kind': 'reject_once'},
+    ],
+    '_harness': {'pendingId': 'p1', 'tool': 'read_file'},
+  },
+  sessionId: 's1',
+  synthetic: true,
+  pendingId: 'p1',
+);
+
+InteractionRequest _pendingQuestion() => InteractionRequest(
+  method: '_harness/ask_user',
+  params: {
+    'sessionId': 's1',
+    'requestId': 'q1',
+    'question': 'The fabricator can template on Tuesday or Thursday. Which?',
+    'options': const ['Tuesday', 'Thursday'],
+  },
+  sessionId: 's1',
+  synthetic: true,
+  pendingId: 'q1',
+);
+
+WorkspaceController _controller({
+  List<InteractionRequest> pending = const [],
+  String status = 'running',
+}) {
   final workspace = WorkspaceSummary(
     id: 'w1',
     name: 'Home',
     lastThread: 't1',
-    threads: const [
+    threads: [
       WorkspaceThread(
         id: 't1',
         title: 'Kitchen renovation',
         state: 'live',
+        episodeStatus: status,
         live: 's1',
-        tags: ['Kitchen', 'Budget'],
+        pending: [
+          for (final request in pending)
+            WorkspacePendingRequest(
+              id: request.pendingId ?? '',
+              kind: request.isQuestion ? 'question' : 'permission',
+              title: request.title,
+            ),
+        ],
+        tags: const ['Kitchen', 'Budget'],
       ),
-      WorkspaceThread(
+      const WorkspaceThread(
         id: 't2',
         title: 'Harness memory',
         tags: ['Harness', 'Memory'],
       ),
-      WorkspaceThread(
+      const WorkspaceThread(
         id: 't3',
         title: 'Kitchen budget',
         tags: ['Kitchen', 'Budget'],
@@ -61,6 +111,7 @@ WorkspaceController _controller() {
       width: 1280,
       height: 800,
     ),
+    pending: pending,
     entries: const [
       WorkspaceEntry(
         kind: 'divider',
@@ -112,6 +163,7 @@ Future<(GlobalKey, WorkspaceController)> _show(
   required double width,
   required double height,
   double textScale = 1,
+  WorkspaceController? controller,
 }) async {
   tester.view.physicalSize = Size(width, height);
   tester.view.devicePixelRatio = 1;
@@ -126,7 +178,7 @@ Future<(GlobalKey, WorkspaceController)> _show(
   final boundary = GlobalKey();
   final settings = SettingsController();
   final app = AppController(settings: settings);
-  final controller = _controller();
+  final shown = controller ?? _controller();
   await tester.pumpWidget(
     RepaintBoundary(
       key: boundary,
@@ -145,7 +197,7 @@ Future<(GlobalKey, WorkspaceController)> _show(
               ),
               child: WorkspaceScreen(
                 app: app,
-                controller: controller,
+                controller: shown,
                 onOpenSession: (_) {},
                 vncTransportFactory: (_) =>
                     FakeRfbTransport(width: 640, height: 400),
@@ -165,7 +217,7 @@ Future<(GlobalKey, WorkspaceController)> _show(
     () => Future<void>.delayed(const Duration(milliseconds: 120)),
   );
   await tester.pump();
-  return (boundary, controller);
+  return (boundary, shown);
 }
 
 Future<void> _write(
@@ -249,6 +301,53 @@ void main() {
     expect(find.text('Return control'), findsOneWidget);
     if (shots != null) {
       await _write(tester, boundary, '$shots/workspace-desktop-control.png');
+    }
+  });
+
+  testWidgets('workspace blocked on a permission', (tester) async {
+    final (boundary, _) = await _show(
+      tester,
+      width: 1440,
+      height: 900,
+      controller: _controller(
+        status: 'blocked',
+        pending: [_pendingPermission()],
+      ),
+    );
+    expect(find.text('PERMISSION'), findsOneWidget);
+    expect(find.text('Allow once'), findsOneWidget);
+    expect(
+      find.textContaining('Kitchen renovation · Blocked · Permission'),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-blocked-permission.png');
+    }
+  });
+
+  testWidgets('workspace blocked on a question, on a phone', (tester) async {
+    final (boundary, _) = await _show(
+      tester,
+      width: 390,
+      height: 844,
+      controller: _controller(
+        status: 'blocked',
+        pending: [_pendingQuestion()],
+      ),
+    );
+    expect(find.text('QUESTION'), findsOneWidget);
+    expect(find.text('Tuesday'), findsOneWidget);
+    // The desktop header says what the episode waits on; a phone's
+    // narrower one keeps that line above the chat.
+    expect(find.text('Blocked · Question'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(
+        tester,
+        boundary,
+        '$shots/workspace-blocked-question-phone.png',
+      );
     }
   });
 

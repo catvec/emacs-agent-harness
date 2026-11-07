@@ -1959,6 +1959,11 @@ class FakeHarness {
       }
       if (method == '_harness/permission/answer') {
         permissionAnswers.add(asMap(params['answer']));
+        final sid = asString(params['session-id']);
+        final pid = asString(params['pending-id']);
+        if (sid != null && pid != null && sessions[sid] != null) {
+          _resolvePermission(sid, pid);
+        }
         _respond(id, const <String, Object?>{});
         return;
       }
@@ -2720,6 +2725,7 @@ class FakeHarness {
       'id': 'th-1',
       'title': 'Kitchen renovation',
       'state': 'live',
+      'episode-status': 'running',
       'live': 's1',
       'tags': ['Kitchen', 'Budget'],
     },
@@ -3722,6 +3728,68 @@ class FakeHarness {
       if (diagrams != null) 'diagrams': diagrams,
       if (allowMultiple) 'allow-multiple': true,
     }, announce: announce);
+  }
+
+  /// The harness holds a permission request as pending on [sid], and says
+  /// so, without asking this client: what a workspace finds with
+  /// `permission/pending`, as the request of an episode it has not opened.
+  void leavePendingPermission(
+    String sid, {
+    String requestId = 'p-left',
+    String tool = 'bash',
+    String title = 'Run the command',
+    String kind = 'execute',
+    Map<String, Object?> extra = const {},
+    bool announce = true,
+  }) {
+    final pending = _pendingOf(sid);
+    pending.removeWhere((item) => item['id'] == requestId);
+    pending.add({
+      'id': requestId,
+      'kind': 'permission',
+      'created': DateTime.now().millisecondsSinceEpoch / 1000,
+      'payload': {
+        'title': title,
+        'tool': tool,
+        'kind': kind,
+        'input': {'path': '/tmp/tasks.json'},
+        if (extra.isNotEmpty) ...extra,
+      },
+    });
+    sessions[sid]!['status'] = 'blocked';
+    if (announce) {
+      _setStatus(sid, 'blocked');
+      _event('session/pending-changed', [sid, List.of(pending)]);
+    }
+  }
+
+  /// The permission request [id] of session [sid] was answered somewhere
+  /// else (in Emacs, on another device): the harness tells its clients.
+  void permissionAnsweredElsewhere(String sid, String id) =>
+      _resolvePermission(sid, id);
+
+  void _resolvePermission(String sid, String id) {
+    final pending = _pendingOf(sid);
+    pending.removeWhere((item) => item['id'] == id);
+    if (pending.isEmpty) _setStatus(sid, 'running');
+    _event('session/pending-changed', [sid, List.of(pending)]);
+  }
+
+  /// Set a workspace thread's fine status and what it waits on, as the
+  /// harness's workspace view reports them, and tell the clients it
+  /// changed.
+  void setWorkspaceThread(
+    String id, {
+    String? status,
+    List<Map<String, Object?>>? pending,
+  }) {
+    for (final thread in workspaceThreads) {
+      if (thread['id'] != id) continue;
+      if (status != null) thread['episode-status'] = status;
+      if (pending != null) thread['pending'] = pending;
+      _event('workspace/thread-changed', ['w1', thread]);
+      return;
+    }
   }
 
   /// The question [id] of session [sid] was answered somewhere else (in

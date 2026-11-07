@@ -27,19 +27,26 @@
        (harness-test-load-module 'ui-chat)
        (harness-test-load-module 'ui-compose)
        (harness-test-load-module 'ui-workspace)
+       (harness-ui-pending--forget-all)
        (unwind-protect (progn ,@body)
+         (harness-ui-pending--forget-all)
          (harness-ui-workspace--shutdown)))))
 
 (defun harness-ui-workspace-test-data ()
-  "Return a workspace plist for the tests."
-  '(:id "w-1"
+  "Return a fresh workspace plist for the tests.
+A case may change a thread's status or add one, and the next case
+must see the fixture as it was."
+  (copy-tree
+   '(:id "w-1"
     :name "Home"
     :root "/tmp/workspace/"
     :last-thread "th-1"
     :threads ((:id "th-1" :title "Kitchen renovation" :state "live"
+                    :episode-status "running" :pending nil
                     :live "s-1" :episodes ("s-1") :pinned t :last-at 20.0)
               (:id "th-2" :title "Harness memory" :state "parked"
-                    :live nil :episodes ("s-0") :pinned nil :last-at 10.0))))
+                    :episode-status "parked" :pending nil
+                    :live nil :episodes ("s-0") :pinned nil :last-at 10.0)))))
 
 (defun harness-ui-workspace-test-entries ()
   "Return timeline entries for the tests."
@@ -110,7 +117,7 @@
         (harness-ui-workspace--render))
       (goto-char (point-min))
       (should (equal (buffer-substring-no-properties (line-beginning-position) (line-end-position))
-                     "Workspace · Home   Thread · Kitchen renovation   Memory · ready   Computer · off   Tasks New thread Open episode Stop Refresh Computer Resources"))
+                     "Workspace · Home   Thread · Kitchen renovation · Running   Memory · ready   Computer · off   Tasks New thread Open episode Stop Refresh Computer Resources"))
       (search-forward "Tasks")
       (should (equal "The task board of this workspace" (get-text-property (1- (point)) 'help-echo)))
       (search-forward "New thread")
@@ -305,6 +312,224 @@ client's does."
     (should (eq (lookup-key harness-ui-workspace-mode-map (kbd "C-c w R"))
                 #'harness-ui-workspace-resources))))
 
+(defun harness-ui-workspace-test-permission (&optional id session title)
+  "Add a pending permission request to SESSION, with ID and TITLE."
+  (harness-ui-pending-add
+   (or session "s-1")
+   (list :id (or id "p-1") :kind "permission" :created (- (float-time) 1)
+         :title (or title "Run the command") :tool "bash"
+         :tool-kind "execute" :options '("allow-once" "deny-once"))))
+
+(defun harness-ui-workspace-test-question (&optional id session question options multiple)
+  "Add a pending question to SESSION, with ID, QUESTION and OPTIONS.
+With MULTIPLE, several options may be ticked."
+  (harness-ui-pending-add
+   (or session "s-1")
+   (list :id (or id "q-1") :kind "question" :created (float-time)
+         :question (or question "Which database?")
+         :options (or options '("sqlite" "postgres"))
+         :allow-multiple (and multiple t))))
+
+(ert-deftest harness-ui-workspace-shows-episode-status ()
+  "A thread says Running, Blocked, Idle, Failed, Stopped and Parked."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (should (string-match-p "Thread · Kitchen renovation · Running" (buffer-string)))
+      (should (string-match-p "Kitchen renovation  Running" (buffer-string)))
+      (should (string-match-p "Harness memory  Parked" (buffer-string)))
+      (let ((thread (car (plist-get harness-ui-workspace--data :threads))))
+        (dolist (case '(("blocked" "Blocked · Permission")
+                        ("idle" "Idle")
+                        ("failed" "Failed")
+                        ("stopped" "Stopped")
+                        ("inactive" "Inactive")
+                        ("parked" "Parked")))
+          (setf (plist-get thread :episode-status) (car case))
+          (harness-ui-workspace--render)
+          (should (string-match-p
+                   (concat "Thread · Kitchen renovation · " (regexp-quote (cadr case)))
+                   (buffer-string)))
+          (should (string-match-p (regexp-quote (cadr case)) (buffer-string))))))))
+
+(ert-deftest harness-ui-workspace-blocked-names-what-it-waits-on ()
+  "A blocked episode says whether it waits on a permission or a question."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (let ((thread (car (plist-get harness-ui-workspace--data :threads))))
+        (setf (plist-get thread :episode-status) "blocked")
+        (harness-ui-workspace-test-permission)
+        (harness-ui-workspace--render)
+        (should (string-match-p "Thread · Kitchen renovation · Blocked · Permission"
+                                (buffer-string)))
+        (harness-ui-pending--forget-all)
+        (harness-ui-workspace-test-question)
+        (harness-ui-workspace--render)
+        (should (string-match-p "Thread · Kitchen renovation · Blocked · Question"
+                                (buffer-string)))))))
+
+(ert-deftest harness-ui-workspace-shows-a-pending-permission-card ()
+  "The workspace draws the shared pending permission panel.
+It says Permission, the call, and the answers every view offers."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace-test-permission)
+      (harness-ui-workspace--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Pending requests" text))
+        (should (string-match-p "Permission  Run the command" text))
+        (should (string-match-p "Allow" text))
+        (should (string-match-p "Deny" text))
+        ;; The panel is the selected episode's, and answers in it.
+        (should (equal "s-1" harness-ui-pending-session-id))
+        (goto-char (point-min))
+        (search-forward "Permission")
+        (should (equal "p-1" (get-text-property (match-beginning 0)
+                                                'harness-ui-pending)))))))
+
+(ert-deftest harness-ui-workspace-shows-a-pending-question-card ()
+  "The workspace draws the shared pending question panel with its options."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace-test-question)
+      (harness-ui-workspace--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Pending requests" text))
+        (should (string-match-p "Question" text))
+        (should (string-match-p "Which database?" text))
+        (should (string-match-p "sqlite" text))
+        (should (string-match-p "postgres" text))
+        (should (equal "s-1" harness-ui-pending-session-id))))))
+
+(ert-deftest harness-ui-workspace-cards-follow-the-thread ()
+  "Only the selected thread's live episode's request is drawn and owned."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      ;; A second live thread with its own episode and request.
+      (setf (plist-get harness-ui-workspace--data :threads)
+            (append (plist-get harness-ui-workspace--data :threads)
+                    (list (list :id "th-3" :title "Second topic" :state "live"
+                                :episode-status "idle" :pending nil
+                                :live "s-2" :episodes (list "s-2") :pinned nil
+                                :last-at 5.0))))
+      (harness-ui-workspace-test-permission "p-1" "s-1" "First call")
+      (harness-ui-workspace-test-permission "p-2" "s-2" "Second call")
+      (harness-ui-workspace--render)
+      (should (string-match-p "First call" (buffer-string)))
+      (should-not (string-match-p "Second call" (buffer-string)))
+      (should (equal "s-1" harness-ui-pending-session-id))
+      (should (harness-ui-workspace--drawn-p "s-1"))
+      (should-not (harness-ui-workspace--drawn-p "s-2"))
+      (harness-ui-workspace--select-thread "th-3")
+      (should (string-match-p "Second call" (buffer-string)))
+      (should-not (string-match-p "First call" (buffer-string)))
+      (should (equal "s-2" harness-ui-pending-session-id))
+      (should-not (harness-ui-workspace--drawn-p "s-1"))
+      (should (harness-ui-workspace--drawn-p "s-2")))))
+
+(ert-deftest harness-ui-workspace-drops-a-resolved-card ()
+  "A card goes when the request is answered, here or in another client."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace-test-permission)
+      (harness-ui-workspace--render)
+      (should (string-match-p "Permission  Run the command" (buffer-string)))
+      ;; Another client answered it: the session says nothing waits.
+      (harness-ui-workspace--on-event 'session/pending-changed (list "s-1" nil))
+      (should-not (string-match-p "Permission  Run the command" (buffer-string)))
+      (should-not (string-match-p "Pending requests" (buffer-string))))))
+
+(ert-deftest harness-ui-workspace-reconciles-a-fetched-pending-list ()
+  "A fetched workspace brings in, and takes out, what its episodes wait on."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (let* ((data (harness-ui-workspace-test-data))
+             (thread (car (plist-get data :threads))))
+        (setf (plist-get thread :episode-status) "blocked"
+              (plist-get thread :pending)
+              (list (list :id "p-fetched" :kind "question"
+                          :payload (list :question "Proceed?" :options (list "yes" "no")))))
+        (harness-ui-workspace--set-data data (harness-ui-workspace-test-entries) nil)
+        (should (harness-ui-pending-record "s-1" "p-fetched"))
+        (should (string-match-p "Proceed?" (buffer-string)))
+        ;; A later view with nothing pending takes the card away.  The
+        ;; store keeps a request whose list lags by half a second; this
+        ;; one was read before that.
+        (setf (plist-get (harness-ui-pending-record "s-1" "p-fetched") :created)
+              (- (float-time) 1))
+        (setf (plist-get thread :pending) nil
+              (plist-get thread :episode-status) "idle")
+        (harness-ui-workspace--set-data data (harness-ui-workspace-test-entries) nil)
+        (should-not (harness-ui-pending-record "s-1" "p-fetched"))
+        (should-not (string-match-p "Proceed?" (buffer-string)))))))
+
+(ert-deftest harness-ui-workspace-follows-pending-and-status-events ()
+  "session/pending-changed fills the store and the status before a fetch."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace--on-event
+       'session/pending-changed
+       (list "s-1" (list (list :id "p-event" :kind "question"
+                               :payload (list :question "Carry on?")))))
+      (should (harness-ui-pending-record "s-1" "p-event"))
+      (should (string-match-p "Carry on?" (buffer-string)))
+      (should (equal "blocked"
+                     (plist-get (car (plist-get harness-ui-workspace--data :threads))
+                                :episode-status)))
+      (harness-ui-workspace--on-event 'session/status (list "s-1" 'running))
+      (should (equal "running"
+                     (plist-get (car (plist-get harness-ui-workspace--data :threads))
+                                :episode-status))))))
+
+(ert-deftest harness-ui-workspace-send-answers-a-question ()
+  "The box answers a waiting question, as a chat's does, not a new prompt."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace-test-question)
+      (harness-ui-workspace--render)
+      (let ((inhibit-read-only t))
+        (harness-compose-insert "sqlite"))
+      (let (calls)
+        (cl-letf (((symbol-function 'harness-ui-call)
+                   (lambda (method params callback &optional _on-error)
+                     (push (list method params) calls)
+                     (funcall callback nil)))
+                  ((symbol-function 'harness-compose-fetch-completions) #'ignore))
+          (harness-ui-workspace-send))
+        (should (equal "_harness/question/answer" (caar calls)))
+        (should (equal "q-1" (plist-get (cadar calls) :pid)))
+        (should (equal "sqlite" (plist-get (cadar calls) :answer)))
+        (should-not (cl-find "_harness/workspace/prompt" calls :key #'car :test #'equal))
+        (should-not (harness-ui-pending-record "s-1" "q-1"))))))
+
+(ert-deftest harness-ui-workspace-send-composes-a-multiple-answer ()
+  "Options ticked and the words in the box are one answer."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace-test-question "q-multi" "s-1" "Pick storage"
+                                          '("sqlite" "postgres") t)
+      (harness-ui-pending-toggle-option "s-1" "q-multi" 1)
+      (harness-ui-workspace--render)
+      (let ((inhibit-read-only t))
+        (harness-compose-insert "and a backup"))
+      (let (calls)
+        (cl-letf (((symbol-function 'harness-ui-call)
+                   (lambda (method params callback &optional _on-error)
+                     (push (list method params) calls)
+                     (funcall callback nil)))
+                  ((symbol-function 'harness-compose-fetch-completions) #'ignore))
+          (harness-ui-workspace-send))
+        (should (equal "postgres\nand a backup"
+                       (plist-get (cadar calls) :answer)))))))
 (ert-deftest harness-ui-workspace-computer-shows-the-real-box ()
   "The computer page names the backend, the screen and the VNC endpoint."
   (harness-ui-workspace-test-with

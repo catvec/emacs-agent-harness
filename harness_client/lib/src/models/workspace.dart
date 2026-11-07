@@ -63,15 +63,48 @@ class WorkspaceSummary {
   }
 }
 
+/// One request a thread's live episode waits on: a permission prompt or a
+/// question.  The workspace shows it in the same card a conversation does.
+class WorkspacePendingRequest {
+  const WorkspacePendingRequest({
+    required this.id,
+    required this.kind,
+    this.title = '',
+  });
+
+  factory WorkspacePendingRequest.fromWire(JsonMap wire) {
+    final payload = asMap(wire['payload']);
+    return WorkspacePendingRequest(
+      id: asStringOr(wire['id'], ''),
+      kind: asStringOr(wire['kind'], ''),
+      title: asStringOr(
+        payload['title'] ?? payload['tool'] ?? payload['question'],
+        '',
+      ),
+    );
+  }
+
+  final String id;
+  final String kind;
+  final String title;
+
+  bool get isQuestion => kind == 'question';
+}
+
 /// One topic in a workspace.  Its [state] is `live`, `waiting`, `parked` or
-/// `done`; [live] names the episode session when one is open.
+/// `done`, and [episodeStatus] says the finer thing its live episode does:
+/// `running`, `blocked`, `idle`, `failed`, `stopped` or `parked`.  [live]
+/// names the episode session when one is open, and [pending] is what it
+/// waits on.
 class WorkspaceThread {
   const WorkspaceThread({
     required this.id,
     required this.title,
     this.state = 'parked',
+    this.episodeStatus = '',
     this.live,
     this.episodes = const [],
+    this.pending = const [],
     this.pinned = false,
     this.summary = '',
     this.project = '',
@@ -90,9 +123,17 @@ class WorkspaceThread {
       id: asStringOr(wire['id'], ''),
       title: title,
       state: asStringOr(wire['state'], 'parked'),
+      episodeStatus: asStringOr(
+        wire['episode-status'] ?? wire['episodeStatus'],
+        '',
+      ),
       live: live == null || live.isEmpty ? null : live,
       episodes: [
         for (final episode in asList(wire['episodes'])) asStringOr(episode, ''),
+      ],
+      pending: [
+        for (final item in asMapList(wire['pending']))
+          WorkspacePendingRequest.fromWire(item),
       ],
       pinned: asBool(wire['pinned']),
       summary: asStringOr(wire['summary'], ''),
@@ -105,8 +146,10 @@ class WorkspaceThread {
   final String id;
   final String title;
   final String state;
+  final String episodeStatus;
   final String? live;
   final List<String> episodes;
+  final List<WorkspacePendingRequest> pending;
   final bool pinned;
   final String summary;
   final String project;
@@ -120,13 +163,68 @@ class WorkspaceThread {
 
   bool get liveNow => state == 'live' || state == 'waiting';
 
-  WorkspaceThread copyWith({List<String>? tags, String? state, String? live}) {
+  /// The status the thread shows, from the finer [episodeStatus] when the
+  /// harness sends it and the coarser [state] otherwise.
+  String get statusKey {
+    if (episodeStatus.isNotEmpty) return episodeStatus;
+    return switch (state) {
+      'waiting' => 'blocked',
+      'live' => 'live',
+      'done' => 'done',
+      _ => 'parked',
+    };
+  }
+
+  /// The status in one word, for a row: `Running`, `Blocked`, `Idle`,
+  /// `Failed`, `Stopped`, `Inactive`, `Live`, `Done` or `Parked`.
+  String get statusWord => switch (statusKey) {
+    'running' => 'Running',
+    'blocked' => 'Blocked',
+    'idle' => 'Idle',
+    'failed' => 'Failed',
+    'stopped' => 'Stopped',
+    'inactive' => 'Inactive',
+    'live' => 'Live',
+    'done' => 'Done',
+    _ => 'Parked',
+  };
+
+  /// The status in words, with what a blocked episode waits on when it
+  /// knows: `Running`, `Blocked · Permission`, `Blocked · Question`,
+  /// `Idle`, `Failed`, `Stopped`, `Inactive`, `Live` or `Parked`.
+  String get statusLabel {
+    final key = statusKey;
+    if (key == 'blocked') {
+      final question = pending.any((item) => item.isQuestion);
+      return question ? 'Blocked · Question' : 'Blocked · Permission';
+    }
+    return switch (key) {
+      'running' => 'Running',
+      'idle' => 'Idle',
+      'failed' => 'Failed',
+      'stopped' => 'Stopped',
+      'inactive' => 'Inactive',
+      'live' => 'Live',
+      'done' => 'Done',
+      _ => 'Parked',
+    };
+  }
+
+  WorkspaceThread copyWith({
+    List<String>? tags,
+    String? state,
+    String? episodeStatus,
+    String? live,
+    List<WorkspacePendingRequest>? pending,
+  }) {
     return WorkspaceThread(
       id: id,
       title: title,
       state: state ?? this.state,
+      episodeStatus: episodeStatus ?? this.episodeStatus,
       live: live ?? this.live,
       episodes: episodes,
+      pending: pending ?? this.pending,
       pinned: pinned,
       summary: summary,
       project: project,

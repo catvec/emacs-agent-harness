@@ -200,15 +200,40 @@ subscription must not recurse into itself.")
   (and (harness-method-exists-p 'agent/running)
        (harness-call 'agent/running session-id)))
 
+(defun harness-workspace--session-record (session-id)
+  "Return the session plist of SESSION-ID, or nil when it is gone."
+  (when (and (stringp session-id)
+             (harness-method-exists-p 'session/exists-p)
+             (harness-call 'session/exists-p session-id))
+    (harness-call 'session/get session-id)))
+
 (defun harness-workspace--session-state (session-id)
   "Return the state of SESSION-ID as the workspace shows it."
-  (if (not (and (stringp session-id) (harness-call 'session/exists-p session-id)))
-      "parked"
-    (let ((status (plist-get (harness-call 'session/get session-id) :status)))
-      (cond ((eq status 'running) "live")
-            ((eq status 'blocked) "waiting")
-            ((eq status 'idle) "live")
-            (t "parked")))))
+  (if-let* ((session (harness-workspace--session-record session-id)))
+      (let ((status (plist-get session :status)))
+        (cond ((eq status 'running) "live")
+              ((eq status 'blocked) "waiting")
+              ((eq status 'idle) "live")
+              (t "parked")))
+    "parked"))
+
+(defun harness-workspace--episode-status (thread session)
+  "Return the state of THREAD's live episode, SESSION being its record.
+That is \"running\", \"blocked\", \"idle\", \"failed\", \"stopped\",
+\"inactive\" or, with no live episode, \"parked\".  A turn that ended
+with an error stays failed, and one the user cancelled stopped, until
+the next turn starts."
+  (cond
+   ((null session) "parked")
+   (t (pcase (plist-get session :status)
+        ('running "running")
+        ('blocked "blocked")
+        ('inactive "inactive")
+        ('idle (pcase (plist-get thread :last-stop)
+                 ("error" "failed")
+                 ("cancelled" "stopped")
+                 (_ "idle")))
+        (_ "idle")))))
 
 ;;;; Persistence
 
@@ -232,15 +257,24 @@ subscription must not recurse into itself.")
     workspace))
 
 (defun harness-workspace--view (workspace)
-  "Return WORKSPACE as clients read it, with thread states."
+  "Return WORKSPACE as clients read it, with thread states.
+Each thread carries `:state' as clients have always read it (`live',
+`waiting', `merged' or `parked'), the finer `:episode-status'
+(`running', `blocked', `idle', `failed', `stopped', `inactive' or
+`parked') and `:pending', what its live episode waits on."
   (let* ((threads (mapcar (lambda (thread)
                             (let* ((live (plist-get thread :live))
-                                   (state (if (plist-get thread :merged-into)
-                                              "merged"
-                                            (if live
-                                                (harness-workspace--session-state live)
-                                              "parked"))))
-                              (append (copy-sequence thread) (list :state state))))
+                                   (session (and live (harness-workspace--session-record live)))
+                                   (state (cond ((plist-get thread :merged-into) "merged")
+                                                ((null session) "parked")
+                                                ((eq (plist-get session :status) 'running) "live")
+                                                ((eq (plist-get session :status) 'blocked) "waiting")
+                                                ((eq (plist-get session :status) 'idle) "live")
+                                                (t "parked"))))
+                              (append (copy-sequence thread)
+                                      (list :state state
+                                            :episode-status (harness-workspace--episode-status thread session)
+                                            :pending (plist-get session :pending)))))
                           (plist-get workspace :threads)))
          (threads (sort threads
                         (lambda (a b)
@@ -354,7 +388,10 @@ the divider the user sees.  Return the session id."
          (session (apply #'harness-call 'session/create plist))
          (sid (plist-get session :id)))
     (setf (plist-get thread :live) sid
-          (plist-get thread :status) "live")
+          (plist-get thread :status) "live"
+          ;; The last stop was the old episode's: a new episode starts
+          ;; without one, running or idle, never failed or stopped.
+          (plist-get thread :last-stop) nil)
     (setf (plist-get thread :episodes)
           (append (plist-get thread :episodes) (list sid)))
     (harness-workspace--put-thread workspace thread)
@@ -670,11 +707,30 @@ ends rather than when the first chunk opens the node."
                              workspace (plist-get ext :thread))))
           (harness-workspace--note-thread workspace thread 'assistant text))))))
 
-(defun harness-workspace--on-turn-ended (session-id &rest _)
-  "Mark the episode of SESSION-ID idle in its workspace."
+(defun harness-workspace--on-turn-started (session-id &rest _)
+  "Clear the failed or stopped mark of SESSION-ID's episode.
+A new turn is a new chance: the episode reads running, not what its
+last turn ended with."
+  (when-let* ((ext (harness-workspace--episode-p session-id))
+              (workspace (gethash (plist-get ext :workspace) harness-workspace--table))
+              (thread (harness-workspace--thread workspace (plist-get ext :thread)))
+              ((equal (plist-get thread :live) session-id))
+              ((plist-get thread :last-stop)))
+    (setf (plist-get thread :last-stop) nil)
+    (harness-workspace--put-thread workspace thread)
+    (harness-workspace--save workspace)
+    (harness-emit 'workspace/thread-changed (plist-get workspace :id) thread)))
+
+(defun harness-workspace--on-turn-ended (session-id &optional reason)
+  "Mark the episode of SESSION-ID idle in its workspace.
+REASON is why the turn ended; an error stays marked failed, and a turn
+the user cancelled stopped, until the episode starts another."
   (when-let* ((ext (harness-workspace--episode-p session-id))
               (workspace (gethash (plist-get ext :workspace) harness-workspace--table))
               (thread (harness-workspace--thread workspace (plist-get ext :thread))))
+    (setf (plist-get thread :last-stop) (and reason (format "%s" reason)))
+    ;; The key may be new: put the thread back, not only its plist.
+    (harness-workspace--put-thread workspace thread)
     (harness-workspace--save workspace)
     (harness-emit 'workspace/thread-changed (plist-get workspace :id) thread)))
 
@@ -1194,6 +1250,7 @@ Only an episode gets them; a normal session is unchanged."
     (setq harness-workspace--subscribed t)
     (harness-on 'session/node-added #'harness-workspace--on-node-added)
     (harness-on 'session/node-updated #'harness-workspace--on-node-updated)
+    (harness-on 'agent/turn-started #'harness-workspace--on-turn-started)
     (harness-on 'agent/turn-ended #'harness-workspace--on-turn-ended)
     (harness-on 'session/deleted #'harness-workspace--on-session-deleted)
     (harness-add-filter 'agent/system-prompt #'harness-workspace--system-prompt)))
@@ -1204,6 +1261,7 @@ Only an episode gets them; a normal session is unchanged."
     (setq harness-workspace--subscribed nil)
     (harness-off (cons 'session/node-added #'harness-workspace--on-node-added))
     (harness-off (cons 'session/node-updated #'harness-workspace--on-node-updated))
+    (harness-off (cons 'agent/turn-started #'harness-workspace--on-turn-started))
     (harness-off (cons 'agent/turn-ended #'harness-workspace--on-turn-ended))
     (harness-off (cons 'session/deleted #'harness-workspace--on-session-deleted))
     (harness-remove-filter 'agent/system-prompt #'harness-workspace--system-prompt)))

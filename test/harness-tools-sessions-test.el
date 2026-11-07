@@ -1473,6 +1473,41 @@ the handler moves nothing the user did not confirm."
 
 (declare-function harness-tasks--set "harness-tasks")
 
+(ert-deftest harness-tools-sessions-task-list-project-filter ()
+  "task_list's project lists that project's tasks, as all_projects lists all.
+The filter goes through the board's own `task/list': it reads no file,
+asks for no directory, and all_projects still wins over it."
+  (harness-tools-sessions-test-with
+    (harness-test-mark-project default-directory)
+    (let* ((me (harness-tools-sessions-test-session))
+           (other (harness-test-temp-dir))
+           (other-task (progn
+                         (harness-test-mark-project other)
+                         (plist-get (harness-call 'task/submit other "Other project work") :id)))
+           (own-task (plist-get (harness-call 'task/submit default-directory "This project work") :id)))
+      (let ((own (harness-tools-sessions-test-ok me "task_list" nil)))
+        (should (string-match-p (regexp-quote own-task) own))
+        (should-not (string-match-p (regexp-quote other-task) own)))
+      (let ((chosen (harness-tools-sessions-test-ok me "task_list" (list :project other))))
+        (should (string-match-p (regexp-quote other-task) chosen))
+        (should-not (string-match-p (regexp-quote own-task) chosen)))
+      (let ((chosen (harness-tools-sessions-test-ok
+                     me "task_list" (list :project (directory-file-name default-directory)))))
+        (should (string-match-p (regexp-quote own-task) chosen))
+        (should-not (string-match-p (regexp-quote other-task) chosen)))
+      (let ((all (harness-tools-sessions-test-ok me "task_list" '(:all_projects t))))
+        (should (string-match-p (regexp-quote own-task) all))
+        (should (string-match-p (regexp-quote other-task) all)))
+      ;; all_projects wins over a project named beside it.
+      (let ((all (harness-tools-sessions-test-ok
+                  me "task_list" (list :project other :all_projects t))))
+        (should (string-match-p (regexp-quote own-task) all))
+        (should (string-match-p (regexp-quote other-task) all)))
+      (let* ((schema (plist-get (harness-call 'tools/get "task_list") :schema))
+             (properties (plist-get schema :properties)))
+        (should (equal "string" (plist-get (plist-get properties :project) :type))))
+      (delete-directory other t))))
+
 (ert-deftest harness-tools-sessions-task-list-has-the-cancelled-column ()
   "task_list names the cancelled column and filters by it; task_wait settles on it.
 A task the user cancelled and marked done is in the cancelled column,

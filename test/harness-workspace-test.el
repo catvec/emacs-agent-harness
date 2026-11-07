@@ -52,6 +52,9 @@
            (harness-workspace-episode-context 0.6)
            (harness-workspace-episode-turns 120)
            (default-directory dir))
+       ;; The module subscribes only while this is nil, and the bus is
+       ;; reset for every test: forget the last test's subscription too.
+       (setq harness-workspace--subscribed nil)
        (dolist (module '(store project config provider provider-demo tools session agent
                                workspace-memory workspace-box workspace))
          (harness-test-load-module module))
@@ -60,7 +63,6 @@
        (clrhash harness-agent--turns)
        (clrhash harness-workspace--table)
        (setq harness-workspace--loaded nil
-             harness-workspace--subscribed nil
              harness-workspace-memory--db nil
              harness-workspace-memory--schema nil
              harness-workspace-memory--fts nil
@@ -120,8 +122,13 @@
              (thread (car threads))
              (session (plist-get thread :live))
              (entries (harness-call 'workspace/timeline id)))
+        (harness-workspace-test-wait-idle session)
+        (setq view (harness-call 'workspace/get id)
+              thread (car (plist-get view :threads)))
         (should (= 1 (length threads)))
         (should (equal "live" (plist-get thread :state)))
+        (should (equal "idle" (plist-get thread :episode-status)))
+        (should (null (plist-get thread :pending)))
         (should session)
         (should (equal "workspace"
                        (format "%s" (plist-get (harness-call 'session/get session) :kind))))
@@ -138,6 +145,76 @@
                        (format "%s" (plist-get (car (harness-workspace-test-messages id)) :role))))
         (should (string-match-p "Remember that the tile is matte"
                                 (plist-get (car (harness-workspace-test-messages id)) :text)))))))
+
+(ert-deftest harness-workspace-episode-status-and-pending ()
+  "A thread says running, blocked, idle, failed or stopped, and what it waits on.
+The fine status is the session's, with the reason its last turn ended
+kept on the thread; the pending list is the session's own, so a client
+reads what the episode waits on without opening it."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let* ((thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (session (plist-get thread :live)))
+        (harness-workspace-test-wait-idle session)
+        (setq thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+        (should (equal "idle" (plist-get thread :episode-status)))
+        (should (null (plist-get thread :pending)))
+        ;; A question holds the episode blocked, and is in what it waits on.
+        (let ((pid (harness-call 'session/pending-add
+                                 session
+                                 (list :kind "question"
+                                       :payload (list :question "Which database?"
+                                                      :options (list "sqlite" "postgres"))))))
+          (setq thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+          (should (equal "blocked" (plist-get thread :episode-status)))
+          (should (equal "waiting" (plist-get thread :state)))
+          (should (equal pid (plist-get (car (plist-get thread :pending)) :id)))
+          (should (equal "question" (format "%s" (plist-get (car (plist-get thread :pending)) :kind))))
+          (harness-call 'session/pending-resolve session pid "sqlite")
+          (setq thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+          (should (equal "idle" (plist-get thread :episode-status)))
+          (should (null (plist-get thread :pending))))
+        ;; A turn that failed stays failed until the episode starts another.
+        (harness-emit 'agent/turn-ended session 'error)
+        (should (equal "failed"
+                       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads))
+                                  :episode-status)))
+        (harness-emit 'agent/turn-started session)
+        (should (equal "idle"
+                       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads))
+                                  :episode-status)))
+        (harness-emit 'agent/turn-ended session 'cancelled)
+        (should (equal "stopped"
+                       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads))
+                                  :episode-status)))
+        (harness-emit 'agent/turn-started session)
+        (should (equal "idle"
+                       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads))
+                                  :episode-status)))))))
+
+(ert-deftest harness-workspace-new-episode-clears-the-last-stop ()
+  "A new episode starts idle, though the one before it failed."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread (harness-call 'workspace/thread/create id "Kitchen renovation"))
+           (internal (harness-workspace--get id))
+           (record (harness-workspace--thread internal (plist-get thread :id)))
+           (session (harness-workspace--start-episode internal record 'new-thread)))
+      (harness-emit 'agent/turn-ended session 'error)
+      (should (equal "failed"
+                     (plist-get (car (plist-get (harness-call 'workspace/get id) :threads))
+                                :episode-status)))
+      (harness-workspace--start-episode internal record 'revived)
+      (let ((shown (car (plist-get (harness-call 'workspace/get id) :threads))))
+        (should (equal "live" (plist-get shown :state)))
+        (should (equal "idle" (plist-get shown :episode-status)))
+        (should-not (plist-get (harness-workspace--thread internal (plist-get shown :id))
+                               :last-stop))))))
 
 (ert-deftest harness-workspace-second-turn-continues-same-episode ()
   "A second message in the same thread keeps the live episode."

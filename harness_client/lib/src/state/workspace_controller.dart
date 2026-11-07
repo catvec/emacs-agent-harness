@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../models/workspace.dart';
+import 'interaction.dart';
 import '../services/harness_api.dart';
 
 /// The workspace chat on the client: the workspace, its threads, its timeline
@@ -20,6 +21,7 @@ class WorkspaceController extends ChangeNotifier {
     List<WorkspaceEntry> entries = const [],
     WorkspaceMemoryStatus? memory,
     WorkspaceComputerStatus computer = const WorkspaceComputerStatus(),
+    List<InteractionRequest> pending = const [],
   }) : _api = null,
        workspaces = [workspace],
        current = workspace,
@@ -27,6 +29,7 @@ class WorkspaceController extends ChangeNotifier {
        entries = entries,
        memory = memory,
        computer = computer,
+       previewPending = pending,
        selectedThread = workspace.active?.id {
     _learnThreads(threads);
     _learnTimeline(entries);
@@ -46,6 +49,36 @@ class WorkspaceController extends ChangeNotifier {
   String? error;
   bool loading = false;
   bool sending = false;
+
+  /// What a preview workspace waits on, for the widget tests and the
+  /// screenshot cases.  A real one reads the live episode's session.
+  List<InteractionRequest> previewPending = const [];
+
+  /// The request a preview workspace shows, or nil.
+  InteractionRequest? get previewRequest =>
+      previewPending.isEmpty ? null : previewPending.first;
+
+  /// The first request a preview workspace shows for episode [live], or nil.
+  InteractionRequest? previewRequestFor(String? live) {
+    for (final request in previewPending) {
+      if (live == null || request.sessionId == live) return request;
+    }
+    return null;
+  }
+
+  /// Answer, or dismiss, the request a preview shows: there is no harness
+  /// behind it, so the card simply goes, as an answered one does.  The
+  /// request must still be the one there: a card that outlived a thread
+  /// switch answers nothing.
+  void resolvePreview(InteractionRequest request) {
+    if (!_preview) return;
+    if (!previewPending.any((item) => identical(item, request))) return;
+    previewPending = [
+      for (final item in previewPending)
+        if (!identical(item, request)) item,
+    ];
+    notifyListeners();
+  }
 
   int _loads = 0;
   Timer? _reloadTimer;

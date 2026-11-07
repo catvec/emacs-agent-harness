@@ -11,15 +11,86 @@ import '../adaptive/adaptive_widgets.dart';
 import '../theme/harness_theme.dart';
 import 'markdown_view.dart';
 
-class InteractionCard extends StatefulWidget {
+/// The card of a conversation's pending request: a permission prompt or a
+/// question.  It is the first request the conversation shows.
+class InteractionCard extends StatelessWidget {
   const InteractionCard({super.key, required this.controller});
+
   final SessionController controller;
 
   @override
-  State<InteractionCard> createState() => _InteractionCardState();
+  Widget build(BuildContext context) {
+    final request = controller.currentInteraction;
+    if (request == null) return const SizedBox.shrink();
+    return PendingActionCard(
+      key: ValueKey(pendingRequestKey(request)),
+      request: request,
+      onPermission: (optionId, {pattern}) {
+        if (!identical(controller.currentInteraction, request)) {
+          return Future<void>.value();
+        }
+        return controller.answerPermission(optionId, pattern: pattern);
+      },
+      onQuestion: (answer) {
+        if (!identical(controller.currentInteraction, request)) {
+          return Future<void>.value();
+        }
+        return controller.answerQuestion(answer);
+      },
+      onDismissPermission: () {
+        if (!identical(controller.currentInteraction, request)) {
+          return Future<void>.value();
+        }
+        return controller.dismissPermission();
+      },
+      onCancelQuestion: () {
+        if (!identical(controller.currentInteraction, request)) {
+          return Future<void>.value();
+        }
+        return controller.cancelQuestion();
+      },
+      questionImage: (index) {
+        if (!identical(controller.currentInteraction, request)) {
+          return Future<Uint8List?>.value();
+        }
+        return controller.questionImage(index);
+      },
+    );
+  }
 }
 
-class _InteractionCardState extends State<InteractionCard> {
+/// What names a request: its method, its own id and its title.  A card is
+/// keyed by it, so another request never inherits the one before it.
+String pendingRequestKey(InteractionRequest request) =>
+    '${request.method}:${request.pendingId ?? request.questionId}:${request.title}';
+
+/// A pending request's card, drawn the same in a conversation and in a
+/// workspace showing its episode.  It knows the request and nothing else:
+/// the callbacks answer that request, and the host decides whether it still
+/// owns it, so a stale card can never answer another request or episode.
+class PendingActionCard extends StatefulWidget {
+  const PendingActionCard({
+    super.key,
+    required this.request,
+    required this.onPermission,
+    required this.onQuestion,
+    required this.onDismissPermission,
+    required this.onCancelQuestion,
+    required this.questionImage,
+  });
+
+  final InteractionRequest request;
+  final Future<void> Function(String optionId, {String? pattern}) onPermission;
+  final Future<void> Function(String answer) onQuestion;
+  final Future<void> Function() onDismissPermission;
+  final Future<void> Function() onCancelQuestion;
+  final Future<Uint8List?> Function(int index) questionImage;
+
+  @override
+  State<PendingActionCard> createState() => _PendingActionCardState();
+}
+
+class _PendingActionCardState extends State<PendingActionCard> {
   final _answer = TextEditingController();
   final _scroll = ScrollController();
   String? _currentKey;
@@ -45,7 +116,7 @@ class _InteractionCardState extends State<InteractionCard> {
   Future<void> _permission(String optionId) async {
     if (_busy) return;
     setState(() => _busy = true);
-    await widget.controller.answerPermission(
+    await widget.onPermission(
       optionId,
       pattern: _selectedPattern?.trim().isEmpty == true
           ? null
@@ -57,7 +128,7 @@ class _InteractionCardState extends State<InteractionCard> {
   Future<void> _question(String answer) async {
     if (_busy) return;
     setState(() => _busy = true);
-    await widget.controller.answerQuestion(answer.trim());
+    await widget.onQuestion(answer.trim());
     _answered();
   }
 
@@ -79,26 +150,34 @@ class _InteractionCardState extends State<InteractionCard> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final request = widget.controller.currentInteraction;
-    if (request == null) return const SizedBox.shrink();
-    final key =
-        '${request.method}:${request.pendingId ?? request.questionId}:${request.title}';
-    if (key != _currentKey) {
-      _currentKey = key;
-      _pattern = asString(request.harness['pattern']);
-      _selectedPattern = _pattern;
-      _answer.clear();
-      _busy = false;
-      _selectedQuestion = 0;
-      _ticked.clear();
-      // Another request: its pictures are not the last one's, and it is
-      // read from its first line.
-      _images.clear();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _scroll.hasClients) _scroll.jumpTo(0);
-      });
+  void didUpdateWidget(PendingActionCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (pendingRequestKey(oldWidget.request) !=
+        pendingRequestKey(widget.request)) {
+      _reset(widget.request);
     }
+  }
+
+  void _reset(InteractionRequest request) {
+    _currentKey = pendingRequestKey(request);
+    _pattern = asString(request.harness['pattern']);
+    _selectedPattern = _pattern;
+    _answer.clear();
+    _busy = false;
+    _selectedQuestion = 0;
+    _ticked.clear();
+    // Another request: its pictures are not the last one's, and it is read
+    // from its first line.
+    _images.clear();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _scroll.hasClients) _scroll.jumpTo(0);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final request = widget.request;
+    if (pendingRequestKey(request) != _currentKey) _reset(request);
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
       child: request.isQuestion
@@ -308,7 +387,7 @@ class _InteractionCardState extends State<InteractionCard> {
       eyebrow: 'Permission',
       title: request.title,
       subtitle: request.subtitle,
-      onDismiss: _busy ? null : widget.controller.dismissPermission,
+      onDismiss: _busy ? null : widget.onDismissPermission,
       body: (_) => Padding(
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
         child: Column(
@@ -505,7 +584,7 @@ class _InteractionCardState extends State<InteractionCard> {
       icon: Icons.help_outline_rounded,
       eyebrow: 'Question',
       title: short ? question : null,
-      onDismiss: _busy ? null : widget.controller.cancelQuestion,
+      onDismiss: _busy ? null : widget.onCancelQuestion,
       body: (tight) => Padding(
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
         child: Column(
@@ -552,8 +631,9 @@ class _InteractionCardState extends State<InteractionCard> {
                   diagram: selectedDiagram,
                   maxHeight: 200,
                   image: asString(selectedDiagram['type']) == 'image'
-                      ? (_images[_selectedQuestion] ??= widget.controller
-                            .questionImage(_selectedQuestion))
+                      ? (_images[_selectedQuestion] ??= widget.questionImage(
+                            _selectedQuestion,
+                          ))
                       : null,
                 ),
               ),
@@ -620,9 +700,9 @@ class _InteractionCardState extends State<InteractionCard> {
   /// choices, with the options ticked too (see [multipleAnswer]).  Nothing
   /// is sent when there is nothing to send.
   void _sendTyped() {
-    final request = widget.controller.currentInteraction;
+    final request = widget.request;
     final typed = _answer.text.trim();
-    final text = request != null && request.allowMultiple
+    final text = request.allowMultiple
         ? multipleAnswer(request.questionOptions, _ticked, typed)
         : typed;
     if (text.isNotEmpty) _question(text);

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/models/workspace.dart';
 import 'package:harness_client/src/state/app_controller.dart';
+import 'package:harness_client/src/state/interaction.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/state/workspace_controller.dart';
 import 'package:harness_client/src/ui/adaptive/platform_style.dart';
@@ -27,6 +28,7 @@ WorkspaceController _preview() {
         id: 't1',
         title: 'Kitchen renovation',
         state: 'live',
+        episodeStatus: 'running',
         live: 's1',
         tags: ['Kitchen', 'Budget'],
       ),
@@ -133,6 +135,80 @@ Future<void> _pump(
   );
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 350));
+}
+
+InteractionRequest _permissionRequest({
+  String id = 'p1',
+  String title = 'Read tasks.json',
+  String sessionId = 's1',
+}) => InteractionRequest(
+  method: 'session/request_permission',
+  params: {
+    'sessionId': sessionId,
+    'toolCall': {
+      'toolCallId': 'c-$id',
+      'title': title,
+      'kind': 'read',
+      'rawInput': {'path': '/home/noah/documents/ai/emacs-agent-harness/.git/harness/tasks.json'},
+    },
+    'options': const [
+      {'optionId': 'allow-once', 'name': 'Allow once', 'kind': 'allow_once'},
+      {'optionId': 'deny-once', 'name': 'Deny', 'kind': 'reject_once'},
+    ],
+    '_harness': {'pendingId': id, 'tool': 'read_file'},
+  },
+  sessionId: sessionId,
+  synthetic: true,
+  pendingId: id,
+);
+
+InteractionRequest _questionRequest({
+  String id = 'q1',
+  String question = 'Which database?',
+  String sessionId = 's1',
+}) => InteractionRequest(
+  method: '_harness/ask_user',
+  params: {
+    'sessionId': sessionId,
+    'requestId': id,
+    'question': question,
+    'options': const ['sqlite', 'postgres'],
+  },
+  sessionId: sessionId,
+  synthetic: true,
+  pendingId: id,
+);
+
+/// A preview workspace with [status] on its live thread, and [pending]
+/// requests waiting on its episode.
+WorkspaceController _previewStatus(
+  String status, {
+  List<InteractionRequest> pending = const [],
+  String title = 'Kitchen renovation',
+}) {
+  final workspace = WorkspaceSummary(
+    id: 'w1',
+    name: 'Home',
+    lastThread: 't1',
+    threads: [
+      WorkspaceThread(
+        id: 't1',
+        title: title,
+        state: status == 'parked' ? 'parked' : 'live',
+        episodeStatus: status,
+        live: status == 'parked' ? null : 's1',
+        pending: [
+          for (final request in pending)
+            WorkspacePendingRequest(
+              id: request.pendingId ?? '',
+              kind: request.isQuestion ? 'question' : 'permission',
+              title: request.title,
+            ),
+        ],
+      ),
+    ],
+  );
+  return WorkspaceController.preview(workspace: workspace, pending: pending);
 }
 
 Future<(AppController, FakeHarness, WorkspaceController)> _connectedWorkspace() async {
@@ -324,7 +400,7 @@ void main() {
     await _pump(tester, controller, size: const Size(1440, 900));
     for (final copy in const [
       'Home',
-      'Kitchen renovation · Live · 12 notes',
+      'Kitchen renovation · Running · 12 notes',
       'Threads',
       'Concepts',
       'Shared tags',
@@ -551,6 +627,143 @@ void main() {
     expect(find.text('No workspace'), findsOneWidget);
     expect(find.text('One chat, its threads and its memory'), findsOneWidget);
     expect(find.text('New workspace'), findsOneWidget);
+  });
+
+  testWidgets('a running, blocked, idle or failed episode says so', (
+    tester,
+  ) async {
+    for (final status in const ['running', 'blocked', 'idle', 'failed']) {
+      final controller = _previewStatus(status);
+      await _pump(tester, controller, size: const Size(1440, 900));
+      final word = switch (status) {
+        'running' => 'Running',
+        'blocked' => 'Blocked',
+        'idle' => 'Idle',
+        'failed' => 'Failed',
+        _ => 'Parked',
+      };
+      expect(find.text(word), findsOneWidget, reason: status);
+      expect(
+        find.textContaining('Kitchen renovation · $word'),
+        findsOneWidget,
+        reason: status,
+      );
+      if (status == 'blocked') {
+        // With no request known yet, a blocked episode still says what it
+        // waits on rather than nothing.
+        expect(
+          find.textContaining('Blocked · Permission'),
+          findsOneWidget,
+        );
+      }
+      expect(tester.takeException(), isNull, reason: status);
+    }
+  });
+
+  testWidgets('a phone says what its episode is doing', (tester) async {
+    final controller = _previewStatus(
+      'blocked',
+      pending: [_questionRequest()],
+    );
+    await _pump(tester, controller, size: const Size(390, 844));
+    // The desktop header shows the state beside the thread; a phone's
+    // narrower one puts it above the chat, in the same words.
+    expect(find.text('Blocked · Question'), findsOneWidget);
+    expect(find.text('QUESTION'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a blocked episode names its pending request', (tester) async {
+    final controller = _previewStatus(
+      'blocked',
+      pending: [_permissionRequest()],
+    );
+    await _pump(tester, controller, size: const Size(1440, 900));
+    expect(find.text('PERMISSION'), findsOneWidget);
+    expect(find.text('Read tasks.json'), findsOneWidget);
+    expect(find.text('Allow once'), findsOneWidget);
+    expect(find.text('Deny'), findsOneWidget);
+    expect(find.textContaining('Blocked · Permission'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the permission card answers the request it shows', (
+    tester,
+  ) async {
+    final controller = _previewStatus(
+      'blocked',
+      pending: [_permissionRequest()],
+    );
+    await _pump(tester, controller, size: const Size(1440, 900));
+    await tester.tap(find.text('Allow once'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('PERMISSION'), findsNothing);
+    expect(controller.previewPending, isEmpty);
+  });
+
+  testWidgets('a question is answered on its card, not in the composer', (
+    tester,
+  ) async {
+    final controller = _previewStatus(
+      'blocked',
+      pending: [_questionRequest()],
+    );
+    await _pump(tester, controller, size: const Size(1440, 900));
+    expect(find.text('QUESTION'), findsOneWidget);
+    expect(find.text('Which database?'), findsOneWidget);
+    expect(find.text('sqlite'), findsOneWidget);
+    expect(find.text('postgres'), findsOneWidget);
+    expect(find.text('Send answer'), findsOneWidget);
+    await tester.tap(find.text('sqlite'));
+    await tester.pump();
+    await tester.tap(find.text('Send answer'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('QUESTION'), findsNothing);
+    expect(controller.previewPending, isEmpty);
+  });
+
+  testWidgets('a thread switch shows only the selected episode card', (
+    tester,
+  ) async {
+    final workspace = WorkspaceSummary(
+      id: 'w1',
+      name: 'Home',
+      lastThread: 't1',
+      threads: const [
+        WorkspaceThread(
+          id: 't1',
+          title: 'First topic',
+          state: 'live',
+          episodeStatus: 'blocked',
+          live: 's1',
+        ),
+        WorkspaceThread(
+          id: 't2',
+          title: 'Second topic',
+          state: 'live',
+          episodeStatus: 'blocked',
+          live: 's2',
+        ),
+      ],
+    );
+    final controller = WorkspaceController.preview(
+      workspace: workspace,
+      pending: [
+        _permissionRequest(id: 'p1', title: 'First call', sessionId: 's1'),
+        _permissionRequest(id: 'p2', title: 'Second call', sessionId: 's2'),
+      ],
+    );
+    await _pump(tester, controller, size: const Size(1440, 900));
+    expect(find.text('First call'), findsOneWidget);
+    expect(find.text('Second call'), findsNothing);
+    await tester.tap(find.text('Second topic'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Second call'), findsOneWidget);
+    expect(find.text('First call'), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a concept keeps its full name and a 44px target', (tester) async {
