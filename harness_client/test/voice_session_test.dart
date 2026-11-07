@@ -272,6 +272,29 @@ void main() {
       },
     );
 
+    test('an answer still streaming when voice opens is spoken', () async {
+      final rig = await _rig();
+      final controller = await _open(rig);
+      final turn = controller.send('Work slowly through the tests');
+      await _until(
+        () => controller.transcript.items.any(
+          (item) => item.isAssistant && item.streaming,
+        ),
+        'the answer to start',
+      );
+
+      // A walkthrough's conversation answers before voice attaches: an answer
+      // that has not finished is no history, and is spoken when it is whole.
+      final bridge = SessionVoiceBridge(controller);
+      final heard = <String>[];
+      bridge.addReplyListener(heard.add);
+
+      await turn;
+      await _until(() => heard.isNotEmpty, 'the answer spoken');
+      expect(heard.single, startsWith('I’m done with this step.'));
+      bridge.removeReplyListener(heard.add);
+    });
+
     test('a permission waiting on the person shows as blocked', () async {
       final rig = await _rig();
       final controller = await _open(rig);
@@ -381,6 +404,57 @@ void main() {
         isTrue,
       );
       // The turn this started runs to its end before the test does.
+      await _settle(tester);
+    });
+  });
+
+  group('a conversation opened for a walkthrough', () {
+    testWidgets('opens voice mode by itself, and once', (tester) async {
+      final rig = await _rig();
+      tester.view.physicalSize = const Size(1170, 2532);
+      tester.view.devicePixelRatio = 3;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final backend = FakeBackend();
+      await tester.pumpWidget(
+        HarnessStyle(
+          style: HarnessPlatformStyle.material,
+          child: HarnessScope(
+            app: rig.app,
+            settings: rig.settings,
+            child: MaterialApp(
+              debugShowCheckedModeBanner: false,
+              theme: HarnessTheme.material(Brightness.light),
+              home: SessionScreen(
+                sessionId: 's1',
+                startVoice: true,
+                voiceBackendFactory: (settings, address) => backend,
+              ),
+            ),
+          ),
+        ),
+      );
+      // The conversation loads, then voice mode opens by itself.
+      for (var i = 0; i < 50; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+        if (find.byKey(const Key('voice-status')).evaluate().isNotEmpty) {
+          break;
+        }
+      }
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.byKey(const Key('voice-status')), findsOneWidget);
+      expect(backend.started, isTrue);
+      // Voice mode says nothing of its own: the question of a walkthrough is
+      // the report's, already on its way into this conversation.
+      expect(_prompts(rig), isEmpty);
+
+      // Ending goes back to the conversation, and voice mode stays closed:
+      // it was opened once.
+      await tester.tap(find.byKey(const Key('voice-close')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byKey(const Key('voice-status')), findsNothing);
+      expect(_prompts(rig), isEmpty);
       await _settle(tester);
     });
   });

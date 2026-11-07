@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../acp/acp_message.dart';
 import '../../models/picture.dart';
@@ -10,6 +11,7 @@ import '../../models/transcript.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../format.dart';
+import '../screens/hand_in_design_screen.dart';
 import '../theme/harness_theme.dart';
 import 'harness_picture.dart';
 import 'markdown_view.dart';
@@ -638,6 +640,45 @@ class HandInReportView extends StatelessWidget {
                   : Icons.info_outline_rounded,
             ),
           ),
+        // The design the work was written against, before the problem it
+        // answers: a report that names none has nothing here.
+        if (report.design case final design? when !design.isEmpty)
+          section(
+            'DESIGN',
+            Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (design.title != null)
+                    Text(design.title!, style: HarnessText.rowTitle(context)),
+                  if (design.summary != null)
+                    Padding(
+                      padding: EdgeInsets.only(
+                        top: design.title == null ? 0 : 2,
+                      ),
+                      child: HarnessMarkdown(
+                        text: design.summary!,
+                        compact: true,
+                      ),
+                    ),
+                  // Only a design whose document the harness could read can
+                  // be read here: the page is the text that was handed in.
+                  if (design.hasText)
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: HarnessTextButton(
+                        label: 'Read design',
+                        icon: Icons.menu_book_outlined,
+                        dense: true,
+                        onPressed: () =>
+                            HandInDesignScreen.show(context, design),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
         if (report.problem.isNotEmpty)
           section(
             'PROBLEM',
@@ -723,6 +764,7 @@ class _EvidenceRowState extends State<EvidenceRow> {
     'code' => (item.text ?? '').isNotEmpty,
     // A note with a caption is the caption, which opens to the note.
     'note' => (item.caption ?? '').isNotEmpty && (item.text ?? '').isNotEmpty,
+    'demo' => (item.narration ?? '').isNotEmpty,
     'tool-call' =>
       (item.output ?? '').isNotEmpty || (item.input ?? '').isNotEmpty,
     _ => false,
@@ -734,14 +776,53 @@ class _EvidenceRowState extends State<EvidenceRow> {
     'file' => Icons.insert_drive_file_outlined,
     'code' => Icons.code_rounded,
     'note' => Icons.notes_rounded,
+    'demo' => Icons.slideshow_rounded,
     _ => item.isError ? Icons.error_outline_rounded : Icons.terminal_rounded,
   };
+
+  /// Where the demo is served, when it is: only a web page is opened here,
+  /// and only over http or https.
+  Uri? get _demoUrl {
+    if (!item.isDemo) return null;
+    final url = item.url;
+    if (url == null) return null;
+    final uri = Uri.tryParse(url);
+    return uri != null && (uri.scheme == 'http' || uri.scheme == 'https')
+        ? uri
+        : null;
+  }
+
+  /// Whether the demo runs where the harness does, and there is no page to
+  /// open here.
+  bool get _onHarness =>
+      item.isDemo &&
+      _demoUrl == null &&
+      (item.path != null || item.command.isNotEmpty);
+
+  Future<void> _openDemo() async {
+    final uri = _demoUrl;
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // Nothing on this device can open it: the row still names it.
+    }
+  }
 
   String? get _detail => switch (item.kind) {
     'image' ||
     'video' ||
     'file' => item.path == null ? null : baseName(item.path!),
     'code' => item.language,
+    'demo' =>
+      item.title != null && item.title != item.label
+          ? item.title
+          : item.url ??
+                (item.name != null
+                    ? baseName(item.name!)
+                    : item.path == null
+                    ? null
+                    : baseName(item.path!)),
     'tool-call' =>
       (item.title != null && item.title != item.label)
           ? item.title
@@ -788,9 +869,29 @@ class _EvidenceRowState extends State<EvidenceRow> {
                           .copyWith(fontFamily: 'monospace', fontSize: 11.5),
                     ),
                   ),
+                // A demo that is not served, or is served somewhere this
+                // device cannot open, runs where the harness does.
+                if (_onHarness)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'On the harness machine',
+                      style: HarnessText.caption(context),
+                    ),
+                  ),
               ],
             ),
           ),
+          if (_demoUrl != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 4, top: 1),
+              child: HarnessTextButton(
+                label: 'Open',
+                icon: Icons.open_in_new_rounded,
+                dense: true,
+                onPressed: _openDemo,
+              ),
+            ),
           if (_hasBody)
             Padding(
               padding: const EdgeInsets.only(left: 6, top: 1),
@@ -833,7 +934,15 @@ class _EvidenceRowState extends State<EvidenceRow> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (item.kind == 'note')
+                if (item.isDemo)
+                  ToolSection(
+                    label: 'NARRATION',
+                    child: HarnessMarkdown(
+                      text: item.narration!,
+                      compact: true,
+                    ),
+                  )
+                else if (item.kind == 'note')
                   HarnessMarkdown(text: item.text!, compact: true)
                 else if (item.kind == 'code')
                   ToolText(

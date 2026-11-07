@@ -156,13 +156,16 @@ Return a promise that settles once the BTW is shown."
        (lambda (child) (harness-ui-btw--show (plist-get child :id) over about question))
        (lambda (e) (message "BTW failed: %s" (harness-error-message e)) nil)))))
 
-(defun harness-ui-btw--show (id over about question)
+(defun harness-ui-btw--show (id over about question &optional after)
   "Show BTW session ID in a side window over buffer OVER, point in its box.
 The window shows the session's chat buffer as any session's, header
 line, keys and menu included; `harness-ui-btw-minor-mode' only adds to
 it.  ABOUT says what the conversation is about, nil for a side
 conversation over OVER's session.  QUESTION, when non-nil, is asked at
-once; otherwise the first message sent from the box names the BTW."
+once; otherwise the first message sent from the box names the BTW.
+AFTER, when non-nil, is called with the BTW's buffer once it shows and
+is ready: a walkthrough turns voice on there and asks its first
+question itself, in that order."
   (puthash id over harness-ui-btw--open)
   (harness-ui-refresh-sessions
    (lambda (_)
@@ -187,7 +190,8 @@ once; otherwise the first message sent from the box names the BTW."
          ;; Ready for the question.
          (when (harness-compose-live-p)
            (goto-char harness-compose-end)
-           (set-window-point window harness-compose-end)))))))
+           (set-window-point window harness-compose-end))
+         (when after (funcall after buf)))))))
 
 (defun harness-ui-btw--on-send (text _attachments)
   "Name this BTW after TEXT, the first message sent in it.

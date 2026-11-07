@@ -2761,5 +2761,18 @@ replies\", and the model takes a step more to correct it."
   "A file reference in a typed reply keeps that video with only that comment."
   (harness-thread-reply-test--typed-media "video/mp4" "clip.mp4" "@clip.mp4"))
 
+(ert-deftest harness-patch-review-a-buffer-reference-is-a-location ()
+  "A reply to lines of a buffer, as a design section is, is kept at its file and lines."
+  (let* ((ref (list :kind "buffer" :file "docs/design/parser.md"
+                    :line 3 :end 9 :text "It reads nested quotes."))
+         (location (harness-patch-review--thread-location
+                    (list :refs (list ref) :response "Why this way?"))))
+    (should (change-review-location-p location))
+    (should (equal "docs/design/parser.md" (change-review-location-file location)))
+    (should (equal 'new (change-review-location-side location)))
+    (should (= 3 (change-review-location-line location)))
+    (should (= 9 (change-review-location-end-line location)))
+    (should (equal "It reads nested quotes." (change-review-location-excerpt location)))))
+
 (provide 'harness-patch-review-test)
 ;;; harness-patch-review-test.el ends here

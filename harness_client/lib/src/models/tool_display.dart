@@ -295,8 +295,15 @@ String errorPreview(ToolView tool, {int max = 160}) {
 class EvidenceItem {
   const EvidenceItem({
     required this.kind,
+    this.id,
     this.caption,
     this.path,
+    this.name,
+    this.url,
+    this.command = const [],
+    this.cwd,
+    this.cwdName,
+    this.narration,
     this.text,
     this.language,
     this.reference,
@@ -306,12 +313,37 @@ class EvidenceItem {
     this.isError = false,
   });
 
-  /// `image`, `video`, `file`, `code`, `note` or `tool-call`.
+  /// `image`, `video`, `file`, `code`, `note`, `demo` or `tool-call`.
   final String kind;
+
+  /// How the report names a demo (`demo-1`), which `demo/start` takes.  A
+  /// report written without one is read with its place among the demos as
+  /// the name, so that an older report's demo can still be started.
+  final String? id;
   final String? caption;
 
   /// Where an image, a video or a file is, on the harness's machine.
   final String? path;
+
+  /// A demo's path relative to the task's worktree.
+  final String? name;
+
+  /// Where a demo is served from, when it is served: the only way to open it
+  /// on this device.
+  final String? url;
+
+  /// How a demo is started, as the argv of a command on the harness's
+  /// machine.  Empty when the demo is just served.
+  final List<String> command;
+
+  /// Where a demo is started, on the harness's machine.
+  final String? cwd;
+
+  /// [cwd] relative to the task's worktree.
+  final String? cwdName;
+
+  /// What to do with a demo, as Markdown, said in the row of its evidence.
+  final String? narration;
 
   /// A note's text, or a code block's code.
   final String? text;
@@ -329,8 +361,36 @@ class EvidenceItem {
 
   bool get isMedia => kind == 'image' || kind == 'video' || kind == 'file';
 
+  /// A demo the work hands in: a page on the harness's machine, opened here
+  /// when it is served at a URL.
+  bool get isDemo => kind == 'demo';
+
+  /// The same item, named [id].
+  EvidenceItem withId(String id) => EvidenceItem(
+    kind: kind,
+    id: id,
+    caption: caption,
+    path: path,
+    name: name,
+    url: url,
+    command: command,
+    cwd: cwd,
+    cwdName: cwdName,
+    narration: narration,
+    text: text,
+    language: language,
+    reference: reference,
+    title: title,
+    input: input,
+    output: output,
+    isError: isError,
+  );
+
   /// The words that stand for the item in a list.
   String get label {
+    // A demo is named by what it shows, and called a demo when it says
+    // nothing of itself.
+    if (isDemo) return _nonBlank(title) ?? 'Demo';
     final said = caption?.trim();
     if (said != null && said.isNotEmpty) return said;
     return switch (kind) {
@@ -352,12 +412,14 @@ class EvidenceItem {
     }
     final item = asMap(wire);
     if (item.isEmpty) return null;
+    final id = _nonBlank(asString(item['id']));
     final caption = asString(item['caption']);
     final kind = asString(item['kind']);
     if (kind != null) {
       return switch (kind) {
         'tool-call' => EvidenceItem(
           kind: kind,
+          id: id,
           caption: caption,
           title: asString(item['title']),
           reference: asString(item['tool']),
@@ -367,26 +429,37 @@ class EvidenceItem {
         ),
         'code' => EvidenceItem(
           kind: kind,
+          id: id,
           caption: caption,
           text: asString(item['code']),
           language: asString(item['language']),
         ),
         'note' => EvidenceItem(
           kind: kind,
+          id: id,
           caption: caption,
           text: asString(item['text'] ?? item['note']),
         ),
+        'demo' => _demo(item, caption: caption),
         _ => EvidenceItem(
           kind: kind,
+          id: id,
           caption: caption,
           path: asString(item['path']),
         ),
       };
     }
+    final demo = item['demo'];
+    if (demo != null) {
+      return demo is String
+          ? EvidenceItem(kind: 'demo', id: id, caption: caption, path: demo)
+          : _demo(asMap(demo), caption: caption);
+    }
     for (final media in const ['image', 'video', 'file']) {
       if (item[media] != null) {
         return EvidenceItem(
           kind: media,
+          id: id,
           caption: caption,
           path: asString(item[media]),
         );
@@ -395,6 +468,7 @@ class EvidenceItem {
     if (item['code'] != null) {
       return EvidenceItem(
         kind: 'code',
+        id: id,
         caption: caption,
         text: asString(item['code']),
         language: asString(item['language']),
@@ -403,6 +477,7 @@ class EvidenceItem {
     if (item['note'] != null) {
       return EvidenceItem(
         kind: 'note',
+        id: id,
         caption: caption,
         text: asString(item['note']),
       );
@@ -410,12 +485,32 @@ class EvidenceItem {
     if (item['tool_call'] != null) {
       return EvidenceItem(
         kind: 'tool-call',
+        id: id,
         caption: caption,
         reference: asString(item['tool_call']),
       );
     }
     return null;
   }
+
+  /// A demo, as the report resolves it and as the call asked for it: the
+  /// page, where it is served, how it starts, and what to do with it.
+  static EvidenceItem _demo(JsonMap item, {String? caption}) => EvidenceItem(
+    kind: 'demo',
+    id: _nonBlank(asString(item['id'])),
+    caption: caption,
+    title: _nonBlank(asString(item['title'])),
+    path: _nonBlank(asString(item['path'])),
+    name: _nonBlank(asString(item['name'])),
+    url: _nonBlank(asString(item['url'])),
+    command: [
+      for (final part in asList(item['command']))
+        if (part is String && part.trim().isNotEmpty) part,
+    ],
+    cwd: _nonBlank(asString(item['cwd'])),
+    cwdName: _nonBlank(asString(item['cwd-name'] ?? item['cwdName'])),
+    narration: _nonBlank(asString(item['narration'])),
+  );
 
   static String? _jsonText(Object? value) {
     if (value == null) return null;
@@ -432,6 +527,12 @@ class EvidenceItem {
   }
 }
 
+/// [text] with nothing around it, or null when there is nothing left.
+String? _nonBlank(String? text) {
+  final trimmed = text?.trim();
+  return trimmed == null || trimmed.isEmpty ? null : trimmed;
+}
+
 /// A line's worth of [text]: its first non-empty line, cut.
 String truncateLine(String text, {int max = 90}) {
   final first = text
@@ -439,6 +540,62 @@ String truncateLine(String text, {int max = 90}) {
       .map((line) => line.trim())
       .firstWhere((line) => line.isNotEmpty, orElse: () => '');
   return first.length <= max ? first : '${first.substring(0, max - 1)}…';
+}
+
+/// The design document a task's work was written against: what it decides
+/// and why, the full text of it when the harness could read it, and where it
+/// is.  A design the call only asked for has its path, title and summary,
+/// and no text: nothing is read that was not handed in.
+class HandInDesign {
+  const HandInDesign({
+    this.title,
+    this.path,
+    this.name,
+    this.summary,
+    this.text,
+  });
+
+  /// What the document is called.
+  final String? title;
+
+  /// Where it is on the harness's machine.
+  final String? path;
+
+  /// Its path relative to the task's worktree.
+  final String? name;
+
+  /// What it decides and why, as Markdown.
+  final String? summary;
+
+  /// The document as it was when the work was handed in.
+  final String? text;
+
+  /// Whether there is text to read on a page of its own.
+  bool get hasText => _nonBlank(text) != null;
+
+  /// Whether there is anything of it to show.
+  bool get isEmpty =>
+      _nonBlank(title) == null &&
+      _nonBlank(path) == null &&
+      _nonBlank(name) == null &&
+      _nonBlank(summary) == null &&
+      _nonBlank(text) == null;
+
+  /// The design in [wire], or null when there is none: the report resolves
+  /// the document and keeps its text, while the input of the call that asked
+  /// for the work has its path and summary and no text.
+  static HandInDesign? fromWire(Object? wire) {
+    final map = asMap(wire);
+    if (map.isEmpty) return null;
+    final design = HandInDesign(
+      title: _nonBlank(asString(map['title'])),
+      path: _nonBlank(asString(map['path'])),
+      name: _nonBlank(asString(map['name'])),
+      summary: _nonBlank(asString(map['summary'])),
+      text: _nonBlank(asString(map['text'])),
+    );
+    return design.isEmpty ? null : design;
+  }
 }
 
 /// What a task's work was handed in with: why, what was done, how to see it,
@@ -456,6 +613,8 @@ class HandInReport {
     this.problem = '',
     this.summary = '',
     this.reproduction,
+    this.design,
+    this.walkthrough,
     this.evidence = const [],
     this.cannotContinue = false,
     this.noMerge = false,
@@ -490,15 +649,36 @@ class HandInReport {
       problem: asStringOr(wire['problem'], '').trim(),
       summary: asStringOr(wire['summary'], '').trim(),
       reproduction: asString(wire['reproduction'])?.trim(),
-      evidence: [
-        for (final item in asList(wire['evidence']))
-          if (EvidenceItem.fromWire(item) case final EvidenceItem found) found,
-      ],
+      design: HandInDesign.fromWire(wire['design'] ?? input['design']),
+      walkthrough: _nonBlank(
+        asString(wire['walkthrough'] ?? input['walkthrough']),
+      ),
+      evidence: _evidence(wire['evidence']),
       cannotContinue: flag('cannot_continue'),
       noMerge: flag('no_merge'),
       missing: asBool(wire['missing']),
       at: parseTime(wire['at']),
     );
+  }
+
+  /// The evidence [wire] lists.  A demo the harness did not name is named by
+  /// its place among the demos of the report (`demo-1`, `demo-2`), so that a
+  /// report written before demos had ids can still start one; any other
+  /// evidence keeps the name it was given, or none.
+  static List<EvidenceItem> _evidence(Object? wire) {
+    final evidence = <EvidenceItem>[];
+    var demos = 0;
+    for (final raw in asList(wire)) {
+      final item = EvidenceItem.fromWire(raw);
+      if (item == null) continue;
+      if (item.isDemo) {
+        demos++;
+        evidence.add(item.id == null ? item.withId('demo-$demos') : item);
+      } else {
+        evidence.add(item);
+      }
+    }
+    return evidence;
   }
 
   final String problem;
@@ -507,6 +687,12 @@ class HandInReport {
   /// report that is [missing], the last message the session wrote.
   final String summary;
   final String? reproduction;
+
+  /// The design document the work was written against, when it named one.
+  final HandInDesign? design;
+
+  /// How to present the finished work, as a prompt for a voice walkthrough.
+  final String? walkthrough;
   final List<EvidenceItem> evidence;
   final bool cannotContinue;
   final bool noMerge;
@@ -525,6 +711,8 @@ class HandInReport {
       problem.isEmpty &&
       summary.isEmpty &&
       (reproduction ?? '').isEmpty &&
+      design == null &&
+      (walkthrough ?? '').isEmpty &&
       evidence.isEmpty;
 
   /// The report of [tool], when it is a `hand_in` call that went through.

@@ -152,6 +152,18 @@ work from the user."
   '("mp4" "webm" "mov" "mkv" "avi" "m4v" "ogv")
   "File extensions a video evidence may have.")
 
+(defconst harness-tools-handin-design-limit 120000
+  "Characters of a design document a report keeps.")
+
+(defconst harness-tools-handin-demo-narration-limit 8000
+  "Characters of a demo's narration a report keeps.")
+
+(defconst harness-tools-handin-demo-command-args 20
+  "Most arguments a demo command may have.")
+
+(defconst harness-tools-handin-walkthrough-limit 24000
+  "Characters of the presenter brief a report keeps.")
+
 (defun harness-tools-handin--invalid (format-string &rest args)
   "Return the error result for a malformed call.
 Its message is FORMAT-STRING formatted with ARGS, as by `format'."
@@ -197,6 +209,153 @@ when it is none of that."
      ((and (equal kind "video") (not (member extension harness-tools-handin-video-types)))
       (format "Evidence %d: %s is not a video (MP4, WebM, MOV or the like)" number raw))
      (t (list :kind kind :path path :extension extension)))))
+
+(defun harness-tools-handin--relative-name (session path)
+  "Return PATH as the session's directory shows it.
+A path outside every directory of SESSION is its own name, so a report
+never claims a file of the project that is not one."
+  (let ((cwd (plist-get session :cwd)))
+    (if (and cwd (harness-path-within-p cwd path))
+        (directory-file-name (file-relative-name path cwd))
+      (file-name-nondirectory path))))
+
+(defun harness-tools-handin--read-text (path)
+  "Return the UTF-8 text of the file at PATH."
+  (with-temp-buffer
+    (let ((coding-system-for-read 'utf-8))
+      (insert-file-contents path))
+    (buffer-string)))
+
+(defun harness-tools-handin--first-heading (text)
+  "Return the first Markdown heading of TEXT, or nil."
+  (when (string-match "^#+[ \t]+\\(.+?\\)[ \t]*\r?$" text)
+    (string-trim (match-string 1 text))))
+
+(defun harness-tools-handin--design (value ctx)
+  "Return the report's design document for VALUE, or an error string.
+VALUE is a path or an object with `:path', and optional `:title' and
+`:summary'.  The document is read at hand-in time and kept whole in the
+report, so the review reads what the task explained and not whatever
+the file says after the branch moved.  The path must lie in one of the
+session's directories."
+  (cond
+   ((null value) nil)
+   ((not (or (stringp value) (listp value)))
+    "design is neither a path nor an object")
+   (t
+    (let* ((object (if (stringp value) (list :path value) value))
+           (raw (harness-tools-handin--clean (plist-get object :path)))
+           (given-title (harness-tools-handin--clean (plist-get object :title)))
+           (given-summary (harness-tools-handin--clean (plist-get object :summary)))
+           (session (harness-tools-handin--session-plist (plist-get ctx :session-id)))
+           (path (and raw (harness-tools-resolve-path raw ctx))))
+      (cond
+       ((not raw)
+        "design needs path: the Markdown document that explains the design")
+       ((not (file-regular-p path))
+        (format "design: %s not found" raw))
+       ((not (file-readable-p path))
+        (format "design: %s is not readable" raw))
+       ((not (harness-tools-handin--within-p session path))
+        (format "design: %s lies outside the directories this session may use" raw))
+       ((> (or (file-attribute-size (file-attributes path)) 0)
+           harness-tools-handin-design-limit)
+        (format "design: %s is longer than %d characters; keep the design document to the design"
+                raw harness-tools-handin-design-limit))
+       (t
+        (let ((text (harness-tools-handin--read-text path)))
+          (cond
+           ((harness-string-blank-p text)
+            (format "design: %s is empty" raw))
+           ((string-search "\0" text)
+            (format "design: %s is not a text document" raw))
+           (t
+            (list :title (or given-title
+                             (harness-tools-handin--first-heading text)
+                             (file-name-base path))
+                  :path path
+                  :name (harness-tools-handin--relative-name session path)
+                  :summary (and given-summary
+                                (harness-truncate-end given-summary 4000))
+                  :text (harness-truncate-end text harness-tools-handin-design-limit)))))))))))
+
+(defun harness-tools-handin--demo-command (value)
+  "Return VALUE as a demo command list, or an error string."
+  (let ((command (and (or (listp value) (vectorp value)) (append value nil))))
+    (cond
+     ((not command) "demo command is not a list of arguments")
+     ((> (length command) harness-tools-handin-demo-command-args)
+      (format "demo command has more than %d arguments" harness-tools-handin-demo-command-args))
+     ((cl-some (lambda (arg) (not (and (stringp arg) (not (string-empty-p arg)))))
+               command)
+      "demo command has an argument that is not a non-empty string")
+     (t command))))
+
+(defun harness-tools-handin--demo (value number ctx)
+  "Return the report's demo evidence for VALUE, the NUMBERth item, or an error.
+VALUE is a path or an object with `:path', `:url', `:command', `:cwd',
+`:title', `:narration' and `:workspace'.  It names at least one of the
+three ways to show the demo -- the file, the URL, the command -- and
+every path must lie in one of the session's directories.  `:workspace'
+binds the demo to a workspace whose computer runs it; without one the
+demo runs where the harness does.  Nothing runs at hand-in time: running
+the demo is the reviewer's action, confirmed then."
+  (let ((object (cond ((stringp value) (list :path value))
+                      ((listp value) value)
+                      (t nil))))
+    (if (not object)
+        (format "Evidence %d: demo is neither a path nor an object" number)
+      (let* ((raw-path (harness-tools-handin--clean (plist-get object :path)))
+             (raw-url (harness-tools-handin--clean (plist-get object :url)))
+             (raw-cwd (harness-tools-handin--clean (plist-get object :cwd)))
+             (narration (harness-tools-handin--clean (plist-get object :narration)))
+             (given-title (harness-tools-handin--clean (plist-get object :title)))
+             (workspace (harness-tools-handin--clean (plist-get object :workspace)))
+             (session (harness-tools-handin--session-plist (plist-get ctx :session-id)))
+             (path (and raw-path (harness-tools-resolve-path raw-path ctx)))
+             (command (and (plist-get object :command)
+                           (harness-tools-handin--demo-command (plist-get object :command))))
+             (cwd (and raw-cwd (harness-tools-resolve-path raw-cwd ctx)))
+             (default-cwd (cond ((and path (file-directory-p path)) path)
+                                ((and path (file-regular-p path)) (file-name-directory path))
+                                (t (plist-get session :cwd)))))
+        (cond
+         ((and (null raw-path) (null raw-url) (null (plist-get object :command)))
+          (format "Evidence %d: demo needs a path, a url or a command" number))
+         ((and raw-path (not (file-exists-p path)))
+          (format "Evidence %d: demo %s not found" number raw-path))
+         ((and raw-path (not (harness-tools-handin--within-p session path)))
+          (format "Evidence %d: demo %s lies outside the directories this session may use"
+                  number raw-path))
+         ((and raw-url (not (string-match-p "\\`https?://[^ \t\n]+\\'" raw-url)))
+          (format "Evidence %d: demo url %s is not an http or https URL" number raw-url))
+         ((stringp command) (format "Evidence %d: %s" number command))
+         ((and raw-cwd (not (file-directory-p cwd)))
+          (format "Evidence %d: demo cwd %s is not a directory" number raw-cwd))
+         ((and raw-cwd (not (harness-tools-handin--within-p session cwd)))
+          (format "Evidence %d: demo cwd %s lies outside the directories this session may use"
+                  number raw-cwd))
+         (t
+          (list :kind "demo"
+                :title (or given-title
+                           (cond (path (file-name-base path))
+                                 (raw-url (harness-truncate-end
+                                           (replace-regexp-in-string "\\`https?://" "" raw-url)
+                                           80))
+                                 (t (file-name-nondirectory (car command)))))
+                :path path
+                :name (and path (harness-tools-handin--relative-name session path))
+                :url raw-url
+                :command command
+                :cwd (or cwd default-cwd)
+                :cwd-name (and (or cwd default-cwd)
+                               (harness-tools-handin--relative-name
+                                session (or cwd default-cwd)))
+                :workspace workspace
+                :narration (and narration
+                                (harness-truncate-end
+                                 narration harness-tools-handin-demo-narration-limit)))))))))
+
 
 (defun harness-tools-handin--tool-name (node)
   "Return the tool name of call node NODE."
@@ -344,8 +503,8 @@ may quote."
 (defun harness-tools-handin--item (item number ctx)
   "Return the report evidence item for ITEM, the NUMBERth, of CTX.
 ITEM is a string (a note), or an object with exactly one of `:image',
-`:video', `:file', `:code', `:note' and `:tool_call', and an optional
-`:caption'.  Return an error string when it is none of that."
+`:video', `:file', `:code', `:note', `:tool_call' and `:demo', and an
+optional `:caption'.  Return an error string when it is none of that."
   (let ((caption (let ((c (plist-get item :caption)))
                    (and (stringp c) (not (harness-string-blank-p c)) (string-trim c))))
         (sid (plist-get ctx :session-id)))
@@ -361,10 +520,12 @@ ITEM is a string (a note), or an object with exactly one of `:image',
              (code (plist-get item :code))
              (note (plist-get item :note))
              (call (harness-tools-handin--clean (plist-get item :tool_call)))
+             (demo (plist-get item :demo))
              (kinds (delq nil (list (and image 'image) (and video 'video) (and file 'file)
                                     (and (stringp code) (not (harness-string-blank-p code)) 'code)
                                     (and (stringp note) (not (harness-string-blank-p note)) 'note)
-                                    (and call 'tool-call))))
+                                    (and call 'tool-call)
+                                    (and demo 'demo))))
              (one (lambda (result)
                     ;; An error string stays as it is.
                     (if (and caption (listp result))
@@ -372,9 +533,9 @@ ITEM is a string (a note), or an object with exactly one of `:image',
                       result))))
         (cond
          ((null kinds)
-          (format "Evidence %d says nothing: give it an image, a video, a file, code, a note or a tool_call" number))
+          (format "Evidence %d says nothing: give it an image, a video, a file, code, a note, a tool_call or a demo" number))
          ((cdr kinds)
-          (format "Evidence %d gives %s: give it exactly one of image, video, file, code, note or tool_call"
+          (format "Evidence %d gives %s: give it exactly one of image, video, file, code, note, tool_call or demo"
                   number (mapconcat (lambda (kind) (if (eq kind 'tool-call) "tool_call" (symbol-name kind)))
                                     kinds " and ")))
          ((eq (car kinds) 'image) (funcall one (or (harness-tools-handin--file image "image" number ctx)
@@ -389,12 +550,24 @@ ITEM is a string (a note), or an object with exactly one of `:image',
                                                                   "text")
                                                     :code (harness-truncate-end code 20000))))
          ((eq (car kinds) 'note) (funcall one (list :kind "note" :text (string-trim note))))
+         ((eq (car kinds) 'demo)
+          (funcall one (or (harness-tools-handin--demo demo number ctx)
+                           (format "Evidence %d: demo needs a path, a url or a command" number))))
          (t (funcall one (or (harness-tools-handin--call sid call number)
                              (format "Evidence %d: no tool call %s" number call))))))))))
 
 (defun harness-tools-handin--clean (value)
   "Return VALUE as a non-blank trimmed string, or nil."
   (and (stringp value) (not (harness-string-blank-p value)) (string-trim value)))
+
+(defun harness-tools-handin--demo-ids (items)
+  "Return ITEMS with each demo numbered among the demos: `demo-1', `demo-2'."
+  (let ((n 0))
+    (mapcar (lambda (item)
+              (if (equal (plist-get item :kind) "demo")
+                  (plist-put (copy-sequence item) :id (format "demo-%d" (cl-incf n)))
+                item))
+            items)))
 
 (defun harness-tools-handin--item-written (item written)
   "Return the report evidence ITEM with the links in its words written out.
@@ -404,9 +577,77 @@ of a caption; a code block is code, and what it says is left alone."
   (let ((item (copy-sequence item)))
     (when (equal (plist-get item :kind) "note")
       (setq item (plist-put item :text (funcall written (plist-get item :text)))))
+    (when (and (equal (plist-get item :kind) "demo")
+               (stringp (plist-get item :narration)))
+      (setq item (plist-put item :narration
+                            (funcall written (plist-get item :narration)))))
     (when (stringp (plist-get item :caption))
       (setq item (plist-put item :caption (funcall written (plist-get item :caption)))))
     item))
+
+(defun harness-tools-handin--walkthrough (report task)
+  "Return the presenter brief for REPORT, TASK's hand-in, or nil.
+A report with a design document or an interactive demo gets a brief a
+review conversation starts from: a session of its own, on the task's
+model, that explains the work, runs the demo and answers the reviewer's
+questions without changing anything.  A report with neither has no
+brief."
+  (let* ((design (plist-get report :design))
+         (demos (cl-remove-if-not (lambda (item) (equal (plist-get item :kind) "demo"))
+                                  (append (plist-get report :evidence) nil)))
+         (prompt (or (plist-get task :prompt) ""))
+         (title (harness-first-line (if (harness-string-blank-p prompt) "the task" prompt) 80))
+         (where (or (plist-get task :worktree) (plist-get task :project) (plist-get task :cwd))))
+    (when (or design demos)
+      (let* ((design-text
+              (when design
+                (format "The design document is %s. Read it before you start: it explains the design as a whole, not a list of files.%s%s"
+                        (or (plist-get design :name) (plist-get design :path) "the design document")
+                        (if-let* ((summary (plist-get design :summary)))
+                            (format "\nIts summary: %s" summary)
+                          "")
+                        (if-let* ((text (plist-get design :text)))
+                            (format "\nIts first part:\n%s"
+                                    (harness-truncate-end text 6000))
+                          ""))))
+             (demo-text
+              (when demos
+                (concat
+                 "When you show a demo, open its URL or run its command, then narrate each step in one or two sentences. Wait for the reviewer after each step. The demos are:\n"
+                 (string-join
+                  (mapcar
+                   (lambda (demo)
+                     (concat "- " (or (plist-get demo :title) "demo")
+                             (if-let* ((workspace (plist-get demo :workspace)))
+                                 (format " · on the workspace computer %s" workspace) "")
+                             (if-let* ((url (plist-get demo :url)))
+                                 (format " · %s" url) "")
+                             (if-let* ((command (plist-get demo :command)))
+                                 (format " · %s%s"
+                                         (mapconcat #'shell-quote-argument command " ")
+                                         (if-let* ((cwd (plist-get demo :cwd-name)))
+                                             (format " · in %s" cwd) ""))
+                               "")
+                             (if-let* ((narration (plist-get demo :narration)))
+                                 (format " · narration: %s" narration)
+                               " · narrate what you do")))
+                   demos)
+                  "\n"))))
+             (parts
+              (delq nil
+                    (list
+                     (format "You are presenting the finished work of the task \"%s\" to its reviewer. The task is in review: do not change files, do not call hand_in, and do not send the task back. You are its presenter, not its worker." title)
+                     "Start with one sentence on what the work does, then ask what the reviewer wants to look at first. Keep replies short: they may be spoken. Do not read the whole design or the whole demo at once; go a step at a time and wait for the reviewer after each."
+                     "The reviewer may interrupt at any time. When they do, stop and answer what they ask, then carry on where you were. When they ask to see a different part, show that part."
+                     (format "The work is in %s." (or where "the task's directory"))
+                     design-text
+                     demo-text
+                     (unless demos
+                       "Walk through the design a section at a time. Say what the section decides and why, then wait for questions.")
+                     "The reviewer may ask for a change. That belongs in the task's review feedback: say so, and do not change the work here. If they ask what a comment means or where something is, answer it."))))
+        (harness-truncate-end (string-join parts "\n\n")
+                              harness-tools-handin-walkthrough-limit)))))
+
 
 (defun harness-tools-handin--branches (root)
   "Return a promise of the local branches of the repository at ROOT.
@@ -523,14 +764,20 @@ the session's branch is built on has to be in it first."
        "hand_in needs problem: a short summary of what must be fixed and how to see it, which the review shows at the top"))
      ((and (null raw) (not cannot))
       (harness-tools-handin--invalid
-       "hand_in needs evidence: at least one image, video, file, code block, note or tool_call. Show the work, do not just describe it; when it has anything to see, an image or a video is required."))
+       "hand_in needs evidence: at least one image, video, file, code block, note, tool_call or demo. Show the work, do not just describe it; when it has anything to see, an image or a video is required."))
      (t
-      (let ((items (cl-loop for item in raw for n from 1
-                            collect (harness-tools-handin--item item n ctx)))
-            (bad nil))
+      (let* ((design (harness-tools-handin--design (plist-get input :design) ctx))
+             (items (cl-loop for item in raw for n from 1
+                             collect (harness-tools-handin--item item n ctx)))
+             (bad (and (stringp design) (list design))))
         (dolist (item items) (when (stringp item) (push item bad)))
         (unless bad
-          (setq items (mapcar (lambda (item) (harness-tools-handin--item-written item written)) items)))
+          (setq items (harness-tools-handin--demo-ids items))
+          (setq items (mapcar (lambda (item) (harness-tools-handin--item-written item written)) items))
+          (when design
+            (when-let* ((summary (plist-get design :summary)))
+              (setq design (plist-put (copy-sequence design)
+                                      :summary (funcall written summary))))))
         (if bad
             (harness-tools-handin--invalid "%s" (string-join (nreverse bad) "\n"))
           (let ((task (and (harness-method-exists-p 'task/for-session)
@@ -554,17 +801,20 @@ the session's branch is built on has to be in it first."
                                        (harness-tools-handin--blocked task))))
                      (if refusal
                          (harness-tools-handin--invalid "%s" refusal)
-                       (let* ((report (append (list :summary summary :problem problem)
-                                              (and reproduction (list :reproduction reproduction))
-                                              (list :evidence items :at (float-time))
-                                              ;; The call that handed the work in: the review
-                                              ;; names it as the author of the version.
-                                              (and (plist-get ctx :call-id) (list :call-id (plist-get ctx :call-id)))
-                                              (and cannot (list :cannot-continue t))
-                                              (and no-merge (list :no-merge t))
-                                              ;; Where the work belongs, when the task named
-                                              ;; another branch than the one it was made from.
-                                              (and base (list :merge-base base))))
+                       (let* ((body (append (list :summary summary :problem problem)
+                                            (and design (list :design design))
+                                            (and reproduction (list :reproduction reproduction))
+                                            (list :evidence items :at (float-time))
+                                            ;; The call that handed the work in: the review
+                                            ;; names it as the author of the version.
+                                            (and (plist-get ctx :call-id) (list :call-id (plist-get ctx :call-id)))
+                                            (and cannot (list :cannot-continue t))
+                                            (and no-merge (list :no-merge t))
+                                            ;; Where the work belongs, when the task named
+                                            ;; another branch than the one it was made from.
+                                            (and base (list :merge-base base))))
+                              (walk (harness-tools-handin--walkthrough body task))
+                              (report (append body (and walk (list :walkthrough walk))))
                               (record
                                (lambda ()
                                  (harness-call 'task/hand-in (plist-get task :id) report)
@@ -605,10 +855,19 @@ the session's branch is built on has to be in it first."
 
 (harness-define-tool "hand_in"
   :label "Hand in the finished work"
-  :description "Hand the finished work in and stop: the turn ends, the task leaves the working phase, and it waits for the user's review with your summary and evidence in front of them. Call it when the work is complete, not to answer a message or report progress: a plain reply is the working phase, and the task stays with you. Do not ask first whether the work is ready to hand in, and do not show what you are about to hand in for approval -- before the first hand-in, hand it in. When the review has open threads, they are the user's questions: answer each in its thread and close it only when done -- never in a batch just to hand in. Every open thread must be answered and closed first, or hand_in is refused. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. If the work belongs on another local branch of the project than the one the task was made from, pass merge_base with that branch: the review then reads your changes against it and verifying merges them into it, rather than into the branch the task was made from. A branch the project does not have, or the task's own branch, is refused with the branches it could name. A project can refuse a hand-in until a check of its own has passed; the refusal then says what to run first. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); or tool_call (an earlier call of yours, which the user then sees as a link to that call in the session). Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. \"bash\"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says."
+  :description "Hand the finished work in and stop: the turn ends, the task leaves the working phase, and it waits for the user's review with your summary and evidence in front of them. Call it when the work is complete, not to answer a message or report progress: a plain reply is the working phase, and the task stays with you. Do not ask first whether the work is ready to hand in, and do not show what you are about to hand in for approval -- before the first hand-in, hand it in. When the review has open threads, they are the user's questions: answer each in its thread and close it only when done -- never in a batch just to hand in. Every open thread must be answered and closed first, or hand_in is refused. problem is required: a short summary of what must be fixed and how to see it, which the review shows at the top, where the task's name alone would not remind the user what it was about. summary is your final message, in markdown. reproduction is optional: how to see the problem, or the steps to check the fix, for the review. design is optional and is what the review reads first when the work has a design to explain: an object with path (a Markdown document in the worktree) and optional title and summary. Write it for the reviewer: what the design decides and why, the alternatives, and the shape of the change; one line of code shows no design, the document shows the whole. The review comments on its sections, and a walkthrough explains it. If the task cannot be finished, call it with cannot_continue true and say what blocks it in summary: it goes to the user's input instead of review and nothing merges. If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: verifying it completes without merging. If the work belongs on another local branch of the project than the one the task was made from, pass merge_base with that branch: the review then reads your changes against it and verifying merges them into it, rather than into the branch the task was made from. A branch the project does not have, or the task's own branch, is refused with the branches it could name. A project can refuse a hand-in until a check of its own has passed; the refusal then says what to run first. evidence is required and holds at least one item; an item is an object with exactly one of: image or video (a path to a file you made, such as a screenshot); file (a path); code (with language); note (markdown text); tool_call (an earlier call of yours, which the user then sees as a link to that call in the session); or demo (something the reviewer can try: an object with title and any of path, url, command (an argv list, never a shell string), cwd, narration and workspace). A demo bound to a workspace (workspace) runs on that workspace's computer when the reviewer starts it, and the presenter drives it there; without one it runs where the harness does. The review opens a demo, runs it after the reviewer confirms, and a walkthrough narrates it; when the work has an interactive surface or a concept to show, build a demo and add it. Show, do not tell: when the work has anything to see -- a UI, a rendering, a chart, a layout, anything a screenshot can show -- an image, or a video for motion, is required, not just nice to have; take the screenshot with bash first. Quote the tool call that proves a claim (the tests pass, the command's output) as a tool_call item. A file, code or note is evidence only when nothing visual applies. caption says what the item shows. A tool_call may name the call by its tool's name (the newest call of that tool, e.g. \"bash\"), by `#N` or `<tool>#N` as an earlier hand_in error listed it (1 = newest), or by its call or node id. The summary, problem, reproduction and notes can link those calls too, and messages and sessions: [the test run](harness:call/bash#2), as the system prompt says."
   :schema '(:type "object"
             :properties (:problem (:type "string"
                                   :description "A short summary of what must be fixed and how to see it, in markdown. The review shows it at the top: with many tasks going on, the title alone does not say what the work was for. Say what the user must check, not the task prompt again.")
+                         :design (:type "object"
+                                  :properties (:path (:type "string"
+                                                     :description "Path of the Markdown design document in the task's worktree.")
+                                               :title (:type "string"
+                                                       :description "The design's title, when its first heading is not the one to show.")
+                                               :summary (:type "string"
+                                                         :description "A few lines on what the design decides and why, shown under the title."))
+                                  :required ("path")
+                                  :description "The design document the review reads first: what the design decides and why, the alternatives, and the shape of the change. Optional, but for work that changes how something is designed or behaves it is what the reviewer reads and comments on before the code.")
                          :reproduction (:type "string"
                                         :description "Optional: how to see the problem, or the steps to check the fix, for the review.")
                          :summary (:type "string"
@@ -622,11 +881,21 @@ the session's branch is built on has to be in it first."
                                                          :language (:type "string" :description "Language of code, for its highlighting.")
                                                          :note (:type "string" :description "Markdown text as evidence.")
                                                          :tool_call (:type "string" :description "An earlier tool call of this session, shown to the user as a link to that call: its call id or node id, the name of its tool (the newest call of that tool, e.g. \"bash\"), or `#N`/`<tool>#N` (1 = newest) as an earlier hand_in error listed it.")
+                                                         :demo (:type "object"
+                                                                :properties (:title (:type "string" :description "What the demo shows.")
+                                                                             :path (:type "string" :description "Path of a page, program or directory of the demo in the task's worktree.")
+                                                                             :url (:type "string" :description "An http or https URL the reviewer opens.")
+                                                                             :command (:type "array" :items (:type "string")
+                                                                                       :description "An argv list that starts the demo, never a shell string.")
+                                                                             :cwd (:type "string" :description "Where the command runs, by default the demo's directory.")
+                                                                             :narration (:type "string" :description "How to show it, step by step, for the walkthrough.")
+                                                                             :workspace (:type "string" :description "The workspace whose computer runs the demo. With one the demo opens on that computer, and the reviewer sees its screen in the app; without one it runs where the harness does."))
+                                                                :description "Something the reviewer can try: a page, a URL or a program, with the narration of what to show.")
                                                          :caption (:type "string" :description "What this item shows, under it.")))
                                     ;; No `:required' here: any one key is enough.  An empty
                                     ;; `:required ()' would encode as JSON null, which providers
                                     ;; refuse ("null is not of type array").
-                                    :description "At least one piece of evidence. Prefer an image or a video whenever the work has anything to see; a tool_call for claims about commands or tests.")
+                                    :description "At least one piece of evidence. Prefer an image or a video whenever the work has anything to see; a demo when the reviewer can try it; a tool_call for claims about commands or tests.")
                          :cannot_continue (:type "boolean"
                                            :description "Set true when the task cannot be finished. Record what blocks it in summary; evidence may be empty. The task goes to the user's input instead of review, and nothing merges.")
                          :no_merge (:type "boolean"

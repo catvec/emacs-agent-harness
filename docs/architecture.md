@@ -7887,9 +7887,52 @@ priority).
   `task/for-session SESSION-ID` (the task of a session, or nil, which
   `hand_in` and the session's review banner use; the banner at the end
   of a report popout has the task already) and
-  `task/hand-in ID REPORT` (record `:summary` and `:evidence` as the
+  `task/hand-in ID REPORT` (record `:summary`, `:design`, `:evidence`
+  and `:walkthrough` as the
   work ID handed in; the write-up tool's `:end-turn` ends its turn, which
-  the review step then picks up).  A round of work whose turn ends
+  the review step then picks up).  `:design` is what the review reads
+  first: a snapshot of a Markdown document (`:path`, `:name` in the
+  worktree, `:title`, optional `:summary`, and the whole `:text` at
+  hand-in time), so a review reads what was explained and not what the
+  file says after the branch moved.  An evidence item may be a `demo`:
+  a page, a URL or an argv `:command` with its `:cwd` and a `:narration`
+  for the walkthrough; handing it in runs nothing, and the reviewer is
+  the one who opens it or starts it, and a demo may name the `:workspace`
+  whose computer runs it.  `:walkthrough` is a presenter
+  brief the tool writes from the design and the demos: a BTW on the
+  task's session starts with it, answers the reviewer's questions, runs
+  the demo and never changes the work.  Every path of a design or a demo
+  is resolved against the session's directories at hand-in
+  (`harness-tools-handin--design`, `--demo`), and a document too long for
+  the report, a blank one, or one outside them is refused with what to
+  do first.  A report with neither a design nor a demo has no brief.
+
+  `demo/start SESSION DEMO &optional PLACEMENT WORKSPACE` is the app's
+  Start demo: it resolves the task of SESSION, the demo in the task's
+  last report, the reviewed commit of its worktree and the workspace the
+  demo belongs to (its own, else the one whose root holds the task's
+  project), and runs the demo there -- on the box through
+  `workspace/box/*`: `status`, `exec` in the directory its mounts map
+  the demo's to, `vnc` for the screen and `take-over`/`return-control`
+  for who has it.  A demo bound to no workspace runs where the harness
+  does and says `placement: host`; a worktree that moved, a box on
+  another commit, a missing mount, a box that is not running and a
+  harness without the box's methods answer `not-ready` with the reason,
+  and nothing is started twice: the same demo answers the run it is
+  already in.  The start opens the presenter too: a BTW of the task's
+  session whose brief names the run, the workspace, the commit and
+  `present_demo`, the tool that works the box (click, type, key, scroll,
+  drag, open, launch, windows, screenshot) and refuses while the reviewer
+  has control.  `demo/status RUN` is the run now (`lost` when this
+  harness did not make it, as after a restart), `demo/stop RUN` stops
+  what the run started -- its process, or control given back -- and not
+  the box, and `demo/control RUN CONTROL` is the reviewer's
+  (`workspace/box/take-over`) or the presenter's
+  (`workspace/box/return-control`).  The box's methods are the workspace
+  work's (`harness-workspace.el`); this module calls them and is
+  `not-ready` without them (`harness-demo.el`).
+
+  A round of work whose turn ends
   without a hand-in -- the model replied instead, or had no tools to
   call -- gets a `:report` marked `:missing t` instead
   (`harness-tasks--missing-report`): no evidence, and as `:summary` the
@@ -9201,7 +9244,10 @@ whose strict syntax it reads, and the correction of a malformed reply;
   comment it follows; a closed thread is open again, with a change of
   status by the user.  A reference to lines of a
   diff puts a new thread on that file and those lines, at the revision the
-  reference names, the lines as the location's excerpt.  Any other starts
+  reference names, the lines as the location's excerpt.  A reference to
+  lines of a buffer -- a section of a design document, say -- puts a new
+  thread on that file and those lines too, at the newest revision, so a
+  comment on the design is kept where the document says it.  Any other starts
   a thread on the change as a whole.  A reply that has its thread
   already (`:id`) is left alone, so a message passed through the filter
   twice makes nothing twice; one put back into the box ([edit]) comes
@@ -15540,7 +15586,11 @@ of it, scaled down to fit or up by `harness-ui-popout-image-max-scale`
 at most, with Emacs's image keys and [Open externally]), the review of
 a task (`harness-ui-review`: one banner, the board's Ready for
 review -- its heading, the handed-in report in full and always
-expanded, the changes the task made (what
+expanded, the design document first (its Markdown sections are quote
+targets of the review, so C-c > on one starts a thread at the document
+and its lines; a demo is evidence with [Open demo], [Run demo] or
+[Stop demo] and [Walkthrough], which starts the presenter conversation
+with the report's brief, voice on where the voice module is loaded), the changes the task made (what
 `harness-ui-review-changes-functions` draw for it, indented as the
 banner's text: the review module's tree of the files and the threads
 below it), then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`) and

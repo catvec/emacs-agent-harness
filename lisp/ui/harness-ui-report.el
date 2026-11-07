@@ -130,6 +130,33 @@ shows it larger still (`harness-ui-popout-image-max-height')."
   :type '(choice (float :tag "Fraction of the frame's height") (integer :tag "Pixels"))
   :group 'harness-ui-report)
 
+(defcustom harness-ui-report-design-max-chars 60000
+  "Characters of a design document the report draws.
+The whole document is kept in the report and opened with [Open
+design]; the report draws this much of it, so a long design does not
+bury the rest of the review."
+  :type 'integer :group 'harness-ui-report)
+
+(defcustom harness-ui-report-walkthrough-voice t
+  "When non-nil, a walkthrough turns voice on where the voice module is loaded.
+Voice is the point of a walkthrough: the reviewer listens, interrupts
+and asks.  Without the module, or with this off, the conversation is
+the same in text."
+  :type 'boolean :group 'harness-ui-report)
+
+(defvar harness-ui-report--demo-runs (make-hash-table :test 'equal)
+  "Report and evidence number -> the demo run this Emacs started for it.
+The run is `demo/start''s: its id names what it may stop, and its state
+is asked of the harness when the row is drawn.")
+
+(defvar harness-ui-report--demo-results (make-hash-table :test 'equal)
+  "Report and evidence number -> the answer the last demo start gave.
+A start that did not run says why in the row, until another start is
+made.")
+
+(defvar harness-ui-report--demo-processes (make-hash-table :test 'equal)
+  "Task and evidence number -> the demo process started from a report.")
+
 (defvar harness-ui-report-panel-functions nil
   "Functions putting a panel of their own at the end of a report popout.
 Each is called with the TASK the popout shows, in the popout buffer, on
@@ -315,6 +342,11 @@ string has nowhere to draw an image later.")
 (declare-function harness-chat--rerender "harness-ui-chat" (block))
 (declare-function harness-chat--str "harness-ui-chat" (kind))
 (declare-function harness-ui-review--task "harness-ui-review" (sid))
+(declare-function harness-ui-session "harness-ui" (id))
+(declare-function harness-ui-display-session "harness-ui" (id))
+(declare-function harness-ui-call-turn "harness-ui" (session-id method params callback &optional on-error))
+(defvar harness-ui-open-session-function)
+(defvar harness-ui-btw--asked)
 
 (defun harness-ui-report--report (task)
   "Return TASK's report plist, or nil."
@@ -380,6 +412,399 @@ feedback to `:feedback'."
   "Open PATH with the desktop's opener, or in Emacs.
 See `harness-ui-popout-open-file'."
   (harness-ui-popout-open-file path))
+
+;;;; The design document
+
+(defun harness-ui-report--first-heading (text)
+  "Return the first Markdown heading of TEXT, or nil."
+  (when (and (stringp text)
+             (string-match "^#+[ \t]+\\(.+?\\)[ \t]*\r?$" text))
+    (string-trim (match-string 1 text))))
+
+(defun harness-ui-report--design-sections (text)
+  "Return TEXT as its Markdown sections, a list of (TEXT START END).
+START and END are the 1-based lines of TEXT the section covers; a
+section starts at a heading and ends before the next, and a line inside
+a fenced code block is no heading."
+  (let* ((lines (split-string text "\n"))
+         (count (length lines))
+         (sections nil)
+         (start 1)
+         (fence nil)
+         (number 1))
+    (dolist (line lines)
+      (when (and (> number start) (not fence)
+                 (string-match-p "\\`#+[ \t]+" line))
+        (push (list (mapconcat #'identity (cl-subseq lines (1- start) (1- number)) "\n")
+                    start (1- number))
+              sections)
+        (setq start number))
+      (when (string-match-p "\\`[ \t]*\\(```\\|~~~\\)" line)
+        (setq fence (not fence)))
+      (setq number (1+ number)))
+    (push (list (mapconcat #'identity (cl-subseq lines (1- start)) "\n")
+                start count)
+          sections)
+    (nreverse sections)))
+
+(defun harness-ui-report--open-design (design)
+  "Open DESIGN's document in a window of its own."
+  (let ((path (plist-get design :path)))
+    (if (and path (file-readable-p path))
+        (find-file-other-window path)
+      (user-error "No design file here"))))
+
+(defun harness-ui-report--insert-design-section (design section start end)
+  "Insert a SECTION of DESIGN, a quote target for lines START to END."
+  (let ((from (point))
+        (file (or (plist-get design :name) "design"))
+        (last end))
+    (harness-ui-report--insert-markdown section)
+    (when (> (point) from)
+      (harness-quote--mark
+       from (point)
+       (lambda (beg end)
+         (let ((selected (string-trim (buffer-substring-no-properties beg end))))
+           (list (list :kind "buffer" :file file
+                       :line start :end last
+                       :text (if (string-blank-p selected) section selected)))))
+       "C-c >: a thread on this section of the design"))))
+
+(defun harness-ui-report--insert-design (design task)
+  "Insert DESIGN, TASK's design document, first in its report.
+The document is read as a whole and commented on a section at a time:
+C-c > quotes a section in a thread whose place is the document and its
+lines.  It folds as the report's other sections do; folding it leaves
+the title and [Open design]."
+  (let* ((text (or (plist-get design :text) ""))
+         (title (plist-get design :title))
+         (summary (plist-get design :summary))
+         (name (plist-get design :name))
+         (folded (harness-ui-report--folded-p task "design" nil))
+         (limit harness-ui-report-design-max-chars))
+    (insert (harness-ui-report--fold-button
+             task "design" folded (if title (format "Design: %s" title) "Design"))
+            "\n")
+    (insert "  ")
+    (when name
+      (insert (propertize name 'face 'harness-dim-face) "  "))
+    (insert (harness-ui-report--button
+             "[Open design]"
+             (lambda () (harness-ui-report--open-design design))
+             "The design document, in a window of its own")
+            "\n")
+    (unless folded
+      (insert "\n")
+      (when summary
+        (harness-ui-report--insert-message summary)
+        (insert "\n"))
+      (let ((shown (if (> (length text) limit) (substring text 0 limit) text)))
+        (dolist (section (harness-ui-report--design-sections shown))
+          (harness-ui-report--insert-design-section
+           design (nth 0 section) (nth 1 section) (nth 2 section))))
+      (when (> (length text) limit)
+        (insert (propertize (format "  More in %s" (or name "the design file"))
+                            'face 'harness-dim-face)
+                "\n")))
+    (insert "\n")))
+
+;;;; Interactive demos
+
+(defun harness-ui-report--demo-key (task number)
+  "Return the key of evidence NUMBER of TASK in the demo processes."
+  (format "%s/%s" (or (plist-get task :id) "task") number))
+
+(defun harness-ui-report--demo-process (task number)
+  "Return the demo process of evidence NUMBER of TASK, or nil."
+  (gethash (harness-ui-report--demo-key task number) harness-ui-report--demo-processes))
+
+(defun harness-ui-report--demo-running-p (task number)
+  "Return non-nil when the demo of evidence NUMBER of TASK runs."
+  (let ((process (harness-ui-report--demo-process task number)))
+    (and process (process-live-p process))))
+
+(defun harness-ui-report--demo-run (task number)
+  "Return the demo run of evidence NUMBER of TASK, as the harness has it now.
+That is the last `demo/start' this Emacs made for it, asked of the
+harness (`demo/status'), or nil when there is none and the harness does
+not offer one."
+  (let ((run (gethash (harness-ui-report--demo-key task number) harness-ui-report--demo-runs)))
+    (and run (harness-method-exists-p 'demo/status)
+         (ignore-errors (harness-call 'demo/status run)))))
+
+(defun harness-ui-report--demo-result (task number)
+  "Return the last demo start answer of evidence NUMBER of TASK, or nil."
+  (gethash (harness-ui-report--demo-key task number) harness-ui-report--demo-results))
+
+(defun harness-ui-report--start-demo (task number item)
+  "Start ITEM's demo, evidence NUMBER of TASK, where the review runs it.
+The start binds the task's report and demo and the demo's workspace,
+runs it there, and opens the presenter that drives it; the row says
+what it got, and the presenter's conversation is shown so the reviewer
+can talk to it."
+  (let* ((key (harness-ui-report--demo-key task number))
+         (session (plist-get task :session))
+         (demo (plist-get item :id)))
+    (unless (harness-method-exists-p 'demo/start)
+      (user-error "This harness has no demo start"))
+    (unless (and (stringp session) (not (string-empty-p session)))
+      (user-error "No session for this task"))
+    (let ((answer (harness-call 'demo/start session demo)))
+      (puthash key answer harness-ui-report--demo-results)
+      (when (equal (plist-get answer :state) "running")
+        (puthash key (plist-get answer :run) harness-ui-report--demo-runs)
+        (harness-ui-report--show-presenter (plist-get answer :presenter)))
+      (harness-ui-report--refresh task)
+      (if (equal (plist-get answer :state) "running")
+          (message "Demo running%s"
+                   (if-let* ((vnc (plist-get answer :vnc))
+                             (url (plist-get vnc :url)))
+                       (format ": %s" url)
+                     ""))
+        (message "Demo %s: %s" (plist-get answer :state)
+                 (or (plist-get (plist-get answer :reason) :text)
+                     "not started"))))))
+
+(defun harness-ui-report--show-presenter (presenter)
+  "Show PRESENTER, the conversation `demo/start' opened, and say so.
+The conversation is where the demo is spoken through: the reviewer
+talks to it, and it drives the computer with `present_demo'."
+  (when-let* ((id (plist-get presenter :session)))
+    (cond ((and (fboundp 'harness-ui-display-session) (functionp 'harness-ui-display-session))
+           (harness-ui-display-session id)
+           (message "Presenter: %s" (or (plist-get presenter :name) id)))
+          (t (message "Presenter: %s" id)))))
+
+(defun harness-ui-report--stop-demo-run (task number)
+  "Stop the demo run of evidence NUMBER of TASK, and forget it."
+  (let* ((key (harness-ui-report--demo-key task number))
+         (run (gethash key harness-ui-report--demo-runs)))
+    (when (and run (harness-method-exists-p 'demo/stop))
+      (let ((answer (ignore-errors (harness-call 'demo/stop run))))
+        (puthash key answer harness-ui-report--demo-results)))
+    (remhash key harness-ui-report--demo-runs)
+    (harness-ui-report--refresh task)
+    (message "Demo stopped")))
+
+(defun harness-ui-report--open-vnc (run)
+  "Open RUN's VNC screen in this desktop's browser, when it is a page.
+The box publishes its noVNC page; Emacs cannot draw the screen itself,
+and says where it is rather than pretending to."
+  (let* ((vnc (plist-get run :vnc))
+         (url (plist-get vnc :url)))
+    (cond
+     ((and (stringp url) (string-match-p "\\`https?://" url)) (browse-url url))
+     ((stringp url) (kill-new url) (message "VNC address copied: %s" url))
+     (t (user-error "No VNC screen")))))
+
+(defun harness-ui-report--open-demo (item)
+  "Open ITEM's demo: its URL, its page, or its directory.
+A demo that is a page opens in the browser; anything else opens with
+the desktop's opener, or in Emacs."
+  (let ((url (plist-get item :url))
+        (path (plist-get item :path)))
+    (cond
+     (url (browse-url url))
+     ((and path (file-directory-p path))
+      (let ((index (expand-file-name "index.html" path)))
+        (if (file-exists-p index)
+            (browse-url-of-file index)
+          (harness-ui-report--open-file path))))
+     ((and path (file-exists-p path))
+      (if (string-match-p "\\.html?\\'" path)
+          (browse-url-of-file path)
+        (harness-ui-report--open-file path)))
+     (t (user-error "No demo to open")))))
+
+(defun harness-ui-report--stop-demo (task number)
+  "Stop the demo of evidence NUMBER of TASK."
+  (when-let* ((process (harness-ui-report--demo-process task number)))
+    (when (process-live-p process) (delete-process process))
+    (remhash (harness-ui-report--demo-key task number) harness-ui-report--demo-processes)
+    (harness-ui-report--refresh task)
+    (message "Demo stopped")))
+
+(defun harness-ui-report--run-demo (task number item)
+  "Run ITEM's demo command for TASK, the NUMBERth evidence, after a confirmation.
+The command is an argv list, never a shell string.  Its output goes to
+a buffer of its own, `*harness demo: TITLE*'; [Stop demo] stops it."
+  (let* ((command (plist-get item :command))
+         (cwd (or (plist-get item :cwd) (plist-get task :project) default-directory))
+         (title (or (plist-get item :title) "demo"))
+         (key (harness-ui-report--demo-key task number))
+         (name (format "*harness demo: %s*" title)))
+    (unless (and command (listp command) command)
+      (user-error "No demo command"))
+    (unless (file-directory-p cwd)
+      (user-error "No demo directory"))
+    (when-let* ((old (gethash key harness-ui-report--demo-processes)))
+      (when (process-live-p old) (delete-process old)))
+    (when (y-or-n-p (format "Run %s in %s?"
+                            (mapconcat #'shell-quote-argument command " ") cwd))
+      (let ((buffer (get-buffer-create name)))
+        (with-current-buffer buffer
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (format "$ %s\n\n" (mapconcat #'shell-quote-argument command " ")))))
+        (condition-case err
+            (let ((default-directory cwd)
+                  (process (make-process
+                            :name name :buffer buffer :stderr buffer
+                            :command command :noquery t
+                            :connection-type 'pipe
+                            :sentinel
+                            (lambda (process _event)
+                              (unless (process-live-p process)
+                                (remhash key harness-ui-report--demo-processes)
+                                (ignore-errors (harness-ui-report--refresh task)))))))
+              (set-process-query-on-exit-flag process nil)
+              (puthash key process harness-ui-report--demo-processes)
+              (message "Demo running: %s" title)
+              (harness-ui-report--refresh task))
+          (error
+           (message "Demo failed: %s" (harness-error-message err))))))))
+
+(defun harness-ui-report--insert-demo (item task number report)
+  "Insert ITEM, the NUMBERth demo evidence of TASK, with its actions.
+REPORT is the report being drawn, whose walkthrough, when it has one,
+is what [Walkthrough] starts.  The actions are [Open demo], [Run demo]
+or [Stop demo], and [Walkthrough]; the narration and the command are
+shown as what they are."
+  (let* ((title (or (plist-get item :title) "demo"))
+         (url (plist-get item :url))
+         (name (plist-get item :name))
+         (command (plist-get item :command))
+         (narration (plist-get item :narration))
+         (workspace (plist-get item :workspace))
+         (run (harness-ui-report--demo-run task number))
+         (result (harness-ui-report--demo-result task number))
+         (host-running (harness-ui-report--demo-running-p task number))
+         (running (or host-running (equal (plist-get run :state) "running")))
+         (vnc (and run (plist-get run :vnc))))
+    (insert "  " (propertize (or url name title (car command) "demo")
+                             'face 'harness-md-code-block)
+            "\n  ")
+    (when (or url name)
+      (insert (harness-ui-report--button
+               "[Open demo]"
+               (lambda () (harness-ui-report--open-demo item))
+               "The demo, in its window")
+              " "))
+    (if running
+        (insert (harness-ui-report--button
+                 "[Stop demo]"
+                 (lambda ()
+                   (if host-running
+                       (harness-ui-report--stop-demo task number)
+                     (harness-ui-report--stop-demo-run task number)))
+                 "The demo, where it runs")
+                " ")
+      (when (and (harness-method-exists-p 'demo/start)
+                 (stringp (plist-get item :id)))
+        (insert (harness-ui-report--button
+                 "[Start demo]"
+                 (lambda () (harness-ui-report--start-demo task number item))
+                 (if workspace
+                     (format "The demo on the computer of workspace %s, with a presenter" workspace)
+                   "The demo, with a presenter that drives and explains it"))
+                " "))
+      (when command
+        (insert (harness-ui-report--button
+                 "[Run demo]"
+                 (lambda () (harness-ui-report--run-demo task number item))
+                 "The demo command, on this machine")
+                " ")))
+    (when (and running vnc (or (plist-get vnc :url) (plist-get vnc :socket)))
+      (insert (harness-ui-report--button
+               "[Open VNC]"
+               (lambda () (harness-ui-report--open-vnc run))
+               "The workspace computer's screen, in this desktop's browser")
+              " "))
+    (when (plist-get report :walkthrough)
+      (insert (harness-ui-report--button
+               "[Walkthrough]"
+               (lambda () (harness-ui-report--walkthrough task))
+               "A review conversation about the design and the demos")))
+    (insert "\n")
+    (when workspace
+      (insert "  " (propertize (format "In workspace %s" workspace)
+                               'face 'harness-dim-face)
+              "\n"))
+    (when running
+      (insert "  " (propertize "Demo running" 'face 'success) "\n"))
+    (when (and result (not running))
+      (insert "  " (propertize (or (plist-get (plist-get result :reason) :text)
+                                   (plist-get result :state))
+                               'face 'harness-dim-face)
+              "\n"))
+    (when (and running (plist-get run :commit))
+      (insert "  " (propertize (format "Commit %s" (plist-get run :commit))
+                               'face 'harness-dim-face)
+              "\n"))
+    (when command
+      (insert "  " (propertize (mapconcat #'shell-quote-argument command " ")
+                               'face 'harness-dim-face)
+              "\n"))
+    (when (and narration (not (harness-string-blank-p narration)))
+      (insert "  " (propertize "Narration" 'face 'harness-label-face) "\n")
+      (harness-ui-report--insert-markdown narration))
+    (insert "\n")))
+
+(defun harness-ui-report--walkthrough (task)
+  "Start a conversation that walks the reviewer through TASK's report.
+It is a BTW of the task's session, on the task's model, whose first
+message is the report's walkthrough brief: a presenter that explains
+the design, runs the demo and answers questions without changing the
+work.  Voice is turned on where the voice module is loaded, before the
+first message, so the first answer is spoken."
+  (let* ((report (harness-ui-report--report task))
+         (prompt (plist-get report :walkthrough))
+         (sid (plist-get task :session))
+         (title (harness-ui-report--title task)))
+    (unless (and (stringp prompt) (not (harness-string-blank-p prompt)))
+      (user-error "No walkthrough here"))
+    (unless (and (stringp sid) (not (string-empty-p sid)))
+      (user-error "No session for this task"))
+    (let* ((session (and (fboundp 'harness-ui-session) (harness-ui-session sid)))
+           (model (plist-get session :model))
+           (name (harness-truncate-end (format "review: %s" title) 60))
+           (over (current-buffer))
+           (ask (lambda (id buffer)
+                  (when (and buffer (buffer-live-p buffer))
+                    (with-current-buffer buffer
+                      (when (boundp 'harness-ui-btw--asked)
+                        (setq harness-ui-btw--asked t))
+                      (when (and harness-ui-report-walkthrough-voice
+                                 (fboundp 'harness-voice))
+                        (condition-case err
+                            (funcall 'harness-voice)
+                          (error (message "Voice unavailable: %s"
+                                          (harness-error-message err)))))))
+                  (harness-ui-call-turn id "session/prompt"
+                   (list :sessionId id
+                         :prompt (list (list :type "text" :text prompt)))
+                   #'ignore))))
+      (harness-then
+       (harness-ui-request "_harness/session/btw"
+                           (append (list :id sid :name name)
+                                   (and model (list :model model))))
+       (lambda (child)
+         (let ((id (plist-get child :id)))
+           (unless (stringp id)
+             (user-error "No walkthrough session"))
+           (if (and (fboundp 'harness-ui-btw--show)
+                    (functionp harness-ui-open-session-function))
+               (funcall 'harness-ui-btw--show
+                        id over "the design and demo" nil
+                        (lambda (buffer) (funcall ask id buffer)))
+             (progn
+               (when (fboundp 'harness-ui-display-session)
+                 (harness-ui-display-session id))
+               (let ((buffer (and (functionp harness-ui-open-session-function)
+                                  (funcall harness-ui-open-session-function id))))
+                 (funcall ask id buffer))))))
+       (lambda (err)
+         (message "Walkthrough failed: %s" (harness-error-message err)))))))
 
 (defun harness-ui-report--image-frame ()
   "Return the frame the report's images are drawn for.
@@ -677,10 +1102,11 @@ quotes it from the box too."
                                      (format " (%s)" language) ""))))
       ("note" (harness-first-line (or (plist-get item :text) "note") 90))
       ("tool-call" (or (plist-get item :title) (plist-get item :tool) "tool call"))
+      ("demo" (format "demo %s" (or (plist-get item :title) "interactive")))
       (_ kind))))
 
-(defun harness-ui-report--insert-item (item task number)
-  "Insert evidence ITEM number NUMBER of TASK's report, with its fold line.
+(defun harness-ui-report--insert-item (item task number report)
+  "Insert evidence ITEM number NUMBER of TASK's report REPORT, with its fold line.
 The number's line names what it is and folds it away; the caption under
 it, when there is one, says what it shows."
   (let* ((key (list 'evidence number))
@@ -700,6 +1126,7 @@ it, when there is one, says what it shows."
                  (format "```%s\n%s\n```\n" (or (plist-get item :language) "text") (plist-get item :code))))
         ("note" (harness-ui-report--insert-markdown (or (plist-get item :text) "")))
         ("tool-call" (harness-ui-report--insert-call item task))
+        ("demo" (harness-ui-report--insert-demo item task number report))
         (_ (insert (propertize (format "[%s]\n" kind) 'face 'harness-dim-face))))
       (when (and (stringp caption) (not (harness-string-blank-p caption)))
         (insert (propertize (concat "  " caption "\n") 'face 'harness-dim-face
@@ -723,6 +1150,7 @@ hand-in time; the transcript has the call itself."
              (code (harness-ui-report--text (plist-get item :code)))
              (note (harness-ui-report--text (plist-get item :note)))
              (call (harness-ui-report--text (plist-get item :tool_call)))
+             (demo (plist-get item :demo))
              (put-caption (lambda (plist)
                             (if caption (plist-put plist :caption caption) plist))))
         (cond
@@ -734,7 +1162,40 @@ hand-in time; the transcript has the call itself."
                                           :code code)))
          (note (funcall put-caption (list :kind "note" :text note)))
          (call (funcall put-caption (list :kind "tool-call" :call-id call)))
+         (demo
+          (let* ((object (if (stringp demo) (list :path demo) demo))
+                 (command (plist-get object :command)))
+            (funcall put-caption
+                     (list :kind "demo"
+                           :title (harness-ui-report--text (plist-get object :title))
+                           :path (harness-ui-report--text (plist-get object :path))
+                           :name (harness-ui-report--text (plist-get object :path))
+                           :url (harness-ui-report--text (plist-get object :url))
+                           :command (and command (append command nil))
+                           :cwd (harness-ui-report--text (plist-get object :cwd))
+                           :cwd-name (harness-ui-report--text (plist-get object :cwd))
+                           :narration (harness-ui-report--text (plist-get object :narration))))))
          (t nil)))))))
+
+(defun harness-ui-report--design-from-input (design)
+  "Return the design a hand_in call with DESIGN, its input, asked for.
+The document's text is read where this Emacs can read it; without it
+the title and summary are still the design's."
+  (let* ((object (if (stringp design) (list :path design) design))
+         (path (harness-ui-report--text (plist-get object :path)))
+         (text (when (and path (file-readable-p path))
+                 (with-temp-buffer
+                   (let ((coding-system-for-read 'utf-8))
+                     (insert-file-contents path))
+                   (buffer-string))))
+         (title (harness-ui-report--text (plist-get object :title))))
+    (list :title (or title
+                     (harness-ui-report--first-heading text)
+                     (and path (file-name-base path)))
+          :path path
+          :name path
+          :summary (harness-ui-report--text (plist-get object :summary))
+          :text text)))
 
 (defun harness-ui-report--from-input (input)
   "Return the report a hand_in call with INPUT handed in, rebuilt.
@@ -744,6 +1205,8 @@ model wrote, tool references without the snapshot the harness copies."
   (when (and (listp input) (harness-ui-report--text (plist-get input :summary)))
     (append
      (list :summary (plist-get input :summary))
+     (when-let* ((design (plist-get input :design)))
+       (list :design (harness-ui-report--design-from-input design)))
      (when-let* ((problem (harness-ui-report--text (plist-get input :problem))))
        (list :problem problem))
      (when-let* ((reproduction (harness-ui-report--text (plist-get input :reproduction))))
@@ -822,6 +1285,10 @@ with the work -- [Verify] and [Send back]."
          ((harness-ui-report-missing-p report)
           (harness-ui-report--insert-missing report task))
          (t
+          ;; The design document first: the whole the reviewer reads and
+          ;; comments on, before the code's summary.
+          (when-let* ((design (plist-get report :design)))
+            (harness-ui-report--insert-design design task))
           ;; What must be fixed, first: with many tasks the title alone does
           ;; not say.  A report from before this field has none and starts
           ;; with the summary as it always did.
@@ -856,7 +1323,7 @@ with the work -- [Verify] and [Send back]."
                 (cl-loop for item in evidence for first = t then nil for number from 1
                          do (unless first (insert "\n"))
                          (condition-case item-err
-                             (harness-ui-report--insert-item item task number)
+                             (harness-ui-report--insert-item item task number report)
                            (error (harness-ui-report--insert-failed
                                    (format "Evidence %d" number) item-err)))))))))
       (error (harness-ui-report--insert-failed "The report" err)))

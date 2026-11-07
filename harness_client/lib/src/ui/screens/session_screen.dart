@@ -35,6 +35,7 @@ class SessionScreen extends StatefulWidget {
     required this.sessionId,
     this.embedded = false,
     this.voiceBackendFactory,
+    this.startVoice = false,
   });
 
   final String sessionId;
@@ -43,6 +44,11 @@ class SessionScreen extends StatefulWidget {
   /// What voice mode opens its microphone and provider with.  The app leaves
   /// it null and builds the real ones; a test hands it a scripted backend.
   final VoiceBackendFactory? voiceBackendFactory;
+
+  /// Whether voice mode opens by itself, once the conversation is loaded.
+  /// The app leaves it false; a walkthrough opens it while the answer to its
+  /// question is already streaming, so that the answer is spoken.
+  final bool startVoice;
 
   @override
   State<SessionScreen> createState() => _SessionScreenState();
@@ -61,6 +67,10 @@ class _SessionScreenState extends State<SessionScreen> {
   /// The voice screen is a route of its own; a second tap while it opens must
   /// not stack another one.
   bool _voiceOpen = false;
+
+  /// A screen asked for voice when it opened has done so already, however
+  /// often it is built again after that.
+  bool _voiceStarted = false;
 
   @override
   void didChangeDependencies() {
@@ -142,6 +152,20 @@ class _SessionScreenState extends State<SessionScreen> {
         Navigator.of(context).pop();
       }
     }
+  }
+
+  /// A conversation opened for a walkthrough opens voice mode by itself,
+  /// once it is loaded: the answer to the question that started it is meant
+  /// to be spoken, and voice mode attaches while that answer streams.  It
+  /// happens once: the screen stays open behind voice mode.
+  void _openVoiceIfAsked() {
+    if (!widget.startVoice || _voiceStarted || _controller.loading) return;
+    _voiceStarted = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_openVoice());
+      }
+    });
   }
 
   Future<void> _openVoice() async {
@@ -373,6 +397,7 @@ class _SessionScreenState extends State<SessionScreen> {
         _app.tasks,
       ]),
       builder: (context, _) {
+        _openVoiceIfAsked();
         final summary =
             _controller.summary ?? _app.summaryFor(widget.sessionId);
         final title = summary?.displayTitle ?? 'Session';

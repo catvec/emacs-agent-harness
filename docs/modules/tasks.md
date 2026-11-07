@@ -8,7 +8,7 @@ Task mode: one session per task, through review and the merge queue, with a limi
 - **Source:** [lisp/modules/harness-tasks.el](../../lisp/modules/harness-tasks.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [store](store.md), [project](project.md), [session](session.md), [agent](agent.md)
-- **Required by:** [patch-review](patch-review.md), [recap](recap.md), [tasks-notify](tasks-notify.md), [tasks-search](tasks-search.md)
+- **Required by:** [demo](demo.md), [patch-review](patch-review.md), [recap](recap.md), [tasks-notify](tasks-notify.md), [tasks-search](tasks-search.md)
 - **Brings along:** [ui-tasks](ui-tasks.md) (its UI), [priority](priority.md) (its file requires it), [readonly](readonly.md) (its file requires it)
 
 ## About

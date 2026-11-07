@@ -397,6 +397,101 @@ void main() {
       },
     );
 
+    test(
+      'carries the design the work was written against, and the walkthrough',
+      () {
+        final report = HandInReport.fromWire({
+          'problem': 'The parser loses a quote',
+          'design': {
+            'title': 'The parser design',
+            'path': '/harness/docs/design/parser.md',
+            'name': 'docs/design/parser.md',
+            'summary': 'Quotes are read in pairs.',
+            'text': '# The parser design\n\nQuotes are read in pairs.',
+          },
+          'walkthrough': 'Present the finished work.',
+        });
+        final design = report.design!;
+        expect(design.title, 'The parser design');
+        expect(design.path, '/harness/docs/design/parser.md');
+        expect(design.name, 'docs/design/parser.md');
+        expect(design.summary, 'Quotes are read in pairs.');
+        expect(design.text, contains('# The parser design'));
+        expect(design.hasText, isTrue);
+        expect(design.isEmpty, isFalse);
+        expect(report.walkthrough, 'Present the finished work.');
+      },
+    );
+
+    test('reads the design of a call that only asked for one, and no text', () {
+      final input = {
+        'problem': 'The parser loses a quote',
+        'design': {
+          'title': 'The parser design',
+          'path': '/harness/docs/design/parser.md',
+          'summary': 'Quotes are read in pairs.',
+        },
+        'walkthrough': 'Present the finished work.',
+      };
+      final report = HandInReport.fromWire(input, input: input);
+      expect(report.design!.title, 'The parser design');
+      // Nothing is read that was not handed in.
+      expect(report.design!.text, isNull);
+      expect(report.design!.hasText, isFalse);
+      expect(report.walkthrough, 'Present the finished work.');
+      expect(HandInReport.fromWire({'summary': 'Done'}).design, isNull);
+      expect(
+        HandInReport.fromWire({'design': <String, Object?>{}}).design,
+        isNull,
+      );
+      expect(HandInDesign.fromWire(null), isNull);
+    });
+
+    test(
+      'reads a demo as the harness resolved it and as the call asked for it',
+      () {
+        final written = EvidenceItem.fromWire({
+          'kind': 'demo',
+          'title': 'Nested quotes',
+          'path': '/harness/demo/index.html',
+          'name': 'demo/index.html',
+          'url': 'http://localhost:8000',
+          'command': ['python3', '-m', 'http.server', '8000'],
+          'cwd': '/harness/demo',
+          'cwd-name': 'demo',
+          'narration': 'Type a quote and watch the error.',
+          'caption': 'The demo',
+        })!;
+        expect(written.isDemo, isTrue);
+        expect(written.isMedia, isFalse);
+        expect(written.label, 'Nested quotes');
+        expect(written.url, 'http://localhost:8000');
+        expect(written.name, 'demo/index.html');
+        expect(written.command, ['python3', '-m', 'http.server', '8000']);
+        expect(written.cwd, '/harness/demo');
+        expect(written.cwdName, 'demo');
+        expect(written.narration, 'Type a quote and watch the error.');
+
+        // The call's input: the demo under `demo`, and no kind.
+        final asked = EvidenceItem.fromWire({
+          'demo': {
+            'title': 'Nested quotes',
+            'path': 'demo/index.html',
+            'narration': 'Type a quote.',
+          },
+        })!;
+        expect(asked.isDemo, isTrue);
+        expect(asked.path, 'demo/index.html');
+        expect(asked.narration, 'Type a quote.');
+
+        // A demo named only by its path.
+        final bare = EvidenceItem.fromWire({'demo': 'demo/index.html'})!;
+        expect(bare.isDemo, isTrue);
+        expect(bare.path, 'demo/index.html');
+        expect(bare.label, 'Demo');
+      },
+    );
+
     test('says what the task cannot do however the key is written', () {
       for (final (key, cannot, noMerge) in [
         ('cannot_continue', true, false),

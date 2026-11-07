@@ -86,6 +86,7 @@ class FakeHarness {
     this.quota = true,
     this.toolCatalogue = true,
     this.sessionPictures = true,
+    this.demo = true,
     Set<String>? knownSecrets,
   }) : knownSecrets = knownSecrets ?? <String>{} {
     if (enhanced) {
@@ -154,6 +155,7 @@ class FakeHarness {
         'harness/modules',
         'config/describe',
         if (toolCatalogue) 'tools/list',
+        if (demo) ...['demo/start', 'demo/status', 'demo/stop', 'demo/control'],
       });
       events.addAll({
         'session/created',
@@ -254,6 +256,72 @@ class FakeHarness {
   /// (`session/image`): the screenshots a task handed in, the image a
   /// `read_file` call read.  An older harness does not.
   final bool sessionPictures;
+
+  /// Whether the harness runs the demos a report hands in (`demo/start`,
+  /// `demo/status`, `demo/stop`, `demo/control`).  An older harness does not,
+  /// and a report page then offers no *Start demo*.
+  final bool demo;
+
+  /// The answers `demo/start` gives, in order: each is one start's answer,
+  /// and the last repeats.  A test sets the state, the screen and the
+  /// presenter it needs the run to have.  A start that names no run is
+  /// `run-1`, `run-2`, ...
+  List<Map<String, Object?>> demoAnswers = [
+    {
+      'state': 'running',
+      'task': 'task-handed-in',
+      'demo': 'demo-1',
+      'title': 'A spinning top',
+      'placement': 'workspace',
+      'workspace': 'w-kitchen',
+      'workspace-name': 'Kitchen',
+      'commit': 'abc1234',
+      'commit-verified': true,
+      'artifact': {
+        'name': 'demo/index.html',
+        'cwd': 'demo',
+        'command': ['python3', 'serve.py'],
+      },
+      'launch': {
+        'command': ['python3', 'serve.py'],
+        'cwd': 'demo',
+        'box-cwd': '/home/box/work/demo',
+      },
+      'vnc': {
+        'url': 'http://127.0.0.1:6080/vnc.html',
+        'socket': 'ws://127.0.0.1:5901/websockify',
+        'state': 'agent',
+        'available': true,
+        'reason': null,
+      },
+      'control': 'agent',
+      'presenter': {'session': 's-demo', 'name': 'demo: A spinning top'},
+    },
+  ];
+
+  /// What `demo/status` adds to a run's answer; null for an unchanged run.
+  Map<String, Object?>? demoStatusAnswer;
+
+  /// Whether the run `demo/status` is asked about is gone: stopped, with no
+  /// screen.
+  bool demoGone = false;
+
+  /// Make one of the demo methods fail, with these words.
+  String? failDemoStart;
+  String? failDemoStop;
+  String? failDemoControl;
+
+  /// The runs the harness started, by id, as the last thing it said of each.
+  final Map<String, Map<String, Object?>> demoRuns = {};
+  int _demoStarts = 0;
+
+  /// A start waits for this before it answers, as a harness that is slow to
+  /// start the computer does: a second tap can be made while it waits.
+  Future<void>? demoStartGate;
+
+  /// A stop waits for this before it answers, as a harness that is slow to
+  /// stop the computer does.
+  Future<void>? demoStopGate;
 
   /// The picture files of the harness's machine it can read, by path.  A
   /// path that is not here is a file that is gone, as a finished task's
@@ -1669,6 +1737,40 @@ class FakeHarness {
         _respond(id, copy);
         return;
       }
+      if (method == '_harness/session/btw') {
+        // A side conversation over a session: a new, empty session of kind
+        // `btw` where the parent works, answered as the harness answers it
+        // (the session itself, with its `id`).
+        final parent = asString(params['id']);
+        final over = sessions[parent];
+        if (parent == null || over == null) {
+          _respondError(id, -32603, 'No session $parent');
+          return;
+        }
+        final sid = 'btw-${++_generated}';
+        final now = DateTime.now().millisecondsSinceEpoch / 1000;
+        final btw = <String, Object?>{
+          'id': sid,
+          'name': asString(params['name']) ?? 'Side chat',
+          'kind': 'btw',
+          'parent-id': parent,
+          'project': over['project'],
+          'cwd': over['cwd'],
+          'model': asString(params['model']) ?? over['model'],
+          'permissionMode': over['permissionMode'],
+          'status': 'idle',
+          'created': now,
+          'updated': now,
+          'contextWindow': over['contextWindow'] ?? 200000,
+          'todos': <Object?>[],
+          'pending': <Object?>[],
+          'queue': <Object?>[],
+        };
+        sessions[sid] = btw;
+        nodes[sid] = [];
+        _respond(id, btw);
+        return;
+      }
       if (method == '_harness/compaction/revert' ||
           method == '_harness/compaction/restore') {
         // As the harness does: the node is marked (or not), announced again,
@@ -1811,6 +1913,95 @@ class FakeHarness {
           'mime': 'image/svg+xml',
           'data': base64Encode(utf8.encode(_sampleSvg)),
         });
+        return;
+      }
+      if (method == '_harness/demo/start') {
+        if (failDemoStart != null) {
+          _respondError(id, -32603, failDemoStart!);
+          return;
+        }
+        if (demoStartGate != null) await demoStartGate;
+        final template = demoAnswers.isEmpty
+            ? <String, Object?>{'state': 'running'}
+            : (demoAnswers.length > 1
+                  ? demoAnswers.removeAt(0)
+                  : demoAnswers.first);
+        final run = asString(template['run']) ?? 'run-${++_demoStarts}';
+        final answer = <String, Object?>{
+          ...template,
+          'run': run,
+          'demo': asString(params['demo']) ?? template['demo'] ?? 'demo-1',
+          'state': asString(template['state']) ?? 'running',
+        };
+        demoRuns[run] = answer;
+        _respond(id, answer);
+        return;
+      }
+      if (method == '_harness/demo/status') {
+        final run = asString(params['run']);
+        final base = demoRuns[run];
+        if (base == null) {
+          _respond(id, {
+            'state': 'missing',
+            'reason': {'code': 'no-demo', 'text': 'no such demo run'},
+            'run': run,
+            'stopped': true,
+          });
+          return;
+        }
+        if (demoGone) {
+          final gone = <String, Object?>{
+            ...base,
+            ...?demoStatusAnswer,
+            'state': 'stopped',
+            'stopped': true,
+            'vnc': null,
+          };
+          if (run != null) demoRuns[run] = gone;
+          _respond(id, gone);
+          return;
+        }
+        final answer = <String, Object?>{...base, ...?demoStatusAnswer};
+        if (run != null) demoRuns[run] = answer;
+        _respond(id, answer);
+        return;
+      }
+      if (method == '_harness/demo/stop') {
+        if (failDemoStop != null) {
+          _respondError(id, -32603, failDemoStop!);
+          return;
+        }
+        if (demoStopGate != null) await demoStopGate;
+        final run = asString(params['run']);
+        final stopped = <String, Object?>{
+          ...?demoRuns[run],
+          'run': run,
+          'state': 'stopped',
+          'stopped': true,
+          'vnc': null,
+          'control': 'agent',
+        };
+        if (run != null) demoRuns[run] = stopped;
+        _respond(id, stopped);
+        return;
+      }
+      if (method == '_harness/demo/control') {
+        if (failDemoControl != null) {
+          _respondError(id, -32603, failDemoControl!);
+          return;
+        }
+        final run = asString(params['run']);
+        final control = asString(params['control']) ?? 'agent';
+        final base = demoRuns[run];
+        final answer = <String, Object?>{
+          'run': run,
+          'control': control,
+          'state': base?['state'] ?? 'running',
+          'vnc': base?['vnc'],
+          'reason': null,
+        };
+        if (run != null) demoRuns[run] = {...?base, ...answer};
+        _respond(id, answer);
         return;
       }
       if (method == '_harness/task/list') {

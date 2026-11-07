@@ -15,16 +15,25 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/models/tool_display.dart';
 import 'package:harness_client/src/models/transcript.dart';
+import 'package:harness_client/src/state/app_controller.dart';
+import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/ui/adaptive/platform_style.dart';
+import 'package:harness_client/src/ui/app_scope.dart';
+import 'package:harness_client/src/ui/screens/hand_in_design_screen.dart';
 import 'package:harness_client/src/ui/screens/hand_in_report_screen.dart';
+import 'package:harness_client/src/ui/screens/session_screen.dart';
 import 'package:harness_client/src/ui/screens/tool_detail_screen.dart';
+import 'package:harness_client/src/ui/screens/voice_screen.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
+import 'package:harness_client/src/voice/voice_controller.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support/fake_harness.dart';
 import 'support/handed_in_task.dart';
 import 'support/real_fonts.dart';
 import 'support/report_flows.dart';
 import 'support/tool_showcase.dart';
+import 'support/voice_fakes.dart';
 
 /// The report of the handed-in task, as the page of a bare app draws it.
 Future<void> _pumpPage(
@@ -64,6 +73,62 @@ Future<void> _pumpFullView(WidgetTester tester, ToolView tool) async {
     ),
   );
   await settle(tester, 3);
+}
+
+/// An app connected to a harness that draws nothing: the scope a page needs
+/// to start a walkthrough.
+class _Rig {
+  _Rig(this.settings, this.harness, this.app);
+
+  final SettingsController settings;
+  final FakeHarness harness;
+  final AppController app;
+}
+
+Future<_Rig> _rig() async {
+  SharedPreferences.setMockInitialValues({});
+  final settings = SettingsController();
+  await settings.load();
+  final harness = FakeHarness();
+  final app = AppController(settings: settings, connector: harness.connector);
+  await app.connect('ws://memory/acp');
+  return _Rig(settings, harness, app);
+}
+
+/// [HandInReportScreen] for [report], in the scope of [rig]'s app: the page
+/// as the app opens it, with the harness behind it.
+Future<void> _pumpReportInApp(
+  WidgetTester tester,
+  _Rig rig,
+  HandInReport report, {
+  String? sessionId,
+  bool startVoiceWalkthrough = true,
+  VoiceBackendFactory? voiceBackendFactory,
+}) async {
+  tester.view.physicalSize = const Size(1170, 2532);
+  tester.view.devicePixelRatio = 3.0;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  await tester.pumpWidget(
+    HarnessStyle(
+      style: HarnessPlatformStyle.material,
+      child: HarnessScope(
+        app: rig.app,
+        settings: rig.settings,
+        child: MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: HarnessTheme.material(Brightness.light),
+          home: HandInReportScreen(
+            report: report,
+            sessionId: sessionId,
+            startVoiceWalkthrough: startVoiceWalkthrough,
+            voiceBackendFactory: voiceBackendFactory,
+          ),
+        ),
+      ),
+    ),
+  );
+  await settle(tester, 4);
 }
 
 Future<void> main() async {
@@ -491,6 +556,185 @@ Future<void> main() async {
       expect(find.byType(HandInReportScreen), findsNothing);
       expect(find.text('ERROR'), findsOneWidget);
       expect(find.text('PROBLEM'), findsNothing);
+    });
+  });
+
+  group('a report that hands in a design and a demo', () {
+    final record = <String, Object?>{
+      'problem': 'The parser loses a quote',
+      'summary': 'The parser reads quotes in pairs now.',
+      'design': {
+        'title': 'The parser design',
+        'path': '/harness/docs/design/parser.md',
+        'name': 'docs/design/parser.md',
+        'summary': 'Quotes are read in pairs, and an unclosed one is an error.',
+        'text':
+            '# The parser design\n\nA quote opens a string; the next one '
+            'closes it.',
+      },
+      'evidence': [
+        {
+          'kind': 'demo',
+          'title': 'Nested quotes',
+          'path': '/harness/demo/index.html',
+          'name': 'demo/index.html',
+          'url': 'http://localhost:8000',
+          'command': ['python3', '-m', 'http.server', '8000'],
+          'cwd': '/harness/demo',
+          'cwd-name': 'demo',
+          'narration': 'Type a quote and watch the error.',
+        },
+      ],
+    };
+
+    testWidgets('draws the design before the problem, and reads its text '
+        'on a page of its own', (tester) async {
+      await _pumpPage(tester, HandInReport.fromWire(record));
+      expect(find.text('DESIGN'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('DESIGN')).dy,
+        lessThan(tester.getTopLeft(find.text('PROBLEM')).dy),
+        reason: 'the design comes first',
+      );
+      expect(find.text('The parser design'), findsOneWidget);
+      expect(
+        find.textContaining(
+          'Quotes are read in pairs, and an unclosed one is an error.',
+        ),
+        findsOneWidget,
+      );
+      // The document is not on the report itself: it is read on its page.
+      expect(find.textContaining('A quote opens a string'), findsNothing);
+
+      await tester.ensureVisible(find.text('Read design'));
+      await tester.pump();
+      await tester.tap(find.text('Read design'));
+      await settle(tester, 8);
+      expect(find.byType(HandInDesignScreen), findsOneWidget);
+      expect(find.text('Design'), findsOneWidget);
+      expect(find.text('docs/design/parser.md'), findsOneWidget);
+      expect(find.textContaining('A quote opens a string'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('names a demo, opens the one that is served, and says where '
+        'the other one lives', (tester) async {
+      final report = HandInReport.fromWire({
+        'evidence': [
+          ...(record['evidence'] as List),
+          {
+            'kind': 'demo',
+            'title': 'The report page',
+            'path': '/harness/demo/report.html',
+            'name': 'demo/report.html',
+            'command': ['python3', '-m', 'http.server', '8001'],
+            'narration': 'Scroll to the end.',
+          },
+        ],
+      });
+      await _pumpPage(tester, report);
+      expect(find.text('EVIDENCE'), findsOneWidget);
+      expect(find.text('Nested quotes'), findsOneWidget);
+      expect(find.text('The report page'), findsOneWidget);
+      // Both narrations are open on the page of a report.
+      expect(find.text('NARRATION'), findsNWidgets(2));
+      expect(
+        find.textContaining('Type a quote and watch the error.'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Scroll to the end.'), findsOneWidget);
+      // Only a demo served at a URL can be opened here.
+      expect(find.text('Open'), findsOneWidget);
+      expect(find.text('On the harness machine'), findsOneWidget);
+      expect(find.text('http://localhost:8000'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('the walkthrough of a report', () {
+    HandInReport reportWith(String? walkthrough) => HandInReport.fromWire({
+      'problem': 'Nested quotes are lost',
+      if (walkthrough != null) 'walkthrough': walkthrough,
+    });
+
+    testWidgets('has a way in only with a prompt and a session', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      await _pumpReportInApp(
+        tester,
+        rig,
+        reportWith('Show the new card.'),
+        sessionId: 's1',
+      );
+      expect(find.byKey(const Key('report-walkthrough')), findsOneWidget);
+      expect(find.text('Walkthrough'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox());
+      await _pumpReportInApp(tester, rig, reportWith(null), sessionId: 's1');
+      expect(find.byKey(const Key('report-walkthrough')), findsNothing);
+
+      await tester.pumpWidget(const SizedBox());
+      await _pumpReportInApp(tester, rig, reportWith('Show the new card.'));
+      expect(find.byKey(const Key('report-walkthrough')), findsNothing);
+    });
+
+    testWidgets('starts a side conversation of the session, with the prompt', (
+      tester,
+    ) async {
+      final rig = await _rig();
+      final backend = FakeBackend();
+      await _pumpReportInApp(
+        tester,
+        rig,
+        reportWith('Show the new card.'),
+        sessionId: 's1',
+        voiceBackendFactory: (settings, address) => backend,
+      );
+      await tester.tap(find.byKey(const Key('report-walkthrough')));
+      await settle(tester, 20);
+
+      // A BTW of the task's session, on the model the session runs.
+      final btw = rig.harness.requests
+          .where((request) => request.$1 == '_harness/session/btw')
+          .single;
+      expect(btw.$2, {
+        'id': 's1',
+        'name': 'review: Nested quotes are lost',
+        'model': 'claude:claude-fable-5-1',
+      });
+      // The walkthrough is the first question of that conversation, sent by
+      // the report once: voice mode opens over the answer as it streams, and
+      // says nothing of its own.
+      final side = rig.harness.sessions.values.firstWhere(
+        (session) => session['kind'] == 'btw' && session['parent-id'] == 's1',
+      );
+      Object? onlyPrompt() {
+        final prompts = [
+          for (final (method, params) in rig.harness.requests)
+            if (method == 'session/prompt' && params['sessionId'] == side['id'])
+              params['prompt'],
+        ];
+        return prompts.single;
+      }
+
+      expect(onlyPrompt(), [
+        {'type': 'text', 'text': 'Show the new card.'},
+      ]);
+      // Voice mode opened over it, through the microphone the test scripts.
+      expect(find.byType(VoiceScreen), findsOneWidget);
+      expect(backend.started, isTrue);
+
+      // Ending voice mode leaves the conversation it was opened over, and
+      // adds nothing to what was said.
+      await tester.tap(find.byKey(const Key('voice-close')));
+      await settle(tester, 8);
+      expect(find.byType(VoiceScreen), findsNothing);
+      expect(find.byType(SessionScreen), findsOneWidget);
+      expect(onlyPrompt(), [
+        {'type': 'text', 'text': 'Show the new card.'},
+      ]);
+      expect(tester.takeException(), isNull);
     });
   });
 }

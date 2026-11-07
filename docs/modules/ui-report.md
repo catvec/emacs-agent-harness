@@ -120,11 +120,20 @@ record it was about whole, and a review holds the task's hand-in.
 ### Options
 
 - `harness-ui-report-auto-fold` — Non-nil: the second hand-in of a task opens with its sections folded.
+- `harness-ui-report-design-max-chars` — Characters of a design document the report draws.
 - `harness-ui-report-image-max-height` — Height an evidence image of a report takes at most.
 - `harness-ui-report-max-height` — Height a report popout grows to at most, as a fraction of its frame's.
 - `harness-ui-report-output-limit` — Characters of a referenced tool call's output shown before [show all].
+- `harness-ui-report-walkthrough-voice` — When non-nil, a walkthrough turns voice on where the voice module is loaded.
 
 ## Uses
+
+### Methods it calls
+
+- `demo/start` ([demo](demo.md)), when it is loaded
+- `demo/status` ([demo](demo.md)), when it is loaded
+- `demo/stop` ([demo](demo.md)), when it is loaded
+- `session/btw` ([session](session.md))
 
 ### Events it hears over ACP
 

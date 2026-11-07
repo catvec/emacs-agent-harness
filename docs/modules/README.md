@@ -30,6 +30,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
  ;;cost-compare       ; What the recorded usage would have cost at other models' prices.
  ;;cowboy             ; Ask what goes first when a message meets a session whose prompt cache…
  ;;decisions          ; Lasting decisions -- answers that hold beyond their moment -- with…
+ ;;demo               ; Start a hand-in's demo on its workspace computer: the VNC screen, the…
  ;;fallback           ; Carry on with another provider when one runs out of quota or money.
  ;;gremlin            ; Opt-in chaos fixtures and the budgeted run that contains them.
  ;;handoff            ; Warn before a lossy switch to a hosted-loop provider, and hand the…
@@ -116,6 +117,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [cost-compare](cost-compare.md) |  | [usage](usage.md), [provider](provider.md) | What the recorded usage would have cost at other models' prices. |
 | [cowboy](cowboy.md) |  | [session](session.md), [agent](agent.md), [compaction](compaction.md) | Ask what goes first when a message meets a session whose prompt cache went cold. |
 | [decisions](decisions.md) |  | [store](store.md) | Lasting decisions -- answers that hold beyond their moment -- with their undo and redo, from any session. |
+| [demo](demo.md) |  | [tools](tools.md), [tasks](tasks.md), [session](session.md), [agent](agent.md) | Start a hand-in's demo on its workspace computer: the VNC screen, the takeover, and the presenter that drives it. |
 | [fallback](fallback.md) |  | [store](store.md), [session](session.md), [provider](provider.md) | Carry on with another provider when one runs out of quota or money. |
 | [gremlin](gremlin.md) |  |  | Opt-in chaos fixtures and the budgeted run that contains them. |
 | [handoff](handoff.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md) | Warn before a lossy switch to a hosted-loop provider, and hand the conversation over. |

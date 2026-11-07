@@ -120,6 +120,22 @@ time it opens. It asks again only when the harness does.
   | A clip conversation | The settings of either provider | The way in |
   |---|---|---|
   | ![The voice screen listening: the orb, what was said and what the agent answered, and Mute, Interrupt and End](screenshots/voice-listening.png) | ![Voice settings: Clip or Live, the delivery, and the fields of the chosen provider](screenshots/voice-settings.png) | ![A conversation, with the microphone in the message box](screenshots/voice-entry.png) |
+- **Starts a demo where it runs.** A report's *Start demo* asks the
+  harness to run that demo as the review knows it: the task's last report,
+  the demo in it, and the workspace the demo belongs to. On a workspace it
+  runs on that workspace's computer, and the page watched and driven here
+  is that computer's screen: the app speaks VNC to the box's socket itself
+  (a WebSocket, RFB 3.3 to 3.8, Raw and CopyRect), the pointer and keys go
+  to it while *Control · you*, and *Control · agent* gives them back to the
+  presenter. A demo with no workspace runs on the harness's machine, and
+  the page says so; a start that cannot run says why, in its own words, and
+  stays on the report.
+- **Sits beside the presenter.** The presenter of a demo is a conversation
+  the start opened and briefed: its narration is shown as it arrives, and
+  *Talk*, *Interrupt*, *Mute*, *Set up* and a field to type a direction
+  into all reach that same session -- the one whose tools drive the
+  computer the screen shows. Leaving the page leaves the run alone; only
+  *Stop demo* stops it, and it stops its own run.
 - **Shows the rest of the harness.** The task board (all seven columns, queue
   state and slot use, backlog mode, submit; a finished task's card has the
   words of its summary, without the Markdown it was written in), spend,

@@ -73,6 +73,44 @@ void seedHandedInTaskWithPictures(FakeHarness harness) {
   harness.seedShowcasePictures();
 }
 
+/// [seedHandedInTask], with the design the work was written against and a
+/// demo among the evidence: what a report draws before its problem, and what
+/// a demo says of itself.
+void seedDesignReport(FakeHarness harness) {
+  seedHandedInTask(harness);
+  final record = handedInRecord(harness);
+  record['design'] = {
+    'title': 'The parser design',
+    'path': '/Users/noah/Code/emacs-agent-harness/docs/design/parser.md',
+    'name': 'docs/design/parser.md',
+    'summary':
+        'Quotes are read in pairs, and an unclosed one is an error at the '
+        'line it starts.',
+    'text':
+        '# The parser design\n\nA quote opens a string, and the next one '
+        'closes it.\n\n## Errors\n\nAn unclosed quote is an error at the '
+        'line it starts.\n',
+  };
+  record['evidence'] = [
+    ...asList(record['evidence']),
+    {
+      'kind': 'demo',
+      'title': 'Nested quotes',
+      'path':
+          '/Users/noah/Code/emacs-agent-harness/.worktrees/task-handed-in/demo/'
+          'index.html',
+      'name': 'demo/index.html',
+      'url': 'http://localhost:8000',
+      'command': ['python3', '-m', 'http.server', '8000'],
+      'cwd':
+          '/Users/noah/Code/emacs-agent-harness/.worktrees/task-handed-in/demo',
+      'cwd-name': 'demo',
+      'narration': 'Type a quote and watch the error.',
+      'caption': 'The demo',
+    },
+  ];
+}
+
 /// [handedInTaskId], and beside it [unreportedTaskId], in review as well,
 /// whose round of work ended without a report: the harness recorded the last
 /// message the session wrote instead (`missing`), and that message is the
