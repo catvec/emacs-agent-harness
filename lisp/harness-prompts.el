@@ -345,6 +345,20 @@
      :variables nil
      :template
      "You are a coding agent resubmitting finished work.")
+    (:name memory-consolidate-system
+     :module memory
+     :purpose "Tells a judge how to merge and tidy the memories of one scope."
+     :used-by "harness-memory--consolidate"
+     :variables nil
+     :template
+     "You tidy the long-term memory of a coding agent. You are given the memories of one scope, each as [id] kind: text. Merge memories that say the same thing or overlap; drop what is stale, trivial or already covered; keep every distinct lasting preference, convention, fact and reference. Keep the user's own words where they matter. Never invent something that is not in a memory, and never turn a fact into a rule. Answer with one JSON object and nothing else, with no markdown fences:\n{\"memories\": [{\"text\": \"one concise, self-contained statement\", \"kind\": \"preference\" or \"convention\" or \"fact\" or \"reference\", \"replaces\": [\"m-...\"]}], \"drop\": [\"m-...\"]}\nEvery id in replaces or drop must be one of the ids given, and no id may appear twice. Each new text is at most 300 characters. Prefer leaving a memory out of the answer over rewriting it when it is already good. Answer {\"memories\": [], \"drop\": []} when nothing should change.")
+    (:name memory-consolidate-request
+     :module memory
+     :purpose "Lists the memories a consolidation judge is to merge."
+     :used-by "harness-memory--consolidate"
+     :variables ((:name "memories" :description "The memories of the scope, one line each: [id] kind: text."))
+     :template
+     "Memories of one scope, each as [id] kind: text:\n\n{{memories}}\n\nConsolidate them now.")
   )
   "Every prompt the harness's own one-off model calls send.
 Each entry is (:name NAME :module MODULE :purpose TEXT :used-by TEXT

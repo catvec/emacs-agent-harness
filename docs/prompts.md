@@ -6,8 +6,8 @@ one registry: `harness-prompts--registry` in
 the one-off ones that go through `harness-small-ask` (a session's name,
 the permission judge and the summary of a prompt, the session judge, a
 recap, a compaction's summary, the Insights summary, the todo sync, the
-task board's search, the cache warmer, the companion pet) and the
-provider checks, which are their own requests.  The system prompt a
+task board's search, the cache warmer, the companion pet and memory
+consolidation) and the provider checks, which are their own requests.  The system prompt a
 conversation is assembled with is not one of them; it is the
 conversation's own prompt, built by `harness-agent--system-prompt`.
 
@@ -319,3 +319,10 @@ that does not use it gains no hooks, options or timers from it.
 | Prompt | Purpose | Variables | Used by |
 |---|---|---|---|
 | `secret-sandbox-withheld` | Tells the agent that a locked run's output, exit status and duration are not returned. | none | harness-secret-sandbox--withheld |
+
+### memory
+
+| Prompt | Purpose | Variables | Used by |
+|---|---|---|---|
+| `memory-consolidate-system` | Tells a judge how to merge and tidy the memories of one scope. | none | harness-memory--consolidate |
+| `memory-consolidate-request` | Lists the memories a consolidation judge is to merge. | `{{memories}}` The memories of the scope, one line each: [id] kind: text. | harness-memory--consolidate |

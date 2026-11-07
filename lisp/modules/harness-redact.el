@@ -204,6 +204,7 @@ it is in memory only.")
     harness-redact--stage-claude
     harness-redact--stage-copilot
     harness-redact--stage-tasks
+    harness-redact--stage-memories
     harness-redact--stage-attribution-prompts
     harness-redact--stage-transcripts
     harness-redact--stage-spill
@@ -985,6 +986,29 @@ A scope of sessions leaves the tasks alone."
                                        (harness-redact--n (apply #'+ (mapcar (lambda (f) (plist-get f :count)) files))
                                                           "occurrence"))
                        "")))))))
+
+(defun harness-redact--stage-memories (run)
+  "Take the secrets of RUN out of the lasting memories.
+A scope of sessions leaves them alone, as it leaves the task records:
+a memory is not a session's artifact.  The all scope takes every memory,
+the project scope the project's own.  The memory module writes the
+changed texts, drops its index and VACUUMs it, so the old text is not
+left in its pages."
+  (when (and (harness-method-exists-p 'memory/redact)
+             (memq (harness-redact-run-scope run) '(all project)))
+    (let* ((project (and (eq (harness-redact-run-scope run) 'project)
+                         (harness-redact-run-project run)))
+           (result (harness-call 'memory/redact (harness-redact-run-secrets run) project
+                                 (harness-redact-run-dry-p run)))
+           (memories (plist-get result :memories)))
+      (harness-redact-add-store
+       run (list :store "memories" :count (or (plist-get result :count) 0)
+                 :memories (mapcar (lambda (m)
+                                     (list :id (plist-get m :id) :count (plist-get m :count)))
+                                   memories))
+       (list (format "Memories: %s in %s."
+                     (harness-redact--n (or (plist-get result :count) 0) "occurrence")
+                     (harness-redact--n (length memories) "memory")))))))
 
 (defun harness-redact--stage-attribution-prompts (run)
   "Take the secrets of RUN out of the prompt records of the private service.

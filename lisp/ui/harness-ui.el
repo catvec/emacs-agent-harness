@@ -6856,7 +6856,8 @@ Choosing a group opens its menu, as a directory opens what it holds."
                                                'harness-delete-budget 'harness-worktrees
                                                'harness-slots 'harness-chatgpt-plan-page
                                                'harness-redact-secret
-                                               'harness-secrets-list-sources)))
+                                               'harness-secrets-list-sources
+                                               'harness-memories 'harness-remember)))
     ("c" "Config & remote…" harness-config-menu)
     ("b" "This buffer…" harness-buffer-menu
      :if (lambda () (harness-ui--buffer-menu-p)))]])
@@ -6950,6 +6951,11 @@ Choosing a group opens its menu, as a directory opens what it holds."
      :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("Q" "Task slots" harness-slots
      :if (lambda () (harness-ui--command-available-p 'harness-slots)))]
+   ["Memory"
+    ("m" "Remember…" harness-remember
+     :if (lambda () (harness-ui--command-available-p 'harness-remember)))
+    ("M" "Memory" harness-memories
+     :if (lambda () (harness-ui--command-available-p 'harness-memories)))]
    ["Secrets"
     ("x" "Redact a secret…" harness-redact-secret
      :if (lambda () (harness-ui--command-available-p 'harness-redact-secret)))

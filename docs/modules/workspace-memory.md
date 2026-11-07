@@ -54,6 +54,7 @@ timeline, which this module can do with `workspace-memory/rebuild`.
 
 ### Methods it calls
 
+- `memory/search` ([memory](memory.md))
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
 - `store/sqlite` ([store](store.md))

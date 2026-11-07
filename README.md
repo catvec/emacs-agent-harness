@@ -260,6 +260,11 @@ A non-comprehensive list of all the different functionality offered by modules s
 - Sticky compose box (`ui-sticky-compose`)
   - A chat window scrolled away from its compose box draws a compact copy of it in its mode line while you compose
   - The start and end of the draft, its lines and attachments, and a button that jumps back to the box
+- Lasting memory (optional, `(harness-enable-modules :features memory)`)
+  - Preferences, conventions, facts and references the user or the agent saves, in a user scope and a project scope, put into every session's system prompt
+  - `memory_save`, `memory_search`, `memory_get`, `memory_forget` and `memory_consolidate`; saving the same text edits it, and `replaces` folds memories into one
+  - Full-text and optional semantic search over the same SQLite approach as the session search, a memory page (`C-c h M`) and quick capture (`C-c h m`)
+  - Redaction reaches memories, and consolidation asks a cheap model and applies only a valid answer
 - Configuration via customize
   - Global overridden by per-project (via `.dir-locals.el`)
   - Corporate policy profiles

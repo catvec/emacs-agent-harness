@@ -178,6 +178,7 @@ redaction is not (`harness-perms--call-kind`).
 ### Methods it calls
 
 - `agent/running` ([agent](agent.md)), when it is loaded
+- `memory/redact` ([memory](memory.md)), when it is loaded
 - `secrets/shape` ([secrets](secrets.md))
 - `session/exists-p` ([session](session.md))
 - `session/family-ids` ([session](session.md))

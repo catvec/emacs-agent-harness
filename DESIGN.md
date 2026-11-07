@@ -250,6 +250,17 @@ The global configuration must be overridable by project specific permissions whi
 ## Skills
 Should look in common locations for skill files. Should provide tooling to the model to search for skills to use. Should provide tooling to load a skill, and the files that come with it. The common locations are the documented ones: Claude Code's (its plugins' included), the open Agent Skills convention's (which Codex and Copilot CLI read), Copilot CLI's and the harness's own, both in the user's home and in the project.
 
+## Memory
+Lasting things an agent should know in a later session: how the user wants work done ("Don't import inside function bodies"), a convention of this codebase, a durable fact, or where something lives. It is not task state and not a transcript search: what the user or the agent decided once, and would otherwise have to say again, belongs here. The model is Claude Code's (CLAUDE.md and auto memory): four kinds (`preference`, `convention`, `fact`, `reference`), a user scope that holds in every project and a project scope shared by every worktree of a checkout, loaded into every session's system prompt, and edited by people as well as by the agent.
+
+The memories are the data, kept in `memory.db` (SQLite) and written in one transaction when one changes; the database is their only copy, with the full-text index and the vectors beside them in the same file. The system prompt gets a `## Memory` section built from the database alone: project instructions, then the user's, in full; then the project's notes and the user's, in full while `harness-memory-prompt-budget` allows and otherwise as an index of ids that `memory_get` reads. It is deliberately independent of the request, so the provider's prompt cache survives from step to step; a memory that is saved changes it once.
+
+The agent saves, searches, reads, forgets and consolidates with `memory_save`, `memory_search`, `memory_get`, `memory_forget` and `memory_consolidate`. Saving the same text again edits the memory that holds it, and `replaces` folds older memories into a new one. Consolidation asks the simple tier of a session's model to merge and drop notes, and applies the answer only when every id and kind it names exists -- a bad answer changes nothing. Search reuses the session search's shape on a much smaller corpus: an FTS5 external-content table over the memories is kept in step by triggers, with optional int8 vectors for `semantic` search; without FTS5 the memories are filtered in Elisp. A redaction reaches memory too, replacing the secret and rebuilding the full-text index, so the old text is not left in its pages.
+
+`C-c h m` remembers one (`C-u` for the user's), `C-c h M` opens the memory page: both scopes, each memory under its kind, with buttons to add, edit, forget, search and consolidate.
+
+Storage, and why the database is the only copy: [docs/memory-storage.md](docs/memory-storage.md).
+
 ## Model Switcher
 Provide a user interface to switch between models. The available models should be fetched by enumerating over all providers and asking for available models. The list of models should be searchable. Model names should indicate the provider of the model (Anthropic, Open Router, ect) and the name and version of the model.
 

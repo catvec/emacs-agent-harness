@@ -101,7 +101,7 @@ of `workspace/prompt`.
 - `agent/cancel` ([agent](agent.md))
 - `agent/prompt` ([agent](agent.md))
 - `agent/running` ([agent](agent.md))
-- `memory/search` ([workspace-memory](workspace-memory.md))
+- `memory/search` ([memory](memory.md)), when it is loaded
 - `memory/status` ([workspace-memory](workspace-memory.md))
 - `secret-sandbox/secrets` ([secret-sandbox](secret-sandbox.md)), when it is loaded
 - `secret-sandbox/status` ([secret-sandbox](secret-sandbox.md)), when it is loaded
