@@ -7,6 +7,7 @@
 (defvar harness-acp-token)
 (defvar harness-ui-map)
 (defvar harness-ui-event-functions)
+(defvar harness-ui--queue)
 (defvar harness-ui-workspace--data)
 (defvar harness-ui-workspace--entries)
 (defvar harness-ui-workspace--id)
@@ -142,6 +143,78 @@
         (should (equal "w-1" (plist-get (cadar sent) :id)))
         (should (equal "th-1" (plist-get (plist-get (cadar sent) :opts) :thread)))
         (should (string-match-p "matte tile" (plist-get (cadar sent) :text)))))))
+
+(ert-deftest harness-ui-workspace-renders-the-loading-state ()
+  "The loading state draws before the harness answers, with a project.
+The compose box completes from the buffer's directory until the
+workspace plist arrives, so the first render must not pass it nil."
+  (harness-ui-workspace-test-with
+    (let ((dir (file-name-as-directory (make-temp-file "harness-workspace-" t))))
+      (unwind-protect
+          (with-temp-buffer
+            (setq default-directory dir)
+            (harness-ui-workspace-mode)
+            (setq harness-ui-workspace--id "w-1"
+                  harness-ui-workspace--state 'loading
+                  harness-ui-workspace--data nil
+                  harness-ui-workspace--entries nil)
+            (let ((harness-ui--queue nil))
+              (harness-ui-workspace--render))
+            (should (equal dir (harness-compose--project)))
+            (should (string-match-p "Workspace · loading" (buffer-string)))
+            (should (string-match-p "Loading…" (buffer-string))))
+        (delete-directory dir t)))))
+
+(ert-deftest harness-ui-workspace-open-shows-the-buffer ()
+  "Opening a workspace shows its buffer before the data arrives.
+That is what C-c h Y does: the loading chat appears at once, from the
+workspace root, instead of no buffer at all."
+  (harness-ui-workspace-test-with
+    (let (shown)
+      (unwind-protect
+          (with-temp-buffer
+            (let ((harness-ui--queue nil))
+              (cl-letf (((symbol-function 'harness-ui-display-view)
+                         (lambda (buffer &optional _position) (setq shown buffer)))
+                        ((symbol-function 'harness-compose-fetch-completions) #'ignore))
+                (harness-ui-workspace--open (harness-ui-workspace-test-data))))
+            (should (buffer-live-p shown))
+            (with-current-buffer shown
+              (should (derived-mode-p 'harness-ui-workspace-mode))
+              (should (equal "/tmp/workspace/" default-directory))
+              (should (equal "/tmp/workspace/" (harness-compose--project)))
+              (should (string-match-p "Workspace · loading" (buffer-string)))
+              (should (string-match-p "Loading…" (buffer-string)))))
+        (when (buffer-live-p (get-buffer "*harness workspace: Home*"))
+          (kill-buffer "*harness workspace: Home*"))))))
+
+(ert-deftest harness-ui-workspace-fetch-shows-the-memory-state ()
+  "The fetch asks for the workspace's memory and the header names it ready.
+The request names the parameter the method takes, `workspace', as the
+client's does."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--state 'loading
+            harness-ui-workspace--data nil
+            harness-ui-workspace--entries nil)
+      (let (requests)
+        (let ((harness-ui--queue nil))
+          (cl-letf (((symbol-function 'harness-ui-request)
+                     (lambda (method &optional params)
+                       (push (cons method params) requests)
+                       (harness-resolved
+                        (pcase method
+                          ("_harness/workspace/get" (harness-ui-workspace-test-data))
+                          ("_harness/workspace/timeline" (harness-ui-workspace-test-entries))
+                          ("_harness/memory/status" (list :notes 2))
+                          (_ nil)))))
+                    ((symbol-function 'harness-compose-fetch-completions) #'ignore))
+            (harness-ui-workspace--fetch)))
+        (should (equal (list :workspace "w-1") (cdr (assoc "_harness/memory/status" requests))))
+        (harness-test-wait (lambda () (string-match-p "Memory · ready" (buffer-string))))
+        (should (string-match-p "The tile is matte." (buffer-string)))))))
 
 (ert-deftest harness-ui-workspace-refuses-an-empty-message ()
   "An empty send is a user error, not a turn."

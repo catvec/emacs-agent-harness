@@ -258,6 +258,11 @@ Letters type into the compose box; these chords act on the workspace.")
   "Redraw the compose box after the compose module changed its state."
   (harness-ui-workspace--render))
 
+(defun harness-ui-workspace--use-root (workspace)
+  "Make this buffer's `default-directory' the root of WORKSPACE."
+  (when-let* ((root (plist-get workspace :root)))
+    (setq default-directory (file-name-as-directory (expand-file-name root)))))
+
 (defun harness-ui-workspace--set-data (workspace entries memory)
   "Take WORKSPACE, its ENTRIES and MEMORY as this buffer's state."
   (setq harness-ui-workspace--data workspace
@@ -265,8 +270,7 @@ Letters type into the compose box; these chords act on the workspace.")
         harness-ui-workspace--memory memory
         harness-ui-workspace--error nil
         harness-ui-workspace--state 'ready)
-  (when-let* ((root (plist-get workspace :root)))
-    (setq default-directory (file-name-as-directory (expand-file-name root))))
+  (harness-ui-workspace--use-root workspace)
   (unless (and harness-ui-workspace--thread
                (cl-find harness-ui-workspace--thread (plist-get workspace :threads)
                         :key (lambda (thread) (plist-get thread :id)) :test #'equal))
@@ -285,7 +289,7 @@ Letters type into the compose box; these chords act on the workspace.")
            (timeline (harness-ui-request "_harness/workspace/timeline"
                                          (list :id id :opts (list :limit 200))))
            (memory (harness-catch
-                    (harness-ui-request "_harness/memory/status" (list :id id))
+                    (harness-ui-request "_harness/memory/status" (list :workspace id))
                     (lambda (_) nil))))
       (setq harness-ui-workspace--request generation)
       (unless (eq harness-ui-workspace--state 'ready)
@@ -463,6 +467,9 @@ Letters type into the compose box; these chords act on the workspace.")
     (with-current-buffer buffer
       (unless (derived-mode-p 'harness-ui-workspace-mode)
         (harness-ui-workspace-mode))
+      ;; The root is known before the workspace itself is read: the box
+      ;; that draws the loading state completes from it, not from nil.
+      (harness-ui-workspace--use-root workspace)
       (setq harness-ui-workspace--id id
             harness-ui-workspace--state (or harness-ui-workspace--state 'loading)
             harness-ui-workspace--thread (and (plist-get workspace :last-thread)
@@ -531,7 +538,11 @@ the `C-c w' keys act on the workspace."
               word-wrap t
               truncate-partial-width-windows nil)
   (harness-compose-setup
-   :project (lambda () (plist-get harness-ui-workspace--data :root))
+   ;; Before the first answer from the harness there is no workspace plist:
+   ;; the box still completes and attaches from the buffer's directory,
+   ;; which `harness-ui-workspace--open' set to the workspace root.
+   :project (lambda () (or (plist-get harness-ui-workspace--data :root)
+                           default-directory))
    :placeholder (lambda () "Message…")
    :redraw #'harness-ui-workspace--render-tail
    :bottom t)
