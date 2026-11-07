@@ -17,6 +17,7 @@
 (defvar harness-compaction-mid-turn)
 (defvar harness-compaction--mid-turn)
 (defvar harness-compaction--mid-turn-note)
+(defvar harness-compaction--carried-on)
 (defvar harness-compaction--request-text)
 (defvar harness-compaction--summary-output)
 (defvar harness-cache-ttl)
@@ -52,6 +53,7 @@ own prefix cached would let it be made.")
      (clrhash harness-compaction--pending)
      (clrhash harness-compaction--revert-hold)
      (clrhash harness-compaction--mid-turn)
+     (clrhash harness-compaction--carried-on)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override nil)
            (harness-compaction--context-reserve 1000)
@@ -1513,6 +1515,119 @@ it is not asked again at the next step, and the turn goes on."
       (should (string-match-p
                "\\`Context nearly full: carrying on with the whole conversation, ~7\\.5k tokens uncached, as you chose"
                (car (harness-compaction-test-hints id)))))))
+
+(ert-deftest harness-compaction-mid-turn-carried-on-is-not-asked-again ()
+  "A turn told to carry on asks nothing more, and neither does the next turn.
+The answer stands while the conversation can still be sent
+\(`harness-compaction--carried-on'): without it the boundary before the
+fifth of these steps would put the question again, three steps after the
+one it was answered at."
+  (harness-compaction-test-with
+    (harness-test-load-module 'tools-question)
+    (harness-compaction-test-define-echo)
+    (let* ((id (harness-compaction-test-session))
+           (questions 0)
+           (harness-provider-demo-script-override
+            (harness-compaction-test-tool-turn '(7500 7500 7500 7500 7500 7500))))
+      (harness-on 'compaction/asked (lambda (&rest _) (cl-incf questions)))
+      (let ((turn (harness-call 'agent/prompt id "go")))
+        (harness-compaction-test-answer id "carry on")
+        (should (eq 'end-turn (plist-get (harness-await turn 20) :stop-reason))))
+      (should (= 1 questions))
+      (should-not (member 'compaction (harness-compaction-test-kinds id)))
+      ;; The next turn, at the same context: the message goes, unasked.
+      (setq harness-provider-demo-script-override harness-compaction-test-script)
+      (should (eq 'end-turn
+                  (plist-get (harness-await (harness-call 'agent/prompt id "and now the lexer") 20)
+                             :stop-reason)))
+      (should (= 1 questions))
+      (should (gethash id harness-compaction--carried-on)))))
+
+(ert-deftest harness-compaction-mid-turn-past-the-window-asks-at-once ()
+  "A step past the window is asked about at once, not after the cooldown.
+A conversation carried on with at 7.5k which reaches 8.1k at its next
+step cannot be sent at all: the question comes back at once, and not
+after the three boundaries a try that did not help waits for."
+  (harness-compaction-test-with
+    (harness-test-load-module 'tools-question)
+    (harness-compaction-test-define-echo)
+    (let* ((id (harness-compaction-test-session))
+           (questions 0)
+           (harness-provider-demo-script-override
+            (harness-compaction-test-tool-turn '(7500 8100 600))))
+      (harness-on 'compaction/asked (lambda (&rest _) (cl-incf questions)))
+      (let ((turn (harness-call 'agent/prompt id "go")))
+        (harness-compaction-test-answer id "carry on")
+        ;; Past the window at the next boundary: the question comes at once.
+        (harness-compaction-test-answer id "not now")
+        (should (eq 'blocked (plist-get (harness-await turn 20) :stop-reason))))
+      (should (= 2 questions))
+      (should-not (member 'compaction (harness-compaction-test-kinds id))))))
+
+(ert-deftest harness-compaction-carried-on-ends-past-the-window ()
+  "Past the window the question comes back, and carrying on is not offered.
+Carrying on then is a request the model cannot take; the new answer ends
+the earlier one, and the question comes back when it is near the limit
+again."
+  (harness-compaction-test-with
+    (harness-test-load-module 'tools-question)
+    (let* ((id (harness-compaction-test-session))
+           (questions 0)
+           (harness-provider-demo-script-override harness-compaction-test-script))
+      (harness-on 'compaction/asked (lambda (&rest _) (cl-incf questions)))
+      (harness-call 'session/usage-add id '(:context 7500))
+      (let ((turn (harness-call 'agent/prompt id "next question")))
+        (harness-compaction-test-answer id "carry on")
+        (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
+      (should (= 1 questions))
+      (should (gethash id harness-compaction--carried-on))
+      ;; Past the 8.0k window: the question comes back, without carrying on.
+      (harness-call 'session/usage-add id '(:context 8100))
+      (let ((turn (harness-call 'agent/prompt id "go on")))
+        (let* ((question (harness-compaction-test-question id))
+               (payload (plist-get question :payload))
+               (options (append (plist-get payload :options) nil)))
+          (should (= 2 questions))
+          (should (string-match-p "more than this model\'s ~8\\.0k window"
+                                  (plist-get payload :question)))
+          (should (= 6 (length options)))
+          (should-not (cl-some (lambda (option) (string-prefix-p "Carry on" option)) options))
+          (harness-call 'question/answer id (plist-get question :id) '(:answer "not now")))
+        (should (eq 'blocked (plist-get (harness-await turn 10) :stop-reason))))
+      (should-not (gethash id harness-compaction--carried-on)))))
+
+(ert-deftest harness-compaction-carried-on-is-forgotten-under-the-limit ()
+  "Once the context is under the limit the answer to carry on is forgotten.
+A conversation compacted or cut since is another one, and the question
+comes back when it next comes near the limit.  The answer goes with the
+session too."
+  (harness-compaction-test-with
+    (harness-test-load-module 'tools-question)
+    (let* ((id (harness-compaction-test-session))
+           (questions 0)
+           (harness-provider-demo-script-override harness-compaction-test-script))
+      (harness-on 'compaction/asked (lambda (&rest _) (cl-incf questions)))
+      (harness-call 'session/usage-add id '(:context 7500))
+      (let ((turn (harness-call 'agent/prompt id "next question")))
+        (harness-compaction-test-answer id "carry on")
+        (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
+      (should (gethash id harness-compaction--carried-on))
+      ;; Under the limit: nothing asked, and the answer is forgotten.
+      (harness-call 'session/usage-add id '(:context 6900))
+      (should (eq 'end-turn
+                  (plist-get (harness-await (harness-call 'agent/prompt id "a small one") 10)
+                             :stop-reason)))
+      (should (= 1 questions))
+      (should-not (gethash id harness-compaction--carried-on))
+      ;; Near the limit again: a question, as for a new conversation.
+      (harness-call 'session/usage-add id '(:context 7500))
+      (let ((turn (harness-call 'agent/prompt id "next question")))
+        (harness-compaction-test-answer id "carry on")
+        (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
+      (should (= 2 questions))
+      (should (gethash id harness-compaction--carried-on))
+      (harness-emit 'session/deleted id)
+      (should-not (gethash id harness-compaction--carried-on)))))
 
 (ert-deftest harness-compaction-an-automatic-compaction-can-be-reverted ()
   "What an automatic compaction did can be taken back and made again.

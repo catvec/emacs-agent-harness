@@ -373,6 +373,18 @@ have passed since the latest.  Gone once a boundary finds the context
 under the limit, and when the turn ends.  Kept beside the other tables
 of this module.")
 
+(defvar harness-compaction--carried-on (make-hash-table :test 'equal)
+  "Session id -> t while the user's answer to carry on still stands.
+Set when the automatic compaction question is answered with `carry-on':
+the question is not put again while the conversation can still be sent
+at the size it has, before the next turn or at the next steps of one.
+Carrying on is no option once the context is past the window
+\(`harness-compaction--window'), and the question comes back then; a
+boundary that finds the context under the limit forgets the answer, a
+compaction or a trim having changed the conversation, and so does
+another answer (`harness-compaction--note-answer').  Gone with the
+session, and not kept across a restart.")
+
 (defun harness-compaction-busy-p (session-id)
   "Non-nil while a compaction of SESSION-ID is under way."
   (and (gethash session-id harness-compaction--running) t))
@@ -523,6 +535,26 @@ where L is one of `ok', `warning', `urgent' and `critical'."
   (let ((context (or (plist-get (plist-get session :usage) :context) 0)))
     (> context (harness-compaction--usable (harness-compaction--window session)
                                            (harness-compaction--reserve session)))))
+
+(defun harness-compaction--carried-on-p (session-id session)
+  "Non-nil when SESSION-ID's user chose to carry on, and it still can be.
+The answer stands while SESSION's context is within its window
+\(`harness-compaction--window'): past it the conversation cannot be
+sent, and the question, whose choices no longer include carrying on,
+is put again.  See `harness-compaction--carried-on'."
+  (and (gethash session-id harness-compaction--carried-on)
+       (<= (or (plist-get (plist-get session :usage) :context) 0)
+           (harness-compaction--window session))
+       t))
+
+(defun harness-compaction--note-answer (session-id choice)
+  "Keep, or forget, SESSION-ID's answer to the automatic compaction question.
+CHOICE is what it was answered with: `carry-on' stands until the
+conversation changes or is past its window
+\(`harness-compaction--carried-on'), and any other answer ends it."
+  (if (eq choice 'carry-on)
+      (puthash session-id t harness-compaction--carried-on)
+    (remhash session-id harness-compaction--carried-on)))
 
 (defun harness-compaction-hosted-p (session)
   "Non-nil when SESSION's provider compacts on its own side."
@@ -1909,6 +1941,7 @@ it (`harness-compaction--mid-turn')."
   "Forget the compaction of SESSION-ID, which is gone."
   (remhash session-id harness-compaction--mid-turn)
   (remhash session-id harness-compaction--revert-hold)
+  (remhash session-id harness-compaction--carried-on)
   (remhash session-id harness-compaction--pending)
   (remhash session-id harness-compaction--asking))
 
@@ -1993,11 +2026,19 @@ decide as they would have."
 ;; user's to choose: where they can be asked, the automatic compaction
 ;; asks first, as the cold-cache question does (harness-cowboy.el), with
 ;; what each kind costs and what carrying on costs, and it compacts only
-;; when told to.  Where nobody is asked -- a task, a seed, a session
-;; whose user turned asking off -- it makes `harness-compaction-kind', as
-;; before, and the transcript says so.  Whatever made it, a compaction
-;; can be taken back and made again afterwards (`compaction/revert',
-;; `compaction/restore'); the question takes nothing of that away.
+;; when told to.  An answer to carry on stands: the question is not put
+;; again while the conversation can still be sent -- before the next
+;; turn, nor at the next steps of one -- and comes back once it is past
+;; the window, where carrying on is no option, or once the context has
+;; been under the limit since, a compaction or a trim having made it
+;; another conversation (`harness-compaction--carried-on').  Asking three
+;; steps later, for a conversation a few thousand tokens longer, is
+;; asking about an answer already given.  Where nobody is asked -- a
+;; task, a seed, a session whose user turned asking off -- it makes
+;; `harness-compaction-kind', as before, and the transcript says so.
+;; Whatever made it, a compaction can be taken back and made again
+;; afterwards (`compaction/revert', `compaction/restore'); the question
+;; takes nothing of that away.
 
 (defconst harness-compaction--ask-kinds '(brief summary transcript fresh truncate)
   "The compaction kinds the automatic-compaction question offers, in this order.")
@@ -2383,6 +2424,7 @@ compacted, the message is held rather than sent uncached."
      (lambda (answer)
        (let ((choice (plist-get answer :choice))
              (by (plist-get answer :by)))
+         (harness-compaction--note-answer session-id choice)
          (cond
           ((memq choice '(hold nil))
            (funcall next (list :proceed nil :reason harness-compaction--hold-reason)))
@@ -2428,6 +2470,7 @@ conversation uncached."
      (lambda (answer)
        (let ((choice (plist-get answer :choice))
              (by (plist-get answer :by)))
+         (harness-compaction--note-answer session-id choice)
          (cond
           ((eq choice 'carry-on)
            (harness-compaction--say session-id 'carry-on by session)
@@ -2471,33 +2514,48 @@ costs and what carrying on costs, and does as they answer
 \(`harness-compaction--asked-before-turn').  A conversation the user
 just gave back whole (`compaction/revert') is let through once, or the
 compaction would be made again before the model saw it
-\(`harness-compaction--revert-hold')."
+\(`harness-compaction--revert-hold').  One whose user answered to carry
+on is let through, unasked, while it can still be sent: the answer
+stands (`harness-compaction--carried-on')."
   (let* ((id (plist-get session :id))
          (session (or (ignore-errors (harness-call 'session/get id)) session))
          (held (and (plist-get value :proceed)
-                    (gethash id harness-compaction--revert-hold))))
+                    (gethash id harness-compaction--revert-hold)))
+         (needed (harness-compaction-needed-p session)))
     (when held
       (remhash id harness-compaction--revert-hold)
       (harness-log 'info "compaction: %s goes on with the conversation its user reverted" id))
-    (if (or (not (plist-get value :proceed))
-            held
-            (not (harness-compaction-needed-p session))
-            (harness-compaction-hosted-p session))
-        (funcall next value)
+    (cond
+     ((or (not (plist-get value :proceed)) held)
+      (funcall next value))
+     ;; Under the limit again: the conversation changed since -- compacted,
+     ;; cut, or given back -- so a question asked from now on is a new one.
+     ((not needed)
+      (remhash id harness-compaction--carried-on)
+      (funcall next value))
+     ((harness-compaction-hosted-p session)
+      (funcall next value))
+     ;; The user answered carry on, and the conversation can still be sent:
+     ;; the message goes, and the question is not put again
+     ;; (`harness-compaction--carried-on').
+     ((and (harness-compaction--asks-p session)
+           (harness-compaction--carried-on-p id session))
+      (funcall next value))
+     ((harness-compaction--asks-p session)
       ;; The turn's message waits for the question and then the
       ;; compaction, which both take a while.
-      (if (harness-compaction--asks-p session)
-          (harness-compaction--asked-before-turn id session value next)
-        (let ((kind (harness-compaction--effective-kind id harness-compaction-kind
-                                                        (list :fallback "transcript"))))
-          (harness-compaction-show-waiting id)
-          (harness-compaction--say id kind 'unasked session)
-          (harness-compaction--say-not-warm id harness-compaction-kind kind)
-          (harness-compaction--compact-with-bounds
-           id kind (harness-compaction--ask-meta kind 'unasked)
-           (lambda (_node) (funcall next value))
-           (lambda (&rest _)
-             (funcall next (list :proceed nil :reason harness-compaction--uncacheable-reason))))))))
+      (harness-compaction--asked-before-turn id session value next))
+     (t
+      (let ((kind (harness-compaction--effective-kind id harness-compaction-kind
+                                                      (list :fallback "transcript"))))
+        (harness-compaction-show-waiting id)
+        (harness-compaction--say id kind 'unasked session)
+        (harness-compaction--say-not-warm id harness-compaction-kind kind)
+        (harness-compaction--compact-with-bounds
+         id kind (harness-compaction--ask-meta kind 'unasked)
+         (lambda (_node) (funcall next value))
+         (lambda (&rest _)
+           (funcall next (list :proceed nil :reason harness-compaction--uncacheable-reason))))))))
   nil)
 
 ;;;; Automatic compaction in the middle of a turn
@@ -2552,32 +2610,52 @@ and a compaction that failed or did not help is not repeated at every
 step (`harness-compaction--mid-turn-due-p').  Where the user can be
 asked (`harness-compaction--asks-p') the question comes first
 (`harness-compaction--asked-before-step'), and a boundary it asked at
-counts as a try, so one carried on at is not asked again at once.  The
-step goes on once a compaction, or a transcript or a cut in its place,
-was made, and is refused when none could be made, or when the user
-dismissed the question: the whole conversation is never sent uncached
-for want of an answer.  SESSION is read
+counts as a try, so one compacted at is not asked again at once.  One
+answered to carry on is not asked about again while the conversation
+can still be sent (`harness-compaction--carried-on'); past the window,
+where it cannot, the question comes at once, not after the cooldown.
+The step goes on once a compaction, or a transcript or a cut in its
+place, was made, and is refused when none could be made, or when the
+user dismissed the question: the whole conversation is never sent
+uncached for want of an answer.  SESSION is read
 again first: a handler earlier in the chain may have changed its model."
   (let* ((id (plist-get session :id))
-         (session (or (ignore-errors (harness-call 'session/get id)) session)))
+         (session (or (ignore-errors (harness-call 'session/get id)) session))
+         (needed (harness-compaction-needed-p session)))
     (cond
      ((or (not (plist-get value :proceed)) (not harness-compaction-mid-turn))
       (funcall next value))
-     ((not (harness-compaction-needed-p session))
+     ((not needed)
       (remhash id harness-compaction--mid-turn)
+      (remhash id harness-compaction--carried-on)
       (funcall next value))
-     ((or (harness-compaction-hosted-p session)
-          (not (harness-compaction--mid-turn-due-p id)))
+     ((harness-compaction-hosted-p session)
       (funcall next value))
      (t
-      (let ((carry-on (lambda (&rest _)
-                        (harness-compaction--note-activity id nil)
-                        (funcall next value))))
-        (if (harness-compaction--asks-p session)
-            ;; The step waits for the question; its answer decides.
-            (harness-compaction--asked-before-step id session carry-on next)
+      (let* ((carry-on (lambda (&rest _)
+                         (harness-compaction--note-activity id nil)
+                         (funcall next value)))
+             (asks (harness-compaction--asks-p session))
+             ;; Past the window the conversation cannot be sent at all:
+             ;; where the user is asked, the question comes at once, and
+             ;; not after the cooldown a try that did not help waits for.
+             (over (and asks
+                        (> (or (plist-get (plist-get session :usage) :context) 0)
+                           (harness-compaction--window session)))))
+        (cond
+         ;; The user answered carry on, and the conversation can still be
+         ;; sent: the step goes on, and the question is not put again
+         ;; (`harness-compaction--carried-on').
+         ((and asks (harness-compaction--carried-on-p id session))
+          (funcall next value))
+         ((and (not over) (not (harness-compaction--mid-turn-due-p id)))
+          (funcall next value))
+         (asks
+          ;; The step waits for the question; its answer decides.
+          (harness-compaction--asked-before-step id session carry-on next))
+         (t
           (let* ((kind (harness-compaction--effective-kind id harness-compaction-kind
-                                                        (list :fallback "transcript")))
+                                                           (list :fallback "transcript")))
                  (meta (append (harness-compaction--ask-meta kind 'unasked)
                                (list :mid-turn t))))
             (harness-compaction--note-activity id 'compacting)
@@ -2591,7 +2669,7 @@ again first: a handler earlier in the chain may have changed its model."
              (lambda (&rest _)
                (harness-compaction--note-activity id nil)
                (funcall next (list :proceed nil
-                                   :reason harness-compaction--uncacheable-reason))))))))))
+                                   :reason harness-compaction--uncacheable-reason)))))))))))
   nil)
 
 (defun harness-compaction--init ()

@@ -6012,7 +6012,14 @@ and tools.
   answer: a kind compacts as it says, carrying on sends the
   conversation as it is, and a dismissed question holds the message,
   with `harness-compaction--hold-reason', as not now does.  An answer
-  naming no choice asks again.  A question that cannot be asked (an
+  naming no choice asks again.  An answer to carry on stands while the
+  conversation can still be sent: the question is not put again before
+  the next turn, nor at the next steps of one, and comes back once the
+  context is past the window -- where carrying on is no option -- or
+  once a boundary has found the context under the limit since, a
+  compaction or a trim having made it another conversation
+  (`harness-compaction--carried-on'; any other answer forgets it, and so
+  does the session's end).  A question that cannot be asked (an
   error, or no `question/ask') falls back to
   `harness-compaction--effective-kind' of `harness-compaction-kind': a
   summary or brief nobody chose is a transcript there too.  An answer
@@ -6060,10 +6067,14 @@ and tools.
   instead (`harness-compaction--held-step-reason`), as a compaction
   that cannot be made does: none of them answered to pay for the whole
   conversation.
-  The question is not put at every step: a boundary that asked, and was
-  told to carry on, counts as a try (`harness-compaction--mid-turn-due-p'),
-  so the next question waits for the cooldown.  `:mid-turn` is kept on the node's `:meta`: the content then
-  ends in `harness-compaction--mid-turn-note`, telling the model the work
+  The question is not put at every step: the answer to carry on stands
+  while the conversation can still be sent
+  (`harness-compaction--carried-on`), so it is not put again at the next
+  steps of the turn, nor before the next one; it comes back once the
+  context is past the window -- at once then, not after the cooldown --
+  or once a boundary finds the context under the limit.  `:mid-turn`
+  is kept on the node's `:meta`: the content then ends in
+  `harness-compaction--mid-turn-note`, telling the model the work
   it describes is not finished and to carry on without waiting for the
   user (nothing follows the compaction in what the model is sent next,
   where a message of the user's ends a compaction made before a turn),
