@@ -40,7 +40,13 @@ audio capture path, before the PCM is uploaded or queued for a model.
   (`onset_hold = 30 ms`) open the gate.  The detector raises its threshold
   above the local player's own level while the assistant speaks and asks
   for a longer echo hold, so a narrow-band speaker echo does not gate the
-  assistant against itself.
+  assistant against itself.  Its noise floor is learned only from frames
+  that do not look voiced: a quiet or missed word is a speech candidate
+  even below the threshold, so it cannot teach the detector to miss the
+  next one.  The floor follows a quieter frame down faster than a louder
+  one up and counts digital silence as a measurement, so an utterance
+  leaves the configured threshold behind rather than a raised one; it is
+  frozen while the gate is open or the player is audible.
 - **GPT-Live adapter** (`scripts/harness-voice-live-gpt`): the same local
   detector runs on the microphone before audio is sent to the server.  The
   server's own VAD still decides its turns, but the local gate is what
@@ -240,8 +246,9 @@ The tradeoff is explicit:
   for long.
 - Echo handling without acoustic echo cancellation must choose between
   self-interruption and missing a quiet voice.  The local detector raises
-  its threshold while the assistant plays; an open speaker at a level
-  close to the voice still needs headphones or a real AEC.
+  its threshold while the assistant plays and freezes its noise floor
+  then; an open speaker at a level close to the voice still needs
+  headphones or a real AEC.
 
 ## Controls and state transitions
 
@@ -269,14 +276,21 @@ synthetic fixtures and no microphone:
 - human-like voiced audio against silence, white noise, hum and a click;
 - onset before transcription, and an utterance that is one dictation
   across a 400 ms natural pause;
-- speaker echo at the player's level not gating the assistant, while a
-  louder voice does;
+- a quieter utterance after digital silence, repeated utterances at
+  alternating levels, a quiet utterance over low room noise, the same
+  decisions across chunk boundaries, silence decaying a raised noise
+  floor, and a hum or click leaving no raised floor;
+- speaker echo at the player's level not gating the assistant and not
+  raising the floor, while a louder voice does and a quieter voice after
+  the echo is still heard;
 - held output before a blocked STT result exists, transcript plus pending
   context exactly once, and no replay after a real utterance;
 - late/out-of-order transcripts delivered in utterance order;
 - a false trigger that releases, a resumed voice that keeps the gate
   closed, mute dropping a late transcript, and stop/restart clearing the
   gate;
+- both a loud and a quieter utterance reaching a fake STT in order, and
+  noise, hum and echo creating no utterance or self-interruption;
 - GPT-Live's own local gate dropping server audio while speech is active;
 - the latency budgets above and the detector CPU assertion.
 

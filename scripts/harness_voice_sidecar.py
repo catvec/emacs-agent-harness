@@ -657,7 +657,23 @@ class SpeechDetector:
     ``("end",)`` after HANGOVER seconds without it.  The onset is the
     signal the gate uses; it is deliberately much earlier than a full
     utterance or a transcription.
+
+    The noise floor is only learned from frames that do not look voiced.
+    A frame that fails the energy test but has the zero-crossing and
+    first-difference shape of voice is a quiet or missed word, not room
+    noise: learning it would let one missed utterance raise the threshold
+    that must then miss the next.  The floor follows a quieter frame down
+    faster than a louder one up, and digital silence counts as a
+    measurement, so a burst of speech leaves the configured threshold
+    behind rather than a raised one.  It is frozen while the gate is
+    active and while the assistant's player is audible, where the
+    microphone is hearing the person or the speaker rather than the room.
     """
+
+    #: Per-frame rates at which the noise floor follows a quiet frame down
+    #: and a louder one up; a 10 ms frame makes decay about 100 ms.
+    noise_rise = 0.02
+    noise_decay = 0.1
 
     def __init__(self, rate=LOCAL_RATE, threshold=0.02, frame=0.01,
                  onset_hold=0.03, hangover=0.85, echo_hold=0.20,
@@ -743,22 +759,32 @@ class SpeechDetector:
         return threshold
 
     def _learn_noise(self, energy):
-        if energy <= 0:
+        """Move the noise floor toward ENERGY, faster down than up.
+
+        Digital silence is a measurement, not a missing one: a true pause
+        has to decay the floor, or the raised threshold from the previous
+        utterance outlives the sound that caused it.
+        """
+        energy = min(0.05, max(0.0, energy))
+        if self._noise <= 0.0:
+            self._noise = energy
             return
-        if self._noise <= 0:
-            self._noise = min(0.05, energy)
-        else:
-            self._noise = min(0.05, (self._noise * 0.98) + (energy * 0.02))
+        rate = self.noise_decay if energy < self._noise else self.noise_rise
+        self._noise = min(0.05, max(0.0,
+                                      self._noise + (energy - self._noise) * rate))
 
     def classify(self, frame):
         """Return whether one PCM16 frame is likely human speech."""
         energy = pcm_energy(frame)
         self.last_energy = energy
-        loud = False
-        if energy >= self._threshold():
-            loud = (self.zero_crossing_rate(frame) <= 0.35
-                    and self.change_ratio(frame) >= 0.03)
-        if not loud and energy <= max(self.threshold, 0.03):
+        voice = False
+        if energy > 0.0:
+            voice = (self.zero_crossing_rate(frame) <= 0.35
+                     and self.change_ratio(frame) >= 0.03)
+        loud = energy >= self._threshold() and voice
+        if (not loud and not voice and not self.active
+                and self._playback <= 0.005
+                and energy <= max(self.threshold, 0.03)):
             self._learn_noise(energy)
         self.last_loud = loud
         return loud

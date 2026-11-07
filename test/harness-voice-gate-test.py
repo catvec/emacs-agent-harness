@@ -70,6 +70,18 @@ def detector_events(data, level=0.0, chunk=320):
     return events, detector
 
 
+def detector_stream(parts):
+    """Feed (PCM, playback level) pairs, returning events and the detector."""
+    detector = SpeechDetector()
+    events = []
+    for data, level in parts:
+        detector.set_playback(level)
+        for offset in range(0, len(data), 320):
+            for event in detector.feed(data[offset:offset + 320]):
+                events.append(event[0])
+    return events, detector
+
+
 class TestPlayer(NullAudio):
     """A NullAudio player whose playback level and busy state tests control."""
 
@@ -105,6 +117,7 @@ class SidecarRig:
         self.stt_gate = threading.Event()
         self.stt_gate.set()
         self.transcript = "open the merge queue"
+        self.transcript_queue = []
         self.sidecar = unmute.UnmuteSidecar(
             args(), events=self.events, player=self.player,
             recorder=NullAudio(),
@@ -114,6 +127,8 @@ class SidecarRig:
     def _stt(self, url, fields, filename, data, headers=None, timeout=120):
         self.stt_calls.append({"bytes": len(data)})
         self.stt_gate.wait(timeout=5)
+        if self.transcript_queue:
+            return json.dumps({"text": self.transcript_queue.pop(0)}).encode("utf-8")
         return json.dumps({"text": self.transcript}).encode("utf-8")
 
     def _tts(self, url, payload, headers=None, timeout=60, method=None):
@@ -181,6 +196,113 @@ class DetectorTest(unittest.TestCase):
         speech = [result for result in results if result[0] == "speech"]
         self.assertEqual(len(speech), 1, "a short natural pause split the dictation")
         self.assertGreater(len(speech[0][1]) / 32000.0, 2.0)
+
+    def test_a_quieter_utterance_after_digital_silence_is_still_detected(self):
+        loud = fixtures.voiced(2.0, amplitude=0.30)
+        quiet = fixtures.voiced(2.0, amplitude=0.08)
+        events, detector = detector_events(
+            fixtures.concat(loud, fixtures.silence(2.0), quiet))
+        self.assertEqual([kind for _, kind in events], ["start", "end", "start"])
+        self.assertGreater(events[2][0], 4.0,
+                           "the second onset came from the first utterance")
+        # The loud utterance and the silence leave the configured threshold,
+        # not a raised one the quieter utterance cannot cross.
+        self.assertEqual(detector._threshold(), detector.threshold)
+        self.assertLess(detector._noise, 0.001)
+        fresh, _ = detector_events(quiet)
+        self.assertEqual([kind for _, kind in fresh], ["start"],
+                         "a fresh detector accepts the fixture; the estimator did not")
+
+    def test_a_missed_quiet_utterance_does_not_raise_the_floor_for_the_next(self):
+        # 0.048 is below the configured threshold even at its loudest frame,
+        # so this attempt is missed; 0.07 is accepted by a clean detector but
+        # not above a floor the missed attempt would have taught.
+        missed = fixtures.voiced(2.0, amplitude=0.048)
+        next_one = fixtures.voiced(1.5, amplitude=0.07)
+        events, detector = detector_events(
+            fixtures.concat(missed, fixtures.silence(1.0), next_one))
+        self.assertEqual([kind for _, kind in events], ["start"])
+        self.assertEqual(detector._threshold(), detector.threshold)
+        self.assertLess(detector._noise, 0.001)
+
+    def test_repeated_utterances_recover_after_each_one(self):
+        parts = []
+        for amplitude in (0.30, 0.08, 0.25, 0.06, 0.30):
+            parts.append(fixtures.voiced(1.0, amplitude=amplitude))
+            parts.append(fixtures.silence(1.2))
+        events, detector = detector_events(fixtures.concat(*parts))
+        self.assertEqual([kind for _, kind in events], ["start", "end"] * 5)
+        self.assertEqual(detector._threshold(), detector.threshold)
+
+    def test_low_level_room_noise_does_not_hide_a_quiet_utterance(self):
+        room = 0.012
+        speech = fixtures.mix(
+            fixtures.voiced(1.5, amplitude=0.08),
+            fixtures.white_noise(1.5, amplitude=room, seed=11))
+        events, detector = detector_events(
+            fixtures.concat(fixtures.white_noise(1.0, amplitude=room),
+                            speech,
+                            fixtures.white_noise(1.0, amplitude=room, seed=13)))
+        self.assertEqual([kind for _, kind in events], ["start", "end"])
+        self.assertEqual(detector._threshold(), detector.threshold,
+                         "a quiet room raised the threshold a quiet voice needs")
+        events, _ = detector_events(
+            fixtures.white_noise(4.0, amplitude=room))
+        self.assertEqual(events, [], "room noise created an utterance")
+
+    def test_chunk_boundaries_do_not_change_the_decisions(self):
+        data = fixtures.concat(fixtures.voiced(0.6, amplitude=0.30),
+                               fixtures.silence(1.0),
+                               fixtures.voiced(0.6, amplitude=0.08),
+                               fixtures.silence(1.0))
+        expected = None
+        for chunk in (1, 3, 160, 320, 999, 4096, len(data)):
+            events, _ = detector_events(data, chunk=chunk)
+            kinds = [kind for _, kind in events]
+            if expected is None:
+                expected = kinds
+            self.assertEqual(kinds, expected, "chunk size %d" % chunk)
+        self.assertEqual(expected, ["start", "end", "start", "end"])
+
+    def test_digital_silence_decays_a_raised_noise_floor(self):
+        detector = SpeechDetector()
+        detector.feed(fixtures.white_noise(1.0, amplitude=0.02))
+        self.assertGreater(detector._threshold(), detector.threshold,
+                           "the fixture did not raise the floor")
+        detector.feed(fixtures.silence(1.0))
+        self.assertLess(detector._noise, 0.001)
+        self.assertEqual(detector._threshold(), detector.threshold)
+
+    def test_a_hum_and_a_click_do_not_leave_a_raised_floor(self):
+        cases = (
+            ("hum", fixtures.hum(2.0)),
+            ("click", fixtures.concat(fixtures.silence(0.5),
+                                      fixtures.click(),
+                                      fixtures.silence(0.5))),
+        )
+        for name, data in cases:
+            detector = SpeechDetector()
+            events = []
+            for offset in range(0, len(data), 320):
+                events.extend(detector.feed(data[offset:offset + 320]))
+            self.assertEqual(events, [], name)
+            detector.feed(fixtures.silence(1.0))
+            self.assertEqual(detector._threshold(), detector.threshold, name)
+
+    def test_playback_echo_does_not_raise_the_floor_or_hide_the_next_voice(self):
+        playback = fixtures.voiced(1.0)
+        level = SpeechDetector.energy(playback)
+        events, detector = detector_stream([
+            (fixtures.echo(playback, gain=0.32), level),
+            (fixtures.silence(0.5), 0.0),
+            (fixtures.voiced(1.5, amplitude=0.08), 0.0),
+            (fixtures.silence(1.0), 0.0),
+        ])
+        self.assertEqual(events, ["start", "end"],
+                         "the echo crossed the gate or hid the next voice")
+        self.assertEqual(detector._noise, 0.0,
+                         "the assistant's echo was learned as room noise")
+        self.assertEqual(detector._threshold(), detector.threshold)
 
     def test_playback_echo_does_not_gate_the_assistant_against_itself(self):
         playback = fixtures.voiced(1.0)
@@ -259,6 +381,55 @@ class SidecarGateTest(unittest.TestCase):
             texts = [item["text"] for item in rig.find("delegation")]
             self.assertEqual(texts, ["first words", "second words"])
             self.assertEqual(rig.sidecar.next_utterance, 3)
+        finally:
+            rig.stop()
+
+    def test_two_utterances_at_different_levels_both_reach_transcription(self):
+        rig = SidecarRig()
+        try:
+            rig.transcript_queue = ["first words", "second words"]
+            rig.feed(fixtures.concat(fixtures.voiced(1.2, amplitude=0.30),
+                                     fixtures.silence(1.2),
+                                     fixtures.voiced(1.2, amplitude=0.08),
+                                     fixtures.silence(1.2)))
+            self.assertTrue(
+                rig.pump(until=lambda: len(rig.find("delegation")) == 2),
+                "the quieter second utterance never reached transcription")
+            self.assertEqual(len(rig.stt_calls), 2)
+            self.assertEqual([item["text"] for item in rig.find("delegation")],
+                             ["first words", "second words"])
+            self.assertEqual(len(rig.find("transcribing")), 2)
+            self.assertEqual(len(rig.find("user_delta")), 2)
+            self.assertFalse(rig.sidecar.gate_blocked())
+        finally:
+            rig.stop()
+
+    def test_noise_hum_and_echo_create_no_utterance_or_self_interruption(self):
+        rig = SidecarRig()
+        try:
+            playback = fixtures.voiced(1.0)
+            level = SpeechDetector.energy(playback)
+            rig.player.busy_value = True
+            rig.player.level_value = level
+            rig.sidecar.vad.set_playback(level)
+            rig.feed(fixtures.echo(playback, gain=0.32))
+            self.assertEqual(rig.find("speech"), [],
+                             "the assistant's echo interrupted it")
+            self.assertFalse(rig.sidecar.speech_active)
+            rig.player.busy_value = False
+            rig.player.level_value = 0.0
+            rig.sidecar.vad.set_playback(0.0)
+            rig.feed(fixtures.concat(
+                fixtures.white_noise(1.0),
+                fixtures.hum(1.0),
+                fixtures.silence(0.3),
+                fixtures.click(),
+                fixtures.silence(0.3)))
+            rig.pump(timeout=0.2)
+            self.assertEqual(rig.find("speech"), [])
+            self.assertEqual(rig.find("transcribing"), [])
+            self.assertEqual(rig.find("delegation"), [])
+            self.assertFalse(rig.sidecar.speech_active)
         finally:
             rig.stop()
 
@@ -613,7 +784,9 @@ class Service(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(length)
         if self.path.endswith("/audio/transcriptions"):
-            payload = json.dumps({"text": "add a docstring"}).encode()
+            texts = getattr(self.server, "transcripts", None)
+            text = texts.pop(0) if texts else "add a docstring"
+            payload = json.dumps({"text": text}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -646,6 +819,85 @@ class SidecarAudioTest(unittest.TestCase):
             handle.write(body)
         os.chmod(path, 0o755)
         return path
+
+    def test_two_utterances_at_different_levels_both_transcribe(self):
+        speech = fixtures.concat(
+            fixtures.voiced(1.2, amplitude=0.30),
+            fixtures.silence(1.0),
+            fixtures.voiced(1.2, amplitude=0.08),
+            fixtures.silence(1.0))
+        speech_file = os.path.join(self.work, "speech.raw")
+        with open(speech_file, "wb") as handle:
+            handle.write(speech)
+        self.program("pw-record", (
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "sys.stdout.buffer.write(open(%r, 'rb').read())\n"
+            "sys.stdout.buffer.flush()\n"
+            "while True:\n"
+            "    sys.stdout.buffer.write(b'\\x00' * 640)\n"
+            "    sys.stdout.buffer.flush()\n"
+            "    time.sleep(0.02)\n") % speech_file)
+        self.program("pw-play", "#!/bin/sh\ncat > /dev/null\n")
+        original = os.environ.get("PATH", "")
+        os.environ["PATH"] = self.work + os.pathsep + original
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Service)
+        server.transcripts = ["first words", "second words"]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = "http://127.0.0.1:%d" % server.server_address[1]
+        sidecar = subprocess.Popen(
+            [sys.executable, SCRIPT, "--stt-url", base + "/v1/audio/transcriptions",
+             "--tts-url", base + "/v1/audio/speech", "--threshold", "0.02"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=dict(os.environ), text=True, bufsize=1)
+        seen = []
+        events = queue.Queue()
+
+        def read_events():
+            for line in sidecar.stdout:
+                try:
+                    events.put(json.loads(line))
+                except ValueError:
+                    pass
+
+        threading.Thread(target=read_events, daemon=True).start()
+
+        def send(**fields):
+            sidecar.stdin.write(json.dumps(fields) + "\n")
+            sidecar.stdin.flush()
+
+        def wait_for(kind, timeout=30):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    event = events.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                seen.append(event.get("event"))
+                if event.get("event") == kind:
+                    return event
+            self.fail("no %s event, saw %s" % (kind, seen))
+
+        try:
+            send(event="start", protocol=1, context="")
+            wait_for("ready")
+            first = wait_for("delegation")
+            second = wait_for("delegation")
+            self.assertEqual([first.get("text"), second.get("text")],
+                             ["first words", "second words"])
+            self.assertEqual(seen.count("transcribing"), 2)
+            send(event="stop")
+            wait_for("closed")
+        finally:
+            os.environ["PATH"] = original
+            sidecar.stdin.close()
+            sidecar.wait(timeout=15)
+            log = sidecar.stderr.read()
+            sidecar.stdout.close()
+            sidecar.stderr.close()
+            server.shutdown()
+            server.server_close()
+        self.assertIn("capture · pw-record", log)
 
     def test_the_local_sidecar_runs_the_whole_loop(self):
         tone_file = os.path.join(self.work, "tone.raw")

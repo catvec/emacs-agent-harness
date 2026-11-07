@@ -102,6 +102,21 @@ def concat(*parts):
     return b"".join(parts)
 
 
+def mix(*parts):
+    """Mix PCM fragments sample by sample, clipping at full scale.
+
+    A quiet utterance recorded over a room's noise is the sum of the two,
+    not the utterance followed by the noise: this keeps the background
+    under the speech, where the detector has to separate them.
+    """
+    length = max((len(part) for part in parts), default=0) // 2
+    sums = [0.0] * length
+    for part in parts:
+        for index, value in enumerate(unpack(part)):
+            sums[index] += value
+    return pcm(sums)
+
+
 def with_pauses(speech_seconds=1.2, pauses=(0.4, 1.2), rate=RATE):
     """Return a long dictation with a natural pause and a longer one."""
     chunks = [voiced(speech_seconds, rate=rate)]
