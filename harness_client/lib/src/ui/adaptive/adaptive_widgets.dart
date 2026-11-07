@@ -94,12 +94,18 @@ class HarnessPage extends StatelessWidget {
     ];
     // Always a column of the same shape, so that the body keeps its state
     // (a scroll position, what was typed) as notices come and go.
+    // The bottom of a page is part of its body, not the scaffold's
+    // `bottomNavigationBar`: that one stays where it is when the keyboard
+    // comes up, and the box a person writes in would be under it.  In the
+    // body, the page shrinks by the keyboard's height and the box goes up
+    // with it.
     final column = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         chrome?.notices(context, attention: attentionNotice) ??
             const SizedBox.shrink(),
         Expanded(child: body),
+        if (bottom != null) bottom!,
       ],
     );
     final content = maxContentWidth == null
@@ -183,7 +189,6 @@ class HarnessPage extends StatelessWidget {
         centerTitle: centerTitle,
       ),
       body: SafeArea(top: false, child: content),
-      bottomNavigationBar: bottom,
       resizeToAvoidBottomInset: resizeToAvoidBottomInset,
     );
   }
@@ -206,6 +211,7 @@ class HarnessIconButton extends StatelessWidget {
     this.onPressed,
     this.color,
     this.size = 22,
+    this.selected = false,
   });
 
   final IconData icon;
@@ -214,29 +220,52 @@ class HarnessIconButton extends StatelessWidget {
   final Color? color;
   final double size;
 
+  /// A control that is on: it keeps the accent's colour, and the shape of a
+  /// choice made, so a mode the person chose is visible without reading a
+  /// tooltip.
+  final bool selected;
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final effective = onPressed == null
-        ? (color ?? Theme.of(context).colorScheme.onSurface).withValues(
-            alpha: 0.3,
-          )
-        : (color ?? Theme.of(context).colorScheme.onSurface);
+        ? (color ?? theme.colorScheme.onSurface).withValues(alpha: 0.3)
+        : selected
+        ? theme.colorScheme.primary
+        : (color ?? theme.colorScheme.onSurface);
+    final background = selected
+        ? theme.colorScheme.primary.withValues(alpha: 0.14)
+        : null;
     if (HarnessStyle.isCupertino(context)) {
       return Semantics(
         button: true,
+        selected: selected,
         label: label,
-        child: CupertinoButton(
-          padding: EdgeInsets.zero,
-          minimumSize: const Size(40, 40),
-          onPressed: onPressed,
-          child: Icon(icon, size: size, color: effective),
+        child: Container(
+          decoration: BoxDecoration(
+            color: background,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: CupertinoButton(
+            padding: EdgeInsets.zero,
+            minimumSize: const Size(40, 40),
+            onPressed: onPressed,
+            child: Icon(icon, size: size, color: effective),
+          ),
         ),
       );
     }
-    return IconButton(
-      tooltip: label,
-      onPressed: onPressed,
-      icon: Icon(icon, size: size, color: effective),
+    return Container(
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: IconButton(
+        tooltip: label,
+        onPressed: onPressed,
+        icon: Icon(icon, size: size, color: effective),
+        isSelected: selected,
+      ),
     );
   }
 }
@@ -730,51 +759,66 @@ class HarnessPill extends StatelessWidget {
             borderRadius: BorderRadius.circular(999),
             border: Border.all(color: border),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (icon != null) ...[
-                Icon(
-                  icon,
-                  size: 15,
-                  color: selected ? accent : theme.colorScheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: 6),
-              ],
-              Text(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // In a row of bounded width -- a wrap of marks, a toolbar --
+              // a long label at a large text size is cut to the room there
+              // is; in a row that scrolls, it keeps its whole width.
+              final labelText = Text(
                 label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
                   color: selected ? accent : theme.colorScheme.onSurface,
                 ),
-              ),
-              if (count != null) ...[
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 1,
-                  ),
-                  decoration: BoxDecoration(
-                    color: selected
-                        ? accent
-                        : theme.colorScheme.surfaceContainerHigh,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    '$count',
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
+              );
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (icon != null) ...[
+                    Icon(
+                      icon,
+                      size: 15,
                       color: selected
-                          ? Colors.white
+                          ? accent
                           : theme.colorScheme.onSurfaceVariant,
                     ),
-                  ),
-                ),
-              ],
-            ],
+                    const SizedBox(width: 6),
+                  ],
+                  if (constraints.hasBoundedWidth)
+                    Flexible(child: labelText)
+                  else
+                    labelText,
+                  if (count != null) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? accent
+                            : theme.colorScheme.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        '$count',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          color: selected
+                              ? Colors.white
+                              : theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              );
+            },
           ),
         ),
       ),

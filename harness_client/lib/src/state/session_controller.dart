@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../models/activity.dart';
+import '../models/chat_thread.dart';
 import '../models/session.dart';
 import '../models/tool_catalogue.dart';
 import '../models/transcript.dart';
@@ -58,6 +59,25 @@ class SessionController extends ChangeNotifier {
   StreamSubscription<AcpNotification>? _subscription;
   bool _opened = false;
   bool _disposed = false;
+
+  /// The reply the person is writing: the message or thread the next
+  /// message answers, when it is one.  It is kept here, with the words the
+  /// composer holds, so that leaving the screen and coming back finds both,
+  /// and a message that fails to send keeps the message it answered.
+  ChatReplyDraft? reply;
+
+  /// Answer [draft] with the next message.
+  void replyTo(ChatReplyDraft draft) {
+    reply = draft;
+    _notify();
+  }
+
+  /// Write a message of one's own again, not a reply.
+  void cancelReply() {
+    if (reply == null) return;
+    reply = null;
+    _notify();
+  }
 
   /// Set when the connection was lost and replaced: the transcript may be
   /// behind what the harness has, so the next [open] reads it again.
@@ -307,16 +327,30 @@ class SessionController extends ChangeNotifier {
     error = null;
     promptInFlight = true;
     cancelling = false;
+    final draft = reply;
+    final thread = draft?.threadData();
     final echo = transcript.addLocalUser(
       trimmed.isEmpty ? '(${attachments.length} images)' : trimmed,
+      thread: thread,
     );
     _notify();
     final blocks = <Map<String, Object?>>[
-      if (trimmed.isNotEmpty) textBlock(trimmed),
+      // A reply is one block: its words are the response under the quote,
+      // and the thread data says what it answers.
+      if (thread != null)
+        <String, Object?>{
+          'type': 'text',
+          'text': trimmed,
+          '_harness': {'thread': thread},
+        }
+      else if (trimmed.isNotEmpty)
+        textBlock(trimmed),
       for (final attachment in attachments) attachment.toBlock(),
     ];
+    var accepted = false;
     try {
       final result = await api.prompt(sessionId, blocks);
+      accepted = true;
       final stop = asString(result['stopReason']);
       if (stop == 'refusal' || stop == 'max_tokens') {
         error = switch (stop) {
@@ -338,6 +372,9 @@ class SessionController extends ChangeNotifier {
     } catch (failure) {
       error = '$failure';
     } finally {
+      // The harness took the message: the next one answers nothing.  One
+      // that did not go out keeps the reply it was, to be sent again.
+      if (accepted && identical(reply, draft)) reply = null;
       promptInFlight = false;
       cancelling = false;
       transcript.finish();

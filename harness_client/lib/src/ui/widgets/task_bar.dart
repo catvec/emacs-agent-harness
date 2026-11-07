@@ -11,6 +11,7 @@ import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../format.dart';
 import '../screens/hand_in_report_screen.dart';
+import '../screens/review_screen.dart';
 import '../theme/harness_theme.dart';
 import 'task_action_runner.dart';
 
@@ -180,6 +181,20 @@ class _SessionTaskBarState extends State<SessionTaskBar> {
                       style: HarnessText.caption(context),
                     ),
                   ),
+                  if (widget.compact &&
+                      (widget.app.capabilities?.review ?? false) &&
+                      _reviews(task))
+                    HarnessIconButton(
+                      key: const Key('task-review-compact'),
+                      icon: Icons.rate_review_outlined,
+                      label: 'Review',
+                      size: 20,
+                      onPressed: () => ReviewScreen.show(
+                        context,
+                        app: widget.app,
+                        task: task,
+                      ),
+                    ),
                   if (layout.menu.isNotEmpty)
                     HarnessIconButton(
                       icon: Icons.more_horiz_rounded,
@@ -198,6 +213,9 @@ class _SessionTaskBarState extends State<SessionTaskBar> {
                 ),
                 if (task.report case final HandInReport report)
                   _ReportRow(report: report, sessionId: task.sessionId),
+                if ((widget.app.capabilities?.review ?? false) &&
+                    _reviews(task))
+                  _ReviewRow(app: widget.app, task: task),
                 if (_error != null)
                   HarnessErrorBanner(
                     message: _error!,
@@ -250,6 +268,14 @@ class _SessionTaskBarState extends State<SessionTaskBar> {
       },
     );
   }
+
+  /// Whether there is work of this task's to review: a branch of its own,
+  /// or a review that was already made of it.
+  bool _reviews(HarnessTask task) =>
+      !task.isBacklog &&
+      (task.branch != null ||
+          task.columnName == 'review' ||
+          task.report != null);
 
   /// The facts about the task that the heading does not say.
   List<Object?> _facts(HarnessTask task) => [
@@ -344,6 +370,47 @@ class _ReportRow extends StatelessWidget {
   }
 }
 
+/// The way into the change review of the task: its files, their diffs, the
+/// threads on them and the feedback written on them.
+///
+/// The review is the harness's, not this page's: a comment made there is an
+/// operation of the task's review, read by Emacs and by the agent as any
+/// other, and the page says nothing of its own about the task.
+class _ReviewRow extends StatelessWidget {
+  const _ReviewRow({required this.app, required this.task});
+
+  final AppController app;
+  final HarnessTask task;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(right: HarnessSpace.xs, top: 2),
+      child: Row(
+        children: [
+          Expanded(
+            child: HarnessMetaLine(
+              maxLines: 1,
+              style: HarnessText.caption(context),
+              parts: [
+                'Changes, threads and feedback',
+                if (task.branch != null) task.branch!,
+              ],
+            ),
+          ),
+          HarnessTextButton(
+            key: const Key('task-review'),
+            label: 'Review',
+            icon: Icons.rate_review_outlined,
+            dense: true,
+            onPressed: () => ReviewScreen.show(context, app: app, task: task),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// What is said of the state, and what the task itself says went wrong.
 class _Words extends StatelessWidget {
   const _Words({required this.task, required this.line});
@@ -370,9 +437,8 @@ class _Words extends StatelessWidget {
               truncate(error, 200),
               maxLines: 3,
               overflow: TextOverflow.ellipsis,
-              style: HarnessText.caption(
-                context,
-              ).copyWith(color: theme.colorScheme.error),
+              style: HarnessText.caption(context)
+                  .copyWith(color: theme.colorScheme.error),
             ),
           ),
       ],

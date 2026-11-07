@@ -88,6 +88,18 @@ class HarnessCapabilities {
       has('agent/activity') || hasEvent('agent/activity-changed');
   bool get tasks => has('task/list');
 
+  /// A task's change review: its threads, the files it changes and their
+  /// diffs (`patch-review/get`, `-changes`, `-diff`), the marks it keeps
+  /// (`-viewed`, `-set-viewed`), and the operations that comment, reply,
+  /// close and mark reviewed (`patch-review/apply`).
+  bool get review =>
+      has('patch-review/get') &&
+      has('patch-review/changes') &&
+      has('patch-review/diff') &&
+      has('patch-review/apply') &&
+      has('patch-review/viewed') &&
+      has('patch-review/set-viewed');
+
   /// The persistent workspace chat: its list, one workspace, its timeline
   /// and prompts.  A harness with only some of the workspace modules still
   /// shows the tab when the core four are there.
@@ -175,6 +187,11 @@ class HarnessCapabilities {
       'Task board',
       'Start, review and verify harness tasks',
       tasks,
+    ),
+    CapabilityFeature(
+      'Review',
+      'Threads, diffs and feedback on a task\'s work',
+      review,
     ),
     CapabilityFeature(
       'Workspace',

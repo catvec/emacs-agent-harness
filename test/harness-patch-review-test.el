@@ -947,6 +947,218 @@ only the task's own change."
       (should-not (harness-patch-review--record-version (harness-call 'task/get id)))
       (should-not (plist-get (harness-call 'patch-review/get id) :versions)))))
 
+;;;; The changes a client reads
+
+(ert-deftest harness-patch-review-reads-the-changes-of-a-version ()
+  "A client that cannot read the repository gets the files, counts and one
+file's diff, all at the revision comments on it record."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (task (harness-call 'task/get id))
+           (tip (harness-patch-review-test--git repo "rev-parse" "task/fix"))
+           (base (harness-patch-review-test--git repo "merge-base" "main" "task/fix")))
+      (harness-test-await (harness-patch-review--record-version task))
+      (let ((changes (harness-test-await (harness-call-async 'patch-review/changes id))))
+        (should (equal id (plist-get changes :task-id)))
+        (should (equal tip (plist-get changes :revision)))
+        (should (equal base (plist-get changes :base)))
+        (should (equal tip (plist-get changes :version)))
+        (should (equal "v1" (plist-get changes :label)))
+        (should (equal "task/fix" (plist-get changes :branch)))
+        (should (equal 1 (length (plist-get changes :files))))
+        (let ((file (car (plist-get changes :files))))
+          (should (equal "a.el" (plist-get file :path)))
+          (should (equal "M" (plist-get file :status)))
+          (should (= 1 (plist-get file :added)))
+          (should (= 1 (plist-get file :deleted)))
+          (should-not (plist-get file :binary))
+          (should (stringp (plist-get file :new-blob)))))
+      ;; The newest version is the default, and the one named by its id is
+      ;; the same.
+      (should (equal (plist-get (harness-test-await (harness-call-async 'patch-review/changes id)) :revision)
+                     (plist-get (harness-test-await (harness-call-async 'patch-review/changes id tip)) :revision)))
+      (let ((diff (harness-test-await (harness-call-async 'patch-review/diff id "a.el"))))
+        (should (equal tip (plist-get diff :revision)))
+        (should (equal "M" (plist-get diff :status)))
+        (should (= 1 (plist-get diff :added)))
+        (should (= 1 (plist-get diff :deleted)))
+        (should-not (plist-get diff :binary))
+        (should (string-search "diff --git a/a.el b/a.el" (plist-get diff :patch)))
+        (should (string-search "-(setq a2 2)" (plist-get diff :patch)))
+        (should (string-search "+(setq a2 'two)" (plist-get diff :patch)))
+        (should (string-search "@@ -" (plist-get diff :patch))))
+      ;; A file the change does not have, and a path that leaves the
+      ;; repository, are refused.
+      (should-error (harness-test-await (harness-call-async 'patch-review/diff id "no-such.el"))
+                    :type 'error)
+      (should-error (harness-test-await (harness-call-async 'patch-review/diff id "../x"))
+                    :type 'error)
+      ;; A version the review does not have is refused, not taken for the
+      ;; newest.
+      (should-error (harness-test-await (harness-call-async 'patch-review/changes id "no-such-version"))
+                    :type 'error))))
+
+(ert-deftest harness-patch-review-reads-a-rename-as-the-rename-it-is ()
+  "The file list names both paths of a rename, and its diff is the rename,
+not a file added and one deleted."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)))
+      (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+      (harness-patch-review-test--git repo "checkout" "-q" "task/fix")
+      (harness-patch-review-test--git repo "mv" "a.el" "renamed.el")
+      (with-temp-file (expand-file-name "renamed.el" repo)
+        (insert "(setq a1 1)\n(setq a2 'renamed)\n")
+        (dotimes (i 18) (insert (format "(setq a%d %d)\n" (+ i 3) (+ i 3)))))
+      (harness-patch-review-test--git repo "commit" "-q" "-am" "Rename it")
+      (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+      (let* ((changes (harness-test-await (harness-call-async 'patch-review/changes id))))
+        (let ((file (car (plist-get changes :files))))
+          (should (equal "renamed.el" (plist-get file :path)))
+          (should (equal "a.el" (plist-get file :old-path)))
+          (should (equal "R" (plist-get file :status))))
+        (let ((diff (harness-test-await (harness-call-async 'patch-review/diff id "renamed.el"))))
+          (should (string-search "rename from a.el" (plist-get diff :patch)))
+          (should (string-search "rename to renamed.el" (plist-get diff :patch))))
+        ;; The old path names the same file.
+        (should (equal "renamed.el"
+                       (plist-get (harness-test-await (harness-call-async 'patch-review/diff id "a.el"))
+                                  :path)))))))
+
+(ert-deftest harness-patch-review-reads-each-version-as-it-was ()
+  "A version is read as its commit had it: a file the newest version no
+longer has is still there in the version a comment was written at, a
+deleted file shows what it removed, and a comment records that version."
+  (harness-patch-review-test-with
+    (let ((id (harness-patch-review-test--task)) v1-tip)
+      (harness-patch-review-test--git repo "checkout" "-q" "task/fix")
+      (with-temp-file (expand-file-name "b.el" repo)
+        (insert "(setq b1 1)\n(setq b2 2)\n"))
+      (harness-patch-review-test--git repo "add" "-A")
+      (harness-patch-review-test--git repo "commit" "-q" "-m" "Add b")
+      (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+      (setq v1-tip (harness-patch-review-test--git repo "rev-parse" "task/fix"))
+      ;; The next version deletes a.el and b.el: a.el is a deletion, b.el
+      ;; is no file of the newest change at all.
+      (harness-patch-review-test--git repo "rm" "-q" "a.el" "b.el")
+      (harness-patch-review-test--git repo "commit" "-q" "-m" "Remove a and b")
+      (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+      (let* ((v1 (harness-test-await (harness-call-async 'patch-review/changes id v1-tip)))
+             (v2 (harness-test-await (harness-call-async 'patch-review/changes id)))
+             (v1-files (plist-get v1 :files))
+             (v2-files (plist-get v2 :files)))
+        (should (plist-get v1 :label))
+        (should (plist-get v2 :label))
+        (should (equal v1-tip (plist-get v1 :revision)))
+        (should-not (equal (plist-get v1 :revision) (plist-get v2 :revision)))
+        ;; v1 has a changed a.el and the added b.el.
+        (should (equal "M" (plist-get (cl-find "a.el" v1-files
+                                               :key (lambda (f) (plist-get f :path))
+                                               :test #'equal)
+                                      :status)))
+        (should (equal "A" (plist-get (cl-find "b.el" v1-files
+                                               :key (lambda (f) (plist-get f :path))
+                                               :test #'equal)
+                                      :status)))
+        ;; v2 no longer has b.el, and deletes a.el.
+        (should-not (cl-find "b.el" v2-files
+                             :key (lambda (f) (plist-get f :path)) :test #'equal))
+        (should (equal "D" (plist-get (cl-find "a.el" v2-files
+                                               :key (lambda (f) (plist-get f :path))
+                                               :test #'equal)
+                                      :status)))
+        ;; b.el is read in v1, where it was added, and is no file of v2.
+        (should (string-search "+(setq b1 1)"
+                               (plist-get (harness-test-await
+                                           (harness-call-async 'patch-review/diff id "b.el" v1-tip))
+                                          :patch)))
+        (should-error (harness-test-await
+                       (harness-call-async 'patch-review/diff id "b.el"))
+                      :type 'error)
+        ;; a.el is its modification in v1 and its deletion in v2.
+        (should (string-search "+(setq a2 'two)"
+                               (plist-get (harness-test-await
+                                           (harness-call-async 'patch-review/diff id "a.el" v1-tip))
+                                          :patch)))
+        (should (string-search "deleted file mode"
+                               (plist-get (harness-test-await
+                                           (harness-call-async 'patch-review/diff id "a.el"))
+                                          :patch)))
+        ;; A comment made while reading v1 records v1's revision, even
+        ;; though the newest version is v2.
+        (harness-call 'patch-review/apply id
+                      (list :op "add-comment"
+                            :comment (list :body "Old lines, kept."
+                                           :revision (plist-get v1 :revision)
+                                           :location (list :file "b.el" :line 1
+                                                           :side "new"
+                                                           :excerpt "@@ -0,0 +1,2 @@\n+(setq b1 1)"))))
+        (let* ((thread (car (plist-get (harness-call 'patch-review/get id) :threads)))
+               (comment (car (plist-get thread :comments))))
+          (should (equal (plist-get v1 :revision) (plist-get comment :revision)))
+          (should (equal "b.el" (plist-get (plist-get comment :location) :file))))))))
+
+(ert-deftest harness-patch-review-fills-what-a-ui-leaves-out ()
+  "A UI does not have to know the user, the time or an id: a comment it adds
+is the user's, written now, against the newest version, as a draft; a
+status change and a review mark record the user too."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (tip (harness-patch-review-test--git repo "rev-parse" "task/fix"))
+           (location (list :file "a.el" :line 2 :side "new"
+                           :excerpt "@@ -1,4 +1,4 @@\n (setq a1 1)\n-(setq a2 2)\n+(setq a2 'two)"
+                           :end-line 2)))
+      (harness-test-await (harness-patch-review--record-version (harness-call 'task/get id)))
+      (let ((result (harness-call 'patch-review/apply id
+                                  (list :op "add-comment"
+                                        :comment (list :body "A note from the phone"
+                                                       :revision tip
+                                                       :location location)))))
+        (should (plist-get result :changed)))
+      (let* ((threads (plist-get (harness-call 'patch-review/get id) :threads))
+             (thread (car threads))
+             (comment (car (plist-get thread :comments))))
+        (should (= 1 (length threads)))
+        (should (equal "open" (plist-get thread :status)))
+        (should (equal "A note from the phone" (plist-get comment :body)))
+        (should (equal tip (plist-get comment :revision)))
+        (should-not (plist-get comment :sent))
+        (should (numberp (plist-get comment :time)))
+        (should (equal "user" (plist-get (plist-get comment :author) :kind)))
+        (should (stringp (plist-get (plist-get comment :author) :name)))
+        (should (equal 2 (plist-get (plist-get comment :location) :line)))
+        (should (equal 2 (plist-get (plist-get comment :location) :end-line)))
+        ;; Closing it records the user and the time, with an id of its own.
+        (let ((closed (harness-call 'patch-review/apply id
+                                    (list :op "set-status" :thread (plist-get thread :id)
+                                          :status "closed"))))
+          (should (plist-get closed :changed)))
+        (let* ((thread (car (plist-get (harness-call 'patch-review/get id) :threads)))
+               (entry (car (last (plist-get thread :history)))))
+          (should (equal "closed" (plist-get thread :status)))
+          (should (equal "closed" (plist-get entry :status)))
+          (should (equal "user" (plist-get (plist-get entry :author) :kind)))
+          (should (numberp (plist-get entry :time)))
+          (should (stringp (plist-get entry :id))))
+        ;; An agent that answers and closes is to review; the mark is the
+        ;; user's and needs no time from the client.
+        (let* ((thread-id (plist-get thread :id)))
+          (harness-call 'patch-review/apply id
+                        (list :op "set-status" :thread thread-id :status "open"))
+          (harness-call 'patch-review/comment id "Done."
+                        :thread thread-id :status "closed" :session "s-1")
+          (let* ((thread (car (plist-get (harness-call 'patch-review/get id) :threads)))
+                 (entry (car (last (plist-get thread :history)))))
+            (should (equal "agent" (plist-get (plist-get entry :author) :kind)))
+            (should-not (plist-get entry :reviewed))
+            (should (plist-get (harness-call 'patch-review/apply id
+                                             (list :op "mark-reviewed"
+                                                   :thread thread-id
+                                                   :status-id (plist-get entry :id)))
+                               :changed))
+            (let* ((thread (car (plist-get (harness-call 'patch-review/get id) :threads)))
+                   (entry (car (last (plist-get thread :history)))))
+              (should (numberp (plist-get entry :reviewed))))))))))
+
 ;;;; The drafts go with the feedback
 
 (ert-deftest harness-patch-review-sends-the-drafts-with-the-feedback ()

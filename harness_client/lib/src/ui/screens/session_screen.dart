@@ -4,10 +4,12 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/activity.dart';
+import '../../models/chat_thread.dart';
 import '../../models/session.dart';
 import '../../models/task_chat.dart';
 import '../../models/transcript.dart';
 import '../../models/usage.dart';
+import '../../models/task.dart';
 import '../../state/app_controller.dart';
 import '../../state/drafts.dart';
 import '../../state/interaction.dart';
@@ -21,12 +23,15 @@ import '../app_scope.dart';
 import '../format.dart';
 import '../navigation.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/chat_threads.dart';
 import '../widgets/connection_banner.dart';
 import '../widgets/interaction_card.dart';
 import '../widgets/message_composer.dart';
 import '../widgets/quota_widgets.dart';
 import '../widgets/task_bar.dart';
 import '../widgets/transcript_view.dart';
+import 'review_file_screen.dart';
+import 'review_thread_screen.dart';
 import 'voice_screen.dart';
 
 class SessionScreen extends StatefulWidget {
@@ -72,6 +77,15 @@ class _SessionScreenState extends State<SessionScreen> {
   /// often it is built again after that.
   bool _voiceStarted = false;
 
+  /// The message a quote was tapped from, to bring into view, and a count
+  /// so that a second tap brings it again.
+  String? _focusNodeId;
+  int _focusTick = 0;
+
+  /// The longest quote a reply takes, as the harness's own reply does: a
+  /// quote is a reminder, and the message is a link away.
+  static const _quoteLimit = 2000;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -104,6 +118,192 @@ class _SessionScreenState extends State<SessionScreen> {
     }
     _composerFocus.dispose();
     super.dispose();
+  }
+
+  /// Answer the message [item] with the next one.  The quote is its words,
+  /// whole unless it is very long, and names the message and the session so
+  /// that the model can read it again.
+  void _replyToMessage(TranscriptItem item) {
+    final node = item.nodeId;
+    if (node == null) return;
+    var text = item.bodyText.trim();
+    if (text.isEmpty) {
+      text = item.threads
+          .map((thread) => thread.response.trim())
+          .where((words) => words.isNotEmpty)
+          .join('\n\n');
+    }
+    if (text.isEmpty) return;
+    _controller.replyTo(
+      ChatReplyDraft(
+        refs: [
+          ChatThreadRef.message(
+            node: node,
+            who: item.isUser ? 'you' : 'agent',
+            text: _quoted(text),
+            session: widget.sessionId,
+            label: item.isThinking ? 'thinking' : null,
+          ),
+        ],
+      ),
+    );
+    _composerFocus.requestFocus();
+  }
+
+  /// Answer the reply in [thread] of [item].  A reply of the user's quotes
+  /// what its own card quotes, as the Emacs chat does; one an agent wrote is
+  /// the answer itself, and its message is what the answer links to.
+  void _replyToThread(TranscriptItem item, ChatThread thread) {
+    var refs = thread.refs;
+    if (refs.isEmpty) {
+      final answer = thread.response.trim();
+      final text = answer.isNotEmpty ? answer : item.bodyText.trim();
+      if (text.isNotEmpty) {
+        refs = [
+          if (item.nodeId != null)
+            ChatThreadRef.message(
+              node: item.nodeId!,
+              who: item.isUser ? 'you' : 'agent',
+              text: _quoted(text),
+              session: widget.sessionId,
+            )
+          else
+            ChatThreadRef(
+              kind: 'chat',
+              who: item.isUser ? 'you' : 'agent',
+              text: _quoted(text),
+            ),
+        ];
+      }
+    }
+    _controller.replyTo(ChatReplyDraft(refs: refs, threadId: thread.id));
+    _composerFocus.requestFocus();
+  }
+
+  String _quoted(String text) {
+    if (text.length <= _quoteLimit) return text;
+    return '${text.substring(0, _quoteLimit).trimRight()}\n[...]';
+  }
+
+  /// Show what [ref] quotes: the message it is of, the thread of a review,
+  /// or the file of a change at the revision it was read at.
+  void _showRef(ChatThreadRef ref) {
+    if (ref.isChat && ref.node != null) {
+      if (ref.session != null && ref.session != widget.sessionId) {
+        _notice('Another session');
+        return;
+      }
+      setState(() {
+        _focusNodeId = ref.node;
+        _focusTick++;
+      });
+      return;
+    }
+    if (ref.isComment || ref.reviewThread != null) {
+      final task = ref.reviewTask;
+      final thread = ref.reviewThread;
+      if (task != null && thread != null) {
+        unawaited(_openReviewThread(task, thread));
+        return;
+      }
+    }
+    final task = _app.tasks?.forSession(widget.sessionId);
+    if (task == null) {
+      _notice(ref.isDiff ? 'No change' : 'No message');
+      return;
+    }
+    if (ref.isDiff && (ref.file ?? '').isNotEmpty) {
+      unawaited(_openChange(task, ref));
+      return;
+    }
+    if (ref.isComment && ref.reviewThread != null) {
+      unawaited(_openReviewThread(task.id, ref.reviewThread!));
+      return;
+    }
+    _notice(ref.isDiff ? 'No change' : 'No message');
+  }
+
+  /// Open the thread of the task's review that [thread] in the chat names.
+  Future<void> _openThread(TranscriptItem item, ChatThread thread) async {
+    final id = thread.id;
+    final task = _app.tasks?.forSession(widget.sessionId);
+    if (id == null || task == null) {
+      _notice('No review thread');
+      return;
+    }
+    await _openReviewThread(task.id, id);
+  }
+
+  Future<void> _openReviewThread(String taskId, String threadId) async {
+    final service = _app.api;
+    if (service == null) {
+      _notice('No review thread');
+      return;
+    }
+    HarnessTask task;
+    try {
+      task = await service.task(taskId);
+    } catch (_) {
+      _notice('No review thread');
+      return;
+    }
+    final review = _app.reviewFor(task);
+    if (review == null) {
+      _notice('No review thread');
+      return;
+    }
+    await review.load();
+    if (!mounted) return;
+    if (review.thread(threadId) == null) {
+      _notice('No review thread');
+      return;
+    }
+    await Navigator.of(context).push<void>(
+      harnessRoute(
+        context,
+        (_) => ReviewThreadScreen(controller: review, threadId: threadId),
+      ),
+    );
+  }
+
+  /// Open the file of a change a quote is of, at the revision it was read
+  /// at, so that its lines are the ones the comment records.
+  Future<void> _openChange(HarnessTask task, ChatThreadRef ref) async {
+    final review = _app.reviewFor(task);
+    final path = ref.file;
+    if (review == null || path == null) {
+      _notice('No change');
+      return;
+    }
+    await review.load();
+    if (!mounted) return;
+    final revision = ref.revision;
+    if (revision != null &&
+        review.versions.any((version) => version.id == revision) &&
+        revision != review.changes?.versionId) {
+      await review.selectVersion(revision);
+      if (!mounted) return;
+    }
+    if (!mounted) return;
+    final known = review.changes?.files.where(
+      (file) => file.path == path || file.oldPath == path,
+    );
+    if (known == null || known.isEmpty) {
+      _notice('No change');
+      return;
+    }
+    review.selectFile(path);
+    await Navigator.of(context).push<void>(
+      harnessRoute(
+        context,
+        (_) => ReviewFileScreen(controller: review, path: path),
+      ),
+    );
+  }
+
+  void _notice(String text) {
+    ScaffoldMessenger.maybeOf(context)
+        ?.showSnackBar(SnackBar(content: Text(text)));
   }
 
   Future<void> _rename() async {
@@ -257,8 +457,8 @@ class _SessionScreenState extends State<SessionScreen> {
   }
 
   Future<void> _toggleInteractive() => _controller.setNonInteractive(
-        _controller.summary?.nonInteractive != true,
-      );
+    _controller.summary?.nonInteractive != true,
+  );
 
   Future<void> _choosePriority() async {
     final chosen = await showHarnessMenu<String>(
@@ -473,6 +673,13 @@ class _SessionScreenState extends State<SessionScreen> {
     // answer is typed).  It is kept, not rebuilt, so what was typed in it,
     // and the images attached, are there when the question is answered.
     final question = interaction?.isQuestion == true;
+    // A 320 by 640 phone at twice the text has a strip of a page above the
+    // keyboard: the message box becomes one line of reply target, a field of
+    // two lines and its controls.  The rest of the page has its room back.
+    final tightKeyboard =
+        typing &&
+        MediaQuery.textScalerOf(context).scale(15) > 19.5 &&
+        MediaQuery.sizeOf(context).height < 720;
     return Column(
       children: [
         // A conversation opened as a page of its own covers the home
@@ -536,11 +743,22 @@ class _SessionScreenState extends State<SessionScreen> {
                                 _app.capability?.compactionRevert == true
                                 ? controller.toggleCompaction
                                 : null,
+                            sessionId: widget.sessionId,
+                            onReply: _replyToMessage,
+                            onReplyThread: _replyToThread,
+                            onShowRef: _showRef,
+                            onOpenThread: _openThread,
+                            focusNodeId: _focusNodeId,
+                            focusTick: _focusTick,
                           ),
                   ),
-                  if (plan.isNotEmpty && interaction == null)
-                    _PlanStrip(plan: plan),
-                  if (bar && !(typing && interaction != null))
+                  // With the keyboard up the room is for what is being
+                  // written: the plan and the activity are one line each on
+                  // a large screen, and most of the conversation on a phone
+                  // held upright at twice the text.
+                  if (plan.isNotEmpty && interaction == null && !typing)
+                    _PlanStrip(key: const Key('session-plan'), plan: plan),
+                  if (bar && !typing)
                     _ActivityBar(
                       activity: controller.activity,
                       waiting: interaction != null,
@@ -572,9 +790,22 @@ class _SessionScreenState extends State<SessionScreen> {
           offstage: question,
           child: MessageComposer(
             focusNode: _composerFocus,
+            tight: tightKeyboard,
             // What a message does here, where it is not the usual: for a task
             // in review it is the feedback that sends the task back.
-            hint: taskMessageHint(_app.tasks?.forSession(widget.sessionId)),
+            hint: controller.reply != null
+                ? 'Reply'
+                : taskMessageHint(_app.tasks?.forSession(widget.sessionId)),
+            header: controller.reply == null
+                ? null
+                : ChatReplyBar(
+                    tight: tightKeyboard,
+                    draft: controller.reply!,
+                    onCancel: controller.cancelReply,
+                    onShow: controller.reply!.refs.isEmpty
+                        ? null
+                        : () => _showRef(controller.reply!.refs.first),
+                  ),
             running: controller.promptInFlight,
             cancelling: controller.cancelling,
             canAttach: _app.capability?.promptImages == true,
@@ -590,13 +821,18 @@ class _SessionScreenState extends State<SessionScreen> {
             onStop: controller.cancel,
             // How the next message is handled: the model, the permission mode,
             // how full the context is and what the conversation has cost.
-            footer: _SessionFooter(
-              app: _app,
-              summary: summary,
-              onModel: _chooseModel,
-              onMode: _chooseMode,
-              onInteractive: _toggleInteractive,
-            ),
+            // The settings give the keyboard's room to the words: they are
+            // one tap away again when it goes.
+            footer: typing
+                ? null
+                : _SessionFooter(
+                    key: const Key('session-footer'),
+                    app: _app,
+                    summary: summary,
+                    onModel: _chooseModel,
+                    onMode: _chooseMode,
+                    onInteractive: _toggleInteractive,
+                  ),
             // What is typed outlives this screen: see DraftStore.
             drafts: _app.drafts,
             draftKey: DraftStore.composerKey(widget.sessionId),
@@ -746,6 +982,7 @@ class _SessionContext extends StatelessWidget {
 /// on the right how full the context is and what the conversation has cost.
 class _SessionFooter extends StatelessWidget {
   const _SessionFooter({
+    super.key,
     required this.app,
     required this.summary,
     required this.onModel,
@@ -909,7 +1146,7 @@ class _ContextMeter extends StatelessWidget {
 }
 
 class _PlanStrip extends StatelessWidget {
-  const _PlanStrip({required this.plan});
+  const _PlanStrip({super.key, required this.plan});
   final List<PlanEntry> plan;
 
   @override
@@ -1030,18 +1267,16 @@ class _PlanStrip extends StatelessWidget {
                               entry.isDone
                                   ? Icons.check_circle_rounded
                                   : entry.isActive
-                                      ? Icons.radio_button_checked_rounded
-                                      : Icons.radio_button_unchecked_rounded,
+                                  ? Icons.radio_button_checked_rounded
+                                  : Icons.radio_button_unchecked_rounded,
                               size: 19,
                               color: entry.isDone
                                   ? HarnessColors.moss
                                   : entry.isActive
-                                      ? Theme.of(sheetContext)
-                                          .colorScheme
-                                          .primary
-                                      : Theme.of(sheetContext)
-                                          .colorScheme
-                                          .onSurfaceVariant,
+                                  ? Theme.of(sheetContext).colorScheme.primary
+                                  : Theme.of(sheetContext)
+                                        .colorScheme
+                                        .onSurfaceVariant,
                             ),
                             const SizedBox(width: 10),
                             Expanded(
@@ -1055,8 +1290,8 @@ class _PlanStrip extends StatelessWidget {
                                       : null,
                                   color: entry.isDone
                                       ? Theme.of(sheetContext)
-                                          .colorScheme
-                                          .onSurfaceVariant
+                                            .colorScheme
+                                            .onSurfaceVariant
                                       : null,
                                 ),
                               ),
@@ -1113,13 +1348,14 @@ class _ActivityBarState extends State<_ActivityBar> {
     final activity = widget.activity;
     final label =
         widget.waiting && (activity == null || activity.phase == 'checking')
-            ? 'Waiting for your answer'
-            : activity?.label ?? (widget.running ? 'Working' : '');
+        ? 'Waiting for your answer'
+        : activity?.label ?? (widget.running ? 'Working' : '');
     if (label.isEmpty) return const SizedBox.shrink();
     final since = activity?.since;
     final elapsed = since == null ? null : DateTime.now().difference(since);
-    final color =
-        widget.waiting ? HarnessColors.amber : theme.colorScheme.primary;
+    final color = widget.waiting
+        ? HarnessColors.amber
+        : theme.colorScheme.primary;
     return Container(
       padding: const EdgeInsets.fromLTRB(
         HarnessSpace.gutter,

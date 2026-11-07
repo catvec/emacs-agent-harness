@@ -13,6 +13,7 @@ import '../models/task.dart';
 import '../models/tool_catalogue.dart';
 import '../models/usage.dart';
 import '../models/resources.dart';
+import '../models/review.dart';
 import '../models/workspace.dart';
 
 class SessionPage {
@@ -469,6 +470,93 @@ class HarnessApi {
   }
 
   // A task's priority is its session's: `setPriority` above gives it.
+
+  // ---- A task's review --------------------------------------------------
+
+  /// The threads of task [id]'s review, with its versions: every comment,
+  /// draft and status change the harness keeps (`patch-review/get`).
+  Future<ReviewSet> review(String id) async =>
+      ReviewSet.fromWire(await extension('patch-review/get', {'task-id': id}));
+
+  /// The files task [id]'s review changes at [version] (the newest when it
+  /// is null), with their status and counts (`patch-review/changes`).
+  Future<ReviewChanges> reviewChanges(String id, {String? version}) async =>
+      ReviewChanges.fromWire(
+        await extension('patch-review/changes', {
+          'task-id': id,
+          if (version != null && version.isNotEmpty) 'version': version,
+        }, const Duration(seconds: 90)),
+      );
+
+  /// One file's unified diff in task [id]'s review (`patch-review/diff`).
+  Future<ReviewFileDiff> reviewDiff(
+    String id,
+    String path, {
+    String? version,
+  }) async => ReviewFileDiff.fromWire(
+    await extension('patch-review/diff', {
+      'task-id': id,
+      'path': path,
+      if (version != null && version.isNotEmpty) 'version': version,
+    }, const Duration(seconds: 90)),
+  );
+
+  /// Perform one operation of the review (`patch-review/apply`); true when
+  /// it changed the review.  The harness fills the author, the time and an
+  /// id the app leaves out, so an operation of the user's is the user's.
+  Future<bool> reviewApply(String id, Map<String, Object?> op) async {
+    final result = await extension('patch-review/apply', {
+      'task-id': id,
+      'op': op,
+    });
+    return asBool(result['changed']);
+  }
+
+  /// The files task [id]'s review marks viewed and approved
+  /// (`patch-review/viewed`).
+  Future<ReviewViewed> reviewViewed(String id) async =>
+      ReviewViewed.fromWire(await extension('patch-review/viewed', {
+        'task-id': id,
+      }));
+
+  /// Mark [files] viewed, or approved, in task [id]'s review, or take the
+  /// mark off (`patch-review/set-viewed`).  Approving views a file too, and
+  /// a file no longer viewed is no longer approved; the harness keeps it.
+  Future<ReviewViewed> reviewSetViewed(
+    String id, {
+    required String kind,
+    required List<Map<String, Object?>> files,
+    required bool on,
+  }) async => ReviewViewed.fromWire(
+    await extension('patch-review/set-viewed', {
+      'task-id': id,
+      'kind': kind,
+      'files': files,
+      'on': on,
+    }),
+  );
+
+  /// Send the drafts of task [id]'s review to its agent
+  /// (`patch-review/send-replies`), for a task at work.  The result says how
+  /// many replies went and whether the harness's last-close message did.
+  Future<ReviewSendResult> reviewSendReplies(String id) async =>
+      ReviewSendResult.fromWire(
+        await extension('patch-review/send-replies', {'task-id': id}),
+      );
+
+  /// The message that task [id]'s last close leaves for the user to send, or
+  /// null when there is none (`patch-review/last-close`).
+  Future<ReviewLastClose?> reviewLastClose(String id) async {
+    final result = await extension('patch-review/last-close', {'task-id': id});
+    final close = ReviewLastClose.fromWire(result);
+    return close.isEmpty ? null : close;
+  }
+
+  /// Drop the message that task [id]'s last close offered
+  /// (`patch-review/discard-last-close`).
+  Future<void> reviewDiscardLastClose(String id) async {
+    await extensionRaw('patch-review/discard-last-close', {'task-id': id});
+  }
 
   Future<TaskSlots> taskSlots({String? cwd}) async => TaskSlots.fromWire(
     await extension('task/slots', {

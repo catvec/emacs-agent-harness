@@ -9200,7 +9200,11 @@ whose strict syntax it reads, and the correction of a malformed reply;
   it (`change-review-save`).  `task/deleted` forgets it.  The module is
   the single writer of a task's threads, so the user's Emacs and the
   agent never disagree: they send operations, the module performs
-  them.
+  them.  A client that cannot read the task's repository -- a phone --
+  reads the files of a version with `patch-review/changes` and one
+  file's unified patch with `patch-review/diff`, both at the revision
+  the version's comments record; no path of the harness's machine goes
+  over the wire.
 - Versions.  `task/review` -- the work was handed in -- records a
   version of the set (`add-version`; one already recorded changes
   nothing): its id and tip are the commit the task's branch ends at, its
@@ -9216,7 +9220,9 @@ whose strict syntax it reads, and the correction of a malformed reply;
   and the `:branch`.  The id is the SOURCE REVISION every comment made
   against the version records.
 - Authors.  The user is `user-full-name` and `user-mail-address` of the
-  harness's Emacs, the login name without the first.  An agent is the
+  harness's Emacs, the login name without the first.  An operation a UI
+  sends without an author, a time or a comment id gets the user, now and
+  a new id (`patch-review/apply`): a phone does not have to know them.  An agent is the
   model's name with its session id; the author of a comment made by a
   <thread> block records the message and where the block starts
   (`:message`, `:block-start`), and one made by the reply tool before it

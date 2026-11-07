@@ -956,6 +956,173 @@ BASE that is blank or no longer there is what DIR has checked out."
      (harness-patch-review--git dir "merge-base" "HEAD" tip))
    (lambda (_) (harness-resolved nil))))
 
+(defun harness-patch-review--decode (bytes)
+  "Return BYTES, as git wrote them, decoded as UTF-8."
+  (decode-coding-string
+   (if (multibyte-string-p bytes)
+       (condition-case nil (string-to-unibyte bytes)
+         (error (encode-coding-string bytes 'utf-8)))
+     bytes)
+   'utf-8))
+
+(defun harness-patch-review--git-text (dir &rest args)
+  "Return a promise of what git, run in DIR with ARGS, writes, as text.
+The output is not trimmed, so a patch keeps its last newline.  It
+rejects with git's message when git fails."
+  (harness-then
+   (harness-run-command (append '("git" "--no-pager" "-c" "core.quotePath=false") args)
+                        :cwd dir :timeout 60 :name "harness-patch-review"
+                        :env '(("GIT_OPTIONAL_LOCKS" . "0")))
+   (lambda (result)
+     (if (eql (plist-get result :exit) 0)
+         (harness-patch-review--decode (or (plist-get result :stdout) ""))
+       (harness-rejected
+        (list 'error (format "git %s failed: %s" (car args)
+                             (harness-first-line
+                              (harness-patch-review--decode (or (plist-get result :stderr) "")) 120))))))))
+
+(defun harness-patch-review--find-version (set ref)
+  "Return the version REF names in SET, or nil.
+REF is a version, an id, a number or a label; a string may also be the
+start of one id, three characters or more, when it names no version as
+it is and exactly one version starts with it."
+  (when set
+    (or (change-review-find-version set ref)
+        (and (stringp ref) (>= (length ref) 3)
+             (let ((matches (cl-remove-if-not
+                             (lambda (version)
+                               (string-prefix-p ref (or (change-review-version-id version) "")))
+                             (change-review-set-versions set))))
+               (and (= 1 (length matches)) (car matches)))))))
+
+(cl-defun harness-patch-review--review-revisions (task &optional version-ref)
+  "Return a promise of where TASK's review reads the version VERSION-REF.
+VERSION-REF names a version of the review (`change-review-find-version'
+takes an id, a number or a label), or is nil for the newest.  The value
+is a plist:
+
+  :dir         the repository directory the version is read in
+  :base        the commit the version is a change from
+  :tip         the commit the version ends at, the revision of its files
+  :revision    :tip, what a comment made there records
+  :version     the version, nil for a task whose work was never handed in
+  :version-id  its id, nil when there is none
+  :label       what to call it, such as \"v2\"
+
+It rejects when the task has no repository here, no branch of its own,
+or no commit in common with its base."
+  (let* ((id (plist-get task :id))
+         (dir (harness-patch-review--repository task))
+         (set (and (stringp id) (harness-patch-review--set-for id)))
+         (version (and set
+                       (if (null version-ref)
+                           (change-review-latest-version set)
+                         (harness-patch-review--find-version set version-ref))))
+         (branch (plist-get task :branch))
+         (base-name (plist-get task :base)))
+    (cond
+     ((and version-ref (null version))
+      (harness-rejected
+       (list 'error (format "The review has no version %s" version-ref))))
+     ((null dir)
+      (harness-rejected
+       (list 'error "The repository of this task is not on this machine")))
+     ((and (null version) (harness-string-blank-p branch))
+      (harness-rejected
+       (list 'error "The task has no branch of its own: it worked in the main checkout")))
+     (t
+      (harness-then
+       (if version
+           (harness-resolved (change-review-version-tip version))
+         (harness-patch-review--git dir "rev-parse" "--verify" "--quiet"
+                                    (concat branch "^{commit}")))
+       (lambda (tip)
+         (when (harness-string-blank-p tip)
+           (harness-rejected (list 'error "The branch of this task names no commit")))
+         (harness-then
+          (let ((recorded (and version (change-review-version-base version))))
+            (if (and (stringp recorded) (not (string-blank-p recorded)))
+                (harness-resolved recorded)
+              (harness-patch-review--merge-base dir base-name tip)))
+          (lambda (base)
+            (when (harness-string-blank-p base)
+              (harness-rejected
+               (list 'error "The branch has no commit in common with its base")))
+            (list :dir dir
+                  :base base
+                  :tip tip
+                  :revision tip
+                  :version version
+                  :version-id (and version (change-review-version-id version))
+                  :label (and version (change-review-version-name version))
+                  :branch branch)))))))))
+
+(defun harness-patch-review--diff-files (raw)
+  "Return the files RAW, what `git diff --raw -z' wrote, in its order.
+Each is a plist of `:path', `:old-path' (for a rename or a copy),
+`:status' (git's letter), `:old-mode', `:new-mode', `:old-blob' and
+`:new-blob' (nil for a side the change has no blob on)."
+  (let ((fields (split-string raw "\0" t))
+        files)
+    (while fields
+      (let ((head (pop fields)))
+        (when (string-match
+               "\\`:\\([0-7]+\\) \\([0-7]+\\) \\([0-9a-f]+\\) \\([0-9a-f]+\\) \\([A-Z]\\)" head)
+          (let* ((old-mode (match-string 1 head))
+                 (new-mode (match-string 2 head))
+                 (old-sha (match-string 3 head))
+                 (new-sha (match-string 4 head))
+                 (status (match-string 5 head))
+                 (two (member status '("R" "C")))
+                 (first (pop fields))
+                 (second (and two (pop fields))))
+            (push (list :path (or second first)
+                        :old-path (and two first)
+                        :status status
+                        :old-mode old-mode
+                        :new-mode new-mode
+                        :old-blob (and (not (string-match-p "\\`0+\\'" old-sha)) old-sha)
+                        :new-blob (and (not (string-match-p "\\`0+\\'" new-sha)) new-sha))
+                  files)))))
+    (nreverse files)))
+
+(defun harness-patch-review--numstat-files (raw)
+  "Return the counts RAW, what `git diff --numstat -z' wrote, in its order.
+Each is a plist of `:path', `:old-path' for a rename or a copy,
+`:added', `:deleted' (numbers, nil for a binary file) and `:binary'."
+  (let ((fields (split-string raw "\0" t))
+        files)
+    (while fields
+      (let ((head (pop fields)))
+        (when (string-match "\\`\\([0-9-]+\\)\t\\([0-9-]+\\)\t\\(.*\\)\\'" head)
+          (let* ((added (match-string 1 head))
+                 (deleted (match-string 2 head))
+                 (path (match-string 3 head))
+                 (binary (or (equal added "-") (equal deleted "-")))
+                 (old (and (string-empty-p path) (pop fields)))
+                 (new (and old (pop fields))))
+            (push (list :path (or new path)
+                        :old-path (and new old)
+                        :added (and (not binary) (string-to-number added))
+                        :deleted (and (not binary) (string-to-number deleted))
+                        :binary binary)
+                  files)))))
+    (nreverse files)))
+
+(defun harness-patch-review--file-counts (file stat)
+  "Return FILE with the counts of STAT, the `--numstat' record of it.
+The counts are those of STAT when it names the same file, else FILE
+keeps none; a binary file is marked either way."
+  (cond
+   ((null stat) file)
+   ((or (not (equal (plist-get stat :path) (plist-get file :path)))
+        (and (plist-get file :old-path)
+             (not (equal (plist-get stat :old-path) (plist-get file :old-path)))))
+    file)
+   (t (append file (list :added (plist-get stat :added)
+                         :deleted (plist-get stat :deleted)
+                         :binary (plist-get stat :binary))))))
+
 (defun harness-patch-review--version-op (task tip merge-base)
   "Return the operation that adds the version of TASK that ends at TIP.
 MERGE-BASE is the commit its branch was made from, or nil."
@@ -1159,6 +1326,210 @@ of feedback as closed threads."
   (let ((set (harness-patch-review--set-for task-id t)))
     (change-review-set-to-data set nil)))
 
+(defun harness-patch-review--pair-counts (files stats)
+  "Return FILES, the `git diff --raw' records, with the counts of STATS.
+STATS are the `git diff --numstat' records of the same change, in the
+same order; a file whose record cannot be told apart by position is
+looked for by its path."
+  (let ((in-order (= (length files) (length stats))))
+    (mapcar (lambda (file)
+              (harness-patch-review--file-counts
+               file
+               (if in-order
+                   (pop stats)
+                 (cl-find (or (plist-get file :path) "")
+                          stats :key (lambda (stat) (or (plist-get stat :path) ""))
+                          :test #'equal))))
+            files)))
+
+(defun harness-patch-review--change-file (path files)
+  "Return the file of FILES that PATH names, after the change or before it."
+  (cl-find-if (lambda (file)
+                (or (equal path (plist-get file :path))
+                    (equal path (plist-get file :old-path))))
+              files))
+
+(harness-defmethod patch-review/changes (task-id &optional version)
+  "Return the files task TASK-ID's review changes at VERSION, as plain data.
+VERSION names a version of the review (`change-review-find-version'
+takes an id, a number or a label), or is nil for the newest.  The work
+of a task that was not handed in yet is read from its branch, against
+the branch it was made from.
+
+The answer is a plist:
+
+  :task-id    TASK-ID
+  :revision   the commit the files are read at, the revision a comment
+              made on them records
+  :base       the commit they are a change from
+  :version    the version's id, nil for a task with no hand-in yet
+  :label      what to call the version, such as \"v2\", when it has one
+  :branch     the task's branch
+  :files      a list of (:path PATH [:old-path PATH] :status LETTER
+              :added N :deleted M :binary BOOL [:old-blob BLOB]
+              [:new-blob BLOB] [:old-mode MODE] [:new-mode MODE])
+
+STATUS is git's letter: A, D, M, R, C or T.  ADDED and DELETED count the
+lines the change touches, nil for a binary file, which BINARY marks.
+This is what a client that cannot read the task's repository shows its
+reviewer: the list and counts, then one file's diff at a time with
+`patch-review/diff'."
+  (let ((task (harness-patch-review--task task-id)))
+    (harness-then
+     (harness-patch-review--review-revisions task version)
+     (lambda (revisions)
+       (let ((dir (plist-get revisions :dir))
+             (base (plist-get revisions :base))
+             (tip (plist-get revisions :tip)))
+         (harness-then
+          (harness-all
+           (list (harness-patch-review--git-text
+                  dir "diff" "--raw" "-z" "-M" "--no-abbrev" base tip)
+                 (harness-patch-review--git-text
+                  dir "diff" "--numstat" "-z" "-M" base tip)))
+          (lambda (outputs)
+            (list :task-id task-id
+                  :revision (plist-get revisions :revision)
+                  :base base
+                  :version (plist-get revisions :version-id)
+                  :label (plist-get revisions :label)
+                  :branch (plist-get revisions :branch)
+                  :files (harness-patch-review--pair-counts
+                          (harness-patch-review--diff-files (nth 0 outputs))
+                          (harness-patch-review--numstat-files (nth 1 outputs)))))))))))
+
+(harness-defmethod patch-review/diff (task-id path &optional version)
+  "Return the diff of PATH in task TASK-ID's review at VERSION.
+VERSION names a version as `patch-review/changes' takes it; nil is the
+newest.  PATH is the file's path after the change, or the one it had
+before it: a renamed file is read as the rename it is, with both paths.
+
+The answer is a plist:
+
+  :task-id    TASK-ID
+  :path       the path after the change
+  :old-path   the path before it, for a rename or a copy
+  :status     git's letter for the change
+  :added      lines added, nil for a binary file
+  :deleted    lines deleted, nil for a binary file
+  :binary     non-nil for a file with no text diff
+  :patch      its part of the unified diff, or nil for a binary file
+  :revision   the commit it is read at, the revision a comment records
+  :base       the commit it is a change from
+  :version    the version's id, when the review has one
+  :label      what to call it, such as \"v2\"
+
+The patch is what `git diff' writes, with its `diff --git' line, its
+hunk headers and its lines of context, additions and deletions.  Signal
+an error when the change has no such file."
+  (unless (and (stringp path)
+               (not (string-empty-p path))
+               (not (string-prefix-p "/" path))
+               (not (string-match-p "\0" path)))
+    (signal 'harness-error (list "A file of the change needs a relative path")))
+  (let ((task (harness-patch-review--task task-id)))
+    (harness-then
+     (harness-patch-review--review-revisions task version)
+     (lambda (revisions)
+       (let ((dir (plist-get revisions :dir))
+             (base (plist-get revisions :base))
+             (tip (plist-get revisions :tip)))
+         (harness-then
+          (harness-all
+           (list (harness-patch-review--git-text
+                  dir "diff" "--raw" "-z" "-M" "--no-abbrev" base tip)
+                 (harness-patch-review--git-text
+                  dir "diff" "--numstat" "-z" "-M" base tip)))
+          (lambda (outputs)
+            (let* ((files (harness-patch-review--diff-files (nth 0 outputs)))
+                   (file (harness-patch-review--change-file path files)))
+              (unless file
+                (signal 'harness-error
+                        (list (format "The change has no file %s" path))))
+              (let ((paths (cl-remove-duplicates
+                            (delq nil (list path
+                                            (plist-get file :path)
+                                            (plist-get file :old-path)))
+                            :test #'equal)))
+                (harness-then
+                 (apply #'harness-patch-review--git-text dir
+                        "diff" "-M" "--no-color" "--no-ext-diff" "--no-textconv"
+                        "--src-prefix=a/" "--dst-prefix=b/" base tip "--" paths)
+                 (lambda (patch)
+                   (let* ((stat (harness-patch-review--file-counts
+                                 file
+                                 (cl-find (plist-get file :path)
+                                          (harness-patch-review--numstat-files (nth 1 outputs))
+                                          :key (lambda (record) (plist-get record :path))
+                                          :test #'equal))))
+                     (list :task-id task-id
+                           :path (plist-get file :path)
+                           :old-path (plist-get file :old-path)
+                           :status (plist-get file :status)
+                           :added (plist-get stat :added)
+                           :deleted (plist-get stat :deleted)
+                           :binary (plist-get stat :binary)
+                           :patch (and (not (plist-get stat :binary)) patch)
+                           :revision (plist-get revisions :revision)
+                           :base base
+                           :version (plist-get revisions :version-id)
+                           :label (plist-get revisions :label))))))))))))))
+
+(defun harness-patch-review--ui-op (task-id op)
+  "Return OP, an operation a UI sends, with what the harness fills for its user.
+A comment the user adds is theirs: the author is
+`harness-patch-review--user', the time is now, the revision is the
+newest version's, and a comment or a thread id left out is made.
+Closing, opening and marking a thread reviewed record the user as the
+one who did it, at the time it was done.  An operation the harness
+cannot complete alone is left as it is for `change-review-apply' to
+refuse."
+  (let* ((kind (let ((value (plist-get op :op)))
+                 (cond ((symbolp value) value)
+                       ((stringp value) (intern value)))))
+         (set (harness-patch-review--set-for task-id t))
+         (user (change-review-author-to-data (harness-patch-review--user)))
+         (now (float-time))
+         (op (copy-sequence op)))
+    (cond
+     ((eq kind 'add-comment)
+      (let* ((comment (copy-sequence (or (plist-get op :comment) (list))))
+             (reply (plist-get comment :reply-to))
+             (parent (and reply (change-review-find-comment set reply)))
+             (thread (or (plist-get comment :thread)
+                         (plist-get op :thread)
+                         (and parent (change-review-comment-thread (cdr parent))))))
+        (when (and parent thread
+                   (not (equal thread (change-review-comment-thread (cdr parent)))))
+          (signal 'harness-error
+                  (list "A reply is in the thread of the comment it answers")))
+        (unless thread (setq thread (change-review-new-thread-id set)))
+        (unless (plist-get comment :id)
+          (setq comment (plist-put comment :id (change-review-new-id "c"))))
+        (unless (plist-get comment :thread)
+          (setq comment (plist-put comment :thread thread)))
+        (unless (plist-get comment :author)
+          (setq comment (plist-put comment :author user)))
+        (unless (plist-get comment :time)
+          (setq comment (plist-put comment :time now)))
+        (unless (plist-get comment :revision)
+          (when-let* ((version (change-review-latest-version set)))
+            (setq comment (plist-put comment :revision
+                                     (change-review-version-id version)))))
+        (setq op (plist-put op :comment comment))
+        (setq op (plist-put op :thread thread))))
+     ((eq kind 'set-status)
+      (unless (plist-get op :id)
+        (setq op (plist-put op :id (change-review-new-id "s"))))
+      (unless (plist-get op :time)
+        (setq op (plist-put op :time now)))
+      (unless (plist-get op :author)
+        (setq op (plist-put op :author user))))
+     ((memq kind '(mark-reviewed unmark-reviewed))
+      (unless (plist-get op :time)
+        (setq op (plist-put op :time now)))))
+    op))
+
 (harness-defmethod patch-review/apply (task-id op)
   "Perform OP, an operation of change-review, on the review of task TASK-ID.
 The UI sends the operations the user makes: `add-comment', `set-status',
@@ -1178,6 +1549,7 @@ drafts (`harness-patch-review-draft-on-last-close',
       (signal 'harness-error (list (format "The review does not take %S operations from a UI" kind))))
     (let ((set (harness-patch-review--set-for task-id t))
           changed)
+      (setq op (harness-patch-review--ui-op task-id op))
       (setq changed (and (change-review-dispatch set op) t))
       (when changed
         (if (harness-patch-review--last-close-p set op)

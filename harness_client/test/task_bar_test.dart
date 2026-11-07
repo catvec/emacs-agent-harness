@@ -499,7 +499,7 @@ Future<void> main() async {
       await _settle(tester, 8);
       expect(find.byType(SessionScreen), findsOneWidget);
       expect(find.byKey(_bar), findsNothing);
-      expect(find.text('Message the harness'), findsOneWidget);
+      expect(find.text('Message'), findsOneWidget);
     });
 
     testWidgets('is there for a task the board is narrowed away from', (

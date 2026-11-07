@@ -1018,6 +1018,68 @@ The screenshots among the evidence are drawn on that page, under their lines,
 the same whichever way the page was come to: both hand the page the session
 the work was done in, whose harness gives the pictures ([Pictures](#pictures)).
 
+### The review of a task
+
+A task's change is reviewed on a page of its own, reached from the task's bar
+above its message box: the files of its newest hand-in with git's status and
+counts, a file's unified diff at the revision the comments record, and the
+threads on it. The review is the harness's -- the same threads, drafts,
+revisions, viewed and approved marks as Emacs -- not a store of the phone's
+own. A comment made here is pinned to the commit whose lines were on the
+screen; a reply names the comment it answers; a resolve, a reopen and a
+review mark are the harness's own operations.
+
+The way in, the files and a thread are in `screenshots/`: the review's
+screens are `review-files.png`, `review-diff.png`,
+`review-comment-keyboard.png`, `review-thread-keyboard.png`,
+`review-wide-split.png`, `review-320-text2.png` and `review-task-bar.png`,
+written by `HARNESS_SHOTS=screenshots flutter test
+test/review_screenshots_test.dart`.
+
+| The files | A diff, its hunks and its threads | A comment, with the keyboard up |
+|---|---|---|
+| ![A task's review: its revision, files, marks and threads](screenshots/review-files.png) | ![A unified diff with line numbers, hunk navigation and two threads marked](screenshots/review-diff.png) | ![The comment box above the keyboard, on an exact line range and revision](screenshots/review-comment-keyboard.png) |
+
+The files are a tree that folds, a flat list when that is wanted, and a search
+by path; viewed and approved are separate named marks, and `Skip approved`
+steps over the files approved. A diff is unified on a phone and may be split
+on a window at least 700 points wide; lines wrap or pan together, additions
+and deletions say `+` and `-` as well as having ink of their own. A thread
+stays readable when it is closed and keeps the revision it was written at.
+`Versions` reads an earlier hand-in as it was: an earlier version is for
+reading, not for marking viewed or approved, and a comment made there keeps
+its commit. Drafts are kept for the task across navigation and a dropped
+connection, and a send goes once. [docs/flutter-review.md](../docs/flutter-review.md)
+has the data, the parity with Emacs, the decisions and the known gaps.
+
+### Replies in the conversation
+
+A conversation has the harness's threads too. A reply in one is a card under
+the message that holds it -- what it quotes, whose words they are, the answer
+and whether the thread is `Open` or `Closed` -- from the data of a message of
+yours or the `<thread>` block an agent writes. `Reply` on a message starts a
+thread with it quoted, `Reply to thread` answers an existing one, and the bar
+over the message box names what is answered until it is sent or cancelled.
+A phone at 320 points and twice the text gives the keyboard its room: the bar
+keeps one line with the quote one tap away, the field stops at two lines and
+scrolls, and the plan and the settings step back until the keyboard goes. A
+message of one's own says `Message`, and the controls take a row under the
+field so the words keep the width. The quote is a link: tapping it brings
+the message into view, opens the review thread, or opens a changed file at
+the revision the comment records.
+The block the app sends is the Emacs chat's own, so the harness makes the same
+review comment, and none of it is kept on the phone.
+
+| A thread on a phone | At 320 points and twice the text | The reply box, the keyboard up |
+|---|---|---|
+| ![A reply card under a user's message, and the agent's closed answer in the same thread](screenshots/chat-thread-360.png) | ![The same card at 320 points with twice the text, its title and actions on two lines](screenshots/chat-thread-320-text2.png) | ![The composer with the message it answers named above it, above the keyboard](screenshots/chat-reply-keyboard.png) |
+| ![The reply box at 360 points and twice the text, its quote and three typed lines above the keyboard](screenshots/chat-reply-keyboard-360-text2.png) | ![The same box at 320 points and twice the text: one line of reply target and a field of two lines](screenshots/chat-reply-keyboard-320-text2.png) | ![A message of one's own at 360 points and twice the text, keyboard up](screenshots/chat-composer-keyboard-360-text2.png) |
+
+`screenshots/chat-reply-360-text2.png` is the reply box at 360 points and
+twice the text with the keyboard down, and `screenshots/chat-thread-wide.png`
+is the conversation on a 900-point window. They are written by
+`HARNESS_SHOTS=screenshots flutter test test/chat_thread_screenshots_test.dart`.
+
 ### Pictures
 
 A result and a hand-in name the pictures they show by paths on the harness's
@@ -1239,6 +1301,10 @@ flutter test                       # 348 tests: ACP, capabilities, reducer,
                                    # layout, tool calls, reconnecting, going
                                    # back in on launch, saved settings,
                                    # WebSocket pings
+flutter test test/review_model_test.dart test/review_screen_test.dart
+                                   # the review's model, page, drafts and copy
+flutter test test/chat_thread_test.dart test/chat_thread_screen_test.dart
+                                   # threads in the conversation and their copy
 python3 tool/test_qr_tools.py      # QR encoder against qrencode, the phone
                                    # installer (pairing, install, build
                                    # freshness, pub cache repair) with a fake

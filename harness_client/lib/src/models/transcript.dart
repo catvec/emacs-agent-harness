@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:collection/collection.dart';
 
 import '../acp/acp_message.dart';
+import 'chat_thread.dart';
 
 enum TranscriptKind {
   user,
@@ -127,6 +128,7 @@ class TranscriptItem {
     this.node,
     this.localEcho = false,
     this.pending = false,
+    this.threads = const <ChatThread>[],
   });
 
   String key;
@@ -148,6 +150,16 @@ class TranscriptItem {
   /// has not read it -- so it is shown last, queued, and stands where it was
   /// read once the turn takes it (see [TranscriptState.syncPending]).
   bool pending;
+
+  /// The replies in threads this message holds, drawn as cards above its
+  /// words.  A message of the user's keeps their data in its blocks; an
+  /// agent's writes them as `<thread>` blocks in its text, which are no part
+  /// of what the bubble draws ([chat_body]).
+  List<ChatThread> threads;
+
+  /// The words of the message, without the `<thread>` blocks: what the
+  /// bubble draws.  A reply's words are its card's, not the message's.
+  String get bodyText => stripThreadMarkup(text).body;
 
   bool get isUser => kind == TranscriptKind.user;
   bool get isAssistant => kind == TranscriptKind.assistant;
@@ -230,15 +242,20 @@ class TranscriptState {
     _counter = 0;
   }
 
-  TranscriptItem addLocalUser(String text) {
+  TranscriptItem addLocalUser(String text, {JsonMap? thread}) {
+    final reply = thread == null
+        ? null
+        : ChatThread.fromWire(thread, response: text);
     final item = TranscriptItem(
       key: 'local-${_counter++}',
       kind: TranscriptKind.user,
-      text: text,
+      // A reply's words are its card's: the bubble keeps none of them.
+      text: reply == null ? text : '',
       sender: 'You',
       timestamp: DateTime.now(),
       localEcho: true,
       streaming: false,
+      threads: reply == null ? const <ChatThread>[] : <ChatThread>[reply],
     );
     items.add(item);
     return item;
@@ -387,9 +404,15 @@ class TranscriptState {
       final index = items.indexWhere((item) => item.localEcho);
       if (index >= 0) {
         final local = items[index];
+        final words = message.text.isNotEmpty ? message.text : local.text;
+        final chat = parseThreadMarkup(words);
+        // A reply the harness holds sends its response alone: the card is
+        // the local echo's, and the words are not shown under it again.
+        final keepsReply = chat.threads.isEmpty && local.threads.isNotEmpty;
         local
           ..nodeId = message.id
-          ..text = message.text.isNotEmpty ? message.text : local.text
+          ..text = keepsReply ? local.text : chat.body
+          ..threads = chat.threads.isEmpty ? local.threads : chat.threads
           ..sender = message.sender ?? local.sender ?? 'You'
           ..localEcho = false
           ..pending = true;
@@ -482,7 +505,12 @@ class TranscriptState {
     final sender = formatSender(harness['from']);
     final existing = itemForNode(nodeId);
     if (existing != null) {
-      existing.text = text.isNotEmpty ? text : existing.text;
+      final chat = parseThreadMarkup(text);
+      final keepsReply = chat.threads.isEmpty && existing.threads.isNotEmpty;
+      existing.text = keepsReply
+          ? existing.text
+          : (chat.body.isNotEmpty ? chat.body : existing.text);
+      if (chat.threads.isNotEmpty) existing.threads = chat.threads;
       existing.sender = sender ?? existing.sender;
       existing.streaming = false;
       if (existing.pending) {
@@ -507,11 +535,13 @@ class TranscriptState {
         _standAtEnd(local);
         return;
       }
+      final chat = parseThreadMarkup(text);
       items.add(
         TranscriptItem(
           key: 'user-${_counter++}',
           kind: TranscriptKind.user,
-          text: text,
+          text: chat.body,
+          threads: chat.threads,
           sender: sender ?? 'You',
           timestamp: timestamp,
         ),
@@ -524,20 +554,27 @@ class TranscriptState {
       // whether or not the text is identical, so the same turn never shows
       // twice.
       final local = items[localIndex];
+      final chat = parseThreadMarkup(text);
+      final keepsReply = chat.threads.isEmpty && local.threads.isNotEmpty;
       local
         ..nodeId = nodeId
-        ..text = text.isNotEmpty ? text : local.text
+        ..text = keepsReply
+            ? local.text
+            : (chat.body.isNotEmpty ? chat.body : local.text)
+        ..threads = chat.threads.isEmpty ? local.threads : chat.threads
         ..localEcho = false
         ..sender = sender ?? 'You';
       _standAtEnd(local);
       return;
     }
+    final chat = parseThreadMarkup(text);
     items.add(
       TranscriptItem(
         key: 'node-$nodeId',
         nodeId: nodeId,
         kind: TranscriptKind.user,
-        text: text,
+        text: chat.body,
+        threads: chat.threads,
         sender: sender ?? 'You',
         timestamp: timestamp,
       ),
@@ -676,10 +713,12 @@ class TranscriptState {
     _noteParent(nodeId, node);
     switch (kind) {
       case 'user':
+        final chat = ChatThreadText.fromNode(node);
         final existing = itemForNode(nodeId);
         if (existing != null) {
           existing
-            ..text = content.isNotEmpty ? content : existing.text
+            ..text = chat.body.isNotEmpty ? chat.body : existing.text
+            ..threads = chat.threads
             ..sender = sender ?? existing.sender
             ..localEcho = false
             ..settled = true;
@@ -694,7 +733,8 @@ class TranscriptState {
               key: 'node-$nodeId',
               nodeId: nodeId,
               kind: TranscriptKind.user,
-              text: content,
+              text: chat.body,
+              threads: chat.threads,
               sender: sender ?? 'You',
               timestamp: timestamp,
               settled: true,
@@ -707,10 +747,14 @@ class TranscriptState {
         final targetKind = kind == 'thinking'
             ? TranscriptKind.thinking
             : TranscriptKind.assistant;
+        final chat = parseThreadMarkup(content);
         var item = itemForNode(nodeId);
         item ??= _lastStreamingOfKind(targetKind);
         if (item != null) {
-          if (content.isNotEmpty) item.text = content;
+          if (content.isNotEmpty) {
+            item.text = chat.body;
+            item.threads = chat.threads;
+          }
           item
             ..nodeId = nodeId
             ..kind = targetKind
@@ -723,7 +767,8 @@ class TranscriptState {
             key: 'node-$nodeId',
             nodeId: nodeId,
             kind: targetKind,
-            text: content,
+            text: chat.body,
+            threads: chat.threads,
             sender: targetKind == TranscriptKind.assistant ? 'Agent' : null,
             timestamp: timestamp,
             settled: true,

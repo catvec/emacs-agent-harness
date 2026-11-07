@@ -26,6 +26,8 @@ class MessageComposer extends StatefulWidget {
     this.drafts,
     this.draftKey = '',
     this.footer,
+    this.tight = false,
+    this.header,
     this.focusNode,
     this.hint,
     this.textController,
@@ -61,6 +63,15 @@ class MessageComposer extends StatefulWidget {
   /// A row under the field: what decides how the next message is handled,
   /// and how the conversation stands.  Without one, a line of help.
   final Widget? footer;
+
+  /// The keyboard leaves a strip of a page on a small phone at twice the
+  /// text: the field ends at two lines and the reply bar keeps one.
+  final bool tight;
+
+  /// What stands over the field: the message or thread this one answers,
+  /// when it answers one.  It is part of the composer, so the keyboard
+  /// lifts it with the field instead of covering it.
+  final Widget? header;
 
   /// The field's focus, for a caller that has to give it: a button that asks
   /// for something to be typed (a task's *Send back*) puts the cursor here.
@@ -213,10 +224,115 @@ class _MessageComposerState extends State<MessageComposer> {
     return KeyEventResult.ignored;
   }
 
+  /// The button that adds pictures, when the harness takes them.
+  Widget _attach(ThemeData theme) => Padding(
+    padding: const EdgeInsets.only(right: 4, bottom: 2),
+    child: Semantics(
+      button: true,
+      label: 'Attach images',
+      child: GestureDetector(
+        key: const Key('composer-attach'),
+        onTap: widget.running ? null : _pickImages,
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHigh,
+            shape: BoxShape.circle,
+          ),
+          child: _picking
+              ? const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(
+                  Icons.add_photo_alternate_outlined,
+                  size: 20,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+        ),
+      ),
+    ),
+  );
+
+  /// The field a message is written in.  It is given the whole width on a
+  /// narrow screen, where the controls take a row of their own rather than
+  /// squeeze the words into a column of one letter.
+  Widget _field(ThemeData theme, {required int maxLines}) {
+    final hint = widget.offline
+        ? 'Reconnecting… what you type is kept'
+        : widget.awaitingAnswer
+        ? 'Answer above to continue'
+        : widget.running
+        ? 'The agent is working…'
+        : widget.hint ??
+              (_keyboardHint ? 'Message · Enter to send' : 'Message');
+    return Focus(
+      onKeyEvent: _onKey,
+      child: HarnessTextField(
+        key: const Key('composer-field'),
+        controller: _text,
+        focusNode: _focus,
+        hint: hint,
+        maxLines: maxLines,
+        minLines: 1,
+        keyboardType: TextInputType.multiline,
+        textInputAction: TextInputAction.newline,
+        onChanged: (_) => setState(() {}),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 15,
+          vertical: 11,
+        ),
+      ),
+    );
+  }
+
+  Widget _voice(ThemeData theme) => Padding(
+    padding: const EdgeInsets.only(right: 6, bottom: 2),
+    child: _RoundActionButton(
+      key: const Key('composer-voice'),
+      icon: CupertinoIcons.mic,
+      materialIcon: Icons.mic_rounded,
+      color: theme.colorScheme.surfaceContainerHigh,
+      foreground: theme.colorScheme.onSurfaceVariant,
+      label: 'Voice mode',
+      onTap: widget.enabled ? widget.onVoice : null,
+    ),
+  );
+
+  Widget _primary(ThemeData theme) {
+    if (widget.running) {
+      return _RoundActionButton(
+        icon: CupertinoIcons.stop_fill,
+        materialIcon: Icons.stop_rounded,
+        color: theme.colorScheme.error,
+        label: 'Stop the turn',
+        busy: widget.cancelling,
+        onTap: widget.cancelling ? null : widget.onStop,
+      );
+    }
+    return _RoundActionButton(
+      key: const Key('composer-send'),
+      icon: CupertinoIcons.arrow_up,
+      materialIcon: Icons.arrow_upward_rounded,
+      color: _canSend
+          ? theme.colorScheme.primary
+          : theme.colorScheme.surfaceContainerHigh,
+      foreground: _canSend ? Colors.white : theme.colorScheme.onSurfaceVariant,
+      label: 'Send message',
+      onTap: _canSend ? _send : null,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cupertino = HarnessStyle.isCupertino(context);
+    // A phone at a large text size has no room for a line of advice under the
+    // controls: the words being written keep that height instead.
+    final largeText = MediaQuery.textScalerOf(context).scale(15) > 19.5;
+    final compact =
+        MediaQuery.sizeOf(context).width < 380 || largeText || widget.tight;
     final background = cupertino
         ? CupertinoTheme.of(context).barBackgroundColor
         : theme.colorScheme.surfaceContainerLowest;
@@ -240,6 +356,7 @@ class _MessageComposerState extends State<MessageComposer> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (widget.header != null) widget.header!,
               if (_attachments.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
@@ -312,114 +429,53 @@ class _MessageComposerState extends State<MessageComposer> {
                         .copyWith(color: theme.colorScheme.error),
                   ),
                 ),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (widget.canAttach)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 4, bottom: 2),
-                      child: Semantics(
-                        button: true,
-                        label: 'Attach images',
-                        child: GestureDetector(
-                          onTap: widget.running ? null : _pickImages,
-                          child: Container(
-                            width: 40,
-                            height: 40,
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.surfaceContainerHigh,
-                              shape: BoxShape.circle,
-                            ),
-                            child: _picking
-                                ? const Padding(
-                                    padding: EdgeInsets.all(11),
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : Icon(
-                                    Icons.add_photo_alternate_outlined,
-                                    size: 20,
-                                    color: theme.colorScheme.onSurfaceVariant,
-                                  ),
-                          ),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  // On a narrow phone, or at a large text size, the controls
+                  // beside the field leave it too little room: a word as
+                  // short as Message breaks.  They take a row of their own,
+                  // and the field keeps the width for a sentence.
+                  final compact =
+                      constraints.maxWidth < 360 || largeText || widget.tight;
+                  if (compact) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // Below a page's worth of room, the field stops at
+                        // two lines and scrolls its words rather than push
+                        // the controls under the keyboard.
+                        _field(theme, maxLines: widget.tight ? 2 : 3),
+                        const SizedBox(height: 6),
+                        Row(
+                          key: const Key('composer-controls'),
+                          children: [
+                            if (widget.canAttach) _attach(theme),
+                            if (widget.canVoice) _voice(theme),
+                            const Spacer(),
+                            _primary(theme),
+                          ],
                         ),
-                      ),
-                    ),
-                  Expanded(
-                    child: Focus(
-                      onKeyEvent: _onKey,
-                      child: HarnessTextField(
-                        key: const Key('composer-field'),
-                        controller: _text,
-                        focusNode: _focus,
-                        hint: widget.offline
-                            ? 'Reconnecting… what you type is kept'
-                            : widget.awaitingAnswer
-                            ? 'Answer above to continue'
-                            : widget.running
-                            ? 'The agent is working…'
-                            : widget.hint ??
-                                  (_keyboardHint
-                                      ? 'Message the harness · Enter to send'
-                                      : 'Message the harness'),
-                        maxLines: 5,
-                        minLines: 1,
-                        keyboardType: TextInputType.multiline,
-                        textInputAction: TextInputAction.newline,
-                        onChanged: (_) => setState(() {}),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 15,
-                          vertical: 11,
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (widget.canVoice)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 6, bottom: 2),
-                      child: _RoundActionButton(
-                        key: const Key('composer-voice'),
-                        icon: CupertinoIcons.mic,
-                        materialIcon: Icons.mic_rounded,
-                        color: theme.colorScheme.surfaceContainerHigh,
-                        foreground: theme.colorScheme.onSurfaceVariant,
-                        label: 'Voice mode',
-                        onTap: widget.enabled ? widget.onVoice : null,
-                      ),
-                    ),
-                  const SizedBox(width: 6),
-                  if (widget.running)
-                    _RoundActionButton(
-                      icon: CupertinoIcons.stop_fill,
-                      materialIcon: Icons.stop_rounded,
-                      color: theme.colorScheme.error,
-                      label: 'Stop the turn',
-                      busy: widget.cancelling,
-                      onTap: widget.cancelling ? null : widget.onStop,
-                    )
-                  else
-                    _RoundActionButton(
-                      key: const Key('composer-send'),
-                      icon: CupertinoIcons.arrow_up,
-                      materialIcon: Icons.arrow_upward_rounded,
-                      color: _canSend
-                          ? theme.colorScheme.primary
-                          : theme.colorScheme.surfaceContainerHigh,
-                      foreground: _canSend
-                          ? Colors.white
-                          : theme.colorScheme.onSurfaceVariant,
-                      label: 'Send message',
-                      onTap: _canSend ? _send : null,
-                    ),
-                ],
+                      ],
+                    );
+                  }
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      if (widget.canAttach) _attach(theme),
+                      Expanded(child: _field(theme, maxLines: 5)),
+                      if (widget.canVoice) _voice(theme),
+                      const SizedBox(width: 6),
+                      _primary(theme),
+                    ],
+                  );
+                },
               ),
               if (widget.footer != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 2),
                   child: widget.footer!,
                 )
-              else if (!widget.running && _text.text.isEmpty)
+              else if (!widget.running && _text.text.isEmpty && !compact)
                 Padding(
                   padding: const EdgeInsets.only(left: 4, top: 6),
                   child: Text(
@@ -473,8 +529,8 @@ class _RoundActionButton extends StatelessWidget {
               },
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
-          width: 42,
-          height: 42,
+          width: 44,
+          height: 44,
           decoration: BoxDecoration(
             color: effective,
             shape: BoxShape.circle,

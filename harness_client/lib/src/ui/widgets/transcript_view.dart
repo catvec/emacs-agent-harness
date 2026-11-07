@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../../acp/acp_message.dart';
+import '../../models/chat_thread.dart';
 import '../../models/tool_catalogue.dart';
 import '../../models/tool_runs.dart';
 import '../../models/transcript.dart';
@@ -10,6 +11,7 @@ import '../adaptive/mark.dart';
 import '../adaptive/platform_style.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
+import 'chat_threads.dart';
 import 'compaction_toggle.dart';
 import 'markdown_view.dart';
 import 'tool_card.dart';
@@ -25,6 +27,13 @@ class TranscriptView extends StatefulWidget {
     this.tools = ToolCatalogue.empty,
     this.waiting = const {},
     this.onToggleCompaction,
+    this.sessionId,
+    this.onReply,
+    this.onReplyThread,
+    this.onShowRef,
+    this.onOpenThread,
+    this.focusNodeId,
+    this.focusTick = 0,
   });
 
   final List<TranscriptItem> items;
@@ -47,6 +56,27 @@ class TranscriptView extends StatefulWidget {
   /// leaves the note without one.  Only the latest compaction offers it: an
   /// older one keeps the state it had when the next was made.
   final void Function(TranscriptItem item)? onToggleCompaction;
+
+  /// The conversation's id, when it is known: a quote of one of its messages
+  /// names it, so that the model can read the message again.
+  final String? sessionId;
+
+  /// Answers a message with the next one.
+  final void Function(TranscriptItem item)? onReply;
+
+  /// Answers a reply in a thread with the next message.
+  final void Function(TranscriptItem item, ChatThread thread)? onReplyThread;
+
+  /// Shows the message a quote is of, or opens the thread it names.
+  final void Function(ChatThreadRef ref)? onShowRef;
+
+  /// Opens the thread in the task's review.
+  final void Function(TranscriptItem item, ChatThread thread)? onOpenThread;
+
+  /// The node to bring into view: a message a quote is of.  [focusTick] makes
+  /// the same node scroll again when it is tapped twice.
+  final String? focusNodeId;
+  final int focusTick;
 
   @override
   State<TranscriptView> createState() => _TranscriptViewState();
@@ -92,6 +122,13 @@ class _TranscriptViewState extends State<TranscriptView> {
   /// The first call of the run the person has just opened, until it has been
   /// drawn and brought into view (see `ToolRunMember.reveal`).
   String? _revealing;
+
+  /// A key for each item, so that the one a quote is of can be brought into
+  /// view however far down the conversation it stands.
+  final Map<String, GlobalKey> _itemKeys = <String, GlobalKey>{};
+
+  GlobalKey _itemKey(String key) =>
+      _itemKeys.putIfAbsent(key, () => GlobalKey());
 
   void _toggle(ToolRun run) {
     final keys = [for (final member in run.members) member.key];
@@ -154,8 +191,16 @@ class _TranscriptViewState extends State<TranscriptView> {
     _lastCount = widget.items.length;
     _lastLength = _totalLength();
     // A conversation opens on its latest message, as one that is read as it
-    // goes does: not on its first, which a long one has far behind it.
-    if (widget.items.isNotEmpty) _jumpToBottom();
+    // goes does: not on its first, which a long one has far behind it.  A
+    // quote the screen was opened to show is found first.
+    if (widget.items.isNotEmpty && widget.focusNodeId == null) {
+      _jumpToBottom();
+    }
+    if (widget.focusNodeId != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _revealNode(widget.focusNodeId);
+      });
+    }
   }
 
   @override
@@ -168,8 +213,48 @@ class _TranscriptViewState extends State<TranscriptView> {
     } else if ((count != _lastCount || length != _lastLength) && _atBottom) {
       _jumpToBottom();
     }
+    if (widget.focusTick != oldWidget.focusTick && widget.focusNodeId != null) {
+      _revealNode(widget.focusNodeId);
+    }
     _lastCount = count;
     _lastLength = length;
+  }
+
+  /// Bring the message of [nodeId] into view, opening the way to it as a
+  /// lazy list must be walked: the row is built when it is near the screen.
+  /// A jump to the place the row has among the rows brings it near, and the
+  /// frame after it finds the row itself.
+  void _revealNode(String? nodeId) {
+    if (nodeId == null) return;
+    final rows = _rows();
+    final index = rows.indexWhere(
+      (row) => row is _ItemRow && row.item.nodeId == nodeId,
+    );
+    if (index < 0) return;
+    final item = (rows[index] as _ItemRow).item;
+
+    void attempt(int left) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scroll.hasClients) return;
+        final context = _itemKey(item.key).currentContext;
+        if (context != null) {
+          Scrollable.ensureVisible(
+            context,
+            alignment: 0.32,
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+          );
+          return;
+        }
+        final max = _scroll.position.maxScrollExtent;
+        if (max <= 0) return;
+        final target = rows.length <= 1 ? 0.0 : max * index / (rows.length - 1);
+        _scroll.jumpTo(target.clamp(0.0, max));
+        if (left > 0) attempt(left - 1);
+      });
+    }
+
+    attempt(8);
   }
 
   int _totalLength() {
@@ -297,9 +382,14 @@ class _TranscriptViewState extends State<TranscriptView> {
                   isLast: index == rows.length - 1,
                   showThinking: widget.showThinking,
                   streaming: widget.streaming,
+                  onReply: widget.onReply,
+                  onReplyThread: widget.onReplyThread,
+                  onShowRef: widget.onShowRef,
+                  onOpenThread: widget.onOpenThread,
                 );
+                final Widget row;
                 if (item.kind == TranscriptKind.compaction) {
-                  return CompactionToggle(
+                  row = CompactionToggle(
                     key: ValueKey(item.key),
                     item: item,
                     onToggle:
@@ -310,13 +400,15 @@ class _TranscriptViewState extends State<TranscriptView> {
                         : () => toggleCompaction(item),
                     note: entry,
                   );
+                } else if (nested) {
+                  row = ToolRunMember(
+                    reveal: item.key == _revealing,
+                    child: entry,
+                  );
+                } else {
+                  row = entry;
                 }
-                return nested
-                    ? ToolRunMember(
-                        reveal: item.key == _revealing,
-                        child: entry,
-                      )
-                    : entry;
+                return KeyedSubtree(key: _itemKey(item.key), child: row);
             }
           },
         ),
@@ -360,6 +452,11 @@ class _TranscriptViewState extends State<TranscriptView> {
                       const SizedBox(width: 5),
                       Text(
                         'Latest',
+                        // A floating control over the conversation: it keeps
+                        // its room, whatever the text size, rather than
+                        // cover what it scrolls to.
+                        textScaler: MediaQuery.textScalerOf(context)
+                            .clamp(maxScaleFactor: 1.3),
                         style: HarnessText.meta(context).copyWith(
                           fontWeight: FontWeight.w700,
                           color: theme.colorScheme.onSurface,
@@ -384,6 +481,10 @@ class TranscriptEntry extends StatelessWidget {
     required this.isLast,
     required this.showThinking,
     required this.streaming,
+    this.onReply,
+    this.onReplyThread,
+    this.onShowRef,
+    this.onOpenThread,
   });
 
   final TranscriptItem item;
@@ -391,18 +492,33 @@ class TranscriptEntry extends StatelessWidget {
   final bool isLast;
   final bool showThinking;
   final bool streaming;
+  final void Function(TranscriptItem item)? onReply;
+  final void Function(TranscriptItem item, ChatThread thread)? onReplyThread;
+  final void Function(ChatThreadRef ref)? onShowRef;
+  final void Function(TranscriptItem item, ChatThread thread)? onOpenThread;
 
   @override
   Widget build(BuildContext context) {
     final grouped = previous != null && _sameSpeaker(previous!, item);
     switch (item.kind) {
       case TranscriptKind.user:
-        return _UserBubble(item: item, grouped: grouped);
+        return _UserBubble(
+          item: item,
+          grouped: grouped,
+          onReply: onReply,
+          onReplyThread: onReplyThread,
+          onShowRef: onShowRef,
+          onOpenThread: onOpenThread,
+        );
       case TranscriptKind.assistant:
         return _AssistantMessage(
           item: item,
           grouped: grouped,
           streaming: streaming,
+          onReply: onReply,
+          onReplyThread: onReplyThread,
+          onShowRef: onShowRef,
+          onOpenThread: onOpenThread,
         );
       case TranscriptKind.thinking:
         if (!showThinking) return const SizedBox.shrink();
@@ -439,9 +555,21 @@ class TranscriptEntry extends StatelessWidget {
 }
 
 class _UserBubble extends StatelessWidget {
-  const _UserBubble({required this.item, required this.grouped});
+  const _UserBubble({
+    required this.item,
+    required this.grouped,
+    this.onReply,
+    this.onReplyThread,
+    this.onShowRef,
+    this.onOpenThread,
+  });
+
   final TranscriptItem item;
   final bool grouped;
+  final void Function(TranscriptItem item)? onReply;
+  final void Function(TranscriptItem item, ChatThread thread)? onReplyThread;
+  final void Function(ChatThreadRef ref)? onShowRef;
+  final void Function(TranscriptItem item, ChatThread thread)? onOpenThread;
 
   @override
   Widget build(BuildContext context) {
@@ -463,53 +591,98 @@ class _UserBubble extends StatelessWidget {
         : (fromSomeoneElse
               ? theme.colorScheme.onSurface
               : theme.colorScheme.onPrimaryContainer);
+    final parsed = item.threads.isEmpty ? parseThreadMarkup(item.text) : null;
+    final threads = item.threads.isNotEmpty
+        ? item.threads
+        : (parsed?.threads ?? const <ChatThread>[]);
+    var body = (parsed?.body ?? item.bodyText).trim();
+    if (threads.isEmpty && item.streaming) {
+      final open = body.indexOf('<thread');
+      if (open >= 0) body = body.substring(0, open).trimRight();
+    }
+    final reply = item.nodeId == null ? null : onReply;
     return Padding(
-      padding: EdgeInsets.fromLTRB(18, grouped ? 2 : 12, 14, 2),
+      padding: EdgeInsets.fromLTRB(18, grouped ? 2 : 8, 14, 2),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           if (!grouped)
             Padding(
-              padding: const EdgeInsets.only(right: 4, bottom: 4),
-              child: Text(
-                // A message the turn has not read yet waits, and says so.
-                item.pending ? '$sender · Queued' : sender,
-                style: HarnessText.meta(context).copyWith(
-                  color: fromSomeoneElse
-                      ? theme.colorScheme.onSurfaceVariant
-                      : theme.colorScheme.onSurfaceVariant.withValues(
-                          alpha: 0.7,
-                        ),
-                  fontWeight: FontWeight.w600,
+              padding: const EdgeInsets.only(right: 2, bottom: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (reply != null)
+                    _MessageReplyAction(
+                      key: ValueKey('reply-${item.key}'),
+                      label: 'Reply',
+                      onTap: () => reply(item),
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  Text(
+                    // A message the turn has not read yet waits, and says so.
+                    item.pending ? '$sender · Queued' : sender,
+                    style: HarnessText.meta(context).copyWith(
+                      color: fromSomeoneElse
+                          ? theme.colorScheme.onSurfaceVariant
+                          : theme.colorScheme.onSurfaceVariant.withValues(
+                              alpha: 0.7,
+                            ),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (body.isNotEmpty)
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth:
+                    MediaQuery.sizeOf(context).width *
+                    (cupertino ? 0.78 : 0.82),
+              ),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: bubbleColor,
+                  borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(18),
+                    topRight: const Radius.circular(18),
+                    bottomLeft: const Radius.circular(18),
+                    bottomRight: Radius.circular(grouped ? 18 : 6),
+                  ),
+                ),
+                // What a person or the harness sends is Markdown, as it is in
+                // the Emacs chat: drawn, in the color of the bubble's text.
+                child: HarnessMarkdown(
+                  text: body,
+                  color: textColor,
+                  lineHeight: 1.4,
+                  tight: true,
                 ),
               ),
             ),
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth:
-                  MediaQuery.sizeOf(context).width * (cupertino ? 0.78 : 0.82),
-            ),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: bubbleColor,
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(18),
-                  topRight: const Radius.circular(18),
-                  bottomLeft: const Radius.circular(18),
-                  bottomRight: Radius.circular(grouped ? 18 : 6),
-                ),
+          if (threads.isNotEmpty)
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth:
+                    MediaQuery.sizeOf(context).width * (cupertino ? 0.86 : 0.9),
               ),
-              // What a person or the harness sends is Markdown, as it is in
-              // the Emacs chat: drawn, in the color of the bubble's text.
-              child: HarnessMarkdown(
-                text: item.text,
-                color: textColor,
-                lineHeight: 1.4,
-                tight: true,
+              child: ChatThreadList(
+                keyPrefix: item.key,
+                threads: threads,
+                onReply: onReplyThread == null
+                    ? null
+                    : (thread) => onReplyThread!(item, thread),
+                onShowRef: onShowRef,
+                onOpenThread: onOpenThread == null
+                    ? null
+                    : (thread) => onOpenThread!(item, thread),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -521,19 +694,50 @@ class _AssistantMessage extends StatelessWidget {
     required this.item,
     required this.grouped,
     required this.streaming,
+    this.onReply,
+    this.onReplyThread,
+    this.onShowRef,
+    this.onOpenThread,
   });
 
   final TranscriptItem item;
   final bool grouped;
   final bool streaming;
+  final void Function(TranscriptItem item)? onReply;
+  final void Function(TranscriptItem item, ChatThread thread)? onReplyThread;
+  final void Function(ChatThreadRef ref)? onShowRef;
+  final void Function(TranscriptItem item, ChatThread thread)? onOpenThread;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final model = asStringOr(asMap(item.node?['meta'])['model'], '');
     final label = item.sender ?? 'Harness';
+    final parsed = item.threads.isEmpty ? parseThreadMarkup(item.text) : null;
+    final replies = item.threads.isNotEmpty
+        ? item.threads
+        : (parsed?.threads ?? const <ChatThread>[]);
+    var body = (parsed?.body ?? item.bodyText).trim();
+    if (replies.isEmpty && item.streaming) {
+      final open = body.indexOf('<thread');
+      if (open >= 0) body = body.substring(0, open).trimRight();
+    }
+    final reply = item.nodeId == null ? null : onReply;
+    final threads = replies.isEmpty
+        ? null
+        : ChatThreadList(
+            keyPrefix: item.key,
+            threads: replies,
+            onReply: onReplyThread == null
+                ? null
+                : (thread) => onReplyThread!(item, thread),
+            onShowRef: onShowRef,
+            onOpenThread: onOpenThread == null
+                ? null
+                : (thread) => onOpenThread!(item, thread),
+          );
     return Padding(
-      padding: EdgeInsets.fromLTRB(18, grouped ? 2 : 14, 18, 2),
+      padding: EdgeInsets.fromLTRB(18, grouped ? 2 : 10, 18, 2),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -563,20 +767,67 @@ class _AssistantMessage extends StatelessWidget {
                     ),
                   ),
                 ],
+                const Spacer(),
+                if (reply != null)
+                  _MessageReplyAction(
+                    key: ValueKey('reply-${item.key}-head'),
+                    label: 'Reply',
+                    onTap: () => reply(item),
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
               ],
             ),
-          if (item.text.trim().isNotEmpty)
+          if (body.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: HarnessMarkdown(text: item.text),
+              child: HarnessMarkdown(text: body),
             ),
+          if (threads != null) threads,
           if (item.streaming)
             const Padding(
               padding: EdgeInsets.only(top: 2),
               child: _BlinkingCaret(),
             ),
+          if (grouped && reply != null && (body.isNotEmpty || threads != null))
+            Align(
+              alignment: Alignment.centerRight,
+              child: _MessageReplyAction(
+                key: ValueKey('reply-${item.key}-tail'),
+                label: 'Reply',
+                onTap: () => reply(item),
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
         ],
       ),
+    );
+  }
+}
+
+/// The action that answers a message with the next one.  A phone target:
+/// wide and tall enough for a thumb, and named for a reader.
+class _MessageReplyAction extends StatelessWidget {
+  const _MessageReplyAction({
+    super.key,
+    required this.label,
+    required this.onTap,
+    required this.color,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      onPressed: onTap,
+      tooltip: label,
+      icon: const Icon(Icons.reply_rounded, size: 17),
+      color: color,
+      constraints: const BoxConstraints(minWidth: 44, minHeight: 40),
+      padding: EdgeInsets.zero,
+      visualDensity: VisualDensity.compact,
     );
   }
 }

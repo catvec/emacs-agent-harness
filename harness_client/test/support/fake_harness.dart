@@ -6,6 +6,7 @@ import 'package:harness_client/src/acp/acp_message.dart';
 import 'package:harness_client/src/acp/acp_transport.dart';
 import 'package:harness_client/src/acp/connection_target.dart';
 
+import 'fake_review.dart';
 import 'harness_tools.dart';
 import 'tool_showcase.dart';
 
@@ -87,6 +88,7 @@ class FakeHarness {
     this.toolCatalogue = true,
     this.sessionPictures = true,
     this.workspace = false,
+    this.reviews = false,
     this.resources = false,
     this.resourcesCredentialsOnly = false,
     this.demo = true,
@@ -163,6 +165,17 @@ class FakeHarness {
           'task/suspend-all-queues',
           'task/resume-all-queues',
         ],
+        if (reviews) ...[
+          'patch-review/get',
+          'patch-review/changes',
+          'patch-review/diff',
+          'patch-review/apply',
+          'patch-review/viewed',
+          'patch-review/set-viewed',
+          'patch-review/send-replies',
+          'patch-review/last-close',
+          'patch-review/discard-last-close',
+        ],
         'usage/totals',
         'usage/summary',
         'usage/live-all',
@@ -198,6 +211,7 @@ class FakeHarness {
         'usage/rates-updated',
         'usage/budgets-changed',
         'session/status',
+        if (reviews) ...['patch-review/changed', 'patch-review/last-close'],
         'permission/requested',
         if (quota) 'provider/quota-updated',
       });
@@ -282,6 +296,23 @@ class FakeHarness {
   /// A harness whose workspace modules are loaded: the workspace tab is
   /// offered and its four methods answer a small scripted workspace.
   final bool workspace;
+
+  /// Whether the harness keeps a task's change review: the threads, the
+  /// files at a revision, their diffs and the marks a reviewer makes.  The
+  /// data is [reviewData], which a test may change.
+  final bool reviews;
+
+  /// The review [reviews] answers from: a task with threads at two
+  /// revisions, a draft, files to view and a diff for each.
+  FakeReview reviewData = FakeReview();
+
+  /// Called before the harness answers [method]; a test can wait on a
+  /// completer here to put answers of two requests out of order.
+  Future<void> Function(String method, JsonMap params)? beforeAnswer;
+
+  /// Lose the answer to the next `patch-review/apply`, after the review
+  /// performed it: the operation is there and the client did not hear so.
+  bool loseNextApplyAnswer = false;
 
   /// A harness that also answers the resources contract: the browser and
   /// wallet sections hold mock metadata (never a value) and the mutations
@@ -481,6 +512,11 @@ class FakeHarness {
   /// queues its tasks itself: the harness keeps both for each project.
   final Set<String> suspendedQueues = {};
   final Set<String> autoQueues = {};
+
+  /// The blocks of each `session/prompt`, as the client sent them: a
+  /// reply in a thread is one text block with `_harness.thread`, and a test
+  /// reads what the app answered there.
+  final List<List<JsonMap>> promptBlocks = [];
 
   /// What was written to the session of a task with `task/prompt`: the
   /// task's id, and the text.
@@ -1618,6 +1654,7 @@ class FakeHarness {
         _respondError(id, -32601, 'Method not found: $method');
         return;
       }
+      if (beforeAnswer != null) await beforeAnswer!(method, params);
       if (method == 'session/list') {
         if (failSessionList) {
           _respondError(id, -32603, 'The harness could not list sessions');
@@ -1690,9 +1727,11 @@ class FakeHarness {
           _respondError(id, -32602, 'sessionId required');
           return;
         }
-        prompts.add(_promptText(params['prompt']));
-        _taskMessage(sid, _promptText(params['prompt']));
-        _streamTurn(sid, _promptText(params['prompt']), id);
+        final blocks = asList(params['prompt']).map(asMap).toList();
+        promptBlocks.add(blocks);
+        prompts.add(_promptText(blocks));
+        _taskMessage(sid, _promptText(blocks));
+        _streamTurn(sid, blocks, id);
         return;
       }
       if (method == 'session/cancel') {
@@ -2040,7 +2079,7 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/workspace/list') {
-        _respond(id, [ _workspaceFixture() ]);
+        _respond(id, [_workspaceFixture()]);
         return;
       }
       if (method == '_harness/workspace/get') {
@@ -2121,7 +2160,9 @@ class FakeHarness {
         } else if (method == '_harness/workspace/wallet/authorization/revoke') {
           final wanted = asString(params['authorization']);
           for (final authorization in resourcesAuthorizations) {
-            if (authorization['id'] == wanted) authorization['status'] = 'revoked';
+            if (authorization['id'] == wanted) {
+              authorization['status'] = 'revoked';
+            }
           }
         } else if (method == '_harness/workspace/wallet/purchase/decide') {
           final wanted = asString(params['purchase']);
@@ -2151,10 +2192,7 @@ class FakeHarness {
         _respond(id, [
           for (final note in memoryNotes)
             if ((note['text'] as String).toLowerCase().contains(query))
-              {
-                ...note,
-                'snippet': _snippet(note['text'] as String, query),
-              },
+              {...note, 'snippet': _snippet(note['text'] as String, query)},
         ]);
         return;
       }
@@ -2178,6 +2216,74 @@ class FakeHarness {
       if (method == '_harness/task/for-session') {
         // The task a session is the session of, nothing for any other.
         _respond(id, _taskOfSession(asString(params['session-id'])));
+        return;
+      }
+      if (reviews && method == '_harness/patch-review/get') {
+        _respond(id, reviewData.set);
+        return;
+      }
+      if (reviews && method == '_harness/patch-review/changes') {
+        _respond(id, reviewData.changesFor(asString(params['version'])));
+        return;
+      }
+      if (reviews && method == '_harness/patch-review/diff') {
+        final found = reviewData.diff(
+          asStringOr(params['path'], ''),
+          version: asString(params['version']),
+        );
+        if (found == null) {
+          _respondError(id, -32602, 'No such file in the change');
+        } else {
+          _respond(id, found);
+        }
+        return;
+      }
+      if (reviews && method == '_harness/patch-review/apply') {
+        final result = reviewData.apply(asMap(params['op']));
+        if (loseNextApplyAnswer) {
+          loseNextApplyAnswer = false;
+          _respondError(id, -32603, 'The answer was lost');
+        } else {
+          _respond(id, result);
+        }
+        return;
+      }
+      if (reviews && method == '_harness/patch-review/viewed') {
+        _respond(id, reviewData.viewed);
+        return;
+      }
+      if (reviews && method == '_harness/patch-review/set-viewed') {
+        final kind = asStringOr(params['kind'], 'seen');
+        final on = params['on'] == true;
+        for (final item in asMapList(params['files'])) {
+          final file = asMap(item);
+          for (final list in [reviewData.seen, reviewData.approved]) {
+            list.removeWhere((entry) => entry['path'] == file['path']);
+          }
+          if (on) {
+            reviewData.seen.add({'path': file['path'], 'blob': file['blob']});
+            if (kind == 'approved') {
+              reviewData.approved.add({
+                'path': file['path'],
+                'blob': file['blob'],
+              });
+            }
+          }
+        }
+        _respond(id, reviewData.viewed);
+        return;
+      }
+      if (reviews && method == '_harness/patch-review/send-replies') {
+        _respond(id, reviewData.sendReplies());
+        return;
+      }
+      if (reviews && method == '_harness/patch-review/last-close') {
+        _respond(id, reviewData.lastClose);
+        return;
+      }
+      if (reviews && method == '_harness/patch-review/discard-last-close') {
+        reviewData.lastClose = null;
+        _respond(id, const <String, Object?>{});
         return;
       }
       if (method == '_harness/task/slots') {
@@ -2580,18 +2686,30 @@ class FakeHarness {
 
   final List<String> workspacePrompts = <String>[];
   final List<Map<String, Object?>> workspaceThreads = [
-    {'id': 'th-1', 'title': 'Kitchen renovation', 'state': 'live',
-     'live': 's1', 'tags': ['Kitchen', 'Budget']},
-    {'id': 'th-2', 'title': 'Harness memory', 'state': 'parked',
-     'tags': ['Harness', 'Memory']},
-    {'id': 'th-3', 'title': 'Kitchen budget', 'state': 'parked',
-     'tags': ['Kitchen']},
+    {
+      'id': 'th-1',
+      'title': 'Kitchen renovation',
+      'state': 'live',
+      'live': 's1',
+      'tags': ['Kitchen', 'Budget'],
+    },
+    {
+      'id': 'th-2',
+      'title': 'Harness memory',
+      'state': 'parked',
+      'tags': ['Harness', 'Memory'],
+    },
+    {
+      'id': 'th-3',
+      'title': 'Kitchen budget',
+      'state': 'parked',
+      'tags': ['Kitchen'],
+    },
   ];
 
   List<String> _workspaceTags(String title) => [
     for (final word in title.split(RegExp(r'[^A-Za-z0-9]+')))
-      if (word.length > 3)
-        word[0].toUpperCase() + word.substring(1),
+      if (word.length > 3) word[0].toUpperCase() + word.substring(1),
   ];
 
   Map<String, Object?> _workspaceFixture() => {
@@ -2604,29 +2722,49 @@ class FakeHarness {
   };
 
   List<Map<String, Object?>> _workspaceTimeline() => [
-    {'kind': 'divider', 'thread': 'th-1', 'title': 'Kitchen renovation',
-     'reason': 'new-thread'},
+    {
+      'kind': 'divider',
+      'thread': 'th-1',
+      'title': 'Kitchen renovation',
+      'reason': 'new-thread',
+    },
     {'kind': 'brief', 'thread': 'th-1', 'tokens': 120},
-    {'kind': 'message', 'thread': 'th-1', 'role': 'user',
-     'text': 'The tile is matte.'},
-    {'kind': 'message', 'thread': 'th-1', 'role': 'assistant',
-     'text': 'Noted. The quote is open.'},
+    {
+      'kind': 'message',
+      'thread': 'th-1',
+      'role': 'user',
+      'text': 'The tile is matte.',
+    },
+    {
+      'kind': 'message',
+      'thread': 'th-1',
+      'role': 'assistant',
+      'text': 'Noted. The quote is open.',
+    },
   ];
 
   final List<String> memorySearches = <String>[];
   final List<Map<String, Object?>> memoryNotes = [
-    {'id': 'n1', 'thread': 'Kitchen renovation', 'role': 'user',
-     'text': 'Let us go with quartz for the countertop.',
-     'ts': DateTime.now()
-         .subtract(const Duration(minutes: 12))
-         .toUtc()
-         .toIso8601String()},
-    {'id': 'n2', 'thread': 'Harness memory', 'role': 'assistant',
-     'text': 'The recall index keeps the thread and the page it came from.',
-     'ts': DateTime.now()
-         .subtract(const Duration(hours: 5))
-         .toUtc()
-         .toIso8601String()},
+    {
+      'id': 'n1',
+      'thread': 'Kitchen renovation',
+      'role': 'user',
+      'text': 'Let us go with quartz for the countertop.',
+      'ts': DateTime.now()
+          .subtract(const Duration(minutes: 12))
+          .toUtc()
+          .toIso8601String(),
+    },
+    {
+      'id': 'n2',
+      'thread': 'Harness memory',
+      'role': 'assistant',
+      'text': 'The recall index keeps the thread and the page it came from.',
+      'ts': DateTime.now()
+          .subtract(const Duration(hours: 5))
+          .toUtc()
+          .toIso8601String(),
+    },
   ];
 
   String _snippet(String text, String query) {
@@ -2653,143 +2791,239 @@ class FakeHarness {
   final List<Map<String, Object?>> resourcesCalls = [];
 
   final List<Map<String, Object?>> resourcesSites = [
-    {'origin': 'https://stoneco.example', 'cookies': 12,
-     'storage-bytes': 320000, 'cache-bytes': 640000, 'permissions': 2,
-     'auth': 'signed-in', 'value': 'SESSION-SECRET',
-     'last-used': DateTime.now()
-         .subtract(const Duration(minutes: 12))
-         .toUtc()
-         .toIso8601String()},
-    {'origin': 'https://github.com', 'cookies': 4,
-     'storage-bytes': 110000, 'cache-bytes': 210000, 'permissions': 0,
-     'auth': 'signed-out',
-     'last-used': DateTime.now()
-         .subtract(const Duration(hours: 5))
-         .toUtc()
-         .toIso8601String()},
+    {
+      'origin': 'https://stoneco.example',
+      'cookies': 12,
+      'storage-bytes': 320000,
+      'cache-bytes': 640000,
+      'permissions': 2,
+      'auth': 'signed-in',
+      'value': 'SESSION-SECRET',
+      'last-used': DateTime.now()
+          .subtract(const Duration(minutes: 12))
+          .toUtc()
+          .toIso8601String(),
+    },
+    {
+      'origin': 'https://github.com',
+      'cookies': 4,
+      'storage-bytes': 110000,
+      'cache-bytes': 210000,
+      'permissions': 0,
+      'auth': 'signed-out',
+      'last-used': DateTime.now()
+          .subtract(const Duration(hours: 5))
+          .toUtc()
+          .toIso8601String(),
+    },
   ];
 
   final List<Map<String, Object?>> resourcesLogins = [
-    {'id': 'lg-1', 'origin': 'https://stoneco.example',
-     'username': 'j•••@example.com', 'state': 'active',
-     'password': 'hunter2', 'cookie': 'SESSION-SECRET',
-     'created': DateTime.now()
-         .subtract(const Duration(days: 20))
-         .toUtc()
-         .toIso8601String(),
-     'last-used': DateTime.now()
-         .subtract(const Duration(minutes: 12))
-         .toUtc()
-         .toIso8601String()},
+    {
+      'id': 'lg-1',
+      'origin': 'https://stoneco.example',
+      'username': 'j•••@example.com',
+      'state': 'active',
+      'password': 'hunter2',
+      'cookie': 'SESSION-SECRET',
+      'created': DateTime.now()
+          .subtract(const Duration(days: 20))
+          .toUtc()
+          .toIso8601String(),
+      'last-used': DateTime.now()
+          .subtract(const Duration(minutes: 12))
+          .toUtc()
+          .toIso8601String(),
+    },
   ];
 
   final List<Map<String, Object?>> resourcesCards = [
-    {'id': 'card-1', 'label': 'Visa •••• 4242', 'network': 'Visa',
-     'last4': '4242', 'exp-month': 9, 'exp-year': 2028, 'state': 'active',
-     'added': DateTime.now()
-         .subtract(const Duration(days: 30))
-         .toUtc()
-         .toIso8601String(),
-     'last-used': DateTime.now()
-         .subtract(const Duration(minutes: 12))
-         .toUtc()
-         .toIso8601String()},
+    {
+      'id': 'card-1',
+      'label': 'Visa •••• 4242',
+      'network': 'Visa',
+      'last4': '4242',
+      'exp-month': 9,
+      'exp-year': 2028,
+      'state': 'active',
+      'added': DateTime.now()
+          .subtract(const Duration(days: 30))
+          .toUtc()
+          .toIso8601String(),
+      'last-used': DateTime.now()
+          .subtract(const Duration(minutes: 12))
+          .toUtc()
+          .toIso8601String(),
+    },
   ];
 
   final List<Map<String, Object?>> resourcesAuthorizations = [
-    {'id': 'auth-1', 'card': 'card-1', 'amount': 1000, 'currency': 'USD',
-     'cap-kind': 'cumulative', 'merchant-scope': ['stoneco.example'],
-     'fees': 'included', 'tax': 'included', 'shipping': 'included',
-     'expires': DateTime.now()
-         .add(const Duration(hours: 20))
-         .toUtc()
-         .toIso8601String(),
-     'status': 'active', 'spent': 0, 'reserved': 940, 'advisory': true,
-     'created': DateTime.now()
-         .subtract(const Duration(hours: 4))
-         .toUtc()
-         .toIso8601String()},
+    {
+      'id': 'auth-1',
+      'card': 'card-1',
+      'amount': 1000,
+      'currency': 'USD',
+      'cap-kind': 'cumulative',
+      'merchant-scope': ['stoneco.example'],
+      'fees': 'included',
+      'tax': 'included',
+      'shipping': 'included',
+      'expires': DateTime.now()
+          .add(const Duration(hours: 20))
+          .toUtc()
+          .toIso8601String(),
+      'status': 'active',
+      'spent': 0,
+      'reserved': 940,
+      'advisory': true,
+      'created': DateTime.now()
+          .subtract(const Duration(hours: 4))
+          .toUtc()
+          .toIso8601String(),
+    },
   ];
 
   final List<Map<String, Object?>> resourcesPurchases = [
-    {'id': 'buy-1', 'authorization': 'auth-1',
-     'merchant': 'stoneco.example', 'amount': 940, 'currency': 'USD',
-     'status': 'proposed',
-     'at': DateTime.now()
-         .subtract(const Duration(minutes: 12))
-         .toUtc()
-         .toIso8601String()},
+    {
+      'id': 'buy-1',
+      'authorization': 'auth-1',
+      'merchant': 'stoneco.example',
+      'amount': 940,
+      'currency': 'USD',
+      'status': 'proposed',
+      'at': DateTime.now()
+          .subtract(const Duration(minutes: 12))
+          .toUtc()
+          .toIso8601String(),
+    },
   ];
 
   Map<String, Object?> _resourcesFixture() => {
     'workspace': 'w1',
     'status': 'ready',
     'metadata-only': true,
-    if (!resourcesCredentialsOnly) 'browser': {
-      'profile': {
-        'label': 'Home', 'kind': 'Firefox', 'bytes': 412 * 1024 * 1024,
-        'sites': resourcesSites.length,
-        'last-used': DateTime.now()
-            .subtract(const Duration(minutes: 4))
-            .toUtc()
-            .toIso8601String(),
+    if (!resourcesCredentialsOnly)
+      'browser': {
+        'profile': {
+          'label': 'Home',
+          'kind': 'Firefox',
+          'bytes': 412 * 1024 * 1024,
+          'sites': resourcesSites.length,
+          'last-used': DateTime.now()
+              .subtract(const Duration(minutes: 4))
+              .toUtc()
+              .toIso8601String(),
+        },
+        'sites': resourcesSites,
+        'logins': resourcesLogins,
+        'browsers': [
+          {
+            'id': 'firefox',
+            'label': 'Firefox',
+            'primary': true,
+            'available': true,
+            'support': 'primary',
+          },
+          {
+            'id': 'chromium',
+            'label': 'Chromium',
+            'primary': false,
+            'available': true,
+            'support': 'secondary',
+          },
+        ],
+        'totals': {
+          'cookies': resourcesSites.fold<int>(
+            0,
+            (sum, site) => sum + (asInt(site['cookies']) ?? 0),
+          ),
+          'bytes': 412 * 1024 * 1024,
+        },
       },
-      'sites': resourcesSites,
-      'logins': resourcesLogins,
-      'browsers': [
-        {'id': 'firefox', 'label': 'Firefox', 'primary': true, 'available': true, 'support': 'primary'},
-        {'id': 'chromium', 'label': 'Chromium', 'primary': false, 'available': true, 'support': 'secondary'},
-      ],
-      'totals': {
-        'cookies': resourcesSites.fold<int>(
-            0, (sum, site) => sum + (asInt(site['cookies']) ?? 0)),
-        'bytes': 412 * 1024 * 1024,
+    if (!resourcesCredentialsOnly)
+      'wallet': {
+        'cards': resourcesCards,
+        'authorizations': resourcesAuthorizations,
+        'purchases': resourcesPurchases,
       },
-    },
-    if (!resourcesCredentialsOnly) 'wallet': {
-      'cards': resourcesCards,
-      'authorizations': resourcesAuthorizations,
-      'purchases': resourcesPurchases,
-    },
     'access': [
       for (final site in resourcesSites.take(1))
-        {'kind': 'site', 'label': site['origin'], 'scope': 'site',
-         'owner': 'user', 'state': 'active', 'availability': 'ready',
-         'access': 'allowed', 'detail': 'Signed in'},
+        {
+          'kind': 'site',
+          'label': site['origin'],
+          'scope': 'site',
+          'owner': 'user',
+          'state': 'active',
+          'availability': 'ready',
+          'access': 'allowed',
+          'detail': 'Signed in',
+        },
       for (final authorization in resourcesAuthorizations)
-        {'kind': 'authorization', 'label': r'$10.00 · Visa •••• 4242',
-         'scope': 'authorization', 'owner': 'user',
-         'state': asStringOr(authorization['status'], 'active'),
-         'availability': 'ready', 'access': 'ask',
-         'detail': 'Per purchase'},
-      {'kind': 'permission', 'label': 'Browser · stoneco.example',
-       'scope': 'global', 'owner': 'user', 'state': 'active',
-       'availability': 'ready', 'access': 'ask', 'detail': 'Every tool'},
+        {
+          'kind': 'authorization',
+          'label': r'$10.00 · Visa •••• 4242',
+          'scope': 'authorization',
+          'owner': 'user',
+          'state': asStringOr(authorization['status'], 'active'),
+          'availability': 'ready',
+          'access': 'ask',
+          'detail': 'Per purchase',
+        },
+      {
+        'kind': 'permission',
+        'label': 'Browser · stoneco.example',
+        'scope': 'global',
+        'owner': 'user',
+        'state': 'active',
+        'availability': 'ready',
+        'access': 'ask',
+        'detail': 'Every tool',
+      },
     ],
     'browser-status': resourcesCredentialsOnly ? 'unavailable' : 'ready',
     'wallet-status': resourcesCredentialsOnly ? 'unavailable' : 'ready',
     'credentials': [
-      {'label': 'deploy-key', 'fingerprint': '4f9c2a1b', 'usable': true,
-       'value': 'SECRET-VALUE'},
-      {'label': 'npm-token', 'fingerprint': 'b81e7d20', 'usable': false,
-       'error': 'Masking off', 'value': 'SECRET-VALUE'},
+      {
+        'label': 'deploy-key',
+        'fingerprint': '4f9c2a1b',
+        'usable': true,
+        'value': 'SECRET-VALUE',
+      },
+      {
+        'label': 'npm-token',
+        'fingerprint': 'b81e7d20',
+        'usable': false,
+        'error': 'Masking off',
+        'value': 'SECRET-VALUE',
+      },
     ],
     'credentials-status': {
-      'status': 'ready', 'mask': true, 'locked': true, 'count': 2,
+      'status': 'ready',
+      'mask': true,
+      'locked': true,
+      'count': 2,
     },
     'audit': [
-      {'at': DateTime.now()
-          .subtract(const Duration(minutes: 12))
-          .toUtc()
-          .toIso8601String(),
-       'action': 'Created', 'resource': r'Authorization · $10',
-       'actor': 'user', 'scope': 'authorization'},
-      {'at': DateTime.now()
-          .subtract(const Duration(hours: 3))
-          .toUtc()
-          .toIso8601String(),
-       'action': 'Used', 'resource': 'Site · stoneco.example',
-       'actor': 'agent', 'scope': 'site'},
+      {
+        'at': DateTime.now()
+            .subtract(const Duration(minutes: 12))
+            .toUtc()
+            .toIso8601String(),
+        'action': 'Created',
+        'resource': r'Authorization · $10',
+        'actor': 'user',
+        'scope': 'authorization',
+      },
+      {
+        'at': DateTime.now()
+            .subtract(const Duration(hours: 3))
+            .toUtc()
+            .toIso8601String(),
+        'action': 'Used',
+        'resource': 'Site · stoneco.example',
+        'actor': 'agent',
+        'scope': 'site',
+      },
     ],
   };
 
@@ -2806,7 +3040,9 @@ class FakeHarness {
           case 'cookies':
             site['cookies'] = 0;
             site['auth'] = 'signed-out';
-            resourcesLogins.removeWhere((login) => login['origin'] == site['origin']);
+            resourcesLogins.removeWhere(
+              (login) => login['origin'] == site['origin'],
+            );
           case 'storage':
             site['storage-bytes'] = 0;
           case 'cache':
@@ -3054,16 +3290,23 @@ class FakeHarness {
     return list;
   }
 
-  void _streamTurn(String sid, String text, Object? requestId) async {
+  void _streamTurn(String sid, List<JsonMap> blocks, Object? requestId) async {
     final session = sessions[sid];
     if (session == null) {
       _respondError(requestId, -32603, 'No session');
       return;
     }
+    final text = _promptText(blocks);
     final slow = text.toLowerCase().contains('slowly');
     final pace = slow ? 900 : 25;
     _setStatus(sid, 'running', event: 'agent/turn-started');
-    final userNode = _node('u-${++_generated}', 'user', text);
+    final userNode = _node(
+      'u-${++_generated}',
+      'user',
+      _harnessContent(blocks),
+    );
+    final harnessBlocks = _harnessBlocks(blocks);
+    if (harnessBlocks.isNotEmpty) userNode['blocks'] = harnessBlocks;
     (nodes[sid] ??= []).add(userNode);
     for (final update in _updatesForNode(userNode)) {
       _send('session/update', {'sessionId': sid, 'update': update});
@@ -3768,6 +4011,93 @@ class FakeHarness {
       asList(prompt)
           .map((block) => asString(asMap(block)['text']) ?? '')
           .join(' ');
+
+  /// The harness's blocks of a prompt, as `harness-acp--block-from-acp`
+  /// makes them: a reply in a thread is its markup and the data to draw it.
+  List<JsonMap> _harnessBlocks(List<JsonMap> blocks) {
+    final out = <JsonMap>[];
+    for (final block in blocks) {
+      final type = asString(block['type']);
+      final harness = asMap(block['_harness']);
+      final thread = asMap(harness['thread']);
+      if (type == 'text' && thread.isNotEmpty) {
+        final response = asStringOr(block['text'], '');
+        out.add({
+          'type': 'text',
+          'text': _threadMarkup(thread, response),
+          'thread': {...thread, 'response': response},
+        });
+      } else if (type == 'text' && asBool(harness['attached'])) {
+        out.add({
+          'type': 'text',
+          'text': asStringOr(block['text'], ''),
+          'attached': true,
+        });
+      } else if (type == 'image') {
+        out.add({
+          'type': 'image',
+          'mime': asString(block['mimeType']) ?? 'image/png',
+          'data': block['data'],
+          if (asString(harness['label']) case final label?) 'label': label,
+        });
+      } else if (type == 'resource_link') {
+        out.add({
+          'type': 'file',
+          'path': (asStringOr(block['uri'], '')).replaceFirst('file://', ''),
+          'name': asString(block['name']),
+        });
+      }
+    }
+    return out;
+  }
+
+  /// What the harness records as a node's content: the words, then the
+  /// replies in threads as their markup, a paragraph apart.
+  String _harnessContent(List<JsonMap> blocks) {
+    final words = <String>[];
+    final replies = <String>[];
+    final attached = <String>[];
+    for (final block in blocks) {
+      final type = asString(block['type']);
+      final harness = asMap(block['_harness']);
+      final thread = asMap(harness['thread']);
+      if (type == 'text' && thread.isNotEmpty) {
+        replies.add(_threadMarkup(thread, asStringOr(block['text'], '')));
+      } else if (type == 'text' && asBool(harness['attached'])) {
+        attached.add(asStringOr(block['text'], ''));
+      } else if (type == 'text') {
+        words.add(asStringOr(block['text'], ''));
+      } else if (type == 'image') {
+        words.add('[image]');
+      } else if (type == 'resource_link') {
+        final name = asString(block['name']);
+        if (name != null) words.add('@$name');
+      }
+    }
+    return [
+      ...words,
+      ...replies,
+      ...attached,
+    ].where((part) => part.trim().isNotEmpty).join('\n\n');
+  }
+
+  /// The `<thread>` block of a reply in a thread, as the harness writes it
+  /// (`harness-thread-text`).
+  String _threadMarkup(JsonMap thread, String response) {
+    final id = asString(thread['id']);
+    final tag = id == null || id.isEmpty ? '<thread>' : '<thread id="$id">';
+    final quote = asMapList(thread['refs'])
+        .map((ref) => asStringOr(ref['text'], '').trim())
+        .where((text) => text.isNotEmpty)
+        .join('\n\n');
+    final words = response.trim();
+    return [
+      tag,
+      if (quote.isNotEmpty) '<quote>$quote</quote>',
+      if (words.isNotEmpty) words,
+      '</thread>',
+    ].join('\n');
+  }
 
   String _firstLine(String text) {
     final line = text.split('\n').first.trim();

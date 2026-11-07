@@ -18,6 +18,7 @@ import '../services/device_name.dart';
 import '../state/drafts.dart';
 import '../state/pictures.dart';
 import '../state/quota_controller.dart';
+import '../state/review_controller.dart';
 import '../state/session_controller.dart';
 import '../state/settings_controller.dart';
 import '../state/task_controller.dart';
@@ -175,6 +176,46 @@ class AppController extends ChangeNotifier {
   bool _projectChosen = false;
   TaskController? tasks;
 
+  /// The reviews this device is in the middle of, one a task, kept here so
+  /// that a draft written on the diff, a file the reviewer is at and a
+  /// filter they chose outlive the page they were on.  They are dropped
+  /// with the connection, and read again when it comes back.
+  final Map<String, ReviewController> _reviews = <String, ReviewController>{};
+
+  /// What was typed in a task's review and not sent, kept here so that a
+  /// connection that drops does not take it: a draft names its task, thread
+  /// and revision, and the next controller of the task writes in it.
+  final Map<String, Map<String, ReviewDraft>> _reviewDrafts =
+      <String, Map<String, ReviewDraft>>{};
+
+  /// The review of [task], the one the app keeps while it is open.
+  ReviewController? reviewFor(HarnessTask task) {
+    final service = api;
+    if (service == null) return null;
+    final known = _reviews[task.id];
+    if (known != null && identical(known.api, service)) {
+      known.task = task;
+      return known;
+    }
+    known?.dispose();
+    final controller = ReviewController(
+      api: service,
+      taskId: task.id,
+      task: task,
+      app: this,
+      drafts: _reviewDrafts.putIfAbsent(task.id, () => <String, ReviewDraft>{}),
+    )..attach();
+    _reviews[task.id] = controller;
+    return controller;
+  }
+
+  void _disposeReviews() {
+    for (final controller in _reviews.values) {
+      controller.dispose();
+    }
+    _reviews.clear();
+  }
+
   /// The persistent workspace chat, when the harness offers it.  It is a
   /// major surface of its own on desktop and on the phone; the shell adds
   /// its tab only when [hasWorkspace].
@@ -291,8 +332,7 @@ class AppController extends ChangeNotifier {
 
   bool get hasTasks => capabilities?.tasks == true && tasks != null;
 
-  bool get hasWorkspace =>
-      capabilities?.workspace == true && workspace != null;
+  bool get hasWorkspace => capabilities?.workspace == true && workspace != null;
   bool get hasUsage => capabilities?.usage == true && usage != null;
   bool get hasQuota => capabilities?.quota == true && quota != null;
 
@@ -304,10 +344,8 @@ class AppController extends ChangeNotifier {
   ];
 
   /// Whether a session secret can be given instead of choosing a method.
-  bool get canUseToken =>
-      (capabilities?.authMethods ?? const <AuthMethod>[]).any(
-        (method) => method.isToken,
-      );
+  bool get canUseToken => (capabilities?.authMethods ?? const <AuthMethod>[])
+      .any((method) => method.isToken);
 
   /// Connect to [address]: a `ws://` or `wss://` address (an `https://` one
   /// is its `wss://`), a `tcp://` address, or the connection link the
@@ -440,6 +478,8 @@ class AppController extends ChangeNotifier {
   /// Take [initialized], what `initialize` answered, as what the harness
   /// can do, and wire the client to it.
   void _adopt(AcpClient client, JsonMap initialized) {
+    // A connection of its own: the reviews of the last are not its own.
+    _disposeReviews();
     capabilities = HarnessCapabilities.fromInitialize(initialized);
     api = HarnessApi(client, capabilities!);
     _degradedSubscription?.cancel();
@@ -1684,6 +1724,7 @@ class AppController extends ChangeNotifier {
     tasks = null;
     workspace = null;
     usage = null;
+    _disposeReviews();
     _stopQuota();
     server = null;
     activeSessionId = null;

@@ -329,7 +329,9 @@ void main() {
       await _openBoard(tester, rig);
       // A task that is done takes a message up again, as it did from its sheet.
       await _open(tester, 'Done', 'Ship the session list');
-      expect(find.text('Message'), findsNothing);
+      // The box itself, with its placeholder, and no dialog over the page.
+      expect(find.text('Message'), findsOneWidget);
+      expect(find.byType(AlertDialog), findsNothing);
       await tester.enterText(
         find.byKey(const Key('composer-field')),
         'Use the new endpoint too',
