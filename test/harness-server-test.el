@@ -104,6 +104,64 @@ The harness process loads `harness-server-test--init'."
     ;; The harness methods are not in this Emacs.
     (should-not (harness-method-exists-p 'session/create))))
 
+(ert-deftest harness-server-spawns-with-sigpipe-ignored ()
+  "The harness process starts through the shell that ignores SIGPIPE.
+A batch Emacs leaves SIGPIPE fatal; the interactive Emacs the UI runs in
+does not.  The child cannot inherit the UI's disposition, since Emacs
+gives the processes it starts SIGPIPE back, so the shell sets it before
+`exec' (which keeps an ignored signal)."
+  (let ((command (harness-server--command)))
+    (should (equal (list (nth 0 command) (nth 1 command) (nth 2 command))
+                   (list harness-server--shell "-c" "trap '' PIPE; exec \"$@\"")))
+    (should (equal (nth 3 command) "harness-server"))
+    (should (equal (nth 4 command) harness-server-emacs))
+    (should (member "--batch" command))
+    (should (member "harness-server-main" command))))
+
+(ert-deftest harness-server-a-write-to-a-gone-reader-does-not-end-the-process ()
+  "A batch Emacs started with the harness's shell prefix ignores SIGPIPE.
+The program writes to a subprocess that closed its stdin; with SIGPIPE
+ignored that is an error it can catch, and the program says it is
+alive.  Before the shell prefix, the write killed a batch Emacs with
+status 13, and the UI restarted the harness."
+  (let ((program (make-temp-file "harness-sigpipe" nil ".el"))
+        (output (generate-new-buffer " *harness-sigpipe-output*")))
+    (unwind-protect
+        (progn
+          (with-temp-file program
+            (insert ";;; -*- lexical-binding: t; -*-\n"
+                    "(let ((p (make-process :name \"closed-stdin\"\n"
+                    "                       :command '(\"sh\" \"-c\" \"exec 0<&-; sleep 5\")\n"
+                    "                       :connection-type 'pipe :noquery t)))\n"
+                    "  (sleep-for 0.5)\n"
+                    "  (condition-case nil\n"
+                    "      (dotimes (_ 5)\n"
+                    "        (process-send-string p (make-string 1000 ?x)))\n"
+                    "    (error nil))\n"
+                    "  (ignore-errors (delete-process p))\n"
+                    "  (princ \"alive\\n\"))\n"))
+          (let ((status (apply #'call-process harness-server--shell nil (list output null-device) nil
+                               (append (list "-c" harness-server--sigpipe-shell "harness-server")
+                                       (list harness-server-emacs "--batch" "-Q" "-l" program)))))
+            (should (eql 0 status))
+            (with-current-buffer output
+              (should (string-search "alive" (buffer-string))))))
+      (ignore-errors (delete-file program))
+      (when (buffer-live-p output) (kill-buffer output)))))
+
+(ert-deftest harness-server-stops-writing-a-stderr-that-has-gone ()
+  "A failed stderr write is remembered: logging never fails either.
+The parent's pipe can go while the harness runs; the next log line must
+not signal, and nothing more is written to the dead pipe."
+  (let ((calls 0)
+        (harness-server--stderr-open t))
+    (cl-letf (((symbol-function 'external-debugging-output)
+               (lambda (_char) (cl-incf calls) (error "broken pipe"))))
+      (should-not (harness-server--write-stderr "first"))
+      (should-not (harness-server--write-stderr "second"))
+      (should (= calls 1)))
+    (should-not harness-server--stderr-open)))
+
 (ert-deftest harness-server-blocking-work-never-blocks-the-ui ()
   (harness-server-test-with-process
     (harness-test-await (harness-ui-request "_harness/session/list") 30)

@@ -67,11 +67,16 @@ ELISP
 # The secret of this one run, as the user's Emacs makes one for its harness.
 token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 
-HARNESS_SERVER_CONFIG="$work/config.el" HARNESS_SERVER_PARENT="$$" \
-  HARNESS_SERVER_TOKEN="$token" \
-  emacs --batch -Q -L "$root" -L "$root/lisp" \
-  -l "$root/lisp/harness-server.el" -f harness-server-main \
-  < /dev/null > /dev/null 2> "$work/harness.log" &
+# SIGPIPE ignored, as the user's Emacs starts it
+# (`harness-server--sigpipe-shell'): a batch Emacs leaves it fatal, so a
+# write to a CLI that has gone would end the harness.
+(
+  trap '' PIPE
+  export HARNESS_SERVER_CONFIG="$work/config.el" HARNESS_SERVER_PARENT="$$" \
+    HARNESS_SERVER_TOKEN="$token"
+  exec emacs --batch -Q -L "$root" -L "$root/lisp" \
+    -l "$root/lisp/harness-server.el" -f harness-server-main
+) < /dev/null > /dev/null 2> "$work/harness.log" &
 pid=$!
 
 # The first start compiles the harness.

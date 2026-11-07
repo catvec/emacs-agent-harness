@@ -18,6 +18,10 @@
 ;;   the UI), serves ACP on an ephemeral port guarded by a per-spawn
 ;;   token, prints the address on stderr and then just runs timers and
 ;;   process output until it is told to stop or its parent goes away.
+;;   It starts with SIGPIPE ignored, as the interactive Emacs that runs
+;;   the UI has it (see `harness-server--sigpipe-shell'): a write to a
+;;   process whose reader has gone is then an error it logs, not
+;;   `status 13' ending every running turn.
 ;;
 ;; - `harness-server-spawn' runs in the user's Emacs.  It writes the
 ;;   configuration file, starts the child asynchronously, reads the
@@ -77,6 +81,43 @@ or filters added to the harness bus."
 
 (defconst harness-server--address-prefix "HARNESS-ACP-ADDRESS "
   "Prefix of the stderr line on which the child announces its address.")
+
+(defconst harness-server--shell
+  (or (and (file-executable-p "/bin/sh") "/bin/sh")
+      (executable-find "sh"))
+  "POSIX shell that starts the harness process.
+It must understand the `trap' and `exec' of
+`harness-server--sigpipe-shell'.  `shell-file-name' is the user's
+shell, which need not be POSIX (fish, say).")
+
+(defconst harness-server--sigpipe-shell
+  "trap '' PIPE; exec \"$@\""
+  "Shell code that runs its arguments with SIGPIPE ignored.
+An interactive Emacs has SIGPIPE ignored, so a write to a process whose
+reader has gone -- a CLI that exited, a pipe the reader closed -- is an
+error it can handle.  A batch Emacs leaves SIGPIPE fatal, and a harness
+process is a batch Emacs: the same write would end it with status 13,
+cutting every running turn short, and the UI would restart it.  Emacs
+gives the processes it starts SIGPIPE back, so the child cannot inherit
+the UI's disposition; this shell sets it after the fork, and an ignored
+signal survives `exec'.")
+
+(defun harness-server--command ()
+  "Return the command that starts the harness process.
+SIGPIPE is ignored there, as it is in the Emacs that runs the UI (see
+`harness-server--sigpipe-shell')."
+  (let ((emacs (list harness-server-emacs "--batch" "-Q"
+                     "-L" harness-directory
+                     "-L" (expand-file-name "lisp" harness-directory)
+                     "-l" (expand-file-name "lisp/harness-server.el" harness-directory)
+                     "-f" "harness-server-main")))
+    (if harness-server--shell
+        (append (list harness-server--shell "-c" harness-server--sigpipe-shell
+                      "harness-server")
+                emacs)
+      ;; Without a POSIX shell the process cannot be given the
+      ;; disposition, and starts as it did before.
+      emacs)))
 
 ;;;; Child
 
@@ -200,10 +241,25 @@ holding all of it made the parent copy hundreds of megabytes a chunk at
 a time, which stopped the UI.  What is past this many characters is
 dropped, and `harness-log' cuts the entry it keeps to the same size.")
 
+(defvar harness-server--stderr-open t
+  "Non-nil while the parent still reads the child's stderr.
+A write to a pipe whose reader has gone is an error, not the end of
+the process (`harness-server--sigpipe-shell' makes sure of that), and
+the harness goes on without a parent to read its log.  Once one write
+has failed, nothing more is tried.")
+
+(defun harness-server--write-stderr (text)
+  "Write TEXT to stderr for the parent; return non-nil when it was written.
+Nothing is written once the parent's pipe has gone."
+  (when harness-server--stderr-open
+    (condition-case nil
+        (progn (princ text #'external-debugging-output) t)
+      (error (setq harness-server--stderr-open nil) nil))))
+
 (defun harness-server--log-to-stderr (level msg)
   "Write LEVEL and MSG as one stderr line for the parent's log."
-  (princ (format "%s %s\n" (upcase (symbol-name level)) (replace-regexp-in-string "\n" "\\\\n" msg))
-         #'external-debugging-output))
+  (harness-server--write-stderr
+   (format "%s %s\n" (upcase (symbol-name level)) (replace-regexp-in-string "\n" "\\\\n" msg))))
 
 (defun harness-server--env-flag-p (name)
   "Non-nil when environment variable NAME is set to a true value.
@@ -269,7 +325,7 @@ the harness."
          ;; own listens where the environment says.
          (address (if parent '("127.0.0.1" 0) (harness-server--standalone-address))))
     (when-let* ((problem (harness-server--public-listening-problem (car address) token)))
-      (princ (concat "harness: " problem "\n") #'external-debugging-output)
+      (harness-server--write-stderr (concat "harness: " problem "\n"))
       (kill-emacs 1))
     (add-hook 'harness-log-hook #'harness-server--log-to-stderr)
     ;; An error in a process filter or sentinel is logged, not fatal.
@@ -300,10 +356,10 @@ the harness."
     (harness-start)
     (let ((address (harness-acp-server-address)))
       (unless address
-        (princ "harness: ACP server did not start\n" #'external-debugging-output)
+        (harness-server--write-stderr "harness: ACP server did not start\n")
         (kill-emacs 1))
       ;; stderr: batch Emacs block-buffers stdout when it is a pipe.
-      (princ (concat harness-server--address-prefix address "\n") #'external-debugging-output))
+      (harness-server--write-stderr (concat harness-server--address-prefix address "\n")))
     (when parent
       (run-at-time 2 2 (lambda ()
                          (unless (harness-server--parent-alive-p parent)
@@ -469,11 +525,7 @@ ends: a caller that started another meanwhile can tell which one ended."
     (harness-server--write-config config)
     (let ((proc (make-process
                  :name "harness-server"
-                 :command (list harness-server-emacs "--batch" "-Q"
-                                "-L" harness-directory
-                                "-L" (expand-file-name "lisp" harness-directory)
-                                "-l" (expand-file-name "lisp/harness-server.el" harness-directory)
-                                "-f" "harness-server-main")
+                 :command (harness-server--command)
                  :connection-type 'pipe :noquery t
                  :stderr stderr
                  :filter #'ignore

@@ -268,7 +268,9 @@ run_suite() {
   # leaves it fatal, so a write racing the death of a harness process
   # (the restart tests kill one) would kill the whole suite (exit 141)
   # where the UI gets an error.  Emacs gives the processes it starts
-  # SIGPIPE back, so the harness processes see it as they really do.
+  # SIGPIPE back, so provider CLIs and MCP servers still see it as they
+  # really do; the harness process ignores it itself, as it does in the
+  # UI's own spawn (see `harness-server--sigpipe-shell').
   (trap '' PIPE
    timeout "$TIMEOUT" ${priority[@]+"${priority[@]}"} emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L test -L . \
      -l test/harness-test-helpers.el -l "$f" \

@@ -24,5 +24,10 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 EMACS=${HARNESS_SERVER_EMACS:-${HARNESS_EMACS:-emacs}}
 # No parent to watch: this server is not an Emacs UI's child.
 unset HARNESS_SERVER_PARENT
+# A batch Emacs leaves SIGPIPE fatal: a write to a process that has gone
+# (a CLI that exited, an MCP server that closed) would end it.  The UI's
+# interactive Emacs ignores SIGPIPE; an ignored signal survives exec, so
+# the server gets the same disposition.  See `harness-server--sigpipe-shell'.
+trap '' PIPE
 exec "$EMACS" --batch -Q -L "$ROOT" -L "$ROOT/lisp" \
   -l "$ROOT/lisp/harness-server.el" -f harness-server-main

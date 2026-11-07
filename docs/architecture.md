@@ -83,7 +83,15 @@ default) the layers above are split across two Emacs processes:
 - The child announces `HARNESS-ACP-ADDRESS host:port` and its log lines on
   stderr (batch Emacs buffers stdout); the parent copies the log into
   `*harness-log*`.  Its stdin is closed, so a stray prompt fails rather
-  than hangs; it exits when its parent dies.  The parent restarts it
+  than hangs; it exits when its parent dies.  It starts with SIGPIPE
+  ignored, as the interactive Emacs that runs the UI has it: a write to
+  a process whose reader has gone (a CLI that exited, an MCP server that
+  closed, a pipe the reader closed) is an error it logs, not `status 13`
+  ending every running turn.  Emacs gives the processes it starts
+  SIGPIPE back, so the shell prefix `harness-server--sigpipe-shell` sets
+  the disposition after the fork, and an ignored signal survives `exec`;
+  `scripts/harness-server` does the same for a server run on its own.
+  The parent restarts it
   with backoff when it crashes and stops it with SIGTERM (which runs
   `kill-emacs-hook`, flushing sessions, tasks and streamed text); the
   end of a process it already replaced, reported late, changes nothing.
