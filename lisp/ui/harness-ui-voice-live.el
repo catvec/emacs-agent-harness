@@ -1080,7 +1080,10 @@ never spoken afterwards merely because the transcript arrived."
      (setq harness-voice--controls t
            harness-voice-live--state 'failed
            harness-voice-live--error (harness-ui-one-line (error-message-string err)))
-     (harness-voice-live--refresh))))
+     ;; The failure can come before the sidecar's buffer is recorded, so
+     ;; refresh this compose box directly: otherwise the control still
+     ;; reads Off with a Start button that seems to do nothing.
+     (harness-voice--refresh))))
 
 ;;;###autoload
 (defun harness-voice-live-start ()

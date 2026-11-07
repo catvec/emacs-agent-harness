@@ -299,6 +299,32 @@
                    (error-message-string (should-error (harness-voice-live-start)))))
     (should-not harness-voice-live--process)))
 
+(ert-deftest harness-ui-voice-live-start-control-shows-a-preflight-failure ()
+  "The Start control redraws with the failure that kept the sidecar down.
+The local pipeline builds its command before the sidecar has a buffer,
+which used to leave the line reading Off after a rejected Start."
+  (harness-ui-voice-live-test-with
+    (setq harness-voice-provider 'unmute)
+    (setq-local harness-compose-controls-functions (list #'harness-voice--controls))
+    (harness-ui-voice-live-test--draw)
+    (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 500))
+              ((symbol-function 'harness-compose--room)
+               (lambda () (* 500 (frame-char-width))))
+              ((symbol-function 'harness-voice-unmute--endpoint)
+               (lambda (&rest _) nil)))
+      (should (string-search "Live · Off"
+                             (buffer-substring-no-properties (point-min) (point-max))))
+      (harness-voice-live--start-here)
+      (should (eq harness-voice-live--state 'failed))
+      (should (equal "Local voice stack · not running"
+                     harness-voice-live--error))
+      (should (equal (concat " Live · Failed · [Start] · Local voice stack"
+                             " · not running · [Transcript] · [Setup]")
+                     (substring-no-properties (harness-voice-live--controls))))
+      (should (string-search "Live · Failed"
+                             (buffer-substring-no-properties (point-min) (point-max))))
+      (should-not harness-voice-live--process))))
+
 ;;;; Delegation
 
 (ert-deftest harness-ui-voice-live-delegation-round-trip ()
