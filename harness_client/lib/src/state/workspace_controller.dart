@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../acp/acp_client.dart';
+import '../acp/acp_message.dart';
 import '../models/workspace.dart';
 import '../services/harness_api.dart';
 
@@ -26,7 +27,10 @@ class WorkspaceController extends ChangeNotifier {
        entries = entries,
        memory = memory,
        computer = computer,
-       selectedThread = workspace.active?.id;
+       selectedThread = workspace.active?.id {
+    _learnThreads(threads);
+    _learnTimeline(entries);
+  }
 
   final HarnessApi? _api;
 
@@ -45,6 +49,19 @@ class WorkspaceController extends ChangeNotifier {
 
   int _loads = 0;
   Timer? _reloadTimer;
+
+  /// Episode session id -> thread id, for routing the live episode's ACP
+  /// chunks to the timeline entry they belong to.  It holds the entries a
+  /// workspace has shown as well as its live episodes, so an update for a
+  /// conversation outside this workspace is ignored before any entry walk.
+  final Map<String, String> _episodeThreads = <String, String>{};
+
+  /// Nodes whose first visible chunk a timeline entry already holds.
+  ///
+  /// The harness opens an assistant node with the first chunk and sends
+  /// that chunk again as the first stream delta.  The entry already holds
+  /// those words, so the opening delta is not appended a second time.
+  final Set<String> _streamStarted = <String>{};
 
   bool get _preview => _api == null;
 
@@ -171,9 +188,17 @@ class WorkspaceController extends ChangeNotifier {
       if (overtaken()) return;
       final box = await api.workspaceComputer(chosen.id);
       if (overtaken()) return;
+      final switched = current == null || current!.id != chosen.id;
+      if (switched) {
+        _episodeThreads.clear();
+        _streamStarted.clear();
+        entries = const [];
+      }
       current = detail;
       threads = detail.threads;
-      entries = timeline;
+      _learnThreads(threads);
+      entries = _mergeTimeline(timeline);
+      _learnTimeline(entries);
       memory = notes;
       computer = box ?? const WorkspaceComputerStatus();
       final wanted = selectedThread;
@@ -338,10 +363,201 @@ class WorkspaceController extends ChangeNotifier {
     if (!event.startsWith('workspace/')) return;
     final id = args.isEmpty ? null : args.first;
     if (id is String && current != null && id != current!.id) return;
+    if (event == 'workspace/timeline-appended' && args.length > 1) {
+      final entry = asMap(args[1]);
+      if (entry.isNotEmpty) _learnEntry(WorkspaceEntry.fromWire(entry));
+    } else if (event == 'workspace/episode-changed' && args.length > 2) {
+      _learnEpisode(asString(args[1]), asString(args[2]));
+    } else if (event == 'workspace/thread-changed' && args.length > 1) {
+      _learnThread(WorkspaceThread.fromWire(asMap(args[1])));
+    }
     _reloadTimer?.cancel();
     _reloadTimer = Timer(const Duration(milliseconds: 140), () {
       if (!_preview) unawaited(load(showSpinner: false));
     });
+  }
+
+  /// Take the live episode's ACP updates.
+  ///
+  /// An assistant reply is one node.  `agent_message_chunk` is a delta, so
+  /// it is appended to the entry of that node; `_harness/node` is the whole
+  /// node, so it replaces the entry's text.  Thinking, tool and session
+  /// status updates are not workspace message text and are left alone.
+  void applySessionUpdate(String sessionId, JsonMap update) {
+    switch (asStringOr(update['sessionUpdate'], '')) {
+      case 'agent_message_chunk':
+        _applyAssistantChunk(sessionId, update);
+      case '_harness/node':
+        _applyNodeUpdate(sessionId, update);
+      case '_harness/session_deleted':
+        _forgetSession(sessionId);
+      default:
+        break;
+    }
+  }
+
+  void _applyAssistantChunk(String sessionId, JsonMap update) {
+    final thread = _episodeThreads[sessionId];
+    if (thread == null) return;
+    final node = asString(asMap(update['_harness'])['nodeId']);
+    final delta = textOf(update['content']);
+    if (node == null || node.isEmpty || delta.isEmpty) return;
+    final index = _indexOfNode(node);
+    if (index >= 0) {
+      final entry = entries[index];
+      var text = entry.text;
+      if (text.isEmpty) {
+        text = delta;
+      } else if (_streamStarted.contains(node) || text != delta) {
+        text = '$text$delta';
+      }
+      _streamStarted.add(node);
+      _replaceEntry(index, entry.copyWith(text: text, streaming: true));
+      notifyListeners();
+      return;
+    }
+    _streamStarted.add(node);
+    entries = [
+      ...entries,
+      WorkspaceEntry(
+        kind: 'message',
+        thread: thread,
+        episode: sessionId,
+        role: 'assistant',
+        text: delta,
+        node: node,
+        streaming: true,
+        at: DateTime.now(),
+      ),
+    ];
+    notifyListeners();
+  }
+
+  void _applyNodeUpdate(String sessionId, JsonMap update) {
+    final thread = _episodeThreads[sessionId];
+    if (thread == null) return;
+    final node = asMap(update['node']);
+    final kind = asString(node['kind']);
+    if (kind != 'assistant' && kind != 'user' && kind != 'plan') return;
+    final nodeId = asString(node['id']);
+    if (nodeId == null || nodeId.isEmpty) return;
+    final content = asString(node['content']) ?? '';
+    if (kind == 'user' && asBool(asMap(node['meta'])['workspace-brief'])) {
+      return;
+    }
+    final index = _indexOfNode(nodeId);
+    if (index >= 0) {
+      final entry = entries[index];
+      if (content.isNotEmpty &&
+          (content.length >= entry.text.length || !entry.streaming)) {
+        _replaceEntry(index, entry.copyWith(text: content, streaming: false));
+        notifyListeners();
+      }
+      return;
+    }
+    if (kind == 'user') return;
+    entries = [
+      ...entries,
+      WorkspaceEntry(
+        kind: 'message',
+        thread: thread,
+        episode: sessionId,
+        role: 'assistant',
+        text: content,
+        node: nodeId,
+        streaming: false,
+        at: DateTime.now(),
+      ),
+    ];
+    notifyListeners();
+  }
+
+  int _indexOfNode(String node) {
+    for (var index = 0; index < entries.length; index++) {
+      if (entries[index].node == node) return index;
+    }
+    return -1;
+  }
+
+  void _replaceEntry(int index, WorkspaceEntry entry) {
+    final copy = [...entries];
+    copy[index] = entry;
+    entries = copy;
+  }
+
+  /// A reload answers with the timeline as it was when the read began.  A
+  /// chunk written after that is newer than the answer, so it stays; a node
+  /// is never shown twice.
+  List<WorkspaceEntry> _mergeTimeline(List<WorkspaceEntry> fetched) {
+    final oldByNode = <String, WorkspaceEntry>{};
+    for (final entry in entries) {
+      if (entry.node.isNotEmpty) oldByNode[entry.node] = entry;
+    }
+    final seen = <String>{};
+    final merged = <WorkspaceEntry>[];
+    for (final entry in fetched) {
+      if (entry.node.isNotEmpty) seen.add(entry.node);
+      merged.add(_mergeEntry(entry, oldByNode[entry.node]));
+    }
+    for (final entry in entries) {
+      if (entry.streaming &&
+          entry.node.isNotEmpty &&
+          !seen.contains(entry.node)) {
+        merged.add(entry);
+      }
+    }
+    return merged;
+  }
+
+  WorkspaceEntry _mergeEntry(WorkspaceEntry fetched, WorkspaceEntry? old) {
+    if (old == null) return fetched;
+    if (old.streaming &&
+        old.text.length > fetched.text.length &&
+        old.text.startsWith(fetched.text)) {
+      return fetched.copyWith(text: old.text, streaming: true);
+    }
+    return fetched;
+  }
+
+  void _learnThreads(List<WorkspaceThread> list) {
+    for (final thread in list) {
+      final live = thread.live;
+      if (live != null && live.isNotEmpty) _episodeThreads[live] = thread.id;
+    }
+  }
+
+  void _learnTimeline(List<WorkspaceEntry> list) {
+    for (final entry in list) {
+      _learnEntry(entry);
+    }
+  }
+
+  void _learnEntry(WorkspaceEntry entry) {
+    if (entry.episode.isNotEmpty && entry.thread.isNotEmpty) {
+      _episodeThreads[entry.episode] = entry.thread;
+    }
+  }
+
+  void _learnEpisode(String? thread, String? session) {
+    if (thread != null &&
+        thread.isNotEmpty &&
+        session != null &&
+        session.isNotEmpty) {
+      _episodeThreads[session] = thread;
+    }
+  }
+
+  void _learnThread(WorkspaceThread thread) {
+    final live = thread.live;
+    if (live != null && live.isNotEmpty) {
+      _episodeThreads[live] = thread.id;
+    } else {
+      _episodeThreads.removeWhere((_, id) => id == thread.id);
+    }
+  }
+
+  void _forgetSession(String session) {
+    _episodeThreads.remove(session);
   }
 
   @override

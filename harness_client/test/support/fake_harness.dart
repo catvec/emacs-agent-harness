@@ -2739,7 +2739,7 @@ class FakeHarness {
     'threads': workspaceThreads,
   };
 
-  List<Map<String, Object?>> _workspaceTimeline() => [
+  final List<Map<String, Object?>> workspaceEntries = [
     {
       'kind': 'divider',
       'thread': 'th-1',
@@ -2751,15 +2751,69 @@ class FakeHarness {
       'kind': 'message',
       'thread': 'th-1',
       'role': 'user',
+      'episode': 's1',
+      'node': 'u1',
       'text': 'The tile is matte.',
     },
     {
       'kind': 'message',
       'thread': 'th-1',
       'role': 'assistant',
+      'episode': 's1',
+      'node': 'a1',
       'text': 'Noted. The quote is open.',
     },
   ];
+
+  List<Map<String, Object?>> _workspaceTimeline() => workspaceEntries;
+
+  /// The workspace timeline gains [entry], as a turn appends one.
+  void appendWorkspaceEntry(Map<String, Object?> entry) {
+    workspaceEntries.add(entry);
+    announce('workspace/timeline-appended', ['w1', entry]);
+  }
+
+  /// The text of the workspace entry of [node] becomes [text], as the
+  /// harness's timeline read resolves it from the session node.
+  void setWorkspaceEntryText(String node, String text) {
+    for (final entry in workspaceEntries) {
+      if (entry['node'] != node) continue;
+      entry['text'] = text;
+      return;
+    }
+  }
+
+  /// One streamed delta of an assistant node, as `agent/stream` sends it.
+  void streamChunk(String sid, String nodeId, String text) {
+    _send('session/update', {
+      'sessionId': sid,
+      'update': {
+        'sessionUpdate': 'agent_message_chunk',
+        'content': {'type': 'text', 'text': text},
+        '_harness': {'nodeId': nodeId},
+      },
+    });
+  }
+
+  /// One thought delta: not workspace message text.
+  void streamThought(String sid, String nodeId, String text) {
+    _send('session/update', {
+      'sessionId': sid,
+      'update': {
+        'sessionUpdate': 'agent_thought_chunk',
+        'content': {'type': 'text', 'text': text},
+        '_harness': {'nodeId': nodeId},
+      },
+    });
+  }
+
+  /// The whole node, as the harness sends it when the stream ends.
+  void streamNode(String sid, Map<String, Object?> node) {
+    _send('session/update', {
+      'sessionId': sid,
+      'update': {'sessionUpdate': '_harness/node', 'node': node},
+    });
+  }
 
   final List<String> memorySearches = <String>[];
   final List<Map<String, Object?>> memoryNotes = [

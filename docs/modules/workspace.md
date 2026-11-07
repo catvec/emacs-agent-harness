@@ -109,6 +109,7 @@ of `workspace/prompt`.
 - `session/deactivate` ([session](session.md))
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
+- `session/node` ([session](session.md))
 - `store/append` ([store](store.md))
 - `store/delete` ([store](store.md))
 - `store/list` ([store](store.md))
@@ -122,6 +123,7 @@ of `workspace/prompt`.
 - `agent/turn-ended` → `harness-workspace--on-turn-ended`
 - `session/deleted` → `harness-workspace--on-session-deleted`
 - `session/node-added` → `harness-workspace--on-node-added`
+- `session/node-updated` → `harness-workspace--on-node-updated`
 
 ### Events it emits
 

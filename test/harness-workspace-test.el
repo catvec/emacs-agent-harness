@@ -22,9 +22,20 @@
 (defvar harness-workspace-memory--fts)
 (defvar harness-workspace-memory--subscribed)
 
+(declare-function harness-session--load-all "harness-session" ())
+
 (defconst harness-workspace-test-script
   '((:type text :delta "Noted.")
     (:type done :stop-reason end-turn)))
+
+(defconst harness-workspace-test-stream-script
+  '((:type thinking :delta "The user asked about the quote. ")
+    (:type thinking :delta "I will answer briefly.")
+    (:type text :delta "The ")
+    (:type text :delta "quote ")
+    (:type text :delta "is open.")
+    (:type done :stop-reason end-turn))
+  "A multi-chunk answer with thinking before it.")
 
 (defmacro harness-workspace-test-with (&rest body)
   "Load the workspace state layer with the demo provider, run BODY."
@@ -358,3 +369,122 @@
         (should-not (plist-get answer :browser))
         (should-not (plist-get answer :wallet))
         (should (equal "unavailable" (plist-get answer :browser-status)))))))
+
+(defun harness-workspace-test-assistant-text (id)
+  "Return the text of the newest assistant entry of workspace ID."
+  (let ((entries (harness-workspace-test-assistant-messages id)))
+    (if entries (or (plist-get (car (last entries)) :text) "") "")))
+
+(ert-deftest harness-workspace-streams-a-multi-chunk-reply ()
+  "A streamed reply grows in the timeline and is kept whole.
+Thinking chunks are not answer text, and the timeline is the
+source of truth again after a fresh harness process reads it."
+  (harness-workspace-test-with
+    (let* ((harness-provider-demo-script-override
+            harness-workspace-test-stream-script)
+           (harness-provider-demo--delay 0.02)
+           (workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (snapshots nil))
+      (let ((handle (harness-on
+                     'agent/stream
+                     (lambda (_session _node kind delta)
+                       (when (eq kind 'assistant)
+                         (push (list delta
+                                     (harness-workspace-test-assistant-text id))
+                               snapshots))))))
+        (unwind-protect
+            (progn
+              (harness-call 'workspace/prompt id "How is the quote?")
+              (harness-workspace-test-wait-for
+               (lambda () (= 3 (length snapshots))))
+              (let ((thread (car (plist-get (harness-call 'workspace/get id) :threads))))
+                (harness-workspace-test-wait-idle (plist-get thread :live))))
+          (harness-off handle)))
+      (setq snapshots (nreverse snapshots))
+      ;; Each delta is its own chunk; the timeline read at that moment
+      ;; already holds the words so far, never only the newest chunk and
+      ;; never the accumulated text twice.
+      (should (equal '("The " "quote " "is open.")
+                     (mapcar #'car snapshots)))
+      (should (equal '("The " "The quote " "The quote is open.")
+                     (mapcar #'cadr snapshots)))
+      (let* ((messages (harness-workspace-test-assistant-messages id))
+             (thread (car (plist-get (harness-call 'workspace/get id) :threads))))
+        (should (= 1 (length messages)))
+        (should (equal "The quote is open." (plist-get (car messages) :text)))
+        (should (equal "The quote is open." (plist-get thread :summary)))
+        (should-not (cl-some (lambda (entry)
+                               (string-match-p "asked about the quote"
+                                               (or (plist-get entry :text) "")))
+                             (harness-call 'workspace/timeline id))))
+      ;; Replay: a fresh process has the session's nodes and the workspace
+      ;; timeline, and still reads one complete answer, not the first chunk.
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (let ((messages (harness-workspace-test-assistant-messages id)))
+        (should (= 1 (length messages)))
+        (should (equal "The quote is open." (plist-get (car messages) :text)))))))
+
+(ert-deftest harness-workspace-streaming-keeps-threads-apart ()
+  "A reply in one thread changes only that thread's entries."
+  (harness-workspace-test-with
+    (let ((harness-provider-demo-script-override
+           harness-workspace-test-stream-script)
+          (harness-provider-demo--delay 0.01))
+      (let* ((workspace (harness-workspace-test-workspace))
+             (id (plist-get workspace :id))
+             (first (harness-call 'workspace/thread/create id "Kitchen"))
+             (second (harness-call 'workspace/thread/create id "Taxes")))
+        (harness-call 'workspace/prompt id "How is the kitchen quote?"
+                      (list :thread (plist-get first :id)))
+        (harness-workspace-test-wait-for
+         (lambda ()
+           (let ((thread (harness-call 'workspace/thread id (plist-get first :id))))
+             (and (plist-get thread :live)
+                  (equal "The quote is open."
+                         (harness-workspace-test-assistant-text id))))))
+        (let ((first-text (harness-workspace-test-assistant-text id)))
+          (harness-call 'workspace/prompt id "How are the taxes?"
+                        (list :thread (plist-get second :id)))
+          (harness-workspace-test-wait-for
+           (lambda ()
+             (let ((entries (harness-workspace-test-assistant-messages id)))
+               (and (= 2 (length entries))
+                    (equal "The quote is open."
+                           (plist-get
+                            (cl-find (plist-get second :id) entries
+                                     :key (lambda (entry)
+                                            (plist-get entry :thread))
+                                     :test #'equal)
+                            :text))))))
+          (let ((entries (harness-workspace-test-assistant-messages id)))
+            (should (= 2 (length entries)))
+            (should (equal first-text
+                           (plist-get (cl-find (plist-get first :id) entries
+                                               :key (lambda (entry)
+                                                      (plist-get entry :thread))
+                                               :test #'equal)
+                                      :text)))
+            (should (equal "The quote is open."
+                           (plist-get (cl-find (plist-get second :id) entries
+                                               :key (lambda (entry)
+                                                      (plist-get entry :thread))
+                                               :test #'equal)
+                                      :text)))
+            (let ((filtered (harness-call 'workspace/timeline id
+                                          (list :thread (plist-get first :id)))))
+              (should (cl-every (lambda (entry)
+                                  (equal (plist-get first :id)
+                                         (plist-get entry :thread)))
+                                filtered))
+              (should (cl-find-if
+                       (lambda (entry)
+                         (and (equal "message" (format "%s" (plist-get entry :kind)))
+                              (equal "assistant" (format "%s" (plist-get entry :role)))))
+                       filtered)))))
+        (dolist (thread (list first second))
+          (let ((live (plist-get (harness-call 'workspace/thread id
+                                               (plist-get thread :id))
+                                 :live)))
+            (when live (harness-workspace-test-wait-idle live))))))))

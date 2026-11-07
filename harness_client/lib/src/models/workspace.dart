@@ -144,6 +144,8 @@ class WorkspaceEntry {
     this.reason = '',
     this.title = '',
     this.tokens = 0,
+    this.node = '',
+    this.streaming = false,
     this.at,
   });
 
@@ -157,6 +159,8 @@ class WorkspaceEntry {
       reason: asStringOr(wire['reason'] ?? wire['why'], ''),
       title: asStringOr(wire['title'], ''),
       tokens: asInt(wire['tokens']) ?? 0,
+      node: asStringOr(wire['node'] ?? wire['nodeId'], ''),
+      streaming: asBool(wire['streaming']),
       at: parseTime(wire['at']),
     );
   }
@@ -169,12 +173,45 @@ class WorkspaceEntry {
   final String reason;
   final String title;
   final int tokens;
+
+  /// The session node this message came from.  An assistant reply is one
+  /// node: its text grows as chunks arrive, and the node's final content is
+  /// the whole message.
+  final String node;
+
+  /// Whether the harness is still writing this message.
+  final bool streaming;
+
   final DateTime? at;
 
   bool get isUser => kind == 'message' && role == 'user';
   bool get isAgent => kind == 'message' && role != 'user';
   bool get isDivider => kind == 'divider';
   bool get isBrief => kind == 'brief';
+
+  WorkspaceEntry copyWith({
+    String? thread,
+    String? episode,
+    String? role,
+    String? text,
+    String? node,
+    bool? streaming,
+    DateTime? at,
+  }) {
+    return WorkspaceEntry(
+      kind: kind,
+      thread: thread ?? this.thread,
+      episode: episode ?? this.episode,
+      role: role ?? this.role,
+      text: text ?? this.text,
+      reason: reason,
+      title: title,
+      tokens: tokens,
+      node: node ?? this.node,
+      streaming: streaming ?? this.streaming,
+      at: at ?? this.at,
+    );
+  }
 }
 
 /// What the workspace's local memory says about itself.

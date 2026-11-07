@@ -1046,6 +1046,7 @@ class AppController extends ChangeNotifier {
       if (sid == null) return;
       final update = asMap(notification.params['update']);
       final kind = asString(update['sessionUpdate']);
+      workspace?.applySessionUpdate(sid, update);
       if (kind == '_harness/session') {
         final wire = asMap(update['session']);
         if (wire.isNotEmpty) _upsertSession(SessionSummary.fromWire(wire));

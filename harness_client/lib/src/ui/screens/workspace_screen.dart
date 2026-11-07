@@ -498,9 +498,14 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         itemBuilder: (context, index) {
           final entry = entries[index];
           return _EntryReveal(
+            // A streamed message keeps its element while its text grows:
+            // the reveal plays once, not again on every chunk.  A streamed
+            // reply is keyed by its node; anything else by its time.
             key: ValueKey(
-              '${entry.kind}:${entry.thread}:'
-              '${entry.at?.toIso8601String() ?? 'at-$index'}',
+              entry.node.isEmpty
+                  ? '${entry.kind}:${entry.thread}:'
+                      '${entry.at?.toIso8601String() ?? 'at-$index'}'
+                  : '${entry.kind}:${entry.thread}:${entry.node}',
             ),
             child: _TimelineEntry(
               entry: entry,

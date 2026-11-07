@@ -377,7 +377,8 @@ the divider the user sees.  Return the session id."
       (when (and (equal (plist-get entry :thread) wanted)
                  (eq (harness-workspace--entry-kind entry) 'message))
         (push entry out)))
-    (last (nreverse out) (or limit 0))))
+    (harness-workspace--resolve-entries
+     (last (nreverse out) (or limit 0)))))
 
 (defun harness-workspace--entry-kind (entry)
   "Return ENTRY's kind as a symbol, JSON or not."
@@ -393,12 +394,53 @@ the divider the user sees.  Return the session id."
           ((stringp role) (intern role))
           (t nil))))
 
+(defun harness-workspace--clip-text (text)
+  "Return TEXT clipped to the most a timeline message keeps."
+  (if (> (length text) harness-workspace-max-message-chars)
+      (concat (substring text 0 harness-workspace-max-message-chars) "\n…")
+    text))
+
 (defun harness-workspace--entry-text (entry)
   "Return ENTRY's text, clipped."
-  (let ((text (or (plist-get entry :text) "")))
-    (if (> (length text) harness-workspace-max-message-chars)
-        (concat (substring text 0 harness-workspace-max-message-chars) "\n…")
-      text)))
+  (harness-workspace--clip-text (or (plist-get entry :text) "")))
+
+(defun harness-workspace--node-text (entry)
+  "Return the session text of ENTRY, or its stored text when the node is gone.
+A message entry names the episode and node it came from.  The node is
+the transcript's own copy of the words, so it is what a client reads:
+the timeline captured the node when its first chunk opened it, and the
+rest of a streamed answer is written to the node."
+  (let ((node-id (plist-get entry :node))
+        (session (plist-get entry :episode))
+        (stored (harness-workspace--entry-text entry)))
+    (if (or (not (stringp node-id)) (not (stringp session))
+            (not (harness-method-exists-p 'session/node))
+            (not (harness-call 'session/exists-p session)))
+        stored
+      (condition-case err
+          (let ((node (harness-call 'session/node session node-id)))
+            (if (and node
+                     (stringp (plist-get node :content))
+                     (not (string-blank-p (plist-get node :content))))
+                (harness-workspace--clip-text (plist-get node :content))
+              stored))
+        (error
+         (harness-log 'warn "workspace: cannot read node %s of %s: %s"
+                      node-id session (error-message-string err))
+         stored)))))
+
+(defun harness-workspace--resolve-entry (entry)
+  "Return ENTRY with a message's text read from its node."
+  (if (eq (harness-workspace--entry-kind entry) 'message)
+      (let ((text (harness-workspace--node-text entry)))
+        (if (equal text (or (plist-get entry :text) ""))
+            entry
+          (plist-put (copy-sequence entry) :text text)))
+    entry))
+
+(defun harness-workspace--resolve-entries (entries)
+  "Return ENTRIES with message text read from their nodes."
+  (mapcar #'harness-workspace--resolve-entry entries))
 
 (defun harness-workspace--timeline-internal (id)
   "Return every timeline entry of workspace ID, oldest first."
@@ -609,6 +651,22 @@ ACTION is `continue', `revive' or `new'.  OPTS may name `:thread',
          (if (eq kind 'user) 'user 'assistant)
          node)
       (remhash session-id harness-workspace--handling))))
+
+(defun harness-workspace--on-node-updated (session-id node transient)
+  "Keep a thread's summary from NODE, the final text of SESSION-ID's reply.
+The timeline entry reads its text from the node when it is read; the
+thread summary is a copy, so it is brought up to date when the stream
+ends rather than when the first chunk opens the node."
+  (when (and (not transient)
+             (eq (harness-workspace--entry-kind node) 'assistant))
+    (let ((text (plist-get node :content)))
+      (when (and (stringp text) (not (string-blank-p text)))
+        (when-let* ((ext (harness-workspace--episode-p session-id))
+                    (workspace (gethash (plist-get ext :workspace)
+                                        harness-workspace--table))
+                    (thread (harness-workspace--thread
+                             workspace (plist-get ext :thread))))
+          (harness-workspace--note-thread workspace thread 'assistant text))))))
 
 (defun harness-workspace--on-turn-ended (session-id &rest _)
   "Mark the episode of SESSION-ID idle in its workspace."
@@ -914,8 +972,9 @@ OPTS may name `:limit', `:before' (an index), `:thread', `:kinds'."
         (setq entries (cl-remove-if-not
                        (lambda (entry) (memq (harness-workspace--entry-kind entry) wanted))
                        entries))))
-    (let ((end (if before (min before (length entries)) (length entries))))
-      (last (cl-subseq entries 0 end) (max 0 (min limit end))))))
+    (let* ((end (if before (min before (length entries)) (length entries)))
+           (page (last (cl-subseq entries 0 end) (max 0 (min limit end)))))
+      (harness-workspace--resolve-entries page))))
 
 (harness-defmethod workspace/threads (id &optional filter)
   "Return the threads of workspace ID, newest first."
@@ -1071,6 +1130,7 @@ Only an episode gets them; a normal session is unchanged."
   (unless harness-workspace--subscribed
     (setq harness-workspace--subscribed t)
     (harness-on 'session/node-added #'harness-workspace--on-node-added)
+    (harness-on 'session/node-updated #'harness-workspace--on-node-updated)
     (harness-on 'agent/turn-ended #'harness-workspace--on-turn-ended)
     (harness-on 'session/deleted #'harness-workspace--on-session-deleted)
     (harness-add-filter 'agent/system-prompt #'harness-workspace--system-prompt)))
@@ -1080,6 +1140,7 @@ Only an episode gets them; a normal session is unchanged."
   (when harness-workspace--subscribed
     (setq harness-workspace--subscribed nil)
     (harness-off (cons 'session/node-added #'harness-workspace--on-node-added))
+    (harness-off (cons 'session/node-updated #'harness-workspace--on-node-updated))
     (harness-off (cons 'agent/turn-ended #'harness-workspace--on-turn-ended))
     (harness-off (cons 'session/deleted #'harness-workspace--on-session-deleted))
     (harness-remove-filter 'agent/system-prompt #'harness-workspace--system-prompt)))
