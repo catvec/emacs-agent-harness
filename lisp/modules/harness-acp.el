@@ -188,6 +188,21 @@ A module of your own adds the events its UI half listens to, as
 `harness-acp-extra-method-prefixes' says for methods.  The harness's
 own are `harness-acp--forwarded-events'.")
 
+(defvar harness-acp-extra-method-aliases nil
+  "Client-facing extension names that call another bus method.
+Each entry is (ALIAS TARGET GUARD): a client that calls
+`_harness/ALIAS' calls TARGET instead, but only when GUARD, a function
+of the call's PARAMS, returns non-nil; a nil GUARD always applies.  An
+alias whose target is not a method is not offered and not callable, so
+a module can keep a client's older name working while the method it
+renamed is absent.
+
+The Flutter workspace app, for one, knows the workspace's knowledge
+graph by its former `memory/notes', `memory/search' and `memory/status'
+names; the workspace-knowledge module aliases those to its
+`knowledge/...' methods when the call carries a `:workspace', and the
+harness's own memory tools keep the plain `memory/...' names.")
+
 (defconst harness-acp--enum-keys
   '(:status :kind :permission-mode :behavior :scope :group-by :period :days :tier)
   "Keys whose string values are interned back to symbols on the way in.")
@@ -1052,9 +1067,17 @@ from one it keeps under its own prefix.  The code is method-not-found
       (signal 'harness-no-such-method (list method)))))
 
 (defun harness-acp--extension-methods ()
-  "Return the names of every callable extension method, sorted."
-  (cl-remove-if-not #'harness-acp--extension-allowed-p
-                    (mapcar (lambda (m) (symbol-name (plist-get m :name))) (harness-methods))))
+  "Return the names of every callable extension method, sorted.
+An alias whose target exists is offered under its own name too."
+  (sort (delete-dups
+         (append
+          (cl-remove-if-not #'harness-acp--extension-allowed-p
+                            (mapcar (lambda (m) (symbol-name (plist-get m :name)))
+                                    (harness-methods)))
+          (mapcar #'car (cl-remove-if-not
+                         (lambda (entry) (harness-acp--extension-alias-p (car entry)))
+                         harness-acp-extra-method-aliases))))
+        #'string<))
 
 (defun harness-acp--map-params (fn params)
   "Return the argument list for FN built from the ACP PARAMS object.
@@ -1139,12 +1162,35 @@ machine: a command runs here, outside the permission system."
     (signal 'harness-error
             (list "A secret given as its text or as a command is accepted only from the Emacs on this machine: name where it can be read instead (a file with a JSON path or a regexp, or an environment variable)"))))
 
+(defun harness-acp--method-alias (name params)
+  "Return the bus method NAME stands for with PARAMS, or nil.
+That is `harness-acp-extra-method-aliases' whose guard accepts PARAMS."
+  (when-let* ((entry (cl-find name harness-acp-extra-method-aliases
+                              :key #'car :test #'string=))
+              (target (nth 1 entry))
+              (guard (nth 2 entry)))
+    (when (or (null guard) (funcall guard params))
+      target)))
+
+(defun harness-acp--extension-alias-p (name)
+  "Non-nil when NAME is an alias whose target may be called over ACP."
+  (and (harness-acp--extension-allowed-p name)
+       (cl-some (lambda (entry)
+                  (and (string= name (car entry))
+                       (harness-method-exists-p (intern-soft (nth 1 entry)))
+                       (harness-acp--extension-allowed-p (nth 1 entry))))
+                harness-acp-extra-method-aliases)))
+
 (defun harness-acp--call-extension (name params)
-  "Call bus method NAME (a string) with PARAMS mapped onto its arguments."
-  (let ((sym (intern-soft name)))
-    (unless (and sym (harness-acp--extension-allowed-p name) (harness-method-exists-p sym))
+  "Call bus method NAME (a string) with PARAMS mapped onto its arguments.
+When NAME is an alias that applies to PARAMS, its target is called
+instead (see `harness-acp-extra-method-aliases')."
+  (let* ((target (or (harness-acp--method-alias name params) name))
+         (sym (intern-soft target)))
+    (unless (and sym (harness-acp--extension-allowed-p target)
+                 (harness-method-exists-p sym))
       (signal 'harness-no-such-method (list name)))
-    (harness-acp--refuse-secret-text name params)
+    (harness-acp--refuse-secret-text target params)
     (let ((m (gethash sym harness--methods)))
       (apply #'harness-call sym (harness-acp--map-params (harness-method-fn m) params)))))
 

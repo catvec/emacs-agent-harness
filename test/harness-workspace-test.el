@@ -3,6 +3,7 @@
 
 (require 'harness-test-helpers)
 
+(defvar harness-acp--server-enabled)
 (defvar harness-provider-demo-script-override)
 (defvar harness-provider-demo--delay)
 (defvar harness-naming-auto)
@@ -17,10 +18,11 @@
 (defvar harness-workspace-episode-turns)
 (defvar harness-workspace--loaded)
 (defvar harness-workspace--subscribed)
-(defvar harness-workspace-memory--db)
-(defvar harness-workspace-memory--schema)
-(defvar harness-workspace-memory--fts)
-(defvar harness-workspace-memory--subscribed)
+(defvar harness-logseq-directory)
+(defvar harness-workspace-knowledge--pages)
+(defvar harness-workspace-knowledge--pending)
+(defvar harness-workspace-knowledge--status-cache)
+(defvar harness-workspace-knowledge--subscribed)
 
 (declare-function harness-session--load-all "harness-session" ())
 
@@ -51,22 +53,22 @@
            (harness-naming-auto nil)
            (harness-workspace-episode-context 0.6)
            (harness-workspace-episode-turns 120)
+           (harness-logseq-directory (expand-file-name "graph/" dir))
            (default-directory dir))
        ;; The module subscribes only while this is nil, and the bus is
        ;; reset for every test: forget the last test's subscription too.
        (setq harness-workspace--subscribed nil)
        (dolist (module '(store project config provider provider-demo tools session agent
-                               workspace-memory workspace-box workspace))
+                               acp logseq memory workspace-knowledge workspace-box workspace))
          (harness-test-load-module module))
        (clrhash harness-sessions)
-       (clrhash harness-tools)
        (clrhash harness-agent--turns)
        (clrhash harness-workspace--table)
        (setq harness-workspace--loaded nil
-             harness-workspace-memory--db nil
-             harness-workspace-memory--schema nil
-             harness-workspace-memory--fts nil
-             harness-workspace-memory--subscribed nil)
+             harness-workspace-knowledge--subscribed nil)
+       (clrhash harness-workspace-knowledge--pages)
+       (clrhash harness-workspace-knowledge--pending)
+       (clrhash harness-workspace-knowledge--status-cache)
        (harness-add-filter 'permission/decide
                            (lambda (_details next &rest _)
                              (funcall next (list :behavior 'allow)))
@@ -294,22 +296,36 @@ reads what the episode waits on without opening it."
                                             (format "%s" (plist-get entry :reason)))))
                               (harness-call 'workspace/timeline id))))))))
 
-(ert-deftest harness-workspace-memory-recalls-a-note ()
-  "A turn is remembered and a later search finds it."
+(ert-deftest harness-workspace-knowledge-recalls-a-turn ()
+  "A turn is captured in the Logseq graph and a later search finds it."
   (harness-workspace-test-with
     (let* ((workspace (harness-workspace-test-workspace))
            (id (plist-get workspace :id)))
       (harness-call 'workspace/prompt id "Remember that the grout is warm grey.")
       (harness-workspace-test-wait-for
        (lambda () (harness-workspace-test-assistant-messages id)))
-      (let ((status (harness-call 'memory/status id))
-            (found (harness-call 'memory/search id "warm grey")))
+      (let ((thread (car (plist-get (harness-call 'workspace/get id) :threads))))
+        (harness-workspace-test-wait-idle (plist-get thread :live)))
+      (let* ((thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (status (harness-call 'knowledge/status id))
+            (found (harness-call 'knowledge/search id "warm grey")))
+        (should (plist-get status :available))
         (should (>= (plist-get status :notes) 2))
+        (should (plist-get status :pages))
         (should found)
-        (should (string-match-p "warm grey" (plist-get (car found) :text)))))))
+        (should (string-match-p "warm grey" (plist-get (car found) :text)))
+        (should (equal "user" (format "%s" (plist-get (car found) :role))))
+        ;; The capture is a journal block that links the thread's page.
+        (should (file-exists-p
+                 (harness-logseq-journal-file (harness-logseq-journal-name)
+                                              harness-logseq-directory)))
+        (let ((page (harness-call 'knowledge/thread-page id (plist-get thread :id))))
+          (should (string-prefix-p "Threads/" page))
+          (should (file-exists-p (harness-logseq-page-file page
+                                                          harness-logseq-directory))))))))
 
 (ert-deftest harness-workspace-survives-a-restart ()
-  "A workspace, its threads and its memory survive a fresh load."
+  "A workspace, its threads and its knowledge survive a fresh load."
   (harness-workspace-test-with
     (let* ((workspace (harness-workspace-test-workspace))
            (id (plist-get workspace :id)))
@@ -324,9 +340,9 @@ reads what the episode waits on without opening it."
           (should (= 1 (length (plist-get again :threads))))
           (should (equal (plist-get thread :id)
                          (plist-get (car (plist-get again :threads)) :id))))
-        (should (harness-call 'memory/search id "matte"))))))
+        (should (harness-call 'knowledge/search id "matte"))))))
 
-(ert-deftest harness-workspace-brief-names-the-thread-and-memory ()
+(ert-deftest harness-workspace-brief-names-the-thread-and-knowledge ()
   "The digest a chat or a call asks for names the workspace and its thread."
   (harness-workspace-test-with
     (let* ((workspace (harness-workspace-test-workspace))
@@ -338,7 +354,7 @@ reads what the episode waits on without opening it."
         (should (equal "Home" (plist-get brief :workspace)))
         (should (= 1 (plist-get brief :threads)))
         (should (equal "live" (plist-get brief :last-state)))
-        (should (plist-get brief :memory))))))
+        (should (plist-get brief :knowledge))))))
 
 (ert-deftest harness-workspace-routes-by-title-and-topic-cue ()
   "A thread named in the message is revived; a topic cue starts a new one."
@@ -357,23 +373,31 @@ reads what the episode waits on without opening it."
        (lambda () (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))
       (should (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))))
 
-(ert-deftest harness-workspace-memory-tools-answer-in-an-episode ()
-  "memory_search and memory_write work with a workspace episode's context."
+(ert-deftest harness-workspace-knowledge-tools-answer-in-an-episode ()
+  "knowledge_search and knowledge_write work with an episode's context."
   (harness-workspace-test-with
     (let* ((workspace (harness-workspace-test-workspace))
            (id (plist-get workspace :id)))
       (harness-call 'workspace/prompt id "The tile is matte.")
       (harness-workspace-test-wait-for
        (lambda () (harness-workspace-test-assistant-messages id)))
-      (let* ((session (plist-get (car (plist-get (harness-call 'workspace/get id) :threads)) :live))
+      (let* ((thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (session (plist-get thread :live))
              (ctx (list :session-id session))
-             (searched (harness-workspace-memory--tool-search '(:query "matte") ctx))
-             (written (harness-workspace-memory--tool-write
+             (searched (harness-workspace-knowledge--tool-search '(:query "matte") ctx))
+             (written (harness-workspace-knowledge--tool-write
                        '(:text "The grout is warm grey.") ctx)))
+        (harness-workspace-test-wait-idle session)
         (should-not (plist-get searched :is-error))
         (should (string-match-p "matte" (plist-get searched :content)))
         (should-not (plist-get written :is-error))
-        (should (harness-call 'memory/search id "warm grey"))))))
+        (should (harness-call 'knowledge/search id "warm grey"))
+        (let ((page (plist-get thread :page)))
+          (should page)
+          (should (string-match-p
+                   (regexp-quote "The grout is warm grey.")
+                   (harness-read-file (harness-logseq-page-file page
+                                                               harness-logseq-directory)))))))))
 
 (ert-deftest harness-workspace-resources-answer-what-the-computer-has ()
   "The resources methods exist and never carry a value; without a running
@@ -482,31 +506,37 @@ the target's timeline."
                                      (plist-get entry :thread)))
                             timeline))))))
 
-(ert-deftest harness-workspace-memory-read-and-forget ()
-  "A note can be read by id, paged by thread, recalled and forgotten."
+(ert-deftest harness-workspace-knowledge-reads-and-pages-the-graph ()
+  "Knowledge can be written, read by page, paged by thread and recalled."
   (harness-workspace-test-with
     (let* ((workspace (harness-workspace-test-workspace))
            (id (plist-get workspace :id))
            (thread (harness-call 'workspace/thread/create id "Notes"))
-           (note (harness-call 'memory/write id (plist-get thread :id)
-                               'user "The grout is warm grey."))
-           (read (harness-call 'memory/get id note))
-           (pages (harness-call 'memory/pages id))
-           (page (harness-call 'memory/page id (plist-get thread :id)))
-           (recall (harness-call 'memory/recall-test id "warm grey"))
-           (reindex (harness-call 'memory/reindex id))
-           (sync (harness-call 'memory/sync id)))
-      (should (equal "The grout is warm grey." (plist-get read :text)))
-      (should (cl-find-if (lambda (item) (equal (plist-get thread :id)
-                                                (plist-get item :id)))
-                          pages))
-      (should (= 1 (length page)))
-      (should (string-match-p "warm grey" (plist-get (car recall) :text)))
-      (should (equal 1 (plist-get reindex :notes)))
-      (should (equal 1 (plist-get sync :notes)))
-      (should (equal t (plist-get (harness-call 'memory/forget id note) :deleted)))
-      (should (null (harness-call 'memory/page id (plist-get thread :id))))
-      (should (equal nil (plist-get (harness-call 'memory/forget id note) :deleted))))))
+           (page (plist-get thread :page)))
+      (should page)
+      (harness-call 'knowledge/write id (plist-get thread :id) 'assistant
+                    "The grout is warm grey."
+                    (list :session "s-test" :node "n-test"))
+      (let ((read (harness-call 'knowledge/page id page))
+            (pages (harness-call 'knowledge/pages id))
+            (recall (harness-call 'knowledge/recall id (plist-get thread :id) "grout"))
+            (status (harness-call 'knowledge/status id))
+            (file (harness-logseq-page-file page harness-logseq-directory)))
+        (should (cl-find-if (lambda (block)
+                              (string-match-p "warm grey" (plist-get block :text)))
+                            (plist-get read :blocks)))
+        (should (cl-find-if (lambda (item) (equal page (plist-get item :page))) pages))
+        (should (cl-find-if (lambda (block)
+                              (string-match-p "warm grey" (plist-get block :text)))
+                            recall))
+        (should (>= (plist-get status :notes) 1))
+        (let ((content (harness-read-file file)))
+          ;; The block is a Logseq bullet with provenance and a thread link.
+          (should (string-match-p "^- The grout is warm grey" content))
+          (should (string-match-p "workspace-id:: " content))
+          (should (string-match-p (regexp-quote (format "thread:: [[%s]]" page)) content))
+          (should (string-match-p "source-session:: s-test" content))
+          (should-not (string-match-p "^#\|^---" content)))))))
 
 (defun harness-workspace-test-assistant-text (id)
   "Return the text of the newest assistant entry of workspace ID."
@@ -626,3 +656,79 @@ source of truth again after a fresh harness process reads it."
                                                (plist-get thread :id))
                                  :live)))
             (when live (harness-workspace-test-wait-idle live))))))))
+
+(ert-deftest harness-workspace-knowledge-does-not-take-the-memory-names ()
+  "The workspace's graph methods are its own; memory/search stays the memory's.
+Both modules are loaded, as a dev harness loads every module, and the
+generic search keeps its one-argument contract while the workspace's
+knowledge search takes a workspace."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      ;; The methods are different names and both exist.
+      (should (harness-method-exists-p 'memory/search))
+      (should (harness-method-exists-p 'knowledge/search))
+      (should-not (equal (symbol-function 'harness-method/memory/search)
+                         (symbol-function 'harness-method/knowledge/search)))
+      ;; A generic memory saved for the project is found by the generic search,
+      ;; not by the workspace's knowledge search.
+      (harness-call 'memory/add "The user prefers short answers."
+                    (list :kind "preference" :scope "project"
+                          :project (expand-file-name "workspace/" harness-state-directory)))
+      (let ((memories (harness-call 'memory/search "short answers"
+                                    (list :project (expand-file-name
+                                                    "workspace/" harness-state-directory)))))
+        (should (cl-find-if (lambda (memory)
+                              (string-match-p "short answers"
+                                              (plist-get memory :text)))
+                            memories)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-wait-idle
+       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads)) :live))
+      (let ((found (harness-call 'knowledge/search id "matte")))
+        (should (cl-find-if (lambda (block)
+                              (string-match-p "matte" (plist-get block :text)))
+                            found)))
+      ;; The knowledge tools belong to the workspace episode, not to a plain
+      ;; session, and the memory tools stay in both.
+      (let* ((thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (episode (plist-get thread :live))
+             (plain (harness-call 'session/create :kind 'chat
+                                  :cwd (expand-file-name "workspace/" harness-state-directory))))
+        (let ((episode-tools (harness-tools--names
+                              (harness-call 'session/get episode)))
+              (plain-tools (harness-tools--names
+                            (harness-call 'session/get (plist-get plain :id)))))
+          (dolist (name '("knowledge_search" "knowledge_write"
+                          "knowledge_read" "knowledge_status"))
+            (should (member name episode-tools))
+            (should-not (member name plain-tools)))
+          (should (member "memory_save" episode-tools))
+          (should (member "memory_save" plain-tools)))))))
+
+(ert-deftest harness-workspace-knowledge-answers-the-apps-memory-calls ()
+  "The app's `memory/...' calls with a workspace reach the knowledge methods.
+Without a workspace they still reach the harness's own memory tools, and
+the method catalogue offers the aliases the app checks for."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "Remember that the grout is warm grey.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-wait-idle
+       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads)) :live))
+      (should (equal "knowledge/search"
+                     (harness-acp--method-alias
+                      "memory/search" (list :workspace id :query "grout"))))
+      (should-not (harness-acp--method-alias "memory/search" (list :query "grout")))
+      (should (member "memory/status" (harness-acp--extension-methods)))
+      (let ((found (harness-acp--call-extension
+                    "memory/search" (list :workspace id :query "grout"))))
+        (should (cl-find-if (lambda (block)
+                              (string-match-p "grout" (plist-get block :text)))
+                            found)))
+      (let ((status (harness-acp--call-extension "memory/status" (list :workspace id))))
+        (should (>= (plist-get status :notes) 2))))))

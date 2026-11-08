@@ -35,8 +35,8 @@
 (defvar-local harness-ui-workspace--entries nil
   "Timeline entries this buffer shows, oldest first.")
 
-(defvar-local harness-ui-workspace--memory nil
-  "The memory status of this workspace, or nil.")
+(defvar-local harness-ui-workspace--knowledge nil
+  "The knowledge status of this workspace, or nil.")
 
 (defvar-local harness-ui-workspace--box nil
   "The computer status of this workspace, or nil.")
@@ -174,11 +174,11 @@ send it, the coarser `:state' and the cached session's own status."
          (thread (harness-ui-workspace--current-thread))
          (thread-title (or (plist-get thread :title) "All threads"))
          (status (harness-ui-workspace--episode-status thread))
-         (memory (if (eq harness-ui-workspace--state 'error)
-                     "Memory · unavailable"
-                   (if harness-ui-workspace--memory
-                       "Memory · ready"
-                     "Memory · unavailable")))
+         (knowledge (if (and (not (eq harness-ui-workspace--state 'error))
+                             harness-ui-workspace--knowledge
+                             (plist-get harness-ui-workspace--knowledge :available))
+                        "Knowledge · ready"
+                      "Knowledge · unavailable"))
          (box (plist-get harness-ui-workspace--box :state))
          (computer (cond ((equal box "running") "Computer · live")
                          ((equal box "starting") "Computer · starting")
@@ -189,7 +189,7 @@ send it, the coarser `:state' and the cached session's own status."
             (propertize thread-title 'face 'harness-dim-face)
             " · " (propertize (harness-ui-workspace--status-label thread)
                               'face (harness-ui-workspace--status-face status))
-            "   " (propertize memory 'face 'harness-dim-face)
+            "   " (propertize knowledge 'face 'harness-dim-face)
             "   " (propertize computer 'face 'harness-dim-face)
             "   ")
     (harness-ui-workspace--insert-button
@@ -390,11 +390,11 @@ does not send it is read from the session cache."
             (harness-ui-pending-sync session (plist-get thread :pending))
           (harness-ui-pending-sync-session session))))))
 
-(defun harness-ui-workspace--set-data (workspace entries memory &optional box)
-  "Take WORKSPACE, its ENTRIES, MEMORY and BOX as this buffer's state."
+(defun harness-ui-workspace--set-data (workspace entries knowledge &optional box)
+  "Take WORKSPACE, its ENTRIES, KNOWLEDGE and BOX as this buffer's state."
   (setq harness-ui-workspace--data workspace
         harness-ui-workspace--entries entries
-        harness-ui-workspace--memory memory
+        harness-ui-workspace--knowledge knowledge
         harness-ui-workspace--box box
         harness-ui-workspace--error nil
         harness-ui-workspace--state 'ready)
@@ -417,9 +417,9 @@ does not send it is read from the session cache."
            (get (harness-ui-request "_harness/workspace/get" (list :id id)))
            (timeline (harness-ui-request "_harness/workspace/timeline"
                                          (list :id id :opts (list :limit 200))))
-           (memory (harness-catch
-                    (harness-ui-request "_harness/memory/status" (list :workspace id))
-                    (lambda (_) nil)))
+           (knowledge (harness-catch
+                       (harness-ui-request "_harness/knowledge/status" (list :workspace id))
+                       (lambda (_) nil)))
            (box (harness-catch
                  (harness-ui-request "_harness/workspace/box/status" (list :workspace id))
                  (lambda (_) nil))))
@@ -428,7 +428,7 @@ does not send it is read from the session cache."
         (setq harness-ui-workspace--state 'loading)
         (harness-ui-workspace--render))
       (harness-then
-       (harness-all (list get timeline memory box))
+       (harness-all (list get timeline knowledge box))
        (lambda (values)
          (when (and (buffer-live-p buffer)
                     (eq generation (buffer-local-value 'harness-ui-workspace--request buffer)))
@@ -616,7 +616,7 @@ that a request answered elsewhere leaves no stale card."
     (cond
      ((member event '("workspace/changed" "workspace/deleted"
                       "workspace/timeline-appended" "workspace/thread-changed"
-                      "workspace/episode-changed" "workspace/memory-changed"
+                      "workspace/episode-changed" "workspace/knowledge-changed"
                       "workspace/box-status"))
       (let ((id (car-safe args)))
         (dolist (buffer (harness-ui-workspace--buffers))
@@ -744,7 +744,7 @@ and root.  With more than one workspace, choose one by name."
 
 (define-derived-mode harness-ui-workspace-mode special-mode "Workspace"
   "Major mode of the persistent workspace chat.
-The header shows the workspace, the thread and the memory state; the
+The header shows the workspace, the thread and the knowledge state; the
 thread list selects a topic; the timeline is the one chat.  Letters
 type in the compose box.
 \<harness-ui-workspace-mode-map>\[harness-ui-workspace-send] sends;

@@ -6,8 +6,9 @@
 ;; long-lived assistant with a root directory and a list of threads.  A
 ;; thread is a topic; each live stretch of a thread is an *episode*, an
 ;; ordinary harness session of kind `workspace'.  A new episode starts
-;; from a fresh *brief* built from the thread and from the memory store,
-;; not from a compacted transcript.  The user sees the episodes and the
+;; from a fresh *brief* built from the thread and from the workspace's
+;; Logseq knowledge graph (harness-workspace-knowledge.el), not from a
+;; compacted transcript.  The user sees the episodes and the
 ;; harness events between them as one timeline.
 ;;
 ;; This module is the state layer.  It knows nothing about a buffer.  It
@@ -82,7 +83,7 @@
   :group 'harness-workspace)
 
 (defcustom harness-workspace-recall 8
-  "Memory notes a brief recalls."
+  "Knowledge blocks a brief recalls from the Logseq graph."
   :type 'integer
   :group 'harness-workspace)
 
@@ -284,6 +285,10 @@ Each thread carries `:state' as clients have always read it (`live',
                                       (or (plist-get b :last-at) 0))))))))
     (let ((view (copy-sequence workspace)))
       (setf (plist-get view :threads) threads)
+      (setf (plist-get view :graph)
+            (or (plist-get view :graph)
+                (when (harness-method-exists-p 'logseq/root)
+                  (harness-call 'logseq/root))))
       view)))
 
 (defun harness-workspace--append (workspace entry)
@@ -295,6 +300,31 @@ Each thread carries `:state' as clients have always read it (`live',
     entry))
 
 ;;;; Threads and episodes
+
+(defun harness-workspace--knowledge-touch (workspace thread &optional status)
+  "Bring THREAD's page in WORKSPACE's Logseq graph up to date.
+STATUS is `active' or `parked'.  A graph that cannot be written does
+not break the thread: it is logged and the chat goes on."
+  (when (harness-method-exists-p 'knowledge/thread-touch)
+    (condition-case err
+        (harness-call 'knowledge/thread-touch
+                      (plist-get workspace :id) (plist-get thread :id) status)
+      (error
+       (harness-log 'warn "workspace: knowledge page update failed: %s"
+                    (harness-error-message err))
+       nil))))
+
+(defun harness-workspace--thread-page (workspace thread)
+  "Make sure THREAD of WORKSPACE has a page in the Logseq graph.
+Return its name, or nil when the graph cannot be written."
+  (when (harness-method-exists-p 'knowledge/thread-page)
+    (condition-case err
+        (harness-call 'knowledge/thread-page
+                      (plist-get workspace :id) (plist-get thread :id))
+      (error
+       (harness-log 'warn "workspace: no knowledge page for %s: %s"
+                    (plist-get thread :id) (harness-error-message err))
+       nil))))
 
 (defun harness-workspace--new-thread (workspace title &optional project)
   "Create a thread called TITLE in WORKSPACE, on PROJECT.
@@ -310,6 +340,8 @@ Return the thread record."
                       :created (harness-workspace--now)
                       :last-at (harness-workspace--now))))
     (harness-workspace--put-thread workspace thread)
+    (when-let* ((page (harness-workspace--thread-page workspace thread)))
+      (setf (plist-get thread :page) page))
     thread))
 
 (defun harness-workspace--title (text)
@@ -350,6 +382,7 @@ WHY is kept in the thread's summary for the next brief."
     (setf (plist-get thread :live) nil
           (plist-get thread :status) "parked")
     (harness-workspace--put-thread workspace thread)
+    (harness-workspace--knowledge-touch workspace thread "parked")
     (harness-workspace--save workspace)
     (harness-emit 'workspace/thread-changed (plist-get workspace :id) thread)))
 
@@ -395,6 +428,7 @@ the divider the user sees.  Return the session id."
     (setf (plist-get thread :episodes)
           (append (plist-get thread :episodes) (list sid)))
     (harness-workspace--put-thread workspace thread)
+    (harness-workspace--knowledge-touch workspace thread "active")
     (harness-workspace--save workspace)
     (let ((divider (harness-workspace--append
                     workspace
@@ -407,6 +441,12 @@ the divider the user sees.  Return the session id."
     sid))
 
 ;;;; Briefs
+
+(defun harness-workspace--graph (workspace)
+  "Return the Logseq graph WORKSPACE keeps its knowledge in."
+  (or (plist-get workspace :graph)
+      (when (harness-method-exists-p 'logseq/root)
+        (harness-call 'logseq/root))))
 
 (defun harness-workspace--recent (workspace thread limit)
   "Return the last LIMIT message entries of THREAD."
@@ -485,15 +525,14 @@ rest of a streamed answer is written to the node."
   "Return every timeline entry of workspace ID, oldest first."
   (harness-call 'store/read-all (harness-workspace--timeline-file id)))
 
-(defun harness-workspace--memory-recall (workspace thread text)
-  "Return memory cards for TEXT in WORKSPACE's thread THREAD."
-  (when (harness-method-exists-p 'memory/search)
+(defun harness-workspace--knowledge-recall (workspace thread text)
+  "Return knowledge blocks for TEXT in WORKSPACE's thread THREAD."
+  (when (harness-method-exists-p 'knowledge/recall)
     (condition-case err
-        (harness-call 'memory/search
+        (harness-call 'knowledge/recall
                       (plist-get workspace :id)
-                      (string-trim (concat (plist-get thread :title) " " text))
-                      (list :limit harness-workspace-recall
-                            :thread (plist-get thread :id)))
+                      (plist-get thread :id)
+                      text)
       (error
        (harness-log 'warn "workspace: recall failed: %s" (error-message-string err))
        nil))))
@@ -524,7 +563,7 @@ rest of a streamed answer is written to the node."
 (defun harness-workspace--brief (workspace thread text)
   "Build the brief for a new episode of THREAD, about TEXT."
   (let* ((recent (harness-workspace--recent workspace thread harness-workspace-brief-recent))
-         (recall (harness-workspace--memory-recall workspace thread text))
+         (recall (harness-workspace--knowledge-recall workspace thread text))
          (tasks (harness-workspace--task-lines workspace thread))
          (summary (plist-get thread :summary))
          (parts
@@ -549,14 +588,15 @@ rest of a streamed answer is written to the node."
                                          (harness-workspace--entry-text entry)))
                                recent "\n")))
                  (and recall
-                      (format "Relevant memory:\n%s"
+                      (format "Knowledge:\n%s"
                               (mapconcat
                                (lambda (card)
                                  (format "- [%s] %s"
-                                         (or (plist-get card :thread) "note")
+                                         (or (plist-get card :page) "graph")
                                          (plist-get card :text)))
                                recall "\n")))
-                 "Answer the user's message.  Use memory_search for anything not in this brief; do not invent a memory.")))
+                 (format "Knowledge graph: %s" (harness-workspace--graph workspace))
+                 "Answer the user's message.  Use knowledge_search for anything not in this brief and knowledge_write for what is worth keeping in the graph; do not invent knowledge.  memory_save is only for small behavioral notes about how the user wants work done.")))
          (brief (string-trim (mapconcat #'identity parts "\n\n"))))
     (if (> (length brief) harness-workspace-brief-chars)
         (concat (substring brief 0 harness-workspace-brief-chars) "\n\n[Brief cut to fit.]")
@@ -747,8 +787,10 @@ from the store by the time this runs."
 ;;;; Methods
 
 (harness-defmethod workspace/create (&rest plist)
-  "Create a workspace.  PLIST may set :name, :root, :project, :model,
-:thinking, :permission-mode, :non-interactive and :instructions."
+  "Create a workspace.  PLIST may set :name, :root, :graph, :project,
+:model, :thinking, :permission-mode, :non-interactive and :instructions.
+:graph is the Logseq graph its knowledge lives in; the default is the
+configured graph (`harness-logseq-directory')."
   (harness-workspace--load)
   (let* ((root (file-name-as-directory
                 (expand-file-name (or (plist-get plist :root)
@@ -761,6 +803,11 @@ from the store by the time this runs."
                           :name name
                           :root root
                           :project project
+                          :graph (expand-file-name
+                                  (or (plist-get plist :graph)
+                                      (if (harness-method-exists-p 'logseq/root)
+                                          (harness-call 'logseq/root)
+                                        "~/logseq")))
                           :instructions (plist-get plist :instructions)
                           :model (plist-get plist :model)
                           :thinking (plist-get plist :thinking)
@@ -804,12 +851,15 @@ or instructions."
       (setf (plist-get workspace :root)
             (file-name-as-directory (expand-file-name root)))
       (harness-ensure-directory (plist-get workspace :root)))
+    (when-let* ((graph (plist-get plist :graph)))
+      (setf (plist-get workspace :graph)
+            (file-name-as-directory (expand-file-name graph))))
     (harness-workspace--save workspace)))
 
 (harness-defmethod workspace/delete (id &optional delete-sessions delete-graph)
   "Delete workspace ID.  With DELETE-SESSIONS close its episodes too.
-DELETE-GRAPH is accepted for the future Logseq integration; this
-implementation keeps no graph of its own."
+The Logseq graph is the user's and is never deleted, so DELETE-GRAPH
+changes nothing; the pages the workspace wrote stay in the graph."
   (let ((workspace (harness-workspace--get id)))
     (when (harness-json-true-p delete-sessions)
       (dolist (thread (plist-get workspace :threads))
@@ -839,8 +889,13 @@ implementation keeps no graph of its own."
   (let* ((workspace (harness-workspace--get id))
          (threads (plist-get workspace :threads))
          (live (cl-count-if (lambda (thread) (plist-get thread :live)) threads))
-         (memory (when (harness-method-exists-p 'memory/status)
-                   (harness-call 'memory/status id)))
+         (knowledge (when (harness-method-exists-p 'knowledge/status)
+                      (condition-case err
+                          (harness-call 'knowledge/status id)
+                        (error
+                         (harness-log 'warn "workspace: knowledge status failed: %s"
+                                      (harness-error-message err))
+                         nil))))
          (box (when (harness-method-exists-p 'workspace/box/status)
                 (condition-case err
                     (harness-call 'workspace/box/status id)
@@ -851,7 +906,7 @@ implementation keeps no graph of its own."
     (list :id id :name (plist-get workspace :name)
           :threads (length threads) :live live
           :last-thread (plist-get workspace :last-thread)
-          :memory memory :box box)))
+          :knowledge knowledge :box box)))
 
 (harness-defmethod workspace/resources/status (id)
   "Return workspace ID's browser, wallet, access and credential resources.
@@ -1087,6 +1142,7 @@ OPTS may name `:limit', `:before' (an index), `:thread', `:kinds'."
       (when (plist-member plist key)
         (setf (plist-get found key) (plist-get plist key))))
     (harness-workspace--put-thread workspace found)
+    (harness-workspace--knowledge-touch workspace found)
     (harness-workspace--save workspace)
     (harness-emit 'workspace/thread-changed id found)
     found))
@@ -1197,8 +1253,10 @@ the old episode stays whole."
           :live (length live)
           :last-thread (and last (plist-get last :title))
           :last-state (and last (plist-get last :state))
-          :memory (when (harness-method-exists-p 'memory/status)
-                    (harness-call 'memory/status id))
+          :knowledge (when (harness-method-exists-p 'knowledge/status)
+                       (condition-case nil
+                           (harness-call 'knowledge/status id)
+                         (error nil)))
           :tasks (when (harness-method-exists-p 'task/list)
                    (ignore-errors (harness-call 'task/list (plist-get workspace :root))))
           :box (when (harness-method-exists-p 'workspace/box/status)
@@ -1214,8 +1272,10 @@ Only an episode gets them; a normal session is unchanged."
         prompt
       (concat prompt
               "\n\nWorkspace: you are the user's persistent workspace.  The user sees one chat; threads are the topics inside it.  "
-              "Use memory_search for anything the brief did not give you and memory_write when the user asks you to remember, when a decision is made, or when a commitment is created.  "
-              "Cite the pages you used as [[Page]].  Never claim to remember something you did not retrieve.  "
+              "Your knowledge is the user's Logseq graph: use knowledge_search for anything the brief did not give you, and knowledge_write when the user asks you to remember, when a decision is made, or when a commitment or open loop is created.  "
+              "Write one concise block per piece of knowledge and cite the pages you used as [[Page]].  Never claim to remember something you did not retrieve.  "
+              (when (harness-tool-get "memory_save")
+                "The memory tools are not for knowledge: memory_save is only for small behavioral notes about how the user wants work done.  ")
               "Work that must outlive this conversation, touch a repository, be reviewed, or run in parallel belongs on the task board; use task_list, task_submit and task_control for it.  "
               "Do small, self-contained work here; do not do a task's work in the chat and then submit a task for it."))))
 
@@ -1223,11 +1283,11 @@ Only an episode gets them; a normal session is unchanged."
   "Expose the workspace methods and events to ACP clients."
   (when (boundp 'harness-acp-extra-method-prefixes)
     (add-to-list 'harness-acp-extra-method-prefixes "workspace/")
-    (add-to-list 'harness-acp-extra-method-prefixes "memory/"))
+    (add-to-list 'harness-acp-extra-method-prefixes "knowledge/"))
   (when (boundp 'harness-acp-extra-events)
     (dolist (event '(workspace/changed workspace/deleted workspace/timeline-appended
                      workspace/thread-changed workspace/episode-changed
-                     workspace/context-built workspace/memory-changed))
+                     workspace/context-built workspace/knowledge-changed))
       (add-to-list 'harness-acp-extra-events event))))
 
 (defun harness-workspace--init ()
@@ -1272,11 +1332,11 @@ Only an episode gets them; a normal session is unchanged."
 (harness-declare-event 'workspace/thread-changed "(ID THREAD) when a thread changed.")
 (harness-declare-event 'workspace/episode-changed "(ID THREAD SESSION DIVIDER) when an episode started or ended.")
 (harness-declare-event 'workspace/context-built "(ID THREAD BRIEF) when a brief was built.")
-(harness-declare-event 'workspace/memory-changed "(WORKSPACE OP) when a memory write was indexed.")
+(harness-declare-event 'workspace/knowledge-changed "(WORKSPACE OP) when a block was written to the workspace's Logseq graph.")
 
 (harness-define-module 'workspace
   :doc "Persistent workspace chat: one timeline over topic threads and episodes."
-  :requires '(store session agent project workspace-memory)
+  :requires '(store session agent project workspace-knowledge)
   :init #'harness-workspace--init
   :shutdown #'harness-workspace--shutdown)
 

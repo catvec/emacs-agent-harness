@@ -5,13 +5,17 @@ The main page is the design and the experience; this page is what a
 stage's task reads before it writes code: the modules and their
 dependencies, storage, methods, events, options, tools, prompts, the
 detailed UI and copy inventory, the tests, and the staged plan.  The
-first slice is implemented: `workspace`, `workspace-memory`,
-`workspace-box` and `ui-workspace` are in the tree, with their tests,
-and the Flutter client has the `Workspace` tab, its responsive layout
-and a computer that draws the real RFB stream.  The Logseq client, the
+first slice is implemented: `workspace`, `workspace-knowledge`, the
+markdown half of `logseq`, `workspace-box` and `ui-workspace` are in
+the tree, with their tests, and the Flutter client has the `Workspace`
+tab, its responsive layout and a computer that draws the real RFB
+stream.  The Logseq CLI and its DB graphs, the embedding index, the
 scribe/dream, the container backend, routines and voice are not.  The
 computer's design and its `local` boundary are in
-[workspace computer](workspace-computer.md).
+[workspace computer](workspace-computer.md).  The decision that the
+workspace's knowledge is a Logseq graph and the memory module keeps
+only behavioral notes is in
+[the knowledge graph note](workspace-knowledge-graph.md).
 
 ## Contents
 
@@ -83,21 +87,26 @@ the design tries hard not to duplicate them:
 - `skills`, `todo-sync`, `recap`, `seed`, `insight`: the pieces the
   dream, the threads and the briefs borrow.
 
-What exists now: the `workspace` module (records, threads, episodes,
-the timeline, routing and the brief), `workspace-memory` (a local
-SQLite note store with FTS recall and the `memory_search`,
-`memory_write` and `memory_status` tools) and `ui-workspace` (the
-Emacs buffer, thread list, timeline and compose box), with
+What exists now: the `logseq` module, a client for a Logseq
+**markdown** graph (`$LOGSEQ_HOME`, else `~/logseq`; pages, journals,
+blocks and properties as files); `workspace-knowledge` (a page per
+thread, the day's journal captures, search and the `knowledge_search`,
+`knowledge_write`, `knowledge_read` and `knowledge_status` tools); the
+`workspace` module (records, threads, episodes, the timeline, routing
+and the brief); and `ui-workspace` (the Emacs buffer, thread list,
+timeline and compose box), with `test/harness-logseq-test.el`,
 `test/harness-workspace-test.el` and
-`test/harness-ui-workspace-test.el`.
+`test/harness-ui-workspace-test.el`.  The harness's own `memory`
+module keeps the small behavioral notes and is not the workspace's
+knowledge store.
 
-What does not exist yet: the Logseq client, the embedding index, the
+What does not exist yet: the Logseq CLI and its DB graphs (the
+markdown graph is read and written directly), the embedding index, the
 scribe/curator/dream, the box, routines and voice.  Those are stages 0
-and 3 to 8 below.  The first slice deliberately uses the local SQLite
-note store behind the same `memory/*` methods a Logseq backend will
-implement; the Flutter client draws the workspace, its threads and its
-computer from the same `workspace/*` methods, with the box and the
-memory browser still to come.
+and 3 to 8 below.  The Flutter client draws the workspace, its threads
+and its computer from the same `workspace/*` and `knowledge/*`
+methods; its `Memory` screen reaches the graph through ACP aliases
+(`memory/notes`, `memory/search`, `memory/status` with a `:workspace`).
 
 ### Modules
 
@@ -107,10 +116,10 @@ talks ACP.
 
 | Module | Layer | Requires | What it is |
 |---|---|---|---|
-| `logseq` | state | `core`, `util` | The Logseq CLI/HTTP client: graph status, pages, blocks, queries, schema, one write queue.  No workspace or memory policy. |
-| `workspace-memory` | state | `logseq`, `secrets`, `usage`, the shared embeddings library | The index, retrieval, the memory tools and the write path.  It knows pages, blocks and provenance, not threads or chats. |
-| `workspace` | state | `workspace-memory`, `session`, `agent`, `project`; uses `tasks`, `supervisor` and `seed` when loaded | Workspaces, threads, episodes, the timeline, routing, the brief, the scribe and the curator.  It is the mode. |
-| `workspace-dream` | state | `workspace-memory`, `workspace` | The dream scheduler, phases, reports and review state. |
+| `logseq` | state | `core`, `util` | The Logseq markdown graph client: pages, journals, blocks, properties, search and backlinks, read and written as files.  No workspace or memory policy.  The CLI and its DB graphs are stage 0 below. |
+| `workspace-knowledge` | state | `logseq`, `session`, `tools` | Thread pages, journal captures, retrieval, the knowledge tools and the write path.  It knows pages, blocks and provenance, not threads or chats. |
+| `workspace` | state | `workspace-knowledge`, `session`, `agent`, `project`; uses `tasks`, `supervisor` and `seed` when loaded | Workspaces, threads, episodes, the timeline, routing, the brief, the scribe and the curator.  It is the mode. |
+| `workspace-dream` | state | `workspace-knowledge`, `workspace` | The dream scheduler, phases, reports and review state. |
 | `workspace-box` | state | `store` | The computer's lifecycle, private X display, browser profile, input, control lock and VNC endpoint.  Optional: without it the workspace has no computer.  The first backend is `local`, not the container in the design. |
 | `workspace-routines` | state | `workspace`, `notifications` | Triggers, runs and delivery.  Optional; a workspace without it has no scheduled work. |
 | `ui-workspace-voice` | UI | `ui-workspace`, `ui-voice` (when present) | The call control on a thread; the delegation path is `workspace/prompt` with `:channel 'voice`, which marks the turns. |
@@ -120,7 +129,7 @@ talks ACP.
 | `ui-workspace-box` | UI | `ui-workspace`, `ui-media` | The computer panel, screenshot, takeover and login form. |
 | `ui-workspace-routines` | UI | `ui-workspace` | Routine list and editor. |
 
-The first release can ship `workspace` and `workspace-memory` with the
+The first release can ship `workspace` and `workspace-knowledge` with the
 UI and leave the box, routines and dream behind feature switches, but
 the design expects all of them.
 
@@ -165,7 +174,7 @@ notification, and anything that needs a person goes to review.
    agent/turn-ended
         |-- timeline entry (reply, usage, costs)
         |-- scribe (if due) --.
-        |-- curator (if due) -+--> workspace-memory queue --> logseq --> index
+        |-- curator (if due) -+--> workspace-knowledge queue --> logseq --> index
         |-- task linker (on task events) --'
         v
    workspace/thread-changed, workspace/timeline-appended
@@ -196,7 +205,7 @@ except the graph and the workspace root:
 │   ├── w-….timeline.jsonl       ordered entries (append-only)
 │   ├── w-….dreams.json          dream records, operations, review state
 │   └── w-….box.json             box state (id, ports, mounts, snapshots)
-├── workspace-memory/
+├── workspace-knowledge/
 │   └── w-….db                   the index (SQLite, FTS5, vectors)
 ├── sessions/…                   episodes, exactly as any session
 └── tasks/…                      task records, exactly as any task
@@ -450,15 +459,15 @@ All options are `defcustom`s in `harness` and are described by
 
 **Memory**
 
-- `harness-workspace-memory-embedding-model`, `…-dimensions`.
-- `harness-workspace-memory-chunk-chars` (1200),
+- `harness-workspace-knowledge-embedding-model` (stage 1), `…-dimensions`.
+- `harness-workspace-knowledge-chunk-chars` (1200),
   `…-chunks-per-block` (8), `…-embed-batch` (16).
-- `harness-workspace-memory-sync-seconds` (60).
-- `harness-workspace-memory-recall-limit` (24),
+- `harness-workspace-knowledge-sync-seconds` (60),
+- `harness-workspace-knowledge-recall-limit` (24),
   `…-graph-hops` (1), `…-recency-half-life` (90).
-- `harness-workspace-memory-budget` (nil: no daily cap).
+- `harness-workspace-knowledge-budget` (nil: no daily cap).
 - `harness-workspace-graph-backups` (7).
-- `harness-workspace-memory-private-tag` ("Private").
+- `harness-workspace-knowledge-private-tag` ("Private").
 
 **Dream**
 
@@ -490,11 +499,11 @@ The workspace agent gets the tools of an ordinary session, plus:
 
 | Tool | Class | What it is for |
 |---|---|---|
-| `memory_search` | read | find what the workspace knows |
-| `memory_get` | read | read a page or block, with links |
-| `memory_write` | write | remember, update, link |
-| `memory_forget` | write | forget a block or page; user-only confirmation |
-| `memory_status` | read | the memory's health |
+| `knowledge_search` | read | find what the workspace knows in the Logseq graph |
+| `knowledge_read` | read | read a page's blocks, with links |
+| `knowledge_write` | write | remember, update, link |
+| `knowledge_status` | read | the graph's health |
+| `memory_search` / `memory_save` / `memory_get` / `memory_forget` | read, meta | the small behavioral notes only; not the workspace's knowledge |
 | `workspace_brief` | read | the digest for project management and briefs |
 | `review_threads` | read | the open threads of a task in review; it never replies or closes one |
 | `routine_list` | read | what is scheduled |
@@ -550,11 +559,14 @@ The workspace adds one section to the system prompt of an episode:
 > user sees one chat; threads are the lines of work inside it.  You are
 > not a task: do work that fits here, and use the task board for work
 > that must outlive this conversation, be reviewed, or run in parallel.
-> Memory is a Logseq graph.  Use `memory_search` when you need something
-> you were not given; use `memory_write` when the user asks you to
-> remember, when a decision is made, or when a commitment is created.
-> Cite the pages you used as `[[Page]]`.  Never claim to remember
-> something you did not retrieve; say what you know and ask.  The brief
+> Your knowledge is the user's Logseq graph.  Use `knowledge_search`
+> when you need something you were not given; use `knowledge_write`
+> when the user asks you to remember, when a decision is made, or when
+> a commitment or open loop is created.  Write one concise block of
+> knowledge.  Cite the pages you used as `[[Page]]`.  Never claim to
+> remember something you did not retrieve; say what you know and ask.
+> The memory tools are not for knowledge: `memory_save` is only for
+> small behavioral notes about how the user wants work done.  The brief
 > you were given says where each item came from.  The computer is the
 > box; inside it you may install, build and run anything, but an action
 > that leaves the box (send, post, pay, push, delete outside) is the
@@ -622,7 +634,7 @@ The model tiers:
 - **Costs are recorded** on the episode, the
   scribe/curator/librarian/dream background sessions, and the
   workspace; `workspace/status` and the
-  header show the day's total.  `harness-workspace-memory-budget` and
+  header show the day's total.  `harness-workspace-knowledge-budget` and
   `…-dream-budget` pause the background writers, never the chat.
 
 ### Permissions and access
@@ -643,8 +655,8 @@ The model tiers:
   mounts, a new mount, a network change, a login or an outside action
   still asks, and stopping or removing the box revokes the profile.
 - The memory tools have their own `permission/decide` stages:
-  `memory_forget` is user-only in every mode; `memory_write` to a
-  user-edited block asks; `memory_write` to `Preferences` or a
+  forgetting a block is the user's, in Logseq; `knowledge_write` to a
+  user-edited block asks; `knowledge_write` to `Preferences` or a
   `#Private` page asks; a normal append follows the mode.
 - `browser_login` is user-only in every mode and is not answered by
   the judge.
@@ -670,7 +682,7 @@ tab.
 
 - Without `tasks`: the workspace still chats and remembers; the Work
   button is absent; `workspace_brief` omits tasks.
-- Without `workspace-memory`/`logseq`: the workspace module is not
+- Without `workspace-knowledge`/`logseq`: the workspace module is not
   loaded; ordinary sessions and task mode are unchanged.  With the
   module but no graph or no Logseq, the chat degrades as the memory
   section says.
@@ -835,7 +847,7 @@ A popout or a fullscreen side panel, opened by `[Memory]` or
   `Pending review`, with `Reindex` and `Recall test`.
 
 The browser is read-mostly.  Editing a block opens Logseq (or a small
-form that writes through `memory_write` with a hash check); deep
+form that writes through `knowledge_write` with a hash check); deep
 editing belongs in the editor.
 
 ### The dream review
@@ -1330,14 +1342,15 @@ are the tests the later stages add.
 |---|---|
 | `test/harness-logseq-test.el` | a fake `logseq` executable: the argument lists, JSON parsing, errors, timeouts, the writer queue, retries, schema creation, no shell interpolation, a graph locked by another process, a missing CLI |
 | `test/harness-embeddings-test.el` | the extracted chunking, quantization, cosine and nearest code; the session-search suite still passes on it |
-| `test/harness-workspace-memory-test.el` | index schema, FTS, vectors, incremental sync, delete and rename, hybrid ranking, graph expansion, provenance, private pages, secret masking, rebuild from a fake graph |
+| `test/harness-logseq-test.el` | page names, journal paths, bullets and properties, search ranking and filtering, snippets, backlinks, page properties, the missing graph |
+| `test/harness-workspace-test.el` | thread pages, journal captures, knowledge search and recall, the knowledge tools and their filter, the generic memory tools left alone, the ACP aliases |
 | `test/harness-workspace-test.el` | workspace/thread/episode records, the timeline, routing (hard, similarity, model), brief budgets, continuation and re-entry, a restart, a deleted episode, a moved project, settings |
 | `test/harness-workspace-scribe-test.el` | the scribe's prompts, batching, duplicate detection, hash conflict, no write for a BTW, a failed write queued |
 | `test/harness-workspace-dream-test.el` | phases, candidate scoring, duplicate/update/contradiction, risk classification, idempotent apply, user-edit guard, review/apply/skip, undo, budget stop, backup failure, a crash resumed |
 | `test/harness-workspace-box-test.el` | the `local` box: the off state and its missing tools, a running record's VNC URL and socket, the control lock and input refusal, the window parser, browser metadata with no values, and every method the clients call |
 | `test/harness-workspace-routines-test.el` | schedule computation, timezone, missed runs, catch-up, read-only tools, delivery, pause/resume, event triggers |
 | `test/harness-ui-workspace-test.el` | exact rendered copy (the inventory), header states, empty/loading/error states, dividers, brief cards, event cards, compose routing, keys, overflow, mouse buttons |
-| `test/harness-ui-workspace-memory-test.el` | memory browser states, provenance, correct/forget, index line, exact copy |
+| `test/harness-ui-workspace-test.el` | header knowledge state, `_harness/knowledge/status`, `workspace/knowledge-changed`, exact copy |
 | `test/harness-ui-workspace-box-test.el` | computer panel states, screenshot, takeover, login form, exact copy |
 | `test/harness-ui-workspace-dream-test.el` | review list, diff, apply/skip/undo, exact copy |
 | `test/harness-workspace-voice-test.el` | a call attaches to the thread, delegation goes to `workspace/prompt`, voice nodes, interruption, a call while a turn runs |
@@ -1414,7 +1427,7 @@ and offline.
   host's Docker socket or the graph's `db.sqlite` sees nothing of them;
   `/etc/passwd` and `$HOME` are the box's own.  The mount table is
   exactly the configured one.
-- A `memory_write` with a secret is refused or masked; the secret is
+- A `knowledge_write` with a secret is refused or masked; the secret is
   not in the graph, the index or the log.
 - `memory_forget` and `browser_login` ask in every permission mode,
   including `yolo`, and are refused in a non-interactive session.
@@ -1449,7 +1462,7 @@ The live loop for the first UI stage:
 
 ```sh
 scripts/dev.sh start
-# enable workspace, workspace-memory, ui-workspace in the dev init
+# enable workspace, workspace-knowledge, ui-workspace in the dev init
 scripts/dev.sh eval '(harness-workspace "~/workspace-home")'
 scripts/dev.sh keys 'C-c . n'      # a new thread
 scripts/dev.sh shot
@@ -1471,7 +1484,7 @@ riskiest contracts are settled before the UI that depends on them.
 | Stage | Name | Depends on | What it lands | What it proves |
 |---|---|---|---|---|
 | 0 | Embeddings and the Logseq client | none | `harness-embeddings.el` extracted; `logseq` module with CLI/HTTP client, one writer, schema, fake CLI tests | the graph can be read and written safely, and the vector math exists once |
-| 1 | Memory index and tools | 0 | `workspace-memory`: SQLite schema, FTS, vectors, sync, hybrid retrieval, `memory_search/get/write/forget/status`, private pages, redaction | memory is useful from an ordinary session, before any workspace UI exists |
+| 1 | Memory index and tools | 0 | `workspace-knowledge`: SQLite schema, FTS, vectors, sync, hybrid retrieval, `knowledge_search/get/write/status`, private pages, redaction | knowledge is useful from an ordinary session, before any workspace UI exists |
 | 2 | Workspace and the one chat (Emacs) | 1 | `workspace` records, threads, episodes, timeline, router, brief, `workspace/prompt`, `ui-workspace` chat, thread sidebar, dividers, settings line, copy tests | the user can chat across threads and the context clears without compaction |
 | 3 | Scribe, curator, task linker and memory browser | 2 | the three writers, batching, hash checks, `ui-workspace-memory`, provenance, correct/forget | memory stays current from real turns, and the user can see why it thinks something |
 | 4 | Dreaming | 3 | `workspace-dream`: scheduler, phases, scoring, review/apply/skip/undo, report page, `ui-workspace-dream` | the graph is consolidated, reviewed and improved without silent rewrites |
@@ -1486,12 +1499,15 @@ always at hand.
 
 **Implemented so far.**  The first slice lands the core of stage 2
 (`workspace` records, threads, episodes, routing, the brief and the
-timeline), a local SQLite stand-in for the memory half of stages 0 and
-1 (`workspace-memory` notes, FTS recall and the memory tools), the
+timeline), the markdown half of stage 0 (`logseq` pages, journals,
+blocks and search, with no CLI or DB graph), the knowledge half of
+stage 1 (`workspace-knowledge`: a page per thread, journal captures,
+recall and the `knowledge_*` tools, with no index or vectors), the
 Emacs UI (`ui-workspace`), and the Flutter `Workspace` tab with its
 responsive screen, concept periphery, real computer screen, and the
 Resources surface for the browser data, the wallet and the access the
-agent has to either.  It also lands the `local` half of stage 5:
+agent has to either.  Memories stay with the harness's `memory` module and are not the
+workspace's knowledge.  It also lands the `local` half of stage 5:
 `workspace-box` starts a private Xvfb display, a window manager and a
 real x11vnc/noVNC endpoint, takes screenshots from the framebuffer,
 runs commands and input, keeps a Firefox profile, and enforces the
@@ -1499,10 +1515,21 @@ takeover lock; the Flutter and Emacs clients draw and drive it.  The
 memory contract also gains `memory/get`, `memory/forget`,
 `memory/pages`, `memory/page`, `memory/sync` and `memory/reindex`, and
 `workspace/thread/merge` is implemented.  It does not include the
-Logseq client, the embedding index, the scribe/curator/dream, the
+Logseq CLI and its DB graphs, the embedding index, the scribe/curator/dream, the
 container backend, routines or voice; those keep their stage below.
 
 ### Stage 0: embeddings and the Logseq client
+
+**Implemented first, without the CLI.**  The tree has
+`lisp/modules/harness-logseq.el`, a client for a **markdown** Logseq
+graph: pages and journals as files, blocks as bullets, properties as
+`key:: value`, atomic writes and a word search.  It has the same method
+names the CLI client will take (`logseq/status`, `logseq/page`,
+`logseq/page-add`, `logseq/block-add`, `logseq/property-set`,
+`logseq/search`, `logseq/backlinks`), so a DB-graph client can replace
+its internals without changing `workspace-knowledge`.  The fake-CLI
+tests, the writer queue, retries and the HTTP fallback below are not
+part of that first slice.
 
 **Work**
 
@@ -1544,14 +1571,20 @@ is not stable, the client's `changes-since` falls back to page-level
 
 ### Stage 1: memory index and tools
 
+**Implemented first, without the index.**  `workspace-knowledge`
+writes a page per thread, captures each turn in the day's journal and
+answers search by reading the graph, with no SQLite, FTS or vectors.
+It returns the same result shape an indexed search will, so the tools,
+the brief and the clients do not change when the index lands.
+
 **Work**
 
-1. `harness-workspace-memory.el`: the database, schema, chunks,
+1. `harness-workspace-knowledge.el`: the database, schema, chunks,
    vectors, links, threads, sync log; incremental sync; full rebuild;
    delete/rename handling; private pages; redaction.
-2. `memory/search` with hybrid RRF, graph expansion, boosts, budget
-   and `:why`; `memory/get`, `memory/write`, `memory/forget`,
-   `memory/status`; the tool definitions.
+2. `knowledge/search` with hybrid RRF, graph expansion, boosts, budget
+   and `:why`; `knowledge/get`, `knowledge/write`, `knowledge/page`,
+   `knowledge/status`; the tool definitions.
 3. A small memory browser is not part of this stage; the tools are
    enough to test from an ordinary session.
 4. Tests: fake graph, fake embeddings, 50k-chunk performance, secret
@@ -1911,7 +1944,7 @@ should confirm before the relevant stage starts.
 | A graph is corrupted by a write | no direct `db.sqlite` access, one writer, `graph backup create` before dreams, hashes on updates | a crash during a Logseq write is Logseq's to recover; the backup is the fallback |
 | The scribe fills the graph with noise | batching, search-before-write, duplicate detection, a per-turn block cap, the memory browser and correction | a bad model can still write a plausible wrong note; the user can see and correct it |
 | The dream overwrites a decision | user edits outrank, hash checks, risk classes, review for merges/deletes/supersessions, 72-hour undo | a low-risk update can still surprise the user; the report shows every change |
-| Recall misses the one note that mattered | hybrid words + meaning + links, one-hop expansion, a librarian, an explicit `memory_search`, citations | a badly linked page is hard to find; the dream's link health and the recall test are the repair path |
+| Recall misses the one note that mattered | hybrid words + meaning + links, one-hop expansion, a librarian, an explicit `knowledge_search`, citations | a badly linked page is hard to find; the dream's link health and the recall test are the repair path |
 | The router splits the wrong thread | default continue, a clear divider, `Keep in this thread`, forced `New thread` | a split costs a click and a little extra context |
 | Context and background jobs cost too much | cheap tiers, router only when ambiguous, scribe batching, dream caps, per-workspace budgets | a very active workspace can still exceed a soft budget; the chat keeps working |
 | Memory is private data | local graph, no sync by default, private pages, redaction, local embedding option, a visible provider | a hosted model sees the brief and the recall; the policy and the user's choice govern that |

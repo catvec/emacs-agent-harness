@@ -7,7 +7,7 @@ Persistent workspace chat: one timeline over topic threads and episodes.
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-workspace.el](../../lisp/modules/harness-workspace.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
-- **Requires:** [store](store.md), [session](session.md), [agent](agent.md), [project](project.md), [workspace-memory](workspace-memory.md)
+- **Requires:** [store](store.md), [session](session.md), [agent](agent.md), [project](project.md), [workspace-knowledge](workspace-knowledge.md)
 - **Brings along:** [ui-workspace](ui-workspace.md) (its UI)
 
 ## About
@@ -16,8 +16,9 @@ Workspace mode is one chat over many topics.  A workspace is a named,
 long-lived assistant with a root directory and a list of threads.  A
 thread is a topic; each live stretch of a thread is an *episode*, an
 ordinary harness session of kind `workspace`.  A new episode starts
-from a fresh *brief* built from the thread and from the memory store,
-not from a compacted transcript.  The user sees the episodes and the
+from a fresh *brief* built from the thread and from the workspace's
+Logseq knowledge graph (harness-workspace-knowledge.el), not from a
+compacted transcript.  The user sees the episodes and the
 harness events between them as one timeline.
 
 This module is the state layer.  It knows nothing about a buffer.  It
@@ -44,7 +45,7 @@ of `workspace/prompt`.
 - `workspace/brief` (id &optional opts) — Return a compact digest of workspace ID for the chat or voice.
 - `workspace/cancel` (id &optional thread) — Cancel the live turn of workspace ID, or of THREAD.
 - `workspace/context` (id &optional thread episode) — Return the last brief of workspace ID's THREAD.
-- `workspace/create` (&rest plist) — Create a workspace.  PLIST may set :name, :root, :project, :model,
+- `workspace/create` (&rest plist) — Create a workspace.  PLIST may set :name, :root, :graph, :project,
 - `workspace/delete` (id &optional delete-sessions delete-graph) — Delete workspace ID.  With DELETE-SESSIONS close its episodes too.
 - `workspace/episode` (id thread &optional episode) — Return the session and state of THREAD's episode in workspace ID.
 - `workspace/get` (id) — Return workspace ID with its threads.
@@ -73,7 +74,7 @@ of `workspace/prompt`.
 - `workspace/context-built` — (ID THREAD BRIEF) when a brief was built.
 - `workspace/deleted` — (ID) when a workspace was deleted.
 - `workspace/episode-changed` — (ID THREAD SESSION DIVIDER) when an episode started or ended.
-- `workspace/memory-changed` — (WORKSPACE OP) when a memory write was indexed.
+- `workspace/knowledge-changed` — (WORKSPACE OP) when a block was written to the workspace's Logseq graph.
 - `workspace/thread-changed` — (ID THREAD) when a thread changed.
 - `workspace/timeline-appended` — (ID ENTRY) when a timeline entry was appended.
 
@@ -89,7 +90,7 @@ of `workspace/prompt`.
 - `harness-workspace-non-interactive` — Whether a workspace episode starts non-interactive.
 - `harness-workspace-notify` — Whether the workspace sends a notification when a reply is ready.
 - `harness-workspace-permission-mode` — Permission mode of a workspace episode.
-- `harness-workspace-recall` — Memory notes a brief recalls.
+- `harness-workspace-recall` — Knowledge blocks a brief recalls from the Logseq graph.
 - `harness-workspace-thinking` — Thinking level a workspace episode runs at, or nil for the session default.
 - `harness-workspace-thread-idle-hours` — Hours after which a message starts a new episode in the same thread.
 
@@ -100,8 +101,11 @@ of `workspace/prompt`.
 - `agent/cancel` ([agent](agent.md))
 - `agent/prompt` ([agent](agent.md))
 - `agent/running` ([agent](agent.md))
-- `memory/search` ([memory](memory.md)), when it is loaded
-- `memory/status` ([workspace-memory](workspace-memory.md))
+- `knowledge/recall` ([workspace-knowledge](workspace-knowledge.md))
+- `knowledge/status` ([workspace-knowledge](workspace-knowledge.md))
+- `knowledge/thread-page` ([workspace-knowledge](workspace-knowledge.md))
+- `knowledge/thread-touch` ([workspace-knowledge](workspace-knowledge.md))
+- `logseq/root` ([logseq](logseq.md)), when it is loaded
 - `secret-sandbox/secrets` ([secret-sandbox](secret-sandbox.md)), when it is loaded
 - `secret-sandbox/status` ([secret-sandbox](secret-sandbox.md)), when it is loaded
 - `session/append` ([session](session.md))
@@ -122,6 +126,7 @@ of `workspace/prompt`.
 ### Events it handles
 
 - `agent/turn-ended` → `harness-workspace--on-turn-ended`
+- `agent/turn-started` → `harness-workspace--on-turn-started`
 - `session/deleted` → `harness-workspace--on-session-deleted`
 - `session/node-added` → `harness-workspace--on-node-added`
 - `session/node-updated` → `harness-workspace--on-node-updated`

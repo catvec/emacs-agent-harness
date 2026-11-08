@@ -1,12 +1,13 @@
 # Workspace mode
 
 Design note, November 2026.  **First slice implemented.**  The core
-chat, threads, episodes, routing, the brief, a local SQLite memory with
-recall, the memory tools, the Emacs workspace buffer and the local
-computer with a real VNC screen are implemented in `workspace`,
-`workspace-memory`, `workspace-box` and `ui-workspace`.  The Logseq
-graph, the scribe and dream, the container backend, routines and voice
-are still the staged design below.  This page is the design for the
+chat, threads, episodes, routing, the brief, the Logseq markdown
+knowledge graph with its `knowledge_*` tools, the Emacs workspace
+buffer and the local computer with a real VNC screen are implemented
+in `workspace`, `workspace-knowledge`, `logseq`, `workspace-box` and
+`ui-workspace`.  The Logseq CLI and its DB graphs, the index, the
+scribe and dream, the container backend, routines and voice are still
+the staged design below.  This page is the design for the
 whole mode: a persistent workspace chat with a long-term memory, a
 computer of its own, and the whole harness underneath it.  The module contracts, UI copy, tests and staged plan
 are on the [implementation page](workspace-mode-implementation.md).
@@ -68,13 +69,13 @@ the chat, so the same mode can run a life and run a task board.
 | What is the chat? | A **timeline** of messages and events, stitched from many ordinary harness sessions and shown as one scroll.  It survives restarts. |
 | How does context clear? | A **thread** is a topic.  Each live stretch of a thread is an **episode**, an ordinary session.  A topic shift, a long context, or a long gap ends the episode; the next message starts a new one from a **brief**, not from a compacted transcript.  The old episode stays searchable. |
 | How does it pick a topic back up? | A router (heuristics first, a cheap model when ambiguous) chooses *continue*, *revive* or *new*, and the memory layer builds the brief from the thread's Logseq page, its linked pages, recent decisions and open tasks. |
-| What is the memory? | A local **Logseq DB graph** is the source of truth.  A SQLite index adds full-text search, int8 embeddings and the link graph; it is a rebuildable cache, never the authority. |
+| What is the memory? | A local **Logseq graph** is the source of truth: a markdown graph (`$LOGSEQ_HOME`, else `~/logseq`) in the first slice, a DB graph through the CLI in the full design.  A SQLite index adds full-text search, int8 embeddings and the link graph; it is a rebuildable cache, never the authority.  The harness's **memories** are only small behavioral notes and never the workspace's knowledge. |
 | How is memory kept true? | A cheap **scribe** writes durable notes after turns; a **curator** maintains thread pages; a **dream** consolidates the day's notes, updates every page that needs it, finds contradictions and duplicates, and leaves a reviewable report.  Nothing durable is written without provenance. |
 | What is the computer? | A persistent **box** with its own home, desktop (Xvfb + x11vnc + noVNC), browser profile, toolchains and servers.  The first implementation is the `local` backend: its own display and process tree on this machine, not a container; the status says `local display and process`, and the rootless-container backend remains the stronger design.  The agent has broad rights inside the box, the user can take over over VNC and return control, and host mounts are explicit. |
 | How does it work on non-code work? | The workspace root is an ordinary project; task mode already works outside git.  Daily-life tasks, routines, notes, decisions, people and projects all live in the graph; the box is where the results are used. |
 | How does voice fit? | A call attaches to a thread.  Live voice delegates each utterance to `workspace/prompt`; replies stream back to speech.  Voice turns are ordinary chat turns marked `voice`. |
 | Where does it run? | In the harness process, with the UI in Emacs and the ACP client (Flutter) as a remote front end.  The box is a separate sandbox; the memory graph is local. |
-| What is the implementation status? | The core chat, threads, episodes, local memory, Emacs UI, the local computer and its VNC screen are implemented; the Logseq graph, dreaming, the container backend, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md) and [the computer](workspace-computer.md). |
+| What is the implementation status? | The core chat, threads, episodes, the Logseq markdown knowledge graph and its tools, the Emacs UI, the local computer and its VNC screen are implemented; the Logseq CLI and DB graphs, the index, dreaming, the container backend, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md) and [the computer](workspace-computer.md). |
 
 ## Why this mode
 
@@ -671,6 +672,11 @@ A small example of how the pieces meet; none of it is a special case.
 
 ## Memory: the Logseq graph
 
+The decision that this graph, and not the harness's memory module, is
+the workspace's knowledge, and how the first slice keeps it in a
+markdown graph, is in
+[the knowledge graph note](workspace-knowledge-graph.md).
+
 ### Why a graph
 
 A vector store over old messages is a bag of fragments.  It can find a
@@ -725,41 +731,42 @@ or an export), and the workspace keeps `harness-workspace-graph-backups`
 
 ### The graph, the root and the workspace
 
-A workspace has a **graph root** and a **graph name**:
+A workspace has a **graph directory**, resolved in this order:
 
-```elisp
-(setq harness-workspace-default-graph-root "~/logseq"
-      harness-workspace-default-graph "home")
-```
+1. its `:graph`, set when the workspace is created or changed;
+2. `harness-logseq-directory` when set;
+3. `$LOGSEQ_HOME` when it names a directory;
+4. `~/logseq`.
 
-The default layout is the user's Logseq root, outside the workspace
-root and the box's mounts:
+The default layout is the user's Logseq markdown graph, outside the
+workspace root and the box's mounts:
 
 ```
 ~/logseq/
-├── cli.edn                 the Logseq CLI's config (graph, output)
-└── graphs/home/db.sqlite   the DB graph
+├── pages/                  one file per page: Threads/, Projects/, …
+└── journals/2026-11-07.md  one file per day
 ```
 
-A user who already has a graph can point a workspace at it when the
-workspace is created:
+A user who already has a graph can point a workspace at it:
 
 ```elisp
-(harness-call 'workspace/update id :graph-root "~/logseq" :graph "personal")
+(harness-call 'workspace/update id :graph "~/logseq")
 ```
 
-The module never edits `db.sqlite` directly.  It goes through the
-Logseq CLI (or the Logseq HTTP API when a desktop instance is already
-running and the operation is not available in the CLI).  The CLI owns
-the worker, the lock file and the database; the harness owns one
-writer queue in front of it.
+The first slice reads and writes that markdown graph directly: pages
+and journals are files, blocks are bullets, properties are
+`key:: value`, and the day's journal captures what was said.  It never
+touches `logseq/` inside the graph, which is Logseq's own, and it never
+deletes a page or a block: that is the user's editor.  The full design
+replaces the file access with the Logseq CLI for a DB graph (below);
+the methods stay the same.
 
 A workspace with no graph is still usable.  The first time it needs
-memory, it offers to create a graph (`graph create`), with the tags and
-properties below.  If Logseq is not installed, the workspace runs in
-**degraded memory**: session search and the timeline still work, no
-memory is written, and the header says `Memory · unavailable`.  It
-never silently pretends to remember.
+knowledge, it creates `pages/` and `journals/` in the graph directory
+and writes the thread's page there.  If the directory cannot be
+written, the workspace runs in **degraded memory**: session search and
+the timeline still work, no knowledge is written, and the header says
+`Knowledge · unavailable`.  It never silently pretends to remember.
 
 ### The page schema
 
@@ -840,6 +847,17 @@ a synthesis the dream marked `#Dream`.
 
 ### The Logseq client
 
+**The first slice** has `lisp/modules/harness-logseq.el`, a client for
+a markdown graph: `logseq/status`, `logseq/page`, `logseq/page-add`,
+`logseq/block-add`, `logseq/property-set`, `logseq/search` and
+`logseq/backlinks`, with atomic file writes.  It follows the Logseq
+skill's format: `- ` bullets, indented children, `key:: value`
+properties, `[[Page]]` links, no headers and no separators.  Search
+reads the newest pages and journals and ranks the blocks it finds; it
+is not an index yet.
+
+The full design below is the CLI client for a DB graph:
+
 The `logseq` module is a small, strict client for the Logseq CLI.  It
 does not know about workspaces or memory policy; it knows the commands,
 the JSON and the lock.
@@ -919,7 +937,7 @@ both:
 
 ### The index
 
-`workspace-memory.db` in the harness state directory is SQLite, with
+`workspace-knowledge.db` in the harness state directory is SQLite, with
 FTS5 and the quantized vectors.  It is a cache; `memory/reindex`
 deletes and rebuilds it.
 
@@ -973,7 +991,7 @@ breadcrumb and body separately for snippets.
 **Embeddings**
 
 The vector layer is the same idea as `session-search`: cut a block into
-at most `harness-workspace-memory-chunk-chars` (1200) characters, at a
+at most `harness-workspace-knowledge-chunk-chars` (1200) characters, at a
 paragraph or sentence boundary; hash each chunk; embed missing hashes
 in batches of 16; store int8 quantized vectors with a scale; compare
 with integer arithmetic in Elisp.  Text met twice -- a block quoted in
@@ -997,7 +1015,7 @@ first stage, the workspace may copy the functions behind a deliberately
 marked adapter, but the design prefers one implementation: the int8
 math is easy to get subtly wrong twice.
 
-The model is `harness-workspace-memory-embedding-model`; when it is nil,
+The model is `harness-workspace-knowledge-embedding-model`; when it is nil,
 the workspace uses `harness-session-search-embedding-model`; when both
 are nil, semantic search is off and the index is keyword-only.  The
 policy's allowed models apply.  In corporate mode only a local server
@@ -1299,7 +1317,7 @@ The graph is personal.  The design's defaults follow that:
 
 | Failure | What happens |
 |---|---|
-| Logseq not installed | `Memory · unavailable`; chat and tasks still work; no writes; setup button |
+| Logseq graph missing | `Knowledge · unavailable`; chat and tasks still work; no writes; setup button |
 | Graph missing | Offer to create or attach; the chat works with session search only until then |
 | Logseq worker stale or locked | `logseq/server restart`, retry once; the memory write is queued and the scribe is told |
 | Index corrupt | Delete and rebuild; the graph is untouched; searches say `Memory · indexing` |
@@ -1316,7 +1334,7 @@ degrades; the chat answers; the failure is visible.
 
 - The scribe is the largest new cost: one simple-tier call per few
   turns, with a bounded transcript slice.  The design budgets
-  `harness-workspace-memory-budget` (a dollar amount per workspace per
+  `harness-workspace-knowledge-budget` (a dollar amount per workspace per
   day, or a share of the plan) and pauses the scribe (not the chat) when
   it is spent.
 - Embeddings are batched and cached by hash.  The index is local; the
@@ -1487,7 +1505,7 @@ an operation on a page tagged `#Private`.
 
 Low-risk operations apply in one serialized write batch, after the
 graph backup.  The apply is the module's, not the model's: the dream
-session returns the operation list, and `workspace-memory` validates
+session returns the operation list, and `workspace-knowledge` validates
 and writes it; the session never calls `memory_write` for a planned
 operation.  Each operation is validated against the live graph first:
 

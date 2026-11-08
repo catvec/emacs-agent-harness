@@ -50,7 +50,7 @@ session behind the thread when the user wants the full transcript.
 
 ### Methods it calls
 
-- `memory/status` ([workspace-memory](workspace-memory.md))
+- `knowledge/status` ([workspace-knowledge](workspace-knowledge.md))
 - `workspace/cancel` ([workspace](workspace.md))
 - `workspace/create` ([workspace](workspace.md))
 - `workspace/get` ([workspace](workspace.md))
@@ -60,11 +60,16 @@ session behind the thread when the user wants the full transcript.
 
 ### Events it hears over ACP
 
+- `agent/turn-ended` → `harness-ui-workspace--on-event`
+- `agent/turn-started` → `harness-ui-workspace--on-event`
+- `session/deleted` → `harness-ui-workspace--on-event`
+- `session/pending-changed` → `harness-ui-workspace--on-event`
+- `session/status` → `harness-ui-workspace--on-event`
 - `workspace/box-status` → `harness-ui-workspace--on-event`
 - `workspace/changed` → `harness-ui-workspace--on-event`
 - `workspace/deleted` → `harness-ui-workspace--on-event`
 - `workspace/episode-changed` → `harness-ui-workspace--on-event`
-- `workspace/memory-changed` → `harness-ui-workspace--on-event`
+- `workspace/knowledge-changed` → `harness-ui-workspace--on-event`
 - `workspace/thread-changed` → `harness-ui-workspace--on-event`
 - `workspace/timeline-appended` → `harness-ui-workspace--on-event`
 
@@ -72,6 +77,8 @@ session behind the thread when the user wants the full transcript.
 
 - `harness-ui-connected-hook` → `harness-ui-workspace--on-redraw`
 - `harness-ui-event-functions` → `harness-ui-workspace--on-event`
+- `harness-ui-pending-changed-hook` → `harness-ui-workspace--on-pending-changed`
+- `harness-ui-pending-drawn-predicates` → `harness-ui-workspace--drawn-p`
 - `harness-ui-redraw-hook` → `harness-ui-workspace--on-redraw`
 - `kill-buffer-hook` → `harness-ui-workspace--kill`
 

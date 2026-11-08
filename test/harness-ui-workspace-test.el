@@ -11,7 +11,7 @@
 (defvar harness-ui-workspace--data)
 (defvar harness-ui-workspace--entries)
 (defvar harness-ui-workspace--id)
-(defvar harness-ui-workspace--memory)
+(defvar harness-ui-workspace--knowledge)
 (defvar harness-ui-workspace--state)
 (defvar harness-ui-workspace--thread)
 
@@ -63,7 +63,7 @@ must see the fixture as it was."
         harness-ui-workspace--state 'ready
         harness-ui-workspace--data (harness-ui-workspace-test-data)
         harness-ui-workspace--entries (harness-ui-workspace-test-entries)
-        harness-ui-workspace--memory nil)
+        harness-ui-workspace--knowledge nil)
   (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
     (harness-ui-workspace--render))
   (buffer-string))
@@ -112,12 +112,12 @@ must see the fixture as it was."
             harness-ui-workspace--state 'ready
             harness-ui-workspace--data (harness-ui-workspace-test-data)
             harness-ui-workspace--entries nil
-            harness-ui-workspace--memory '(:notes 2))
+            harness-ui-workspace--knowledge '(:available t :notes 2))
       (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
         (harness-ui-workspace--render))
       (goto-char (point-min))
       (should (equal (buffer-substring-no-properties (line-beginning-position) (line-end-position))
-                     "Workspace · Home   Thread · Kitchen renovation · Running   Memory · ready   Computer · off   Tasks New thread Open episode Stop Refresh Computer Resources"))
+                     "Workspace · Home   Thread · Kitchen renovation · Running   Knowledge · ready   Computer · off   Tasks New thread Open episode Stop Refresh Computer Resources"))
       (search-forward "Tasks")
       (should (equal "The task board of this workspace" (get-text-property (1- (point)) 'help-echo)))
       (search-forward "New thread")
@@ -141,6 +141,12 @@ must see the fixture as it was."
         (harness-ui-workspace--render))
       (should (string-match-p "No threads" (buffer-string)))
       (should (string-match-p "No messages" (buffer-string)))
+      (should (string-match-p "Knowledge · unavailable" (buffer-string)))
+      (setq harness-ui-workspace--knowledge '(:available nil)
+            harness-ui-workspace--state 'ready)
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+        (harness-ui-workspace--render))
+      (should (string-match-p "Knowledge · unavailable" (buffer-string)))
       (setq harness-ui-workspace--state 'error
             harness-ui-workspace--error "The harness is out of reach.")
       (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
@@ -211,8 +217,8 @@ workspace root, instead of no buffer at all."
         (when (buffer-live-p (get-buffer "*harness workspace: Home*"))
           (kill-buffer "*harness workspace: Home*"))))))
 
-(ert-deftest harness-ui-workspace-fetch-shows-the-memory-state ()
-  "The fetch asks for the workspace's memory and the header names it ready.
+(ert-deftest harness-ui-workspace-fetch-shows-the-knowledge-state ()
+  "The fetch asks for the workspace's knowledge and the header names it ready.
 The request names the parameter the method takes, `workspace', as the
 client's does."
   (harness-ui-workspace-test-with
@@ -231,12 +237,12 @@ client's does."
                         (pcase method
                           ("_harness/workspace/get" (harness-ui-workspace-test-data))
                           ("_harness/workspace/timeline" (harness-ui-workspace-test-entries))
-                          ("_harness/memory/status" (list :notes 2))
+                          ("_harness/knowledge/status" (list :available t :notes 2))
                           (_ nil)))))
                     ((symbol-function 'harness-compose-fetch-completions) #'ignore))
             (harness-ui-workspace--fetch)))
-        (should (equal (list :workspace "w-1") (cdr (assoc "_harness/memory/status" requests))))
-        (harness-test-wait (lambda () (string-match-p "Memory · ready" (buffer-string))))
+        (should (equal (list :workspace "w-1") (cdr (assoc "_harness/knowledge/status" requests))))
+        (harness-test-wait (lambda () (string-match-p "Knowledge · ready" (buffer-string))))
         (should (string-match-p "The tile is matte." (buffer-string)))))))
 
 (ert-deftest harness-ui-workspace-refuses-an-empty-message ()

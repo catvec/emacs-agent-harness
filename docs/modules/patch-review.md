@@ -184,7 +184,9 @@ to say.
 
 - `patch-review/apply` (task-id op) — Perform OP, an operation of change-review, on the review of task TASK-ID.
 - `patch-review/assume-viewed` (task-id &optional revision) — Take every file of task TASK-ID's review as viewed, but those changed lately.
+- `patch-review/changes` (task-id &optional version) — Return the files task TASK-ID's review changes at VERSION, as plain data.
 - `patch-review/comment` (task-id body &rest opts) — Add the agent's comment BODY to the review of task TASK-ID.
+- `patch-review/diff` (task-id path &optional version) — Return the diff of PATH in task TASK-ID's review at VERSION.
 - `patch-review/discard-last-close` (task-id) — Forget the message that TASK-ID's last thread is closed, unsent.
 - `patch-review/drafts` (task-id) — Return the draft comments of task TASK-ID's review, those not sent yet, as data.
 - `patch-review/get` (task-id) — Return the review of task TASK-ID as plain data: its versions and threads.
