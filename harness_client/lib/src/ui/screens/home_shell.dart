@@ -255,8 +255,10 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
       _tab = 'sessions';
     }
     final index = tabs.indexWhere((tab) => tab.id == _tab);
-    final wide = MediaQuery.sizeOf(context).width >= 920;
+    final width = MediaQuery.sizeOf(context).width;
+    final wide = width >= 920;
     final cupertino = HarnessStyle.isCupertino(context);
+    final labels = [for (final tab in tabs) tab.label];
     // What the shell has to say (a failed action, a session that needs an
     // answer) is not laid over the pages: each page puts it in its own flow,
     // under its header (see [HarnessChrome]).
@@ -309,35 +311,59 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
     }
 
     if (cupertino) {
+      // The names under the icons fit their destinations in one line, at a
+      // size they share (see `_fittedLabelScale`).
+      final fitted = _fittedLabelScale(
+        context,
+        labels: labels,
+        barWidth: width,
+        style: CupertinoTheme.of(context).textTheme.tabLabelTextStyle,
+      );
       return CupertinoPageScaffold(
         child: Column(
           children: [
             Expanded(child: _withBuddy(body)),
             ConnectionBanner(app: app),
-            CupertinoTabBar(
-              currentIndex: index < 0 ? 0 : index,
-              onTap: (next) => _select(tabs[next].id),
-              backgroundColor: CupertinoTheme.of(context).barBackgroundColor,
-              activeColor: CupertinoTheme.of(context).primaryColor,
-              inactiveColor: CupertinoColors.tertiaryLabel.resolveFrom(context),
-              items: [
-                for (final tab in tabs)
-                  BottomNavigationBarItem(
-                    icon: _TabIcon(
-                      tab: tab,
-                      selected: _tab == tab.id,
-                      badge: tab.id == 'tasks'
-                          ? (app.tasks?.needsAttention ?? 0)
-                          : 0,
+            _withFittedLabels(
+              fitted,
+              CupertinoTabBar(
+                currentIndex: index < 0 ? 0 : index,
+                onTap: (next) => _select(tabs[next].id),
+                backgroundColor: CupertinoTheme.of(context).barBackgroundColor,
+                activeColor: CupertinoTheme.of(context).primaryColor,
+                inactiveColor: CupertinoColors.tertiaryLabel.resolveFrom(
+                  context,
+                ),
+                items: [
+                  for (final tab in tabs)
+                    BottomNavigationBarItem(
+                      icon: _TabIcon(
+                        tab: tab,
+                        selected: _tab == tab.id,
+                        badge: tab.id == 'tasks'
+                            ? (app.tasks?.needsAttention ?? 0)
+                            : 0,
+                      ),
+                      label: tab.label,
                     ),
-                    label: tab.label,
-                  ),
-              ],
+                ],
+              ),
             ),
           ],
         ),
       );
     }
+
+    final theme = Theme.of(context);
+    final fitted = _fittedLabelScale(
+      context,
+      labels: labels,
+      barWidth: width,
+      style:
+          theme.navigationBarTheme.labelTextStyle?.resolve(<WidgetState>{}) ??
+          theme.textTheme.labelSmall ??
+          const TextStyle(fontSize: 11),
+    );
 
     return Scaffold(
       body: _withBuddy(body),
@@ -348,33 +374,85 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
         mainAxisSize: MainAxisSize.min,
         children: [
           ConnectionBanner(app: app),
-          NavigationBar(
-            selectedIndex: index < 0 ? 0 : index,
-            onDestinationSelected: (next) => _select(tabs[next].id),
-            destinations: [
-              for (final tab in tabs)
-                NavigationDestination(
-                  icon: _BadgedIcon(
-                    icon: Icon(tab.materialIcon),
-                    count: tab.id == 'tasks'
-                        ? (app.tasks?.needsAttention ?? 0)
-                        : 0,
+          _withFittedLabels(
+            fitted,
+            NavigationBar(
+              selectedIndex: index < 0 ? 0 : index,
+              onDestinationSelected: (next) => _select(tabs[next].id),
+              destinations: [
+                for (final tab in tabs)
+                  NavigationDestination(
+                    icon: _BadgedIcon(
+                      icon: Icon(tab.materialIcon),
+                      count: tab.id == 'tasks'
+                          ? (app.tasks?.needsAttention ?? 0)
+                          : 0,
+                    ),
+                    selectedIcon: _BadgedIcon(
+                      icon: Icon(tab.materialIcon),
+                      count: tab.id == 'tasks'
+                          ? (app.tasks?.needsAttention ?? 0)
+                          : 0,
+                    ),
+                    label: tab.label,
                   ),
-                  selectedIcon: _BadgedIcon(
-                    icon: Icon(tab.materialIcon),
-                    count: tab.id == 'tasks'
-                        ? (app.tasks?.needsAttention ?? 0)
-                        : 0,
-                  ),
-                  label: tab.label,
-                ),
-            ],
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 }
+
+/// The largest scale of the text at which every one of [labels] fits the
+/// destination the bottom bar gives it, or null when the size in use already
+/// fits.
+///
+/// A phone has room for six destinations only just: at 320 points each one
+/// has 53 for its name, and a name that does not fit there is broken in the
+/// middle of the word.  The bar draws every name at one size, smaller than
+/// the text is set when the names are long and the phone is narrow, so that
+/// no name is ever two lines.  `null` leaves the bar as it is: the names of
+/// a wide phone, or of a harness with three destinations, still grow with
+/// the text as a person sets it.
+double? _fittedLabelScale(
+  BuildContext context, {
+  required List<String> labels,
+  required double barWidth,
+  required TextStyle style,
+}) {
+  if (labels.isEmpty || barWidth <= 0) return null;
+  // The bar gives each destination the same width.  What is left after this
+  // margin is where a label's line has to end; it keeps a name off the edge
+  // of its destination when a font rounds a width up.
+  const gap = 4.0;
+  final cell = barWidth / labels.length;
+  if (cell <= gap) return null;
+  final direction = Directionality.of(context);
+  var widest = 0.0;
+  for (final label in labels) {
+    final painter = TextPainter(
+      text: TextSpan(text: label, style: style),
+      textDirection: direction,
+      textScaler: TextScaler.noScaling,
+      maxLines: 1,
+    )..layout();
+    if (painter.width > widest) widest = painter.width;
+    painter.dispose();
+  }
+  if (widest <= 0) return null;
+  final fits = (cell - gap) / widest;
+  final size = style.fontSize ?? 14;
+  final inUse = MediaQuery.textScalerOf(context).scale(size) / size;
+  return fits < inUse ? fits : null;
+}
+
+/// [bar] with its labels at no more than [scale] of the text size in use;
+/// the bar itself when [scale] is null.
+Widget _withFittedLabels(double? scale, Widget bar) => scale == null
+    ? bar
+    : MediaQuery.withClampedTextScaling(maxScaleFactor: scale, child: bar);
 
 class _Tab {
   const _Tab(this.id, this.label, this.materialIcon, this.cupertinoIcon);

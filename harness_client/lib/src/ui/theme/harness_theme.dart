@@ -206,6 +206,9 @@ class HarnessTheme {
       scaffoldBackgroundColor: scheme.surface,
       splashFactory: InkSparkle.splashFactory,
     );
+    // Material's label for a destination of the bottom bar: its size and
+    // line, which the platform's text theme above leaves to the locale.
+    final barLabel = Typography.englishLike2021.labelSmall;
     return base.copyWith(
       textTheme: _textTheme(base.textTheme, dark),
       appBarTheme: AppBarTheme(
@@ -245,7 +248,17 @@ class HarnessTheme {
             : HarnessColors.paperRaised,
         indicatorColor: scheme.primaryContainer,
         labelTextStyle: WidgetStatePropertyAll(
-          base.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w600),
+          // The platform text theme names only a family and a colour here:
+          // the size and the line of Material's label belong to the locale,
+          // and a theme is built before the app knows one.  Given only the
+          // body's 14 points, a name on the bar takes two lines on a narrow
+          // phone.
+          base.textTheme.labelSmall?.copyWith(
+            fontSize: barLabel?.fontSize,
+            height: barLabel?.height,
+            letterSpacing: barLabel?.letterSpacing,
+            fontWeight: FontWeight.w600,
+          ),
         ),
         iconTheme: WidgetStatePropertyAll(
           IconThemeData(color: scheme.onSurfaceVariant),

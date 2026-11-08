@@ -1600,6 +1600,11 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   harness from before the controls, which is offered none of them
 - plain ACP fallback (three tabs, working chat, standard notice)
 - Cupertino rendering of the shell
+- the bottom bar (`test/bottom_bar_test.dart`): every name is one line inside
+  its own destination at 320, 360 and 390 points and at one and a third and
+  one and a half times the text, in the Material bar and the Cupertino one,
+  at one size for all of them, while a bar with room keeps the size the text
+  is set at
 - layout (`test/layout_test.dart`): the notice that a session needs an answer
   is under the header and never over it (and the page under it keeps its
   place), tabs, search and rows start on the gutter, the cost of every row
