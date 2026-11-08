@@ -858,6 +858,7 @@ class AudioBackendTest(unittest.TestCase):
 
     def test_the_player_writes_through_the_backend(self):
         played = os.path.join(self.work, "played.raw")
+        pcm = b"\x01\x00" * 800
         self.program("pw-record", "#!/bin/sh\nexit 0\n")
         self.program("pw-play", (
             "#!/usr/bin/env python3\n"
@@ -872,16 +873,164 @@ class AudioBackendTest(unittest.TestCase):
         self.only()
         player = Player(16000)
         try:
-            player.play(b"\x01\x00" * 800)
+            player.play(pcm)
+            # The writer thread hands the audio over, so wait for it to
+            # arrive rather than assuming play() wrote it synchronously.
             deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and not os.path.exists(played):
+            while time.monotonic() < deadline:
+                if (os.path.exists(played)
+                        and os.path.getsize(played) >= len(pcm)):
+                    break
                 time.sleep(0.02)
             self.assertEqual(player.backend, "pipewire")
             player.close()
             with open(played, "rb") as handle:
-                self.assertEqual(handle.read(), b"\x01\x00" * 800)
+                self.assertEqual(handle.read(), pcm)
         finally:
             player.close()
+
+
+class PlayerPacingTest(unittest.TestCase):
+    """Playback runs on a writer thread; the capture loop never waits for it.
+
+    The player's pipe holds about two seconds of audio.  Writing a whole
+    reply from the sidecar's tick therefore blocked that tick -- and the
+    microphone with it -- for the rest of the reply.  ``play`` now hands
+    the audio to the writer and returns.
+    """
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp(prefix="harness-player-")
+        self.path = os.environ.get("PATH", "")
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.addCleanup(os.environ.__setitem__, "PATH", self.path)
+
+    def program(self, name, body):
+        path = os.path.join(self.work, name)
+        with open(path, "w") as handle:
+            handle.write(body)
+        os.chmod(path, 0o755)
+        return path
+
+    def only(self):
+        os.environ["PATH"] = self.work + os.pathsep + self.path
+
+    def test_play_does_not_wait_for_a_slow_player(self):
+        played = os.path.join(self.work, "played.raw")
+        self.program("pw-record", "#!/bin/sh\nexit 0\n")
+        self.program("pw-play", (
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "out = open(%r, 'wb')\n"
+            "while True:\n"
+            "    data = sys.stdin.buffer.read1(1280)\n"
+            "    if not data:\n"
+            "        break\n"
+            "    out.write(data)\n"
+            "    out.flush()\n"
+            "    time.sleep(0.04)\n") % played)
+        self.only()
+        player = Player(16000)
+        try:
+            pcm = b"\x01\x00" * (16000 * 4)  # four seconds of audio
+            start = time.monotonic()
+            player.play(pcm)
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, 0.5,
+                            "play() waited %.2fs for a slow player" % elapsed)
+            self.assertTrue(player.busy())
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not os.path.exists(played):
+                time.sleep(0.02)
+            self.assertTrue(os.path.exists(played), "the writer wrote nothing")
+            player.stop()
+            self.assertFalse(player.busy())
+        finally:
+            player.close()
+
+    def test_a_stopped_player_starts_again_for_the_next_reply(self):
+        played = os.path.join(self.work, "played.raw")
+        starts = os.path.join(self.work, "starts.log")
+        self.program("pw-record", "#!/bin/sh\nexit 0\n")
+        self.program("pw-play", (
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "open(%r, 'a').write('start\\n')\n"
+            "out = open(%r, 'ab')\n"
+            "while True:\n"
+            "    data = sys.stdin.buffer.read1(4096)\n"
+            "    if not data:\n"
+            "        break\n"
+            "    out.write(data)\n"
+            "    out.flush()\n") % (starts, played))
+        self.only()
+        player = Player(16000)
+        first = b"\x01\x00" * 16000
+        second = b"\x02\x00" * 16000
+
+        def wait_for(total):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    if os.path.getsize(played) >= total:
+                        return True
+                except OSError:
+                    pass
+                time.sleep(0.02)
+            return False
+
+        try:
+            player.play(first)
+            self.assertTrue(wait_for(len(first)), "the first reply never played")
+            player.stop()
+            player.play(second)
+            self.assertTrue(wait_for(len(first) + len(second)),
+                            "playback did not restart after a stop")
+            player.close()
+            with open(played, "rb") as handle:
+                self.assertEqual(handle.read(), first + second)
+            with open(starts) as handle:
+                self.assertEqual(len(handle.read().split()), 2)
+        finally:
+            player.close()
+
+
+class RecorderAlignmentTest(unittest.TestCase):
+    """A split sample is carried, not dropped, so later samples stay aligned."""
+
+    def test_a_byte_between_reads_does_not_shift_the_stream(self):
+        work = tempfile.mkdtemp(prefix="harness-align-")
+        self.addCleanup(shutil.rmtree, work, True)
+        script = os.path.join(work, "capture")
+        with open(script, "w") as handle:
+            handle.write(
+                "#!/usr/bin/env python3\n"
+                "import sys, time\n"
+                "sys.stdout.buffer.write(b'\\x01')\n"
+                "sys.stdout.buffer.flush()\n"
+                "time.sleep(0.2)\n"
+                "sys.stdout.buffer.write(b'\\x02\\x03\\x04')\n"
+                "sys.stdout.buffer.flush()\n"
+                "time.sleep(0.5)\n")
+        os.chmod(script, 0o755)
+        recorder = Recorder(16000, command=[sys.executable, script])
+        try:
+            data = b""
+            chunks = []
+            deadline = time.monotonic() + 10
+            while len(data) < 4 and time.monotonic() < deadline:
+                chunk = recorder.read(1, timeout=1.0)
+                if chunk:
+                    chunks.append(chunk)
+                    data += chunk
+            # Every read of a PCM16 stream is whole samples: a byte split
+            # across reads is carried, not returned on its own.
+            self.assertTrue(chunks)
+            for chunk in chunks:
+                self.assertEqual(len(chunk) % 2, 0, chunks)
+            self.assertEqual(data, b"\x01\x02\x03\x04")
+        finally:
+            recorder.close()
 
 
 class Service(BaseHTTPRequestHandler):
@@ -904,7 +1053,9 @@ class Service(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
         if self.path.endswith("/audio/speech"):
-            data = wav_from_pcm(tone(0.4), fixtures.RATE)
+            data = getattr(self.server, "tts_wav", None)
+            if data is None:
+                data = wav_from_pcm(tone(0.4), fixtures.RATE)
             self.send_response(200)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("Content-Length", str(len(data)))
@@ -1098,6 +1249,292 @@ class SidecarAudioTest(unittest.TestCase):
         self.assertIn("playback · pw-play", log)
         with open(self.played, "rb") as handle:
             self.assertGreaterEqual(len(handle.read()), 1600)
+
+
+class LivePacingTest(unittest.TestCase):
+    """A reply must not take the microphone away from the person.
+
+    The sidecar's loop reads the microphone and plays replies on the same
+    thread.  A reply longer than the player's pipe used to block that
+    loop: the capture pipe filled, the sound server dropped the
+    microphone, and the next thing the person said reached the speech
+    service cut short.  These tests run a real sidecar process with fake
+    capture and playback programs that behave like a sound server, and a
+    fake speech service.
+    """
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp(prefix="harness-voice-pacing-")
+        self.path = os.environ.get("PATH", "")
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.addCleanup(os.environ.__setitem__, "PATH", self.path)
+
+    def program(self, name, body):
+        path = os.path.join(self.work, name)
+        with open(path, "w") as handle:
+            handle.write(body)
+        os.chmod(path, 0o755)
+        return path
+
+    @staticmethod
+    def capture_counts(path):
+        """Return (chunks produced, chunks dropped) from a fake recorder log."""
+        chunks = dropped = 0
+        with open(path) as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) == 3 and fields[0].isdigit():
+                    chunks, dropped = int(fields[0]), int(fields[1])
+        return chunks, dropped
+
+    def capture_program(self, log, trigger, first=(0.5, 1.2), second=1.2):
+        """A sound-server capture program that drops what the pipe will not take.
+
+        It speaks one 1.2 s burst at 0.5 s, so the sidecar has an
+        utterance and a delegation, then waits for TRIGGER and speaks the
+        second burst.  A chunk the pipe will not accept while the app is
+        not reading is counted as dropped, the way PipeWire and
+        PulseAudio overrun a real-time capture.
+        """
+        body = (
+            "#!/usr/bin/env python3\n"
+            "import fcntl, math, os, struct, sys, time\n"
+            "rate = 16000\n"
+            "def voiced(seconds, amplitude=0.3):\n"
+            "    return b''.join(struct.pack('<h', int(32767 * amplitude"
+            " * math.sin(2*math.pi*140*i/rate))) for i in range(int(seconds*rate)))\n"
+            "def chunk_of(pcm, at, start):\n"
+            "    offset = int((at - start) * rate) * 2\n"
+            "    return pcm[offset:offset + 640]\n"
+            "first_start, first_len = __FIRST__\n"
+            "fd = sys.stdout.fileno()\n"
+            "flags = fcntl.fcntl(fd, fcntl.F_GETFL)\n"
+            "fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)\n"
+            "log = open(__LOG__, 'w')\n"
+            "log.write('0 0 0.000\\n'); log.flush()\n"
+            "start = time.monotonic()\n"
+            "count = dropped = 0\n"
+            "second_start = None\n"
+            "first_pcm = voiced(first_len)\n"
+            "second_pcm = None\n"
+            "while True:\n"
+            "    elapsed = time.monotonic() - start\n"
+            "    target = int(elapsed / 0.02)\n"
+            "    while count < target:\n"
+            "        at = count * 0.02\n"
+            "        data = b'\\x00\\x00' * 320\n"
+            "        if first_start <= at < first_start + first_len:\n"
+            "            data = chunk_of(first_pcm, at, first_start)\n"
+            "        if second_start is None and os.path.exists(__TRIGGER__):\n"
+            "            second_start = at\n"
+            "            second_pcm = voiced(__SECOND__)\n"
+            "        if (second_start is not None\n"
+            "                and second_start <= at < second_start + __SECOND__):\n"
+            "            data = chunk_of(second_pcm, at, second_start)\n"
+            "        try:\n"
+            "            os.write(fd, data)\n"
+            "        except BlockingIOError:\n"
+            "            dropped += 1\n"
+            "        count += 1\n"
+            "        if count % 10 == 0:\n"
+            "            log.write('%d %d %.3f\\n' % (count, dropped, elapsed))\n"
+            "            log.flush()\n"
+            "    time.sleep(0.004)\n"
+        )
+        return (body.replace("__FIRST__", repr(first))
+                    .replace("__TRIGGER__", repr(trigger))
+                    .replace("__SECOND__", repr(second))
+                    .replace("__LOG__", repr(log)))
+
+    def prefill_capture_program(self, seconds, log):
+        """A capture program that starts with a full pipe, then runs in real time.
+
+        The burst is written with blocking writes, so it fills the pipe;
+        the real-time silence that follows is dropped when the pipe will
+        not take it.  A real session ends up here once a stall has
+        filled the pipe; a correct reader drains the burst instead of
+        keeping the pipe full.
+        """
+        body = (
+            "#!/usr/bin/env python3\n"
+            "import fcntl, math, os, struct, sys, time\n"
+            "rate = 16000\n"
+            "def voiced(seconds, amplitude=0.3):\n"
+            "    return b''.join(struct.pack('<h', int(32767 * amplitude"
+            " * math.sin(2*math.pi*140*i/rate))) for i in range(int(seconds*rate)))\n"
+            "fd = sys.stdout.fileno()\n"
+            "log = open(__LOG__, 'w')\n"
+            "view = memoryview(voiced(__SECONDS__))\n"
+            "while view:\n"
+            "    view = view[os.write(fd, view):]\n"
+            "log.write('0 0 0.000\\n'); log.flush()\n"
+            "flags = fcntl.fcntl(fd, fcntl.F_GETFL)\n"
+            "fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)\n"
+            "chunk = b'\\x00\\x00' * 320\n"
+            "start = time.monotonic()\n"
+            "count = dropped = 0\n"
+            "while True:\n"
+            "    elapsed = time.monotonic() - start\n"
+            "    target = int(elapsed / 0.02)\n"
+            "    while count < target:\n"
+            "        try:\n"
+            "            os.write(fd, chunk)\n"
+            "        except BlockingIOError:\n"
+            "            dropped += 1\n"
+            "        count += 1\n"
+            "    if count % 10 == 0:\n"
+            "        log.write('%d %d %.3f\\n' % (count, dropped, elapsed))\n"
+            "        log.flush()\n"
+            "    time.sleep(0.004)\n"
+        )
+        return (body.replace("__SECONDS__", repr(seconds))
+                    .replace("__LOG__", repr(log)))
+
+    def player_program(self, log):
+        """A speaker that consumes PCM at real time, logging that it started."""
+        return (
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "open(__LOG__, 'a').write('start\\n')\n"
+            "while True:\n"
+            "    data = sys.stdin.buffer.read1(1280)\n"
+            "    if not data:\n"
+            "        break\n"
+            "    time.sleep(0.04)\n"
+        ).replace("__LOG__", repr(log))
+
+    def start(self, transcripts, tts_wav):
+        """Start a fake speech service and the real sidecar against it."""
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Service)
+        server.transcripts = list(transcripts)
+        server.tts_wav = tts_wav
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = "http://127.0.0.1:%d" % server.server_address[1]
+        sidecar = subprocess.Popen(
+            [sys.executable, SCRIPT, "--stt-url", base + "/v1/audio/transcriptions",
+             "--tts-url", base + "/v1/audio/speech", "--threshold", "0.02"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=dict(os.environ), text=True, bufsize=1)
+        events = queue.Queue()
+        seen = []
+
+        def read_events():
+            for line in sidecar.stdout:
+                try:
+                    events.put(json.loads(line))
+                except ValueError:
+                    pass
+
+        threading.Thread(target=read_events, daemon=True).start()
+
+        def send(**fields):
+            sidecar.stdin.write(json.dumps(fields) + "\n")
+            sidecar.stdin.flush()
+
+        def wait_for(kind, timeout=30):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    event = events.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                seen.append(event)
+                if event.get("event") == kind:
+                    return event
+            self.fail("no %s event, saw %s"
+                      % (kind, [event.get("event") for event in seen]))
+
+        def finish():
+            try:
+                send(event="stop")
+                wait_for("closed", 5)
+            except (OSError, ValueError, self.failureException):
+                pass
+            try:
+                sidecar.stdin.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                sidecar.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                sidecar.kill()
+                sidecar.wait()
+            sidecar.stdout.close()
+            sidecar.stderr.close()
+
+        return send, wait_for, seen, finish
+
+    def test_a_reply_does_not_stop_the_microphone(self):
+        capture_log = os.path.join(self.work, "capture.log")
+        player_log = os.path.join(self.work, "player.log")
+        trigger = os.path.join(self.work, "trigger")
+        self.program("pw-record", self.capture_program(capture_log, trigger))
+        self.program("pw-play", self.player_program(player_log))
+        os.environ["PATH"] = self.work + os.pathsep + self.path
+        send, wait_for, seen, finish = self.start(
+            ["first words", "second words"],
+            wav_from_pcm(fixtures.silence(5), fixtures.RATE))
+        try:
+            send(event="start", protocol=1, context="")
+            wait_for("ready")
+            first = wait_for("delegation", 15)
+            self.assertEqual(first.get("text"), "first words")
+            send(event="delegate_result", id=first.get("id"), text="A long answer.")
+            wait_for("assistant_delta", 10)
+            # Wait until the reply is actually being played, then let the
+            # person speak over it.  A blocking player writes the reply
+            # from the sidecar's tick, so everything said now is dropped.
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not os.path.exists(player_log):
+                time.sleep(0.02)
+            self.assertTrue(os.path.exists(player_log),
+                            "the reply never started playing")
+            with open(trigger, "w") as handle:
+                handle.write("speak\n")
+            # A stalled loop overruns the capture pipe within a few
+            # hundred milliseconds; give it longer than that to show.
+            time.sleep(3.0)
+            chunks, dropped = self.capture_counts(capture_log)
+            self.assertGreater(chunks, 0)
+            self.assertEqual(
+                dropped, 0,
+                "%d of %d capture chunks dropped while the reply played"
+                % (dropped, chunks))
+            second = wait_for("delegation", 20)
+            self.assertEqual(second.get("text"), "second words")
+            segments = [event for event in seen
+                        if event.get("event") == "segment"
+                        and event.get("state") == "accepted"]
+            self.assertGreaterEqual(len(segments), 2, segments)
+            # A 1.2 s burst with pre-roll and hangover is about 2.3 s; a
+            # burst the blocked loop cut in half is about 1.5 s.
+            self.assertGreaterEqual(segments[-1].get("seconds", 0), 2.0,
+                                    segments)
+        finally:
+            finish()
+
+    def test_capture_keeps_up_when_the_pipe_is_full(self):
+        capture_log = os.path.join(self.work, "capture.log")
+        self.program("pw-record", self.prefill_capture_program(2.0, capture_log))
+        self.program("pw-play", "#!/bin/sh\ncat > /dev/null\n")
+        os.environ["PATH"] = self.work + os.pathsep + self.path
+        send, wait_for, seen, finish = self.start(
+            ["after the ring"], wav_from_pcm(fixtures.silence(0.2), fixtures.RATE))
+        try:
+            send(event="start", protocol=1, context="")
+            wait_for("ready")
+            delegation = wait_for("delegation", 15)
+            self.assertEqual(delegation.get("text"), "after the ring")
+            chunks, dropped = self.capture_counts(capture_log)
+            self.assertGreater(chunks, 20)
+            self.assertEqual(
+                dropped, 0,
+                "%d of %d capture chunks dropped behind a full pipe"
+                % (dropped, chunks))
+        finally:
+            finish()
 
 
 class TtsWavTest(unittest.TestCase):

@@ -179,7 +179,13 @@ A whisper.cpp server (see below) and a Piper server with the same request shape
 work too, so the local provider needs no particular speech service. The sidecar
 records and plays through the same audio backend as the WAV recorder. The
 energy detector is not acoustic echo cancellation: use headphones when the
-speaker is open.
+speaker is open. The microphone keeps being read while a reply plays, in blocks
+that drain a backlog rather than one tick at a time, and the reply is written by
+a player thread of its own: a long answer neither makes the capture fall behind
+nor hides the first word of a person speaking over it.
+
+[Why capture and playback are paced this way](design/live-voice-capture-pacing.md)
+has the measurements and the tests.
 
 The local stack in `scripts/stacks/voice-local/` runs whisper.cpp and
 Kokoro-FastAPI in containers on a network of its own, each published on a

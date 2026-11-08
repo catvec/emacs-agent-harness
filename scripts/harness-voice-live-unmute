@@ -46,7 +46,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness_voice_sidecar import (  # noqa: E402
-    AUDIO_AUTO, LOCAL_RATE, FakeEvents, Loop, NullAudio, Player, Recorder,
+    AUDIO_AUTO, CAPTURE_SECONDS, LOCAL_RATE, FakeEvents, Loop, NullAudio,
+    Player, Recorder,
     Sidecar, Vad, audio_backend_names, http_json, http_multipart, log,
     pcm_from_wav, self_test_audio, self_test_failed, self_test_ok, wav_from_pcm,
 )
@@ -209,7 +210,9 @@ class UnmuteSidecar(Sidecar):
             self.fail(self.recorder.error or "microphone unavailable")
             return
         self.tick_playback()
-        chunk = self.recorder.read(320)  # 20 ms at 16 kHz
+        # Up to 200 ms: a tick is 20 ms, so one read also drains a
+        # backlog rather than letting the capture pipe fill.
+        chunk = self.recorder.read(int(self.rate * CAPTURE_SECONDS))
         if chunk:
             if len(chunk) % 2:
                 chunk = chunk[:-1]

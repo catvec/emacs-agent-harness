@@ -48,6 +48,31 @@ Three rules follow from the table:
    session instead of waiting on a stream that will never speak. Before this,
    a dead `arecord` left a session that looked started and heard nothing.
 
+## Pacing: the capture loop must outrun the sound server
+
+PipeWire and PulseAudio cannot block a real-time capture. When the
+application stops reading the capture pipe, the server's buffer overruns
+and the microphone audio is dropped; the app then reads old audio and
+misses the present. Two rules keep the sidecars reading:
+
+- **A capture read takes up to 0.2 s (`CAPTURE_SECONDS`), not one tick's
+  worth.** The loop ticks about every 20 ms. A tick-sized read leaves no
+  room for a late tick: the deficit accumulates, the pipe fills, and the
+  server drops audio. Ten ticks of headroom drains the backlog instead.
+  A byte that ends a read in the middle of a PCM16 sample is carried to
+  the next read, so a split write cannot shift every later sample.
+- **Playback writes on its own thread.** A synthesized reply can be many
+  seconds long; the player's pipe holds about two. Writing it from the
+  sidecar's loop blocked that loop -- and the microphone and speech
+  detector with it -- for the rest of the reply. `Player.play` now
+  queues the audio and returns; the writer feeds the pipe. `stop`
+  clears the queue and kills the process at once, so barge-in is heard
+  while the assistant is speaking, and the selected backend is kept for
+  the next reply rather than consumed by the stop.
+
+[Why the capture loop and the player were changed](design/live-voice-capture-pacing.md)
+has the measurements, the alternatives and the tests.
+
 ## What was rejected
 
 - **A recorder of our own** (a ctypes binding to libpipewire or libpulse, or an
@@ -73,8 +98,11 @@ Three rules follow from the table:
   `audio_missing_reason()` (the one line naming what would fix it).
 - `Recorder` and `Player` take a backend name or `auto`. The recorder reads its
   pipe with `select` so a dead or stalled program is noticed instead of
-  blocking the sidecar's tick; `Player` starts the next backend when a write
-  breaks.
+  blocking the sidecar's tick, and asks for up to `CAPTURE_SECONDS` (0.2 s)
+  so one late tick cannot leave the pipe full; `Player` starts the next
+  backend when a write breaks, writes on a thread of its own so a long reply
+  never stops the capture loop, and keeps its backend across a `stop` so the
+  next reply plays.
 - `Recorder.exhausted()` tells a sidecar that nothing is left to try, so it can
   fail with a reason.
 - `self_test_audio()` checks the table and the failover with fake programs, so
@@ -121,9 +149,12 @@ Three rules follow from the table:
   exact setup-list copy with and without a backend, both sidecars' `--self-test`
   (which include the backend table and a failover through real subprocesses).
 - `test/harness-voice-gate-test.py`: the recorder's failover from a dead
-  `pw-record` to a working `parec`, the player writing through a backend, and
-  the real `harness-voice-live-unmute` process running the whole loop —
-  capture, detector, speech to text, delegation, text to speech, playback —
+  `pw-record` to a working `parec`, the recorder carrying a split sample,
+  the player writing through a backend, returning before a slow player
+  consumes a reply, and restarting after a stop, capture keeping up with
+  a full pipe, a reply not stopping the microphone, and the real
+  `harness-voice-live-unmute` process running the whole loop -- capture,
+  detector, speech to text, delegation, text to speech, playback --
   against fake `pw-record`/`pw-play` and a fake speech service.
 
 A task sandbox has no audio device and no working PipeWire graph, so the live

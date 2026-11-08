@@ -46,7 +46,11 @@ audio capture path, before the PCM is uploaded or queued for a model.
   next one.  The floor follows a quieter frame down faster than a louder
   one up and counts digital silence as a measurement, so an utterance
   leaves the configured threshold behind rather than a raised one; it is
-  frozen while the gate is open or the player is audible.
+  frozen while the gate is open or the player is audible.  The capture
+  loop reads up to 0.2 s per tick so a late tick cannot make the sound
+  server drop audio, and the player writes replies on its own thread, so
+  a long reply does not stop the detector: the gate sees the first word
+  of a person speaking over the assistant, not the end of the reply.
 - **GPT-Live adapter** (`scripts/harness-voice-live-gpt`): the same local
   detector runs on the microphone before audio is sent to the server.  The
   server's own VAD still decides its turns, but the local gate is what
@@ -301,6 +305,13 @@ synthetic fixtures and no microphone:
 - a false trigger that releases, a resumed voice that keeps the gate
   closed, mute dropping a late transcript, and stop/restart clearing the
   gate;
+- playback on its own thread: `play` returns before a slow player has
+  consumed the reply, a stop restarts the same backend for the next
+  reply, and a five-second reply drops no capture while the person
+  speaks over it;
+- capture pacing: a full capture pipe drains instead of dropping the
+  microphone, and a split sample is carried rather than shifting the
+  stream;
 - both a loud and a quieter utterance reaching a fake STT in order, and
   noise, hum and echo creating no utterance or self-interruption;
 - GPT-Live's own local gate dropping server audio while speech is active;

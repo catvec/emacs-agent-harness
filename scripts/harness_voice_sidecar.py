@@ -27,6 +27,7 @@ CI can check them without a microphone, a key or a network.
 
 import array
 import base64
+import collections
 import io
 import json
 import os
@@ -51,6 +52,13 @@ PROTOCOL = 1
 #: all accept PCM16 mono at these rates through the sidecar.
 GPT_RATE = 24000
 LOCAL_RATE = 16000
+
+#: How much audio one capture read asks for, in seconds.  A sidecar's loop
+#: ticks about every 20 ms, so a tick-sized read leaves no room for even
+#: one late tick: the pipe fills, and PipeWire or PulseAudio -- which
+#: cannot block a real-time capture -- overruns and drops the microphone.
+#: Ten ticks of headroom drains a backlog instead of adding to it.
+CAPTURE_SECONDS = 0.2
 
 
 def log(text):
@@ -326,11 +334,25 @@ class Player:
     the audio still queued, which the sidecar turns into
     ``speaking``/``listening``.
 
+    A writer thread feeds the player's pipe, so ``play`` returns at once.
+    Writing a reply straight from the sidecar's loop would block once the
+    pipe's buffer filled, and the microphone and the speech gate with it:
+    a person speaking over the assistant then could not be heard until
+    the reply was almost over.  The queue is bounded so a caller that
+    runs ahead of real time cannot grow it without limit.
+
     The player takes the first installed backend that starts.  One that
     dies is dropped and the next one is tried, so a missing aplay or a
     PipeWire session that stopped does not leave a silent session
-    behind: ``error`` says what happened.
+    behind: ``error`` says what happened.  ``stop`` keeps the selected
+    backend and the next ``play`` starts it again: an interruption, not
+    a broken service, must not leave the assistant mute.
     """
+
+    #: Most audio queued for the writer, in seconds.  Beyond it the
+    #: oldest audio is dropped, so a caller that never waits cannot grow
+    #: the queue without bound.
+    QUEUE_SECONDS = 120.0
 
     def __init__(self, rate=GPT_RATE, command=None, backend=AUDIO_AUTO):
         self.rate = rate
@@ -339,14 +361,20 @@ class Player:
         self.backend = None
         self.error = None
         self._candidates = None
+        self._candidate = 0
         self._process = None
         self._until = 0.0
+        self._queue = collections.deque()
+        self._queued = 0
+        self._writer = None
+        self._wake = threading.Event()
+        self._closing = False
         self._lock = threading.Lock()
         self.played = 0
         self._level = 0.0
 
     def candidates(self):
-        """Return the playback commands this player has still to try."""
+        """Return the playback commands this player may try, in order."""
         if self._candidates is None:
             if self.command:
                 self._candidates = [(self.command[0], self.command)]
@@ -368,48 +396,105 @@ class Player:
     def _start(self):
         """Start the next playback backend; called with the lock held."""
         pending = self.candidates()
-        while pending:
-            name, command = pending.pop(0)
-            if not shutil.which(command[0]):
-                continue
-            try:
-                process = subprocess.Popen(
-                    command, stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError as error:
-                self.error = "speaker failed · %s: %s" % (command[0], error)
-                continue
-            self.backend = name
-            self._process = process
-            self.error = None
-            log("playback · %s" % " ".join(command))
-            return True
+        while self._candidate < len(pending):
+            name, command = pending[self._candidate]
+            if shutil.which(command[0]):
+                try:
+                    process = subprocess.Popen(
+                        command, stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except OSError as error:
+                    self.error = "speaker failed · %s: %s" % (command[0], error)
+                else:
+                    self.backend = name
+                    self._process = process
+                    self.error = None
+                    log("playback · %s" % " ".join(command))
+                    return True
+            self._candidate += 1
+        # Every backend failed: a later play starts the list again rather
+        # than leaving the session mute after a transient failure.
+        self._candidate = 0
         if self.error is None:
             self.error = audio_missing_reason(self.requested, "playback")
         return False
 
     def play(self, pcm):
-        """Queue PCM16 bytes for playback."""
+        """Queue PCM16 bytes for playback and return at once."""
         if not pcm:
             return
         with self._lock:
-            if self._process is None or self._process.poll() is not None:
-                if not self._start():
-                    return
-            try:
-                self._process.stdin.write(pcm)
-                self._process.stdin.flush()
-            except (BrokenPipeError, ValueError) as error:
-                log("playback lost · %s: %s" % (self.backend, error))
-                self._discard()
+            if self._closing:
                 return
-            self.played += len(pcm)
+            self._queue.append(pcm)
+            self._queued += len(pcm)
+            limit = int(self.QUEUE_SECONDS * 2 * self.rate)
+            while self._queued > limit and len(self._queue) > 1:
+                dropped = self._queue.popleft()
+                self._queued -= len(dropped)
+                log("playback queue full · dropped %d bytes" % len(dropped))
             self._level = max(self._level * 0.6, pcm_energy(pcm))
-            self._until = max(time.monotonic(), self._until) + len(pcm) / (2.0 * self.rate)
+            self._until = (max(time.monotonic(), self._until)
+                           + len(pcm) / (2.0 * self.rate))
+            if self._writer is None or not self._writer.is_alive():
+                self._writer = threading.Thread(
+                    target=self._write_loop, name="voice-player", daemon=True)
+                self._writer.start()
+        self._wake.set()
+
+    def _write_loop(self):
+        """Write queued PCM to the player's pipe, off the sidecar's loop."""
+        while True:
+            with self._lock:
+                if self._closing:
+                    return
+                if not self._queue:
+                    chunk = None
+                    process = None
+                else:
+                    chunk = self._queue.popleft()
+                    self._queued -= len(chunk)
+                    if self._process is None or self._process.poll() is not None:
+                        self._discard()
+                        if not self._start():
+                            self._fail()
+                            continue
+                        # A new process starts with whatever is queued
+                        # now, so the projected end of playback is here,
+                        # not where the enqueue that preceded the stall
+                        # put it.
+                        self._until = time.monotonic() + (
+                            len(chunk) + self._queued) / (2.0 * self.rate)
+                    process = self._process
+            if chunk is None:
+                self._wake.wait(0.2)
+                self._wake.clear()
+                continue
+            try:
+                process.stdin.write(chunk)
+                process.stdin.flush()
+            except (BrokenPipeError, ValueError, OSError) as error:
+                log("playback lost · %s: %s" % (self.backend, error))
+                with self._lock:
+                    if process is self._process:
+                        self._discard()
+                        self._fail()
+                continue
+            with self._lock:
+                self.played += len(chunk)
+
+    def _fail(self):
+        """Forget queued audio after a backend failure; locked."""
+        self._queue.clear()
+        self._queued = 0
+        self._until = 0.0
 
     def busy(self):
         """Non-nil while the queued audio is still playing."""
-        return time.monotonic() < self._until
+        with self._lock:
+            if self._queue:
+                return True
+            return time.monotonic() < self._until
 
     def _discard(self):
         """Kill the playing process; called with the lock held."""
@@ -425,16 +510,35 @@ class Player:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             pass
+        try:
+            process.stdin.close()
+        except (BrokenPipeError, ValueError, OSError):
+            pass
 
     def stop(self):
         """Silence playback now and forget what was queued."""
         with self._lock:
+            self._queue.clear()
+            self._queued = 0
             self._discard()
 
     def close(self):
         """Stop playback and close the pipe."""
         with self._lock:
+            self._closing = True
+            self._queue.clear()
+            self._queued = 0
+            self._until = 0.0
             process, self._process = self._process, None
+            writer, self._writer = self._writer, None
+        self._wake.set()
+        if process is not None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        if writer is not None:
+            writer.join(timeout=2)
         if process is None:
             return
         try:
@@ -444,7 +548,7 @@ class Player:
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            self.stop()
+            pass
 
 
 class Recorder:
@@ -477,6 +581,7 @@ class Recorder:
         self._started = 0.0
         self._last = 0.0
         self._heard = 0
+        self._carry = b""
 
     def candidates(self):
         """Return the capture commands this recorder has still to try."""
@@ -518,6 +623,7 @@ class Recorder:
             self._process = process
             self._started = self._last = time.monotonic()
             self._heard = 0
+            self._carry = b""
             self.error = None
             log("capture · %s" % " ".join(command))
             return
@@ -525,7 +631,15 @@ class Recorder:
             self.error = audio_missing_reason(self.requested, "capture")
 
     def read(self, frames, timeout=0.2):
-        """Return about FRAMES samples as PCM16 bytes, or b"" when none yet."""
+        """Return up to FRAMES samples as PCM16 bytes, or b"" when none yet.
+
+        FRAMES is the most one call takes, not the amount it waits for:
+        reading what the pipe holds drains a backlog a late tick left
+        behind, where a tick-sized read would leave the pipe full and make
+        the sound server drop audio.  A byte that ends a read in the middle
+        of a sample is carried to the next one, so a split write cannot
+        shift every later sample by a byte.
+        """
         self.open()
         process = self._process
         if process is None or process.stdout is None:
@@ -540,9 +654,17 @@ class Recorder:
             except (OSError, ValueError):
                 chunk = b""
             if chunk:
-                self._heard += len(chunk)
+                heard = len(chunk)
+                if self._carry:
+                    chunk = self._carry + chunk
+                    self._carry = b""
+                if len(chunk) % 2:
+                    self._carry = chunk[-1:]
+                    chunk = chunk[:-1]
+                self._heard += heard
                 self._last = time.monotonic()
-                return chunk
+                if chunk:
+                    return chunk
         if process.poll() is not None:
             self._died(process)
         elif time.monotonic() - self._last > self.STALL_SECONDS:
@@ -553,6 +675,7 @@ class Recorder:
         """Forget PROCESS, remember why it ended, and free the next backend."""
         if process is self._process:
             self._process = None
+        self._carry = b""
         try:
             process.kill()
         except OSError:
@@ -562,6 +685,7 @@ class Recorder:
         except subprocess.TimeoutExpired:
             pass
         message = self._stderr_text(process) or reason
+        self._close_streams(process)
         if self._heard:
             self.error = "microphone stopped · %s%s" % (
                 self.backend or "recorder", _after(message))
@@ -583,9 +707,22 @@ class Recorder:
                  if line.strip()]
         return lines[-1][:200] if lines else ""
 
+    @staticmethod
+    def _close_streams(process):
+        """Close PROCESS's pipes after it ended."""
+        for stream in (getattr(process, "stdout", None),
+                       getattr(process, "stderr", None)):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
     def close(self):
         """Stop the recorder."""
         process, self._process = self._process, None
+        self._carry = b""
         if process is None:
             return
         try:
@@ -596,6 +733,7 @@ class Recorder:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             pass
+        self._close_streams(process)
 
 
 def _after(message):

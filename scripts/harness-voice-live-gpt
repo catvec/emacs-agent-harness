@@ -38,7 +38,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness_voice_sidecar import (  # noqa: E402
-    AUDIO_AUTO, AUDIO_BACKENDS, GPT_RATE, PROTOCOL, FakeConnection, FakeEvents,
+    AUDIO_AUTO, AUDIO_BACKENDS, CAPTURE_SECONDS, GPT_RATE, PROTOCOL,
+    FakeConnection, FakeEvents,
     NullAudio, Player, Recorder, Sidecar, Vad, WebSocket, audio_backend,
     audio_backend_names, log, self_test_audio, self_test_failed, self_test_ok,
 )
@@ -199,7 +200,9 @@ class GptSidecar(Sidecar):
             # Every backend died: say why instead of waiting on silence.
             self.fail(self.recorder.error or "microphone unavailable")
             return
-        chunk = self.recorder.read(1200)  # 50 ms at 24 kHz
+        # Up to 200 ms: one read drains a backlog instead of leaving the
+        # capture pipe to fill and the sound server to drop audio.
+        chunk = self.recorder.read(int(self.rate * CAPTURE_SECONDS))
         if not chunk:
             return
         if len(chunk) % 2:
