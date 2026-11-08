@@ -1918,16 +1918,16 @@ is no writing tool left to keep in view."
     (should (eq t (plist-get (harness-call 'tools/get "review_threads") :coalescable)))
     (should-not (harness-call 'tools/get "review_comment"))))
 
-(ert-deftest harness-patch-review-offers-its-tool-to-task-sessions-only ()
-  "A session that is no task's has no review to read."
+(ert-deftest harness-patch-review-offers-its-tools-to-navigation-sessions ()
+  "An ordinary assistant can read and open the review of an explicitly named task."
   (harness-patch-review-test-with
     (let* ((id (harness-patch-review-test--task))
            (task-session (harness-call 'session/get (plist-get (harness-call 'task/get id) :session)))
            (other (harness-call 'session/create :cwd default-directory)))
       (should (equal '("review_threads" "read_file")
                      (harness-run-filter 'agent/tools '("review_threads" "read_file") task-session)))
-      (should (equal '("read_file")
-                     (harness-run-filter 'agent/tools '("review_threads" "read_file")
+      (should (equal '("review_threads" "review_open" "read_file")
+                     (harness-run-filter 'agent/tools '("review_threads" "review_open" "read_file")
                                          (harness-call 'session/get (if (listp other) (plist-get other :id) other)))))
       (let ((result (harness-patch-review-test--tool "review_threads" nil id)))
         (should-not (plist-get result :is-error))))))

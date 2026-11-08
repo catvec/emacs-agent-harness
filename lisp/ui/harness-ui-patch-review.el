@@ -7586,6 +7586,224 @@ comments are written in the session that works on the task."
     (setq harness-ui-linking-handlers (assoc-delete-all "thread" harness-ui-linking-handlers)))
   (remove-hook 'harness-ui-linking-context-functions #'harness-ui-patch-review--link-context))
 
+;;;; Bounded navigation for the Emacs MCP endpoint
+
+(defvar harness-ui-patch-review--tool-requests (make-hash-table :test 'equal)
+  "The newest navigation token for each task, with its deadline.
+A tool request expires before the calling tool's thirty-second deadline,
+so a slow callback cannot open a view after the call reported a timeout.")
+
+(defun harness-ui-patch-review--tool-check (params options)
+  "Refuse stale, expired or disabled navigation with PARAMS and OPTIONS."
+  (unless harness-ui-patch-review--active (user-error "Review module unavailable"))
+  (let ((token (plist-get options :token)))
+    (unless (and (eq token (gethash (plist-get params :task) harness-ui-patch-review--tool-requests))
+                 (< (float-time) (car token)))
+      (user-error "Review navigation superseded or expired"))))
+
+(defun harness-ui-patch-review--tool-options (params)
+  "Validate PARAMS before a navigation request changes any review."
+  (let ((view (or (plist-get params :view) "changes"))
+        (diff (or (plist-get params :diff) "base"))
+        (filter (or (plist-get params :filter) "all")))
+    (unless (member view '("changes" "ediff" "threads"))
+      (user-error "Unknown review view: %s" view))
+    (unless (and (stringp (plist-get params :task))
+                 (not (string-blank-p (plist-get params :task))))
+      (user-error "Task required"))
+    (unless (and (stringp diff) (not (string-blank-p diff)))
+      (user-error "Diff required"))
+    (unless (member filter '("open" "closed" "all" "unreviewed" "reviewed"))
+      (user-error "Unknown thread filter: %s" filter))
+    (dolist (key '(:file :thread))
+      (when (plist-member params key)
+        (unless (and (stringp (plist-get params key))
+                     (not (string-blank-p (plist-get params key))))
+          (user-error "Nonblank %s required" (substring (symbol-name key) 1)))))
+    (when (or (plist-member params :line) (plist-member params :side))
+      (unless (and (equal view "ediff")
+                   (or (not (plist-member params :line))
+                       (and (integerp (plist-get params :line)) (> (plist-get params :line) 0)))
+                   (member (or (plist-get params :side) "new") '("old" "new")))
+        (user-error "Ediff line or side invalid")))
+    (list :view view :selector (cond ((equal diff "base") nil)
+                                    ((equal diff "since-review") 'since-review)
+                                    (t (harness-ui-patch-review--selector-of diff)))
+          :filter (intern filter))))
+
+(defun harness-ui-patch-review--tool-result (review params options buffer)
+  "Return the navigation receipt for REVIEW, PARAMS, OPTIONS and BUFFER."
+  (harness-ui-patch-review--tool-check params options)
+  (unless (and (buffer-live-p buffer) (get-buffer-window buffer t))
+    (user-error "Review view unavailable"))
+  (list :status "opened" :task (harness-ui-patch-review--r-id review)
+        :view (plist-get options :view) :buffer (buffer-name buffer)
+        :diff (or (plist-get params :diff) "base")
+        :old (harness-ui-patch-review--r-merge-base review)
+        :new (harness-ui-patch-review--r-tip review)
+        :files (mapcar #'change-review-file-path (harness-ui-patch-review--r-files review))
+        :threads (mapcar #'change-review-thread-id
+                         (change-review-set-threads (harness-ui-patch-review--r-set review)))))
+
+(defun harness-ui-patch-review--tool-target (review params options)
+  "Show the loaded REVIEW at PARAMS and OPTIONS; return a receipt or its promise."
+  (harness-ui-patch-review--tool-check params options)
+  (when (or (harness-ui-patch-review--r-loading review)
+            (harness-ui-patch-review--r-placing review))
+    (user-error "Review navigation superseded"))
+  (when-let* ((reason (or (harness-ui-patch-review--r-selection-error review)
+                         (harness-ui-patch-review--r-error review))))
+    ;; The interactive picker can retain an earlier diff on failure.  A
+    ;; tool must not silently open that earlier diff as the requested one.
+    (user-error "%s" reason))
+  (unless (equal (harness-ui-patch-review--r-shown-selector review) (plist-get options :selector))
+    (user-error "Review diff changed"))
+  (let* ((set (harness-ui-patch-review--r-set review))
+         (thread (when-let* ((id (plist-get params :thread)))
+                   (or (change-review-find-thread set id)
+                       (user-error "Unknown review thread: %s" id))))
+         (location (and thread (change-review-thread-location thread)))
+         (path (or (plist-get params :file)
+                   (and location (change-review-location-file location))))
+         (files (harness-ui-patch-review--r-files review))
+         (index (and path
+                     (cl-position-if
+                      (lambda (file) (or (equal path (change-review-file-path file))
+                                          (equal path (change-review-file-old-path file))))
+                      files)))
+         (view (plist-get options :view))
+         (filter (plist-get options :filter)))
+    (when (and path (null index))
+      (user-error "File outside selected diff: %s" path))
+    (when (and thread (plist-get params :file) location
+               (not (harness-ui-patch-review--location-file-p location (nth index files))))
+      (user-error "Thread outside selected file: %s" (change-review-thread-id thread)))
+    ;; Open all parents as well as the thread itself.  The report starts
+    ;; each file folded and may also have folded its entire threads section.
+    (harness-ui-patch-review--ensure-fold-round review)
+    (when (or path thread)
+      (puthash "threads" 'open (harness-ui-patch-review--r-folded review))
+      (change-review-ui-set-file-fold set (if thread (change-review-thread-file thread)
+                                           (change-review-file-path (nth index files))) nil t))
+    (when thread
+      (setq filter 'all)
+      (change-review-ui-set-fold set thread 'full t))
+    (cond
+     ((equal view "ediff")
+      (when (and thread (null path)) (user-error "Thread without a file"))
+      (setq index (or index (cl-position-if-not #'harness-ui-patch-review--incomparable files)))
+      (unless index (user-error "No comparable files in selected diff"))
+      (let* ((file (nth index files))
+             (why (harness-ui-patch-review--incomparable file))
+             (placement (and thread (change-review-placement set thread)))
+             (line (or (plist-get params :line) (plist-get placement :line)
+                       (and location (change-review-location-line location))))
+             (side (if (plist-member params :side)
+                       (intern (plist-get params :side))
+                     (or (plist-get placement :side)
+                         (and location (change-review-location-side location)) 'new))))
+        (when why (user-error "%s" why))
+        (let ((old (harness-ui-patch-review--r-merge-base review))
+              (new (harness-ui-patch-review--r-tip review)))
+          (harness-ui-patch-review--note-origin review)
+          ;; Unlike the interactive comparison, errors must reject this
+          ;; request.  Check the exact files and commits before displaying
+          ;; asynchronously fetched blobs, not merely the file's index.
+          (harness-then
+           (harness-all (list (harness-ui-patch-review--blob review (change-review-file-old-blob file))
+                              (harness-ui-patch-review--blob review (change-review-file-new-blob file))))
+           (lambda (texts)
+             (harness-ui-patch-review--tool-check params options)
+             (unless (and (eq files (harness-ui-patch-review--r-files review))
+                          (not (harness-ui-patch-review--r-loading review))
+                          (equal old (harness-ui-patch-review--r-merge-base review))
+                          (equal new (harness-ui-patch-review--r-tip review))
+                          (equal (plist-get options :selector) (harness-ui-patch-review--r-selector review)))
+               (user-error "Review diff changed"))
+             (harness-ui-patch-review--start-ediff
+              review index (nth 0 texts) (nth 1 texts) (harness-ui-patch-review--goto side line))
+             (let ((control (plist-get (harness-ui-patch-review--r-ediff review) :control)))
+               (when thread (harness-ui-patch-review--sync-thread review (change-review-thread-id thread)))
+               (append (harness-ui-patch-review--tool-result review params options control)
+                       (list :file (change-review-file-path file)))))))))
+     ((equal view "threads")
+      (let ((buffer (change-review-open-threads set filter)))
+        (with-current-buffer buffer
+          (setq default-directory (harness-ui-patch-review--link-directory review)))
+        (harness-ui-patch-review--install-quote-keys buffer)
+        (unless (and (buffer-live-p buffer) (get-buffer-window buffer t))
+          (user-error "Review view unavailable"))
+        (when thread
+          (unless (harness-ui-patch-review--goto-thread buffer (change-review-thread-id thread))
+            (user-error "Review thread unavailable")))
+        (when (and path (not thread))
+          (with-current-buffer buffer
+            (let* ((canonical (change-review-file-path (nth index files)))
+                   (pos (harness-ui-patch-review--find-property 'change-review-file canonical (point-min))))
+              (unless pos (user-error "No threads for selected file: %s" canonical))
+              (goto-char pos)
+              (set-window-point (get-buffer-window buffer t) pos))))
+        (harness-ui-patch-review--tool-result review params options buffer)))
+     (t
+      ;; The files were just read.  Opening the report must not trigger a
+      ;; second reading which could replace the requested diff under us.
+      (let ((harness-ui-patch-review--opening-box t))
+        (harness-ui-patch-review--open-task (harness-ui-patch-review--r-task review)))
+      (let ((buffer (harness-ui-popout-buffer (list 'report (harness-ui-patch-review--r-id review)))))
+        (unless (buffer-live-p buffer) (user-error "Review view unavailable"))
+        (with-current-buffer buffer
+          (when change-review-ui--redraw-function (change-review-ui-set-filter filter))
+          (when thread
+            (unless (harness-ui-patch-review--goto-thread buffer (change-review-thread-id thread))
+              (user-error "Review thread unavailable"))))
+        (when (and index (not thread))
+          (harness-ui-patch-review--reveal-path review (change-review-file-path (nth index files)))
+          (harness-ui-patch-review--refresh review t)
+          (with-current-buffer buffer
+            (let ((pos (harness-ui-patch-review--find-property
+                        'harness-ui-patch-review-file index (point-min))))
+              (unless pos (user-error "No report row for selected file"))
+              (goto-char pos)
+              (set-window-point (get-buffer-window buffer t) pos))))
+        (harness-ui-patch-review--tool-result review params options buffer))))))
+
+(defun harness-ui-patch-review-tool-open (params)
+  "Open a task's selected review view for a bounded MCP request PARAMS.
+Return a promise of the displayed view, never a queued-success receipt.
+Only task/get and patch-review/get use ACP; git reads local review data.
+No approvals, comments, feedback or other reviewer decisions are made."
+  (let* ((options (harness-ui-patch-review--tool-options params))
+         (token (list (+ (float-time) 25))))
+    (setq options (plist-put options :token token))
+    (puthash (plist-get params :task) token harness-ui-patch-review--tool-requests)
+    (harness-ui-patch-review--tool-check params options)
+    (harness-then
+     (harness-ui-request "_harness/task/get" (list :id (plist-get params :task)))
+     (lambda (task)
+       (harness-ui-patch-review--tool-check params options)
+       (unless (and (consp task) (equal (plist-get task :id) (plist-get params :task)))
+         (user-error "Unknown review task: %s" (plist-get params :task)))
+       (let ((review (harness-ui-patch-review--review-for task)))
+         (unless (harness-ui-patch-review--repository task)
+           (user-error "Local review repository unavailable"))
+         (unless (plist-get task :branch) (user-error "Task branch unavailable"))
+         (let ((harness-ui-patch-review-auto-approve nil))
+           (harness-ui-patch-review--end-ediff review))
+         (setf (harness-ui-patch-review--r-selector review) (plist-get options :selector)
+               (harness-ui-patch-review--r-started review) t
+               (harness-ui-patch-review--r-show review) t)
+         ;; Fetch with the request API, not the interactive sync's error
+         ;; callback, so an unavailable review rejects the tool's promise.
+         (harness-then
+          (harness-ui-request "_harness/patch-review/get" (list :task-id (plist-get task :id)))
+          (lambda (data)
+            (harness-ui-patch-review--tool-check params options)
+            (change-review-set-from-data data (harness-ui-patch-review--r-set review))
+            (setf (harness-ui-patch-review--r-synced review) t)
+            (harness-then
+             (harness-ui-patch-review--load review)
+             (lambda (_) (harness-ui-patch-review--tool-target review params options))))))))))
+
 ;;;; Module
 
 (defun harness-ui-patch-review--redraw-dropped ()

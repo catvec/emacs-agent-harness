@@ -2,7 +2,7 @@
 
 # tools-review
 
-The review_threads tool: a task's agent reads the threads of its review and answers them in <thread> blocks.
+Review threads and navigation: read review_threads and answer in <thread> blocks, or open a task's changes, Ediff or threads in the user's Emacs with review_open.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-tools-review.el](../../lisp/modules/harness-tools-review.el)
@@ -30,8 +30,11 @@ as many blocks as the agent has things to say in it, and every one is
 kept.  A block that names no thread starts one, on the change as a
 whole; status="closed" closes the thread, status="open" opens it again.
 
-The tool is offered to task sessions: a session that is no task's has no
-review (the filter `agent/tools` removes it), unless it names a task.
+Any session can name a task explicitly, so a voice-driven assistant
+can read and open its review without being the agent working on it.
+Omitting the task still means the calling session's own task.
+docs/review-navigation.md is the page for what may be opened, and why
+the vocabulary is fixed.
 
 The user's replies that quote the agent's words are comments in threads
 of the review too, and the message the agent reads names the thread each
@@ -49,6 +52,7 @@ joins the run of reads around it instead of cutting that run in two.
 
 ### Tools
 
+- `review_open` — Open a task's review in the user's Emacs: changes (the report and file tree), Ediff with its file tree and threads beside it, or the threads view. Use this when the user asks you to navigate the harness for them, including speech-to-text requests. Name any task by id, unique id prefix or exact name, or omit task for your own. diff selects base (the branch against its merge base), since-review, or git revisions such as main..task/fix or HEAD~2...HEAD. file is an exact repository-relative changed path, including the old name of a renamed file. thread is an id or unique prefix from review_threads; it is expanded and revealed even when closed. Ediff can start at a line on the old or new side; without a file it opens the thread's file or the first comparable file. The result arrives after the view opens and includes its buffer, actual commit ids, files and thread ids. Invalid targets or unavailable UI modules return errors, not success for a different diff. Navigation only: no approvals, feedback submission, permission answers or settings changes. Requires a connected Emacs with the review UI enabled.
 - `review_threads` — List the threads of comments in the review of your task's work: for each, its id, whether it is open or closed, where in the change it is, a link to it that you can put in a message, and the comments the user sent, with who wrote them. Use it to find the thread to answer when the feedback that sent the task back is no longer in your context: answer in your message with a <thread id="..."><quote>what you answer</quote>your answer</thread> block, and put status="closed" in the tag to close the thread. With status, only the open or only the closed threads; with task, another task's review.
 
 ## Uses
@@ -57,9 +61,4 @@ joins the run of reads around it instead of cutting that run in two.
 
 - `patch-review/threads-text` ([patch-review](patch-review.md)), when it is loaded
 - `task/for-session` ([tasks](tasks.md)), when it is loaded
-- `task/get` ([tasks](tasks.md)), when it is loaded
-
-### Filter chains it joins
-
-- `agent/tools` → `harness-tools-review--tools`
 

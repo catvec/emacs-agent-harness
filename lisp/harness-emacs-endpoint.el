@@ -62,6 +62,18 @@
 ;;     -> (:text)
 ;;   tools/call snapshot {cursor maxChars seconds release}
 ;;     -> (:chunk :next :done :variables :buffers :chars)
+;;   tools/call harness_views {}
+;;     -> (:views ((:view :label :available :requires) ...))
+;;   tools/call harness_open {view session task project}
+;;     -> (:view :status :buffer)
+;;   tools/call review_open {task view diff file thread line side filter}
+;;     -> (:status :task :view :buffer :diff :old :new :files :threads)
+;;
+;; Harness navigation uses fixed UI entry points in enabled modules.  It
+;; never calls an arbitrary command, enables a plugin, answers a pending
+;; request, or changes a review decision.  Async views return promises:
+;; a review receipt confirms the requested view, not a queued operation.
+;; docs/review-navigation.md is the page for what each may open.
 ;;
 ;; The reads are quick and bounded -- a buffer's text, a variable's
 ;; printed value and a definition's text stop at the size the harness
@@ -89,7 +101,8 @@
 ;; command or a function, and none evaluates what a model wrote.  What
 ;; an agent can do in this Emacs is what the list above says, and a
 ;; request that is not in it is refused, whatever it is called.  Every
-;; request is answered at once.  Lisp a model writes runs in the
+;; read is answered at once; async navigation yields to the event loop.
+;; Lisp a model writes runs in the
 ;; `elisp' tool's background Emacs instead (see harness-elisp.el), in the
 ;; sandbox a bash command runs in, never in the user's Emacs, where code
 ;; that blocks would freeze typing and redisplay.
@@ -1556,6 +1569,29 @@ PARAMS may name `:cursor', `:maxChars', `:seconds' and `:release'; see
 
 ;;;; Answering the harness
 
+(defun harness-emacs-endpoint--harness-views (_params)
+  "Return the fixed harness views available in this Emacs."
+  (unless (fboundp 'harness-ui-tool-views)
+    (error "Harness UI unavailable"))
+  (list :views (harness-ui-tool-views)))
+
+(defun harness-emacs-endpoint--harness-open (params)
+  "Open one named harness view with PARAMS, without running arbitrary commands."
+  (unless (fboundp 'harness-ui-tool-open-view)
+    (error "Harness UI unavailable"))
+  (harness-ui-tool-open-view params))
+
+(defun harness-emacs-endpoint--review-open (params)
+  "Open the review view named by PARAMS; return a promise of its actual result."
+  (unless (and (bound-and-true-p harness-ui-patch-review--active)
+               (fboundp 'harness-ui-patch-review-tool-open))
+    (error "Review module unavailable"))
+  (harness-ui-patch-review-tool-open params))
+
+(declare-function harness-ui-tool-views "harness-ui" ())
+(declare-function harness-ui-tool-open-view "harness-ui" (params))
+(declare-function harness-ui-patch-review-tool-open "harness-ui-patch-review" (params))
+
 (defconst harness-emacs-endpoint--methods
   '(("buffers" . harness-emacs-endpoint--buffers)
     ("windows" . harness-emacs-endpoint--windows)
@@ -1567,10 +1603,13 @@ PARAMS may name `:cursor', `:maxChars', `:seconds' and `:release'; see
     ("definition" . harness-emacs-endpoint--definition)
     ("trace" . harness-emacs-endpoint--trace)
     ("messages" . harness-emacs-endpoint--messages)
-    ("snapshot" . harness-emacs-endpoint--snapshot))
+    ("snapshot" . harness-emacs-endpoint--snapshot)
+    ("harness_views" . harness-emacs-endpoint--harness-views)
+    ("harness_open" . harness-emacs-endpoint--harness-open)
+    ("review_open" . harness-emacs-endpoint--review-open))
   "Tool name -> function of its arguments.
-This is the whole vocabulary: each tool answers at once, and none takes
-code to run.  They are the tools of `harness-emacs-endpoint-server'.")
+This is the whole vocabulary.  Navigation may return a promise; no tool
+takes code to run.  They are the tools of `harness-emacs-endpoint-server'.")
 
 (defconst harness-emacs-endpoint--tool-docs
   '(("buffers" . "List the live buffers of this Emacs: name, major mode, modified flag, size and visited file.")
@@ -1583,7 +1622,10 @@ code to run.  They are the tools of `harness-emacs-endpoint-server'.")
     ("definition" . "Return the source of a function, variable or face of this Emacs.")
     ("trace" . "Trace a function or watch a variable of this Emacs.")
     ("messages" . "Return the last lines of this Emacs's *Messages* buffer.")
-    ("snapshot" . "Return a copy of this Emacs's variables and buffers as text, in slices, credentials left out by name."))
+    ("snapshot" . "Return a copy of this Emacs's variables and buffers as text, in slices, credentials left out by name.")
+    ("harness_views" . "List the fixed harness views and whether their UI modules are enabled.")
+    ("harness_open" . "Open a named harness view without prompts or arbitrary commands.")
+    ("review_open" . "Open a task's changes, Ediff, or threads at a selected diff, file, thread or line. Wait for the requested review view before answering."))
   "What each tool of `harness-emacs-endpoint-server' says it does.")
 
 (defconst harness-emacs-endpoint--tool-schemas
@@ -1625,11 +1667,25 @@ code to run.  They are the tools of `harness-emacs-endpoint-server'.")
                    :properties (:cursor (:type "string")
                                 :maxChars (:type "integer" :minimum 1)
                                 :seconds (:type "number" :minimum 0.001)
-                                :release (:type "boolean")))))
+                                :release (:type "boolean"))))
+    ("harness_views" . (:type "object" :properties :empty))
+    ("harness_open" . (:type "object"
+                       :properties (:view (:type "string") :session (:type "string")
+                                    :task (:type "string") :project (:type "string"))
+                       :required ["view"]))
+    ("review_open" . (:type "object"
+                      :properties (:task (:type "string")
+                                   :view (:type "string" :enum ("changes" "ediff" "threads"))
+                                   :diff (:type "string") :file (:type "string")
+                                   :thread (:type "string")
+                                   :line (:type "integer" :minimum 1)
+                                   :side (:type "string" :enum ("old" "new"))
+                                   :filter (:type "string" :enum ("open" "closed" "all" "unreviewed" "reviewed")))
+                      :required ["task"])))
   "The JSON schema of each tool's arguments.")
 
 (defconst harness-emacs-endpoint--read-only-tools
-  '("buffers" "windows" "buffer" "describe" "definition" "messages" "snapshot")
+  '("buffers" "windows" "buffer" "describe" "definition" "messages" "snapshot" "harness_views")
   "The tools that change nothing in this Emacs.")
 
 (defun harness-emacs-endpoint-handle (name params)
@@ -1652,16 +1708,21 @@ Signal an error for a tool this Emacs refuses or does not know."
      :annotations (list :readOnlyHint (if (member name harness-emacs-endpoint--read-only-tools)
                                           t :false))
      :handler (lambda (arguments _context)
-                (let ((value (harness-emacs-endpoint-handle name arguments)))
-                  ;; The data goes as `structuredContent'; the text is for
-                  ;; a client that only reads text.
-                  (harness-mcp-call-result
-                   (if (plist-member value :chunk)
-                       (format "slice of %d characters%s"
-                               (length (plist-get value :chunk))
-                               (if (eq (plist-get value :done) t) ", the last" ""))
-                     (harness-truncate-end (format "%S" value) 2000))
-                   :structured value))))))
+                (let* ((value (harness-emacs-endpoint-handle name arguments))
+                       (finish
+                        (lambda (answer)
+                          ;; Data travels as structuredContent; text is for
+                          ;; a client that only reads text.
+                          (harness-mcp-call-result
+                           (if (plist-member answer :chunk)
+                               (format "slice of %d characters%s"
+                                       (length (plist-get answer :chunk))
+                                       (if (eq (plist-get answer :done) t) ", the last" ""))
+                             (harness-truncate-end (format "%S" answer) 2000))
+                           :structured answer))))
+                  (if (harness-promise-p value)
+                      (harness-then value finish)
+                    (funcall finish value)))))))
 
 (defvar harness-emacs-endpoint-server
   (harness-mcp-make-server
@@ -1690,10 +1751,23 @@ A message this Emacs refuses or cannot answer gets a JSON-RPC error."
              ((equal method harness-emacs-endpoint-mcp-method)
               (let ((response (harness-mcp-serve harness-emacs-endpoint-server
                                                  (plist-get params :message))))
-                ;; Once answered, a failure to send the answer is not
-                ;; answered with a second one.
-                (setq answered t)
-                (funcall respond response)))
+                ;; Review navigation waits for ACP and git.  Do not send a
+                ;; promise object as a response, or report success before
+                ;; the requested view exists.  A send failure is never
+                ;; answered with a second response.
+                (let ((send (lambda (value)
+                              (unless answered
+                                (setq answered t)
+                                (funcall respond value)))))
+                  (if (harness-promise-p response)
+                      (harness-then response send
+                                    (lambda (err)
+                                      (unless answered
+                                        (setq answered t)
+                                        (harness-acp-respond-error
+                                         respond harness-acp-error-method
+                                         (harness-error-message err)))))
+                    (funcall send response)))))
              (t (error "This Emacs answers no request %s"
                        (if (string-prefix-p harness-emacs-endpoint--prefix method)
                            (substring method (length harness-emacs-endpoint--prefix))

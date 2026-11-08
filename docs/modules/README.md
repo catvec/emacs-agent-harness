@@ -80,7 +80,7 @@ and supervisor load only when they are named.
  ;;gremlin            ; Slow, hanging, noisy, lying and boundary-testing chaos tools.
  ;;handin             ; The hand_in tool: a task session hands its finished work in and stops.
  ;;notify             ; Notification and Notification providers: agents reach the user through…
- ;;review             ; The review_threads tool: a task's agent reads the threads of its…
+ ;;review             ; Review threads and navigation: read review_threads and answer in…
  ;;sessions           ; Tools to list, search, read, message, control, move and wait on…
  ;;ssh                ; SSH: shell commands on another host, through TRAMP.
  ;;web                ; Web search (pluggable providers, Brave built in; else the model…
@@ -182,7 +182,7 @@ and supervisor load only when they are named.
 | [tools](tools.md) | by default |  | Tool registry, permission-gated execution and context-bomb guard. |
 | [tools-agent](tools-agent.md) | by default | [tools](tools.md), [session](session.md), [agent](agent.md) | The Sub-agent tool (spawn_agent), and the Planning section of the system prompt. |
 | [tools-compact](tools-compact.md) |  | [tools](tools.md), [compaction](compaction.md) | The compact tool: an agent compacts its own conversation, on a running turn by queueing it or interrupting it. |
-| [tools-emacs](tools-emacs.md) | by default | [tools](tools.md) | List buffers, List windows, Read buffer, Open buffer, Insert text, Save buffer, Describe symbol, Find definition, Trace symbol and Emacs messages: bounded tools into the user's Emacs, without evaluation. |
+| [tools-emacs](tools-emacs.md) | by default | [tools](tools.md) | Bounded tools into the user's Emacs without evaluation: buffers, windows, text, symbols, traces and messages, plus harness_views and harness_open for discovering and opening harness pages. |
 | [tools-events](tools-events.md) |  | [tools](tools.md), [session](session.md), [agent](agent.md), [tools-sessions](tools-sessions.md) | watch_events and unwatch_events: a session watches harness events, and a cheap model decides which call for it to act. |
 | [tools-fs](tools-fs.md) | by default | [tools](tools.md) | Read file, Write file, Edit file, List directory, Find files, Search files and File info. |
 | [tools-gremlin](tools-gremlin.md) |  | [tools](tools.md), [gremlin](gremlin.md) | Slow, hanging, noisy, lying and boundary-testing chaos tools. |
@@ -190,7 +190,7 @@ and supervisor load only when they are named.
 | [tools-notify](tools-notify.md) |  | [tools](tools.md), [notifications](notifications.md) | Notification and Notification providers: agents reach the user through the notifications module. |
 | [tools-plan](tools-plan.md) | by default | [tools](tools.md), [session](session.md) | The Plan tool: record a plan for a complex task, shown to the user. |
 | [tools-question](tools-question.md) | by default | [tools](tools.md), [session](session.md) | The Question tool (ask_user), and the questions the harness asks the user itself. |
-| [tools-review](tools-review.md) |  | [tools](tools.md), [session](session.md) | The review_threads tool: a task's agent reads the threads of its review and answers them in <thread> blocks. |
+| [tools-review](tools-review.md) |  | [tools](tools.md), [session](session.md) | Review threads and navigation: read review_threads and answer in <thread> blocks, or open a task's changes, Ediff or threads in the user's Emacs with review_open. |
 | [tools-session-info](tools-session-info.md) | by default | [tools](tools.md), [session](session.md) | The Session info tool (session_info): the current session and its live access, described to the model. |
 | [tools-sessions](tools-sessions.md) |  | [tools](tools.md), [session](session.md), [agent](agent.md) | Tools to list, search, read, message, control, move and wait on sessions and tasks. |
 | [tools-shell](tools-shell.md) | by default | [tools](tools.md) | Bash (asynchronous, sandboxed when available) and Emacs Lisp evaluation. |
@@ -418,7 +418,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50), [thread-reply](thread-reply.md) (60) |
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50) |
 | `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [memory](memory.md) (55), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40), [workspace](workspace.md) (50) |
-| `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [tools-review](tools-review.md) (50), [workspace-knowledge](workspace-knowledge.md) (40) |
+| `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [workspace-knowledge](workspace-knowledge.md) (40) |
 | `naming/auto-p` | [naming](naming.md) | [tasks](tasks.md) (50) |
 | `naming/system-prompt` | [naming](naming.md) | [tasks](tasks.md) (60) |
 | `notification/before-send` | [notifications](notifications.md) |  |

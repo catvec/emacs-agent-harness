@@ -7500,7 +7500,7 @@ checks that."
   (let ((default-directory harness-test-root)
         (known '("harness-ui-patch-review.el" "harness-patch-review.el"
                  "harness-thread-reply.el"
-                 "harness-tools-review.el" "harness-acp.el")))
+                 "harness-tools-review.el" "harness-emacs-endpoint.el" "harness-acp.el")))
     (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
                                 (append (list "harness.el")
                                         (directory-files "lisp" t "\\.el\\'")
@@ -7559,6 +7559,268 @@ Both line comments' after-strings and file comments' before-strings count."
                       (should buffer-read-only)
                       (should-not (buffer-modified-p))))
                 (kill-buffer buffer)))))))))
+
+;;;; Bounded tool navigation
+
+(defmacro harness-ui-patch-review-test-with-tool-review (&rest body)
+  "Run BODY with a local `task', `review' and its wire `data' in `repo'.
+Only ACP fixture responses are stubbed; git, drawing and Ediff are real.
+BODY may replace DATA after adding threads or versions to REVIEW."
+  (declare (indent 0))
+  `(let ((harness-ui-patch-review--reviews (make-hash-table :test 'equal))
+         (harness-ui-popout--buffers (make-hash-table :test 'equal))
+         (harness-ui-popout--drafts (make-hash-table :test 'equal))
+         (harness-ui-report--reports (make-hash-table :test 'equal))
+         (harness-ui-report--folds (make-hash-table :test 'equal))
+         (harness-ui-report-panel-functions '(harness-ui-patch-review--panel))
+         (harness-ui-report-compose-functions nil)
+         (harness-ui-patch-review--active t)
+         (harness-ui-patch-review-auto-approve nil)
+         (harness-ui-patch-review-ediff-tree nil)
+         (harness-ui-patch-review-ediff-box-height nil)
+         (harness-ui-default-position 'full)
+         (change-review-ui-sets nil)
+         (buffers-before (buffer-list))
+         (height (frame-height)))
+     (unwind-protect
+         (progn
+           (set-frame-height nil 44)
+           (harness-ui-patch-review-test-with-repo
+             (let* ((task (harness-ui-patch-review-test--task repo :cwd repo))
+                    (review (harness-ui-patch-review-test--review repo))
+                    (data (change-review-set-to-data (harness-ui-patch-review--r-set review))))
+               (cl-letf (((symbol-function 'harness-ui-request)
+                          (lambda (method params)
+                            (pcase method
+                              ("_harness/task/get"
+                               (should (equal (list :id (plist-get task :id)) params))
+                               (harness-resolved task))
+                              ("_harness/patch-review/get"
+                               (should (equal (list :task-id (plist-get task :id)) params))
+                               (harness-resolved data))
+                              (_ (harness-make-promise))))))
+                 (unwind-protect
+                     (progn ,@body)
+                   (unwind-protect
+                       (maphash (lambda (_id item) (harness-ui-patch-review--forget item))
+                                (copy-hash-table harness-ui-patch-review--reviews))
+                     ;; A report is a selected side window: close it before
+                     ;; the repository fixture's final delete-other-windows.
+                     (harness-ui-popout-close (list 'report (plist-get task :id)))
+                     (when-let* ((window (cl-find-if-not
+                                          (lambda (item) (window-parameter item 'window-side))
+                                          (window-list))))
+                       (select-window window))))))))
+       (dolist (buffer (buffer-list))
+         (when (and (not (memq buffer buffers-before))
+                    (memq (buffer-local-value 'major-mode buffer)
+                          '(harness-ui-popout-mode change-review-threads-mode)))
+           (kill-buffer buffer)))
+       (set-frame-height nil height))))
+
+(defun harness-ui-patch-review-test--tool-result (promise)
+  "Await PROMISE and check its receipt names a real, displayed buffer."
+  (should (harness-promise-p promise))
+  (let* ((result (harness-test-await promise))
+         (buffer (get-buffer (plist-get result :buffer))))
+    (should (equal "opened" (plist-get result :status)))
+    (should (equal "t-patch" (plist-get result :task)))
+    (should (buffer-live-p buffer))
+    (should (window-live-p (get-buffer-window buffer t)))
+    result))
+
+(ert-deftest harness-ui-patch-review-tool-open-awaits-the-selected-real-diff ()
+  "No receipt before the data arrives; custom and base diffs really differ."
+  (harness-ui-patch-review-test-with-tool-review
+    (let ((request (symbol-function 'harness-ui-request))
+          (response (harness-make-promise)))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (method params)
+                   (if (equal method "_harness/patch-review/get") response
+                     (funcall request method params)))))
+        (let ((promise (harness-ui-patch-review-tool-open
+                        '(:task "t-patch" :view "changes" :diff "main..task/fix" :file "keep.el"))))
+          (should (harness-promise-p promise))
+          (should-not (harness-promise-settled-p promise))
+          (should-not (harness-ui-popout-buffer '(report "t-patch")))
+          (harness-resolve response data)
+          (let* ((result (harness-ui-patch-review-test--tool-result promise))
+                 (buffer (get-buffer (plist-get result :buffer))))
+            (should (equal "changes" (plist-get result :view)))
+            (should (equal "main..task/fix" (plist-get result :diff)))
+            (should (equal (harness-ui-patch-review-test--git repo "rev-parse" "main")
+                           (plist-get result :old)))
+            (should (equal (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")
+                           (plist-get result :new)))
+            (should (equal '("a.el" "b.el" "d.el" "docs/é.txt" "img.bin" "keep.el" "new.el")
+                           (plist-get result :files)))
+            (should-not (plist-get result :threads))
+            (should (eq buffer (harness-ui-patch-review--r-popout review)))
+            (should-not (harness-ui-patch-review--r-loading review))
+            (should-not (harness-ui-patch-review--r-placing review))
+            (with-current-buffer buffer
+              (should (derived-mode-p 'harness-ui-popout-mode))
+              (should (equal 5 (get-text-property (point) 'harness-ui-patch-review-file)))
+              (should (= (point) (window-point (get-buffer-window buffer t)))))))))
+    ;; An exact nested Unicode path is revealed even in the folded file tree.
+    (let* ((result (harness-ui-patch-review-test--tool-result
+                    (harness-ui-patch-review-tool-open
+                     '(:task "t-patch" :view "changes" :diff "base" :file "docs/é.txt"))))
+           (buffer (get-buffer (plist-get result :buffer))))
+      (should (equal "base" (plist-get result :diff)))
+      (should (equal (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix")
+                     (plist-get result :old)))
+      (should (equal '("a.el" "b.el" "d.el" "docs/é.txt" "img.bin" "new.el")
+                     (plist-get result :files)))
+      (should-not (harness-ui-patch-review--r-shown-selector review))
+      (should-not (string-search "keep.el" (harness-ui-patch-review-test--text buffer)))
+      (with-current-buffer buffer
+        (should (equal 3 (get-text-property (point) 'harness-ui-patch-review-file)))
+        (should (string-search "é.txt" (buffer-substring-no-properties (line-beginning-position) (line-end-position))))))))
+
+(ert-deftest harness-ui-patch-review-tool-open-since-review-uses-the-earlier-commit ()
+  "The since-review receipt and report describe the actual subsequent commit."
+  (harness-ui-patch-review-test-with-tool-review
+    (let ((first (harness-ui-patch-review--r-tip review)))
+      (harness-ui-patch-review-test--advance repo)
+      (let* ((result (harness-ui-patch-review-test--tool-result
+                      (harness-ui-patch-review-tool-open
+                       '(:task "t-patch" :view "changes" :diff "since-review" :file "a.el"))))
+             (text (harness-ui-patch-review-test--text (get-buffer (plist-get result :buffer)))))
+        (should (equal "since-review" (plist-get result :diff)))
+        (should (equal first (plist-get result :old)))
+        (should (equal (harness-ui-patch-review-test--git repo "rev-parse" "task/fix")
+                       (plist-get result :new)))
+        (should-not (equal (plist-get result :old) (plist-get result :new)))
+        (should (equal '("a.el") (plist-get result :files)))
+        (should (eq 'since-review (harness-ui-patch-review--r-shown-selector review)))
+        (should (string-search
+                 (format "▾ Changes (1)   0 of 1 file viewed, 1 left   task/fix since v1 @ %s   +4 −1"
+                         (substring first 0 7)) text))
+        (should-not (string-search "b.el" text))))))
+
+(ert-deftest harness-ui-patch-review-tool-open-ediff-targets-old-name-and-either-side ()
+  "A rename's old name and explicit old/new lines reach real Ediff versions."
+  (harness-ui-patch-review-test-with-tool-review
+    (let (previous)
+      (pcase-dolist (`(,requested ,actual ,side ,line ,old-text ,new-text)
+                     '(("c.el" "d.el" "old" 6 "(setq c6 6)" "(setq c6 'six)")
+                       ("a.el" "a.el" "new" 18 "(setq a18 18)" "(setq a18 'eighteen)")))
+        (let* ((result (harness-ui-patch-review-test--tool-result
+                        (harness-ui-patch-review-tool-open
+                         (list :task "t-patch" :view "ediff" :file requested :side side :line line))))
+               (state (harness-ui-patch-review--r-ediff review))
+               (control (get-buffer (plist-get result :buffer)))
+               (old (plist-get state :a))
+               (new (plist-get state :b))
+               (target (if (equal side "old") old new)))
+          (should (equal "ediff" (plist-get result :view)))
+          (should (equal "base" (plist-get result :diff)))
+          (should (equal actual (plist-get result :file)))
+          (should (eq control (plist-get state :control)))
+          (should (eq 'ediff-mode (buffer-local-value 'major-mode control)))
+          (should (equal actual (change-review-file-path
+                                 (nth (plist-get state :index) (harness-ui-patch-review--r-files review)))))
+          (should (buffer-live-p old))
+          (should (buffer-live-p new))
+          (should (window-live-p (get-buffer-window target t)))
+          (with-current-buffer target
+            (should (= line (line-number-at-pos (window-point (get-buffer-window target t))))))
+          (dolist (version (list (cons old old-text) (cons new new-text)))
+            (with-current-buffer (car version)
+              (save-excursion
+                (goto-char (point-min))
+                (forward-line (1- line))
+                (should (equal (cdr version)
+                               (buffer-substring-no-properties (line-beginning-position) (line-end-position)))))))
+          (dolist (buffer previous) (should-not (buffer-live-p buffer)))
+          (setq previous (list control old new))
+          (should (zerop (hash-table-count (harness-ui-patch-review--r-approved review)))))))))
+
+(ert-deftest harness-ui-patch-review-tool-open-reveals-a-closed-thread-by-prefix ()
+  "Named closed threads are full and targeted, without changing their status."
+  (harness-ui-patch-review-test-with-tool-review
+    (let* ((harness-ui-patch-review-ediff-tree t)
+           (set (harness-ui-patch-review--r-set review))
+           (body (concat "Who used b3?\n" (apply #'concat (make-list 14 "Closed-thread detail.\n"))
+                         "Final closed-thread detail."))
+           (comment (harness-ui-patch-review-test--comment-on review "b.el" '(:old . 3) body))
+           (thread (harness-ui-patch-review-test--thread-of review comment))
+           (id (change-review-thread-id thread))
+           (prefix (substring id 0 (1- (length id)))))
+      (change-review-close set thread)
+      (setq data (change-review-set-to-data set))
+      (dolist (view '("changes" "threads" "ediff"))
+        (ert-info ((format "Closed thread in %s" view))
+          (change-review-ui-set-fold set (change-review-find-thread set id) 'collapsed)
+          (let* ((result (harness-ui-patch-review-test--tool-result
+                          (harness-ui-patch-review-tool-open
+                           (list :task "t-patch" :view view :thread prefix :filter "open"))))
+                 (thread (change-review-find-thread set id))
+                 (buffer (if (equal view "ediff") (harness-ui-patch-review--threads-pane-buffer review)
+                           (get-buffer (plist-get result :buffer)))))
+            (should (equal view (plist-get result :view)))
+            (should (equal (list id) (plist-get result :threads)))
+            (should (eq 'closed (change-review-thread-status thread)))
+            (should (eq 'full (change-review-ui-thread-fold set thread)))
+            (should (buffer-live-p buffer))
+            (should (window-live-p (get-buffer-window buffer t)))
+            (should (harness-ui-patch-review-test--at-thread-p buffer id))
+            (with-current-buffer buffer
+              (should (eq 'all change-review-ui--filter))
+              (should (= (point) (window-point (get-buffer-window buffer t)))))
+            (should (string-search "Final closed-thread detail." (harness-ui-patch-review-test--text buffer)))
+            (when (equal view "ediff")
+              (let* ((state (harness-ui-patch-review--r-ediff review))
+                     (old (plist-get state :a)))
+                (should (equal "b.el" (plist-get result :file)))
+                (should (equal id (plist-get state :thread)))
+                (with-current-buffer old
+                  (should (= 3 (line-number-at-pos (window-point (get-buffer-window old t))))))))))))))
+
+(ert-deftest harness-ui-patch-review-tool-open-rejects-an-invalid-diff-not-the-retained-one ()
+  "A failed revision selection is a rejected promise, not a base-diff receipt."
+  (harness-ui-patch-review-test-with-tool-review
+    (harness-ui-patch-review-test--tool-result
+     (harness-ui-patch-review-tool-open '(:task "t-patch" :view "changes")))
+    (let* ((files (harness-ui-patch-review--r-files review))
+           (error (should-error
+                   (harness-test-await
+                    (harness-ui-patch-review-tool-open
+                     '(:task "t-patch" :view "ediff" :diff "missing..task/fix" :file "a.el")))
+                   :type 'user-error)))
+      (should (equal (harness-ui-patch-review--r-selection-error review) (error-message-string error)))
+      (should (string-match-p "\\`Could not show the diff .missing\\.\\.task/fix.: There is no commit .missing. in"
+                              (error-message-string error)))
+      (should (eq files (harness-ui-patch-review--r-files review)))
+      (should-not (harness-ui-patch-review--r-shown-selector review))
+      (should-not (harness-ui-patch-review--r-ediff review)))))
+
+(ert-deftest harness-ui-patch-review-tool-open-rejects-targets-outside-the-diff ()
+  "Paths are exact and inside the selected diff; missing threads are errors."
+  (harness-ui-patch-review-test-with-tool-review
+    (pcase-dolist (`(,params ,message)
+                   '(((:view "changes" :file "a") "File outside selected diff: a")
+                     ((:view "ediff" :file "missing.el") "File outside selected diff: missing.el")
+                     ((:view "changes" :file "keep.el") "File outside selected diff: keep.el")
+                     ((:view "threads" :thread "t-missing") "Unknown review thread: t-missing")
+                     ((:view "ediff" :file "img.bin") "img.bin is binary: Ediff compares text")))
+      (let ((error (should-error
+                    (harness-test-await
+                     (harness-ui-patch-review-tool-open (append '(:task "t-patch") params)))
+                    :type 'user-error)))
+        (should (equal message (error-message-string error)))
+        (should-not (harness-ui-patch-review--r-ediff review))))
+    (let* ((comment (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (id (change-review-thread-id (harness-ui-patch-review-test--thread-of review comment))))
+      (setq data (change-review-set-to-data (harness-ui-patch-review--r-set review)))
+      (let ((error (should-error
+                    (harness-test-await
+                     (harness-ui-patch-review-tool-open
+                      (list :task "t-patch" :view "ediff" :file "d.el" :thread id)))
+                    :type 'user-error)))
+        (should (equal (concat "Thread outside selected file: " id) (error-message-string error)))
+        (should-not (harness-ui-patch-review--r-ediff review))))))
 
 (provide 'harness-ui-patch-review-test)
 ;;; harness-ui-patch-review-test.el ends here

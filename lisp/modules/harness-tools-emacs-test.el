@@ -782,5 +782,54 @@ with input its tool takes, so they can be tried live without a model."
       (should (eq 'write (harness-tool-kind tool)))
       (should-not (harness-tool-coalescable tool)))))
 
+;;;; Named harness navigation
+
+(ert-deftest harness-tools-emacs-navigation-defaults-and-receipts ()
+  "Targets are canonicalized here; view selection stays in the lent Emacs."
+  (harness-tools-emacs-test--setup)
+  (harness-test-with-temp-state
+    (let (seen)
+      (cl-letf (((symbol-function 'harness-tools-ask-emacs)
+                 (lambda (method params &rest _)
+                   (push (list method params) seen)
+                   (harness-resolved (if (equal method "harness_views")
+                                         '(:views ((:view "server" :label "Server" :available t :requires nil)))
+                                       '(:view "session" :buffer "*Chat*" :status "opened")))))
+                ((symbol-function 'harness-method-exists-p) (lambda (_) t))
+                ((symbol-function 'harness-call)
+                 (lambda (method &rest _)
+                   (pcase method
+                     ('session/list '((:id "s-123" :name "Voice assistant")))
+                     ('task/list '((:id "t-123" :name "Fix the flaky test")))))))
+        (let ((r (harness-test-await
+                  (harness-tools-emacs--harness-open '(:view "session" :session "Voice assistant")
+                                                     (list :session-id "own" :cwd default-directory)))))
+          (should-not (plist-get r :is-error))
+          (should (equal '(:view "session" :buffer "*Chat*" :status "opened")
+                         (harness-json-parse (plist-get r :content))))
+          (should (equal "s-123" (plist-get (cadar seen) :session))))
+        ;; A spoken task title resolves without its id.
+        (harness-test-await (harness-tools-emacs--harness-open '(:view "report" :task "fix the flaky TEST")
+                                                             (list :session-id "own" :cwd default-directory)))
+        (should (equal "t-123" (plist-get (cadar seen) :task)))
+        (harness-test-await (harness-tools-emacs--harness-open '(:view "tasks")
+                                                             (list :session-id "own" :cwd default-directory)))
+        (should (equal (expand-file-name default-directory) (plist-get (cadar seen) :project)))
+        (should (equal "own" (plist-get (cadar seen) :session)))
+        (let ((r (harness-test-await (harness-tools-emacs--views nil nil))))
+          (should (equal "Server" (plist-get (car (plist-get (harness-json-parse (plist-get r :content)) :views)) :label))))))
+    (should (equal "Harness views" (plist-get (harness-call 'tools/get "harness_views") :label)))
+    (should (equal "Open harness view: tasks" (harness-tool-title "harness_open" '(:view "tasks"))))))
+
+(ert-deftest harness-tools-emacs-navigation-invalid-session-stays-local ()
+  "Unknown and ambiguous session references never cause an Emacs request."
+  (harness-tools-emacs-test--setup)
+  (cl-letf (((symbol-function 'harness-call)
+             (lambda (&rest _) '((:id "s-111" :name "Voice") (:id "s-112" :name "Voice"))))
+            ((symbol-function 'harness-tools-ask-emacs) (lambda (&rest _) (ert-fail "Invalid target sent"))))
+    (dolist (ref '("Voice" "s-11" "absent"))
+      (let ((r (harness-tools-emacs--harness-open (list :view "session" :session ref) nil)))
+        (should (plist-get r :is-error))))))
+
 (provide 'harness-tools-emacs-test)
 ;;; harness-tools-emacs-test.el ends here

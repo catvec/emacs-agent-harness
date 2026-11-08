@@ -442,6 +442,31 @@ SESSION-ID and `default-directory' as its `:cwd'."
         (concat host p)
       p)))
 
+(defun harness-tools-resolve-task (ref)
+  "Return the id of the task REF names, or signal `user-error'.
+REF is a task's exact id, a unique prefix of an id, or its exact name
+compared without case: a request spoken or typed by hand names a task by
+its title far more easily than by its id.  `user-error' says when REF
+names no task or more than one; nil is for a blank REF."
+  (when (and (stringp ref) (not (string-blank-p ref)))
+    (when (harness-method-exists-p 'task/list)
+      (let* ((tasks (harness-call 'task/list))
+             (exact (cl-find ref tasks :key (lambda (task) (plist-get task :id))
+                             :test #'equal))
+             (matches (or (and exact (list exact))
+                          (cl-remove-if-not (lambda (task)
+                                              (string-prefix-p ref (plist-get task :id)))
+                                            tasks)
+                          (cl-remove-if-not (lambda (task)
+                                              (and (stringp (plist-get task :name))
+                                                   (equal (downcase ref)
+                                                          (downcase (plist-get task :name)))))
+                                            tasks))))
+        (pcase (length matches)
+          (1 (plist-get (car matches) :id))
+          (0 (user-error "Unknown task: %s" ref))
+          (_ (user-error "Ambiguous task: %s" ref)))))))
+
 (defun harness-tools--request-path (path ctx)
   "Return PATH absolute under CTX, for the permission chain.
 As `harness-tools-resolve-path' does, but nothing may connect: the

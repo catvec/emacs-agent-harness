@@ -4828,6 +4828,165 @@ from a callback (`harness-ui--call-with-display-override')."
   "Read a position name with completion."
   (intern (completing-read "Position: " (mapcar (lambda (p) (symbol-name (car p))) harness-ui-positions) nil t)))
 
+;;;; Bounded navigation for tools
+
+(declare-function harness-ui-report-popout "harness-ui-report" (task))
+(declare-function harness-ui-pending-popout "harness-ui-pending" (session-id &optional keep-pos))
+(declare-function harness-tree "harness-ui-tree" (&optional session-id))
+(declare-function harness-access "harness-ui-access" (&optional session-id section))
+(declare-function harness-worktrees "harness-ui-worktree" (&optional root))
+(declare-function harness-settings "harness-ui-config" (&optional directory scope))
+(declare-function harness-server "harness-ui-server" ())
+(declare-function harness-slots "harness-ui-slots" (&optional dir))
+
+(defconst harness-ui-tool--views
+  '((:view "sessions" :label "Sessions" :requires "project"
+     :modules (ui-sessions) :function harness-sessions :mode harness-ui-sessions-mode)
+    (:view "session" :label "Session" :requires "session"
+     :modules (ui-chat) :function harness-ui-display-session :mode harness-chat-mode)
+    (:view "tasks" :label "Tasks" :requires "project"
+     :modules (ui-tasks) :function harness-tasks :mode harness-ui-tasks-mode)
+    (:view "report" :label "Task report" :requires "task"
+     :modules (ui-report ui-popout) :function harness-ui-report-popout)
+    (:view "pending" :label "Pending requests" :requires "session"
+     :modules (ui-pending ui-popout) :function harness-ui-pending-popout)
+    (:view "tree" :label "Conversation tree" :requires "session"
+     :modules (ui-tree) :function harness-tree :mode harness-ui-tree-mode)
+    (:view "access" :label "Access" :requires "session"
+     :modules (ui-access) :function harness-access :mode harness-ui-access-mode)
+    (:view "worktrees" :label "Worktrees" :requires "project"
+     :modules (ui-worktree) :function harness-worktrees :mode harness-ui-worktree-mode)
+    (:view "settings" :label "Settings" :requires "project"
+     :modules (ui-config) :function harness-settings :mode harness-ui-config-mode)
+    (:view "server" :label "Server" :requires nil
+     :modules (ui-server) :function harness-server :mode harness-ui-server-mode)
+    (:view "usage" :label "Usage" :requires nil
+     :modules (ui-usage) :function harness-usage :mode harness-ui-usage-mode)
+    (:view "slots" :label "Task slots" :requires "project"
+     :modules (ui-slots) :function harness-slots :mode harness-ui-slots-mode))
+  "The fixed vocabulary of views a tool may open.
+No entry takes a command, code, a module to load or an interactive
+argument.  The modules must be running in this Emacs; a function left
+behind by a disabled module is not an available view.")
+
+(defun harness-ui-tool--defined-p (function)
+  "Non-nil when FUNCTION is defined in this Emacs now, not an autoload."
+  (let ((definition (if (symbolp function)
+                        (and (fboundp function) (indirect-function function))
+                      function)))
+    (and (functionp definition) (not (autoloadp definition)))))
+
+(defun harness-ui-tool--available-p (entry)
+  "Non-nil when the fixed view ENTRY can be opened without loading code."
+  (and (cl-every #'harness-module-ready-p (plist-get entry :modules))
+       (harness-ui-tool--defined-p (plist-get entry :function))
+       (or (not (equal (plist-get entry :view) "session"))
+           (harness-ui-tool--defined-p harness-ui-open-session-function))))
+
+(defun harness-ui-tool-views ()
+  "Return the fixed views a tool may open, with their live availability.
+Each plist has :view and :label strings, :available t or :false, and
+:requires, a target name (\"session\", \"project\" or \"task\") or nil.
+This only describes views; it loads no modules and opens nothing."
+  (mapcar (lambda (entry)
+            (list :view (plist-get entry :view) :label (plist-get entry :label)
+                  :available (if (harness-ui-tool--available-p entry) t :false)
+                  :requires (plist-get entry :requires)))
+          harness-ui-tool--views))
+
+(defun harness-ui-tool--view (name)
+  "Return the fixed view NAME when available; otherwise signal an error."
+  (let ((entry (cl-find name harness-ui-tool--views
+                        :key (lambda (view) (plist-get view :view)) :test #'equal)))
+    (unless entry (user-error "Unknown harness view: %s" name))
+    (unless (harness-ui-tool--available-p entry)
+      (user-error "Harness view unavailable: %s" name))
+    entry))
+
+(defun harness-ui-tool--view-result (entry value)
+  "Return the result of opening ENTRY, using the actual buffer VALUE.
+Some page commands return a refresh promise rather than the buffer they
+just displayed.  In that case, the selected window's buffer counts only
+when it is the mode of this fixed view.  An answer with no such buffer
+is loading, never a claim that an unseen page opened."
+  (let* ((mode (plist-get entry :mode))
+         (buffer (cond ((buffer-live-p value) value)
+                       ((and mode (provided-mode-derived-p
+                                   (buffer-local-value 'major-mode (window-buffer)) mode))
+                        (window-buffer)))))
+    (list :view (plist-get entry :view)
+          :buffer (and buffer (buffer-name buffer))
+          :status (if buffer "opened" "loading"))))
+
+(defun harness-ui-tool-open-view (params)
+  "Open one fixed harness view named by PARAMS, without interactive prompts.
+PARAMS has :view and its explicit :session, :project or :task target,
+as `harness-ui-tool-views' names.  Session and task targets are canonical
+ids resolved by the calling tool; a project is an absolute directory.
+No command name, Lisp, module load, permission answer or paid action is
+accepted.  Only existing view entry points are called, through the UI's
+ACP connection rather than the harness state bus.
+
+Return a plist with :view, :buffer (an actual buffer name, or nil while
+only queued), and :status, \"opened\" or \"loading\".  Opened confirms
+buffer display, not completion of the view's asynchronous data refresh.
+The report returns a promise of that plist, after fetching its task."
+  (let* ((entry (harness-ui-tool--view (plist-get params :view)))
+         (view (plist-get entry :view))
+         (required (plist-get entry :requires))
+         (target (plist-get params (pcase required
+                                    ("session" :session) ("project" :project) ("task" :task)))))
+    (when (and required (not (and (stringp target) (not (string-blank-p target)))))
+      (user-error "Missing %s" required))
+    (when (and (equal required "project")
+               (or (not (file-name-absolute-p target)) (file-remote-p target)))
+      (user-error "Invalid project directory"))
+    (if (equal view "report")
+        (harness-then
+         (harness-ui-request "_harness/task/get" (list :id target))
+         (lambda (task)
+           ;; A module may have stopped while the task was on its way.
+           (harness-ui-tool--view view)
+           (unless (and (consp task) (equal (plist-get task :id) target))
+             (user-error "Unknown task: %s" target))
+           (harness-ui-tool--view-result entry (harness-ui-report-popout task))))
+      (let* ((default-directory (if (equal required "project")
+                                    (file-name-as-directory target)
+                                  default-directory))
+             ;; Direct calls, not `call-interactively': no view may ask
+             ;; for its target or inherit a keyboard prefix argument.
+             (current-prefix-arg nil)
+             (value (pcase view
+                      ("sessions" (harness-sessions nil))
+                      ("session" (harness-ui-display-session target))
+                      ("tasks" (harness-tasks target))
+                      ("pending"
+                       (harness-then
+                        (harness-ui-request "_harness/session/get" (list :id target))
+                        (lambda (session)
+                          (unless (equal (plist-get session :id) target)
+                            (user-error "Unknown session: %s" target))
+                          ;; The cache can lag a request raised after the
+                          ;; last refresh; reconcile with the authoritative
+                          ;; pending list before deciding there is none.
+                          (harness-ui-pending-sync target (plist-get session :pending))
+                          (let ((buffer (harness-ui-pending-popout target)))
+                            (if buffer
+                                (harness-ui-tool--view-result entry buffer)
+                              (user-error "No pending requests"))))))
+                      ("tree" (harness-tree target))
+                      ("access" (harness-access target))
+                      ("worktrees" (harness-worktrees target))
+                      ("settings" (harness-settings target))
+                      ("server" (harness-server))
+                      ("usage" (harness-usage))
+                      ("slots" (harness-slots target)))))
+        (if (harness-promise-p value)
+            (harness-then value (lambda (answer)
+                                  (if (listp answer) answer
+                                    (harness-ui-tool--view-result entry answer))))
+          (harness-ui-tool--view-result entry value))))))
+
 ;;;; Where a window prefix says
 ;;
 ;; Emacs lets a prefix command say where the next command's buffer is to

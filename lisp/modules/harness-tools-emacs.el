@@ -891,8 +891,77 @@ file named relatively, such as an autoload's library."
   :subject (lambda (input) (format "last %s lines" (or (plist-get input :count) harness-tools-emacs--messages-default)))
   :handler #'harness-tools-emacs--messages)
 
+;;;; Harness navigation
+;;
+;; A fixed catalogue of pages, never a command or Lisp to run.  See
+;; docs/review-navigation.md.
+
+(defun harness-tools-emacs--views (_input _ctx)
+  "List the named harness views available in the user's Emacs."
+  (harness-then
+   (harness-tools-ask-emacs "harness_views" nil)
+   (lambda (answer) (harness-tool-ok (harness-json-encode-text answer)))
+   (lambda (err) (harness-tool-error (harness-tools-reason err)))))
+
+(defun harness-tools-emacs--navigation-session (ref)
+  "Resolve REF as an exact session id, unique id prefix or unique session name."
+  (let* ((sessions (harness-call 'session/list))
+         (exact (cl-find ref sessions :key (lambda (s) (plist-get s :id)) :test #'equal))
+         (matches (or (and exact (list exact))
+                      (cl-remove-if-not (lambda (s) (string-prefix-p ref (plist-get s :id))) sessions)
+                      (cl-remove-if-not (lambda (s)
+                                          (and (stringp (plist-get s :name))
+                                               (equal (downcase ref)
+                                                      (downcase (plist-get s :name)))))
+                                        sessions))))
+    (pcase (length matches)
+      (1 (plist-get (car matches) :id))
+      (0 (user-error "Unknown session: %s" ref))
+      (_ (user-error "Ambiguous session: %s" ref)))))
+
+(defun harness-tools-emacs--harness-open (input ctx)
+  "Open a fixed harness view named by INPUT, using CTX for default targets."
+  (condition-case err
+      (let* ((params (list :view (plist-get input :view)))
+             (ref (plist-get input :session))
+             (task-ref (plist-get input :task))
+             (sid (if ref (harness-tools-emacs--navigation-session ref) (plist-get ctx :session-id)))
+             (task (and task-ref (harness-tools-resolve-task task-ref)))
+             (project (or (plist-get input :project) (plist-get ctx :cwd) default-directory)))
+        (when sid (setq params (plist-put params :session sid)))
+        (when task (setq params (plist-put params :task task)))
+        (when (stringp project)
+          (setq params (plist-put params :project (expand-file-name project (plist-get ctx :cwd)))))
+        (harness-then
+         (harness-tools-ask-emacs "harness_open" params)
+         (lambda (answer) (harness-tool-ok (harness-json-encode-text answer)))
+         (lambda (reason) (harness-tool-error (harness-tools-reason reason)))))
+    (error (harness-tool-error (harness-error-message err)))))
+
+(harness-define-tool "harness_views"
+  :label "Harness views"
+  :description "List the harness UI views the user's Emacs can open, their labels, required targets (session, project or task), and whether the corresponding optional plugin is enabled. Use this to discover navigation for the user, including speech-to-text requests. No modules are enabled and no settings change. Requires a connected Emacs; a phone-only or headless harness returns an error. Open a listed view with harness_open; use review_open for changes, Ediff and review threads."
+  :schema '(:type "object" :properties :empty)
+  :kind 'read
+  :coalescable t
+  :handler #'harness-tools-emacs--views)
+
+(harness-define-tool "harness_open"
+  :label "Open harness view"
+  :description "Open a named harness page in the user's Emacs without minibuffer prompts or arbitrary command execution. Discover enabled pages with harness_views. Views: sessions, session (chat), tasks (board), report (task report), pending (unanswered requests, not answers), tree (session transcript tree), access, worktrees, settings, server, usage, slots. Session targets accept an id, unique prefix or exact unique name and default to this session. Project targets default to this session's working directory; task is required for report. A result with status opened names an actual displayed buffer, whose data may still be refreshing; loading means the view is queued and has no buffer yet. Read the buffer with emacs_buffer if needed. Navigation only: no approvals, permission answers, settings changes, plugin loading, paid checks or model calls. For a specific review diff/file/thread use review_open instead. Requires a connected Emacs with the requested UI module enabled."
+  :schema '(:type "object"
+            :properties (:view (:type "string" :enum ("sessions" "session" "tasks" "report" "pending" "tree" "access" "worktrees" "settings" "server" "usage" "slots")
+                                :description "Named harness page to open; harness_views lists availability.")
+                         :session (:type "string" :description "Session id, unique prefix or exact unique name. Default: this session.")
+                         :task (:type "string" :description "Task id, unique id prefix or exact task name; required for report.")
+                         :project (:type "string" :description "Project directory. Default: this session's working directory."))
+            :required ["view"])
+  :kind 'meta
+  :subject (lambda (input) (plist-get input :view))
+  :handler #'harness-tools-emacs--harness-open)
+
 (harness-define-module 'tools-emacs
-  :doc "List buffers, List windows, Read buffer, Open buffer, Insert text, Save buffer, Describe symbol, Find definition, Trace symbol and Emacs messages: bounded tools into the user's Emacs, without evaluation."
+  :doc "Bounded tools into the user's Emacs without evaluation: buffers, windows, text, symbols, traces and messages, plus harness_views and harness_open for discovering and opening harness pages."
   :requires '(tools))
 
 (provide 'harness-tools-emacs)

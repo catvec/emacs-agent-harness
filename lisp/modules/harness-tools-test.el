@@ -572,6 +572,30 @@ chain's paths avoid that."
       (ignore-errors (harness-tools-resolve-path "/ssh:u@box.example.invalid:~/x" '(:cwd "/work/proj/"))))
     (should (equal '("/ssh:u@box.example.invalid:") attempts))))
 
+(ert-deftest harness-tools-resolve-task-takes-id-prefix-or-name ()
+  "A task is named by its id, a unique id prefix or its exact name, without case."
+  (cl-letf (((symbol-function 'harness-method-exists-p)
+             (lambda (method) (eq method 'task/list)))
+            ((symbol-function 'harness-call)
+             (lambda (method &rest _)
+               (should (eq method 'task/list))
+               '((:id "t-abc123" :name "Fix the flaky test")
+                 (:id "t-def456" :name "Add the login page")))))
+    (should (equal "t-abc123" (harness-tools-resolve-task "t-abc123")))
+    (should (equal "t-def456" (harness-tools-resolve-task "t-def")))
+    (should (equal "t-abc123" (harness-tools-resolve-task "fix the FLAKY test")))
+    (should-not (harness-tools-resolve-task "  "))
+    (should (equal "Unknown task: t-zzz"
+                   (condition-case err (harness-tools-resolve-task "t-zzz")
+                     (user-error (error-message-string err)))))
+    ;; A prefix two tasks share is refused, never guessed.
+    (should (equal "Ambiguous task: t-"
+                   (condition-case err (harness-tools-resolve-task "t-")
+                     (user-error (error-message-string err))))))
+  ;; Without the tasks module there is no task to name.
+  (cl-letf (((symbol-function 'harness-method-exists-p) (lambda (_) nil)))
+    (should-not (harness-tools-resolve-task "t-1"))))
+
 ;;;; An Emacs that may be blocked, and an instance that notifies nobody
 
 (defvar harness-notifications-providers)

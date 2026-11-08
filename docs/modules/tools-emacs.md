@@ -2,7 +2,7 @@
 
 # tools-emacs
 
-List buffers, List windows, Read buffer, Open buffer, Insert text, Save buffer, Describe symbol, Find definition, Trace symbol and Emacs messages: bounded tools into the user's Emacs, without evaluation.
+Bounded tools into the user's Emacs without evaluation: buffers, windows, text, symbols, traces and messages, plus harness_views and harness_open for discovering and opening harness pages.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-tools-emacs.el](../../lisp/modules/harness-tools-emacs.el)
@@ -62,6 +62,8 @@ below, and docs/trust-model.md).
 - `emacs_save_buffer` — Save a live buffer to the local file it visits, as the user would with `save-buffer`. Refuses buffers with no file, remote (TRAMP) files, and files that changed on disk since the buffer was read; it never waits on a lock file or a prompt.
 - `emacs_trace` — Trace a function or watch a variable in the user's live Emacs while they work, to debug it: each call of the function is recorded with its arguments, return value (or non-local exit), nesting and time; each change of the variable (set, let-binding, made void) with its new value and the buffer it is local in. Each record can also name the functions that led to it (callers). Records go to the *trace-output* buffer, which you read with emacs_buffer; values are printed bounded, and a trace stops itself after limit records. action start (the default) starts a trace (replacing one of the same symbol), stop stops one, or every trace when no symbol is given, list lists them. Special forms, macros and the tracing's own functions cannot be traced.
 - `emacs_windows` — List the windows of the user's Emacs, frame by frame: which window is selected, the buffer it shows, its mode, its size in characters and the buffer's file. Read-only.
+- `harness_open` — Open a named harness page in the user's Emacs without minibuffer prompts or arbitrary command execution. Discover enabled pages with harness_views. Views: sessions, session (chat), tasks (board), report (task report), pending (unanswered requests, not answers), tree (session transcript tree), access, worktrees, settings, server, usage, slots. Session targets accept an id, unique prefix or exact unique name and default to this session. Project targets default to this session's working directory; task is required for report. A result with status opened names an actual displayed buffer, whose data may still be refreshing; loading means the view is queued and has no buffer yet. Read the buffer with emacs_buffer if needed. Navigation only: no approvals, permission answers, settings changes, plugin loading, paid checks or model calls. For a specific review diff/file/thread use review_open instead. Requires a connected Emacs with the requested UI module enabled.
+- `harness_views` — List the harness UI views the user's Emacs can open, their labels, required targets (session, project or task), and whether the corresponding optional plugin is enabled. Use this to discover navigation for the user, including speech-to-text requests. No modules are enabled and no settings change. Requires a connected Emacs; a phone-only or headless harness returns an error. Open a listed view with harness_open; use review_open for changes, Ediff and review threads.
 
 ## Uses
 
@@ -69,4 +71,5 @@ below, and docs/trust-model.md).
 
 - `permission/path-writable-p` ([perms](perms.md)), when it is loaded
 - `permission/reveal-file` ([perms](perms.md)), when it is loaded
+- `session/list` ([session](session.md))
 

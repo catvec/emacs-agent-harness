@@ -170,7 +170,8 @@ be called, whether or not the message says it is one."
   (let* ((server harness-emacs-endpoint-server)
          (names (mapcar #'harness-mcp-tool-name (harness-mcp-server-tools server))))
     (should (equal '("buffers" "windows" "buffer" "open" "insert" "save"
-                     "describe" "definition" "trace" "messages" "snapshot")
+                     "describe" "definition" "trace" "messages" "snapshot"
+                     "harness_views" "harness_open" "review_open")
                    names))
     (dolist (name names)
       (let ((tool (harness-mcp-server-tool server name)))

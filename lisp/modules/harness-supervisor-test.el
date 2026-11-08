@@ -1475,14 +1475,14 @@ selected by `:active' alone; the active sessions change as ever."
   "Reading the reviewer's threads is coordination: a supervising task has the tool.
 The feedback that sends it back names the threads and says to answer them
 in <thread> blocks; a supervisor that could not read them would not know
-what to answer.  A session that is no task's has no review to read."
+what to answer.  An ordinary session can name another task's review."
   (harness-supervisor-test-with-modules (tools-fs tools-handin tools-review tasks)
     (harness-supervisor-test-confined nil)
     (let ((task-session (harness-supervisor-test-session))
           (other (harness-supervisor-test-session)))
       (harness-call 'task/adopt task-session)
       (should (member "review_threads" (harness-supervisor-test-tool-names task-session)))
-      (should-not (member "review_threads" (harness-supervisor-test-tool-names other))))))
+      (should (member "review_threads" (harness-supervisor-test-tool-names other))))))
 
 (ert-deftest harness-supervisor-others-keep-their-tools-but-lose-the-supervisors ()
   "A session that is hands-on, or not governed, keeps every tool but the supervisor's own."

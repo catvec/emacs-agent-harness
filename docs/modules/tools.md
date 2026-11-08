@@ -117,6 +117,7 @@ exist (`harness-tools--in-scope-p`).
 - `session/exists-p` ([session](session.md)), when it is loaded
 - `session/get` ([session](session.md)), when it is loaded
 - `session/nodes` ([session](session.md))
+- `task/list` ([tasks](tasks.md)), when it is loaded
 
 ### Events it handles
 

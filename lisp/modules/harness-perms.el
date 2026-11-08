@@ -290,7 +290,7 @@ That is a tool of `harness-perms--auto-allow-tools' or of
       (member tool harness-perms-extra-auto-allow-tools)))
 
 (defconst harness-perms--inspection-tools
-  '("emacs_buffers" "emacs_buffer" "emacs_windows" "emacs_describe" "emacs_find_definition" "emacs_messages"
+  '("emacs_buffers" "emacs_buffer" "emacs_windows" "emacs_describe" "emacs_find_definition" "emacs_messages" "harness_views"
     "session_info" "session_list" "session_read" "session_search" "session_history" "session_wait"
     "task_list" "task_wait" "notification_providers" "watch_events" "unwatch_events")
   "Tools that only inspect the harness itself or the user's live Emacs.

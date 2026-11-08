@@ -19,6 +19,7 @@
 (defvar harness-model)
 (defvar harness-tools-max-output-chars)
 (defvar harness-emacs-endpoint--methods)
+(defvar harness-ui-patch-review--active)
 (declare-function harness-tools-reason "harness-tools" (err))
 (declare-function harness-acp-add-client "harness-acp")
 (declare-function harness-acp-client-receive "harness-acp")
@@ -516,15 +517,16 @@ ranges, a long line is cut, and a big value is printed only in part."
 (declare-function harness-acp-error-value-message "harness-acp")
 
 (ert-deftest harness-emacs-endpoint-has-a-fixed-vocabulary-without-eval ()
-  "The lent Emacs answers eleven requests of data and bounded work, and none
+  "The lent Emacs answers fixed requests of data and bounded work, and none
 takes code to run: there is no `eval', no option that would turn one on,
 and none of the machinery that ran one is left."
   (require 'harness-emacs-endpoint)
   (should (equal '("buffers" "windows" "buffer" "open" "insert" "save"
-                   "describe" "definition" "trace" "messages" "snapshot")
+                   "describe" "definition" "trace" "messages" "snapshot"
+                   "harness_views" "harness_open" "review_open")
                  (mapcar #'car harness-emacs-endpoint--methods)))
   (should-not (assoc "eval" harness-emacs-endpoint--methods))
-  ;; Every request is answered at once: nothing is left to answer later.
+  ;; No eval queue remains; async navigation uses ordinary MCP promises.
   (should-not (boundp 'harness-emacs-endpoint--deferred-methods))
   ;; The option and its predicate are gone, not just off.
   (should-not (fboundp 'harness-emacs-eval-p))
@@ -607,6 +609,52 @@ offers no tool and changes no answer."
         (should-not (harness-tool-get "emacs_eval"))
         (should-error (harness-emacs-endpoint-handle "eval" '(:code "(+ 1 2)"))))
     (makunbound 'harness-emacs-eval)))
+
+;;;; Harness navigation uses the lent Emacs and supports async MCP results
+
+(ert-deftest harness-emacs-endpoint-navigation-round-trip ()
+  "Navigation crosses MCP as plain data and answers only after its promise settles."
+  (harness-emacs-endpoint-test--setup)
+  (harness-test-with-temp-state
+    (let* ((client (harness-emacs-endpoint-test--connect t))
+           (promise (harness-make-promise))
+           (harness-ui-patch-review--active t)
+           seen)
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-ui-tool-views)
+                     (lambda () '((:view "tasks" :label "Tasks" :available t :requires "project"))))
+                    ((symbol-function 'harness-ui-patch-review-tool-open)
+                     (lambda (params) (setq seen params) promise)))
+            (should (equal '((:view "tasks" :label "Tasks" :available t :requires "project"))
+                           (plist-get (harness-test-await (harness-call 'emacs/request "harness_views" nil)) :views)))
+            (let ((answer (harness-call 'emacs/request "review_open" '(:task "t-voice" :view "ediff"))))
+              (should-not (harness-promise-settled-p answer))
+              (harness-resolve promise '(:status "opened" :buffer "*Review*"))
+              (should (equal '(:status "opened" :buffer "*Review*") (harness-test-await answer)))
+              (should (equal '(:task "t-voice" :view "ediff") seen))))
+        (harness-acp-close (car client))))))
+
+(ert-deftest harness-emacs-endpoint-navigation-async-failure ()
+  "A failure after dispatch is one failed MCP result, never a success receipt."
+  (harness-emacs-endpoint-test--setup)
+  (harness-test-with-temp-state
+    (let* ((client (harness-emacs-endpoint-test--connect t))
+           (promise (harness-make-promise))
+           (harness-ui-patch-review--active t))
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-ui-patch-review-tool-open) (lambda (_) promise)))
+            (let ((answer (harness-call 'emacs/request "review_open" '(:task "t-voice"))))
+              (harness-reject promise '(user-error "Unknown review thread: absent"))
+              (should-error (harness-test-await answer))))
+        (harness-acp-close (car client))))))
+
+(ert-deftest harness-emacs-endpoint-review-disabled-copy ()
+  "A stale function from a disabled review module cannot open anything."
+  (require 'harness-emacs-endpoint)
+  (let ((harness-ui-patch-review--active nil))
+    (cl-letf (((symbol-function 'harness-ui-patch-review-tool-open) (lambda (_) (ert-fail "disabled review"))))
+      (should (equal '(error "Review module unavailable")
+                     (should-error (harness-emacs-endpoint-handle "review_open" '(:task "t"))))))))
 
 ;;;; Chores of the UI
 
