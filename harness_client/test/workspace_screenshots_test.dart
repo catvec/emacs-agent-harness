@@ -10,6 +10,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness_client/src/models/activity.dart';
 import 'package:harness_client/src/models/workspace.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/interaction.dart';
@@ -80,6 +81,12 @@ WorkspaceController _controller({
         state: 'live',
         episodeStatus: status,
         live: 's1',
+        model: 'claude:claude-fable-5-1',
+        thinking: 'medium',
+        permissionMode: 'auto',
+        activity: status == 'running'
+            ? const TurnActivity(phase: 'tool', tool: 'read_file', title: 'Read file')
+            : null,
         pending: [
           for (final request in pending)
             WorkspacePendingRequest(
@@ -93,6 +100,7 @@ WorkspaceController _controller({
       const WorkspaceThread(
         id: 't2',
         title: 'Harness memory',
+        model: 'claude:claude-haiku-4-5',
         tags: ['Harness', 'Memory'],
       ),
       const WorkspaceThread(

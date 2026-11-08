@@ -1774,6 +1774,10 @@ class FakeHarness {
             return;
           }
           _pushMode(sid, mode);
+          // The workspace view reads the live episode's mode.
+          for (final thread in workspaceThreads) {
+            if (thread['live'] == sid) thread['permission-mode'] = mode;
+          }
         }
         _respond(id, const <String, Object?>{});
         return;
@@ -1783,6 +1787,10 @@ class FakeHarness {
         final model = asString(params['modelId']);
         if (sid != null && sessions[sid] != null && model != null) {
           sessions[sid]!['model'] = model;
+          // The workspace view reads the live episode's model.
+          for (final thread in workspaceThreads) {
+            if (thread['live'] == sid) thread['model'] = model;
+          }
           _pushSession(sid);
         }
         _respond(id, const <String, Object?>{});
@@ -2118,6 +2126,23 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/workspace/get') {
+        _respond(id, _workspaceFixture());
+        return;
+      }
+      if (method == '_harness/workspace/update') {
+        workspaceUpdates.add(Map<String, Object?>.of(params));
+        final model = asString(params['model']);
+        final mode = asString(params['permission-mode']);
+        if (model != null) workspaceModel = model;
+        if (mode != null) workspacePermissionMode = mode;
+        // The view resolves the defaults into a thread with no episode, as
+        // the harness does: its next one starts with them.
+        for (final thread in workspaceThreads) {
+          if (thread['live'] != null) continue;
+          if (model != null) thread['model'] = model;
+          if (mode != null) thread['permission-mode'] = mode;
+        }
+        _event('workspace/changed', ['w1', _workspaceFixture()]);
         _respond(id, _workspaceFixture());
         return;
       }
@@ -2720,6 +2745,12 @@ class FakeHarness {
   }
 
   final List<String> workspacePrompts = <String>[];
+  final List<Map<String, Object?>> workspaceUpdates = <Map<String, Object?>>[];
+
+  /// The workspace's own defaults, as `workspace/update` changes them.
+  String workspaceModel = 'claude:claude-fable-5-1';
+  String workspacePermissionMode = 'auto';
+
   final List<Map<String, Object?>> workspaceThreads = [
     {
       'id': 'th-1',
@@ -2727,12 +2758,21 @@ class FakeHarness {
       'state': 'live',
       'episode-status': 'running',
       'live': 's1',
+      'model': 'claude:claude-fable-5-1',
+      'thinking': 'medium',
+      'permission-mode': 'auto',
+      'non-interactive': false,
+      'activity': {'phase': 'waiting'},
       'tags': ['Kitchen', 'Budget'],
     },
     {
       'id': 'th-2',
       'title': 'Harness memory',
       'state': 'parked',
+      'model': 'claude:claude-fable-5-1',
+      'thinking': 'medium',
+      'permission-mode': 'ask',
+      'non-interactive': false,
       'tags': ['Harness', 'Memory'],
     },
     {
@@ -2754,6 +2794,10 @@ class FakeHarness {
     'root': '/Users/noah/workspace/',
     'project': '/Users/noah/workspace/',
     'last-thread': 'th-1',
+    'model': workspaceModel,
+    'thinking': 'medium',
+    'permission-mode': workspacePermissionMode,
+    'non-interactive': false,
     'threads': workspaceThreads,
   };
 

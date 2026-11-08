@@ -277,6 +277,9 @@ void main() {
     await _until(tester, () => find.text('Running').evaluate().isNotEmpty,
         what: 'the running status');
     expect(find.textContaining('Kitchen renovation · Running'), findsOneWidget);
+    // The model the episode runs on, and what its turn is doing.
+    expect(find.textContaining('claude-fable-5-1'), findsWidgets);
+    expect(find.text('Waiting for the model'), findsOneWidget);
 
     for (final (status, label) in const [
       ('idle', 'Idle'),

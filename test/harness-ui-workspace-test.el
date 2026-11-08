@@ -14,6 +14,7 @@
 (defvar harness-ui-workspace--knowledge)
 (defvar harness-ui-workspace--state)
 (defvar harness-ui-workspace--thread)
+(defvar harness-ui--sessions)
 
 (defmacro harness-ui-workspace-test-with (&rest body)
   "Load the UI and the workspace front end, then run BODY."
@@ -43,10 +44,14 @@ must see the fixture as it was."
     :last-thread "th-1"
     :threads ((:id "th-1" :title "Kitchen renovation" :state "live"
                     :episode-status "running" :pending nil
-                    :live "s-1" :episodes ("s-1") :pinned t :last-at 20.0)
+                    :live "s-1" :episodes ("s-1") :pinned t :last-at 20.0
+                    :model "demo:scripted" :thinking "medium"
+                    :permission-mode "auto" :non-interactive nil)
               (:id "th-2" :title "Harness memory" :state "parked"
                     :episode-status "parked" :pending nil
-                    :live nil :episodes ("s-0") :pinned nil :last-at 10.0)))))
+                    :live nil :episodes ("s-0") :pinned nil :last-at 10.0
+                    :model "demo:scripted" :thinking "medium"
+                    :permission-mode "auto" :non-interactive nil)))))
 
 (defun harness-ui-workspace-test-entries ()
   "Return timeline entries for the tests."
@@ -599,3 +604,185 @@ It says Permission, the call, and the answers every view offers."
                                 :type 'user-error)))
         (should (equal "No VNC page · computer off"
                        (error-message-string error)))))))
+
+(defun harness-ui-workspace-test-cache-session ()
+  "Put the fixture's live episode in the session cache, with its figures."
+  (puthash "s-1" (list :id "s-1" :model "demo:scripted" :thinking "medium"
+                       :permission-mode "auto" :status "idle"
+                       :context-window 200000
+                       :usage (list :context 12345 :output 500 :cost 0.42))
+           harness-ui--sessions))
+
+(ert-deftest harness-ui-workspace-settings-line-names-the-settings ()
+  "The line under the box names the model, thinking level and permission mode.
+It is the same settings line a chat draws, so a workspace episode and a
+chat session say what they run with in the same words, and the episode's
+context and cost stand beside them."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-cache-session)
+      (harness-ui-workspace-test-render)
+      (goto-char (point-max))
+      (should (equal " scripted (Demo) · … medium · Auto · interactive   12.3k/200k · $0.420"
+                     (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position))))
+      (goto-char (point-min))
+      (search-forward "scripted (Demo)")
+      (should (equal "Model of this thread" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "medium")
+      (should (equal "Thinking level of this thread"
+                     (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "Auto")
+      (should (equal "Permission mode of this thread"
+                     (get-text-property (1- (point)) 'help-echo)))
+      (should-not (string-match-p "non-interactive" (buffer-string))))))
+
+(ert-deftest harness-ui-workspace-settings-line-shows-the-workspace-defaults ()
+  "A thread with no episode names the defaults the next one starts with."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-cache-session)
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace--select-thread "th-2")
+      (goto-char (point-max))
+      (let ((line (buffer-substring-no-properties
+                   (line-beginning-position) (line-end-position))))
+        ;; The parked thread has no live episode: its defaults, and no
+        ;; figures of an episode that does not exist.
+        (should (equal " scripted (Demo) · … medium · Auto · interactive" line)))
+      (goto-char (point-min))
+      (search-forward "scripted (Demo)")
+      (should (equal "Model of this workspace"
+                     (get-text-property (1- (point)) 'help-echo)))
+      (should (equal (list (list :model "demo:scripted" :thinking "medium"
+                                 :permission-mode "auto" :non-interactive nil)
+                           (nth 1 (harness-ui-workspace--setting-target))
+                           "this workspace")
+                     (harness-ui-workspace--setting-target))))))
+
+(ert-deftest harness-ui-workspace-leaves-point-in-the-box ()
+  "A redraw leaves point in the compose box, not after the settings line."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (should (harness-compose-in-p))
+      (should (<= (point) harness-compose-end)))))
+
+(ert-deftest harness-ui-workspace-settings-line-with-no-thread ()
+  "A workspace with no thread yet still names the model it would start on."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--state 'ready
+            harness-ui-workspace--data (list :id "w-1" :name "Home"
+                                             :root "/tmp/workspace/"
+                                             :threads nil
+                                             :model "demo:scripted"
+                                             :permission-mode "auto")
+            harness-ui-workspace--entries nil)
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+        (harness-ui-workspace--render))
+      (goto-char (point-max))
+      (should (equal " scripted (Demo) · … default · Auto · interactive"
+                     (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position))))
+      (should (equal "this workspace"
+                     (nth 2 (harness-ui-workspace--setting-target)))))))
+
+(ert-deftest harness-ui-workspace-says-what-the-running-turn-does ()
+  "The header and the thread row say the running turn's activity, not a time.
+The words are the chat's, and a turn that is waiting for the model says
+so before the first token arrives."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace--change-thread
+       "th-1" (list :activity (list :phase "waiting" :since 1.0)))
+      (harness-ui-workspace--render)
+        (should (string-match-p "Thread · Kitchen renovation · Running · Waiting for the model…"
+                                (buffer-string)))
+        (should (string-match-p "Kitchen renovation  Waiting for the model…"
+                                (buffer-string)))
+        (goto-char (point-min))
+        (should (equal (concat "Workspace · Home   Thread · Kitchen renovation · Running · "
+                               "Waiting for the model…   Knowledge · unavailable   Computer · off   "
+                               "Tasks New thread Open episode Stop Refresh Computer Resources")
+                       (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position)))))))
+
+(ert-deftest harness-ui-workspace-running-turn-says-so-above-the-box ()
+  "The line above the box says what the selected turn does.
+The header and the thread rail scroll away with a long timeline; the
+line above the box, where the person types, does not."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace--change-thread
+       "th-1" (list :episode-status "running"
+                    :activity (list :phase "waiting" :since 1.0)))
+      (harness-ui-workspace--render)
+      ;; The last line saying it is the one above the box, not the header's.
+      (goto-char (point-max))
+      (search-backward "Waiting for the model…")
+      (should (equal " Waiting for the model…"
+                     (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position))))
+      (should-not (harness-compose-in-p))
+      ;; It sits above the compose area; the settings line follows the box.
+      (let ((activity (point))
+            (box (save-excursion (goto-char (point-max))
+                                 (search-backward "❯") (point)))
+            (settings (save-excursion (goto-char (point-max))
+                                      (search-backward " scripted (Demo)") (point))))
+        (should (< activity box))
+        (should (< box settings)))
+      ;; A running turn without an activity says it works; an idle one is quiet.
+      (harness-ui-workspace--change-thread
+       "th-1" (list :episode-status "running" :activity nil))
+      (harness-ui-workspace--render)
+      (should (string-match-p " Working…\n" (buffer-string)))
+      (harness-ui-workspace--change-thread
+       "th-1" (list :episode-status "idle" :activity nil))
+      (harness-ui-workspace--render)
+      (should-not (string-match-p "Waiting for the model…" (buffer-string)))
+      (should-not (string-match-p "Working…" (buffer-string))))))
+
+(ert-deftest harness-ui-workspace-activity-follows-the-turn ()
+  "An activity update says what the turn does now; a session update its model."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace--on-update
+       "s-1" (list :sessionUpdate "_harness/activity"
+                   :activity (list :phase "tool" :tool "read_file"
+                                   :title "Read file: x.el" :since 2.0)))
+      (should (string-match-p "Running Read file: x.el…" (buffer-string)))
+      (harness-ui-workspace--on-update
+       "s-1" (list :sessionUpdate "_harness/activity" :activity nil))
+      (should-not (string-match-p "Running Read file" (buffer-string)))
+      ;; A setting changes the thread's own values, so the line follows it.
+      (harness-ui-workspace--on-update
+       "s-1" (list :sessionUpdate "_harness/session"
+                   :session (list :id "s-1" :model "other:model" :thinking "high"
+                                  :permission-mode "yolo" :non-interactive t)))
+      (should (string-match-p "model (Other)" (buffer-string)))
+      (should (string-match-p "YOLO" (buffer-string)))
+      (should (string-match-p "non-interactive" (buffer-string))))))
+
+(ert-deftest harness-ui-workspace-send-shows-the-model-loading ()
+  "Sending marks the thread running and waiting for the model at once."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (let ((inhibit-read-only t))
+        (harness-compose-insert "Please remember the matte tile."))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (_method _params callback &optional _on-error)
+                   (funcall callback nil)))
+                ((symbol-function 'harness-compose-fetch-completions) #'ignore))
+        (harness-ui-workspace-send))
+      (should (string-match-p "Waiting for the model…" (buffer-string)))
+      (let ((thread (car (plist-get harness-ui-workspace--data :threads))))
+        (should (equal "running" (plist-get thread :episode-status)))
+        (should (equal "waiting" (plist-get (plist-get thread :activity) :phase)))))))

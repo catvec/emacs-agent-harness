@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
-import '../../models/activity.dart';
 import '../../models/chat_thread.dart';
 import '../../models/session.dart';
 import '../../models/session_modes.dart';
@@ -24,6 +23,7 @@ import '../app_scope.dart';
 import '../format.dart';
 import '../navigation.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/activity_bar.dart';
 import '../widgets/chat_threads.dart';
 import '../widgets/connection_banner.dart';
 import '../widgets/interaction_card.dart';
@@ -757,7 +757,7 @@ class _SessionScreenState extends State<SessionScreen> {
                   if (plan.isNotEmpty && interaction == null && !typing)
                     _PlanStrip(key: const Key('session-plan'), plan: plan),
                   if (bar && !typing)
-                    _ActivityBar(
+                    ActivityBar(
                       activity: controller.activity,
                       waiting: interaction != null,
                       running: controller.promptInFlight,
@@ -1317,102 +1317,6 @@ class _PlanStrip extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-class _ActivityBar extends StatefulWidget {
-  const _ActivityBar({
-    required this.activity,
-    required this.waiting,
-    required this.running,
-  });
-
-  final TurnActivity? activity;
-  final bool waiting;
-  final bool running;
-
-  @override
-  State<_ActivityBar> createState() => _ActivityBarState();
-}
-
-class _ActivityBarState extends State<_ActivityBar> {
-  Timer? _timer;
-
-  @override
-  void initState() {
-    super.initState();
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
-    });
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final activity = widget.activity;
-    final label =
-        widget.waiting && (activity == null || activity.phase == 'checking')
-        ? 'Waiting for your answer'
-        : activity?.label ?? (widget.running ? 'Working' : '');
-    if (label.isEmpty) return const SizedBox.shrink();
-    final since = activity?.since;
-    final elapsed = since == null ? null : DateTime.now().difference(since);
-    final color = widget.waiting
-        ? HarnessColors.amber
-        : theme.colorScheme.primary;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(
-        HarnessSpace.gutter,
-        8,
-        HarnessSpace.gutter,
-        8,
-      ),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.04),
-        border: Border(
-          top: BorderSide(
-            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 16,
-            child: Center(
-              child: widget.waiting
-                  ? Icon(Icons.front_hand_rounded, size: 15, color: color)
-                  : HarnessActivity(radius: 7, color: color),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: HarnessText.meta(context)
-                  .copyWith(color: color, fontWeight: FontWeight.w600),
-            ),
-          ),
-          if (elapsed != null)
-            Text(_formatElapsed(elapsed), style: HarnessText.meta(context)),
-        ],
-      ),
-    );
-  }
-
-  String _formatElapsed(Duration duration) {
-    if (duration.inSeconds < 60) return '${duration.inSeconds}s';
-    final minutes = duration.inMinutes;
-    final seconds = duration.inSeconds % 60;
-    return '${minutes}m ${seconds.toString().padLeft(2, '0')}s';
   }
 }
 

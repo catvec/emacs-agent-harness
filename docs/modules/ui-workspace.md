@@ -57,6 +57,7 @@ session behind the thread when the user wants the full transcript.
 - `workspace/list` ([workspace](workspace.md))
 - `workspace/prompt` ([workspace](workspace.md))
 - `workspace/timeline` ([workspace](workspace.md))
+- `workspace/update` ([workspace](workspace.md))
 
 ### Events it hears over ACP
 
@@ -80,5 +81,6 @@ session behind the thread when the user wants the full transcript.
 - `harness-ui-pending-changed-hook` → `harness-ui-workspace--on-pending-changed`
 - `harness-ui-pending-drawn-predicates` → `harness-ui-workspace--drawn-p`
 - `harness-ui-redraw-hook` → `harness-ui-workspace--on-redraw`
+- `harness-ui-update-functions` → `harness-ui-workspace--on-update`
 - `kill-buffer-hook` → `harness-ui-workspace--kill`
 

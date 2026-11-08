@@ -2,11 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness_client/src/models/activity.dart';
 import 'package:harness_client/src/models/workspace.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/interaction.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/state/workspace_controller.dart';
+import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
 import 'package:harness_client/src/ui/adaptive/platform_style.dart';
 import 'package:harness_client/src/ui/screens/workspace_screen.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
@@ -30,6 +32,8 @@ WorkspaceController _preview() {
         state: 'live',
         episodeStatus: 'running',
         live: 's1',
+        model: 'demo:scripted',
+        activity: TurnActivity(phase: 'waiting'),
         tags: ['Kitchen', 'Budget'],
       ),
       WorkspaceThread(
@@ -107,6 +111,7 @@ Future<void> _pump(
   Size size = const Size(1440, 900),
   double textScale = 1,
   bool cupertino = false,
+  AppController? app,
   RfbTransport Function(String url)? vncTransportFactory,
 }) async {
   tester.view.physicalSize = size;
@@ -127,7 +132,7 @@ Future<void> _pump(
             textScaler: TextScaler.linear(textScale),
           ),
           child: WorkspaceScreen(
-            app: _app(),
+            app: app ?? _app(),
             controller: controller,
             onOpenSession: (_) {},
             vncTransportFactory:
@@ -190,6 +195,8 @@ WorkspaceController _previewStatus(
   String status, {
   List<InteractionRequest> pending = const [],
   String title = 'Kitchen renovation',
+  String? model = 'demo:scripted',
+  TurnActivity? activity,
 }) {
   final workspace = WorkspaceSummary(
     id: 'w1',
@@ -202,6 +209,8 @@ WorkspaceController _previewStatus(
         state: status == 'parked' ? 'parked' : 'live',
         episodeStatus: status,
         live: status == 'parked' ? null : 's1',
+        model: model,
+        activity: activity,
         pending: [
           for (final request in pending)
             WorkspacePendingRequest(
@@ -405,7 +414,7 @@ void main() {
     await _pump(tester, controller, size: const Size(1440, 900));
     for (final copy in const [
       'Home',
-      'Kitchen renovation · Running · 12 notes',
+      'Kitchen renovation · Running · scripted · 12 notes',
       'Threads',
       'Concepts',
       'Shared tags',
@@ -425,6 +434,7 @@ void main() {
       'Box · local',
       'Details',
       'Workspace message',
+      'Waiting for the model',
     ]) {
       expect(find.text(copy), findsWidgets, reason: copy);
     }
@@ -714,6 +724,7 @@ void main() {
       'Brief · 120 tokens',
       'New thread · Kitchen renovation',
       'Workspace message',
+      'Waiting for the model',
     ]) {
       expect(find.text(copy), findsWidgets, reason: copy);
     }
@@ -863,6 +874,134 @@ void main() {
     expect(find.text('No workspace'), findsOneWidget);
     expect(find.text('One chat, its threads and its memory'), findsOneWidget);
     expect(find.text('New workspace'), findsOneWidget);
+  });
+
+  testWidgets('a running episode says its model and what it is doing', (
+    tester,
+  ) async {
+    final controller = _previewStatus(
+      'running',
+      activity: const TurnActivity(phase: 'thinking'),
+    );
+    await _pump(tester, controller, size: const Size(1440, 900));
+    // The model is a fact of the subtitle, beside the episode's state; what
+    // the turn does is its own line above the composer, as in a chat.
+    expect(find.textContaining('scripted'), findsWidgets);
+    expect(find.text('Thinking'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a phone says the model and the activity too', (tester) async {
+    final controller = _previewStatus(
+      'running',
+      activity: const TurnActivity(
+        phase: 'tool',
+        tool: 'read_file',
+        title: 'Read file',
+      ),
+    );
+    await _pump(tester, controller, size: const Size(390, 844));
+    expect(
+      tester.widget<Text>(find.byKey(const Key('workspace-model'))).data,
+      'scripted',
+    );
+    expect(find.text('Running Read file'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the workspace shows its model and permission mode under the box', (
+    tester,
+  ) async {
+    final controller = _previewStatus('running');
+    await _pump(tester, controller, size: const Size(1440, 900));
+    final model = tester.widget<HarnessPicker>(
+      find.byKey(const Key('workspace-model-picker')),
+    );
+    final mode = tester.widget<HarnessPicker>(
+      find.byKey(const Key('workspace-mode-picker')),
+    );
+    expect(model.label, 'scripted');
+    expect(mode.label, 'Ask');
+    // A preview has no harness behind it: the values only show.
+    expect(model.onTap, isNull);
+    expect(mode.onTap, isNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets("the pickers change the live episode's model and mode", (
+    tester,
+  ) async {
+    final (app, harness, controller) = await _connectedWorkspace();
+    await _pump(tester, controller, app: app, size: const Size(1440, 900));
+
+    await tester.tap(find.byKey(const Key('workspace-model-picker')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('Claude Haiku 4.5'));
+    await tester.pumpAndSettle();
+    expect(harness.sessions['s1']?['model'], 'claude:claude-haiku-4-5');
+    expect(
+      tester
+          .widget<HarnessPicker>(find.byKey(const Key('workspace-model-picker')))
+          .label,
+      'claude-haiku-4-5',
+    );
+
+    await tester.tap(find.byKey(const Key('workspace-mode-picker')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('YOLO'));
+    await tester.pumpAndSettle();
+    expect(harness.sessions['s1']?['permissionMode'], 'yolo');
+    expect(
+      tester
+          .widget<HarnessPicker>(find.byKey(const Key('workspace-mode-picker')))
+          .label,
+      'YOLO',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the pickers change the defaults when no episode runs', (
+    tester,
+  ) async {
+    final (app, harness, controller) = await _connectedWorkspace();
+    await _pump(tester, controller, app: app, size: const Size(1440, 900));
+    await tester.tap(find.text('Harness memory'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('workspace-model-picker')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('Claude Haiku 4.5'));
+    await tester.pumpAndSettle();
+    expect(harness.workspaceUpdates.last['model'], 'claude:claude-haiku-4-5');
+    expect(
+      tester
+          .widget<HarnessPicker>(find.byKey(const Key('workspace-model-picker')))
+          .label,
+      'claude-haiku-4-5',
+    );
+
+    await tester.tap(find.byKey(const Key('workspace-mode-picker')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('YOLO'));
+    await tester.pumpAndSettle();
+    expect(harness.workspaceUpdates.last['permission-mode'], 'yolo');
+    expect(
+      tester
+          .widget<HarnessPicker>(find.byKey(const Key('workspace-mode-picker')))
+          .label,
+      'YOLO',
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a send whose model has not answered says it is loading', (
+    tester,
+  ) async {
+    final controller = _previewStatus('idle');
+    controller.sending = true;
+    await _pump(tester, controller, size: const Size(1440, 900));
+    expect(find.text('Waiting for the model'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a running, blocked, idle or failed episode says so', (

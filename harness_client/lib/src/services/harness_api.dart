@@ -987,11 +987,13 @@ class HarnessApi {
   Future<void> updateWorkspace(
     String id, {
     String? model,
+    String? permissionMode,
     String? title,
   }) async {
     await extensionRaw('workspace/update', {
       'id': id,
       if (model != null) 'model': model,
+      if (permissionMode != null) 'permission-mode': permissionMode,
       if (title != null) 'name': title,
     });
   }

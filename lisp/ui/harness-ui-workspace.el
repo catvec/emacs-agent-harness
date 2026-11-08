@@ -167,6 +167,131 @@ send it, the coarser `:state' and the cached session's own status."
     ("stopped" (harness-ui-icon 'harness-icon-caution))
     (_ (harness-ui-icon 'harness-icon-idle))))
 
+(declare-function harness-chat--activity-text "harness-ui-chat" (activity))
+
+(defun harness-ui-workspace--activity-label (thread)
+  "Return what THREAD's running episode does now, or nil.
+The words are the chat's (`harness-chat--activity-text'), so a workspace
+says \"Waiting for the model…\", \"Thinking…\" or \"Running Read file…\"
+as a chat does.  Only a running episode has them: a stale activity from
+the turn before does not outlive its state words."
+  (when (and (equal "running" (harness-ui-workspace--episode-status thread))
+             (plist-get thread :activity))
+    (harness-chat--activity-text (plist-get thread :activity))))
+
+(defun harness-ui-workspace--activity-line (thread)
+  "Return the line above the box that says what THREAD's turn does, or nil.
+A running turn with no activity yet -- before the harness's first
+update, or from a harness that reports none -- says \"Working…\", as
+the chat's activity line does.  An episode that does not run says
+nothing, so the box moves up to the timeline."
+  (when (equal "running" (harness-ui-workspace--episode-status thread))
+    (let ((activity (plist-get thread :activity)))
+      (concat " "
+              (propertize (if activity
+                              (harness-chat--activity-text activity)
+                            "Working…")
+                          'face 'harness-dim-face)))))
+
+(defun harness-ui-workspace--setting-values (&optional thread)
+  "Return the settings the settings line shows for THREAD.
+They are what its live episode runs with, or the workspace's defaults
+when it has none (or when there is no thread yet), as the harness sends
+them."
+  (let ((workspace harness-ui-workspace--data))
+    (list :model (or (plist-get thread :model) (plist-get workspace :model))
+          :thinking (or (plist-get thread :thinking) (plist-get workspace :thinking))
+          :permission-mode (or (plist-get thread :permission-mode)
+                               (plist-get workspace :permission-mode))
+          :non-interactive (if (plist-member thread :non-interactive)
+                               (plist-get thread :non-interactive)
+                             (plist-get workspace :non-interactive)))))
+
+(defun harness-ui-workspace--setting-target ()
+  "Return what the setting commands change in this buffer.
+That is the selected thread's live episode, or its workspace's defaults
+for the next episode: (VALUES SET-FUNCTION CONTEXT), as
+`harness-ui-setting-target-function' takes a non-session target."
+  (let* ((thread (harness-ui-workspace--current-thread))
+         (live (and thread (plist-get thread :live))))
+    (or live
+        (and harness-ui-workspace--data
+             (list (harness-ui-workspace--setting-values thread)
+                   #'harness-ui-workspace--set-default
+                   "this workspace")))))
+
+(defun harness-ui-workspace--set-default (key value)
+  "Set the workspace default for setting KEY to VALUE.
+It applies to the next episode, not to one that is already live."
+  (let ((buffer (current-buffer)))
+    (harness-ui-call
+     "_harness/workspace/update"
+     (list :id harness-ui-workspace--id key
+           (if (and (eq key :non-interactive) (not value)) :false value))
+     (lambda (_workspace)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (harness-ui-workspace--fetch))))
+     (lambda (err)
+       (message "Workspace · %s" (harness-error-message err))))))
+
+(defun harness-ui-workspace--setting-button (spec)
+  "Return the button standing for setting SPEC of `harness-ui-setting-specs'."
+  (let ((command (plist-get spec :command)))
+    (harness-ui-action-button (plist-get spec :label)
+                              (lambda () (call-interactively command))
+                              :help (plist-get spec :help)
+                              :face (or (plist-get spec :face) 'harness-dim-face))))
+
+(defun harness-ui-workspace--settings-room ()
+  "Return how many columns the workspace settings line has.
+The narrowest window showing the buffer decides, so the line fits them
+all, less a column for the continuation glyph of a window without
+fringes; 80 when no window shows it."
+  (let ((windows (get-buffer-window-list (current-buffer) nil t)))
+    (if windows
+        (max 20 (1- (apply #'min (mapcar #'window-body-width windows))))
+      80)))
+
+(defun harness-ui-workspace--settings-line (&optional room)
+  "Return the workspace's settings line, or nil when there is none.
+It is drawn below the compose box, as a chat's is: the selected
+thread's model, thinking level, permission mode and interactive switch
+-- its live episode's, or the workspace defaults when it has no episode
+-- and, while an episode is live, what it has used: the context and the
+cost.  The settings are buttons of the shared settings line
+\(`harness-ui-settings-line'), fitted to ROOM columns."
+  (let* ((thread (harness-ui-workspace--current-thread))
+         (live (and thread (plist-get thread :live)))
+         (session (and live (harness-ui-session live)))
+         (values (or (and session (list :model (plist-get session :model)
+                                        :thinking (plist-get session :thinking)
+                                        :permission-mode (plist-get session :permission-mode)
+                                        :non-interactive (plist-get session :non-interactive)))
+                     (harness-ui-workspace--setting-values thread)))
+         (scope (if live "this thread" "this workspace"))
+         (figures
+          (when session
+            (delq nil
+                  (list (let ((context (harness-ui-format-context session t)))
+                          (and context (not (string-empty-p context))
+                               (list (harness-ui-string-action
+                                      context (lambda () (harness-set-context-limit live)))
+                                     30)))
+                        (let ((spend (harness-ui-format-spend
+                                      session t "This episode" t)))
+                          (and spend (not (string-empty-p spend))
+                               (list (harness-ui-string-action
+                                      spend (lambda () (harness-ui-show-usage)))
+                                     10))))))))
+    (when (and values (or thread (plist-get harness-ui-workspace--data :model)))
+      (harness-ui-settings-line
+       (list (harness-ui-setting-items
+              (harness-ui-setting-specs values :scope scope)
+              #'harness-ui-workspace--setting-button)
+             figures)
+       room))))
+
 (defun harness-ui-workspace--insert-header ()
   "Insert the header line of the workspace."
   (let* ((workspace harness-ui-workspace--data)
@@ -174,6 +299,7 @@ send it, the coarser `:state' and the cached session's own status."
          (thread (harness-ui-workspace--current-thread))
          (thread-title (or (plist-get thread :title) "All threads"))
          (status (harness-ui-workspace--episode-status thread))
+         (activity (harness-ui-workspace--activity-label thread))
          (knowledge (if (and (not (eq harness-ui-workspace--state 'error))
                              harness-ui-workspace--knowledge
                              (plist-get harness-ui-workspace--knowledge :available))
@@ -189,6 +315,9 @@ send it, the coarser `:state' and the cached session's own status."
             (propertize thread-title 'face 'harness-dim-face)
             " · " (propertize (harness-ui-workspace--status-label thread)
                               'face (harness-ui-workspace--status-face status))
+            (if activity
+                (concat " · " (propertize activity 'face 'harness-dim-face))
+              "")
             "   " (propertize knowledge 'face 'harness-dim-face)
             "   " (propertize computer 'face 'harness-dim-face)
             "   ")
@@ -228,7 +357,10 @@ send it, the coarser `:state' and the cached session's own status."
                (title (or (plist-get thread :title) "Thread"))
                (status (harness-ui-workspace--episode-status thread))
                (face (harness-ui-workspace--status-face status))
-               (label (harness-ui-workspace--status-label thread))
+               ;; A running thread says what its turn does now, as a chat's
+               ;; activity line does; the state words say what it is otherwise.
+               (label (or (harness-ui-workspace--activity-label thread)
+                          (harness-ui-workspace--status-label thread)))
                (start (point))
                (title-end (+ start (length (harness-ui-workspace--status-icon status))
                              1 (length title) 2)))
@@ -346,7 +478,24 @@ them, so the answers and their tooltips are the ones every view has."
          (insert "\n")
          (harness-ui-workspace--insert-pending)))
       (insert "\n")
+      ;; The header and the thread rail scroll away with a long timeline;
+      ;; the line above the box says what the selected turn does where the
+      ;; person types.
+      (when-let* ((activity (harness-ui-workspace--activity-line
+                             (harness-ui-workspace--current-thread))))
+        (insert activity "\n"))
       (harness-compose-insert (or draft "") "Workspace message")
+      (let ((compose-end (and (markerp harness-compose-end)
+                              (marker-position harness-compose-end)))
+            (settings (and (eq harness-ui-workspace--state 'ready)
+                           (harness-ui-workspace--settings-line
+                            (harness-ui-workspace--settings-room)))))
+        (when settings
+          (insert "\n" settings)
+          ;; The settings are not part of the box: its end stays before
+          ;; them, so the read-only region below begins after the box.
+          (when (and compose-end (markerp harness-compose-end))
+            (set-marker harness-compose-end compose-end))))
       (when (and harness-compose-start harness-compose-end)
         (put-text-property (point-min) (1- harness-compose-start) 'read-only t)
         (put-text-property (1+ harness-compose-end) (point-max) 'read-only t))
@@ -358,7 +507,12 @@ them, so the answers and their tooltips are the ones every view has."
        (panel
         (when-let* ((pos (text-property-any (point-min) (point-max)
                                             'harness-ui-pending panel)))
-          (goto-char pos))))
+          (goto-char pos)))
+       ;; The settings line follows the box, so the end of the buffer is no
+       ;; longer where typing goes: a redraw leaves point in the box, as it
+       ;; did before the line existed.
+       (t (when (and harness-compose-end (>= (point) (point-max)))
+            (goto-char harness-compose-end))))
       (setq harness-ui-workspace--rendered-key
             (list harness-ui-workspace--id selected harness-ui-workspace--state
                   (length harness-ui-workspace--entries)
@@ -496,6 +650,13 @@ blocked otherwise, and a message sent beside it would only queue."
             (buffer (current-buffer)))
         (let ((inhibit-read-only t))
           (harness-compose-insert ""))
+        ;; The model is loading before the harness's first activity says so:
+        ;; the thread, the header and the line above the box say it at once,
+        ;; not only after a round trip.
+        (when thread
+          (harness-ui-workspace--change-thread
+           thread (list :episode-status "running"
+                        :activity (list :phase "waiting" :since (float-time)))))
         (harness-ui-workspace--render)
         (harness-ui-call
          "_harness/workspace/prompt"
@@ -598,6 +759,54 @@ with the same panels and keys as a chat."
                         (harness-plist-merge thread changes)
                       thread))
                   (plist-get harness-ui-workspace--data :threads)))))
+
+(defun harness-ui-workspace--change-thread (thread-id changes)
+  "Merge CHANGES into the thread THREAD-ID of this buffer's data."
+  (setf (plist-get harness-ui-workspace--data :threads)
+        (mapcar (lambda (thread)
+                  (if (equal thread-id (plist-get thread :id))
+                      (harness-plist-merge thread changes)
+                    thread))
+                (plist-get harness-ui-workspace--data :threads))))
+
+(defun harness-ui-workspace--on-update (session-id update)
+  "Take SESSION-ID's UPDATE into the thread it is an episode of.
+An activity change says what a running turn does now, and the thread
+and header words follow it at once; a session change carries the model,
+thinking level and permission mode the settings line shows."
+  (pcase (plist-get update :sessionUpdate)
+    ("_harness/activity"
+     (let ((activity (plist-get update :activity)))
+       (dolist (buffer (harness-ui-workspace--buffers))
+         (with-current-buffer buffer
+           (when (harness-ui-workspace--episode-of-p session-id)
+             (let* ((thread (cl-find session-id (plist-get harness-ui-workspace--data :threads)
+                                     :key (lambda (item) (plist-get item :live))
+                                     :test #'equal))
+                    (old (plist-get thread :activity)))
+               (unless (equal old activity)
+                 (harness-ui-workspace--set-thread
+                  session-id (append (list :activity activity)
+                                     (and activity (list :episode-status "running"))))
+                 (harness-ui-workspace--render))))))))
+    ("_harness/session"
+     (let ((session (plist-get update :session)))
+       (when (listp session)
+         (dolist (buffer (harness-ui-workspace--buffers))
+           (with-current-buffer buffer
+             (when (harness-ui-workspace--episode-of-p session-id)
+               (let* ((thread (cl-find session-id (plist-get harness-ui-workspace--data :threads)
+                                       :key (lambda (item) (plist-get item :live))
+                                       :test #'equal))
+                      (changes (list :model (plist-get session :model)
+                                     :thinking (plist-get session :thinking)
+                                     :permission-mode (plist-get session :permission-mode)
+                                     :non-interactive (plist-get session :non-interactive))))
+                 (when (cl-some (lambda (key)
+                                  (not (equal (plist-get thread key) (plist-get changes key))))
+                                '(:model :thinking :permission-mode :non-interactive))
+                   (harness-ui-workspace--set-thread session-id changes)
+                   (harness-ui-workspace--render)))))))))))
 
 (defun harness-ui-workspace--on-pending-changed (session-id)
   "Redraw the buffers showing SESSION-ID, whose requests changed."
@@ -744,15 +953,20 @@ and root.  With more than one workspace, choose one by name."
 
 (define-derived-mode harness-ui-workspace-mode special-mode "Workspace"
   "Major mode of the persistent workspace chat.
-The header shows the workspace, the thread and the knowledge state; the
-thread list selects a topic; the timeline is the one chat.  Letters
-type in the compose box.
+The header shows the workspace, the thread, what its turn does now and
+the knowledge state; the thread list selects a topic; the timeline is
+the one chat; the settings line under the box shows the model, thinking
+level, permission mode and the workspace's defaults.  Letters type in
+the compose box.
 \<harness-ui-workspace-mode-map>\[harness-ui-workspace-send] sends;
 the `C-c w' keys act on the workspace."
   (setq buffer-read-only nil)
   (setq-local truncate-lines nil
               word-wrap t
               truncate-partial-width-windows nil
+              ;; A setting clicked here changes the selected thread's live
+              ;; episode, or the workspace defaults when it has none.
+              harness-ui-setting-target-function #'harness-ui-workspace--setting-target
               ;; [Send answer] on a question that allows several options
               ;; sends this box, as the chat's sends its own.
               harness-ui-pending-send-function #'harness-ui-workspace-send)
@@ -785,6 +999,7 @@ the `C-c w' keys act on the workspace."
 (defun harness-ui-workspace--init ()
   "Add the workspace mode to the harness UI."
   (add-hook 'harness-ui-event-functions #'harness-ui-workspace--on-event)
+  (add-hook 'harness-ui-update-functions #'harness-ui-workspace--on-update)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-workspace--on-redraw)
   (add-hook 'harness-ui-connected-hook #'harness-ui-workspace--on-redraw)
   (add-hook 'harness-ui-pending-drawn-predicates #'harness-ui-workspace--drawn-p)
@@ -794,6 +1009,7 @@ the `C-c w' keys act on the workspace."
 (defun harness-ui-workspace--shutdown ()
   "Remove the workspace mode from the harness UI."
   (remove-hook 'harness-ui-event-functions #'harness-ui-workspace--on-event)
+  (remove-hook 'harness-ui-update-functions #'harness-ui-workspace--on-update)
   (remove-hook 'harness-ui-redraw-hook #'harness-ui-workspace--on-redraw)
   (remove-hook 'harness-ui-connected-hook #'harness-ui-workspace--on-redraw)
   (remove-hook 'harness-ui-pending-drawn-predicates #'harness-ui-workspace--drawn-p)

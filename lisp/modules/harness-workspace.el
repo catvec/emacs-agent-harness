@@ -257,13 +257,63 @@ the next turn starts."
                   (harness-workspace--view workspace))
     workspace))
 
+(defun harness-workspace--settings (workspace)
+  "Return the settings WORKSPACE's episodes start with, as a plist.
+That is its own model, thinking level, permission mode and interactive
+switch, else the workspace options (`harness-workspace-model' and the
+ones beside it), else the harness's configured defaults at its root.
+It is what a parked thread reads, and what a client names before the
+first message starts an episode."
+  (let* ((root (or (plist-get workspace :root) default-directory))
+         (defaults
+          (list :model (or (plist-get workspace :model)
+                           harness-workspace-model
+                           (harness-session--config 'harness-model root))
+                :thinking (or (plist-get workspace :thinking)
+                              harness-workspace-thinking
+                              (harness-session--config 'harness-thinking root))
+                :permission-mode (harness-workspace--symbol
+                                  (or (plist-get workspace :permission-mode)
+                                      harness-workspace-permission-mode))
+                :non-interactive (harness-json-true-p
+                                  (if (plist-member workspace :non-interactive)
+                                      (plist-get workspace :non-interactive)
+                                    (or harness-workspace-non-interactive
+                                        (harness-session--config
+                                         'harness-non-interactive root)))))))
+    defaults))
+
+(defun harness-workspace--thread-setting (thread key defaults)
+  "Return what THREAD uses for setting KEY.
+DEFAULTS are the workspace's own (`harness-workspace--settings').  A
+live episode's value is its own even when nil, which means the model's
+or the harness's own default."
+  (let ((live (plist-get thread :live)))
+    (if-let* ((session (and live (harness-workspace--session-record live))))
+        (plist-get session key)
+      (plist-get defaults key))))
+
+(defun harness-workspace--thread-activity (thread)
+  "Return what THREAD's live episode does now, as `agent/activity' does.
+Nil when it has no live episode, the episode is not running, or the
+harness has no agent activity to report."
+  (when-let* ((live (plist-get thread :live))
+              (session (harness-workspace--session-record live))
+              ((eq (plist-get session :status) 'running))
+              ((harness-method-exists-p 'agent/activity)))
+    (ignore-errors (harness-call 'agent/activity live))))
+
 (defun harness-workspace--view (workspace)
   "Return WORKSPACE as clients read it, with thread states.
 Each thread carries `:state' as clients have always read it (`live',
 `waiting', `merged' or `parked'), the finer `:episode-status'
 (`running', `blocked', `idle', `failed', `stopped', `inactive' or
-`parked') and `:pending', what its live episode waits on."
-  (let* ((threads (mapcar (lambda (thread)
+`parked'), `:pending', what its live episode waits on, `:activity',
+what the running turn does now, and the settings it runs or would run
+with: `:model', `:thinking', `:permission-mode' and `:non-interactive'
+from its live episode, else the workspace's defaults."
+  (let* ((defaults (harness-workspace--settings workspace))
+         (threads (mapcar (lambda (thread)
                             (let* ((live (plist-get thread :live))
                                    (session (and live (harness-workspace--session-record live)))
                                    (state (cond ((plist-get thread :merged-into) "merged")
@@ -275,7 +325,16 @@ Each thread carries `:state' as clients have always read it (`live',
                               (append (copy-sequence thread)
                                       (list :state state
                                             :episode-status (harness-workspace--episode-status thread session)
-                                            :pending (plist-get session :pending)))))
+                                            :pending (plist-get session :pending)
+                                            :activity (harness-workspace--thread-activity thread)
+                                            :model (harness-workspace--thread-setting
+                                                    thread :model defaults)
+                                            :thinking (harness-workspace--thread-setting
+                                                       thread :thinking defaults)
+                                            :permission-mode (harness-workspace--thread-setting
+                                                              thread :permission-mode defaults)
+                                            :non-interactive (harness-workspace--thread-setting
+                                                              thread :non-interactive defaults)))))
                           (plist-get workspace :threads)))
          (threads (sort threads
                         (lambda (a b)
@@ -285,6 +344,12 @@ Each thread carries `:state' as clients have always read it (`live',
                                       (or (plist-get b :last-at) 0))))))))
     (let ((view (copy-sequence workspace)))
       (setf (plist-get view :threads) threads)
+      ;; The workspace's own settings too, so a client names the model
+      ;; before its first thread exists.
+      (setf (plist-get view :model) (plist-get defaults :model)
+            (plist-get view :thinking) (plist-get defaults :thinking)
+            (plist-get view :permission-mode) (plist-get defaults :permission-mode)
+            (plist-get view :non-interactive) (plist-get defaults :non-interactive))
       (setf (plist-get view :graph)
             (or (plist-get view :graph)
                 (when (harness-method-exists-p 'logseq/root)

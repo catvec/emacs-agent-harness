@@ -45,7 +45,9 @@ class TurnActivity {
     if (multiple) return '${count ?? calls.length} tools running';
     final name = title ?? tool;
     if (name == null || name.trim().isEmpty) return 'Running a tool';
-    return detail == null || detail!.trim().isEmpty ? name : '$name · $detail';
+    return detail == null || detail!.trim().isEmpty
+        ? 'Running $name'
+        : 'Running $name · $detail';
   }
 
   bool get isTool => phase == 'tool' || phase == 'checking';

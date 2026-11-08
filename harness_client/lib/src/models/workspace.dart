@@ -1,4 +1,5 @@
 import '../acp/acp_message.dart';
+import 'activity.dart';
 import 'session.dart';
 
 /// A persistent workspace: one chat, its threads and its memory.
@@ -10,6 +11,10 @@ class WorkspaceSummary {
     this.project = '',
     this.lastThread,
     this.threads = const [],
+    this.model,
+    this.thinking,
+    this.permissionMode,
+    this.nonInteractive = false,
     this.createdAt,
     this.updatedAt,
   });
@@ -25,6 +30,12 @@ class WorkspaceSummary {
         for (final item in asMapList(wire['threads']))
           WorkspaceThread.fromWire(item),
       ],
+      model: asString(wire['model']),
+      thinking: asString(wire['thinking']),
+      permissionMode: asString(
+        wire['permission-mode'] ?? wire['permissionMode'],
+      ),
+      nonInteractive: asBool(wire['non-interactive'] ?? wire['nonInteractive']),
       createdAt: parseTime(wire['created']),
       updatedAt: parseTime(wire['updated']),
     );
@@ -36,6 +47,14 @@ class WorkspaceSummary {
   final String project;
   final String? lastThread;
   final List<WorkspaceThread> threads;
+
+  /// The defaults a new episode starts with: the model, thinking level,
+  /// permission mode and interactive switch the harness resolved for the
+  /// workspace, so its first thread can already name them.
+  final String? model;
+  final String? thinking;
+  final String? permissionMode;
+  final bool nonInteractive;
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
@@ -57,6 +76,10 @@ class WorkspaceSummary {
       project: project,
       lastThread: lastThread ?? this.lastThread,
       threads: threads ?? this.threads,
+      model: model,
+      thinking: thinking,
+      permissionMode: permissionMode,
+      nonInteractive: nonInteractive,
       createdAt: createdAt,
       updatedAt: updatedAt,
     );
@@ -110,6 +133,11 @@ class WorkspaceThread {
     this.project = '',
     this.tags = const [],
     this.lastAt,
+    this.model,
+    this.thinking,
+    this.permissionMode,
+    this.nonInteractive = false,
+    this.activity,
   });
 
   factory WorkspaceThread.fromWire(JsonMap wire) {
@@ -140,6 +168,15 @@ class WorkspaceThread {
       project: asStringOr(wire['project'], ''),
       tags: explicit.isEmpty ? conceptTags(title) : explicit,
       lastAt: parseTime(wire['last-at'] ?? wire['lastAt']),
+      model: asString(wire['model']),
+      thinking: asString(wire['thinking']),
+      permissionMode: asString(
+        wire['permission-mode'] ?? wire['permissionMode'],
+      ),
+      nonInteractive: asBool(wire['non-interactive'] ?? wire['nonInteractive']),
+      activity: asMap(wire['activity']).isEmpty
+          ? null
+          : TurnActivity.fromWire(asMap(wire['activity'])),
     );
   }
 
@@ -160,6 +197,19 @@ class WorkspaceThread {
   /// small set of high-level concepts, not every page.
   final List<String> tags;
   final DateTime? lastAt;
+
+  /// What its live episode runs with, or the workspace's defaults when it
+  /// has none: the harness resolves both (`workspace/get`'s `:model`,
+  /// `:thinking`, `:permission-mode` and `:non-interactive`).
+  final String? model;
+  final String? thinking;
+  final String? permissionMode;
+  final bool nonInteractive;
+
+  /// What its running turn does now, as `agent/activity` says it: waiting
+  /// for the model, thinking, writing, or running a tool.  Null when no
+  /// turn runs, or from a harness that does not report activity.
+  final TurnActivity? activity;
 
   bool get liveNow => state == 'live' || state == 'waiting';
 
@@ -216,6 +266,11 @@ class WorkspaceThread {
     String? episodeStatus,
     String? live,
     List<WorkspacePendingRequest>? pending,
+    String? model,
+    String? thinking,
+    String? permissionMode,
+    bool? nonInteractive,
+    TurnActivity? activity,
   }) {
     return WorkspaceThread(
       id: id,
@@ -230,6 +285,11 @@ class WorkspaceThread {
       project: project,
       tags: tags ?? this.tags,
       lastAt: lastAt,
+      model: model ?? this.model,
+      thinking: thinking ?? this.thinking,
+      permissionMode: permissionMode ?? this.permissionMode,
+      nonInteractive: nonInteractive ?? this.nonInteractive,
+      activity: activity ?? this.activity,
     );
   }
 }

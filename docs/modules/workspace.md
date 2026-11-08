@@ -98,6 +98,7 @@ of `workspace/prompt`.
 
 ### Methods it calls
 
+- `agent/activity` ([agent](agent.md))
 - `agent/cancel` ([agent](agent.md))
 - `agent/prompt` ([agent](agent.md))
 - `agent/running` ([agent](agent.md))

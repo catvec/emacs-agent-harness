@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../../models/activity.dart';
 import '../../models/resources.dart';
 import '../../models/workspace.dart';
 import '../../state/app_controller.dart';
@@ -14,10 +15,12 @@ import '../../voice/voice_controller.dart';
 import '../../vnc/rfb.dart';
 import '../../vnc/vnc_view.dart';
 import '../../vnc/websocket_transport.dart';
+import '../format.dart';
 import '../navigation.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/activity_bar.dart';
 import '../widgets/interaction_card.dart';
 import '../widgets/markdown_view.dart';
 import '../widgets/message_composer.dart';
@@ -470,6 +473,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       parts: [
         thread?.title,
         thread?.statusLabel,
+        _modelOf(thread) == null ? null : modelName(_modelOf(thread)),
         notes == null ? null : '$notes notes',
         controller.selectedTag == null
             ? null
@@ -504,6 +508,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
 
   Widget _compactStatus(BuildContext context, WorkspaceThread thread) {
     final color = _threadStatusColor(thread, Theme.of(context));
+    final model = _modelOf(thread);
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         HarnessSpace.gutter,
@@ -523,9 +528,148 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
               style: HarnessText.meta(context).copyWith(color: color),
             ),
           ),
+          if (model != null && model.isNotEmpty) ...[
+            const SizedBox(width: 8),
+            Text(
+              modelName(model),
+              key: const Key('workspace-model'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: HarnessText.meta(context),
+            ),
+          ],
         ],
       ),
     );
+  }
+
+  /// The model the active thread's episode runs on: the live session's own
+  /// when it has one, the workspace's resolved default before that.
+  String? _modelOf(WorkspaceThread? thread) =>
+      _pending?.summary?.model ??
+      thread?.model ??
+      _controller?.current?.model;
+
+  /// What the active thread's running turn does now, as the session says
+  /// it, else as the last workspace view did.
+  TurnActivity? _activityOf(WorkspaceThread? thread) =>
+      _pending?.activity ?? thread?.activity;
+
+  /// The permission mode the active thread's episode runs in, or the
+  /// workspace's default before the first episode.
+  String? _modeOf(WorkspaceThread? thread) =>
+      _pending?.currentModeId ??
+      thread?.permissionMode ??
+      _controller?.current?.permissionMode;
+
+  /// The modes the harness offers: the four the workspace and the chat
+  /// both name.  A workspace episode has no session screen to read them
+  /// from, and the harness's own modes are these.
+  static const _permissionModes = ['ask', 'accept-edits', 'auto', 'yolo'];
+
+  /// Whether the model and permission mode can be changed here: the
+  /// harness is connected, and a workspace is open.
+  bool get _canChangeSettings =>
+      widget.app.isConnected &&
+      widget.app.harness != null &&
+      _controller?.current != null;
+
+  Future<void> _chooseModel(WorkspaceController controller) async {
+    final models = [
+      for (final provider in widget.app.server?.providers ?? const [])
+        for (final model in provider.models) model,
+    ];
+    if (models.isEmpty) {
+      final value = await showHarnessTextPrompt(
+        context: context,
+        title: 'Change model',
+        message: 'The harness takes provider:model.',
+        initial: _modelOf(controller.activeThread) ?? '',
+        hint: 'provider:model',
+        confirmLabel: 'Use model',
+      );
+      if (value != null && value.trim().isNotEmpty) {
+        await _setModel(controller, value.trim());
+      }
+      return;
+    }
+    final chosen = await showHarnessMenu<String>(
+      context: context,
+      title: 'Model',
+      items: [
+        for (final model in models)
+          HarnessMenuItem(
+            value: model.id,
+            label: model.name == model.id
+                ? model.id
+                : '${model.name} · ${model.id}',
+            icon: Icons.memory_rounded,
+          ),
+      ],
+    );
+    if (chosen != null) await _setModel(controller, chosen);
+  }
+
+  /// Change the active thread's model: its live episode's, or the
+  /// workspace's default when it has none (the next episode's).
+  Future<void> _setModel(WorkspaceController controller, String model) async {
+    final live = _pending;
+    if (live != null) {
+      await live.setModel(model);
+    } else {
+      final api = widget.app.harness;
+      final id = controller.current?.id;
+      if (api == null || id == null) return;
+      try {
+        await api.updateWorkspace(id, model: model);
+      } catch (failure) {
+        if (mounted) _say('Model · $failure');
+        return;
+      }
+    }
+    if (mounted) await controller.reload();
+  }
+
+  Future<void> _chooseMode(WorkspaceController controller) async {
+    final chosen = await showHarnessMenu<String>(
+      context: context,
+      title: 'Permission mode',
+      items: [
+        for (final id in _permissionModes)
+          HarnessMenuItem(
+            value: id,
+            label: permissionLabel(id),
+            icon: Icons.shield_outlined,
+          ),
+      ],
+    );
+    if (chosen != null) await _setMode(controller, chosen);
+  }
+
+  /// Change the permission mode: the live episode's, or the workspace's
+  /// default when there is no episode yet.
+  Future<void> _setMode(WorkspaceController controller, String mode) async {
+    final live = _pending;
+    if (live != null) {
+      await live.setMode(mode);
+    } else {
+      final api = widget.app.harness;
+      final id = controller.current?.id;
+      if (api == null || id == null) return;
+      try {
+        await api.updateWorkspace(id, permissionMode: mode);
+      } catch (failure) {
+        if (mounted) _say('Permission · $failure');
+        return;
+      }
+    }
+    if (mounted) await controller.reload();
+  }
+
+  void _say(String text) {
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(text)));
   }
 
   /// A column of the desktop layout, wider when the text is larger: a font
@@ -798,6 +942,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     WorkspaceController controller, {
     double? maxWidth,
   }) {
+    final thread = controller.activeThread;
     final box = MessageComposer(
       drafts: widget.app.drafts,
       draftKey:
@@ -808,6 +953,16 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       enabled: controller.current != null,
       hint: 'Workspace message',
       textController: _composerText,
+      footer: _WorkspaceFooter(
+        model: modelName(_modelOf(thread)),
+        mode: permissionLabel(_modeOf(thread)),
+        onModel: _canChangeSettings
+            ? () => unawaited(_chooseModel(controller))
+            : null,
+        onMode: _canChangeSettings
+            ? () => unawaited(_chooseMode(controller))
+            : null,
+      ),
       onSend: (text, attachments) {
         if (!controller.canSend) return false;
         final origin = controller.selectedThread ?? controller.activeThread?.id;
@@ -844,9 +999,21 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       ),
       child: box,
     );
+    final running = controller.sending || thread?.statusKey == 'running';
+    final activity = _activityOf(thread);
     final column = Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (running || activity != null)
+          ActivityBar(
+            activity: activity ??
+                (controller.sending
+                    ? const TurnActivity(phase: 'waiting')
+                    : null),
+            waiting: false,
+            running: running,
+            animated: activity?.since != null,
+          ),
         if (controller.error != null && _failed != null)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: HarnessSpace.gutter),
@@ -967,6 +1134,52 @@ class _FailedSend {
   const _FailedSend(this.text, this.thread);
   final String text;
   final String? thread;
+}
+
+/// The row under the workspace message field: the model and permission
+/// mode the next message is handled with, and a way to change them.
+///
+/// A live episode changes its own; a thread with no episode changes the
+/// workspace's defaults, which its next episode starts with.  Without a
+/// connection there is nothing to change, and the values only show.
+class _WorkspaceFooter extends StatelessWidget {
+  const _WorkspaceFooter({
+    required this.model,
+    required this.mode,
+    required this.onModel,
+    required this.onMode,
+  });
+
+  final String model;
+  final String mode;
+  final VoidCallback? onModel;
+  final VoidCallback? onMode;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Flexible(
+          flex: 4,
+          child: HarnessPicker(
+            key: const Key('workspace-model-picker'),
+            icon: Icons.memory_rounded,
+            label: model,
+            onTap: onModel,
+          ),
+        ),
+        Flexible(
+          flex: 3,
+          child: HarnessPicker(
+            key: const Key('workspace-mode-picker'),
+            icon: Icons.shield_outlined,
+            label: mode,
+            onTap: onMode,
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _ThreadRail extends StatelessWidget {

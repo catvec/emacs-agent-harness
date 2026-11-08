@@ -198,6 +198,56 @@ reads what the episode waits on without opening it."
                        (plist-get (car (plist-get (harness-call 'workspace/get id) :threads))
                                   :episode-status)))))))
 
+(ert-deftest harness-workspace-view-names-the-model-and-activity ()
+  "A thread carries the model and activity of its live episode.
+A parked thread carries the defaults its next episode would start with,
+so a client names the model before the first message."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread (harness-call 'workspace/thread/create id "Kitchen renovation")))
+      ;; The workspace itself names the defaults its first thread starts on.
+      (let ((view (harness-call 'workspace/get id)))
+        (should (equal "demo:scripted" (plist-get view :model)))
+        (should (equal "auto" (format "%s" (plist-get view :permission-mode)))))
+      ;; No episode yet: the workspace's defaults, as the next one starts.
+      (let ((shown (car (plist-get (harness-call 'workspace/get id) :threads))))
+        (should (equal "demo:scripted" (plist-get shown :model)))
+        (should (equal "auto" (format "%s" (plist-get shown :permission-mode))))
+        (should (plist-get shown :non-interactive))
+        (should (null (plist-get shown :activity))))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let ((live (plist-get (car (plist-get (harness-call 'workspace/get id) :threads))
+                             :live)))
+        (harness-workspace-test-wait-idle live)
+        (let ((shown (car (plist-get (harness-call 'workspace/get id) :threads))))
+          (should (equal "demo:scripted" (plist-get shown :model)))
+          (should (equal "auto" (format "%s" (plist-get shown :permission-mode))))
+          (should (null (plist-get shown :activity))))
+        ;; What the running turn does now rides with the view.
+        (let ((orig (symbol-function 'harness-call))
+              (orig-exists (symbol-function 'harness-method-exists-p)))
+          (cl-letf (((symbol-function 'harness-call)
+                     (lambda (method &rest args)
+                       (if (eq method 'agent/activity)
+                           (list :phase "waiting" :since 1.0)
+                         (apply orig method args))))
+                    ((symbol-function 'harness-method-exists-p)
+                     (lambda (method) (or (eq method 'agent/activity)
+                                          (funcall orig-exists method)))))
+            (harness-call 'session/set-status live 'running)
+            (let ((running (car (plist-get (harness-call 'workspace/get id) :threads))))
+              (should (equal "waiting"
+                             (plist-get (plist-get running :activity) :phase))))))
+        ;; The episode's own setting wins over the workspace's default.
+        (harness-call 'session/update live :model "demo:other")
+        (should (equal "demo:other"
+                       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads))
+                                  :model)))
+        (harness-call 'session/set-status live 'idle)))))
+
 (ert-deftest harness-workspace-new-episode-clears-the-last-stop ()
   "A new episode starts idle, though the one before it failed."
   (harness-workspace-test-with

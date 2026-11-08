@@ -765,6 +765,11 @@ header line, a thread sidebar, the timeline and the compose box.
   file references, task references and skill references work as in a
   chat; `C-c .` then a key presses a workspace key, as on the task
   board.  A draft survives a thread switch per thread.
+- The **activity line** just above the box says what the selected
+  thread's running turn does (`Waiting for the model…`, `Thinking…`,
+  `Running Read file…`), as the chat's does.  The header and the thread
+  rail say it too, but both scroll away with a long timeline; the line
+  above the box stays where the person types.
 - The **side panel** in the mockup is optional: a computer preview and
   a compact work digest.  It is not part of the timeline; `[Computer]`
   and `[Tasks]` open the same things in a popout or the fullscreen side
@@ -971,6 +976,9 @@ The tab is one page at every size, and the page is the chat:
   the concept rail, and the computer desk side by side.  A larger text
   scale widens the side columns by a bounded amount, so a name is not
   cut and the chat keeps a readable width.
+- The message field's footer carries the model and permission-mode
+  pickers, as a conversation's does: a live episode's own, else the
+  workspace defaults its next episode starts with.
 
 The computer desk draws the box's screen, the takeover pill and the
 footer, and the phone's sheet draws the same window above the footer.
@@ -1177,7 +1185,7 @@ against the rendered buffer and the final diff.
 | `Tasks` / `Computer` / `Memory` / `Dream` / `Call` / `Menu` | header buttons |
 | `Open episode` | header and thread action |
 | `live` / `parked` / `done` / `waiting` | thread states |
-| `Routing…` / `Recalling…` / `Working` / `Waiting` / `Thinking` | activity |
+| `Routing…` / `Recalling…` / `Working` / `Waiting` / `Thinking` / `Waiting for the model…` / `Running <tool>…` | activity |
 
 **Compose and thread actions**
 
