@@ -40,9 +40,11 @@
 ;; A sender line shows when it was sent once `harness-chat-time-group'
 ;; seconds passed since the last timestamp shown, and not before: messages
 ;; sent near each other share one timestamp, and a long turn gets another
-;; every few minutes.  The header line says when the message its window
-;; starts on was sent (`harness-chat--top-time'), unless that message shows
-;; its own timestamp already, so a group's time scrolled off is still known.
+;; every few minutes.  A line of its own under the header
+;; (`harness-chat--refresh-time-bar') shows the clock of the message the
+;; window starts on, unless that message shows its own timestamp
+;; already, so a group's time scrolled off is still known without making
+;; the header carry one more segment.
 ;;
 ;; The transcript is never re-rendered on a delta: every node owns a
 ;; region delimited by two markers, streaming text is appended at the
@@ -337,7 +339,7 @@ its own and shows the time it was sent (`harness-chat-time-group').")
 (defvar-local harness-chat--time-known nil
   "When the last message with a timestamp before the end was sent.
 A block that carries none of its own -- a notice the UI drew -- stands
-at this time for the header line (`harness-chat--top-time').")
+at this time for the time line under the header (`harness-chat--top-time').")
 (defvar-local harness-chat--queue nil "Queued items as last rendered.")
 (defvar-local harness-chat--steering nil
   "The messages the running turn has not taken yet, as the session lists them.
@@ -1522,9 +1524,9 @@ Nil while the whole message shows."
 ;; The transcript says when it was said without a clock on every line: a
 ;; sender line shows one once `harness-chat-time-group' seconds passed
 ;; since the last shown, so a turn is one timestamped group of messages,
-;; and the header line shows the time of whatever message a window starts
-;; on (`harness-chat--top-time'), so a group's timestamp can scroll away
-;; without leaving the reader without a time.
+;; and a line of its own under the header shows the clock of the message
+;; a window starts on (`harness-chat--top-time'), so a group's timestamp
+;; can scroll away without leaving the reader without a time.
 
 (defun harness-chat--node-time (node)
   "Return when NODE was sent, as a float time, or nil."
@@ -1540,6 +1542,12 @@ the year first when it is from another one."
         ((equal (format-time-string "%Y" time) (format-time-string "%Y"))
          (format-time-string "%b %-d %H:%M" time))
         (t (format-time-string "%Y-%m-%d %H:%M" time))))
+
+(defun harness-chat--time-clock (time)
+  "Return the clock of TIME, without its day or year.
+The pinned line under the header uses it: the header stays free of the
+date, which the sender lines of the transcript carry."
+  (format-time-string "%H:%M" time))
 
 (defun harness-chat--time-full (time)
   "Return TIME in full, with its date and second, for a tooltip."
@@ -3543,9 +3551,10 @@ below it is a target too, but a long one lighting up whole is jarring."
                          (list 'harness-chat-node (harness-chat-block-id block) 'read-only t 'rear-nonsticky t
                                'harness-chat-time (harness-chat-block-time block))
                          text)
-    ;; The first line is the one a timestamp shows on: the header line tells
-    ;; the time of the block at the top of a window unless that line, with
-    ;; its timestamp, is what the window starts on (`harness-chat--top-time').
+    ;; The first line is the one a timestamp shows on: the time line under
+    ;; the header tells the time of the block at the top of a window unless
+    ;; that line, with its timestamp, is what the window starts on
+    ;; (`harness-chat--top-time').
     (when (harness-chat-block-time-head block)
       (let ((end (or (string-search "\n" text) (length text))))
         (add-text-properties 0 (min (1+ end) (length text)) '(harness-chat-time-head t) text)))
@@ -6935,12 +6944,10 @@ blank lines, so the walk is short."
 
 (defun harness-chat--top-time (&optional window)
   "Return the time of the first message WINDOW shows, or nil.
-WINDOW defaults to the one whose header line is being drawn: redisplay
-binds `selected-window' to it while it evaluates a mode or header line.
-Nil when no message shows, and when the first one shows its own
-timestamp on the line that starts it.  It reads `window-start' and the
-text's properties, never measuring the window, which a header line must
-not do (see `harness-chat--at-bottom-p')."
+WINDOW defaults to the selected one.  Nil when no message shows, and
+when the first one shows its own timestamp on the line that starts it.
+It reads `window-start' and the text's properties, never measuring the
+window."
   (let* ((w (or window (selected-window)))
          (start (and (window-live-p w)
                      (eq (window-buffer w) (current-buffer))
@@ -6950,24 +6957,101 @@ not do (see `harness-chat--at-bottom-p')."
         (and (not (get-text-property (car found) 'harness-chat-time-head))
              (cdr found))))))
 
-(defun harness-chat--time-segment ()
-  "Return the header segment of the time at the top of the window, or nil."
-  (when-let* ((time (harness-chat--top-time)))
-    (list (concat "  " (propertize (harness-chat--time-label time)
-                                   'face 'harness-summary-face
-                                   'help-echo (format "First message on screen: %s"
-                                                      (harness-chat--time-full time))))
-          60 nil)))
+(defvar-local harness-chat--time-bars nil
+  "Alist of (WINDOW . OVERLAY) for the pinned time line under the header.
+Each overlay is window-specific, sits at the start of the first whole
+line its window shows, and its `before-string' is the time line, or nil
+when the message there shows its own timestamp already.")
+
+(defun harness-chat--time-line (time width)
+  "Return the pinned time line for TIME, fitted to WIDTH columns.
+It is the clock and a rule to the window's right edge, on a line of its
+own: the newline at its end puts it above the line it is drawn at.
+TIME's tooltip holds the whole of when it was, date and all; the header
+stays free of the date."
+  (let* ((label (harness-chat--time-clock time))
+         (text (concat " " (propertize label
+                                       'face 'harness-summary-face
+                                       'help-echo (format "First message on screen: %s"
+                                                          (harness-chat--time-full time)))
+                       " "))
+         (room (max 1 (- (or width 80) (string-width text) 1))))
+    (concat text
+            (propertize (make-string room ?─) 'face 'harness-dim-face)
+            "\n")))
+
+(defun harness-chat--first-whole-line (window)
+  "Return the start of the first whole line WINDOW shows, or nil.
+That is `window-start' when a line begins there, else the next line's
+beginning: a window can start in the middle of a line, or at the
+newline that ends one."
+  (when (and (window-live-p window)
+             (bufferp (window-buffer window))
+             (window-start window))
+    (save-excursion
+      (goto-char (window-start window))
+      (if (bolp)
+          (point)
+        (forward-line 1)
+        (unless (eobp) (point))))))
+
+(defun harness-chat--time-bar (window)
+  "Return WINDOW's time-line overlay, making it if need be.
+The overlay is window-specific: a chat shown in two windows has a line
+of its own in each."
+  (or (alist-get window harness-chat--time-bars)
+      (let ((ov (make-overlay (point-min) (point-min) nil t t)))
+        (overlay-put ov 'window window)
+        (overlay-put ov 'harness-chat-time-bar t)
+        (push (cons window ov) harness-chat--time-bars)
+        ov)))
+
+(defun harness-chat--refresh-time-bar (&optional window)
+  "Draw the pinned time line under WINDOW's header line.
+WINDOW defaults to the selected one.  The line says when the first
+message the window shows was sent, and is absent when that message
+shows its own timestamp at the top, and when no message shows.  It
+runs from `pre-redisplay-functions', so it follows scrolling, resizing
+and the transcript growing; it changes the overlay only when the time
+or the line it stands on changed."
+  (let ((w (or window (selected-window))))
+    (when (and (window-live-p w)
+               (eq (window-buffer w) (current-buffer)))
+      ;; Drop the overlays of windows that are gone, or show another
+      ;; buffer: kept, one would draw its line again in a window that
+      ;; shows this buffer later, at a position that is not its top.
+      (dolist (entry harness-chat--time-bars)
+        (unless (and (window-live-p (car entry))
+                     (eq (window-buffer (car entry)) (current-buffer)))
+          (delete-overlay (cdr entry))))
+      (setq harness-chat--time-bars
+            (cl-remove-if-not (lambda (entry)
+                                (and (window-live-p (car entry))
+                                     (eq (window-buffer (car entry)) (current-buffer))))
+                              harness-chat--time-bars))
+      (let ((ov (harness-chat--time-bar w))
+            (time (harness-chat--top-time w))
+            (start (harness-chat--first-whole-line w)))
+        (if (and time start)
+            (let ((line (harness-chat--time-line time (window-body-width w))))
+              (unless (and (= (overlay-start ov) start)
+                           (= (overlay-end ov) start)
+                           (equal (overlay-get ov 'before-string) line))
+                (unless (= (overlay-start ov) start)
+                  (move-overlay ov start start))
+                (overlay-put ov 'before-string line)))
+          (when (overlay-get ov 'before-string)
+            (overlay-put ov 'before-string nil)))))))
 
 (defun harness-chat--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
 It names the buffer and leads out of it: the session's name, the
-session it was started from, when the message at the top of the window
-was sent (while that message does not show its own timestamp already,
-`harness-chat--top-time'), then what the session used -- the context,
+session it was started from, then what the session used -- the context,
 its observed cache rate once a request has completed, the total tokens
 and the cost, the plan's quota windows for a subscription -- then
-[menu] and the newer-messages notice.  The model,
+[menu] and the newer-messages notice.  The clock of the message at the
+top of the window is on a line of its own under the header
+\(`harness-chat--refresh-time-bar').  The model,
 the thinking level, the permission mode and whether it waits for you
 are settings that change what the session does: they stand above the
 compose box (`harness-chat--settings-line'), with a task's queue.  The
@@ -7000,10 +7084,7 @@ it."
                                                   "Session name (mouse-1: rename)" 'bold))
              #'harness-rename-session)
        ;; Where the session came from, right after its own name.
-       (harness-chat--parent-segment)
-       ;; When the message the window starts on was sent: the transcript's
-       ;; timestamps are every few messages, and this one is always there.
-       (harness-chat--time-segment))
+       (harness-chat--parent-segment))
       ;; What the session used: its context, the tokens of every call and
       ;; what it cost, information rather than a setting.
       (harness-chat--figure-items s)
@@ -8155,6 +8236,10 @@ the id of a session written in a message is a link to it.
   (harness-ui-view-adopt #'harness-chat--wake)
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)
   (add-hook 'window-scroll-functions #'harness-chat--update-notice nil t)
+  ;; The time line under the header is an overlay string, so it is put
+  ;; at the window's first line before each redisplay, as the compose
+  ;; box's padding is.
+  (add-hook 'pre-redisplay-functions #'harness-chat--refresh-time-bar nil t)
   (add-hook 'window-size-change-functions #'harness-chat--on-window-size nil t)
   ;; The wheel scrolls by pixels too (see "Scrolling by pixels").
   (setq-local mwheel-scroll-up-function #'harness-chat-scroll-forward

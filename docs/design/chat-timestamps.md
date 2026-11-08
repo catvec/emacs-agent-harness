@@ -33,14 +33,18 @@ Two pieces, one setting:
   carry none: the turn's own line already gives the context, and a time
   on every call would be the clutter the grouping is for.
 
-- **A pinned time in the header line.**  A chat's header line is the one
-  part of the buffer every window always shows.  It gains a segment, after
-  the session's name and where it came from, with the time of the first
-  message the window shows.  It is the message's own time, not its
-  group's, so scrolling through a long turn keeps saying when the thing
-  at the top happened.  It is hidden when that message already shows its
-  own timestamp on the line the window starts on, and when no message
-  shows, so nothing is said twice.
+- **A pinned time on a line under the header.**  The chat's header line
+  already carries the session's name, where it came from and its figures;
+  adding a clock there made it too full.  The clock of the first message
+  the window shows — the message's own time, not its group's — sits on a
+  line of its own, directly under the header, in the first row of the
+  window, so scrolling through a long turn keeps saying when the thing at
+  the top happened.  It is only the clock: the day and year stay on the
+  sender lines, and the header area carries no date.  The line is hidden
+  when that message already shows its own timestamp on the line the
+  window starts on, and when no message shows, so nothing is said twice.
+  A chat shown in two windows has a line in each, each saying what its
+  own window shows.
 
 The setting, `harness-chat-time-group`, is in the `harness-ui-chat`
 group.  0 puts a time on every sender line; a larger value groups more.
@@ -64,15 +68,24 @@ block whose sender line shows it also carries `harness-chat-time-head` on
 that first line.  A coalesced group's summary text carries its first
 member's.
 
-The header reads those properties at `(window-start)` of the window whose
-header line is being drawn.  Redisplay binds `selected-window` to that
-window while it evaluates a `:eval` mode or header line, so a window
-scrolled to a different part of the same session gets its own time.  When
-the start is above the first message — a transcript shorter than its
-window starts on the blank room the compose box's padding makes — the
-first message's property is found by walking to the next one; that walk
-is over blank lines, not the transcript.  The header never measures the
-window, which a header line must not do (`harness-chat--at-bottom-p`).
+The time line is a window-specific overlay (`overlay-put` `window`) at
+the start of the first whole line the window shows
+(`harness-chat--first-whole-line`).  Its `before-string` is the clock
+and a rule to the window's right edge, ending in a newline, so it draws
+in a row of its own above that line without being buffer text.  It runs
+from `pre-redisplay-functions` (`harness-chat--refresh-time-bar`), so it
+follows scrolling, resizing and the transcript growing, and it changes
+the overlay only when the time or the line it stands on changed.  It is
+absent while the message at the top shows its own timestamp, and when no
+message shows.  It takes the clock alone (`harness-chat--time-clock`);
+the day and year are the sender lines' (`harness-chat--time-label`).
+
+The time is read from the text properties at `(window-start)`, as the
+header's time was before it moved: when the start is above the first
+message — a transcript shorter than its window starts on the blank room
+the compose box's padding makes — the first message's property is found
+by walking to the next one; that walk is over blank lines, not the
+transcript.  It never measures the window.
 
 ## Alternatives
 
@@ -82,11 +95,17 @@ window, which a header line must not do (`harness-chat--at-bottom-p`).
   drops it where it adds nothing.
 - **Day separators only.**  The usual chat pattern, but it says nothing
   about a long turn, which is the case this is for.
-- **A sticky line drawn inside the transcript.**  Emacs has no overlay
-  pinned to the top of a window; the header line is the surface that is
-  always visible, and the chat's already carries the session's figures.
-  A segment there needs no scroll hook and no overlay.
-- **The group's timestamp in the header rather than the message's.**  It
+- **The time in the header line.**  The first version put it there, after
+  the session's name and origin.  It needed no scroll hook and no overlay,
+  and every window had one.  But the header already carries the name, the
+  session it came from and the session's figures, and the review found it
+  too full; the time moved to a line of its own under it.
+- **A sticky line drawn inside the transcript.**  Emacs has no buffer
+  text that stays at the top of a window by itself, and text in the
+  transcript scrolls.  The time line is therefore an overlay string at
+  the start of the first whole line, not buffer text: it takes a row of
+  its own above the transcript and leaves no mark in the buffer.
+- **The group's timestamp on the time line rather than the message's.**  It
   would repeat the last marker instead of saying when the message at the
   top was sent, which leaves the long turn's middle as undated as before.
 - **The Flutter client's transcript.**  The same idea fits its session
@@ -98,9 +117,11 @@ window, which a header line must not do (`harness-chat--at-bottom-p`).
 ## Interface copy
 
 - Visible text: the clock (`14:05`), or `Nov 7 14:05` for another day and
-  `2026-11-07 14:05` for another year — data, not prose.
+  `2026-11-07 14:05` for another year — data, not prose — on the sender
+  lines; and the clock alone on the pinned line, with the rule after it.
+  The pinned line never shows the date.
 - Sender-line time tooltip: `Message time: 2026-11-07 14:05:12`.
-- Pinned time tooltip: `First message on screen: 2026-11-07 14:05:12`.
+- Pinned-line time tooltip: `First message on screen: 2026-11-07 14:05:12`.
 - The setting's description is prose, as setting descriptions are.
 
 No headings, buttons, empty or loading states are added.
@@ -112,12 +133,16 @@ No headings, buttons, empty or loading states are added.
 - messages within the interval share one timestamp, and the next group
   starts on the first message after it;
 - the time's face and its whole-time tooltip;
-- the pinned segment of a window at a user's timestamp (none), inside a
+- the pinned line under the header at a user's timestamp (none), inside a
   group (the message's time), at an agent line (its time), and with no
   transcript (none);
-- the clock/day/year forms and the full tooltip form;
+- the pinned line's own overlay, at the window's first whole line, the
+  window it belongs to, and the clock and rule it draws;
+- the clock/day/year forms of the sender lines and the full tooltip form;
+- the pinned line showing only the clock for a message two days old,
+  where the sender line still names the day;
 - a coalesced run carrying its first call's time on the agent line, with
-  the pinned segment only once that line scrolled away.
+  the pinned line only once that line scrolled away.
 
 `scripts/test.sh --changed` covers the suites the change touches, and the
 full `scripts/test.sh` runs before the work is handed in.

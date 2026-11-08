@@ -51,9 +51,11 @@ One buffer per session, "*harness: NAME*", laid out top to bottom:
 A sender line shows when it was sent once `harness-chat-time-group`
 seconds passed since the last timestamp shown, and not before: messages
 sent near each other share one timestamp, and a long turn gets another
-every few minutes.  The header line says when the message its window
-starts on was sent (`harness-chat--top-time`), unless that message shows
-its own timestamp already, so a group's time scrolled off is still known.
+every few minutes.  A line of its own under the header
+(`harness-chat--refresh-time-bar`) shows the clock of the message the
+window starts on, unless that message shows its own timestamp
+already, so a group's time scrolled off is still known without making
+the header carry one more segment.
 
 The transcript is never re-rendered on a delta: every node owns a
 region delimited by two markers, streaming text is appended at the
@@ -225,6 +227,7 @@ this file never touches a session struct.
 - `kill-buffer-hook` → `harness-chat--on-kill`
 - `post-command-hook` → `harness-chat--post-command`
 - `pre-command-hook` → `harness-chat--clear-found`
+- `pre-redisplay-functions` → `harness-chat--refresh-time-bar`
 - `window-buffer-change-functions` → `harness-chat--on-window-buffer-change`
 - `window-scroll-functions` → `harness-chat--update-notice`
 - `window-scroll-functions` → `harness-chat--schedule-history`
