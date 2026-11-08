@@ -5196,7 +5196,7 @@ box's words are kept for \[harness-chat-show-compose]."
             (harness-chat--mark-tail-region from (point) '(notice inactive))))
         (put-text-property start (point) 'read-only t)
         (if harness-chat--threads-view
-            (harness-compose-hide)
+            (harness-compose-hide #'harness-chat-show-compose)
           (harness-compose-insert nil (harness-chat--box-help)))
         ;; The overlay of the box grows with text inserted where it ends;
         ;; the line under it is not part of the box.

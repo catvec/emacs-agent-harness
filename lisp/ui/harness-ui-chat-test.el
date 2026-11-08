@@ -103,6 +103,26 @@
                        5 "chat buffer loaded")
     buf))
 
+(ert-deftest harness-ui-chat-compose-focus-restores-hidden-draft ()
+  "The shared focus shortcut restores compose from the review's threads view."
+  (harness-ui-chat-test-with
+    (save-window-excursion
+      (delete-other-windows)
+      (let* ((sid (harness-ui-chat-test-session))
+             (buffer (harness-ui-chat-test-open sid))
+             (harness-global-mode t)
+             (last-command nil))
+        (switch-to-buffer buffer)
+        (harness-compose-set "Draft before threads")
+        (harness-chat-show-threads)
+        (should-not (harness-compose-live-p))
+        (should harness-chat--threads-view)
+        (execute-kbd-macro (kbd "C-c h SPC"))
+        (should-not harness-chat--threads-view)
+        (should (harness-compose-in-p))
+        (should (<= (window-start) (point) (window-end nil t)))
+        (should (equal "Draft before threads" (harness-compose-text)))))))
+
 (defun harness-ui-chat-test-turns-ended (sid)
   "Return how many turns of SID ended."
   (cl-count-if (lambda (e) (and (equal (car e) "agent/turn-ended") (equal (cadr e) sid)))

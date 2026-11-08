@@ -71,6 +71,13 @@ To use Emacs agent harness:
    
 Now the harness is ready. To get started press `PREFIX` on its own to open the grouped menu: choose a group to see its commands, then a key to run one. `PREFIX n` creates a new session.
 
+`PREFIX SPC` (`C-c h SPC` by default, `harness-compose-focus`) focuses a
+compose box in the current frame. Comment and reply editors take precedence,
+then review popouts, BTW side conversations and the current window's box.
+Repeated presses cycle through the available boxes and wrap around. A hidden
+chat composer returns from thread view with its draft intact; read-only
+popouts are skipped.
+
 # Connect To A Harness Server Elsewhere
 
 By default the harness UI in your Emacs starts its own harness process and talks to it. To drive a harness on another machine instead, run a harness server there with `scripts/harness-server`:

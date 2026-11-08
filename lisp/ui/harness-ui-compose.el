@@ -253,6 +253,10 @@ the box with its project alone (`harness-compose-project-function').")
   "Function returning the hint shown while the box is empty.")
 (defvar-local harness-compose-redraw-function #'ignore
   "Function the host redraws the box with, after the attachments change.")
+(defvar-local harness-compose--reveal-function nil
+  "Function restoring a hidden box, set by `harness-compose-hide'.")
+(defvar harness-compose--focus-target nil
+  "Last (WINDOW . BUFFER) selected by `harness-compose-focus'.")
 
 (defun harness-compose--project ()
   "Return the project root, as `harness-compose-project-function' says."
@@ -567,7 +571,8 @@ attachments show as chips (`harness-compose--show-tokens')."
          (prompt (if accent (concat (harness-compose-bar (car accent) background) "❯ ") "❯ "))
          (label-start (point)))
     (setq harness-compose--face background
-          harness-compose--accent (car accent))
+          harness-compose--accent (car accent)
+          harness-compose--reveal-function nil)
     ;; The prompt is a field of its own, like the minibuffer's: C-a, and
     ;; whatever finds the line's start with `line-beginning-position',
     ;; stops after it, so C-a C-k clears the line rather than running
@@ -576,6 +581,14 @@ attachments show as chips (`harness-compose--show-tokens')."
     (insert (propertize prompt 'face (or accent (list 'harness-dim-face background))
                         'help-echo help
                         'read-only t 'rear-nonsticky t 'field 'harness-compose-prompt))
+    ;; A host may draw its box in a read-only buffer (the sticky-compose
+    ;; tests do): properties are no text of the draft, but Emacs refuses
+    ;; them there unless the host allows the change.
+    (let ((inhibit-read-only t))
+      (add-text-properties (- (point) 2) (1- (point))
+                           (list 'help-echo (harness-compose--focus-help)
+                                 'mouse-face 'highlight
+                                 'keymap (harness-ui-mouse-keymap #'harness-compose-focus))))
     (setq harness-compose-start (copy-marker (point)))
     (insert harness-compose--text)
     (let ((end (point)))
@@ -605,12 +618,14 @@ attachments show as chips (`harness-compose--show-tokens')."
     ;; this marker, but a host's later tail-head insertion belongs before it.
     (set-marker-insertion-type harness-compose-controls-start t)))
 
-(defun harness-compose-hide ()
+(defun harness-compose-hide (&optional reveal)
   "Take the box off the buffer, keeping the words and the attachments.
 A host that draws something else where the box goes calls this instead
 of `harness-compose-insert'; `harness-compose-insert' brings the box
 back with the text it held (`harness-compose--text'), so a draft is no
-less a draft for being out of sight."
+less a draft for being out of sight.  REVEAL, when non-nil, is a function
+restoring it for `harness-compose-focus'."
+  (setq harness-compose--reveal-function reveal)
   (dolist (ov (append (list harness-compose-overlay harness-compose--placeholder harness-compose--indent)
                       harness-compose--quote-wraps
                       harness-compose--token-overlays harness-compose--thread-rails
@@ -1032,6 +1047,86 @@ said, and nothing runs."
           (cancel-timer timer)
           (harness-compose--panel-target-delete (car cell)))))
     (harness-compose--press-panel-key id keys)))
+
+;;;; Compose focus
+
+(define-key harness-ui-map (kbd "SPC") #'harness-compose-focus)
+
+(defun harness-compose--focus-area ()
+  "Return the compose text bounds in this buffer, or nil.
+Comment and reply editors use `string-edit' rather than the shared box;
+their `compose-quote-area-function' identifies the editable text."
+  (cond ((harness-compose-live-p) (list harness-compose-start harness-compose-end))
+        ((and (derived-mode-p 'string-edit-mode) compose-quote-area-function)
+         (funcall compose-quote-area-function))))
+
+(defun harness-compose--focus-priority (window)
+  "Return how early WINDOW's box comes in the compose focus cycle.
+Comment editors precede popouts, BTW, then ordinary host buffers.
+Side windows alone are not popups: normal chats use them too."
+  (with-current-buffer (window-buffer window)
+    (cond ((derived-mode-p 'string-edit-mode) 3)
+          ((derived-mode-p 'harness-ui-popout-mode) 2)
+          ((bound-and-true-p harness-ui-btw-minor-mode) 1)
+          (t 0))))
+
+(defun harness-compose--focus-windows ()
+  "Return this frame's compose windows, popups first, in a stable order.
+A host with a hidden box is eligible only when it can reveal it."
+  (sort (cl-remove-if-not
+         (lambda (window)
+           (with-current-buffer (window-buffer window)
+             (or (harness-compose--focus-area) harness-compose--reveal-function)))
+         (window-list nil 'nomini (frame-first-window)))
+        (lambda (a b) (> (harness-compose--focus-priority a)
+                         (harness-compose--focus-priority b)))))
+
+(defun harness-compose-focus ()
+  "Focus a compose box in this frame; repeated calls cycle through the boxes.
+Comment and reply editors take precedence, then review popouts and
+BTW side conversations.  Otherwise use the current window's box,
+or the first available one.  Consecutive calls move to the next box and
+wrap around.  Read-only popouts and buffers in other frames are ignored.
+
+Keep point where it is when already in the target box, else put it at
+its end.  Reveal a hidden box and scroll its cursor into view, without
+sending anything or changing the draft."
+  (interactive)
+  (let* ((windows (harness-compose--focus-windows))
+         (current (selected-window))
+         (again (and (eq last-command 'harness-compose-focus)
+                     (eq current (car-safe harness-compose--focus-target))
+                     (eq (window-buffer current) (cdr-safe harness-compose--focus-target))
+                     (memq current windows)))
+         (target (cond (again (or (cadr (memq current windows)) (car windows)))
+                       ((and (memq current windows)
+                             (= (harness-compose--focus-priority current)
+                                (harness-compose--focus-priority (car windows))))
+                        current)
+                       (t (car windows)))))
+    (unless target (user-error "No compose box"))
+    (deactivate-mark)
+    (select-window target)
+    (when harness-compose--reveal-function (funcall harness-compose--reveal-function))
+    (let ((area (harness-compose--focus-area)))
+      (unless area (user-error "No compose box"))
+      (deactivate-mark)
+      (unless (<= (car area) (point) (cadr area)) (goto-char (cadr area))))
+    (when (harness-compose-live-p)
+      (harness-compose--note-area)
+      ;; A wheel scroll can hide the box with point still inside it.  An
+      ;; explicit focus always invalidates the follow cache, unlike typing.
+      (cl-incf harness-compose--jumps)
+      (harness-compose-repad target))
+    (set-window-hscroll target 0)
+    (set-window-vscroll target 0)
+    (recenter -1)
+    (setq harness-compose--focus-target (cons target (current-buffer)))))
+
+(defun harness-compose--focus-help ()
+  "Return the compose prompt's focus tooltip with the active prefix key."
+  (format "Compose focus (%s)"
+          (key-description (vconcat (harness-ui--prefix-keys harness-ui-prefix-key) [32]))))
 
 ;;;; The top and the bottom of the box
 

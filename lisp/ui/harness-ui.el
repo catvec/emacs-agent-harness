@@ -7521,6 +7521,8 @@ Choosing a group opens its menu, as a directory opens what it holds."
   [["Sessions"
     ("n" "New" harness-new-session)
     ("s" "Switch" harness-switch-session)
+    ("SPC" "Compose focus" harness-compose-focus
+     :if (lambda () (harness-ui--command-available-p 'harness-compose-focus)))
     ("l" "List" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
     ("g" "Search" harness-search-sessions :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))
     ("/" "Quick search" harness-quick-search

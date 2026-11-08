@@ -106,6 +106,253 @@ which batch Emacs would print."
   (not (harness-ui-compose-test--pending)))
 
 
+;;;; Compose focus
+
+(defun harness-ui-compose-test--focus-host (name text)
+  "Return a new compose host called NAME, holding TEXT."
+  (let ((buffer (generate-new-buffer name)))
+    (with-current-buffer buffer
+      (use-local-map (make-composed-keymap nil harness-compose-map))
+      (harness-compose-setup :redraw #'harness-ui-compose-test--draw)
+      (harness-ui-compose-test--draw)
+      (harness-compose-set text)
+      (goto-char (point-min)))
+    buffer))
+
+(defun harness-ui-compose-test--focus ()
+  "Dispatch the focus key, preserving command-loop history between assertions.
+Separate `execute-kbd-macro' calls reset `last-command' before each macro."
+  (let ((command (key-binding (kbd "C-c h SPC"))))
+    (should (eq 'harness-compose-focus command))
+    (call-interactively command)
+    (setq last-command command)))
+
+(ert-deftest harness-ui-compose-focus-current-box-and-stable-cycle ()
+  "The first press keeps the current host; repeat presses cycle and wrap."
+  (harness-ui-compose-test-with
+    (delete-other-windows)
+    (let* ((other (harness-ui-compose-test--focus-host "*other compose*" "Other draft"))
+           (first (selected-window))
+           (second (split-window-right))
+           (harness-global-mode t)
+           (last-command nil))
+      (unwind-protect
+          (progn
+            (set-window-buffer second other)
+            (harness-compose-set "Main draft")
+            (goto-char (point-min))
+            (harness-ui-compose-test--focus)
+            (should (eq first (selected-window)))
+            (should (harness-compose-in-p))
+            ;; Staying inside the box preserves the editing position.
+            (backward-char 3)
+            (let ((position (point)) (last-command 'backward-char))
+              (harness-ui-compose-test--focus)
+              (should (= position (point))))
+            (harness-ui-compose-test--focus)
+            (should (eq second (selected-window)))
+            (should (harness-compose-in-p))
+            (harness-ui-compose-test--focus)
+            (should (eq first (selected-window)))
+            (should (equal "Main draft" (harness-compose-text)))
+            (should (equal "Other draft" (with-current-buffer other (harness-compose-text)))))
+        (kill-buffer other)))))
+
+(ert-deftest harness-ui-compose-focus-from-a-non-compose-buffer ()
+  "A file or overview can focus a visible box without visiting hidden hosts."
+  (harness-ui-compose-test-with
+    (delete-other-windows)
+    (let* ((source (generate-new-buffer "*focus source*"))
+           (hidden (harness-ui-compose-test--focus-host "*hidden compose*" "Hidden draft"))
+           (first (selected-window))
+           (second (split-window-right))
+           (harness-global-mode t)
+           (last-command nil))
+      (unwind-protect
+          (progn
+            (set-window-buffer second source)
+            (select-window second)
+            (should (equal (list first) (harness-compose--focus-windows)))
+            (harness-ui-compose-test--focus)
+            (should (eq first (selected-window)))
+            (should (harness-compose-in-p))
+            ;; Replacing the last visible host removes it from the cycle.
+            (set-window-buffer first source)
+            (should (equal '(user-error "No compose box")
+                           (should-error (harness-compose-focus) :type 'user-error)))
+            (should (equal "Hidden draft" (with-current-buffer hidden (harness-compose-text)))))
+        (kill-buffer source)
+        (kill-buffer hidden)))))
+
+(ert-deftest harness-ui-compose-focus-popup-before-btw-and-ordinary-hosts ()
+  "Comment popouts win, then BTW, not ordinary chats in side windows."
+  (harness-ui-compose-test-with
+    (harness-test-load-module 'ui-popout)
+    (delete-other-windows)
+    (let* ((first (selected-window))
+           (other (harness-ui-compose-test--focus-host "*side compose*" "Side draft"))
+           (btw (harness-ui-compose-test--focus-host "*btw compose*" "BTW draft"))
+           (second (display-buffer-in-side-window other '((side . right))))
+           (btw-window (display-buffer-in-side-window btw '((side . bottom) (slot . 1))))
+           (harness-global-mode t)
+           (last-command nil)
+           popup)
+      (unwind-protect
+          (progn
+            (with-current-buffer btw (setq-local harness-ui-btw-minor-mode t))
+            (setq popup (harness-ui-popout-show '(focus comment) "Comment"
+                         (lambda () (insert "Comment\n"))
+                         :compose (lambda () #'ignore)))
+            (with-current-buffer popup (harness-compose-set "Comment draft"))
+            (select-window first)
+            (harness-ui-compose-test--focus)
+            (should (eq popup (current-buffer)))
+            (should (harness-compose-in-p))
+            (harness-ui-compose-test--focus)
+            (should (eq btw-window (selected-window)))
+            (harness-ui-compose-test--focus)
+            (should (eq first (selected-window)))
+            (harness-ui-compose-test--focus)
+            (should (eq second (selected-window)))
+            (harness-ui-compose-test--focus)
+            (should (eq popup (current-buffer)))
+            (should (equal "Comment draft" (harness-compose-text)))
+            ;; A closed popup disappears from the cycle immediately.
+            (harness-ui-popout-close '(focus comment))
+            (select-window first)
+            (harness-ui-compose-test--focus)
+            (should (eq btw (current-buffer)))
+            ;; No compose box: a read-only popup is never a target.
+            (setq popup (harness-ui-popout-show '(focus readonly) "Report"
+                         (lambda () (insert "Report\n"))))
+            (harness-ui-compose-test--focus)
+            (should (eq btw (current-buffer)))
+            (should-not (memq (get-buffer-window popup) (harness-compose--focus-windows))))
+        (harness-ui-popout-close '(focus comment))
+        (harness-ui-popout-close '(focus readonly))
+        (kill-buffer other)
+        (kill-buffer btw)))))
+
+(ert-deftest harness-ui-compose-focus-real-comment-editor-before-popout ()
+  "The actual review comment/reply editor wins over the report and chat."
+  (harness-ui-compose-test-with
+    (harness-test-load-module 'ui-popout)
+    (require 'change-review-ui)
+    (delete-other-windows)
+    (let* ((first (selected-window))
+           (harness-global-mode t)
+           (last-command nil)
+           (popup (harness-ui-popout-show '(focus report) "Report"
+                    (lambda () (insert "Report\n"))
+                    :compose (lambda () #'ignore)))
+           editor submitted)
+      (unwind-protect
+          (progn
+            (change-review-ui-read-with-string-edit "Comment" "Comment draft"
+                                                   (lambda (_) (setq submitted t)))
+            (setq editor (window-buffer (selected-window)))
+            (set-buffer editor)
+            (should (derived-mode-p 'string-edit-mode))
+            (should-not (harness-compose-live-p))
+            (let ((text (buffer-string)))
+              ;; A real editor, not a stub with shared compose markers.
+              (select-window first)
+              (harness-ui-compose-test--focus)
+              (should (eq editor (current-buffer)))
+              (should (<= (car (funcall compose-quote-area-function)) (point)))
+              (should (equal text (buffer-string)))
+              (harness-ui-compose-test--focus)
+              (should (eq popup (current-buffer)))
+              (harness-ui-compose-test--focus)
+              (should (eq first (selected-window)))
+              (harness-ui-compose-test--focus)
+              (should (eq editor (current-buffer)))
+              (should (equal text (buffer-string)))
+              (should-not submitted)))
+        (when (buffer-live-p editor) (kill-buffer editor))
+        (harness-ui-popout-close '(focus report))))))
+
+(ert-deftest harness-ui-compose-focus-visible-cursor-and-no-draft-change ()
+  "Explicit focus scrolls even an existing compose cursor back into view."
+  (harness-ui-compose-test-with
+    (delete-other-windows)
+    (let ((inhibit-read-only t))
+      (goto-char (point-min))
+      (insert (make-string 100 ?\n)))
+    (harness-compose-set "Draft\nAnother line")
+    (goto-char harness-compose-end)
+    (let ((position (point))
+          (last-command nil)
+          (harness-global-mode t))
+      (set-window-start (selected-window) (point-min) t)
+      (set-window-hscroll (selected-window) 7)
+      (should-not (pos-visible-in-window-p (point)))
+      (harness-ui-compose-test--focus)
+      (should (= position (point)))
+      ;; Batch Emacs has no glyph matrix for `pos-visible-in-window-p'.
+      ;; A live-frame check covers actual visibility; here check the scroll.
+      (should (> (window-start) (point-min)))
+      (should (<= (point) (window-end nil t)))
+      (should (zerop (window-hscroll)))
+      (should (equal "Draft\nAnother line" (harness-compose-text))))))
+
+(ert-deftest harness-ui-compose-focus-clears-regions-in-both-hosts ()
+  "Typing after focus cannot replace a source or destination region."
+  (harness-ui-compose-test-with
+    (delete-other-windows)
+    (let* ((other (harness-ui-compose-test--focus-host "*region compose*" "Other draft"))
+           (first (selected-window))
+           (second (split-window-right))
+           (harness-global-mode t)
+           (transient-mark-mode t)
+           (last-command nil))
+      (unwind-protect
+          (progn
+            (set-window-buffer second other)
+            (harness-compose-set "Main draft")
+            (select-window second)
+            (goto-char harness-compose-end)
+            (push-mark harness-compose-start t t)
+            (select-window first)
+            (goto-char (point-min))
+            (push-mark (1+ (point)) t t)
+            (execute-kbd-macro (kbd "C-c h SPC C-c h SPC"))
+            (should (eq second (selected-window)))
+            (should-not mark-active)
+            (should-not (buffer-local-value 'mark-active buf))
+            (should (equal "Other draft" (harness-compose-text))))
+        (kill-buffer other)))))
+
+(ert-deftest harness-ui-compose-focus-copy-and-mouse-target ()
+  "The prompt, menus and empty state have exact focus copy."
+  (harness-ui-compose-test-with
+    (delete-other-windows)
+    (should (eq 'harness-compose-focus (lookup-key harness-ui-map (kbd "SPC"))))
+    (let* ((prompt (- harness-compose-start 2))
+           (map (get-text-property prompt 'keymap)))
+      (should (equal "❯" (buffer-substring-no-properties prompt (1+ prompt))))
+      (should (equal "Compose focus (C-c h SPC)" (get-text-property prompt 'help-echo)))
+      (should (commandp (lookup-key map [mouse-1])))
+      (goto-char (point-min))
+      (let ((last-input-event 'mouse-1))
+        (call-interactively (lookup-key map [mouse-1])))
+      (should (harness-compose-in-p)))
+    (let ((harness-ui-prefix-key "C-c j"))
+      (harness-ui-compose-test--draw)
+      (should (equal "Compose focus (C-c j SPC)"
+                     (get-text-property (- harness-compose-start 2) 'help-echo))))
+    (dolist (menu '(harness-session-menu))
+      (call-interactively menu)
+      (unwind-protect
+          (with-current-buffer transient--buffer-name
+            (goto-char (point-min))
+            (should (re-search-forward "SPC +\\(Compose focus\\)\\(?:  \\|$\\)" nil t))
+            (should (equal "Compose focus" (match-string-no-properties 1))))
+        (execute-kbd-macro (kbd "C-g"))))
+    (harness-compose-hide)
+    (let ((last-command nil))
+      (should (equal '(user-error "No compose box") (should-error (harness-compose-focus) :type 'user-error))))))
+
 ;;;; Replies in threads
 
 (defconst harness-ui-compose-test--ref
