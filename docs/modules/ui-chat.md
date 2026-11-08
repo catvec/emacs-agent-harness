@@ -15,7 +15,8 @@ The chat buffer: transcript, pending panel, queue, attachments and compose box.
 
 One buffer per session, "*harness: NAME*", laid out top to bottom:
 
-  header line   name, the session it was started from, menu, after what
+  header line   name, the session it was started from, when the message
+                at the top of the window was sent, menu, after what
                 `harness-chat-header-functions` put in front (a BTW's
                 buttons); what the buffer shows already, it leaves out
   transcript    one block per node, rendered incrementally with markers
@@ -46,6 +47,13 @@ One buffer per session, "*harness: NAME*", laid out top to bottom:
                 and what other modules add (a task's queue), fitted
                 to the window
   mode line     status (the spinner while a turn runs), turn duration
+
+A sender line shows when it was sent once `harness-chat-time-group`
+seconds passed since the last timestamp shown, and not before: messages
+sent near each other share one timestamp, and a long turn gets another
+every few minutes.  The header line says when the message its window
+starts on was sent (`harness-chat--top-time`), unless that message shows
+its own timestamp already, so a group's time scrolled off is still known.
 
 The transcript is never re-rendered on a delta: every node owns a
 region delimited by two markers, streaming text is appended at the
@@ -174,6 +182,7 @@ this file never touches a session struct.
 - `harness-chat-session-label` — Sender name shown above the messages the agent of another session sent.
 - `harness-chat-system-label` — Sender name shown above the messages the harness sent on its own.
 - `harness-chat-thread-quote-limit` — Most characters of a message a reply in a thread quotes.
+- `harness-chat-time-group` — Seconds that separate one timestamped group from the next.
 - `harness-chat-todos-collapsed` — Whether a chat's todo list starts folded to its title line.
 - `harness-chat-user-label` — Sender name shown above the user's messages.
 
