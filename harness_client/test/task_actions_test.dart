@@ -31,6 +31,7 @@ void main() {
         TaskAction.start,
         TaskAction.drop,
         TaskAction.pause,
+        TaskAction.park,
         TaskAction.setPriority,
         TaskAction.delete,
       ]);
@@ -49,6 +50,7 @@ void main() {
         TaskAction.start,
         TaskAction.message,
         TaskAction.drop,
+        TaskAction.park,
         TaskAction.setPriority,
         TaskAction.delete,
       ]);
@@ -131,6 +133,7 @@ void main() {
             TaskAction.retry,
             TaskAction.pause,
             TaskAction.message,
+            TaskAction.putInReview,
             TaskAction.complete,
             TaskAction.setPriority,
             TaskAction.delete,
@@ -144,6 +147,7 @@ void main() {
           TaskAction.retryMerge,
           TaskAction.pause,
           TaskAction.message,
+          TaskAction.putInReview,
           TaskAction.complete,
           TaskAction.setPriority,
           TaskAction.delete,
@@ -155,6 +159,7 @@ void main() {
           TaskAction.openSession,
           TaskAction.message,
           TaskAction.pause,
+          TaskAction.putInReview,
           TaskAction.complete,
           TaskAction.setPriority,
           TaskAction.delete,
@@ -166,6 +171,7 @@ void main() {
           TaskAction.openSession,
           TaskAction.pause,
           TaskAction.message,
+          TaskAction.putInReview,
           TaskAction.complete,
           TaskAction.setPriority,
           TaskAction.delete,
@@ -229,6 +235,7 @@ void main() {
         TaskAction.message,
         TaskAction.pause,
         TaskAction.returnToPending,
+        TaskAction.putInReview,
         TaskAction.stop,
         TaskAction.complete,
         TaskAction.setPriority,
@@ -392,6 +399,7 @@ void main() {
         TaskAction.message,
         TaskAction.pause,
         TaskAction.returnToPending,
+        TaskAction.putInReview,
         TaskAction.complete,
       ]);
       for (final action in actions.secondary) {
@@ -443,6 +451,8 @@ void main() {
         {
           'task/start',
           'task/queue',
+          'task/park',
+          'task/force-review',
           'task/retry',
           'task/merge',
           'task/pause',

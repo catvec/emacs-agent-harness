@@ -190,8 +190,19 @@ time it opens. It asks again only when the harness does.
   catalogue, harness modules and the full ACP capability report.
 - **Handles a task in its conversation.** The board is a list to choose from:
   a tap on a task, in any lane, opens the conversation of its session (a
-  page on a phone, the pane beside the list on a wide screen), and nothing on
-  a card changes the task. Above the message box the conversation has a bar
+  page on a phone, the pane beside the list on a wide screen), and the task
+  is handled there. A card is also carried: a long press lifts it, and a drop
+  on another column runs the harness action that puts the task in that
+  column's state -- `Start now`, `Queue it`, `Move to backlog`, `Return to
+  queue`, `Pause`, `Put in review`, `Verify and merge`, `Send back` or `Mark
+  complete` -- with the column saying which while the card is over it. A
+  card is dropped on a column, in the lane it is drawn in; a task that waits
+  on the person is carried out of the Needs input lane, and the cancelled
+  column takes no drops, since no action puts a task there. On a phone the
+  column's section is the target, and every column shows while a card is
+  carried. See
+  [docs/flutter-task-drag.md](../docs/flutter-task-drag.md). Above the
+  message box the conversation has a bar
   that says where the task stands (its column, priority and branch, what went
   wrong, the files that conflict) and offers what can be done about it:
   *Verify and merge* and *Send back* for a task in review, *Start now* and
@@ -273,10 +284,10 @@ time it opens. It asks again only when the harness does.
 
   | Where it is | What is offered |
   |---|---|
-  | Pending | *Start now*; *Pause* (the task is put back in the queue and held there: *Resume*, which a paused task offers first, lets the queue have it again); *Drop* |
+  | Pending | *Start now*; *Pause* (the task is put back in the queue and held there: *Resume*, which a paused task offers first, lets the queue have it again); *Move to backlog* (`task/park`: out of the queue, not started); *Drop* |
   | Backlog | *Start now*, *Queue it*, *Drop*; a message steers or starts it |
-  | Needs input | *Stop*, for a question or a permission; for a task that stopped part way *Retry* (*Retry merge* after a merge that failed), *Pause*, *Mark complete* |
-  | Active | *Pause*, *Return to queue* (`task/return-to-pending`: the task goes back in the queue, to start again where it stopped), *Stop*, *Mark complete* |
+  | Needs input | *Stop*, for a question or a permission; for a task that stopped part way *Retry* (*Retry merge* after a merge that failed), *Pause*, *Put in review* (`task/force-review`: hand the work in by hand), *Mark complete* |
+  | Active | *Pause*, *Return to queue* (`task/return-to-pending`: the task goes back in the queue, to start again where it stopped), *Put in review* (`task/force-review`), *Stop*, *Mark complete* |
   | Merging | *Stop*, *Mark complete* |
   | Review | *Verify and merge*, *Send back* (the feedback is typed in the message box), *Mark complete*, *Archive* |
   | Done | *Archive*; a message makes the session take it up again |
@@ -301,6 +312,10 @@ time it opens. It asks again only when the harness does.
   the task back*), and an empty one sends nothing.  The priority is shown at
   once and goes back if the harness refuses it.  An action whose method the
   harness lacks (an older one) is not offered.
+
+  | A card carried to another column | The board at rest |
+  |---|---|
+  | ![A pending task carried over the Active column, which says Start now](screenshots/task-board-drag.png) | ![The columns of a desktop board side by side](screenshots/task-board.png) |
 
   The queue of a project stays on the board, as it is the board's and not a
   task's.  It is *set*, never toggled, from the line under the project's name:

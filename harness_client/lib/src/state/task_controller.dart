@@ -353,6 +353,9 @@ class TaskController extends ChangeNotifier {
 
   Future<HarnessTask?> start(String id) => _run(() => api.startTask(id));
   Future<HarnessTask?> queue(String id) => _run(() => api.queueTask(id));
+  Future<HarnessTask?> park(String id) => _run(() => api.parkTask(id));
+  Future<HarnessTask?> putInReview(String id) =>
+      _run(() => api.forceReviewTask(id));
   Future<HarnessTask?> verify(String id) => _run(() => api.verifyTask(id));
   Future<HarnessTask?> reject(String id, String feedback) =>
       _run(() => api.rejectTask(id, feedback));

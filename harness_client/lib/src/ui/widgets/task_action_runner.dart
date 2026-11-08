@@ -48,6 +48,8 @@ IconData taskActionIcon(TaskAction action) => switch (action) {
   TaskAction.answer => Icons.front_hand_outlined,
   TaskAction.start => Icons.play_arrow_rounded,
   TaskAction.queue => Icons.playlist_add_rounded,
+  TaskAction.park => Icons.move_to_inbox_outlined,
+  TaskAction.putInReview => Icons.fact_check_outlined,
   TaskAction.retry => Icons.replay_rounded,
   TaskAction.retryMerge => Icons.call_merge_rounded,
   TaskAction.pause => Icons.pause_rounded,
@@ -110,6 +112,10 @@ class TaskActionRunner {
         await controller.start(id);
       case TaskAction.queue:
         await controller.queue(id);
+      case TaskAction.park:
+        await controller.park(id);
+      case TaskAction.putInReview:
+        await controller.putInReview(id);
       case TaskAction.retry:
         await controller.retry(id);
       case TaskAction.retryMerge:

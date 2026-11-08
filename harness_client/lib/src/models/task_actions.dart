@@ -30,6 +30,14 @@ enum TaskAction {
   /// slot frees (`task/queue`).
   queue('Queue it'),
 
+  /// Move a task waiting for a slot out of the queue into the backlog,
+  /// without starting it or writing it up again (`task/park`).
+  park('Move to backlog'),
+
+  /// Put a task that stopped part way in review by hand, without waiting for
+  /// its agent to hand in (`task/force-review`).
+  putInReview('Put in review'),
+
   /// Have a task that stopped part way carry on (`task/retry`).
   retry('Retry'),
 
@@ -96,6 +104,8 @@ enum TaskAction {
     openSession || answer => null,
     start => 'task/start',
     queue => 'task/queue',
+    park => 'task/park',
+    putInReview => 'task/force-review',
     retry => 'task/retry',
     retryMerge => 'task/merge',
     pause => 'task/pause',
@@ -183,6 +193,9 @@ class TaskActions {
           if (task.returned) actions.add(TaskAction.message);
           actions.add(TaskAction.drop);
           if (!task.isPaused) actions.add(TaskAction.pause);
+          // A task that waits for a slot can be put back in the backlog,
+          // where only the person starts it, without stopping anything.
+          actions.add(TaskAction.park);
         case 'backlog':
           if (task.isRefining) {
             // Being written up (the agent can be steered or stopped); a
@@ -243,10 +256,21 @@ class TaskActions {
                 ]);
             }
           }
+          // A task that stopped part way can be put in review by hand, as
+          // the board of Emacs offers it: the report it handed in last
+          // stands, or the review says none came.  One that asks something
+          // is answered first, and a write-up that stopped is written up
+          // again instead.
+          if (!pendingRequest && task.outcome != null && !task.isRefining) {
+            actions.add(TaskAction.putInReview);
+          }
         case 'active':
           actions.addAll([
             TaskAction.message,
             if (working) ...[TaskAction.pause, TaskAction.returnToPending],
+            // The agent may still hand in, but the person can call the work
+            // done for review; the harness refuses while its turn runs.
+            TaskAction.putInReview,
             TaskAction.stop,
           ]);
         case 'merging':

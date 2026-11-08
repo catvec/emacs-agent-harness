@@ -111,6 +111,7 @@ void main() {
       expect(bar.primary, TaskAction.start);
       expect(bar.buttons, [TaskAction.pause]);
       expect(bar.menu, [
+        TaskAction.park,
         TaskAction.setPriority,
         TaskAction.drop,
         TaskAction.delete,
@@ -150,6 +151,7 @@ void main() {
       expect(bar.buttons, [TaskAction.pause]);
       expect(bar.menu, [
         TaskAction.returnToPending,
+        TaskAction.putInReview,
         TaskAction.complete,
         TaskAction.setPriority,
         TaskAction.stop,
@@ -208,6 +210,7 @@ void main() {
         expect(bar.primary, TaskAction.retry);
         expect(bar.buttons, [TaskAction.pause]);
         expect(bar.menu, [
+          TaskAction.putInReview,
           TaskAction.complete,
           TaskAction.setPriority,
           TaskAction.delete,
@@ -272,16 +275,20 @@ void main() {
   });
 
   group('the bar', () {
-    test('of a task with no session offers no priority, which is a session\'s', () {
-      final bar = _bar(_task('review', session: null));
-      expect(bar.all, isNot(contains(TaskAction.setPriority)));
-      expect(bar.primary, TaskAction.verify);
-    });
+    test(
+      'of a task with no session offers no priority, which is a session\'s',
+      () {
+        final bar = _bar(_task('review', session: null));
+        expect(bar.all, isNot(contains(TaskAction.setPriority)));
+        expect(bar.primary, TaskAction.verify);
+      },
+    );
 
     test('is not offered what the harness cannot do', () {
       final bar = _bar(
         _task('pending'),
-        supports: (method) => method != 'task/pause' && method != 'priority/set',
+        supports: (method) =>
+            method != 'task/pause' && method != 'priority/set',
       );
       expect(bar.all, isNot(contains(TaskAction.pause)));
       expect(bar.all, isNot(contains(TaskAction.setPriority)));
@@ -297,7 +304,9 @@ void main() {
         'merging',
       ]) {
         final menu = _bar(_task(column)).menu;
-        final firstDestructive = menu.indexWhere((action) => action.destructive);
+        final firstDestructive = menu.indexWhere(
+          (action) => action.destructive,
+        );
         if (firstDestructive < 0) continue;
         expect(
           menu.skip(firstDestructive).every((action) => action.destructive),

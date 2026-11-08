@@ -4,7 +4,9 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/task.dart';
+import '../../models/task_actions.dart';
 import '../../models/task_chat.dart';
+import '../../models/task_move.dart';
 import '../../state/app_controller.dart';
 import '../../state/drafts.dart';
 import '../../state/prompt_attachment.dart';
@@ -131,6 +133,7 @@ class _TasksScreenState extends State<TasksScreen> {
                     lanes: taskLanes,
                     onSelectLane: (lane) => setState(() => _lane = lane),
                     onOpen: _openTask,
+                    onMove: _moveTask,
                   ),
                 ),
             ],
@@ -168,6 +171,21 @@ class _TasksScreenState extends State<TasksScreen> {
         controller.reload();
       }
     }
+  }
+
+  /// Move a task between the columns of the board: a card dropped on a
+  /// column is the action that takes the task to that column's state, done as
+  /// the bar of its conversation does it.  What stops work or throws the task
+  /// away asks first, the feedback of [TaskAction.sendBack] is typed in a
+  /// sheet, and the harness's words say why when it refuses.
+  Future<void> _moveTask(HarnessTask task, TaskAction action) async {
+    final controller = widget.app.tasks;
+    if (controller == null) return;
+    controller.error = null;
+    await TaskActionRunner(
+      controller: controller,
+      onOpenSession: widget.onOpenSession,
+    ).run(context, action, task);
   }
 
   /// A task is handled in its conversation: the board only leads there.
@@ -708,7 +726,10 @@ class _AllQueuesSheetState extends State<_AllQueuesSheet> {
   }
 }
 
-class _TaskBoard extends StatelessWidget {
+/// The board's columns and lanes.  A card is carried with a long press and
+/// dropped on another column to move its task there: the column says what
+/// the drop does, and one with no action for the task refuses it.
+class _TaskBoard extends StatefulWidget {
   const _TaskBoard({
     required this.app,
     required this.controller,
@@ -717,6 +738,7 @@ class _TaskBoard extends StatelessWidget {
     required this.lanes,
     required this.onSelectLane,
     required this.onOpen,
+    required this.onMove,
   });
 
   final AppController app;
@@ -732,27 +754,47 @@ class _TaskBoard extends StatelessWidget {
   final List<String> lanes;
   final ValueChanged<String> onSelectLane;
   final ValueChanged<HarnessTask> onOpen;
+  final void Function(HarnessTask task, TaskAction action) onMove;
+
+  @override
+  State<_TaskBoard> createState() => _TaskBoardState();
+}
+
+class _TaskBoardState extends State<_TaskBoard> {
+  /// The task a card carries, while one is carried: a phone's lane shows
+  /// every column then, so that one holding nothing is a target too.
+  HarnessTask? _dragging;
+
+  void _dragStarted(HarnessTask task) => setState(() => _dragging = task);
+  void _dragEnded() => setState(() => _dragging = null);
 
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 920;
     if (wide) {
       return _TaskGrid(
-        app: app,
-        controller: controller,
-        stages: stages,
-        lanes: lanes,
-        onOpen: onOpen,
+        app: widget.app,
+        controller: widget.controller,
+        stages: widget.stages,
+        lanes: widget.lanes,
+        onOpen: widget.onOpen,
+        onMove: widget.onMove,
+        onDragStarted: _dragStarted,
+        onDragEnded: _dragEnded,
       );
     }
     return _TaskLanes(
-      app: app,
-      controller: controller,
-      selectedLane: selectedLane,
-      stages: stages,
-      lanes: lanes,
-      onSelectLane: onSelectLane,
-      onOpen: onOpen,
+      app: widget.app,
+      controller: widget.controller,
+      selectedLane: widget.selectedLane,
+      stages: widget.stages,
+      lanes: widget.lanes,
+      onSelectLane: widget.onSelectLane,
+      onOpen: widget.onOpen,
+      onMove: widget.onMove,
+      dragging: _dragging,
+      onDragStarted: _dragStarted,
+      onDragEnded: _dragEnded,
     );
   }
 }
@@ -766,6 +808,9 @@ class _TaskGrid extends StatelessWidget {
     required this.stages,
     required this.lanes,
     required this.onOpen,
+    required this.onMove,
+    required this.onDragStarted,
+    required this.onDragEnded,
   });
 
   final AppController app;
@@ -773,6 +818,9 @@ class _TaskGrid extends StatelessWidget {
   final List<String> stages;
   final List<String> lanes;
   final ValueChanged<HarnessTask> onOpen;
+  final void Function(HarnessTask task, TaskAction action) onMove;
+  final ValueChanged<HarnessTask> onDragStarted;
+  final VoidCallback onDragEnded;
 
   static const _laneWidth = 156.0;
   static const _stageWidth = 300.0;
@@ -816,6 +864,9 @@ class _TaskGrid extends StatelessWidget {
                   controller: controller,
                   app: app,
                   onOpen: onOpen,
+                  onMove: onMove,
+                  onDragStarted: onDragStarted,
+                  onDragEnded: onDragEnded,
                   brightness: brightness,
                   laneWidth: _laneWidth,
                   stageWidth: _stageWidth,
@@ -869,6 +920,9 @@ class _SwimLane extends StatelessWidget {
     required this.controller,
     required this.app,
     required this.onOpen,
+    required this.onMove,
+    required this.onDragStarted,
+    required this.onDragEnded,
     required this.brightness,
     required this.laneWidth,
     required this.stageWidth,
@@ -880,6 +934,9 @@ class _SwimLane extends StatelessWidget {
   final TaskController controller;
   final AppController app;
   final ValueChanged<HarnessTask> onOpen;
+  final void Function(HarnessTask task, TaskAction action) onMove;
+  final ValueChanged<HarnessTask> onDragStarted;
+  final VoidCallback onDragEnded;
   final Brightness brightness;
   final double laneWidth;
   final double stageWidth;
@@ -920,13 +977,16 @@ class _SwimLane extends StatelessWidget {
           Padding(
             padding: EdgeInsets.only(right: gap),
             child: SizedBox(
+              key: ValueKey('task-cell-$lane-$stage'),
               width: stageWidth,
               child: _LaneCell(
-                lane: lane,
                 stage: stage,
                 tasks: controller.forCell(lane, stage),
                 app: app,
                 onOpen: onOpen,
+                onMove: onMove,
+                onDragStarted: onDragStarted,
+                onDragEnded: onDragEnded,
               ),
             ),
           ),
@@ -935,41 +995,104 @@ class _SwimLane extends StatelessWidget {
   }
 }
 
+/// A cell of the board: the tasks of one lane at one column.  A card carried
+/// over it is dropped on that column, which says what the drop does, and a
+/// column with no action for the task refuses the card.
 class _LaneCell extends StatelessWidget {
   const _LaneCell({
-    required this.lane,
     required this.stage,
     required this.tasks,
     required this.app,
     required this.onOpen,
+    required this.onMove,
+    required this.onDragStarted,
+    required this.onDragEnded,
   });
 
-  final String lane;
   final String stage;
   final List<HarnessTask> tasks;
   final AppController app;
   final ValueChanged<HarnessTask> onOpen;
+  final void Function(HarnessTask task, TaskAction action) onMove;
+  final ValueChanged<HarnessTask> onDragStarted;
+  final VoidCallback onDragEnded;
+
+  /// The move a carried card would make here, or null when the task cannot
+  /// come to this column, which refuses it.
+  TaskMove? _moveFor(HarnessTask task) {
+    final controller = app.tasks;
+    if (controller == null) return null;
+    return TaskMove.of(task, stage, taskActionsOf(app, controller, task));
+  }
 
   @override
   Widget build(BuildContext context) {
+    return DragTarget<HarnessTask>(
+      onWillAcceptWithDetails: (details) => _moveFor(details.data) != null,
+      onAcceptWithDetails: (details) {
+        final move = _moveFor(details.data);
+        if (move != null) onMove(move.task, move.action);
+      },
+      builder: (context, candidates, _) {
+        final carried = candidates.firstOrNull;
+        return _cell(context, carried == null ? null : _moveFor(carried));
+      },
+    );
+  }
+
+  Widget _cell(BuildContext context, TaskMove? move) {
     final theme = Theme.of(context);
-    return Container(
+    final color = HarnessColors.column(stage, theme.brightness);
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
       constraints: const BoxConstraints(minHeight: 96),
       padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow.withValues(alpha: 0.5),
+        color: move != null
+            ? color.withValues(alpha: 0.10)
+            : theme.colorScheme.surfaceContainerLow.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+          color: move != null
+              ? color
+              : theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
         ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // A card over it says what dropping there would do.
+          if (move != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: [
+                  Icon(Icons.south_rounded, size: 14, color: color),
+                  const SizedBox(width: 3),
+                  Flexible(
+                    child: Text(
+                      move.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HarnessText.caption(
+                        context,
+                      ).copyWith(color: color, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           for (final task in tasks)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: TaskCard(task: task, app: app, onTap: () => onOpen(task)),
+              child: _DraggableTaskCard(
+                key: ValueKey('task-card-${task.id}'),
+                task: task,
+                app: app,
+                onTap: () => onOpen(task),
+                onDragStarted: () => onDragStarted(task),
+                onDragEnded: onDragEnded,
+              ),
             ),
         ],
       ),
@@ -979,6 +1102,8 @@ class _LaneCell extends StatelessWidget {
 
 /// The board on a phone: the lanes as tabs, the workflow stages as sections
 /// of the lane shown, so the tasks of a lane read in the order they travel.
+/// While a card is carried every column is a section, that one holding
+/// nothing included, and each section takes the card.
 class _TaskLanes extends StatelessWidget {
   const _TaskLanes({
     required this.app,
@@ -988,6 +1113,10 @@ class _TaskLanes extends StatelessWidget {
     required this.lanes,
     required this.onSelectLane,
     required this.onOpen,
+    required this.onMove,
+    required this.dragging,
+    required this.onDragStarted,
+    required this.onDragEnded,
   });
 
   final AppController app;
@@ -997,6 +1126,12 @@ class _TaskLanes extends StatelessWidget {
   final List<String> lanes;
   final ValueChanged<String> onSelectLane;
   final ValueChanged<HarnessTask> onOpen;
+  final void Function(HarnessTask task, TaskAction action) onMove;
+
+  /// The task a card carries, while one is carried.
+  final HarnessTask? dragging;
+  final ValueChanged<HarnessTask> onDragStarted;
+  final VoidCallback onDragEnded;
 
   @override
   Widget build(BuildContext context) {
@@ -1040,12 +1175,19 @@ class _TaskLanes extends StatelessWidget {
                     ),
                     children: [
                       for (final stage in stages)
-                        if (controller.forCell(selected, stage).isNotEmpty)
+                        // A column that holds nothing is a target too, which
+                        // the board does not show on a phone until a card is
+                        // carried.
+                        if (dragging != null ||
+                            controller.forCell(selected, stage).isNotEmpty)
                           _StageSection(
                             stage: stage,
                             tasks: controller.forCell(selected, stage),
                             app: app,
                             onOpen: onOpen,
+                            onMove: onMove,
+                            onDragStarted: onDragStarted,
+                            onDragEnded: onDragEnded,
                           ),
                     ],
                   ),
@@ -1056,25 +1198,63 @@ class _TaskLanes extends StatelessWidget {
   }
 }
 
+/// A column of a phone's board, the stages of the lane shown: a card carried
+/// over it is dropped on that column.
 class _StageSection extends StatelessWidget {
   const _StageSection({
     required this.stage,
     required this.tasks,
     required this.app,
     required this.onOpen,
+    required this.onMove,
+    required this.onDragStarted,
+    required this.onDragEnded,
   });
 
   final String stage;
   final List<HarnessTask> tasks;
   final AppController app;
   final ValueChanged<HarnessTask> onOpen;
+  final void Function(HarnessTask task, TaskAction action) onMove;
+  final ValueChanged<HarnessTask> onDragStarted;
+  final VoidCallback onDragEnded;
+
+  /// The move a carried card would make here, or null when the task cannot
+  /// come to this column, which refuses it.
+  TaskMove? _moveFor(HarnessTask task) {
+    final controller = app.tasks;
+    if (controller == null) return null;
+    return TaskMove.of(task, stage, taskActionsOf(app, controller, task));
+  }
 
   @override
   Widget build(BuildContext context) {
+    return DragTarget<HarnessTask>(
+      onWillAcceptWithDetails: (details) => _moveFor(details.data) != null,
+      onAcceptWithDetails: (details) {
+        final move = _moveFor(details.data);
+        if (move != null) onMove(move.task, move.action);
+      },
+      builder: (context, candidates, _) {
+        final carried = candidates.firstOrNull;
+        return _section(context, carried == null ? null : _moveFor(carried));
+      },
+    );
+  }
+
+  Widget _section(BuildContext context, TaskMove? move) {
     final theme = Theme.of(context);
     final color = HarnessColors.column(stage, theme.brightness);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
+      margin: const EdgeInsets.only(bottom: 16),
+      constraints: tasks.isEmpty
+          ? const BoxConstraints(minHeight: 64)
+          : const BoxConstraints(),
+      decoration: BoxDecoration(
+        color: move == null ? null : color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1090,16 +1270,104 @@ class _StageSection extends StatelessWidget {
                   style: HarnessText.rowTitle(context).copyWith(fontSize: 14),
                 ),
                 const SizedBox(width: 6),
-                Text('${tasks.length}', style: HarnessText.meta(context)),
+                // A card over it says what dropping there would do; the
+                // count is back once it is carried off.
+                if (move != null)
+                  Flexible(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.south_rounded, size: 14, color: color),
+                        const SizedBox(width: 3),
+                        Flexible(
+                          child: Text(
+                            move.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: HarnessText.caption(context).copyWith(
+                              color: color,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  Text('${tasks.length}', style: HarnessText.meta(context)),
               ],
             ),
           ),
           for (final task in tasks)
             Padding(
               padding: const EdgeInsets.only(bottom: 10),
-              child: TaskCard(task: task, app: app, onTap: () => onOpen(task)),
+              child: _DraggableTaskCard(
+                key: ValueKey('task-card-${task.id}'),
+                task: task,
+                app: app,
+                onTap: () => onOpen(task),
+                onDragStarted: () => onDragStarted(task),
+                onDragEnded: onDragEnded,
+              ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// A task card that is carried with a long press and dropped on another
+/// column, to move the task to that column's state.
+class _DraggableTaskCard extends StatelessWidget {
+  const _DraggableTaskCard({
+    super.key,
+    required this.task,
+    required this.app,
+    required this.onTap,
+    required this.onDragStarted,
+    required this.onDragEnded,
+  });
+
+  final HarnessTask task;
+  final AppController app;
+  final VoidCallback onTap;
+  final VoidCallback onDragStarted;
+  final VoidCallback onDragEnded;
+
+  /// Where the carried card starts from the finger: its top, centered, a
+  /// little below, so the column it is over and the word of the drop stay in
+  /// sight under it.
+  static Offset _belowFinger(
+    Draggable<Object> draggable,
+    BuildContext context,
+    Offset position,
+  ) {
+    final width = context.size?.width ?? 0;
+    return Offset(width / 2, -16);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final card = TaskCard(task: task, app: app, onTap: onTap);
+    final controller = app.tasks;
+    // While the board does something, a second move waits: the card is then
+    // only the card, and a tap still opens its conversation.
+    if (controller == null || controller.busy) return card;
+    return LayoutBuilder(
+      builder: (context, constraints) => LongPressDraggable<HarnessTask>(
+        data: task,
+        dragAnchorStrategy: _belowFinger,
+        onDragStarted: onDragStarted,
+        onDragEnd: (_) => onDragEnded(),
+        feedback: Material(
+          type: MaterialType.transparency,
+          child: SizedBox(
+            width: constraints.maxWidth,
+            child: TaskCard(task: task, app: app, onTap: () {}),
+          ),
+        ),
+        childWhenDragging: Opacity(opacity: 0.3, child: card),
+        child: Semantics(hint: 'Move to another column', child: card),
       ),
     );
   }
@@ -1210,9 +1478,8 @@ class TaskCard extends StatelessWidget {
                             truncate(task.error!, 100),
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
-                            style: HarnessText.caption(
-                              context,
-                            ).copyWith(color: theme.colorScheme.error),
+                            style: HarnessText.caption(context)
+                                .copyWith(color: theme.colorScheme.error),
                           ),
                         ],
                       ],

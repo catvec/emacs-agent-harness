@@ -228,11 +228,18 @@ class HarnessTabStrip<T> extends StatelessWidget {
     required this.tabs,
     required this.value,
     required this.onChanged,
+    this.tabWrapper,
   });
 
   final List<HarnessTab<T>> tabs;
   final T value;
   final ValueChanged<T> onChanged;
+
+  /// Wraps each tab, for a screen where a tab is a drop target, say: the
+  /// child is the tab as the strip draws it, and the wrapper may draw around
+  /// it without changing where the row puts it.
+  final Widget Function(BuildContext context, HarnessTab<T> tab, Widget child)?
+  tabWrapper;
 
   static const _height = 44.0;
   static const _pad = 12.0;
@@ -261,16 +268,23 @@ class HarnessTabStrip<T> extends StatelessWidget {
           ),
           children: [
             for (final tab in tabs)
-              _TabItem<T>(
-                tab: tab,
-                selected: tab.value == value,
-                onTap: () => onChanged(tab.value),
+              _wrap(
+                context,
+                tab,
+                _TabItem<T>(
+                  tab: tab,
+                  selected: tab.value == value,
+                  onTap: () => onChanged(tab.value),
+                ),
               ),
           ],
         ),
       ),
     );
   }
+
+  Widget _wrap(BuildContext context, HarnessTab<T> tab, Widget child) =>
+      tabWrapper?.call(context, tab, child) ?? child;
 }
 
 class _TabItem<T> extends StatelessWidget {

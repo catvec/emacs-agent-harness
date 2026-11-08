@@ -442,6 +442,16 @@ class HarnessApi {
   Future<HarnessTask> queueTask(String id) async =>
       HarnessTask.fromWire(await extension('task/queue', {'id': id}));
 
+  /// Move task [id] out of the pending queue into the backlog, without
+  /// starting it (`task/park`).
+  Future<HarnessTask> parkTask(String id) async =>
+      HarnessTask.fromWire(await extension('task/park', {'id': id}));
+
+  /// Put task [id] in review by hand, without waiting for its agent to hand
+  /// in (`task/force-review`).
+  Future<HarnessTask> forceReviewTask(String id) async =>
+      HarnessTask.fromWire(await extension('task/force-review', {'id': id}));
+
   Future<HarnessTask> verifyTask(String id) async =>
       HarnessTask.fromWire(await extension('task/verify', {'id': id}));
 

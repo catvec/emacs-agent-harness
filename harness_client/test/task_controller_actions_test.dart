@@ -703,6 +703,8 @@ void main() {
             TaskAction.openSession || TaskAction.answer => true,
             TaskAction.start => await board.start(task.id) != null,
             TaskAction.queue => await board.queue(task.id) != null,
+            TaskAction.park => await board.park(task.id) != null,
+            TaskAction.putInReview => await board.putInReview(task.id) != null,
             TaskAction.retry => await board.retry(task.id) != null,
             TaskAction.retryMerge => await board.retryMerge(task.id) != null,
             TaskAction.pause => await board.pause(task.id) != null,

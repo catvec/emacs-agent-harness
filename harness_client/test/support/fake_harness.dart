@@ -104,8 +104,8 @@ class FakeHarness {
     List<Map<String, Object?>>? availableModes,
     this.failSetMode = false,
     Set<String>? knownSecrets,
-  })  : availableModes = availableModes ?? _defaultModes,
-        knownSecrets = knownSecrets ?? <String>{} {
+  }) : availableModes = availableModes ?? _defaultModes,
+       knownSecrets = knownSecrets ?? <String>{} {
     if (enhanced) {
       methods.addAll({
         'session/list',
@@ -170,6 +170,8 @@ class FakeHarness {
           'task/pause',
           'task/resume',
           'task/return-to-pending',
+          'task/park',
+          'task/force-review',
           'task/merge',
           'task/delete',
           'task/suspend-queue',
@@ -1751,10 +1753,7 @@ class FakeHarness {
           'queue': [],
         };
         nodes[sid] = [];
-        _respond(id, {
-          'sessionId': sid,
-          'modes': _modesFor(sessions[sid]!),
-        });
+        _respond(id, {'sessionId': sid, 'modes': _modesFor(sessions[sid]!)});
         return;
       }
       if (method == 'session/prompt') {
@@ -4179,6 +4178,23 @@ class FakeHarness {
         }
         task['column'] = 'pending';
         task['backlog'] = false;
+      case 'park':
+        if (state != 'pending' || task['backlog'] == true) {
+          return refuse('Task $taskId is not waiting in the pending queue');
+        }
+        task['column'] = 'backlog';
+        task['backlog'] = true;
+        task['parked'] = true;
+      case 'force-review':
+        if (state == 'review') break;
+        if (state != 'active') {
+          return refuse('Task $taskId is not at work ($state)');
+        }
+        task['state'] = 'review';
+        task['column'] = 'review';
+        task.remove('outcome');
+        task.remove('error');
+        task.remove('hold');
       case 'verify':
         if (state != 'review') {
           return refuse('Task $taskId is not waiting for review');
