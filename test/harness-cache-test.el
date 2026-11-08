@@ -553,6 +553,33 @@ after it, with the streak it has then."
         (should (= 3 (plist-get (cdar alerts) :streak)))
         (should (= 120000 (plist-get (cdar alerts) :wasted)))))))
 
+(ert-deftest harness-cache-health-a-good-read-does-not-end-the-cooldown ()
+  "A good read clears the streak, but not the cooldown.
+A cache that misses, serves a request and misses again is still a cache
+that keeps missing: the user hears of it once in the cooldown, not once
+an episode."
+  (harness-cache-test-with
+    (let ((harness-cache-health-streak 2)
+          (harness-cache-health-min-context 1000)
+          (harness-cache-health-cooldown 300)
+          (alerts nil))
+      (harness-on 'cache/poor-hit (lambda (sid info) (push (cons sid info) alerts)))
+      (let ((sid (harness-cache-test-session 300 0)))
+        (dotimes (_ 2) (harness-cache-test--reuse sid :previous 40000 :wasted 40000))
+        (should (= 1 (length alerts)))
+        ;; A good read ends the streak...
+        (harness-cache-test--reuse sid :ratio 1.0 :cache-read 40000
+                                   :previous 40000 :wasted 0)
+        (should (= 1 (length alerts)))
+        ;; ...but the misses after it wait out the cooldown too.
+        (dotimes (_ 2) (harness-cache-test--reuse sid :previous 40000 :wasted 40000))
+        (should (= 1 (length alerts)))
+        (let ((harness-cache-health-cooldown 0))
+          (harness-cache-test--reuse sid :previous 40000 :wasted 40000))
+        (should (= 2 (length alerts)))
+        (should (= 3 (plist-get (cdar alerts) :streak)))
+        (should (= 120000 (plist-get (cdar alerts) :wasted)))))))
+
 (ert-deftest harness-cache-health-can-stop-the-turn ()
   "With the stop action the alert cancels the session's running turn too,
 so it stops paying before the next step; the alert itself still comes."

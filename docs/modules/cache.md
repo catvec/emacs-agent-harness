@@ -52,10 +52,11 @@ the cache (`cache/reuse`, emitted by `session/usage-add`), and this
 module watches that: a request that reads less than
 `harness-cache-health-threshold` of the previous prompt is a miss, and
 a streak of them says the cache is not working.  It then tells the
-user -- a hint, a notification, a warning, `cache/poor-hit` -- and,
-with `harness-cache-health-action` `stop`, cancels the turn, rather
-than let a session re-send its context at the uncached rate step after
-step without anyone noticing.
+user -- a hint, a notification, a warning, `cache/poor-hit` -- once in
+`harness-cache-health-cooldown` seconds, a request that read its share
+between the misses or not, and, with `harness-cache-health-action`
+`stop`, cancels the turn, rather than let a session re-send its
+context at the uncached rate step after step without anyone noticing.
 
 Whether to act on a lapse depends on whether the user is around.  A
 sign of life from them -- a message they send, a question they answer,

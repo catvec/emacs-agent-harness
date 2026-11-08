@@ -415,6 +415,7 @@ sessions and the turn loop, the Claude Code provider of the default
 model, compaction and retries, session names, the links agents write
 to sessions, messages and threads (`linking`), the file, shell and
 Emacs tools with the permissions and the sandbox that guard them, the
+pictures tools return, kept as the tool saw them (`images`), the
 MCP host that starts tool servers inside that sandbox and attaches the
 Emacs a client lends (`mcp`), the
 question, plan, todo, session info and sub-agent tools (a module
@@ -1012,7 +1013,7 @@ catalogue changes, the sessions whose window moved get `session/changed`.
  :tool "read_file" :call-id "toolu_…" :input PLIST :title "Read file: src/x.el"
  ;; tool-result (:images only when the tool returned pictures for the model to see):
  :call-id "toolu_…" :output "text" :is-error BOOL :attachments (ATTACHMENT…)
- :images ((:path "/abs/shot.png" :mime "image/png")…)
+ :images ((:path "/abs/shot.png" :mime "image/png" [:snapshot "/state/…/ID.images/HASH.png"])…)
  :usage PLIST        ; assistant nodes: this response's usage
  :checkpoint PLIST   ; where a hosted provider's conversation stood after this node
  :meta PLIST)        ; anything else (model, duration, cost …)
@@ -1152,7 +1153,8 @@ parent's whole conversation; such a session starts a new one.
 (:type "thinking" :text "…" :signature "…")
 (:type "tool_use" :id "…" :name "…" :input PLIST)
 (:type "tool_result" :tool_use_id "…" :content "…" :is_error BOOL)
-(:type "tool_result" … :images ((:type "image" :mime "image/png" :path "/abs")…))  ; or :data BASE64
+(:type "tool_result" … :images ((:type "image" :mime "image/png" :path "/abs"
+                                 [:snapshot "/state/…/ID.images/HASH.png"])…))  ; or :data BASE64
 ```
 
 ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
@@ -1160,9 +1162,10 @@ ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
 A tool_result's `:content` is always a string, so everything that reads
 the words of a conversation (a summary, a title, the judge) is
 unaffected by its `:images`.  `session/messages` gives the block the
-images with their `:path`; the agent makes them `:data` when the request
-goes out, for a model that reads images, and drops them with a note in
-the text for one that does not (see agent).
+images with their `:path`, and the `:snapshot` the result was recorded
+with (see images); the agent reads the copy when the request goes out,
+makes it `:data` for a model that reads images, and drops it with a note
+in the text for one that does not (see agent).
 
 ### Threads (a reply the user starts on purpose)
 
@@ -1956,7 +1959,10 @@ redact).
   images a tool returned for the model (the result node's `:images`)
   follow in the tool_result block's `:images`, image blocks that name
   their files and hold no bytes, on the block of a call that returned
-  any and did not fail; the block's `:content` stays a string.
+  any and did not fail; the block's `:content` stays a string.  A
+  picture whose copy the result was recorded with carries its
+  `:snapshot', which the request sends instead of the file (see
+  images).
 - `session/transcript-text ID` → searchable plain text.
 - `session/write-transcript ID &optional OPTS` → `(:file :lines)`:
   writes `session/transcript-text` to a new Markdown file named after
@@ -3353,8 +3359,10 @@ is what the chat shows the user, `:images` the pictures the model is to
 see (read_file on an image gives both; the agent sends them on, see
 agent), a list of files of type `image/png`, `image/jpeg`, `image/gif`
 or `image/webp`; it survives the size guard and the filters (secrets
-masking among them), which rebuild a result.  A handler can hand back a
-raw byte in `:content` --
+masking among them), which rebuild a result.  What the transcript keeps
+of one is `:path` and `:mime`, with the `:snapshot` copy the agent made
+of it when the result was recorded (see images).  A handler can hand
+back a raw byte in `:content` --
 `cat` of a binary file, say, or a stuck transcript `session_read` or
 `emacs_buffer` read back -- which `harness-tools--normalise-result`
 repairs with `harness-valid-text` before anything truncates, saves,
@@ -5141,25 +5149,31 @@ decisions.
   (`harness-agent--no-vision-note`).  The result node keeps the files'
   paths and types, never their bytes, and only a path of an
   `image/png`, `image/jpeg`, `image/gif` or `image/webp` file, from a
-  call that did not fail.  A hosted loop is handed them with the result:
-  `:respond` gets `(:content TEXT :is-error BOOL :images IMAGES)`, each
-  of IMAGES `(:mime MIME :data BASE64 :name FILENAME)`, read when the
-  call ends and only then; a file that cannot be read is left out and
-  the text says it is gone.  The note, like that one, comes before the
-  steering the result carries.  A native loop is sent them with its next
-  request: `harness-agent--prepare-messages` makes each tool_result
-  block's `:images` image blocks with `:data`, or drops them with the
-  note, and nothing is read for the call itself.  A request carries
-  only the newest `harness-agent-history-images` (16) images of tool
-  results: a native provider is sent the whole conversation again at
-  every step, so past that the oldest go in chunks of half as many,
-  counted from the conversation alone, so the request is the same from
-  step to step between two chunks and the provider's prompt cache
-  lasts; the result of a call whose image went says it is no longer
-  attached, and the model can read the file again.  A hosted loop is
-  sent none from the transcript, having been handed each once; neither
-  are a summary or a title (compaction and naming), which are written
-  from words (`harness-agent-strip-result-images`).
+  call that did not fail.  Before the result is recorded, the bytes of
+  each picture are copied once, under the session's images directory,
+  and the node keeps the copy's name as `:snapshot` beside `:path` (see
+  images): a request reads that copy, so a screenshot written over the
+  file later cannot change a result the conversation holds, which would
+  both show the model a picture it never got and break the provider's
+  prompt cache from that result on.  A hosted loop is handed them with
+  the result: `:respond` gets `(:content TEXT :is-error BOOL :images
+  IMAGES)`, each of IMAGES `(:mime MIME :data BASE64 :name FILENAME)`,
+  read from the copy when the call ends; a file that cannot be read is
+  left out and the text says it is gone.  The note, like that one, comes
+  before the steering the result carries.  A native loop is sent them
+  with its next request: `harness-agent--prepare-messages` makes each
+  tool_result block's `:images` image blocks with `:data`, or drops them
+  with the note, and nothing is made of them for the call itself.  A
+  request carries only the newest `harness-agent-history-images` (16)
+  images of tool results: a native provider is sent the whole
+  conversation again at every step, so past that the oldest go in chunks
+  of half as many, counted from the conversation alone, so the request
+  is the same from step to step between two chunks and the provider's
+  prompt cache lasts; the result of a call whose image went says it is
+  no longer attached, and the model can read the file again.  A hosted
+  loop is sent none from the transcript, having been handed each once;
+  neither are a summary or a title (compaction and naming), which are
+  written from words (`harness-agent-strip-result-images`).
 - Images a steering message holds (attached in the box while the turn
   runs, or to an answer, see `question/answer`) reach the model as
   those of a message sent first would.  A native loop gets the message,
@@ -5222,6 +5236,27 @@ decisions.
   puts each call's note under that call's own block.  Every change is
   announced as `agent/activity-changed`, with nil when the turn ends.
   The state lives beside the turn records, so a reload keeps it.
+
+### images
+
+- `images/keep SESSION-ID PATH MIME` → the name of the copy kept of
+  the picture at PATH, or nil.  It copies the bytes to
+  `sessions/ID.images/SHA1.EXT` under the state directory, once per
+  content: two results of the same picture share one file.  Nil for a
+  file that is gone, empty, unreadable or larger than
+  `harness-images-max-bytes` (16 MiB), and for a type a model is not
+  sent (`image/png`, `image/jpeg`, `image/gif`, `image/webp`).
+- `images/file IMAGE` → the file of IMAGE, a tool result's
+  `(:path PATH :mime MIME :snapshot COPY)`, that a request reads: its
+  copy while the copy is there, else `:path`.
+- The pictures of a result are kept before it is recorded (see agent),
+  so the requests that follow send the bytes the tool returned however
+  the file changes later.  A file changed under an old result would
+  otherwise change what the model is sent: a picture it never got, and
+  every token after that result read fresh from the provider's prompt
+  cache.
+- `session/deleted` takes the session's copies away with it.  A fork
+  keeps its parent's paths and reads them while the parent lives.
 
 ### usage
 

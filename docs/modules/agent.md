@@ -131,6 +131,8 @@ The loop is entirely event driven: nothing here waits.
 
 ### Methods it calls
 
+- `images/file` ([images](images.md)), when it is loaded
+- `images/keep` ([images](images.md)), when it is loaded
 - `link/canonicalize` ([linking](linking.md)), when it is loaded
 - `project/name` ([project](project.md)), when it is loaded
 - `provider/capabilities` ([provider](provider.md))

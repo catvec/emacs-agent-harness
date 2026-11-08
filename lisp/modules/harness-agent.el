@@ -734,21 +734,57 @@ the model can tell apart every image of the message."
 
 (defun harness-agent--result-images (result)
   "Return the images RESULT, what a tool returned, hands the model, paths only.
-Each is (:path PATH :mime MIME), the tool's `:images' reduced to those
-two keys: a picture the transcript names and never holds.  Only one a
-provider can be sent stays -- a file named, of a type in
-`harness-agent--image-mimes' -- and none stays of a call that failed,
-whose result a provider takes as text."
+Each is (:path PATH :mime MIME), with `:snapshot' the copy kept of the
+picture when there is one (see harness-images.el): what the request
+sends, so that a file changed later cannot change a result the
+conversation holds.  Only one a provider can be sent stays -- a file
+named, of a type in `harness-agent--image-mimes' -- and none stays of a
+call that failed, whose result a provider takes as text."
   (unless (plist-get result :is-error)
     (let ((images (plist-get result :images)))
       (and (proper-list-p images)
            (delq nil (mapcar (lambda (image)
                                (let ((path (and (consp image) (plist-get image :path)))
-                                     (mime (and (consp image) (plist-get image :mime))))
+                                     (mime (and (consp image) (plist-get image :mime)))
+                                     (snapshot (and (consp image) (plist-get image :snapshot))))
                                  (and (stringp path) (not (string-empty-p path))
                                       (member mime harness-agent--image-mimes)
-                                      (list :path path :mime mime))))
+                                      (append (list :path path :mime mime)
+                                              (and (stringp snapshot)
+                                                   (not (string-empty-p snapshot))
+                                                   (list :snapshot snapshot))))))
                              images))))))
+
+(defun harness-agent--keep-result-images (session-id result)
+  "Return RESULT with a copy kept of each picture it hands the model.
+The copy is made now, for SESSION-ID, while the files are what the tool
+saw, so that the requests that follow send those bytes however the
+files change, and the provider's prompt cache is not broken by a change
+the conversation does not show (see harness-images.el).  RESULT is
+returned as it is when it has no pictures, when the images module is
+not there to keep them, or when keeping one fails: the request then
+reads the file as it always did."
+  (let ((images (plist-get result :images)))
+    (if (or (not (proper-list-p images))
+            (not (harness-method-exists-p 'images/keep)))
+        result
+      (let ((kept (mapcar (lambda (image)
+                            (let ((copy (and (consp image)
+                                             (member (plist-get image :mime)
+                                                     harness-agent--image-mimes)
+                                             (harness-agent--try
+                                              "keeping the picture of a result"
+                                              (harness-call 'images/keep
+                                                            session-id
+                                                            (plist-get image :path)
+                                                            (plist-get image :mime))))))
+                              (if (stringp copy)
+                                  (plist-put (copy-sequence image) :snapshot copy)
+                                image)))
+                          images)))
+        (if (equal kept images)
+            result
+          (plist-put (copy-sequence result) :images kept))))))
 
 (defun harness-agent--image-data (path)
   "Return the base64 of the image file PATH, or nil when it cannot be read.
@@ -772,8 +808,9 @@ itself is not changed."
 (defun harness-agent--prepare-result (block session)
   "Return tool_result BLOCK, which holds `:images', ready for SESSION's provider.
 For a model that reads images each image becomes (:type \"image\" :mime
-MIME :data BASE64), read from its `:path'; one whose file cannot be read
-any more is left out, and the block's text says it is gone.  For any
+MIME :data BASE64), read from the copy kept with the result, else from
+its `:path' (see harness-images.el); one whose file cannot be read any
+more is left out, and the block's text says it is gone.  For any
 other model all the images go, and the text says that only the user
 sees them.  The images stay in the transcript either way."
   (if (not (harness-agent--vision-p session))
@@ -781,7 +818,10 @@ sees them.  The images stay in the transcript either way."
     (let (images notes)
       (dolist (image (plist-get block :images))
         (let* ((path (plist-get image :path))
-               (data (or (plist-get image :data) (harness-agent--image-data path))))
+               (file (if (harness-method-exists-p 'images/file)
+                         (harness-call 'images/file image)
+                       path))
+               (data (or (plist-get image :data) (harness-agent--image-data file))))
           (if data
               (push (list :type "image" :mime (or (plist-get image :mime) "image/png") :data data) images)
             (push (harness-agent--image-gone-note (or path "?")) notes))))
@@ -1950,24 +1990,30 @@ when the images were what the provider could not take."
 
 (defun harness-agent--hosted-images (sid images)
   "Return (NOTE . SENT): what SID's hosted loop is told of a result's IMAGES.
-IMAGES are (:path PATH :mime MIME).  For a model that reads images SENT
-holds each one that can be read as (:mime MIME :data BASE64 :name
-FILENAME), the shape of `harness-agent--respond's IMAGES; NOTE then
-says of each that cannot that it is gone.  Any other model gets no
-SENT and a NOTE saying that only the user sees the image.  NOTE is
-text to add to the result's content, or nil for none.  The model is the
-one the running step went to (`harness-agent--step-vision-p')."
+IMAGES are (:path PATH :mime MIME), with `:snapshot' the copy kept of
+the picture when there is one (see harness-images.el).  For a model
+that reads images SENT holds each one that can be read as (:mime MIME
+:data BASE64 :name FILENAME), the shape of `harness-agent--respond's
+IMAGES; NOTE then says of each that cannot that it is gone.  Any other
+model gets no SENT and a NOTE saying that only the user sees the image.
+NOTE is text to add to the result's content, or nil for none.  The
+model is the one the running step went to
+\(`harness-agent--step-vision-p')."
   (if (not (harness-agent--step-vision-p sid))
       (cons harness-agent--no-vision-note nil)
     (let (sent notes)
       (dolist (image images)
         (let* ((path (plist-get image :path))
-               (data (harness-agent--image-data path)))
+               (file (if (harness-method-exists-p 'images/file)
+                         (harness-call 'images/file image)
+                       path))
+               (data (harness-agent--image-data file)))
           (if data
               (push (list :mime (plist-get image :mime) :data data
-                          :name (file-name-nondirectory path))
+                          :name (if (stringp path) (file-name-nondirectory path)
+                                  (file-name-nondirectory file)))
                     sent)
-            (push (harness-agent--image-gone-note path) notes))))
+            (push (harness-agent--image-gone-note (or path "?")) notes))))
       (cons (and notes (apply #'concat (nreverse notes))) (nreverse sent)))))
 
 (defun harness-agent--step-vision-p (sid)
@@ -2109,6 +2155,12 @@ logged, short, and the ones after it still run."
          ;; process filter, whose news must not hide behind this call.
          (harness-agent--remove-call sid call-id)
          (harness-agent--update-activity sid)
+         ;; The pictures are kept as the tool saw them before anything
+         ;; else comes to read them: a later request sends the copy, not
+         ;; whatever the file holds by then (see harness-images.el).
+         (setq result (or (harness-agent--try (format "keeping the images of %s" name)
+                            (harness-agent--keep-result-images sid result))
+                          result))
          (unwind-protect
              (let* ((rnode (harness-agent--record-result sid name call-id result started))
                     ;; The pictures of the result go to a hosted loop with

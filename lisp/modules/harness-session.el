@@ -3105,9 +3105,11 @@ no change is returned as it is; one that does lists its results first."
 (defun harness-session--result-images (node)
   "Return the image blocks of tool-result NODE, for its tool_result block.
 The images a tool returned for the model to see are kept on the node as
-`:images', (:path PATH :mime MIME) each; here each is the block
-\(:type \"image\" :mime MIME :path PATH), which names the file and holds
-none of its bytes: the agent reads it when the request goes out, and
+`:images', (:path PATH :mime MIME) each, with `:snapshot' the copy
+kept of the picture when the result was recorded (see
+harness-images.el); here each is the block (:type \"image\" :mime MIME
+:path PATH :snapshot SNAPSHOT), which names the files and holds none
+of their bytes: the agent reads the copy when the request goes out, and
 only for a model that reads images (`harness-agent--prepare-messages').
 A failed call has none: a provider takes only text in the result of one.
 Nil when the node has no images."
@@ -3115,9 +3117,13 @@ Nil when the node has no images."
     (let ((images (plist-get node :images)))
       (and (proper-list-p images)
            (delq nil (mapcar (lambda (image)
-                               (let ((path (and (consp image) (plist-get image :path))))
+                               (let ((path (and (consp image) (plist-get image :path)))
+                                     (snapshot (and (consp image) (plist-get image :snapshot))))
                                  (and (stringp path) (not (string-empty-p path))
-                                      (list :type "image" :mime (plist-get image :mime) :path path))))
+                                      (append (list :type "image" :mime (plist-get image :mime)
+                                                    :path path)
+                                              (and (stringp snapshot) (not (string-empty-p snapshot))
+                                                   (list :snapshot snapshot))))))
                              images))))))
 
 (defun harness-session--render-messages (path delivered &optional start)

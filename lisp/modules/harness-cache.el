@@ -41,10 +41,11 @@
 ;; module watches that: a request that reads less than
 ;; `harness-cache-health-threshold' of the previous prompt is a miss, and
 ;; a streak of them says the cache is not working.  It then tells the
-;; user -- a hint, a notification, a warning, `cache/poor-hit' -- and,
-;; with `harness-cache-health-action' `stop', cancels the turn, rather
-;; than let a session re-send its context at the uncached rate step after
-;; step without anyone noticing.
+;; user -- a hint, a notification, a warning, `cache/poor-hit' -- once in
+;; `harness-cache-health-cooldown' seconds, a request that read its share
+;; between the misses or not, and, with `harness-cache-health-action'
+;; `stop', cancels the turn, rather than let a session re-send its
+;; context at the uncached rate step after step without anyone noticing.
 ;;
 ;; Whether to act on a lapse depends on whether the user is around.  A
 ;; sign of life from them -- a message they send, a question they answer,
@@ -536,11 +537,13 @@ module is loaded, a warning in the log, and `cache/poor-hit'.  With
 (defun harness-cache--on-reuse (sid info)
   "Watch the reuse of SESSION-ID's prompt cache from INFO, a `cache/reuse'.
 A request that reads its share (`harness-cache-health-threshold') clears
-the streak.  A miss counts, and when `harness-cache-health-streak' of
-them have come and the cooldown has passed, `harness-cache--alert' tells
-the user.  Nothing is said of a prompt under
-`harness-cache-health-min-context', of an internal session, or of an
-event without a ratio.  On `cache/reuse'."
+the streak, but not the cooldown: a session whose cache keeps missing
+says so once in it, a good request between the misses or not.  A miss
+counts, and when `harness-cache-health-streak' of them have come and
+the cooldown has passed, `harness-cache--alert' tells the user.
+Nothing is said of a prompt under `harness-cache-health-min-context',
+of an internal session, or of an event without a ratio.  On
+`cache/reuse'."
   (let* ((ratio (plist-get info :ratio))
          (previous (plist-get info :previous))
          (session (ignore-errors (harness-call 'session/get sid)))
@@ -550,26 +553,30 @@ event without a ratio.  On `cache/reuse'."
                (numberp ratio)
                (numberp previous)
                (>= previous harness-cache-health-min-context))
-      (if (>= ratio harness-cache-health-threshold)
-          (remhash sid harness-cache--health)
-        (let* ((old (gethash sid harness-cache--health))
-               (streak (1+ (or (plist-get old :streak) 0)))
-               (wasted (+ (or (plist-get old :wasted) 0) (or (plist-get info :wasted) 0)))
-               (now (float-time))
-               (last (plist-get old :alerted-at)))
-          (if (and (>= streak harness-cache-health-streak)
-                   (or (not (numberp last))
-                       (>= (- now last) harness-cache-health-cooldown)))
-              (progn
-                (harness-cache--alert sid (plist-put (plist-put (copy-sequence info)
-                                                                :streak streak)
-                                                     :wasted wasted))
-                ;; Start a new episode: the next alert reports its own misses,
-                ;; and the cooldown holds until then.
-                (puthash sid (list :streak 0 :wasted 0 :alerted-at now :ratio ratio)
-                         harness-cache--health))
-            (puthash sid (list :streak streak :wasted wasted :alerted-at last :ratio ratio)
-                     harness-cache--health)))))))
+      (let ((old (gethash sid harness-cache--health)))
+        (if (>= ratio harness-cache-health-threshold)
+            (if (numberp (plist-get old :alerted-at))
+                (puthash sid (list :streak 0 :wasted 0
+                                   :alerted-at (plist-get old :alerted-at) :ratio ratio)
+                         harness-cache--health)
+              (remhash sid harness-cache--health))
+          (let ((streak (1+ (or (plist-get old :streak) 0)))
+                (wasted (+ (or (plist-get old :wasted) 0) (or (plist-get info :wasted) 0)))
+                (now (float-time))
+                (last (plist-get old :alerted-at)))
+            (if (and (>= streak harness-cache-health-streak)
+                     (or (not (numberp last))
+                         (>= (- now last) harness-cache-health-cooldown)))
+                (progn
+                  (harness-cache--alert sid (plist-put (plist-put (copy-sequence info)
+                                                                  :streak streak)
+                                                       :wasted wasted))
+                  ;; Start a new episode: the next alert reports its own misses,
+                  ;; and the cooldown holds until then.
+                  (puthash sid (list :streak 0 :wasted 0 :alerted-at now :ratio ratio)
+                           harness-cache--health))
+              (puthash sid (list :streak streak :wasted wasted :alerted-at last :ratio ratio)
+                       harness-cache--health))))))))
 
 ;;;; Claiming a lapse
 

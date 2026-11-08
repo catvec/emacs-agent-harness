@@ -35,7 +35,7 @@
 (defvar harness-provider-demo--delay)
 (defvar harness-compaction--context-reserve)
 (defvar harness-compaction--running)
-(defvar harness-compaction--pending)
+(defvar harness-agent-compaction--pending)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-define-tool "harness-tools")
 (declare-function harness-tool-ok "harness-tools")
@@ -48,6 +48,8 @@
 (declare-function harness-naming--messages "harness-naming" (session-id))
 (declare-function harness-secrets-forget "harness-secrets")
 (declare-function harness-secrets--prime "harness-secrets")
+(defvar harness-images-max-bytes)
+(declare-function harness-images-directory "harness-images" (session-id))
 
 ;;;; Setup
 
@@ -136,7 +138,7 @@ result the agent answers it with, `native' the requests it is sent."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (dolist (m '(store project config provider tools session agent))
+     (dolist (m '(store project config provider tools session images agent))
        (harness-test-load-module m))
      (clrhash harness-sessions)
      (clrhash harness-tools)
@@ -167,8 +169,43 @@ result the agent answers it with, `native' the requests it is sent."
   "Return the first tool-result node of session ID."
   (cl-find 'tool-result (harness-call 'session/nodes id) :key (lambda (n) (plist-get n :kind))))
 
+(defun harness-agent-images-test--images (node)
+  "Return the images of result NODE with the kept copy checked.
+The copy is a file under the session's own images directory, named by
+a digest; the other keys of each image are returned as they are, the
+copy's path left out so that a test can name the file the tool saw."
+  (mapcar (lambda (image)
+            (let ((snapshot (plist-get image :snapshot)))
+              (should (stringp snapshot))
+              (should (file-regular-p snapshot))
+              (should (string-match-p "\\.images/\\'" (file-name-directory snapshot)))
+              (should (equal (harness-agent-images-test-bytes snapshot)
+                             (harness-agent-images-test-bytes (plist-get image :path))))
+              (harness-plist-remove image :snapshot)))
+          (plist-get node :images)))
+
+(defun harness-agent-images-test-bytes (path)
+  "Return the bytes of the file PATH, as a unibyte string."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally path)
+    (buffer-string)))
+
+(defun harness-agent-images-test--sent-result (messages)
+  "Return the first tool_result of MESSAGES that carries images, or nil."
+  (cl-loop for message in messages
+           for block = (cl-find-if (lambda (b) (and (equal (plist-get b :type) "tool_result")
+                                                    (plist-member b :images)))
+                                   (plist-get message :content))
+           when block return block))
+
 (defconst harness-agent-images-test-b64 (base64-encode-string harness-test-png t)
   "The test PNG in base64, on one line.")
+
+(defconst harness-agent-images-test-other-png
+  (base64-decode-string
+   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+  "The bytes of another PNG, a 1x1 one, for a file that changes under a result.")
 
 (defconst harness-agent-images-test-blind-note
   "\n\n[This model does not read images: only the user sees this one.]"
@@ -200,7 +237,8 @@ attachment, and no byte of the image."
                        (plist-get response :images))))
       (let ((node (harness-agent-images-test-result-node id)))
         (should (equal "Image shot.png attached." (plist-get node :output)))
-        (should (equal (list (list :path png :mime "image/png")) (plist-get node :images)))
+        (should (equal (list (list :path png :mime "image/png"))
+                       (harness-agent-images-test--images node)))
         (should (equal "shot.png" (plist-get (car (plist-get node :attachments)) :name)))
         (should-not (string-search harness-agent-images-test-b64 (format "%S" node)))
         (should-not (string-search harness-agent-images-test-b64
@@ -222,7 +260,8 @@ The node still keeps the image, for a model that reads them later."
       (let ((node (harness-agent-images-test-result-node id)))
         ;; The transcript keeps the tool's own words.
         (should (equal "Image shot.png attached." (plist-get node :output)))
-        (should (equal (list (list :path png :mime "image/png")) (plist-get node :images)))))))
+        (should (equal (list (list :path png :mime "image/png"))
+                       (harness-agent-images-test--images node)))))))
 
 (ert-deftest harness-agent-images-hosted-unreadable-image-is-skipped-with-a-note ()
   "An image whose file cannot be read is left out, and the text says so."
@@ -449,8 +488,8 @@ an image a provider cannot take would stay in the conversation for good."
 
 (ert-deftest harness-agent-images-hosted-image-bytes-are-not-in-the-node-or-the-text ()
   "The images the tool returned beyond what the contract names are not kept.
-Only the path and the type go in the transcript, whatever else the tool
-put in the entry, bytes included."
+The path, the type and the name of the kept copy go in the transcript,
+whatever else the tool put in the entry, bytes included."
   (harness-agent-images-test-with
     (let ((id (harness-agent-images-test-session "hosted:eyes")))
       (setq harness-agent-images-test-result
@@ -458,7 +497,8 @@ put in the entry, bytes included."
                                                                     :data "QUJD" :name "x.png")))))
       (should (eq 'end-turn (harness-agent-images-test-run id)))
       (should (equal (list (list :path png :mime "image/png"))
-                     (plist-get (harness-agent-images-test-result-node id) :images))))))
+                     (harness-agent-images-test--images
+                      (harness-agent-images-test-result-node id)))))))
 
 (ert-deftest harness-agent-images-hosted-request-needs-no-image-bytes ()
   "A hosted loop keeps the pictures it was handed itself.
@@ -479,8 +519,8 @@ none of its images."
 
 (ert-deftest harness-agent-images-native-vision-request-carries-the-image ()
   "The step after a result with an image sends the image, inline.
-Nothing is read when the call ends (there is no provider to answer), only
-when the next request is made."
+The bytes are copied when the result is recorded; they are read for the
+model, and no sooner, when the next request is made."
   (harness-agent-images-test-with
     (let ((id (harness-agent-images-test-session "native:eyes"))
           (at-result nil))
@@ -501,8 +541,10 @@ when the next request is made."
                                  (format "%S" (harness-call 'session/nodes id)))))))
 
 (ert-deftest harness-agent-images-native-blind-request-reads-nothing ()
-  "A native model that reads no images is sent none, and no file is read.
-The text of the result says that only the user sees the image."
+  "A native model that reads no images is sent none, and none is read for it.
+The bytes of the result's picture are copied when it is recorded, but
+nothing is base64'd for a model that cannot see it; the text of the
+result says that only the user sees the image."
   (harness-agent-images-test-with
     (let ((id (harness-agent-images-test-session "native:blind")))
       (harness-agent-images-test-counting-reads reads
@@ -514,7 +556,99 @@ The text of the result says that only the user sees the image."
                        (plist-get result :content)))
         (should-not (plist-member result :images)))
       (should (equal (list (list :path png :mime "image/png"))
-                     (plist-get (harness-agent-images-test-result-node id) :images))))))
+                     (harness-agent-images-test--images
+                      (harness-agent-images-test-result-node id)))))))
+
+(ert-deftest harness-agent-images-a-changed-file-does-not-change-the-result ()
+  "A picture changed after its call is still sent as the tool returned it.
+A screenshot written over the same path every time would otherwise
+change a result the conversation holds: the provider's prompt cache
+would miss from that result on, and the model would be shown a picture
+it never got."
+  (harness-agent-images-test-with
+    (let* ((id (harness-agent-images-test-session "native:eyes"))
+           (original (harness-agent-images-test-bytes png)))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (let* ((node (harness-agent-images-test-result-node id))
+             (image (car (plist-get node :images)))
+             (snapshot (plist-get image :snapshot)))
+        (should (stringp snapshot))
+        (should (equal original (harness-agent-images-test-bytes snapshot)))
+        ;; The file the tool named is written over: another picture, same path.
+        (let ((coding-system-for-write 'binary))
+          (write-region harness-agent-images-test-other-png nil png nil 'silent))
+        ;; The result still names the file the user knows...
+        (should (equal png (plist-get image :path)))
+        ;; ...and the copy holds the bytes the tool returned.
+        (should (equal original (harness-agent-images-test-bytes snapshot)))
+        (let* ((messages (harness-agent--request-messages (harness-call 'session/get id)))
+               (result (harness-agent-images-test--sent-result messages))
+               (sent (car (plist-get result :images))))
+          (should (equal "tool_result" (plist-get result :type)))
+          (should (equal harness-agent-images-test-b64 (plist-get sent :data)))
+          (should-not (string-search (base64-encode-string harness-agent-images-test-other-png t)
+                                     (format "%S" messages))))))))
+
+(ert-deftest harness-agent-images-a-picture-returned-twice-is-kept-once ()
+  "Two results of the same picture share the one copy of it.
+The copy is named by the digest of its bytes, however many results
+return it."
+  (harness-agent-images-test-with
+    (let ((id (harness-agent-images-test-session "native:eyes")))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (let* ((nodes (cl-remove-if-not (lambda (node) (eq (plist-get node :kind) 'tool-result))
+                                      (harness-call 'session/nodes id)))
+             (snapshots (mapcar (lambda (node)
+                                  (plist-get (car (plist-get node :images)) :snapshot))
+                                nodes)))
+        (should (= 2 (length snapshots)))
+        (should (stringp (car snapshots)))
+        (should (equal (car snapshots) (cadr snapshots)))
+        (should (= 1 (length (directory-files (harness-images-directory id)
+                                              nil "\\`[a-f0-9]"))))))))
+
+(ert-deftest harness-agent-images-a-picture-too-large-to-keep-is-read-from-its-file ()
+  "A picture larger than `harness-images-max-bytes' is not copied.
+The request reads the file as it always did, so a change under it is
+the caller's risk."
+  (harness-agent-images-test-with
+    (let ((harness-images-max-bytes 10)
+          (id (harness-agent-images-test-session "native:eyes")))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (let ((node (harness-agent-images-test-result-node id)))
+        (should-not (plist-member (car (plist-get node :images)) :snapshot))
+        (should-not (file-directory-p (harness-images-directory id))))
+      (let* ((messages (harness-agent--request-messages (harness-call 'session/get id)))
+             (result (harness-agent-images-test--sent-result messages)))
+        (should (equal (list (list :type "image" :mime "image/png"
+                                   :data harness-agent-images-test-b64))
+                       (plist-get result :images)))))))
+
+(ert-deftest harness-agent-images-a-deleted-session-takes-its-copies ()
+  "The copies of a session's pictures go with the session."
+  (harness-agent-images-test-with
+    (let ((id (harness-agent-images-test-session "native:eyes")))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (let ((dir (harness-images-directory id)))
+        (should (file-directory-p dir))
+        (should (= 1 (length (directory-files dir nil "\\`[a-f0-9]"))))
+        (harness-call 'session/delete id)
+        (should-not (file-directory-p dir))))))
+
+(ert-deftest harness-agent-images-a-missing-copy-falls-back-to-the-file ()
+  "A result whose copy has gone is sent from its file, as before."
+  (harness-agent-images-test-with
+    (let ((id (harness-agent-images-test-session "native:eyes")))
+      (should (eq 'end-turn (harness-agent-images-test-run id)))
+      (let* ((node (harness-agent-images-test-result-node id))
+             (snapshot (plist-get (car (plist-get node :images)) :snapshot)))
+        (delete-file snapshot)
+        (let* ((messages (harness-agent--request-messages (harness-call 'session/get id)))
+               (result (harness-agent-images-test--sent-result messages)))
+          (should (equal (list (list :type "image" :mime "image/png"
+                                     :data harness-agent-images-test-b64))
+                         (plist-get result :images))))))))
 
 (ert-deftest harness-agent-images-read-file-image-reaches-the-model ()
   "The real read_file hands the model an image it reads, hosted or native."
