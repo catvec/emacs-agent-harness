@@ -259,7 +259,7 @@ The agent saves, searches, reads, forgets and consolidates with `memory_save`, `
 
 `C-c h m` remembers one (`C-u` for the user's), `C-c h M` opens the memory page: both scopes, each memory under its kind, with buttons to add, edit, forget, search and consolidate.
 
-Storage, and why the database is the only copy: [docs/memory-storage.md](docs/memory-storage.md).
+Storage, and why the database is the only copy: [docs/memory-storage.md](docs/memory-storage.md). How the module compares with Anthropic's account of the components of agent memory (the four layers, and dreaming): [docs/analysis/memory-vs-anthropic-components-2026-11-07.md](docs/analysis/memory-vs-anthropic-components-2026-11-07.md).
 
 ## Model Switcher
 Provide a user interface to switch between models. The available models should be fetched by enumerating over all providers and asking for available models. The list of models should be searchable. Model names should indicate the provider of the model (Anthropic, Open Router, ect) and the name and version of the model.
