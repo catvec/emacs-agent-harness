@@ -55,8 +55,9 @@
 (defun harness-prompts-test--references ()
   "Return the prompt names the source under lisp/ passes to the registry."
   (let ((names nil))
-    (dolist (file (directory-files-recursively (expand-file-name "lisp" harness-test-root)
-                                               "\\.el\\'"))
+    (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                                (directory-files-recursively (expand-file-name "lisp" harness-test-root)
+                                                             "\\.el\\'")))
       (with-temp-buffer
         (insert-file-contents file)
         (goto-char (point-min))
@@ -554,8 +555,9 @@ refused before it reaches a provider; a named one carries its names."
 (ert-deftest harness-prompts-only-the-wrapper-calls-small-ask ()
   "Every one-off call in the harness's own source goes through
 `harness-prompt-ask', which is what enforces the registry."
-  (dolist (file (directory-files-recursively
-                 (expand-file-name "lisp" harness-test-root) "\\.el\\'"))
+  (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                              (directory-files-recursively
+                               (expand-file-name "lisp" harness-test-root) "\\.el\\'")))
     (unless (member (file-relative-name file harness-test-root)
                     '("lisp/harness-prompts.el" "lisp/modules/harness-small.el"))
       (with-temp-buffer

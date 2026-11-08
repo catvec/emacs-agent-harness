@@ -370,7 +370,7 @@ menu and the settings page keep telling one story.
 5. Is it a secret?  Name it `...-api-key`, `-token`, `-secret` or
    `-password`: the machinery already keeps such values out of
    `.dir-locals.el`, the settings page and the wire.
-6. Run `test/harness-config-test.el`: it fails when a layered setting
+6. Run `lisp/modules/harness-config-test.el`: it fails when a layered setting
    is missing from the sections, or a section names an option that no
    longer exists.
 
@@ -379,7 +379,7 @@ menu and the settings page keep telling one story.
 - `scripts/lint.sh` compiles every file.
 - `scripts/test.sh` runs the suites; the settings suites cover the
   sections, the folded advanced line, saving, scopes and secrets.
-- `test/harness-config-test.el` gains
+- `lisp/modules/harness-config-test.el` gains
   `harness-config-describe-puts-common-settings-in-sections` and
   `harness-config-sections-name-real-options`.
 - The page was rendered outside the tests too: a batch Emacs with the
@@ -387,7 +387,7 @@ menu and the settings page keep telling one story.
   buffer, which is how the sections, the *Advanced* line and the
   *Interface* button were read as a user would see them (project scope,
   global scope, and advanced settings shown and folded).
-- `scripts/test.sh test/harness-ui-config-test.el` covers the layout
+- `scripts/test.sh lisp/ui/harness-ui-config-test.el` covers the layout
   itself: the section headings, the count and "changed" note on the
   *Advanced* line, the fold and unfold, the scope switch from the fold
   and the menu entries.

@@ -13,7 +13,7 @@
 ;;
 ;; It runs only when HARNESS_REAL_CLAUDE names the binary:
 ;;
-;;   HARNESS_REAL_CLAUDE=$(command -v claude) scripts/test.sh test/harness-provider-claude-real-cli-test.el
+;;   HARNESS_REAL_CLAUDE=$(command -v claude) scripts/test.sh lisp/modules/harness-provider-claude-real-cli-test.el
 ;;
 ;; A managed policy of the kind a company deploys is simulated by running
 ;; the CLI in a private mount namespace (bubblewrap) in which

@@ -32,7 +32,10 @@
        (copy-file (expand-file-name "scripts/test.sh" harness-test-root)
                   (expand-file-name "scripts/test.sh" root))
        (harness-test-runner-test--write root ".gitignore" "scripts/.dev/\n")
-       (harness-test-runner-test--write root "test/harness-fixture-test.el" "; fixture\n")
+       ;; A module's test lives beside it, not under test/.
+       (harness-test-runner-test--write root "lisp/modules/harness-fixture.el"
+                                        ";;; harness-fixture.el --- A fixture  -*- lexical-binding: t; -*-\n")
+       (harness-test-runner-test--write root "lisp/modules/harness-fixture-test.el" "; fixture\n")
        ;; Exercise the actual runner, not ERT again.  It must write
        ;; `running' before invoking any suite, even after a prior pass.
        (harness-test-runner-test--write
@@ -86,16 +89,16 @@
       (should (string-match-p "TEST RESULT: FAIL (full run)" (cdr result))))
     (let ((stamp (harness-test-runner-test--stamp root)))
       (should (equal "fail" (plist-get stamp :result)))
-      (should (equal '("test/harness-fixture-test.el") (plist-get stamp :failed))))
+      (should (equal '("lisp/modules/harness-fixture-test.el") (plist-get stamp :failed))))
     (let ((status (harness-test-runner-test--command root "bash" "scripts/test.sh" "--status")))
       (should (equal 1 (car status)))
-      (should (string-match-p "FAILED: test/harness-fixture-test.el" (cdr status))))))
+      (should (string-match-p "FAILED: lisp/modules/harness-fixture-test.el" (cdr status))))))
 
 (ert-deftest harness-test-runner-selected-pass-is-not-a-full-pass ()
   (harness-test-runner-test-with
     (should (equal 0 (car (harness-test-runner-test--command root "bash" "scripts/test.sh"))))
     (should (equal 0 (car (harness-test-runner-test--command
-                          root "bash" "scripts/test.sh" "test/harness-fixture-test.el"))))
+                          root "bash" "scripts/test.sh" "lisp/modules/harness-fixture-test.el"))))
     (should (equal "selected" (plist-get (harness-test-runner-test--stamp root) :kind)))
     (let ((status (harness-test-runner-test--command root "bash" "scripts/test.sh" "--status")))
       (should (equal 1 (car status)))
@@ -129,6 +132,35 @@
     (let ((status (harness-test-runner-test--command root "bash" "scripts/test.sh" "--status")))
       (should (equal 1 (car status)))
       (should (string-match-p "TEST RESULT: RUNNING" (cdr status))))))
+
+(ert-deftest harness-test-runner-finds-a-test-beside-its-module ()
+  "The runner discovers a module's test beside it, and a repository suite in test/."
+  (harness-test-runner-test-with
+    (harness-test-runner-test--write root "test/harness-repository-test.el" "; repository\n")
+    (let ((result (harness-test-runner-test--command root "bash" "scripts/test.sh")))
+      (should (equal 0 (car result))))
+    (let ((stamp (harness-test-runner-test--stamp root)))
+      (should (equal "full" (plist-get stamp :kind)))
+      (should (equal 2 (plist-get stamp :files))))
+    ;; Named files run where they are, test/ or beside their module.
+    (should (equal 0 (car (harness-test-runner-test--command
+                           root "bash" "scripts/test.sh"
+                           "test/harness-repository-test.el"))))))
+
+(ert-deftest harness-test-runner-changed-module-runs-the-test-beside-it ()
+  "A changed module runs its sibling test, not every suite."
+  (harness-test-runner-test-with
+    (harness-test-runner-test--write root "lisp/modules/harness-fixture.el"
+                                     ";;; harness-fixture.el --- Changed  -*- lexical-binding: t; -*-\n")
+    (let* ((result (harness-test-runner-test--command root "bash" "scripts/test.sh" "--changed"))
+           (output (cdr result)))
+      (should (equal 0 (car result)))
+      (should (string-match-p "test.sh --changed: 1 suite(s) to run:" output))
+      (should (string-match-p "lisp/modules/harness-fixture-test.el" output))
+      (should-not (string-match-p "running every suite" output)))
+    (let ((stamp (harness-test-runner-test--stamp root)))
+      (should (equal "selected" (plist-get stamp :kind)))
+      (should (equal 1 (plist-get stamp :files))))))
 
 (provide 'harness-test-runner-test)
 ;;; harness-test-runner-test.el ends here

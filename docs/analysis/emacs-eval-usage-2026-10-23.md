@@ -317,10 +317,10 @@ Emacs share).  With it:
   manifest, not its text.  Both are user options, and the withheld list is the
   user's to extend.
 
-Tests: `test/harness-snapshot-test.el` (the slice cursor, the readable
+Tests: `lisp/harness-snapshot-test.el` (the slice cursor, the readable
 placeholders, the truncation, sorted names, hiding, the manifest, the time
 budget, a buffer's locals and text, and the credentials: a variable, a nested
-key, a buffer-local value and a buffer) and `test/harness-elisp-snapshot-test.el`
+key, a buffer-local value and a buffer) and `lisp/harness-elisp-snapshot-test.el`
 (what the child sets, what it keeps, `harness-user-value`, a partial copy, the
 failure to fetch, and the profile: a snapshot child reads and writes nothing
 outside its call's directory and reaches no network, under real bubblewrap).

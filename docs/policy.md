@@ -353,6 +353,6 @@ Kept out of the first version, to keep it small:
 The tests never read `/etc`: `test/harness-test-helpers.el` sets
 `harness-policy-file` to nil, and `harness-test-with-policy` writes a
 temporary policy file, loads and applies it around a body, and lifts it
-afterwards.  `test/harness-policy-test.el` covers reading the file and
+afterwards.  `lisp/harness-policy-test.el` covers reading the file and
 the guards; the config, session, perms, provider, tools-shell, server
 and settings-page tests cover what a policy means there.

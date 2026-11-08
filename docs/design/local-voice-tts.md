@@ -121,7 +121,7 @@ README and the generated `ui-voice` module page.
 
 ## Testing
 
-- `test/harness-ui-voice-providers-test.el`: the two endpoints, no
+- `lisp/ui/harness-ui-voice-providers-test.el`: the two endpoints, no
   profile, the exact stack and provider doc copy, readiness copy with
   both services and with only whisper, the configured-URL override and
   the missing-endpoint errors.

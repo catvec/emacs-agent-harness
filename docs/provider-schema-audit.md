@@ -100,7 +100,7 @@ advertised parameters leaves the authoritative refusal in place.
 
 ## Regression tests and saved artifacts
 
-`test/harness-tool-schema-boundary-test.el` has six network-free tests covering:
+`lisp/modules/harness-tools-schema-boundary-test.el` has six network-free tests covering:
 
 - Actual schemas serialized through Responses, OpenAI-compatible, and Claude
   MCP adapters, with the original required lists and explicit Responses false.

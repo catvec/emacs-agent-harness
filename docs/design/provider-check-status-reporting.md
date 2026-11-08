@@ -163,7 +163,7 @@ The offline suite runs with a fake provider and exercises:
 - an end-to-end independent-prefix run with every cache-read zero: FAIL,
   with 0/4 prefixes cached and cold controls.
 
-`scripts/test.sh test/harness-provider-check-test.el`, the full
+`scripts/test.sh lisp/modules/harness-provider-check-test.el`, the full
 `scripts/test.sh`, `scripts/lint.sh` and `scripts/module-docs.sh --check`
 are the repository's checks for the final tree.  No live paid run is part
 of this change.

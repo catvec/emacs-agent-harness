@@ -111,7 +111,7 @@ it).  Run it after a Claude Code upgrade, which is what the fake CLI the
 other suites use cannot tell you:
 
 ```sh
-HARNESS_REAL_CLAUDE=$(command -v claude) scripts/test.sh test/harness-provider-claude-real-cli-test.el
+HARNESS_REAL_CLAUDE=$(command -v claude) scripts/test.sh lisp/modules/harness-provider-claude-real-cli-test.el
 ```
 
 ## Report the test result, not an interpretation of it
@@ -282,10 +282,26 @@ timeouts, request and output bounds, rate limits, the separation of
 transport from model behavior, cache evidence classification and scope
 staleness, independent session ids, the opt-in stress bound, and the
 report page -- is tested with a fake provider there
-(`test/harness-provider-check-test.el`,
-`test/harness-ui-provider-check-test.el`).  The ordinary mocked provider
+(`lisp/modules/harness-provider-check-test.el`,
+`lisp/ui/harness-ui-provider-check-test.el`).  The ordinary mocked provider
 suites still cover deterministic wire formats and error responses
 without a key.
+
+## Where tests live
+
+A module's tests live beside it, as `NAME-test.el` next to `NAME.el`:
+in `lisp/`, `lisp/modules/`, `lisp/ui/`, and this repository's plugins
+under `.harness/plugins/NAME/`.  Moving or deleting a module moves or
+deletes its tests with it.  [The test layout
+suite](../test/harness-test-layout-test.el) holds the tree to this and
+names the few repository suites that stay in `test/` because they test
+no module: the README's pictures, the dev loop's frames, the test
+runner itself, `harness-update` in `harness.el`, and the voice gate's
+Python suite.  `test/` keeps the shared helpers and fixtures too.
+
+The libraries vendored under `lisp/vendor/` already lay their tests
+beside them; `harness-core-test` runs each of their suites in an Emacs
+with only its library on the load path.
 
 ## The fast test loop
 
@@ -294,10 +310,12 @@ change can break while you work and save the whole suite for the end:
 
 - `scripts/test.sh --changed` runs the suites the working tree's
   changes touch (a changed test file runs itself; a module runs the
-  suite named after it and every suite that names it; a test helper,
-  a fixture or `harness.el` runs them all).  Name the files yourself
-  when you know them: `scripts/test.sh test/harness-tasks-test.el`,
-  with an ERT selector to narrow it further.
+  test beside it, the suites whose names begin with it and every suite
+  that names it; a test helper, a fixture or `harness.el` runs them
+  all; a vendored library runs `lisp/harness-core-test.el`).  Name the
+  files yourself when you know them:
+  `scripts/test.sh lisp/modules/harness-tasks-test.el`, with an ERT
+  selector to narrow it further.
 - `scripts/test.sh` with no arguments runs every suite.  That is the
   run to make once, before handing work in, not after every edit; a
   plan step or a sub-agent does not each need their own.

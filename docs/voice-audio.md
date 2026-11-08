@@ -143,9 +143,9 @@ has the measurements, the alternatives and the tests.
 
 ## Testing
 
-- `test/harness-ui-media-test.el`: the table, the per-side choice, the WAV
+- `lisp/ui/harness-ui-media-test.el`: the table, the per-side choice, the WAV
   recorder argv for each backend, the player order.
-- `test/harness-ui-voice-providers-test.el`: the needs reason per side, the
+- `lisp/ui/harness-ui-voice-providers-test.el`: the needs reason per side, the
   exact setup-list copy with and without a backend, both sidecars' `--self-test`
   (which include the backend table and a failover through real subprocesses).
 - `test/harness-voice-gate-test.py`: the recorder's failover from a dead

@@ -220,15 +220,15 @@ workspace UI moved to `_harness/knowledge/status` and the
 
 ## Verification
 
-- `test/harness-logseq-test.el` covers the graph format: page names and
+- `lisp/modules/harness-logseq-test.el` covers the graph format: page names and
   namespaces, journal paths, bullets and properties, search ranking and
   workspace/journal filters, snippets, backlinks, property updates and
   the missing graph.
-- `test/harness-workspace-test.el` covers the workspace side: the thread
+- `lisp/modules/harness-workspace-test.el` covers the workspace side: the thread
   page, journal captures, search and recall, the `knowledge_*` tools
   and their episode-only filter, the memory tools left with their own
   names and behavior, and the ACP aliases the Flutter app uses.
-- `test/harness-ui-workspace-test.el` asserts the header copy
+- `lisp/ui/harness-ui-workspace-test.el` asserts the header copy
   (`Knowledge · ready`) and the `knowledge/status` request.
 - A live dev frame shows the workspace header over a temp graph; the
   screenshot is part of the hand-in.

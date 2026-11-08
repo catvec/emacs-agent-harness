@@ -3,7 +3,7 @@
 ;;; Commentary:
 
 ;; The ssh tool runs commands through TRAMP.  The tests reach their
-;; "hosts" with TRAMP's local mock method, as harness-tramp-test.el
+;; "hosts" with TRAMP's local mock method, as harness-tools-shell-tramp-test.el
 ;; does, so the remote code runs for real without a network: the tool
 ;; takes the method once it is among `harness-tools-ssh--methods'.
 ;; Nothing here connects over ssh, but one test, which runs only when

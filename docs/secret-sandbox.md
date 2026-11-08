@@ -11,7 +11,7 @@ cannot -- and while nothing the command prints comes back to the agent.
 
 It is implemented as an opt-in module of the harness, `secret-sandbox`:
 `lisp/modules/harness-secret-sandbox.el`, with its tests in
-`test/harness-secret-sandbox-test.el`.  It is loaded like any other
+`lisp/modules/harness-secret-sandbox-test.el`.  It is loaded like any other
 module (`harness-enable-modules`, or `M-x harness-enable-module
 secret-sandbox` for the running harness) and is off by default: a
 harness without it offers no `run_with_secret`, no `list_secrets` and no
@@ -487,7 +487,7 @@ the chat, and this change does not edit
 
 ## Tests
 
-`test/harness-secret-sandbox-test.el` covers:
+`lisp/modules/harness-secret-sandbox-test.el` covers:
 
 | What | Test |
 |---|---|
@@ -510,7 +510,7 @@ the chat, and this change does not edit
 | The hide layer works under real bwrap (with a control run that reads the value without it). | `a-shell-command-cannot-read-a-source` |
 | The module is off by default. | `is-off-by-default` |
 
-`test/harness-sandbox-test.el` adds the profile tests:
+`lisp/modules/harness-sandbox-test.el` adds the profile tests:
 `sandbox/profiles` per backend, the bwrap arguments of the locked
 profile, the locked profile failing closed, and the MXC builder's
 refusal to hide a path it shows.  A real MXC run is tested only on

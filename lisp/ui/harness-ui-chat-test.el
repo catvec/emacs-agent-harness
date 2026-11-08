@@ -9534,7 +9534,7 @@ was marked as opening a turn until the grouping was known."
       (harness-ui-chat-test-prompt buf "hello there")
       (harness-ui-chat-test-type buf "a draft in progress")
       (with-current-buffer buf
-        (harness-compose-add-attachment (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
+        (harness-compose-add-attachment (expand-file-name "harness-ui-chat-test.el" (expand-file-name "lisp/ui" harness-test-root)))
         (should (harness-ui-chat-test-find buf "chat-test.el")))
       ;; Shown in a window, as a hidden chat is rebuilt once one shows it.
       (set-window-buffer (selected-window) buf)
@@ -9637,7 +9637,7 @@ once, even when nothing showed it, whenever the model catalogue came."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
-           (file (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
+           (file (expand-file-name "harness-ui-chat-test.el" (expand-file-name "lisp/ui" harness-test-root)))
            (seen nil))
       (with-current-buffer buf
         (should (equal "Message\N{U+2026}" (harness-chat--placeholder)))
@@ -9865,7 +9865,7 @@ to a waiting question still goes through the question instead."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
-           (file (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
+           (file (expand-file-name "harness-ui-chat-test.el" (expand-file-name "lisp/ui" harness-test-root)))
            (sent nil)
            (answers nil))
       (with-current-buffer buf

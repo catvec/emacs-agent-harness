@@ -263,7 +263,9 @@ changes nothing."
 which keeps it in flight until it is answered.  Sent any other way, the
 panel would go by the record of a UI that may be behind the harness."
   (let ((found 0))
-    (dolist (file (directory-files (expand-file-name "lisp/ui" harness-test-root) t "\\`harness-.*\\.el\\'"))
+    (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                                (directory-files (expand-file-name "lisp/ui" harness-test-root)
+                                                 t "\\`harness-.*\\.el\\'")))
       (with-temp-buffer
         (insert-file-contents file)
         (goto-char (point-min))

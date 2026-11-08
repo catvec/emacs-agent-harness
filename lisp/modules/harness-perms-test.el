@@ -3702,7 +3702,7 @@ Unconfined, it sees what the user sees, and goes on as before."
 `git worktree prune' once was refused here by a reading of the command
 line, which a command line can always be written to escape.  What it
 did is kept from happening by the sandbox's mounts now (see
-test/harness-sandbox-test.el), so the chain has no stage for it, and
+lisp/modules/harness-sandbox-test.el), so the chain has no stage for it, and
 decides such a command as it decides any other."
   (harness-perms-test--setup :permission-mode 'yolo :worktree "/repo/.worktrees/own/")
   (should-not (fboundp 'harness-perms--sandbox-guard))

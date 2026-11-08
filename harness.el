@@ -374,7 +374,17 @@ never shadows a library."
   (if harness-process '("lisp/ui") harness-module-directories))
 
 (defconst harness--module-file-regexp "\\`harness-[a-z0-9-]+\\.el\\'"
-  "Names of module files: harness-NAME.el holds module NAME.")
+  "Names of module files: harness-NAME.el holds module NAME.
+A module's test, harness-NAME-test.el beside it, matches this too;
+`harness--module-file-p' is what leaves the tests out.")
+
+(defun harness--module-file-p (file)
+  "Non-nil when FILE names a module, not the test of one.
+A module's tests live beside it, as harness-NAME-test.el next to
+harness-NAME.el (see docs/design/co-located-module-tests.md), and the
+harness never loads one as a module."
+  (and (string-match-p harness--module-file-regexp (file-name-nondirectory file))
+       (not (string-match-p "-test\\.el\\'" file))))
 
 (defun harness--file-module-name (file)
   "Return the module name symbol for FILE (harness-NAME.el -> NAME)."
@@ -435,10 +445,12 @@ The harness's own come first, by directory then name -- lisp/modules,
 lisp/ui and `harness-module-directories' -- then those of
 `harness-extra-module-directories', likewise.  Which of them load
 depends on what each requires, whatever side it runs on, so all of them
-count, here and in the harness process.  A file of the user's whose
-name an earlier one has, the harness's libraries included, is left out:
-it would replace it.  With WARN, that is logged, for the files this
-Emacs would load."
+count, here and in the harness process.  A module's tests live beside
+it, as harness-NAME-test.el next to harness-NAME.el, and are not
+modules: they are left out (`harness--module-file-p').  A file of the
+user's whose name an earlier one has, the harness's libraries included,
+is left out: it would replace it.  With WARN, that is logged, for the
+files this Emacs would load."
   (let ((kinds (and warn (harness--module-kinds)))
         (taken (mapcar (lambda (f) (cons (harness--file-module-name f) (harness--path f)))
                        (append harness--core-files harness--library-files)))
@@ -448,19 +460,21 @@ Emacs would load."
       (let ((full (harness--path dir)))
         (when (file-directory-p full)
           (dolist (f (directory-files full t harness--module-file-regexp))
-            (let ((name (harness--file-module-name f)))
-              (unless (assq name sources)
-                (push (cons name f) sources)))))))
+            (when (harness--module-file-p f)
+              (let ((name (harness--file-module-name f)))
+                (unless (assq name sources)
+                  (push (cons name f) sources))))))))
     (dolist (dir (harness--extra-module-directories))
       (when (file-directory-p dir)
         (dolist (f (directory-files dir t harness--module-file-regexp))
-          (let ((name (harness--file-module-name f)))
-            (if-let* ((other (or (alist-get name sources) (alist-get name taken))))
-                (when (and (memq (harness--module-kind name) kinds)
-                           (not (harness--module-disabled-p name)))
-                  (harness-log 'warn "module %s: %s is left out, as %s has that name"
-                               name (abbreviate-file-name f) (abbreviate-file-name other)))
-              (push (cons name f) sources))))))
+          (when (harness--module-file-p f)
+            (let ((name (harness--file-module-name f)))
+              (if-let* ((other (or (alist-get name sources) (alist-get name taken))))
+                  (when (and (memq (harness--module-kind name) kinds)
+                             (not (harness--module-disabled-p name)))
+                    (harness-log 'warn "module %s: %s is left out, as %s has that name"
+                                 name (abbreviate-file-name f) (abbreviate-file-name other)))
+                (push (cons name f) sources)))))))
     (nreverse sources)))
 
 (defvar harness--module-headers (make-hash-table :test 'equal)
@@ -1196,11 +1210,13 @@ loaded again."
 
 (defun harness--auto-reload-callback (event)
   "Schedule `harness-reload' for EVENT, a file notification of a watch.
-A change, creation or rename of an .el file reloads the harness 0.6
-seconds after the last such event; lock and flycheck files do not."
+A change, creation or rename of an .el source file reloads the harness
+0.6 seconds after the last such event; a test file beside its module,
+lock and flycheck files do not."
   (pcase-let ((`(,_ ,action ,file . ,_) event))
     (when (and (memq action '(changed created renamed))
                (string-suffix-p ".el" file)
+               (not (string-match-p "-test\\.el\\'" file))
                (not (string-match-p "/\\.#\\|flycheck_\\|~\\'" file)))
       (harness-debounce 'auto-reload 0.6 #'harness-reload))))
 
@@ -1297,13 +1313,14 @@ such as a configuration's, is that repository's to update."
   "Return a form that checks the harness sources in TREE, compiling into OUT.
 `emacs --batch -Q' evaluates it on a version about to be installed.  It
 loads harness.el first, into an Emacs as fresh as one starting up, then
-byte-compiles every source file: the harness-NAME.el files under lisp/,
-and the .el files, their tests (NAME-test.el) aside, of the libraries
-vendored under lisp/vendor, whose directories it puts on `load-path'
-beside the harness's.  It prints a line for each file that does not
-load or compile, or has a merge conflict marker in its code, naming it
-by its path in TREE, and exits non-zero when there is one.  The markers
-need a check of their own: a conflict between two balanced sides
+byte-compiles every source file: the harness-NAME.el files under
+lisp/, their tests (harness-NAME-test.el) aside, and the .el files of
+the libraries vendored under lisp/vendor, their tests (NAME-test.el)
+aside, whose directories it puts on `load-path' beside the harness's.
+It prints a line for each file that does not load or compile, or has
+a merge conflict marker in its code, naming it by its path in TREE,
+and exits non-zero when there is one.  The markers need a check of
+their own: a conflict between two balanced sides
 compiles, its markers read as variables, and fails only as it runs.  The
 form uses nothing of the harness, so that any version can check any
 other: it finds the vendored directories itself, as
@@ -1347,8 +1364,12 @@ other: it finds the vendored directories itself, as
      (dolist (file (append
                     (list (expand-file-name "harness.el" ,tree))
                     (and (file-directory-p (expand-file-name "lisp" ,tree))
-                         (directory-files-recursively (expand-file-name "lisp" ,tree)
-                                                      "\\`harness-.*\\.el\\'"))
+                         (delq nil
+                               (mapcar (lambda (f)
+                                         (unless (string-match-p "-test\\.el\\'" f) f))
+                                       (directory-files-recursively
+                                        (expand-file-name "lisp" ,tree)
+                                        "\\`harness-.*\\.el\\'"))))
                     ;; A vendored library's files do not start with "harness-".
                     ;; Its tests are not part of what the harness runs.
                     (let ((files nil))

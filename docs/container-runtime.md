@@ -72,7 +72,7 @@ compose plugin is reported as plainly as a missing daemon.
 
 ## What is verified
 
-`test/harness-container-runtime-test.el` covers the registry, the automatic
+`lisp/modules/harness-container-runtime-test.el` covers the registry, the automatic
 order, the explicit choice that never falls back, availability caching, socket
 discovery, `DOCKER_HOST`, the compose and network argv, the process runners and
 the exact copy of the runtimes page, all without a daemon. A real Docker daemon

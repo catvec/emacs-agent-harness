@@ -124,7 +124,7 @@ and the complete message after a fresh process loads the session.
 
 ## Tests and evidence
 
-- `test/harness-workspace-test.el`: a real multi-chunk demo reply
+- `lisp/modules/harness-workspace-test.el`: a real multi-chunk demo reply
   (thinking then three text chunks) records the text as each chunk
   arrives, one complete message at the end, a complete thread summary,
   no thinking text, and the same message after a fresh session load.

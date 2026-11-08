@@ -1,4 +1,4 @@
-;;; harness-internal-test.el --- Tests for internal sessions  -*- lexical-binding: t; -*-
+;;; harness-session-internal-test.el --- Tests for internal sessions  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -211,5 +211,5 @@ records the model its call asked."
         (should (equal "demo:pinned" (plist-get main :model)))
         (should (equal "demo:judge" (plist-get internal :model)))))))
 
-(provide 'harness-internal-test)
-;;; harness-internal-test.el ends here
+(provide 'harness-session-internal-test)
+;;; harness-session-internal-test.el ends here

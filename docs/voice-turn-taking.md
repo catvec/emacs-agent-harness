@@ -324,7 +324,7 @@ microphone:
 python3 test/voice_fixtures.py --out /tmp/voice-fixtures
 ```
 
-The ERT suites cover the Emacs side (`test/harness-ui-voice-live-test.el`)
+The ERT suites cover the Emacs side (`lisp/ui/harness-ui-voice-live-test.el`)
 and the Flutter tests cover the client (`voice_controller_test.dart`,
 `voice_clip_backend_test.dart`, `voice_live_backend_test.dart`,
 `voice_ui_test.dart`, `voice_screenshots_test.dart`).

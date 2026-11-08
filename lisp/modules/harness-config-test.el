@@ -548,7 +548,8 @@ and the supervisor's section follows `sessions' with its own options."
 A misspelt name would quietly drop a setting from the settings page."
   (let ((defined nil))
     (dolist (dir '("lisp" "lisp/modules" "lisp/ui"))
-      (dolist (file (directory-files (expand-file-name dir harness-test-root) t "\\.el\\'"))
+      (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                                  (directory-files (expand-file-name dir harness-test-root) t "\\.el\\'")))
         (with-temp-buffer
           (insert-file-contents file)
           (goto-char (point-min))
@@ -577,7 +578,8 @@ widget library ignore the property."
   (require 'wid-edit)
   (let (found)
     (dolist (dir '("lisp" "lisp/modules" "lisp/ui"))
-      (dolist (file (directory-files (expand-file-name dir harness-test-root) t "\\.el\\'"))
+      (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                                  (directory-files (expand-file-name dir harness-test-root) t "\\.el\\'")))
         (with-temp-buffer
           (insert-file-contents file)
           (goto-char (point-min))

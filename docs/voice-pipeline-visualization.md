@@ -288,7 +288,7 @@ it while the stage's word and elapsed time stay.
 | `scripts/harness_voice_sidecar.py` | `LevelMeter`, `announce_level`, `announce_segment`, and the measured `cancel` event |
 | `scripts/harness-voice-live-gpt`, `scripts/harness-voice-live-unmute` | the level before the gate and the kept/dropped/failed bursts at the real decisions |
 | `scripts/harness-voice-live-fixture` | the scripted demo's levels, kept and dropped bursts |
-| `test/harness-ui-voice-pipeline-test.el`, `test/harness-ui-voice-live-test.el`, `test/harness-voice-gate-test.py` | the Emacs model, the protocol wiring and the sidecar's telemetry |
+| `lisp/ui/harness-ui-voice-pipeline-test.el`, `lisp/ui/harness-ui-voice-live-test.el`, `test/harness-voice-gate-test.py` | the Emacs model, the protocol wiring and the sidecar's telemetry |
 
 ## Verification
 
@@ -300,7 +300,7 @@ flutter test test/voice_pipeline_test.dart test/voice_pipeline_widget_test.dart
 HARNESS_SHOTS=… flutter test test/voice_pipeline_screenshots_test.dart
 
 # the Emacs surface and the sidecar it reads
-scripts/test.sh test/harness-ui-voice-pipeline-test.el test/harness-ui-voice-live-test.el
+scripts/test.sh lisp/ui/harness-ui-voice-pipeline-test.el lisp/ui/harness-ui-voice-live-test.el
 python3 test/harness-voice-gate-test.py
 scripts/lint.sh
 ```

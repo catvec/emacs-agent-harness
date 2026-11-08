@@ -96,5 +96,5 @@ the agent's own message as data.
   with exact labels.
 - `harness_client/test/session_modes_screenshots_test.dart`: real-font
   pictures of the picker and the open sheet on desktop and phone.
-- `test/harness-acp-test.el`: `session/load` answers the current mode and
+- `lisp/modules/harness-acp-test.el`: `session/load` answers the current mode and
   every available mode, and the existing replay/extension tests still hold.

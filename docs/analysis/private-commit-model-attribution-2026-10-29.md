@@ -753,7 +753,7 @@ the whole commit.
 - Add `lisp/modules/harness-commit-attribution.el` with the module
   definition, settings, repository selection, and `status`/`doctor`/
   `configure`.
-- Add `test/harness-commit-attribution-test.el` with a fake git-ai binary
+- Add `lisp/modules/harness-commit-attribution-test.el` with a fake git-ai binary
   that captures payloads and a fake notes service.
 - Regenerate `docs/modules/` and add the README section.
 - Acceptance: off by default; enabling on a temp repo writes the config,
@@ -803,7 +803,7 @@ the whole commit.
 |---|---|
 | `lisp/modules/harness-commit-attribution.el` | New module. |
 | `lisp/ui/harness-ui-commit-attribution.el` | Report/settings UI (optional). |
-| `test/harness-commit-attribution-test.el` | Unit/integration tests. |
+| `lisp/modules/harness-commit-attribution-test.el` | Unit/integration tests. |
 | `docs/modules/commit-attribution.md` | Generated page. |
 | `docs/analysis/private-commit-model-attribution-2026-10-29.md` | This design. |
 | `docs/media/private-commit-attribution.png` | This diagram. |

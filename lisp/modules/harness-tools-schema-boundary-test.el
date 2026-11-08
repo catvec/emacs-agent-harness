@@ -1,4 +1,4 @@
-;;; harness-tool-schema-boundary-test.el --- Optional arguments at provider boundaries -*- lexical-binding: t; -*-
+;;; harness-tools-schema-boundary-test.el --- Optional arguments at provider boundaries -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -153,5 +153,5 @@
       (should (equal calls '((session/get "synthetic") (session/get "synthetic")
                             (session/get "synthetic")))))))
 
-(provide 'harness-tool-schema-boundary-test)
-;;; harness-tool-schema-boundary-test.el ends here
+(provide 'harness-tools-schema-boundary-test)
+;;; harness-tools-schema-boundary-test.el ends here

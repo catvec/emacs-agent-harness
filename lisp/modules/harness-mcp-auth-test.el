@@ -10,8 +10,8 @@
 ;; credential, and that a real file-tools worker refuses an
 ;; unauthenticated client while the harness's own host still serves its
 ;; calls.  The listener and relay have their own suite
-;; (test/harness-claude-plugin-test.el), and the ACP token has
-;; test/harness-acp-tcp-test.el.
+;; (lisp/harness-claude-plugin-test.el), and the ACP token has
+;; lisp/modules/harness-acp-tcp-test.el.
 
 ;;; Code:
 

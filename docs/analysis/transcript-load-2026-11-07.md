@@ -184,8 +184,8 @@ dart run tool/bench_transcript.dart
 dart run tool/bench_transcript.dart 400 5000
 
 # The tests of the behaviour these changes preserve
-scripts/test.sh test/harness-session-test.el test/harness-acp-test.el \
-  test/harness-ui-version-test.el test/harness-ui-test.el
+scripts/test.sh lisp/modules/harness-session-test.el lisp/modules/harness-acp-test.el \
+  lisp/ui/harness-ui-version-test.el lisp/ui/harness-ui-test.el
 cd harness_client && flutter test test/transcript_replay_test.dart \
   test/transcript_order_test.dart
 ```

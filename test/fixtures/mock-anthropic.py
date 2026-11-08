@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A scripted stand-in for the Anthropic Messages API, for running the
-real `claude' CLI offline (test/harness-provider-claude-real-cli-test.el).
+real `claude' CLI offline (lisp/modules/harness-provider-claude-real-cli-test.el).
 
   mock-anthropic.py --script SCRIPT.json --log REQUESTS.jsonl
 

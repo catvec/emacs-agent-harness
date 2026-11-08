@@ -39,7 +39,7 @@ with compose-quote when `(require 'compose-quote nil t)` finds it, and
 reads the reply the same without. Its tests that need the other skip
 themselves when it is not on their load path.
 
-`harness-vendored-libraries-stand-alone` in `test/harness-core-test.el`
+`harness-vendored-libraries-stand-alone` in `lisp/harness-core-test.el`
 checks the rule: it reads every `.el` file of every library for the word
 "harness", and runs every `*-test.el` suite in an Emacs with nothing but
 the library's own directory on its load path.

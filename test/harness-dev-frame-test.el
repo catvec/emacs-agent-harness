@@ -60,7 +60,9 @@ plugins, and the development scripts.  Vendored libraries and the tests
 themselves are left out: they are not a task's path."
   (let* ((root harness-test-root)
          (vendor (expand-file-name "lisp/vendor/" root)))
-    (cl-remove-if (lambda (file) (string-prefix-p vendor file))
+    (cl-remove-if (lambda (file)
+                    (or (string-match-p "-test\\.el\\'" file)
+                        (string-prefix-p vendor file)))
                   (append
                    (list (expand-file-name "harness.el" root))
                    (directory-files-recursively (expand-file-name "lisp" root) "\\.el\\'")

@@ -153,14 +153,14 @@ unhooked or redefined).  The profile above, 74% busy to 13%, is that.  After the
 reload the list follows its windows by itself; press `P` in it once to take the
 pause off.
 
-Tests: `test/harness-ui-test.el` (the shared helper: follow, note, catch up once,
+Tests: `lisp/ui/harness-ui-test.el` (the shared helper: follow, note, catch up once,
 nothing for a window that left; the suspended mark, once in each view's mode line,
 and the click that wakes it; the hover function; lazy figures say what the
-eager ones do), `test/harness-ui-sessions-test.el` (a hidden list draws nothing
+eager ones do), `lisp/ui/harness-ui-sessions-test.el` (a hidden list draws nothing
 for everything that follows the sessions and draws once when shown; hidden and
 paused stays still; the cost spacing; tooltips are made on hover and are never
 older than it; an old list gets the hook on reload; a list shown without catching
-up says it is suspended and a click redraws it), `test/harness-ui-tasks-test.el`
+up says it is suspended and a click redraws it), `lisp/ui/harness-ui-tasks-test.el`
 (a hidden board schedules nothing, is marked, and is woken; the board key ignores
 the order sessions change in).  The existing session list tests show the list in a window, as
 opening it does.  None measures time.

@@ -14,7 +14,7 @@
   messages, including empty, loading, success, validation and failure
   states. Rewrite each as a noun phrase or adjective before coding it.
 - **Before hand-in:** check the rendered text and tooltips with exact
-  regression assertions (see `test/harness-ui-server-test.el`), inspect
+  regression assertions (see `lisp/ui/harness-ui-server-test.el`), inspect
   the live screenshots, and review every changed user-visible string in
   the diff. Grammar/punctuation heuristics alone do not establish this
   rule. A UI review must include this copy check, not just layout and
@@ -43,10 +43,15 @@
 
 ## Tests and evidence
 
+- A module's tests live beside it, as `NAME-test.el` next to `NAME.el`
+  in `lisp/`, `lisp/modules/`, `lisp/ui/` or its plugin directory, so
+  moving or deleting a module moves or deletes its tests with it.
+  `test/harness-test-layout-test.el` holds the tree to this; the few
+  suites in `test/` that test the repository itself are named there.
 - While you work, run only the suites your change touches:
   `scripts/test.sh --changed`, or the files by name
-  (`scripts/test.sh test/harness-tasks-test.el`, with an ERT selector to
-  narrow it). Keep the full run, `scripts/test.sh` with no arguments, for
+  (`scripts/test.sh lisp/modules/harness-tasks-test.el`, with an ERT
+  selector to narrow it). Keep the full run, `scripts/test.sh` with no arguments, for
   once before you hand in.
 - Never pipe a test run through `grep`, `tail` or `head`: the stack trace
   is gone and you have to run the suite again. Every suite's whole output

@@ -94,9 +94,9 @@ thread, the day's journal captures, search and the `knowledge_search`,
 `knowledge_write`, `knowledge_read` and `knowledge_status` tools); the
 `workspace` module (records, threads, episodes, the timeline, routing
 and the brief); and `ui-workspace` (the Emacs buffer, thread list,
-timeline and compose box), with `test/harness-logseq-test.el`,
-`test/harness-workspace-test.el` and
-`test/harness-ui-workspace-test.el`.  The harness's own `memory`
+timeline and compose box), with `lisp/modules/harness-logseq-test.el`,
+`lisp/modules/harness-workspace-test.el` and
+`lisp/ui/harness-ui-workspace-test.el`.  The harness's own `memory`
 module keeps the small behavioral notes and is not the workspace's
 knowledge store.
 
@@ -1341,34 +1341,34 @@ the test in the same commit.
 
 ### Unit suites
 
-The first slice is covered by `test/harness-workspace-test.el` (9
+The first slice is covered by `lisp/modules/harness-workspace-test.el` (9
 tests: create, first turn, continuation, a new thread, a revived
 thread, long-context continuation, title and topic routing, memory
 recall, the memory tools, restart and the brief) and
-`test/harness-ui-workspace-test.el` (5 tests: the rendered one chat,
+`lisp/ui/harness-ui-workspace-test.el` (5 tests: the rendered one chat,
 the header copy and tooltips, the empty and error states, sending the compose text and refusing an
 empty message).  The table below is the full plan; its earlier rows
 are the tests the later stages add.
 
 | Suite | What it proves |
 |---|---|
-| `test/harness-logseq-test.el` | a fake `logseq` executable: the argument lists, JSON parsing, errors, timeouts, the writer queue, retries, schema creation, no shell interpolation, a graph locked by another process, a missing CLI |
+| `lisp/modules/harness-logseq-test.el` | a fake `logseq` executable: the argument lists, JSON parsing, errors, timeouts, the writer queue, retries, schema creation, no shell interpolation, a graph locked by another process, a missing CLI |
 | `test/harness-embeddings-test.el` | the extracted chunking, quantization, cosine and nearest code; the session-search suite still passes on it |
-| `test/harness-logseq-test.el` | page names, journal paths, bullets and properties, search ranking and filtering, snippets, backlinks, page properties, the missing graph |
-| `test/harness-workspace-test.el` | thread pages, journal captures, knowledge search and recall, the knowledge tools and their filter, the generic memory tools left alone, the ACP aliases |
-| `test/harness-workspace-test.el` | workspace/thread/episode records, the timeline, routing (hard, similarity, model), brief budgets, continuation and re-entry, a restart, a deleted episode, a moved project, settings |
+| `lisp/modules/harness-logseq-test.el` | page names, journal paths, bullets and properties, search ranking and filtering, snippets, backlinks, page properties, the missing graph |
+| `lisp/modules/harness-workspace-test.el` | thread pages, journal captures, knowledge search and recall, the knowledge tools and their filter, the generic memory tools left alone, the ACP aliases |
+| `lisp/modules/harness-workspace-test.el` | workspace/thread/episode records, the timeline, routing (hard, similarity, model), brief budgets, continuation and re-entry, a restart, a deleted episode, a moved project, settings |
 | `test/harness-workspace-scribe-test.el` | the scribe's prompts, batching, duplicate detection, hash conflict, no write for a BTW, a failed write queued |
 | `test/harness-workspace-dream-test.el` | phases, candidate scoring, duplicate/update/contradiction, risk classification, idempotent apply, user-edit guard, review/apply/skip, undo, budget stop, backup failure, a crash resumed |
-| `test/harness-workspace-box-test.el` | the `local` box: the off state and its missing tools, a running record's VNC URL and socket, the control lock and input refusal, the window parser, browser metadata with no values, and every method the clients call |
+| `lisp/modules/harness-workspace-box-test.el` | the `local` box: the off state and its missing tools, a running record's VNC URL and socket, the control lock and input refusal, the window parser, browser metadata with no values, and every method the clients call |
 | `test/harness-workspace-routines-test.el` | schedule computation, timezone, missed runs, catch-up, read-only tools, delivery, pause/resume, event triggers |
-| `test/harness-ui-workspace-test.el` | exact rendered copy (the inventory), header states, empty/loading/error states, dividers, brief cards, event cards, compose routing, keys, overflow, mouse buttons |
-| `test/harness-ui-workspace-test.el` | header knowledge state, `_harness/knowledge/status`, `workspace/knowledge-changed`, exact copy |
+| `lisp/ui/harness-ui-workspace-test.el` | exact rendered copy (the inventory), header states, empty/loading/error states, dividers, brief cards, event cards, compose routing, keys, overflow, mouse buttons |
+| `lisp/ui/harness-ui-workspace-test.el` | header knowledge state, `_harness/knowledge/status`, `workspace/knowledge-changed`, exact copy |
 | `test/harness-ui-workspace-box-test.el` | computer panel states, screenshot, takeover, login form, exact copy |
 | `test/harness-ui-workspace-dream-test.el` | review list, diff, apply/skip/undo, exact copy |
 | `test/harness-workspace-voice-test.el` | a call attaches to the thread, delegation goes to `workspace/prompt`, voice nodes, interruption, a call while a turn runs |
 
 The UI suites use the same rendering harness as
-`test/harness-ui-server-test.el` and assert strings like:
+`lisp/ui/harness-ui-server-test.el` and assert strings like:
 
 ```elisp
 (should (equal (harness-ui-workspace-test--header) "Workspace · Home  Thread · Kitchen renovation  Box · running  Memory · ready  Dream · 2h ago  [Tasks] [Computer] [Memory] [Dream] [Call]"))

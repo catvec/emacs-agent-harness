@@ -176,11 +176,11 @@ harness does not send a model.
 
 ## Tests
 
-- `test/harness-workspace-test.el`: the view's model, permission mode,
+- `lisp/modules/harness-workspace-test.el`: the view's model, permission mode,
   non-interactive switch and activity for a parked thread, a live
   episode and a running turn; the episode's own model wins over the
   workspace default; the workspace record carries the resolved defaults.
-- `test/harness-ui-workspace-test.el`: the settings line's exact words
+- `lisp/ui/harness-ui-workspace-test.el`: the settings line's exact words
   and tooltips with and without a live episode and with no thread; the
   context and cost figures; the header and row activity words; the
   line above the box, its `Working…` fallback and its absence when the

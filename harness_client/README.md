@@ -746,7 +746,7 @@ offers what the session's `modes` object says it has. See
   switch them.  The events `task/changed`, `task/review`, `task/done`,
   `task/deleted`, `task/queue` and `task/backlog-mode`.  Nothing of this is
   the app's own: the harness's ACP lets a client call every `task/` method, and
-  `test/harness-tasks-test.el` keeps the calls the app makes, with their
+  `lisp/modules/harness-tasks-test.el` keeps the calls the app makes, with their
   arguments, working.
 - Usage: `usage/totals`, `usage/summary`, `usage/live-all`, `usage/rates`,
   `usage/budgets`.
@@ -1681,7 +1681,7 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
 - runs of calls (`test/tool_runs_test.dart`, `tool_run_view_test.dart`,
   `tool_flow_test.dart`): the allow list is the harness's, read from
   `tools/list` (`test/support/harness_tools.json` is the real one, and a suite
-  on the Emacs side, `test/harness-client-tools-test.el`, keeps it honest); a
+  on the Emacs side, `lisp/modules/harness-tools-client-test.el`, keeps it honest); a
   stretch of calls of listed tools is one run, cut by any other call or item,
   with the thinking between them folded in and the thinking around them left
   out; a call with a picture, one waiting for an answer and one the harness

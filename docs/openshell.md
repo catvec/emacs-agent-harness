@@ -256,7 +256,7 @@ harness makes carry the label `harness=emacs-agent-harness`:
 
 ## Tests
 
-`test/harness-sandbox-openshell-test.el` runs the module against
+`lisp/modules/harness-sandbox-openshell-test.el` runs the module against
 `test/fixtures/fake-openshell.py`, a stand-in for the command line.  It
 answers the calls the harness makes as OpenShell 0.1.5 does and checks what
 the gateway checks of them (the policy file against the documented schema,
@@ -267,5 +267,5 @@ its directories and no other, reads nothing it was not shown, reaches no
 network, and the `elisp` tool's Emacs is read-only and offline when a
 session is -- run on any machine with `python3` and `bwrap`.
 `harness-openshell-real-run-confines` and the `-under-openshell-` tests of
-`test/harness-supervisor-test.el` run the same checks against a real
+`lisp/modules/harness-supervisor-test.el` run the same checks against a real
 OpenShell, and skip without one that [Test OpenShell] would pass.

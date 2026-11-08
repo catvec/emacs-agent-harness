@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; Started by test/harness-mcp-test.el as `emacs --batch -Q -L lisp -l
+;; Started by lisp/modules/harness-mcp-test.el as `emacs --batch -Q -L lisp -l
 ;; THIS-FILE -f harness-mcp-fake-main', in the sandbox or out of it.  Its
 ;; tools do what a test needs a server to do: say something back, say
 ;; where it runs, touch files, take its time, die, fill the pipe with a

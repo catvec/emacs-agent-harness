@@ -492,7 +492,7 @@ The pages see what the code says plainly, so a module keeps to these:
   module of your own).  A UI module hears events in a function it adds
   to `harness-ui-event-functions`, comparing the event with literal
   names (`"task/changed"`) or prefixes (`"merge/"`).  A test of
-  test/harness-module-docs-test.el fails when an event is emitted
+  lisp/harness-module-docs-test.el fails when an event is emitted
   undeclared, or heard in the UI but never forwarded there.
 - Handlers are named functions, as reload safety wants anyway.
 
@@ -605,7 +605,7 @@ A minimal pair, in `~/.config/emacs/harness-modules/`, with
 ```
 
 `harness-server-loads-extra-modules-on-each-side`
-(test/harness-server-test.el) runs such a pair, one module in each
+(lisp/harness-server-test.el) runs such a pair, one module in each
 process.
 
 ## Projects' plugins
@@ -725,10 +725,10 @@ Methods of `plugins`:
 
 Both are callable over ACP as `_harness/plugins/...`.
 
-test/harness-plugins-test.el, `harness-core-plugin-modules-are-those-the-harness-did-not-load`
-(test/harness-core-test.el), `harness-tools-a-plugins-tools-are-for-the-sessions-naming-it`
-(test/harness-tools-test.el) and `harness-tools-dev-repository-names-its-plugin`
-(test/harness-tools-dev-test.el) hold this.
+lisp/modules/harness-plugins-test.el, `harness-core-plugin-modules-are-those-the-harness-did-not-load`
+(lisp/harness-core-test.el), `harness-tools-a-plugins-tools-are-for-the-sessions-naming-it`
+(lisp/modules/harness-tools-test.el) and `harness-tools-dev-repository-names-its-plugin`
+(.harness/plugins/dev/harness-tools-dev-test.el) hold this.
 
 ## Vendored libraries
 
@@ -755,7 +755,7 @@ contracts).  lisp/vendor/README.md is the guide; the contract is this:
   lives in the harness's own files, which set the library's variables
   and bind its commands: the compose box sets
   `compose-quote-source-function` to `harness-ui-markdown-source`, say.
-  `harness-vendored-libraries-stand-alone` (test/harness-core-test.el)
+  `harness-vendored-libraries-stand-alone` (lisp/harness-core-test.el)
   reads every `.el` file of every library for the word, and runs each
   of its `*-test.el` suites in an Emacs with only the library's own
   directory on `load-path`.
@@ -785,8 +785,8 @@ contracts).  lisp/vendor/README.md is the guide; the contract is this:
   library but its tests (`NAME-test.el`), reporting one by its path in the
   tree, so a library that does not compile refuses an update like any
   other file.  `scripts/lint.sh` does the same.
-- `scripts/test.sh` runs `lisp/vendor/*/*-test.el` with the harness's
-  suites, each in a clean Emacs with the harness loaded; a library's own
+- `harness-core-test` runs every `lisp/vendor/*/*-test.el`, each in a
+  clean Emacs with only its library on the load path; a library's own
   `make test` runs its suite alone, as it will run in its repository.
 - A library moves to a repository of its own with `git subtree split`
   and is taken from there with `git subtree add --squash`; later
@@ -9594,8 +9594,8 @@ whose strict syntax it reads, and the correction of a malformed reply;
   `review_comment` was removed, so an agent answers in the <thread>
   blocks of its message, and no call can make a second reply beside
   one.
-- Tests: test/harness-patch-review-test.el (the module, the reply blocks
-  and the reading tool), test/harness-ui-patch-review-test.el (the
+- Tests: lisp/modules/harness-patch-review-test.el (the module, the reply blocks
+  and the reading tool), lisp/ui/harness-ui-patch-review-test.el (the
   adapter), and the library's own, in lisp/vendor/change-review.
 
 ### linking
@@ -9700,10 +9700,10 @@ link names a task or a thread, and says so when they are not there.
   the real ids, and say so in their descriptions, as `session_send`
   and `review_threads` do; `review_threads` lists each
   thread with its `harness:task/TASK/thread/ID`.
-- Tests: test/harness-links-test.el (the library), test/harness-linking-test.el
+- Tests: lisp/harness-links-test.el (the library), lisp/modules/harness-linking-test.el
   (resolving, writing out, the prompt, the turn's hook with the demo
-  provider and each tool's), test/harness-patch-review-test.el (the
-  thread lookup) and test/harness-tools-sessions-test.el (the footers).
+  provider and each tool's), lisp/modules/harness-patch-review-test.el (the
+  thread lookup) and lisp/modules/harness-tools-sessions-test.el (the footers).
 
 ### readonly
 
@@ -12657,7 +12657,7 @@ own, so a tool put on the allow list folds in the chat and in the app
 at once, and a harness that serves no `tools/list` folds nothing
 there.  The app's tests run against the registry as it is served
 (`harness_client/test/support/harness_tools.json`), which
-`test/harness-client-tools-test.el` holds to the registry.
+`lisp/modules/harness-tools-client-test.el` holds to the registry.
 A page of history can start with the result of a
 call on the page before it: the result shows alone, as the result of
 an earlier tool call, until that page loads, then joins its call
@@ -16836,7 +16836,7 @@ the library, never the other way round:
   binds the variable and does not require the library, which loads
   after it; where nothing is assumed, or the library is not there, the
   variable is nil.  `harness-project-keeps-the-project-while-a-worktree-is-assumed`
-  (test/harness-project-test.el) holds this.
+  (lisp/modules/harness-project-test.el) holds this.
 - The task board (`harness-ui-tasks`) adds Assume worktree, or Reset
   worktree, to the menu of a card whose task's worktree is a directory of
   this Emacs's machine that is still there: one command,

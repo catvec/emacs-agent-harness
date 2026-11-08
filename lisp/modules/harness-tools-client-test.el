@@ -1,4 +1,4 @@
-;;; harness-client-tools-test.el --- The tools the app's tests are tried against  -*- lexical-binding: t; -*-
+;;; harness-tools-client-test.el --- The tools the app's tests are tried against  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -34,8 +34,9 @@
   (clrhash harness-tools)
   (dolist (m '(session agent skills perms tasks merge notifications access redact supervisor))
     (harness-test-load-module m))
-  (dolist (file (directory-files (expand-file-name "lisp/modules" harness-test-root)
-                                 nil "\\`harness-\\(tools-.*\\)\\.el\\'"))
+  (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                              (directory-files (expand-file-name "lisp/modules" harness-test-root)
+                                               nil "\\`harness-\\(tools-.*\\)\\.el\\'")))
     (harness-test-load-module (intern (substring file 8 -3)))))
 
 (defun harness-client-tools-test--specs ()
@@ -77,7 +78,7 @@
 It names a tool, says what people call it, its kind and whether its calls
 fold, and a run of calls folds in the app when it says so.  When the
 registry moved on, write the file again:
-  HARNESS_WRITE_CLIENT_TOOLS=1 scripts/test.sh test/harness-client-tools-test.el
+  HARNESS_WRITE_CLIENT_TOOLS=1 scripts/test.sh lisp/modules/harness-tools-client-test.el
 then run the app's tests (harness_client/tool/check_build.sh --quick)."
   (harness-test-with-temp-state
     (harness-test-reset-bus)
@@ -142,5 +143,5 @@ emacs_* tools are not."
     (should-not (file-exists-p (expand-file-name "lisp/modules/harness-tools-emacs-eval.el"
                                                  harness-test-root)))))
 
-(provide 'harness-client-tools-test)
-;;; harness-client-tools-test.el ends here
+(provide 'harness-tools-client-test)
+;;; harness-tools-client-test.el ends here

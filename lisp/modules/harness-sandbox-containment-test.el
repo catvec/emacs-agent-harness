@@ -1,4 +1,4 @@
-;;; harness-containment-test.el --- No tool reaches what the jail hides  -*- lexical-binding: t; -*-
+;;; harness-sandbox-containment-test.el --- No tool reaches what the jail hides  -*- lexical-binding: t; -*-
 
 ;; This file is part of the Emacs agent harness (v3).
 
@@ -404,5 +404,5 @@ session does not hold."
                                        :is-error)))))
         (ignore-errors (delete-directory main t))))))
 
-(provide 'harness-containment-test)
-;;; harness-containment-test.el ends here
+(provide 'harness-sandbox-containment-test)
+;;; harness-sandbox-containment-test.el ends here

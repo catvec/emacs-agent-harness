@@ -1,4 +1,4 @@
-;;; harness-blocked-subagent-test.el --- A sub-agent that asks for access is seen blocked  -*- lexical-binding: t; -*-
+;;; harness-agent-blocked-subagent-test.el --- A sub-agent that asks for access is seen blocked  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -148,5 +148,5 @@ shown, with a link to answer, in its parent's chat."
                          5 "the UI to hear that it goes on")
       (should-not (harness-blocked-subagent-test--panel parent)))))
 
-(provide 'harness-blocked-subagent-test)
-;;; harness-blocked-subagent-test.el ends here
+(provide 'harness-agent-blocked-subagent-test)
+;;; harness-agent-blocked-subagent-test.el ends here

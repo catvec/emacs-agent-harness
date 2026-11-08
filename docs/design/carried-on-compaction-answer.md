@@ -97,7 +97,7 @@ already says what was chosen and why.
 - `harness-compaction--on-deleted` forgets it with the session.
 - The module commentary and `docs/architecture.md` say what stands and
   for how long.
-- Tests in `test/harness-compaction-test.el`: a six-step turn and the
+- Tests in `lisp/modules/harness-compaction-test.el`: a six-step turn and the
   turn after it ask once; past the window the question returns without
   carrying on; under the limit the answer is forgotten and the next
   approach asks again; a step past the window asks at once. The first

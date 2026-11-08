@@ -1,4 +1,4 @@
-;;; harness-thread-test.el --- Tests for replies in threads: data, text and blocks  -*- lexical-binding: t; -*-
+;;; harness-thread-reply-test.el --- Tests for replies in threads: data, text and blocks  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -215,7 +215,7 @@ What differs is what the header says, never how the quote is made."
         (should (string-match-p "\\`> [^\n]+:\n>\n> " quote))))))
 
 (provide 'harness-thread-test)
-;;; harness-thread-test.el ends here
+;;; harness-thread-reply-test.el ends here
 
 ;;;; The <thread> form in messages
 

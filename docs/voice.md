@@ -563,7 +563,7 @@ Emacs voice tests cover the UI lifecycle separately.
 The live protocol tests need Python 3, a microphone is not used:
 
 ```sh
-scripts/test.sh test/harness-ui-voice-live-test.el
+scripts/test.sh lisp/ui/harness-ui-voice-live-test.el
 ```
 
 They start the bundled fixture and scripted sidecars, then check the

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run ERT suites, one clean Emacs per file, several files at once.
-#   scripts/test.sh                      every test/*-test.el
+#   scripts/test.sh                      every suite: a module's beside it, and test/
 #   scripts/test.sh FILE... [SELECTOR]   only these files (optionally an ERT selector)
 #   scripts/test.sh --changed            only the suites the working tree's changes touch
 #   scripts/test.sh --status             check the last run, without running tests
@@ -159,11 +159,31 @@ app_reminder() {
   echo "  $check --quick                     analyze + test the working tree only"
 }
 
+# Where the suites are.  A module's tests live beside it, as
+# NAME-test.el next to NAME.el: lisp/, lisp/modules/, lisp/ui/ and this
+# repository's plugins.  The suites that test the repository itself --
+# its docs, its dev loop, its test runner -- are in test/ (see
+# test/harness-test-layout-test.el).  The vendored libraries' tests live
+# beside their libraries too, and harness-core-test runs each of them in
+# an Emacs that has only its library: they are not run here.
+test_suites() {
+  local dir
+  for dir in lisp lisp/modules lisp/ui test; do
+    [ -d "$dir" ] && find "$dir" -maxdepth 1 -name '*-test.el' -print
+  done
+  for dir in .harness/plugins/*/; do
+    [ -d "$dir" ] && find "$dir" -maxdepth 1 -name '*-test.el' -print
+  done
+  return 0
+}
+
 # --changed: the suites the working tree's changes touch.  A test file
-# runs itself; a module runs the suite named after it and every suite
-# that names the module; a test helper, a fixture or harness.el itself
-# affects every suite and runs them all.  Whatever is not covered is
-# named: the full run is the only check sure to cover it.
+# runs itself; a module runs the test beside it, the suites whose names
+# begin with it, and every suite that names the module; a test helper,
+# a fixture or harness.el itself affects every suite and runs them all;
+# a vendored library runs harness-core-test, which runs its suites.
+# Whatever is not covered is named: the full run is the only check sure
+# to cover it.
 if [ "$changed" = 1 ]; then
   paths=()
   while IFS= read -r p; do
@@ -182,21 +202,37 @@ if [ "$changed" = 1 ]; then
     for have in ${suites[@]+"${suites[@]}"}; do [ "$have" = "$s" ] && return 0; done
     suites+=("$s")
   }
+  all_suites=()
+  while IFS= read -r f; do all_suites+=("$f"); done < <(test_suites | sort)
+  is_suite() {
+    local s=$1 t
+    for t in ${all_suites[@]+"${all_suites[@]}"}; do [ "$t" = "$s" ] && return 0; done
+    return 1
+  }
   run_all=""
   uncovered=()
   for p in "${paths[@]}"; do
+    if is_suite "$p"; then add_suite "$p"; continue; fi
     case "$p" in
-      test/*-test.el) add_suite "$p" ;;
+      lisp/vendor/*/*.el)
+        add_suite lisp/harness-core-test.el ;;
       test/*)
         run_all="${run_all:+$run_all; }$p is a test helper or fixture, which every suite loads" ;;
       harness.el)
         run_all="${run_all:+$run_all; }harness.el loads every module" ;;
-      lisp/*/harness-*.el|lisp/harness-*.el|.harness/plugins/*/harness-*.el)
-        base=$(basename "$p" .el)
+      scripts/test.sh)
+        add_suite test/harness-test-runner-test.el ;;
+      lisp/*.el|lisp/*/*.el|.harness/plugins/*/*.el)
+        dir=${p%/*}
+        base=${p##*/}
+        base=${base%.el}
         short=${base#harness-}
         found=0
-        if [ -f "test/$base-test.el" ]; then add_suite "test/$base-test.el"; found=1; fi
-        while IFS= read -r t; do add_suite "$t"; found=1; done < <(grep -lE "harness-$short|'$short" test/*-test.el 2>/dev/null)
+        if [ -f "$dir/$base-test.el" ]; then add_suite "$dir/$base-test.el"; found=1; fi
+        while IFS= read -r t; do add_suite "$t"; found=1; done < <(
+          find "$dir" -maxdepth 1 -name "$base-*-test.el" -print 2>/dev/null)
+        while IFS= read -r t; do add_suite "$t"; found=1; done < <(
+          grep -lE "harness-$short|'$short" ${all_suites[@]+"${all_suites[@]}"} 2>/dev/null)
         # A module no suite is named after and no suite names has nothing
         # to run for it: say so, rather than skipping it silently.
         [ "$found" = 1 ] || uncovered+=("$p")
@@ -208,7 +244,7 @@ if [ "$changed" = 1 ]; then
   app_reminder
   if [ -n "$run_all" ]; then
     echo "test.sh --changed: running every suite: $run_all"
-    files=(test/harness-*-test.el)
+    files=(${all_suites[@]+"${all_suites[@]}"})
   else
     files=(${suites[@]+"${suites[@]}"})
   fi
@@ -225,7 +261,9 @@ if [ "$changed" = 1 ]; then
   echo "test.sh --changed: ${#files[@]} suite(s) to run:"
   printf '  %s\n' "${files[@]}"
 fi
-[ ${#files[@]} -eq 0 ] && files=(test/harness-*-test.el)
+if [ ${#files[@]} -eq 0 ]; then
+  while IFS= read -r f; do files+=("$f"); done < <(test_suites | sort)
+fi
 
 # A test run is background work: it must not fight whatever the user is
 # doing -- a game above all -- for the machine.  At nice 19 (and idle

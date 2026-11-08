@@ -1,4 +1,4 @@
-;;; harness-tramp-test.el --- Tools over a TRAMP working directory  -*- lexical-binding: t; -*-
+;;; harness-tools-shell-tramp-test.el --- Tools over a TRAMP working directory  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
@@ -93,5 +93,5 @@ command closed its standard error early, as this one does."
     (should (equal "out\nerr\n" (plist-get r :stdout)))
     (should (equal "" (plist-get r :stderr)))))
 
-(provide 'harness-tramp-test)
-;;; harness-tramp-test.el ends here
+(provide 'harness-tools-shell-tramp-test)
+;;; harness-tools-shell-tramp-test.el ends here

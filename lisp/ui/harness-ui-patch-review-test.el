@@ -7501,10 +7501,11 @@ checks that."
         (known '("harness-ui-patch-review.el" "harness-patch-review.el"
                  "harness-thread-reply.el"
                  "harness-tools-review.el" "harness-acp.el")))
-    (dolist (file (append (list "harness.el")
-                          (directory-files "lisp" t "\\.el\\'")
-                          (directory-files "lisp/modules" t "\\.el\\'")
-                          (directory-files "lisp/ui" t "\\.el\\'")))
+    (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                                (append (list "harness.el")
+                                        (directory-files "lisp" t "\\.el\\'")
+                                        (directory-files "lisp/modules" t "\\.el\\'")
+                                        (directory-files "lisp/ui" t "\\.el\\'"))))
       (unless (member (file-name-nondirectory file) known)
         (with-temp-buffer
           (insert-file-contents file)

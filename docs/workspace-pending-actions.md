@@ -125,11 +125,11 @@ still wins.  No filesystem access or directory grant is involved.
 - Emacs: statuses, blocked labels, permission and question panels,
   thread switching, resolved cards, fetched and event reconciliation,
   send-as-answer, and the new-episode last-stop rule in
-  `test/harness-ui-workspace-test.el` and `test/harness-workspace-test.el`.
+  `lisp/ui/harness-ui-workspace-test.el` and `lisp/modules/harness-workspace-test.el`.
 - Flutter: preview statuses at desktop and phone widths, pending cards
   and their answers, thread switching, and exact copy in
   `test/workspace_screen_test.dart`; a connected fake harness covers
   held permissions and questions, another client's answer, reconnect,
   and exact status copy in `test/workspace_pending_test.dart`.
 - Task board: the project filter and `all_projects` precedence in
-  `test/harness-tools-sessions-test.el`.
+  `lisp/modules/harness-tools-sessions-test.el`.

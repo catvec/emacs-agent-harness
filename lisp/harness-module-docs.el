@@ -363,7 +363,8 @@ the harness/started event, for instance.  They have no page."
   "Return the module files the harness can load, its own then the user's.
 Its own are those of lisp/modules, lisp/ui and `harness-module-directories'
 under `harness-directory', the user's those of
-`harness-extra-module-directories'."
+`harness-extra-module-directories'.  A module's tests live beside it
+and are not modules, so they are left out."
   (let ((dirs (append (mapcar (lambda (d) (expand-file-name d harness-directory))
                               (delete-dups (append (list "lisp/modules" "lisp/ui")
                                                    (bound-and-true-p harness-module-directories))))
@@ -371,7 +372,8 @@ under `harness-directory', the user's those of
                            (harness--extra-module-directories)))))
     (cl-loop for dir in dirs
              when (file-directory-p dir)
-             append (directory-files dir t "\\`harness-[a-z0-9-]+\\.el\\'"))))
+             append (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                                  (directory-files dir t "\\`harness-[a-z0-9-]+\\.el\\'")))))
 
 (defun harness-module-docs-collect (&optional files)
   "Return the scans of the modules of FILES, sorted by name, linked together.

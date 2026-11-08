@@ -324,6 +324,6 @@ rewritten into a noun phrase.
   closes it, and sends a draft with no words as feedback once. It refuses a
   fixture that is not an empty directory outside a repository, so it never
   writes in a checkout.
-- The harness's own tests: `scripts/test.sh test/harness-patch-review-test.el`
+- The harness's own tests: `scripts/test.sh lisp/modules/harness-patch-review-test.el`
   covers the two new read methods, a rename, a path that leaves the
   repository, and the identity the harness fills for a UI's operations.

@@ -277,15 +277,15 @@ what must be found before a start; `harness-workspace-box-backend`
 
 ## Tests and the live proof
 
-* `test/harness-workspace-box-test.el` holds the off state and its
+* `lisp/modules/harness-workspace-box-test.el` holds the off state and its
   missing tools, a running record's VNC URL and socket, the control
   lock and input refusal, the window parser, the browser metadata
   (including that no cookie value or encrypted username is in the
   answer), and that every method the clients call exists.
-* `test/harness-workspace-test.el` holds the resources status without a
+* `lisp/modules/harness-workspace-test.el` holds the resources status without a
   box, the merged timeline, and the memory read/forget/page/recall
   path.
-* `test/harness-ui-workspace-test.el` holds the exact header copy,
+* `lisp/ui/harness-ui-workspace-test.el` holds the exact header copy,
   tooltips, the computer page's state lines, its button tooltips and
   the `Computer off` state with the missing tools named.
 * The live run started a real Xvfb display with the extracted tools,

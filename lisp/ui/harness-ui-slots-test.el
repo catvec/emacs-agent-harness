@@ -1942,7 +1942,7 @@ project's.  A queue paused is resumed, and the other way round."
 (defmacro harness-ui-slots-test-with-harness (&rest body)
   "Run BODY against the harness: the tasks, the in-process ACP connection, a board.
 It is set up as `harness-ui-tasks-test-with' sets the board's tests up
-\(test/harness-ui-tasks-test.el), with this page's module too, two slots
+\(lisp/ui/harness-ui-tasks-test.el), with this page's module too, two slots
 a project, and turns that hold until stopped: a task that starts keeps
 its slot.  BODY runs with `board', the board of `dir', open.  The
 module registry is the test's own, so the other tests of this file find

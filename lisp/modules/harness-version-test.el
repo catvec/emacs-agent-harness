@@ -653,8 +653,9 @@ directory."
           (should-not (harness-version--version-header file))
           ;; This repository's own plugin files have versions, and so
           ;; do the vendored libraries.
-          (dolist (plugin (directory-files (expand-file-name ".harness/plugins/dev" harness-directory)
-                                           t "\\.el\\'"))
+          (dolist (plugin (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                                        (directory-files (expand-file-name ".harness/plugins/dev" harness-directory)
+                                                         t "\\.el\\'")))
             (should (harness-version--version-header plugin)))
           (dolist (dir (directory-files (expand-file-name "lisp/vendor" harness-directory)
                                         t "\\`[^.]"))

@@ -253,7 +253,9 @@ plugin goes, wherever the tests run from."
   (let ((plugin (expand-file-name ".harness/plugins/dev/" dir)))
     (make-directory plugin t)
     (copy-file (expand-file-name ".dir-locals.el" harness-test-root) (expand-file-name ".dir-locals.el" dir) t)
-    (dolist (file (directory-files (expand-file-name ".harness/plugins/dev/" harness-test-root) t "\\.el\\'"))
+    (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
+                                (directory-files (expand-file-name ".harness/plugins/dev/" harness-test-root)
+                                                 t "\\.el\\'")))
       (copy-file file (expand-file-name (file-name-nondirectory file) plugin) t))
     (file-name-as-directory dir)))
 

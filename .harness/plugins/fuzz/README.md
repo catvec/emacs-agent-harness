@@ -162,7 +162,7 @@ with a stock Emacs when `afl-qemu-trace` is installed.
 
 ## Tests
 
-`test/harness-fuzz-test.el` covers the adapter, the seed probe, the
+`.harness/plugins/fuzz/harness-fuzz-test.el` covers the adapter, the seed probe, the
 command lines, the report and replay without AFL++, and runs a short
 campaign against the built-in targets when `afl-fuzz` is on `exec-path`
 (and skips it otherwise).

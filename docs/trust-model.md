@@ -2,7 +2,7 @@
 
 This page states the boundary the harness relies on, the one it used to
 rely on, and what each kind of tool may do.  It is the contract the
-containment tests in `test/harness-containment-test.el` check.
+containment tests in `lisp/modules/harness-sandbox-containment-test.el` check.
 
 ## The boundary is the kernel, not a reading of the command
 
@@ -193,22 +193,22 @@ process's session, so one session's relay cannot reach another's tools.
 
 ### Checking it
 
-- `test/harness-mcp-auth-test.el`: the instance id and token, the HMAC,
+- `lisp/modules/harness-mcp-auth-test.el`: the instance id and token, the HMAC,
   the dispatcher's -32001 for no credential, another instance's id, or
   another token; a real `fs` worker refusing an unauthenticated client
   and working for the host; a worker with no environment exiting instead
   of serving.
-- `test/harness-mcp-test.el`: every server the host starts gets the
+- `lisp/modules/harness-mcp-test.el`: every server the host starts gets the
   instance credential (the fake server refuses without it), and a
   declaration cannot override the variables.
-- `test/harness-claude-plugin-test.el`: the challenge names the instance
+- `lisp/harness-claude-plugin-test.el`: the challenge names the instance
   and a fresh nonce, another instance is refused, a replayed nonce is
   refused, a wrong token, a second relay and silence are closed, and the
   real relay completes the handshake and carries the CLI's bytes.
-- `test/harness-acp-tcp-test.el`: a listener with no configured token
+- `lisp/modules/harness-acp-tcp-test.el`: a listener with no configured token
   makes one, writes it 0600, refuses a raw client and another instance's
   token, and accepts its own.
-- `test/harness-sandbox-test.el`: `:env` reaches the command through
+- `lisp/modules/harness-sandbox-test.el`: `:env` reaches the command through
   bwrap and systemd-run.
 
 ## Parsing still exists, as a courtesy
@@ -542,7 +542,7 @@ called the chain with a session it could not find.
 
 ## Checking it
 
-`test/harness-containment-test.el` runs the real bwrap and skips where
+`lisp/modules/harness-sandbox-containment-test.el` runs the real bwrap and skips where
 it cannot start.  It checks that a `bash` command cannot read a file
 outside the session's directories, that a Python script whose intent no
 parser sees cannot either, that a directory outside survives both `rm
@@ -558,11 +558,11 @@ through a link, in a pattern); the Emacs tools refused a buffer that
 visits a file outside, directly or through a link; `task_submit`
 refused a directory outside and a main-tree task from a worktree; and
 each of them working inside, and outside once the user grants the
-directory.  `test/harness-perms-test.el` checks that a failed stage
-refuses the call in every mode, and `test/harness-core-test.el` the
+directory.  `lisp/modules/harness-perms-test.el` checks that a failed stage
+refuses the call in every mode, and `lisp/harness-core-test.el` the
 rule that lets a chain say what a failure hands on.
 
-`test/harness-mcp-fs-test.el` runs the file tools' worker under the real
+`lisp/harness-mcp-fs-test.el` runs the file tools' worker under the real
 bwrap, with the permission chain made to allow everything, so that nothing
 but the kernel stands between a tool and a file outside the session's
 directories.  It checks that no file tool reaches such a file, however it
@@ -577,12 +577,12 @@ output saved by the harness can be read back, an image copy is made where
 the harness can read it, a written file is announced, and a worker that
 dies or whose session is deleted is replaced or goes.
 
-`test/harness-sandbox-test.el` covers the backends themselves: the
+`lisp/modules/harness-sandbox-test.el` covers the backends themselves: the
 mounts, the read-only profile, the capabilities, and the registrations
 of the worktrees a session does not show.  Its tests in a real bwrap
 run git's worktree commands in the jail and look at what is left on
 disk, so what they check is the kernel's refusal, not a message; the
 module has no method left that reads a command line.
-`test/harness-perms-test.el` checks that no stage of the chain reads a
+`lisp/modules/harness-perms-test.el` checks that no stage of the chain reads a
 command for the sandbox, and that a read-only cloud command is allowed
 only where the sandbox confines it.

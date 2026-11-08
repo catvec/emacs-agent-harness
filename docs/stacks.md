@@ -104,8 +104,8 @@ says what the runtime still needs, such as `Socket unavailable ·
 
 The registry, command construction, status parsing, dynamic port discovery,
 the network join, the endpoints and the page's copy are covered by
-`test/harness-stacks-test.el` without a daemon. The runtime seam is covered by
-`test/harness-container-runtime-test.el`. The compose files are checked with
+`lisp/modules/harness-stacks-test.el` without a daemon. The runtime seam is covered by
+`lisp/modules/harness-container-runtime-test.el`. The compose files are checked with
 `compose config`, which shows the empty published ports and the per-stack
 network. A real stack on Docker was run by hand: it published a random loopback
 port, answered through it, and a probe container reached its service by name

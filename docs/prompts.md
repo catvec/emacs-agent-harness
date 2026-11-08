@@ -40,7 +40,7 @@ The top of the page lists the overrides, each with **Edit** and
   undeclared variable.  It returns nil when the library is sound.
 
 `harness-prompt-describe NAME` returns an entry as a string, for a
-program or a message.  `scripts/test.sh test/harness-prompts-test.el`
+program or a message.  `scripts/test.sh lisp/harness-prompts-test.el`
 checks the registry, every call site, the page and the examples below.
 
 The prompts are in the order they were added, grouped by module, in

@@ -134,7 +134,7 @@ the 53 s after: 4,912 ms of CPU, 9% busy, of which GC 25% (2% of the wall
 time), redisplay 28%, the task board 20%, the chat spinner 14%, ACP message
 handling 7%.
 
-Tests (`test/harness-ui-worktree-test.el`, 6 new, none measures time): the
+Tests (`lisp/ui/harness-ui-worktree-test.el`, 6 new, none measures time): the
 `file-truename` calls per redraw are bounded by the directories and are zero
 on the second redraw; a link is its target, the internal sessions are nobody's,
 a remote name is never resolved; a hidden list starts no timer and a shown one

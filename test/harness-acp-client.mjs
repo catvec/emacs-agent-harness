@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // A real, headless Agent Client Protocol (ACP) client used by
-// test/harness-acp-client-test.el.  It is built on the official
+// lisp/modules/harness-acp-client-test.el.  It is built on the official
 // third-party TypeScript SDK, `@agentclientprotocol/sdk` (the client
 // library Zed-class clients use), and speaks the real wire protocol
 // (JSON-RPC 2.0, one message per line) over stdio to

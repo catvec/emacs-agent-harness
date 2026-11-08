@@ -5,7 +5,13 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-files=(harness.el lisp/*.el lisp/modules/*.el lisp/ui/*.el)
+# A module's tests live beside it (NAME-test.el); they are not part of
+# what the harness loads, and are compiled by the test run that loads
+# them, not here.
+files=(harness.el)
+for f in lisp/*.el lisp/modules/*.el lisp/ui/*.el; do
+  case "$f" in *-test.el) ;; *) files+=("$f") ;; esac
+done
 loadpath=(-L lisp -L lisp/modules -L lisp/ui)
 # The libraries vendored under lisp/vendor, a directory each: on the load
 # path, and compiled with the rest, but not their tests (lisp/vendor/README.md).
@@ -24,7 +30,10 @@ loadpath+=(-L .)
 for d in .harness/plugins/*/; do
   [ -d "$d" ] || continue
   loadpath+=(-L "${d%/}")
-  for f in "$d"*.el; do [ -f "$f" ] && files+=("$f"); done
+  for f in "$d"*.el; do
+    [ -f "$f" ] || continue
+    case "$f" in *-test.el) ;; *) files+=("$f") ;; esac
+  done
 done
 # A compile that wedges (a macro looping, an Emacs stuck in C) must not
 # hang the script forever.
