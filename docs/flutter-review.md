@@ -49,8 +49,13 @@ goes over the wire.
   `HarnessTabStrip`, which scrolls rather than squeezing its labels when the
   screen is narrow or the text is large.
 - The file tree, or a flat list, with git's letter, the counts, the thread
-  count and the viewed/approved marks on each file. A search field filters
-  by path. Directories fold, and keep their fold while the review is open.
+  count and the viewed/approved marks on each file. A file is set in one
+  step per directory above it, so it reads under the directory that holds
+  it; the flat list starts every file at the same edge. The control that
+  changes the view is named and drawn as the view it gives: `Flat list`
+  with a list icon while the tree shows, `File tree` with a tree icon while
+  the flat list shows. A search field filters by path. Directories fold, and
+  keep their fold while the review is open.
 - The threads on the change as a whole at the end of the list.
 - A bottom bar with the draft count and one full-width way to the feedback,
   `Feedback` or `Replies`, never a row of small desktop buttons.

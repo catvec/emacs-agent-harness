@@ -638,6 +638,7 @@ class _FilesPane extends StatelessWidget {
               return _FileRow(
                 controller: controller,
                 file: file,
+                depth: row.depth,
                 onTap: () => onOpenFile(file.path),
               );
             },
@@ -671,9 +672,11 @@ class _FilesToolbar extends StatelessWidget {
           const Spacer(),
           HarnessIconButton(
             key: const ValueKey('review-flat-toggle'),
+            // The icon is the view the control gives, as its label is: a
+            // tree view offers the flat list, and a flat list the tree.
             icon: controller.treeView
-                ? Icons.account_tree_outlined
-                : Icons.view_list_outlined,
+                ? Icons.view_list_outlined
+                : Icons.account_tree_outlined,
             label: controller.treeView ? 'Flat list' : 'File tree',
             onPressed: () => controller.setTreeView(!controller.treeView),
           ),
@@ -693,6 +696,13 @@ class _FilesToolbar extends StatelessWidget {
   }
 }
 
+/// How far a tree level sets a row in from the one that holds it.
+const double _treeStep = 12;
+
+/// The left inset of a row at [depth] in the file tree.  A directory and
+/// the files it holds share it, so a file sits under its directory.
+double _treeInset(int depth) => HarnessSpace.gutter + depth * _treeStep;
+
 class _DirectoryRow extends StatelessWidget {
   const _DirectoryRow({
     required this.row,
@@ -711,10 +721,11 @@ class _DirectoryRow extends StatelessWidget {
       expanded: expanded,
       label: '${row.name}, ${row.files} files',
       child: InkWell(
+        key: ValueKey('review-dir-${row.path}'),
         onTap: onTap,
         child: Padding(
           padding: EdgeInsets.fromLTRB(
-            HarnessSpace.gutter + row.depth * 12,
+            _treeInset(row.depth),
             HarnessSpace.sm,
             HarnessSpace.gutter,
             HarnessSpace.sm,
@@ -771,11 +782,15 @@ class _FileRow extends StatelessWidget {
   const _FileRow({
     required this.controller,
     required this.file,
+    required this.depth,
     required this.onTap,
   });
 
   final ReviewController controller;
   final ChangedFile file;
+
+  /// Its place under the directories that hold it; 0 in the flat list.
+  final int depth;
   final VoidCallback onTap;
 
   @override
@@ -800,7 +815,7 @@ class _FileRow extends StatelessWidget {
         child: Container(
           constraints: const BoxConstraints(minHeight: 56),
           padding: EdgeInsets.fromLTRB(
-            HarnessSpace.gutter,
+            _treeInset(depth),
             HarnessSpace.xs,
             HarnessSpace.gutter,
             HarnessSpace.xs,
@@ -815,6 +830,7 @@ class _FileRow extends StatelessWidget {
           child: Row(
             children: [
               Container(
+                key: ValueKey('review-file-status-${file.path}'),
                 width: 22,
                 height: 22,
                 alignment: Alignment.center,

@@ -508,6 +508,82 @@ void main() {
     expect(find.text('Save'), findsOneWidget);
   });
 
+  testWidgets('a file sits under the directory that holds it, in either view', (
+    tester,
+  ) async {
+    final rig = await _rig();
+    await _pump(tester, rig);
+
+    // The tree opens: the control offers the flat list, and shows one.
+    expect(find.byTooltip('Flat list'), findsOneWidget);
+    expect(find.byIcon(Icons.view_list_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.account_tree_outlined), findsNothing);
+
+    // A directory and the rows under it take the same step in.
+    final docsName = tester.getTopLeft(
+      find.descendant(
+        of: find.byKey(const ValueKey('review-dir-docs')),
+        matching: find.text('docs'),
+      ),
+    );
+    final srcName = tester.getTopLeft(
+      find.descendant(
+        of: find.byKey(const ValueKey('review-dir-lib/src')),
+        matching: find.text('src'),
+      ),
+    );
+    expect(srcName.dx - docsName.dx, 12);
+    // The first thing in a file's row is set in by the file's depth.
+    expect(
+      tester
+          .getTopLeft(
+            find.byKey(const ValueKey('review-file-status-docs/logo.png')),
+          )
+          .dx,
+      HarnessSpace.gutter + 12,
+    );
+    expect(
+      tester
+          .getTopLeft(
+            find.byKey(
+              const ValueKey(
+                'review-file-status-lib/src/features/feature_00/widget.dart',
+              ),
+            ),
+          )
+          .dx,
+      HarnessSpace.gutter + 4 * 12,
+    );
+
+    // The flat list is flat: every file starts at the edge, and the control
+    // now offers the tree, with the tree's own icon.
+    await tester.tap(find.byTooltip('Flat list'));
+    await _settle(tester, 4);
+    expect(find.byTooltip('File tree'), findsOneWidget);
+    expect(find.byIcon(Icons.account_tree_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.view_list_outlined), findsNothing);
+    expect(
+      tester
+          .getTopLeft(
+            find.byKey(const ValueKey('review-file-status-docs/logo.png')),
+          )
+          .dx,
+      HarnessSpace.gutter,
+    );
+    expect(
+      tester
+          .getTopLeft(
+            find.byKey(
+              const ValueKey(
+                'review-file-status-lib/src/features/feature_00/widget.dart',
+              ),
+            ),
+          )
+          .dx,
+      HarnessSpace.gutter,
+    );
+  });
+
   testWidgets('an empty review says so in nouns', (tester) async {
     final rig = await _rig(
       arrange: (harness) {
