@@ -28,6 +28,7 @@ import '../widgets/chat_threads.dart';
 import '../widgets/connection_banner.dart';
 import '../widgets/interaction_card.dart';
 import '../widgets/message_composer.dart';
+import '../widgets/queued_messages.dart';
 import '../widgets/quota_widgets.dart';
 import '../widgets/task_bar.dart';
 import '../widgets/transcript_view.dart';
@@ -774,6 +775,27 @@ class _SessionScreenState extends State<SessionScreen> {
             },
           ),
         ),
+        // What waits for the next turn, above the box that sends it: the
+        // harness's queue, from this phone or another client.  With a
+        // request on screen the room is for its answer, and the queue is
+        // back once it goes.
+        if (interaction == null && controller.queued.isNotEmpty)
+          QueuedMessages(
+            key: const Key('session-queue'),
+            items: controller.queued,
+            onSendNow: controller.canSend
+                ? (id) => unawaited(controller.sendQueued(id))
+                : null,
+            onSendAll: controller.canSend && controller.queued.length > 1
+                ? () => unawaited(controller.sendQueuedAll())
+                : null,
+            onEdit: controller.canSend
+                ? (id) => unawaited(controller.editQueued(id))
+                : null,
+            onRemove: controller.canSend
+                ? (id) => unawaited(controller.removeQueued(id))
+                : null,
+          ),
         // A task's conversation is where the task is handled: where it
         // stands and what can be done about it, over the box that sends
         // feedback.  What waits on an answer has the room for that.
@@ -807,6 +829,12 @@ class _SessionScreenState extends State<SessionScreen> {
             running: controller.promptInFlight,
             cancelling: controller.cancelling,
             canAttach: _app.capability?.promptImages == true,
+            canQueue: controller.canQueue,
+            onQueue: (text) {
+              if (!controller.canQueue) return false;
+              unawaited(controller.queue(text));
+              return true;
+            },
             canVoice:
                 controller.canSend &&
                 interaction == null &&

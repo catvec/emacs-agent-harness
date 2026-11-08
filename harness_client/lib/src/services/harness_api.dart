@@ -237,6 +237,37 @@ class HarnessApi {
     return asMap(result);
   }
 
+  /// Put [text] in the session's queue for its next turn (`session/queue`),
+  /// and answer the item the harness made of it.  A running turn is not
+  /// steered: the message waits until the turn ends, which sends the queue
+  /// as a turn of its own.  Empty words are refused by the harness.
+  Future<QueueItem> queueMessage(String sessionId, String text) async =>
+      QueueItem.fromWire(
+        await extension('session/queue', {'id': sessionId, 'text': text}),
+      );
+
+  /// Send the session's queued messages as one turn (`agent/send-queue`).
+  /// With [qids], only those, the others staying queued; while a turn runs
+  /// they steer it and reach the model at its next step.  The answer comes
+  /// when that turn ends, so it waits without a timeout.
+  Future<JsonMap> sendQueue(String sessionId, {List<String>? qids}) async {
+    final result = await _request('_harness/agent/send-queue', {
+      'session-id': sessionId,
+      if (qids != null && qids.isNotEmpty) 'qids': qids,
+    }, Duration.zero);
+    return asMap(result);
+  }
+
+  /// Take a queued message out of the session's queue
+  /// (`session/queue-remove`), and answer what is left of it.
+  Future<List<QueueItem>> removeQueued(String sessionId, String qid) async =>
+      QueueItem.listFrom(
+        await extensionRaw('session/queue-remove', {
+          'id': sessionId,
+          'qid': qid,
+        }),
+      );
+
   Future<void> cancel(String sessionId) =>
       client.notify('session/cancel', {'sessionId': sessionId});
 

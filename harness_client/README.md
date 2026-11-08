@@ -43,6 +43,12 @@ time it opens. It asks again only when the harness does.
   the activity of the running turn (waiting, thinking, writing, preparing a
   tool call, running tools, compacting). A conversation opens on its latest
   message.
+- **Queues the next message.** While the agent works the box offers *Queue
+  message* (or Enter): the harness holds the words for the next turn, and the
+  turn that ends sends them as its own. The queue stands above the box, each
+  message marked *Queued*, with *Send now*, *Edit* and *Delete*, and one queued
+  from Emacs or another device shows there too. See
+  [Queueing the next message](#queueing-the-next-message).
 - **Takes a compaction back.** Under the note of the latest compaction a
   button, *Revert*, gives the model the conversation from before it again in
   place of the summary; the note is then dimmed and says *Reverted*, and the
@@ -413,7 +419,9 @@ time it opens. It asks again only when the harness does.
   `steering` list).  So is a message the harness holds back from a turn
   that has not begun -- the one that waits for a compaction, or for the
   answer to the question about a cold prompt cache -- listed there too, so
-  it shows *Queued* until it is delivered.
+  it shows *Queued* until it is delivered.  A message written for the *next*
+  turn is the harness's queue instead, and waits above the box, with what can
+  be done about it ([Queueing the next message](#queueing-the-next-message)).
 - **Keeps a conversation in the order the harness recorded it.** Every node
   the harness records says which node it follows (`parent`), and the app
   stands each message, call and system note after the one it follows, however
@@ -1085,6 +1093,34 @@ review comment, and none of it is kept on the phone.
 twice the text with the keyboard down, and `screenshots/chat-thread-wide.png`
 is the conversation on a 900-point window. They are written by
 `HARNESS_SHOTS=screenshots flutter test test/chat_thread_screenshots_test.dart`.
+
+### Queueing the next message
+
+While a turn runs, the message box keeps its words for the next one instead
+of refusing them: *Queue message*, the playlist icon beside *Stop*, sends them
+to the harness's queue (`session/queue`), and so does Enter. The turn that
+ends sends the queue as a turn of its own. Until then the queue is drawn
+above the box, under the plan and the activity: `Queue` and how many, then one
+row per message, `Queued` (with who sent it, when it came from Emacs or
+another device), its words and the three things that can be done with it.
+*Send now* sends that message alone -- into the running turn, which gets it
+at its next step, or as a turn of its own -- and *Send all* sends every one.
+*Edit* takes a message back into the box to write it again, and *Delete* drops
+it. Neither a queue that could not be taken nor a connection lost on the way
+loses the words: they go back into the box, with what went wrong above it.
+The queue is the harness's, not the app's: one made in Emacs shows, and one
+this phone makes is there when the app opens again. A message with pictures
+queued in Emacs shows `(1 image)` and can be sent or dropped; the app queues
+words alone, because a picture picked here has no file on the harness's
+machine for the queue to keep. A harness without `session/queue` has no queue
+button, and the box says the agent is working as before.
+
+| The queue above the box, on Android | The same at 320 points and twice the text |
+|---|---|
+| ![A conversation whose agent works, two queued messages under the plan and the activity, and the box with the queue button](screenshots/android-message-queue.png) | ![One queued message and the running box at 320 points and twice the text](screenshots/message-queue-320-text2.png) |
+
+They are written by `HARNESS_SHOTS=screenshots flutter test
+test/message_queue_screenshots_test.dart`.
 
 ### Pictures
 

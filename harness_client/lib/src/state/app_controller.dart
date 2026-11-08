@@ -1101,8 +1101,8 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   String _signature(SessionController controller) {
     final summary = controller.summary;
     return '${summary?.title}|${summary?.status}|${summary?.model}|'
-        '${summary?.todos.length}|${controller.interactions.length}|'
-        '${controller.deleted}';
+        '${summary?.todos.length}|${summary?.queue.length}|'
+        '${controller.interactions.length}|${controller.deleted}';
   }
 
   void _upsertSession(SessionSummary summary, {bool notify = true}) {

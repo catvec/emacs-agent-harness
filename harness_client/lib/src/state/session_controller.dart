@@ -140,6 +140,14 @@ class SessionController extends ChangeNotifier {
   /// While there is none the composer keeps what was typed.
   bool get canSend => !api.client.isClosed;
 
+  /// The messages waiting for this session's next turn (`session/queue`).
+  /// A turn that ends sends them as a turn of its own, and the harness
+  /// announces every change (`session/queue-changed`).
+  List<QueueItem> get queued => summary?.queue ?? const <QueueItem>[];
+
+  /// Whether the harness can take a message for the queue.
+  bool get canQueue => canSend && api.can('session/queue');
+
   /// The connection this session talked over is gone.  What the agent asked
   /// on it (a permission, a question) can no longer be answered there; the
   /// harness still holds it as pending and offers it again to the next
@@ -313,6 +321,19 @@ class SessionController extends ChangeNotifier {
     for (final item in steering ?? const <QueueItem>[])
       (id: item.id, text: item.text, sender: formatSender(item.from)),
   ];
+
+  /// Take what the harness announced as the session's queue, the messages
+  /// waiting for its next turn (`session/queue-changed`), in place of what
+  /// was.  An empty list is an answer: nothing waits.
+  void _applyQueue(Object? value) {
+    final current = summary;
+    if (current == null) {
+      unawaited(refreshInfo());
+      return;
+    }
+    summary = current.withQueue(QueueItem.listFrom(value));
+    _notify();
+  }
 
   /// Read the harness's tools (the api keeps them for the connection, so a
   /// second conversation asks nobody).  An empty answer, which a harness that
@@ -525,6 +546,129 @@ class SessionController extends ChangeNotifier {
       error = '$failure';
       cancelling = false;
       _notify();
+    }
+  }
+
+  /// Queue [text] for the session's next turn (`session/queue`), rather than
+  /// sending it into the turn that runs.  The harness answers the item it
+  /// made, which is shown above the composer at once; the session's
+  /// `session/queue-changed` follows, and brings what other clients do too.
+  /// Words that could not be queued go back to the composer: the model does
+  /// not have them.
+  Future<void> queue(String text) async {
+    final words = text.trim();
+    if (words.isEmpty) return;
+    if (!canQueue) {
+      error = canSend ? 'No queue' : 'No connection';
+      _restoreDraft(words);
+      _notify();
+      return;
+    }
+    try {
+      final item = await api.queueMessage(sessionId, words);
+      final current = summary;
+      if (current == null) {
+        unawaited(refreshInfo());
+      } else if (!current.queue.any((queued) => queued.id == item.id)) {
+        summary = current.withQueue([...current.queue, item]);
+      }
+      _notify();
+    } on AcpException catch (failure) {
+      error = _friendlyError(failure);
+      _restoreDraft(words);
+      _notify();
+    } catch (failure) {
+      error = '$failure';
+      _restoreDraft(words);
+      _notify();
+    }
+  }
+
+  /// Send the queued messages now (`agent/send-queue`): all of them, or with
+  /// [qid], only that one, the others staying queued.  With no turn running
+  /// this starts one; while one runs the messages steer it, and wait in the
+  /// transcript as *Queued* until it takes them at its next step.
+  Future<void> sendQueued([String? qid]) async {
+    if (!canSend || !api.can('agent/send-queue')) return;
+    // A turn of the queue's own shows its work as any turn does, until the
+    // harness says it ended.  One sent into a running turn is that turn's,
+    // which its own end settles.
+    final startsTurn = !promptInFlight && summary?.isRunning != true;
+    if (startsTurn) {
+      promptInFlight = true;
+      cancelling = false;
+      _notify();
+    }
+    try {
+      await api.sendQueue(sessionId, qids: qid == null ? null : [qid]);
+    } on AcpException catch (failure) {
+      error = _friendlyError(failure);
+    } catch (failure) {
+      error = '$failure';
+    } finally {
+      if (startsTurn) {
+        promptInFlight = false;
+        transcript.finish();
+      }
+      _notify();
+      unawaited(refreshInfo());
+      unawaited(_refreshActivity());
+    }
+  }
+
+  /// Send every queued message now, as one turn.
+  Future<void> sendQueuedAll() => sendQueued();
+
+  /// Put the words of queued message [qid] back in the composer, and take it
+  /// out of the queue (`session/queue-remove`), to be written again.  A
+  /// message with pictures stays queued: they are files of the harness's
+  /// machine, and the composer takes pictures picked on this device.
+  Future<void> editQueued(String qid) async {
+    final item = _queuedItem(qid);
+    if (item == null || item.hasAttachments) return;
+    try {
+      final left = await api.removeQueued(sessionId, qid);
+      final current = summary;
+      if (current != null) summary = current.withQueue(left);
+      _restoreDraft(item.text);
+      _notify();
+    } on AcpException catch (failure) {
+      error = _friendlyError(failure);
+      _notify();
+    } catch (failure) {
+      error = '$failure';
+      _notify();
+    }
+  }
+
+  /// Delete queued message [qid]: the model never gets it.
+  Future<void> removeQueued(String qid) async {
+    try {
+      final left = await api.removeQueued(sessionId, qid);
+      final current = summary;
+      if (current != null) summary = current.withQueue(left);
+      _notify();
+    } on AcpException catch (failure) {
+      error = _friendlyError(failure);
+      _notify();
+    } catch (failure) {
+      error = '$failure';
+      _notify();
+    }
+  }
+
+  QueueItem? _queuedItem(String qid) {
+    for (final item in queued) {
+      if (item.id == qid) return item;
+    }
+    return null;
+  }
+
+  /// What was typed but never got there goes back to the composer, as a
+  /// message lost with the connection does.
+  void _restoreDraft(String text) {
+    if (text.isNotEmpty) {
+      drafts?.putBack(DraftStore.composerKey(sessionId), text);
     }
   }
 
@@ -1133,8 +1277,15 @@ class SessionController extends ChangeNotifier {
         _notify();
         unawaited(refreshInfo());
       case 'session/status':
-      case 'session/queue-changed':
         unawaited(refreshInfo());
+      case 'session/queue-changed':
+        // (session id, the messages waiting for the next turn): the queue is
+        // the harness's, and its answer is fresher than a record read for it.
+        if (args.length > 1) {
+          _applyQueue(args[1]);
+        } else {
+          unawaited(refreshInfo());
+        }
       case 'session/steering-changed':
         // (session id, the messages the running turn has not taken yet): the
         // harness has a message sent while the agent works, and says so as

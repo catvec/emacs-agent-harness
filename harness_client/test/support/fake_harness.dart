@@ -118,6 +118,9 @@ class FakeHarness {
         'compaction/restore',
         'agent/activity',
         'agent/prompt',
+        'agent/send-queue',
+        'session/queue',
+        'session/queue-remove',
         'priority/set',
         'permission/pending',
         'permission/answer',
@@ -547,6 +550,16 @@ class FakeHarness {
   /// What was written to the session of a task with `task/prompt`: the
   /// task's id, and the text.
   final List<(String, String)> taskMessages = [];
+
+  /// What each `agent/send-queue` took: the ids it named (null for all the
+  /// queue), and the words of the items that went.
+  final List<({List<String>? qids, String text})> sentQueues = [];
+
+  /// What each `session/queue` asked to queue: the session, and the words.
+  final List<(String, String)> queuedMessages = [];
+
+  /// Make `session/queue` fail, as a harness that refuses a queue does.
+  String? queueError;
 
   /// The params of the requests for [method] (`_harness/task/start`), in the
   /// order they came.
@@ -1759,6 +1772,90 @@ class FakeHarness {
       }
       if (method == 'session/cancel') {
         _respond(id, const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/session/queue') {
+        final sid = asString(params['id']);
+        final text = asString(params['text']) ?? '';
+        if (sid == null || sessions[sid] == null) {
+          _respondError(id, -32603, 'No session $sid');
+          return;
+        }
+        if (text.trim().isEmpty) {
+          _respondError(id, -32603, 'Nothing to send: the message is empty');
+          return;
+        }
+        if (queueError != null) {
+          _respondError(id, -32603, queueError!);
+          return;
+        }
+        queuedMessages.add((sid, text));
+        final item = <String, Object?>{
+          'id': 'q-${++_generated}',
+          'text': text,
+          'attachments': asList(params['attachments']),
+          'ts': _now(),
+        };
+        _setQueue(sid, [...queueOf(sid), item]);
+        _respond(id, item);
+        return;
+      }
+      if (method == '_harness/session/queue-remove') {
+        final sid = asString(params['id']);
+        final qid = asString(params['qid']);
+        if (sid == null || sessions[sid] == null) {
+          _respondError(id, -32603, 'No session $sid');
+          return;
+        }
+        final left = [
+          for (final item in queueOf(sid))
+            if (asString(item['id']) != qid) item,
+        ];
+        _setQueue(sid, left);
+        _respond(id, left);
+        return;
+      }
+      if (method == '_harness/agent/send-queue') {
+        final sid = asString(params['session-id']);
+        if (sid == null || sessions[sid] == null) {
+          _respondError(id, -32603, 'No session $sid');
+          return;
+        }
+        final named = asList(params['qids'])
+            .map(asString)
+            .whereType<String>()
+            .toList();
+        final queue = queueOf(sid);
+        final going = named.isEmpty
+            ? queue
+            : [
+                for (final item in queue)
+                  if (named.contains(asString(item['id']))) item,
+              ];
+        final sent = {for (final item in going) asString(item['id'])};
+        final left = [
+          for (final item in queue)
+            if (!sent.contains(asString(item['id']))) item,
+        ];
+        _setQueue(sid, left);
+        final text = going
+            .map((item) => asString(item['text']) ?? '')
+            .where((words) => words.trim().isNotEmpty)
+            .join('\n\n');
+        sentQueues.add((qids: named.isEmpty ? null : named, text: text));
+        if (text.isEmpty) {
+          _respond(id, {
+            'stopReason': 'end_turn',
+            '_harness': {'reason': 'nothing-queued'},
+          });
+          return;
+        }
+        // As the harness sends the queue when no turn runs: one turn of its
+        // own.  Sent into a running turn the real harness steers it; a test
+        // sends the queue once the turn before it ended.
+        _streamTurn(sid, [
+          {'type': 'text', 'text': text},
+        ], id);
         return;
       }
       if (method == 'session/set_mode') {
@@ -3679,6 +3776,23 @@ class FakeHarness {
     });
   }
 
+  /// The messages queued for session [sid]'s next turn.
+  List<Map<String, Object?>> queueOf(String sid) => [
+    for (final item in asList(sessions[sid]?['queue'])) asMap(item),
+  ];
+
+  /// Replace session [sid]'s queue, and say so as the harness does: the
+  /// record follows (`_harness/session`), and the queue itself
+  /// (`session/queue-changed`).
+  void _setQueue(String sid, List<Map<String, Object?>> items) {
+    final session = sessions[sid];
+    if (session == null) return;
+    session['queue'] = items;
+    session['updated'] = _now();
+    _pushSession(sid);
+    _event('session/queue-changed', [sid, items]);
+  }
+
   /// ACP's mode state for [session], as `session/new` and `session/load`
   /// answer it: the mode it is in, and every mode this agent offers.
   Map<String, Object?> _modesFor(Map<String, Object?> session) {
@@ -3687,7 +3801,8 @@ class FakeHarness {
     ];
     return {
       'currentModeId':
-          session['permissionMode'] ?? (modes.isEmpty ? null : modes.first['id']),
+          session['permissionMode'] ??
+          (modes.isEmpty ? null : modes.first['id']),
       'availableModes': modes,
     };
   }

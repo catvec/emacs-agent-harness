@@ -24,6 +24,9 @@ Future<void> _pump(
   double textScale = 2,
   bool reply = false,
   bool keyboard = false,
+  bool running = false,
+  bool canQueue = false,
+  List<String>? queued,
 }) async {
   tester.view.physicalSize = Size(width, height);
   tester.view.devicePixelRatio = 1;
@@ -46,8 +49,15 @@ Future<void> _pump(
               const Expanded(child: SizedBox.shrink()),
               MessageComposer(
                 onSend: (_, _) => true,
+                onQueue: canQueue
+                    ? (text) {
+                        queued?.add(text);
+                        return true;
+                      }
+                    : null,
+                canQueue: canQueue,
                 onStop: () {},
-                running: false,
+                running: running,
                 cancelling: false,
                 canAttach: true,
                 canVoice: true,
@@ -208,6 +218,50 @@ void main() {
         expect(find.text(long), findsOneWidget);
       },
     );
+
+    testWidgets('the queue and the stop have their place at $width', (
+      tester,
+    ) async {
+      final queued = <String>[];
+      final semantics = tester.ensureSemantics();
+      await _pump(
+        tester,
+        width: width,
+        running: true,
+        canQueue: true,
+        queued: queued,
+      );
+      // The place the pictures took is the queue's while the agent works:
+      // a picture cannot go with a message queued for the next turn.
+      expect(find.byKey(const Key('composer-attach')), findsNothing);
+      expect(find.text('Message for the next turn'), findsOneWidget);
+      expect(find.bySemanticsLabel('Queue message'), findsOneWidget);
+      expect(find.byKey(const Key('composer-stop')), findsOneWidget);
+      expect(
+        tester.getSize(find.byKey(const Key('composer-queue'))).width,
+        greaterThanOrEqualTo(42),
+      );
+      expect(
+        tester.getSize(find.byKey(const Key('composer-stop'))).width,
+        greaterThanOrEqualTo(42),
+      );
+      expect(tester.getSize(_field).width, greaterThanOrEqualTo(width - 24));
+      // Nothing typed: no message to queue.
+      await tester.tap(find.byKey(const Key('composer-queue')));
+      await tester.pump();
+      expect(queued, isEmpty);
+      await tester.enterText(_field, 'A message for the next turn');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('composer-queue')));
+      await tester.pump();
+      expect(queued, ['A message for the next turn']);
+      expect(
+        tester.widget<EditableText>(find.byType(EditableText)).controller.text,
+        isEmpty,
+      );
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+    });
   }
 
   testWidgets('a wide window keeps the controls beside the field', (

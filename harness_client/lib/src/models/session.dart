@@ -177,6 +177,34 @@ class SessionSummary {
         extra: {...extra, 'non-interactive': on, 'nonInteractive': on},
       );
 
+  /// This record with [queue] as the messages waiting for its next turn, as
+  /// the harness announces them (`session/queue-changed`).
+  SessionSummary withQueue(List<QueueItem> queue) => SessionSummary(
+    id: id,
+    title: title,
+    cwd: cwd,
+    project: project,
+    model: model,
+    kind: kind,
+    status: status,
+    parentId: parentId,
+    updatedAt: updatedAt,
+    createdAt: createdAt,
+    lastMessageAt: lastMessageAt,
+    usage: usage,
+    contextWindow: contextWindow,
+    permissionMode: permissionMode,
+    todos: todos,
+    pending: pending,
+    queue: queue,
+    steering: steering,
+    worktree: worktree,
+    head: head,
+    plan: plan,
+    virtual: virtual,
+    extra: extra,
+  );
+
   /// Whether the record this was made from says anything of [key], a list
   /// the harness keeps for a session (`pending`, `queue`, `todos`).  A plain
   /// ACP listing says nothing of them; a session record from the harness
@@ -354,15 +382,22 @@ class PendingRequest {
 }
 
 class QueueItem {
-  const QueueItem({required this.id, required this.text, this.from});
+  const QueueItem({
+    required this.id,
+    required this.text,
+    this.from,
+    this.attachments = const [],
+  });
+
+  factory QueueItem.fromWire(JsonMap wire) => QueueItem(
+    id: asStringOr(wire['id'], ''),
+    text: asStringOr(wire['text'], ''),
+    from: wire['from'],
+    attachments: asMapList(wire['attachments']),
+  );
 
   static List<QueueItem> listFrom(Object? value) => [
-    for (final item in asMapList(value))
-      QueueItem(
-        id: asStringOr(item['id'], ''),
-        text: asStringOr(item['text'], ''),
-        from: item['from'],
-      ),
+    for (final item in asMapList(value)) QueueItem.fromWire(item),
   ];
 
   final String id;
@@ -371,4 +406,24 @@ class QueueItem {
   /// Who sent the message when the person did not: the harness's sender
   /// plist, as it came.
   final Object? from;
+
+  /// The files and pictures queued with the message, as the harness holds
+  /// them.  The app queues words alone: a picture of its own would have to be
+  /// copied to the harness's machine first.  Another client's item may carry
+  /// them all the same.
+  final List<JsonMap> attachments;
+
+  bool get hasAttachments => attachments.isNotEmpty;
+
+  int get images => attachments.where((item) => item['type'] == 'image').length;
+
+  /// The words of the message, or what stands for its pictures when it has
+  /// none of its own.
+  String get displayText {
+    final words = text.trim();
+    if (words.isNotEmpty) return words;
+    final count = images > 0 ? images : attachments.length;
+    if (count == 0) return '';
+    return count == 1 ? '(1 image)' : '($count images)';
+  }
 }

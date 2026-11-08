@@ -18,6 +18,8 @@ class MessageComposer extends StatefulWidget {
     required this.running,
     required this.cancelling,
     required this.canAttach,
+    this.canQueue = false,
+    this.onQueue,
     this.enabled = true,
     this.canVoice = false,
     this.onVoice,
@@ -37,6 +39,16 @@ class MessageComposer extends StatefulWidget {
   /// (there is no connection to send it over), what was typed stays in the
   /// field, to be sent when it can be.
   final bool Function(String text, List<PromptAttachment> attachments) onSend;
+
+  /// Takes the message to queue for the next turn, while the agent works.
+  /// Whether it was taken, as [onSend] answers.  The message is words alone:
+  /// the queue of the harness takes files of its own machine, and this box's
+  /// pictures are picked on the device.
+  final bool Function(String text)? onQueue;
+
+  /// Whether the harness has a queue to take a message for the next turn.
+  final bool canQueue;
+
   final VoidCallback onStop;
   final bool running;
   final bool cancelling;
@@ -106,6 +118,17 @@ class _MessageComposerState extends State<MessageComposer> {
       widget.enabled &&
       !widget.running &&
       (_text.text.trim().isNotEmpty || _attachments.isNotEmpty);
+
+  /// Whether the words can be queued for the next turn: only while the agent
+  /// works, and only words.  The harness's queue takes files of its own
+  /// machine, and a picture picked here would be lost with the message.
+  bool get _canQueue =>
+      widget.canQueue &&
+      widget.onQueue != null &&
+      widget.enabled &&
+      widget.running &&
+      _attachments.isEmpty &&
+      _text.text.trim().isNotEmpty;
 
   @override
   void initState() {
@@ -178,6 +201,16 @@ class _MessageComposerState extends State<MessageComposer> {
     _focus.requestFocus();
   }
 
+  Future<void> _queue() async {
+    if (!_canQueue) return;
+    final text = _text.text;
+    // As sending: a message that was not taken stays in the field.
+    if (!widget.onQueue!(text)) return;
+    _text.clear();
+    setState(() => _attachmentError = null);
+    _focus.requestFocus();
+  }
+
   Future<void> _pickImages() async {
     if (_picking) return;
     setState(() {
@@ -218,7 +251,13 @@ class _MessageComposerState extends State<MessageComposer> {
     if (!desktop) return KeyEventResult.ignored;
     if (event.logicalKey == LogicalKeyboardKey.enter &&
         !HardwareKeyboard.instance.isShiftPressed) {
-      _send();
+      // Enter does what the box's main action does: send, or queue the words
+      // for the turn that runs.
+      if (widget.running) {
+        _queue();
+      } else {
+        _send();
+      }
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -264,7 +303,9 @@ class _MessageComposerState extends State<MessageComposer> {
         : widget.awaitingAnswer
         ? 'Answer above to continue'
         : widget.running
-        ? 'The agent is working…'
+        ? (widget.canQueue && widget.onQueue != null
+              ? 'Message for the next turn'
+              : 'The agent is working…')
         : widget.hint ??
               (_keyboardHint ? 'Message · Enter to send' : 'Message');
     return Focus(
@@ -302,13 +343,35 @@ class _MessageComposerState extends State<MessageComposer> {
 
   Widget _primary(ThemeData theme) {
     if (widget.running) {
-      return _RoundActionButton(
-        icon: CupertinoIcons.stop_fill,
-        materialIcon: Icons.stop_rounded,
-        color: theme.colorScheme.error,
-        label: 'Stop the turn',
-        busy: widget.cancelling,
-        onTap: widget.cancelling ? null : widget.onStop,
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (widget.canQueue && widget.onQueue != null) ...[
+            _RoundActionButton(
+              key: const Key('composer-queue'),
+              icon: CupertinoIcons.rectangle_stack_badge_plus,
+              materialIcon: Icons.playlist_add_rounded,
+              color: _canQueue
+                  ? theme.colorScheme.primary
+                  : theme.colorScheme.surfaceContainerHigh,
+              foreground: _canQueue
+                  ? Colors.white
+                  : theme.colorScheme.onSurfaceVariant,
+              label: 'Queue message',
+              onTap: _canQueue ? _queue : null,
+            ),
+            const SizedBox(width: 6),
+          ],
+          _RoundActionButton(
+            key: const Key('composer-stop'),
+            icon: CupertinoIcons.stop_fill,
+            materialIcon: Icons.stop_rounded,
+            color: theme.colorScheme.error,
+            label: 'Stop the turn',
+            busy: widget.cancelling,
+            onTap: widget.cancelling ? null : widget.onStop,
+          ),
+        ],
       );
     }
     return _RoundActionButton(
@@ -449,7 +512,8 @@ class _MessageComposerState extends State<MessageComposer> {
                         Row(
                           key: const Key('composer-controls'),
                           children: [
-                            if (widget.canAttach) _attach(theme),
+                            if (widget.canAttach && !widget.running)
+                              _attach(theme),
                             if (widget.canVoice) _voice(theme),
                             const Spacer(),
                             _primary(theme),
@@ -461,7 +525,7 @@ class _MessageComposerState extends State<MessageComposer> {
                   return Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      if (widget.canAttach) _attach(theme),
+                      if (widget.canAttach && !widget.running) _attach(theme),
                       Expanded(child: _field(theme, maxLines: 5)),
                       if (widget.canVoice) _voice(theme),
                       const SizedBox(width: 6),
