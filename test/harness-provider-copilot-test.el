@@ -571,15 +571,57 @@ is not even a list of them (a number, a dotted list) is dropped whole."
     (should (eq 'subscription (plist-get harness-provider-copilot--status :billing)))
     (harness-test-wait (lambda () (null harness-provider-copilot--probe)) 15 "the probe to exit")))
 
-(ert-deftest harness-provider-copilot-models-before-login ()
-  "Before `copilot login' the CLI's built-in list of models stands in."
+(ert-deftest harness-provider-copilot-signed-out-lists-nothing ()
+  "Before `copilot login' no model is offered, built-in list or not.
+The built-in list names what Copilot has, not what this account may
+run, so nothing is asked of it without a login."
   (harness-provider-copilot-test--setup)
   (harness-provider-copilot-test--with-env '("HARNESS_FAKE_COPILOT_AUTH=none")
-    (let ((models (harness-test-await (harness-call 'provider/models t) 20)))
-      (should (equal '("copilot:claude-sonnet-5" "copilot:gpt-5.4-mini" "copilot:gemini-3.8-flash")
-                     (mapcar (lambda (m) (plist-get m :id)) models)))
-      (should (equal "GPT-5.4 mini" (plist-get (nth 1 models) :label)))
-      (should (equal "Gemini 3.8 Flash" (plist-get (nth 2 models) :label))))))
+    (let ((log (harness-provider-copilot-test--log-file)))
+      (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+        (should-not (harness-test-await (harness-call 'provider/models t) 20))
+        (should-not (harness-provider-copilot-test--requests log "models.list"))
+        (should-not (harness-provider-copilot-test--requests log "models.getBuiltInCatalog"))
+        ;; A lookup after the answer lists nothing, not an older catalogue.
+        (should-not (harness-test-await (harness-call 'provider/models) 20))))))
+
+(ert-deftest harness-provider-copilot-logout-clears-listed-models ()
+  "A refresh after `copilot logout' stops offering the models listed before.
+The catalogue and the models the picks remember go with the login."
+  (harness-provider-copilot-test--setup)
+  (should (harness-test-await (harness-call 'provider/models t) 20))
+  (should (>= (hash-table-count harness-provider-copilot--catalogue) 1))
+  ;; The next process reads the environment again: the account signed out.
+  (harness-provider-copilot-close-all)
+  (harness-provider-copilot-test--with-env '("HARNESS_FAKE_COPILOT_AUTH=none")
+    (should-not (harness-test-await (harness-call 'provider/models t) 20)))
+  (should (zerop (hash-table-count harness-provider-copilot--catalogue)))
+  (should-not (harness-test-await (harness-call 'provider/models) 20)))
+
+(ert-deftest harness-provider-copilot-refresh-asks-the-account-again ()
+  "A refresh checks the login, even with a process that already answered.
+Another account may have signed in or out since the handshake."
+  (harness-provider-copilot-test--setup)
+  (let ((calls nil)
+        (entry (harness-provider-copilot--make-session :id "probe" :probe t)))
+    (cl-letf (((symbol-function 'harness-provider-copilot--with-server)
+               (lambda (fn)
+                 (funcall fn entry '(:isAuthenticated t :authType "user" :login "octocat"))))
+              ((symbol-function 'harness-provider-copilot--call)
+               (lambda (_entry method &optional _params)
+                 (push method calls)
+                 (harness-resolved (pcase method
+                                     ("auth.getStatus" '(:isAuthenticated :false))
+                                     ("models.list" '(:models ((:id "gpt-5.4"))))
+                                     (_ '(:models nil)))))))
+      (should-not (harness-test-await (harness-provider-copilot--models t)))
+      (should (equal '("auth.getStatus") calls))
+      ;; Without a refresh the handshake's answer stands, and asks nothing.
+      (setq calls nil)
+      (should (equal '("gpt-5.4")
+                     (mapcar (lambda (m) (plist-get m :name))
+                             (harness-test-await (harness-provider-copilot--models)))))
+      (should-not (member "auth.getStatus" calls)))))
 
 ;;;; Turns
 

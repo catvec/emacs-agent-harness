@@ -99,23 +99,47 @@
        (funcall (nth 3 (car requests)) "late failure")))))
 
 (ert-deftest harness-ui-model-complexity-picker-preserves-order-and-real-model-id ()
+  "The ranked picker opens on the flat list, headed as an estimate, with
+the levels in the catalogue's low-to-high order.  Back goes to the
+providers, and a model chosen there keeps its real id and label."
   (harness-ui-model-complexity-test-with
-   (let (picked)
+   (let ((picked nil) (prompts nil) (levels nil))
      (cl-letf (((symbol-function 'completing-read)
                 (lambda (prompt table &rest _)
-                  (should (string-match-p "estimated work complexity" prompt))
-                  (let* ((all (all-completions "" table))
-                         (meta (completion-metadata "" table nil)))
-                    (should (eq (completion-metadata-get meta 'display-sort-function) 'identity))
-                    (should (eq (completion-metadata-get meta 'cycle-sort-function) 'identity))
-                    (should (string-prefix-p "Simple tasks" (nth 0 all)))
-                    (should (string-prefix-p "Routine tasks" (nth 1 all)))
-                    (should (string-prefix-p "Unrated" (car (last all))))
-                    (nth 1 all)))))
+                  (push prompt prompts)
+                  (push (all-completions "" table) levels)
+                  (if (= 1 (length prompts))
+                      "Back"
+                    (signal 'quit nil)))))
+       (condition-case nil
+           (harness-ui-model-complexity--read
+            harness-ui-model-complexity-test--rows
+            (lambda (id label) (setq picked (list id label))))
+         (quit nil)))
+     (should-not picked)
+     (should (equal '("Model · estimated work complexity, low to high: "
+                      "Model provider: ")
+                    (nreverse prompts)))
+     (let* ((flat (nth 1 levels))
+            (table (harness-ui--model-picker-table flat flat)))
+       (let ((meta (completion-metadata "" table nil)))
+         (should (eq (completion-metadata-get meta 'display-sort-function) 'identity))
+         (should (eq (completion-metadata-get meta 'cycle-sort-function) 'identity)))
+       (should (string-prefix-p "Simple tasks  " (nth 0 flat)))
+       (should (string-prefix-p "Routine tasks  " (nth 1 flat)))
+       (should (string-prefix-p "Complex tasks  " (nth 2 flat)))
+       (should (string-prefix-p "Very complex tasks  " (nth 3 flat)))
+       (should (string-prefix-p "Unrated  " (nth 4 flat)))
+       (should (equal "Back" (car (last flat)))))
+     (should (equal '("ChatGPT" "Claude Code" "Local" "All models")
+                    (nth 0 levels))))
+   (let ((picked nil))
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt table &rest _) (nth 1 (all-completions "" table)))))
        (harness-ui-model-complexity--read
         harness-ui-model-complexity-test--rows
-        (lambda (id label) (setq picked (list id label))))
-       (should (equal picked '("chatgpt:gpt-5.6-luna" "GPT-5.6 Luna (ChatGPT)")))))))
+        (lambda (id label) (setq picked (list id label)))))
+     (should (equal picked '("chatgpt:gpt-5.6-luna" "GPT-5.6 Luna (ChatGPT)"))))))
 
 (ert-deftest harness-ui-model-complexity-picker-disambiguates-equal-names ()
   (harness-ui-model-complexity-test-with
@@ -125,7 +149,7 @@
      (cl-letf (((symbol-function 'completing-read)
                 (lambda (_prompt table &rest _)
                   (let ((all (all-completions "" table)))
-                    (should (= (length all) 2))
+                    (should (= (length all) 3))
                     (should-not (equal (car all) (cadr all)))
                     (cadr all)))))
        (harness-ui-model-complexity--read (list one two) (lambda (id _label) (setq picked id))))

@@ -18,10 +18,14 @@ ID. `g` refreshes the catalogue, `w` copies the ID at point, and `q` goes
 back. Opening the guide does not select a model or make an inference request.
 
 With the plugin enabled, the normal session/task model selector (`C-c h
-m`, and the model buttons) also shows the complexity level before each
-model name, in the same order. Choosing one still uses the normal model
-handoff checks; cancelling changes nothing. If a connected harness cannot
-provide rankings, the selector falls back to the normal catalogue.
+m`, and the model buttons) opens on that same low-to-high list: each row
+leads with its estimated level, then the real model name, its provider
+and its ID.  It is the shared model browser, so `Back` goes to the
+providers and their families, `All models` back to this flat list, and a
+typed query searches every model of every provider.  Choosing one still
+uses the normal model handoff checks; cancelling changes nothing.  If a
+connected harness cannot provide rankings, the selector falls back to
+the normal catalogue.
 
 ## Plain task levels
 

@@ -156,7 +156,13 @@
 ;; the state directory between starts.  `harness-provider-claude-models'
 ;; only seeds it, so a model the CLI gains needs no change here; a name
 ;; nothing lists is resolved (`harness-provider-claude--resolve') or
-;; estimated, never given a small window.  See "Model catalogue" below.
+;; estimated, never given a small window.  The catalogue is offered only
+;; while the executable is there: a missing executable lists nothing,
+;; and so do a failed answer and an explicit signed-out account, while
+;; a CLI too old to name one keeps its catalogue, as does one not asked
+;; yet.  A refresh asks and clears the models listed before when the
+;; account is gone; a model lookup still knows the static metadata.
+;; See "Model catalogue" below.
 ;;
 ;; Context.  A session's CLI loads the CLAUDE.md files, as `claude'
 ;; does on its own, but not Claude Code's auto memory unless
@@ -3424,6 +3430,12 @@ read from `harness-provider-claude--listing-file'.")
 (defvar harness-provider-claude--cli-answered nil
   "When a CLI last answered `initialize', as a float time.")
 
+(defvar harness-provider-claude--authenticated 'unchecked
+  "Whether the CLI's last initialize answer identified a usable account.
+`unchecked' means no answer yet, `unknown' an older CLI without account
+information.  Nil means an explicit signed-out account or a failed
+initialize answer; t means an API or subscription account.")
+
 (defvar harness-provider-claude--probe-answered nil
   "The quota probe whose `initialize' answer has arrived, or nil.")
 
@@ -3472,6 +3484,7 @@ the quota probe started to ask, gives up.")
   "Forget what the CLI and the API listed, on disk too."
   (setq harness-provider-claude--listing nil
         harness-provider-claude--cli-answered nil
+        harness-provider-claude--authenticated 'unchecked
         harness-provider-claude--probe-answered nil
         harness-provider-claude--api-asked nil
         harness-provider-claude--api-fetch nil)
@@ -3537,6 +3550,12 @@ A bare promise, as this file pushed before a reload, waits on any."
   "Handle the CLI's answer PAYLOAD to ENTRY's `initialize'; OK says it succeeded.
 It names the account and lists the models.  A probe that was only to
 list them exits once they came, unless a usage report is due from it."
+  (setq harness-provider-claude--authenticated
+        (and ok (if (plist-member payload :account)
+                    (and (plist-get (harness-provider-claude-account-info
+                                     (plist-get payload :account)) :billing)
+                         t)
+                  'unknown)))
   (when ok
     (when-let* ((account (plist-get payload :account)))
       (harness-provider-claude--handle-account entry account))
@@ -3929,21 +3948,43 @@ catalogue's to estimate."
                                                        :key (lambda (c) (plist-get c :name)) :test #'equal))
                                   full)))))
 
+(defun harness-provider-claude--program-p ()
+  "Non-nil when the configured Claude CLI can run locally."
+  (let ((program harness-provider-claude-program))
+    (if (file-name-absolute-p program)
+        (file-executable-p program)
+      (executable-find program))))
+
+(defun harness-provider-claude--available-models ()
+  "Return the Claude catalogue when the CLI's last answer allows it.
+A missing executable offers nothing.  An explicit signed-out account
+or a failed answer hides the catalogue; an older CLI that names no
+account, and one that has not answered yet, still list it."
+  (and (harness-provider-claude--program-p)
+       (not (null harness-provider-claude--authenticated))
+       (harness-provider-claude--catalogue)))
+
 (defun harness-provider-claude--models (&optional refresh)
-  "Return a promise of the Claude models.
-They are what `harness-provider-claude--catalogue' says.  What is
-known answers at once.  REFRESH asks first: a probe for the CLI's
-listing, unless a CLI listed the models moments ago, and the API for
-its own when there is a key; the promise resolves once they answered
-or gave up.  The API's listing is also asked for, in the background,
-when it is older than `harness-provider-claude--api-models-ttl'."
-  (let ((asks (delq nil (list (and refresh (harness-provider-claude--start-listing))
-                              (harness-provider-claude--list-api refresh)))))
-    (if (and refresh asks)
-        (harness-then (harness-all asks)
-                      (lambda (_) (harness-provider-claude--catalogue))
-                      (lambda (_) (harness-provider-claude--catalogue)))
-      (harness-resolved (harness-provider-claude--catalogue)))))
+  "Return a promise of the models the local Claude CLI can use.
+The executable must be there for any of them.  A failed answer or an
+explicit signed-out account hides the catalogue, while an older CLI
+that names no account, and one not asked yet, keep it.  The account
+probe makes no model call and starts no sign-in flow.
+
+REFRESH asks for the CLI's listing unless it just answered, and the
+API's models when there is a key; the promise resolves once the probe
+answered, so a refresh sees a signed-out account at once.  The API's
+listing is also asked for in the background when older than
+`harness-provider-claude--api-models-ttl'."
+  (if (not (harness-provider-claude--program-p))
+      (harness-resolved nil)
+    (let ((asks (delq nil (list (and refresh (harness-provider-claude--start-listing))
+                                (harness-provider-claude--list-api refresh)))))
+      (if (and refresh asks)
+          (harness-then (harness-all asks)
+                        (lambda (_) (harness-provider-claude--available-models))
+                        (lambda (_) (harness-provider-claude--available-models)))
+        (harness-resolved (harness-provider-claude--available-models))))))
 
 (defun harness-provider-claude--family (name)
   "Return the family of Claude model NAME, such as \"opus\", or nil.
@@ -3993,8 +4034,10 @@ the CLI ran under it (`:resolves-to'); \"[1m]\" after a name is the
 model before it with a window of a million tokens.  An alias nothing
 was learned of stands for the newest model of its family, its window
 flagged as the estimate it is.  A full name nothing knows gets a label
-and takes images, and the catalogue estimates its window."
-  (let* ((learned (harness-provider-claude--learned-window name))
+and takes images, and the catalogue estimates its window.  A model
+lookup still knows static metadata when availability hides the listing."
+  (let* ((models (or models (harness-provider-claude--catalogue)))
+         (learned (harness-provider-claude--learned-window name))
          (base (string-remove-suffix "[1m]" name))
          (one-million (harness-provider-claude--one-million-p name))
          (alias (not (string-prefix-p "claude-" base)))
@@ -4002,7 +4045,7 @@ and takes images, and the catalogue estimates its window."
          (target (or (harness-provider-claude--alias-target name)
                      (harness-provider-claude--alias-target base)))
          (target (and target (string-remove-suffix "[1m]" target)))
-         (known (or (funcall by-name target) (and one-million (funcall by-name base))))
+         (known (or (funcall by-name target) (funcall by-name base)))
          (family (and (not known) alias (harness-provider-claude--family-model base models)))
          (model (or known family))
          (window (plist-get model :context-window))
@@ -4019,9 +4062,10 @@ and takes images, and the catalogue estimates its window."
                    (list :context-window window))
                   (t (list :context-window window :context-window-estimated t
                            :context-window-basis (or (plist-get model :context-window-basis)
-                                                     (plist-get model :id)))))
+                                                     (plist-get model :id)
+                                                     (concat "claude:" (plist-get model :name))))))
             (cond (target (list :resolves-to target))
-                  (model (list :resolves-to (plist-get model :name))))
+                  ((and model alias) (list :resolves-to (plist-get model :name))))
             (and model
                  (apply #'harness-plist-remove model
                         :id :name :label :provider :provider-label :context-window

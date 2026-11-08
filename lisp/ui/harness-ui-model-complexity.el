@@ -43,35 +43,19 @@
     (if provider (format "%s (%s)" label provider) label)))
 
 (defun harness-ui-model-complexity--read (models callback)
-  "Offer ranked MODELS and call CALLBACK with the chosen real (ID LABEL).
-Completion metadata preserves the backend's low-to-high ordering, even
-when a completion frontend would otherwise sort candidates by name."
-  (let* ((table (mapcar (lambda (m)
-                          ;; Always include the id: equal display names remain distinct.
-                          (cons (format "%-18s  %s  [%s]"
-                                        (plist-get m :complexity-label)
-                                        (harness-ui-model-complexity--label m)
-                                        (plist-get m :id))
-                                m))
-                        models))
-         (collection
-          (lambda (string pred action)
-            (if (eq action 'metadata)
-                '(metadata (category . harness-model)
-                           (display-sort-function . identity)
-                           (cycle-sort-function . identity))
-              (complete-with-action action table string pred))))
-         (choice (completing-read "Model (estimated work complexity, low to high): " collection nil t))
-         (model (cdr (assoc choice table))))
-    (if model
-        (funcall callback (plist-get model :id) (harness-ui-model-complexity--label model))
-      (message "No model chosen"))))
+  "Browse ranked MODELS and call CALLBACK with the chosen real (ID LABEL).
+Open on the flat low-to-high list, headed as an estimate, and offer the
+shared provider/category navigation from there: Back goes to providers
+and their families.  Model rows keep the backend's ordering."
+  (harness-ui-read-model models callback t
+                         "Model · estimated work complexity, low to high: "))
 
 (defun harness-ui-model-complexity--pick (callback)
   "Handle a model picker for CALLBACK using the optional complexity guide.
 Return non-nil immediately; the catalogue is fetched asynchronously.
 Fall back to the normal picker when the connected harness cannot rank."
   (let ((frame (selected-frame)))
+    (message "Model catalogue loading…")
     (harness-ui-call
      "_harness/model-complexity/list" (list :refresh t)
      (lambda (models)
@@ -82,7 +66,7 @@ Fall back to the normal picker when the connected harness cannot rank."
        (when (frame-live-p frame)
          (harness-ui--in-frame
           frame (lambda ()
-                  (message "Complexity guide unavailable; showing the normal model picker")
+                  (message "Complexity guide unavailable")
                   (harness-ui--choose-model callback)))))))
   t)
 

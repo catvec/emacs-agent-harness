@@ -2746,10 +2746,10 @@ alone."
                    (pcase prompt
                      ("Thinking: " "high")
                      ("Permission mode: " "YOLO")
-                     ("Model: " (caar table))
+                     ("Model provider: " (car (all-completions "demo:other" table)))
                      (_ (error "Unexpected question %s" prompt)))))
                 ((symbol-function 'harness-ui-refresh-models)
-                 (lambda (&optional callback)
+                 (lambda (&optional callback _on-error _refresh)
                    (funcall callback (list (list :id "demo:other" :label "Other" :provider-label "Demo"))))))
         (with-current-buffer harness-ui-sessions--buffer-name
           (cl-flet ((run (command)

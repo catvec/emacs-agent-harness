@@ -110,6 +110,7 @@ provides:
 - `harness-ui-image-max-height` — Maximum pixel height of inline images in harness views.
 - `harness-ui-image-max-scale` — How far larger than its own pixels an image inline in a view may show.
 - `harness-ui-menu-idle-delay` — Seconds `harness-ui-prefix-key` waits for a key before its menu opens.
+- `harness-ui-model-group-function` — Function of a catalogue model returning its categories as a list.
 - `harness-ui-positions` — Named positions a session can be displayed in.
 - `harness-ui-prefix-key` — Prefix key of `harness-ui-map` in `harness-global-mode`.
 - `harness-ui-switch-project-function` — Function switching to a project before a session of it shows, or nil.

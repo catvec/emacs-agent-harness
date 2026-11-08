@@ -165,7 +165,13 @@ an Anthropic API key, what the API's /v1/models lists; it is kept in
 the state directory between starts.  `harness-provider-claude-models`
 only seeds it, so a model the CLI gains needs no change here; a name
 nothing lists is resolved (`harness-provider-claude--resolve`) or
-estimated, never given a small window.  See "Model catalogue" below.
+estimated, never given a small window.  The catalogue is offered only
+while the executable is there: a missing executable lists nothing,
+and so do a failed answer and an explicit signed-out account, while
+a CLI too old to name one keeps its catalogue, as does one not asked
+yet.  A refresh asks and clears the models listed before when the
+account is gone; a model lookup still knows the static metadata.
+See "Model catalogue" below.
 
 Context.  A session's CLI loads the CLAUDE.md files, as `claude`
 does on its own, but not Claude Code's auto memory unless

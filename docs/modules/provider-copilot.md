@@ -88,8 +88,11 @@ allowance from `account.getQuota`.
 
 The model catalogue comes from `models.list` (context window, image
 input, reasoning efforts and token prices per model), asked of a
-short-lived probe process when no session process runs.  Before
-`copilot login` the CLI's built-in list of model ids stands in.
+short-lived probe process when no session process runs.  A CLI that
+is not logged in lists nothing, and a refresh asks the login again,
+so a `copilot logout` stops the models listed before.  The CLI's
+built-in list of model ids, which names what Copilot has rather than
+what the account may run, stands in only after a login.
 
 Session state.  The CLI keeps what each of its sessions said and did
 in a directory of its own, STATE/ID/ (events.jsonl and the files

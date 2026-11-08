@@ -26,6 +26,7 @@
 (defvar harness-provider-claude-api-key)
 (defvar harness-provider-claude--api-base)
 (defvar harness-provider-claude--listing)
+(defvar harness-provider-claude--authenticated)
 (declare-function harness-provider-claude--forget-listing "harness-provider-claude")
 (declare-function harness-provider--forget "harness-provider")
 (defvar harness-provider-claude--call-output)
@@ -214,6 +215,10 @@ and the sessions created meanwhile kept that window."
   "Return the model of MODELS whose id is claude:NAME."
   (cl-find (concat "claude:" name) models :key (lambda (m) (plist-get m :id)) :test #'equal))
 
+(defun harness-provider-claude-test--claude-models (models)
+  "Return only those of MODELS that the Claude provider lists."
+  (cl-remove-if-not (lambda (m) (eq 'claude (plist-get m :provider))) models))
+
 (ert-deftest harness-provider-claude-lists-what-the-cli-lists ()
   "The catalogue is what the CLI's `initialize' answer lists, over what is known.
 Aliases come first, with the window and the prices of the model each
@@ -272,6 +277,46 @@ too, with an estimated window; the models known before stay."
     (setq harness-provider-claude--listing 'unread)
     (harness-test-load-module 'provider-claude)
     (should (equal "claude-opus-5-6" (plist-get (harness-call 'provider/model "claude:opus") :resolves-to)))))
+
+(ert-deftest harness-provider-claude-models-need-the-cli ()
+  "Without the executable no Claude model is offered; lookups still know them.
+The static catalogue and the state directory stay, so a model a session
+names is still described when the listing hides it."
+  (harness-provider-claude-test--setup)
+  (let ((harness-provider-claude-program (expand-file-name "no-such-claude" (harness-test-temp-dir))))
+    (should-not (harness-provider-claude-test--claude-models
+                 (harness-test-await (harness-call 'provider/models t) 15)))
+    (should-not (harness-provider-claude-test--claude-models
+                 (harness-test-await (harness-call 'provider/models) 15)))
+    ;; A model a session names is still described, without a CLI to list it.
+    (should (= 1000000 (plist-get (harness-call 'provider/model "claude:claude-opus-5-5")
+                                  :context-window)))))
+
+(ert-deftest harness-provider-claude-signed-out-lists-nothing ()
+  "A CLI whose account says it is signed out offers no model.
+That is an answer, not an old CLI, and nothing static stands in for it."
+  (harness-provider-claude-test--setup)
+  (let ((process-environment (cons "HARNESS_FAKE_CLAUDE_AUTH=signed-out" process-environment)))
+    (should-not (harness-provider-claude-test--claude-models
+                 (harness-test-await (harness-call 'provider/models t) 15)))
+    (should-not (harness-provider-claude-test--claude-models
+                 (harness-test-await (harness-call 'provider/models) 15)))))
+
+(ert-deftest harness-provider-claude-signed-out-hides-listed-models ()
+  "A refresh with a signed-out account clears the models listed before."
+  (harness-provider-claude-test--setup)
+  (let ((process-environment
+         (cons (concat "HARNESS_FAKE_CLAUDE_MODELS="
+                       (harness-json-encode-text harness-provider-claude-test--cli-models))
+               process-environment)))
+    (should (harness-provider-claude-test--claude-models
+             (harness-test-await (harness-call 'provider/models t) 15)))
+    ;; The account the CLI reports is signed out: what it listed does not stand.
+    (setq harness-provider-claude--authenticated nil)
+    (should-not (harness-provider-claude-test--claude-models
+                 (harness-test-await (harness-call 'provider/models t) 15)))
+    (should-not (harness-provider-claude-test--claude-models
+                 (harness-test-await (harness-call 'provider/models) 15)))))
 
 (ert-deftest harness-provider-claude-listing-waits-for-its-own-probe ()
   "A listing waits for the probe started for it, not for the end of an earlier one.

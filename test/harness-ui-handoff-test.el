@@ -120,13 +120,13 @@
 (defun harness-ui-handoff-test--choose-hosted (command)
   "Run COMMAND, answering its model prompt with the hosted model."
   (cl-letf (((symbol-function 'harness-ui-refresh-models)
-             (lambda (&optional callback)
+             (lambda (&optional callback _on-error _refresh)
                (let ((models (list (list :id "hosted:m" :label "Hosted M"
                                          :provider-label "Hosted" :context-window 1000000))))
                  (clrhash harness-ui--models)
                  (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
                  (when callback (funcall callback models)))))
-            ((symbol-function 'completing-read) (lambda (_prompt table &rest _) (caar table))))
+            ((symbol-function 'completing-read) (harness-test-choose-model "hosted:m")))
     (funcall command)))
 
 (defun harness-ui-handoff-test--press (buffer key)

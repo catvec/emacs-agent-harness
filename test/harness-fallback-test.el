@@ -16,6 +16,7 @@
 
 (defvar harness-openai-endpoints)
 (defvar harness-deepseek-always-register)
+(defvar harness-provider-claude-program)
 (declare-function harness-define-provider "harness-provider")
 
 (defvar harness-fallback-test-requests nil
@@ -199,11 +200,14 @@ tiers below first, the strongest of them first, then those above."
   (harness-test-with-temp-state
     (harness-test-reset-bus)
     (let ((harness-openai-endpoints nil)
-          (harness-deepseek-always-register t))
+          (harness-deepseek-always-register t)
+          (harness-provider-claude-program (harness-test-fixture "fake-claude.py")))
       (dolist (m '(store provider provider-claude provider-openai provider-deepseek fallback))
         (harness-test-load-module m))
       (unwind-protect
           (progn
+            ;; The CLI names no account (an older one): its catalogue stands.
+            (harness-test-await (harness-call 'provider/models t))
             ;; Fable alone is frontier: Opus 5.5 is hard, the strongest
             ;; model the harness picks on its own.
             (should (eq :frontier (harness-provider-model-tier "claude:claude-fable-5-1")))

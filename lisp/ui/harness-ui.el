@@ -1223,8 +1223,9 @@ comes, or when naming it failed."
 (defvar harness-ui--models-seen nil
   "(CONNECTION . MODELS): the catalogue last fetched, and over which connection.")
 
-(defun harness-ui-refresh-models (&optional callback on-error)
+(defun harness-ui-refresh-models (&optional callback on-error refresh)
   "Reload the model catalogue cache, then call CALLBACK with the models.
+REFRESH asks providers for a fresh listing, including availability changes.
 Every view redraws (`harness-ui-redraw-hook') when the catalogue is new:
 it changed, or it is the first over this connection.  The harness says
 the catalogue was updated (`provider/models-updated') whenever a
@@ -1237,7 +1238,7 @@ echo area, or ignored when there is no CALLBACK.  A caller that has
 something to show anyway -- a picker over the cache it holds -- passes
 one, so that a harness that cannot answer does not leave the command
 with nothing."
-  (harness-ui-call "_harness/provider/models" nil
+  (harness-ui-call "_harness/provider/models" (and refresh (list :refresh t))
                    (lambda (models)
                      (let ((new (not (and (eq harness-ui-connection (car harness-ui--models-seen))
                                           (equal models (cdr harness-ui--models-seen))))))
@@ -2858,27 +2859,13 @@ refused, so it never ran, a `caution'."
 
 (defun harness-ui-model-label (model-id)
   "Return a short, readable \"model (provider)\" label for MODEL-ID.
-The model part is the catalogue's label, else a prettified slug, else
-the raw name, less a leading word the provider part already says; the
-provider part is the first word of the provider's label, else its
-capitalized id."
+The catalogue's own entry for the id says what the model is called; an
+id it does not hold is prettified, or read as it is.  See
+`harness-ui-model-display-label'."
   (if (not (and model-id (string-match "\\`\\([^:]+\\):\\(.+\\)\\'" model-id)))
       (or model-id "?")
-    (let* ((pid (match-string 1 model-id))
-           (name (match-string 2 model-id))
-           (m (gethash model-id harness-ui--models))
-           (label (plist-get m :label))
-           (provider (or (car (split-string (or (plist-get m :provider-label) "")))
-                         (capitalize pid)))
-           (model (or (and label (not (equal label name)) label)
-                      (harness-ui--prettify-model-name name)
-                      name)))
-      ;; "Claude Opus 5.5" from "Claude Code" reads as "Opus 5.5 (Claude)".
-      (format "%s (%s)"
-              (if (string-prefix-p (concat provider " ") model t)
-                  (substring model (1+ (length provider)))
-                model)
-              provider))))
+    (harness-ui-model-display-label
+     (or (gethash model-id harness-ui--models) (list :id model-id)))))
 
 (defun harness-ui-button (label action &rest props)
   "Insert a clickable LABEL; ACTION is a command or a function of no arguments.
@@ -5772,37 +5759,370 @@ otherwise use the refreshed catalogue.  An empty answer chooses nothing."
   (unless (run-hook-with-args-until-success 'harness-ui-model-picker-functions callback)
     (harness-ui--choose-model callback)))
 
+(defun harness-ui--model-name-slug (model)
+  "Return MODEL's bare name, without its provider or vendor path.
+An alias is named after the model it resolves to, as the alias itself
+says little of what it is."
+  (let ((name (or (plist-get model :resolves-to) (plist-get model :id)
+                  (plist-get model :name))))
+    (when (stringp name)
+      (when (string-match "\\`[^:/]+:\\(.+\\)\\'" name)
+        (setq name (match-string 1 name)))
+      (car (last (split-string name "/" t))))))
+
+(defconst harness-ui-model-family-blocklist
+  '("text" "tts" "stt" "audio" "image" "code" "default" "latest" "auto" "unknown")
+  "Words that name a kind of model, not a family of models.
+A name that starts with one of them stays directly under its provider
+instead of becoming a category of its own.")
+
+(defun harness-ui--model-family (name)
+  "Return the display family NAME belongs to, or nil.
+GPT versions, Claude families and Gemini and DeepSeek versions are
+recognized by name; any other model takes its vendor word, so
+\"llama-4-maverick\" is Llama.  A name with neither is ungrouped."
+  (let ((case-fold-search t))
+    (cond
+     ((string-match "\\`gpt-\\([0-9]+\\(?:\\.[0-9]+\\)?\\)" name)
+      (concat "GPT " (match-string 1 name)))
+     ((string-match "\\bgemini-\\([0-9]+\\(?:\\.[0-9]+\\)?\\)" name)
+      (concat "Gemini " (match-string 1 name)))
+     ((string-match "\\bdeepseek\\(?:-v\\([0-9]+\\(?:\\.[0-9]+\\)?\\)\\)?" name)
+      (concat "DeepSeek" (when-let* ((version (match-string 1 name)))
+                           (concat " V" version))))
+     ((string-match "\\b\\(haiku\\|sonnet\\|opus\\|fable\\)\\b" name)
+      (concat "Claude " (capitalize (match-string 1 name))))
+     ((and (string-match "\\`\\([[:alpha:]]\\{2,\\}[0-9]*\\)[-_]" name)
+           (not (member (downcase (match-string 1 name))
+                        harness-ui-model-family-blocklist)))
+      (let ((word (match-string 1 name)))
+        (if (member (downcase word) '("gpt" "glm"))
+            (upcase word)
+          (capitalize word)))))))
+
+(defun harness-ui-model-groups (model)
+  "Return the categories MODEL shows under its provider, as strings.
+An explicit `:groups' list wins, followed by `:family', then a family
+inferred from the name: a GPT, Claude, Gemini or DeepSeek family, or the
+vendor word of another model, as Llama or Qwen.  Categories are about
+finding a model, never about its capability, and never change its id or
+routing.  Nil leaves MODEL directly under its provider."
+  (let ((explicit (plist-get model :groups)))
+    (or (if (listp explicit) explicit (and explicit (list explicit)))
+        (when-let* ((family (plist-get model :family))) (list family))
+        (when-let* ((name (harness-ui--model-name-slug model))
+                    (family (harness-ui--model-family name)))
+          (list family)))))
+
+(defcustom harness-ui-model-group-function #'harness-ui-model-groups
+  "Function of a catalogue model returning its categories as a list.
+The categories are drill-down levels below the model's provider, so a
+function of a name can return `(\"Reasoning\")' for the models it calls
+reasoning.  Set this option to nil to list models directly under their
+providers.  A category that holds a single model is not offered as a
+level of its own.  Typing in the picker searches the models below the
+current level whatever the categories are, and `All models' lists them
+flat."
+  :type '(choice (const :tag "No family categories" nil) function)
+  :group 'harness-ui)
+
+(defun harness-ui-model-display-label (model)
+  "Return catalogue MODEL's \"Model (Provider)\" label.
+The model part is its `:label', else a prettified slug, else its bare
+name, less a leading word the provider part already says; the provider
+part is the first word of its `:provider-label', else its capitalized
+provider id."
+  (let* ((id (plist-get model :id))
+         (pid (and (stringp id) (string-match "\\`\\([^:]+\\):" id)
+                   (match-string 1 id)))
+         (slug (or (and (stringp id) (string-match "\\`[^:]+:\\(.+\\)\\'" id)
+                        (match-string 1 id))
+                   (plist-get model :name)))
+         (labelled (plist-get model :label))
+         (provider-label (plist-get model :provider-label))
+         (provider (if (and (stringp provider-label) (not (string-blank-p provider-label)))
+                       (car (split-string provider-label " "))
+                     (and pid (capitalize pid))))
+         (display (or (and (stringp labelled) (not (equal labelled slug)) labelled)
+                      (and (stringp slug) (harness-ui--prettify-model-name slug))
+                      (and (stringp labelled) (not (string-blank-p labelled)) labelled)
+                      slug id "?")))
+    (if (not (and (stringp provider) (not (string-empty-p provider))))
+        display
+      ;; "Claude Opus 5.5" from "Claude Code" reads as "Opus 5.5 (Claude)".
+      (format "%s (%s)"
+              (if (string-prefix-p (concat provider " ") display t)
+                  (substring display (1+ (length provider)))
+                display)
+              provider))))
+
+(defun harness-ui--model-picker-key (model)
+  "Return MODEL's row of the picker: estimate, name, provider and id."
+  (let ((level (plist-get model :complexity-label)))
+    (concat (when (and (stringp level) (not (string-empty-p level))) (concat level "  "))
+            (harness-ui-model-display-label model)
+            "  [" (plist-get model :id) "]")))
+
+(defun harness-ui--model-picker-price (value)
+  "Return VALUE, a price per million tokens, without empty decimals."
+  (let ((text (format "%s" value)))
+    (if (string-match "\\`\\([0-9]+\\)\\.0+\\'" text) (match-string 1 text) text)))
+
+(defun harness-ui--model-picker-annotation (model)
+  "Return MODEL's row annotation: its context window and its price."
+  (let ((price (plist-get model :pricing)))
+    (string-join
+     (delq nil (list (when (plist-get model :context-window)
+                       (concat (harness-ui-format-model-window model) " ctx"))
+                     (when (and price (plist-get price :input) (plist-get price :output))
+                       (format "$%s/$%s per M"
+                               (harness-ui--model-picker-price (plist-get price :input))
+                               (harness-ui--model-picker-price (plist-get price :output))))))
+     " · ")))
+
+(defun harness-ui--model-picker-records (models)
+  "Return MODELS with the provider and category path each one shows under.
+The path starts with the provider's display label, so models of one
+provider group together; providers whose labels are equal stay apart by
+their id."
+  (let ((providers nil))
+    (dolist (model models)
+      (let* ((id (plist-get model :id))
+             (pid (and (stringp id) (car (split-string id ":"))))
+             (label (or (plist-get model :provider-label)
+                        (and pid (capitalize pid)) "Other")))
+        (unless (assoc pid providers)
+          (push (cons pid (format "%s" label)) providers))))
+    (mapcar
+     (lambda (model)
+       (let* ((id (plist-get model :id))
+              (pid (and (stringp id) (car (split-string id ":"))))
+              (provider (or (cdr (assoc pid providers)) "Other"))
+              (label (if (> (cl-count provider providers :key #'cdr :test #'equal) 1)
+                         (format "%s (%s)" provider pid)
+                       provider)))
+         (list :model model
+               :path (cons label (harness-ui-model-groups model)))))
+     models)))
+
+(defun harness-ui--model-picker-entries (records path flat)
+  "Return (BROWSE SEARCH) entries of RECORDS under PATH.
+BROWSE is the next categories followed by the navigation entries, or
+the models of every category when FLAT; SEARCH also has the models of
+deeper categories, for a typed query.  A category below the providers
+holding a single model is not a level of its own: that model is offered
+here.  Every entry is a (KEY . PLIST) of its kind, path or model, and
+annotation."
+  (let* ((depth (length path))
+         (groups nil))
+    (unless flat
+      (dolist (record records)
+        (when-let* ((next (nth depth (plist-get record :path))))
+          (setf (alist-get next groups nil nil #'equal)
+                (1+ (or (cdr (assoc next groups)) 0))))))
+    (let ((levels (unless flat
+                    (cl-remove-if (lambda (group) (and (> depth 0) (= 1 (cdr group))))
+                                  groups)))
+          (models nil) (direct nil))
+      (dolist (record records)
+        (let* ((model (plist-get record :model))
+               (next (nth depth (plist-get record :path)))
+               (entry (cons (harness-ui--model-picker-key model)
+                            (list :kind 'model :model model
+                                  :annotation (harness-ui--model-picker-annotation model)))))
+          (push entry models)
+          (when (or flat (not (and next (assoc next levels))))
+            (push entry direct))))
+      (let* ((categories
+              (mapcar (lambda (group)
+                        (cons (car group)
+                              (list :kind 'group :path (append path (list (car group)))
+                                    :annotation (format "%d model%s" (cdr group)
+                                                        (if (= 1 (cdr group)) "" "s")))))
+                      (sort (copy-sequence levels)
+                            (lambda (a b) (string-version-lessp (car a) (car b))))))
+             (navigation
+              (append (when (and categories (not flat))
+                        (list (cons "All models"
+                                    (list :kind 'all
+                                          :annotation (if path "Flat list" "All providers")))))
+                      (when (or path flat)
+                        (list (cons "Back" (list :kind 'back
+                                                 :annotation "Parent category"))))))
+             (browse (append categories (nreverse direct) navigation)))
+        (list browse
+              (append browse
+                      (cl-remove-if (lambda (entry) (assoc (car entry) browse))
+                                    (nreverse models))))))))
+
+(defun harness-ui--model-picker-terms (query)
+  "Return the terms of QUERY, each as (LITERAL ANCHORED LOOSE).
+Whitespace and the colon part TERMS, so a qualified id asks for its
+provider and its name, and a term's characters must come in order,
+case-insensitively, with punctuation such as a hyphen or a dot needing
+no typing; LITERAL is the term as a substring, ANCHORED the same from a
+word start, and LOOSE the subsequence, so that \"g61sol\" finds
+\"gpt-6.1-sol\" and a term typed mid-word finds a name that holds it."
+  (let (terms)
+    (dolist (part (split-string (downcase query) "[[:space:]:]+" t))
+      (let* ((chars (delete-dups
+                     (mapcar #'char-to-string
+                             (seq-filter (lambda (c)
+                                           (not (memq c '(?- ?. ?_ ?/ ?: ?~ ?\[ ?\] ?\( ?\)))))
+                                         (string-to-list part)))))
+             (subsequence (mapconcat #'regexp-quote chars "[^[:space:]]*?")))
+        (when chars
+          (push (list (mapconcat #'identity chars "") (concat "\\<" subsequence) subsequence)
+                terms))))
+    (nreverse terms)))
+
+(defun harness-ui--model-picker-fields (entry)
+  "Return the strings search may match ENTRY by.
+A model is matched by its name, its qualified name and its provider,
+never by a run of characters that only holds across them: \"opus\" is
+the Opus models, not every model of OpenRouter.  A category is matched
+by its own name."
+  (let ((model (plist-get (cdr entry) :model)))
+    (if (not model)
+        (list (car entry))
+      (delq nil (list (plist-get model :label)
+                      (plist-get model :name)
+                      (harness-ui--model-name-slug model)
+                      (plist-get model :provider-label)
+                      (plist-get model :complexity-label))))))
+
+(defun harness-ui--model-picker-term-score (field term)
+  "Return how tightly TERM matches FIELD: 0 as it is typed, 1 from a word
+start, 2 as a subsequence across it."
+  (pcase-let ((`(,literal ,anchored ,loose) term))
+    (cond ((and (not (string-empty-p literal))
+                (string-match-p (regexp-quote literal) field))
+           0)
+          ((string-match-p anchored field) 1)
+          ((string-match-p loose field) 2))))
+
+(defun harness-ui--model-picker-score (entry terms)
+  "Return ENTRY's match score for TERMS, lower being tighter, or nil.
+Every term must match one of the entry's own strings
+\(`harness-ui--model-picker-fields'); the tightest term wins."
+  (let ((score 0) (matched t))
+    (dolist (term terms)
+      (let ((best nil))
+        (dolist (field (harness-ui--model-picker-fields entry))
+          (when (stringp field)
+            (when-let* ((one (harness-ui--model-picker-term-score field term)))
+              (when (or (not best) (< one best)) (setq best one)))))
+        (if best (setq score (+ score best)) (setq matched nil))))
+    (and matched score)))
+
+(defun harness-ui--model-picker-search (entries query)
+  "Return ENTRIES matching QUERY, tightest first, case-insensitively.
+Every term of QUERY must match an entry's own strings, so a term can name
+a provider while another names part of a model.  A name the term is part
+of comes before one that merely holds its letters in order; entries of
+equally tight matches keep their order."
+  (let ((terms (harness-ui--model-picker-terms query))
+        (case-fold-search t))
+    (if (not terms)
+        entries
+      (let ((index 0) (scored nil))
+        (dolist (entry entries)
+          (when-let* ((score (harness-ui--model-picker-score entry terms)))
+            (push (list score index entry) scored))
+          (setq index (1+ index)))
+        (mapcar #'caddr
+                (sort scored (lambda (a b)
+                               (if (= (car a) (car b))
+                                   (< (cadr a) (cadr b))
+                                 (< (car a) (car b))))))))))
+
+(defun harness-ui--model-picker-table (browse search)
+  "Return a completion table over BROWSE, searching SEARCH for a query.
+A key matches by `harness-ui--model-picker-search', a fuzzy subsequence
+match over names, ids, providers and estimates, not by a prefix.  The
+table answers with what it matched, so a completion style's own filter
+cannot hide a match such as \"g61sol\" for \"GPT-6.1 Sol\"."
+  (lambda (string pred action)
+    (cond
+     ((eq action 'metadata)
+      '(metadata (category . harness-model)
+                 (display-sort-function . identity)
+                 (cycle-sort-function . identity)))
+     ((eq (car-safe action) 'boundaries) nil)
+     (t
+      (let ((keys (mapcar #'car (if (string-empty-p (or string ""))
+                                    browse
+                                  (harness-ui--model-picker-search search string)))))
+        (if pred (cl-remove-if-not pred keys) keys))))))
+
+(defun harness-ui--model-picker-prompt (path flat all)
+  "Return the picker prompt for the level PATH, FLAT or ALL at the root.
+ALL names the flat list of a picker that ranks models across providers."
+  (let ((at (string-join path " / ")))
+    (cond
+     ((and flat (not path)) (or all "All providers: "))
+     (flat (concat "All models · " at ": "))
+     (path (concat "Model · " at ": "))
+     (t "Model provider: "))))
+
+(defun harness-ui-read-model (models callback &optional all prompt)
+  "Browse MODELS by provider and family, then call CALLBACK with (ID LABEL).
+An empty query offers providers first, then the families of the one
+chosen; a typed query searches every model below the current level, and
+at the providers every model of every provider.  `All models' offers the
+flat list and `Back' the level above.  ALL opens on the flat list,
+headed by PROMPT, for a picker that ranks models across providers, as
+the complexity guide does.  Empty answers and quits never call CALLBACK.
+MODELS keep their order within a level, and no provider code runs here."
+  (if (not models)
+      (message "No available models")
+    (let ((records (harness-ui--model-picker-records models))
+          (path nil) (flat (and all t)) (done nil) (chosen nil))
+      (while (not done)
+        (let* ((scoped (cl-remove-if-not
+                        (lambda (record)
+                          (equal path (seq-take (plist-get record :path) (length path))))
+                        records))
+               (entries (harness-ui--model-picker-entries scoped path flat))
+               (browse (car entries)) (search (cadr entries))
+               ;; A function table answers what it matched, which the
+               ;; basic style passes through: flex and partial completion
+               ;; would filter the fuzzy matches again, and a space is a
+               ;; word separator here, not a wildcard.
+               (completion-styles '(basic))
+               (completion-category-overrides '((harness-model (styles basic))))
+               (completion-extra-properties
+                (list :annotation-function
+                      (lambda (key)
+                        (let ((text (plist-get (cdr (assoc key search)) :annotation)))
+                          (if (or (not (stringp text)) (string-empty-p text))
+                              ""
+                            (concat "  " text))))))
+               (choice (completing-read (harness-ui--model-picker-prompt path flat prompt)
+                                        (harness-ui--model-picker-table browse search)
+                                        nil t))
+               (entry (cdr (assoc choice search))))
+          (pcase (plist-get entry :kind)
+            ('group (setq path (plist-get entry :path) flat nil))
+            ('all (setq flat t))
+            ('back (if flat (setq flat nil) (setq path (butlast path))))
+            ('model (setq chosen (plist-get entry :model) done t))
+            (_ (setq done t) (message "No model chosen")))))
+      (when chosen
+        (funcall callback (plist-get chosen :id)
+                 (harness-ui-model-display-label chosen))))))
+
 (defun harness-ui--choose-model (callback)
-  "Offer the default catalogue picker, calling CALLBACK with (ID LABEL).
-Refresh first so a provider that just became available is offered.
-An empty answer chooses nothing: CALLBACK is not called."
-  (harness-ui-refresh-models
-   (lambda (models)
-     (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
-            (table (cl-mapcar (lambda (m label)
-                                ;; Two models sharing a label are told apart by id.
-                                (cons (if (> (cl-count label labels :test #'equal) 1)
-                                          (format "%s (%s)" label (plist-get m :id))
-                                        label)
-                                      m))
-                              models labels))
-            (completion-extra-properties
-             (list :annotation-function
-                   (lambda (choice)
-                     (let ((m (cdr (assoc choice table))))
-                       (format "  %s · %s ctx%s"
-                               (plist-get m :id)
-                               (harness-ui-format-model-window m)
-                               (if-let* ((p (plist-get m :pricing)))
-                                   (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
-                                 ""))))))
-            (choice (completing-read "Model: " table nil t))
-            (model (cdr (assoc choice table))))
-       ;; A required match still lets an empty answer through, which
-       ;; names no model: switching to it would clear every model.
-       (if (not model)
-           (message "No model chosen")
-         (funcall callback (plist-get model :id) choice))))))
+  "Offer a fresh provider-first catalogue, calling CALLBACK with (ID LABEL).
+Refresh availability too, so signed-out or newly configured providers
+are reflected when the picker opens.  Empty answers choose nothing."
+  (let ((frame (selected-frame)))
+    (message "Model catalogue loading…")
+    (harness-ui-refresh-models
+     (lambda (models)
+       (when (frame-live-p frame)
+         (harness-ui--in-frame frame (lambda () (harness-ui-read-model models callback)))))
+     (lambda (_err) (message "Model catalogue unavailable")) t)))
 
 ;;;; Switching models, and handing conversations over
 

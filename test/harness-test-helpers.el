@@ -765,5 +765,14 @@ TASK and THREAD name the review the comment is in; PLACE reads
           (harness-thread-quote-lines text)
           "\n\n"))
 
+(defun harness-test-choose-model (model-id)
+  "Return a `completing-read' stub that chooses MODEL-ID from the model picker.
+The picker opens on providers and searches every model of every
+provider as soon as something is typed, so a qualified id picks the
+model without walking the categories."
+  (lambda (_prompt table &rest _)
+    (or (car (all-completions model-id table))
+        (error "No model %s in the picker" model-id))))
+
 (provide 'harness-test-helpers)
 ;;; harness-test-helpers.el ends here

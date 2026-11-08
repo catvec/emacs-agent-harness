@@ -34,6 +34,12 @@ provider lists it, say), unless the endpoint names one with
 `:default-context`.  Endpoints without a /models route can list
 their models statically with `:models`.
 
+A hosted service with no credential offers no models, however
+public its /models is (`harness-openai--key-needed-hosts`): an
+endpoint with no key, no static models and no headers lists
+nothing, and a refresh clears the models it listed before.  Other
+endpoints, such as a local server, stay usable without a key.
+
 The reasoning effort is model-specific too.  OpenRouter's model list
 names the efforts a model takes in its `reasoning` object
 (`supported_efforts`, with `mandatory` saying that `none` is not

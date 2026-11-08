@@ -79,8 +79,11 @@
 ;;
 ;; The model catalogue comes from `models.list' (context window, image
 ;; input, reasoning efforts and token prices per model), asked of a
-;; short-lived probe process when no session process runs.  Before
-;; `copilot login' the CLI's built-in list of model ids stands in.
+;; short-lived probe process when no session process runs.  A CLI that
+;; is not logged in lists nothing, and a refresh asks the login again,
+;; so a `copilot logout' stops the models listed before.  The CLI's
+;; built-in list of model ids, which names what Copilot has rather than
+;; what the account may run, stands in only after a login.
 ;;
 ;; Session state.  The CLI keeps what each of its sessions said and did
 ;; in a directory of its own, STATE/ID/ (events.jsonl and the files
@@ -1552,34 +1555,43 @@ Return nil for a model the account's policy disables."
                              (list :name id :label (harness-provider-copilot--model-label id)))))
                     (plist-get result :models))))
 
-(defun harness-provider-copilot--models ()
-  "Return a promise of the model catalogue.
-It comes from models.list, or from the CLI's built-in list of models
-before it is logged in.  Without the program there are no models."
+(defun harness-provider-copilot--models (&optional refresh)
+  "Return a promise of the signed-in account's model catalogue.
+It comes from models.list, falling back to the CLI's built-in list
+only for a signed-in account.  REFRESH checks authentication again,
+even when an existing process is reused.  Without the program or a
+login there are no models, including any remembered before logout."
   (if (not (harness-provider-copilot--program-p))
       (progn (harness-log 'info "provider-copilot: %s" (harness-provider-copilot--missing-message))
+             (clrhash harness-provider-copilot--catalogue)
              (harness-resolved nil))
     (harness-provider-copilot--with-server
      (lambda (entry auth)
        (harness-then
-        (if (harness-json-true-p (plist-get auth :isAuthenticated))
-            (harness-then (harness-provider-copilot--call entry "models.list" nil)
-                          (lambda (result)
-                            (harness-provider-copilot--remember-catalogue
-                             (delq nil (mapcar #'harness-provider-copilot-model-from-entry
-                                               (plist-get result :models)))))
-                          (lambda (err)
-                            (harness-log 'warn "provider-copilot: listing models failed: %s"
-                                         (harness-provider-copilot--error-text err))
-                            nil))
-          (harness-resolved nil))
-        (lambda (models)
-          (if models
-              (harness-provider-copilot--sort-models models)
-            (harness-then (harness-provider-copilot--call entry "models.getBuiltInCatalog" nil)
-                          (lambda (result)
-                            (harness-provider-copilot--sort-models
-                             (harness-provider-copilot--builtin-models result)))))))))))
+        (if refresh (harness-provider-copilot--call entry "auth.getStatus" nil) (harness-resolved auth))
+        (lambda (current)
+          (when refresh
+            (setf (harness-provider-copilot-session-auth entry) current)
+            (harness-provider-copilot--handle-auth current))
+          (if (not (harness-json-true-p (plist-get current :isAuthenticated)))
+              (progn (clrhash harness-provider-copilot--catalogue) nil)
+            (harness-then
+             (harness-then (harness-provider-copilot--call entry "models.list" nil)
+                           (lambda (result)
+                             (harness-provider-copilot--remember-catalogue
+                              (delq nil (mapcar #'harness-provider-copilot-model-from-entry
+                                                (plist-get result :models)))))
+                           (lambda (err)
+                             (harness-log 'warn "provider-copilot: listing models failed: %s"
+                                          (harness-provider-copilot--error-text err))
+                             nil))
+             (lambda (models)
+               (if models
+                   (harness-provider-copilot--sort-models models)
+                 (harness-then (harness-provider-copilot--call entry "models.getBuiltInCatalog" nil)
+                               (lambda (result)
+                                 (harness-provider-copilot--sort-models
+                                  (harness-provider-copilot--builtin-models result))))))))))))))
 
 (defun harness-provider-copilot--resolve (name models)
   "Return what model NAME stands for when MODELS, the catalogue, lack it.

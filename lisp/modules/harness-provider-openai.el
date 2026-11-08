@@ -24,6 +24,12 @@
 ;; `:default-context'.  Endpoints without a /models route can list
 ;; their models statically with `:models'.
 ;;
+;; A hosted service with no credential offers no models, however
+;; public its /models is (`harness-openai--key-needed-hosts'): an
+;; endpoint with no key, no static models and no headers lists
+;; nothing, and a refresh clears the models it listed before.  Other
+;; endpoints, such as a local server, stay usable without a key.
+;;
 ;; The reasoning effort is model-specific too.  OpenRouter's model list
 ;; names the efforts a model takes in its `reasoning' object
 ;; (`supported_efforts', with `mandatory' saying that `none' is not
@@ -156,7 +162,10 @@ Every entry is a plist with these keys:
 
 When neither :api-key nor :api-key-env yields a key, auth-source is
 searched with the URL's host and user \"apikey\".  Changing this
-variable through customize re-registers the providers."
+variable through customize re-registers the providers.  A hosted
+service lists no models without a key, static models or headers,
+however public its /models is; a local or other endpoint needs none
+\(see `harness-openai--configured-p')."
   :type `(repeat ,harness-openai--endpoint-type)
   :set #'harness-openai--custom-set
   :group 'harness)
@@ -244,11 +253,29 @@ DeepSeek still gets them."
 
 (defun harness-openai--api-key (endpoint)
   "Resolve the API key for ENDPOINT: literal, environment, then auth-source."
-  (let ((literal (plist-get endpoint :api-key))
+  (let ((usable (lambda (s) (and (stringp s) (not (string-blank-p s)) (string-trim s))))
         (env (plist-get endpoint :api-key-env)))
-    (or (and literal (not (string-empty-p literal)) literal)
-        (and env (let ((v (getenv env))) (and v (not (string-empty-p v)) v)))
-        (harness-openai--auth-source-key (harness-openai--host endpoint)))))
+    (or (funcall usable (plist-get endpoint :api-key))
+        (and env (funcall usable (getenv env)))
+        (funcall usable (harness-openai--auth-source-key (harness-openai--host endpoint))))))
+
+(defconst harness-openai--key-needed-hosts '("api.openai.com" "openrouter.ai")
+  "Hosts of hosted services whose model list needs an account.
+Their /models may answer without a key, as OpenRouter's does, but the
+models are not ones such an endpoint can run, so only a configured
+endpoint lists them; see `harness-openai--configured-p'.  Official
+DeepSeek hosts are treated the same way.")
+
+(defun harness-openai--configured-p (endpoint)
+  "Non-nil when ENDPOINT has enough configuration to offer its models.
+The built-in hosted services need a key, even when /models is public.
+Explicit static models or headers count as configuration.  Other hosts
+remain usable without keys, including local and custom keyless servers."
+  (or (plist-get endpoint :models)
+      (plist-get endpoint :headers)
+      (not (or (member (harness-openai--host endpoint) harness-openai--key-needed-hosts)
+               (harness-openai--deepseek-host-p endpoint)))
+      (harness-openai--api-key endpoint)))
 
 (defun harness-openai--headers (endpoint key)
   "Return the request header alist for ENDPOINT authenticated with KEY."
@@ -446,13 +473,17 @@ secrets."
 
 (defun harness-openai--models (endpoint &optional refresh)
   "Return a promise of ENDPOINT's models, cached for `harness-openai--models-ttl'.
-REFRESH asks the server again however fresh the cache is.  A listing
-that fails answers with the models listed before, when there are any,
-and is logged; else the promise is rejected, which the catalogue logs,
-and nothing is cached."
+REFRESH asks the server again however fresh the cache is.  Hosted
+services without credentials list nothing, including cached models.
+A listing that fails otherwise answers with the models listed before,
+when there are any, and is logged; else the promise is rejected, which
+the catalogue logs, and nothing is cached."
   (let* ((id (plist-get endpoint :id))
          (cached (gethash id harness-openai--models-cache)))
     (cond
+     ((not (harness-openai--configured-p endpoint))
+      (remhash id harness-openai--models-cache)
+      (harness-resolved nil))
      ((plist-get endpoint :models)
       (let ((models (harness-openai--static-models endpoint)))
         (puthash id (cons (float-time) models) harness-openai--models-cache)
@@ -1240,7 +1271,7 @@ flag and returns a promise of model plists, as the models function of
          (t (push (harness-openai--register endpoint) ids)))))
     (dolist (old harness-openai--registered)
       (unless (memq old ids)
-        (remhash old harness-providers)
+        (harness-provider-unregister old)
         (remhash old harness-openai--models-cache)))
     (setq harness-openai--registered ids)))
 

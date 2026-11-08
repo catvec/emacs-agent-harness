@@ -1052,6 +1052,66 @@ sessions would leave it otherwise."
 
 ;;;; Models
 
+(ert-deftest harness-provider-openai-models-hide-unconfigured-hosted-services ()
+  "Public hosted catalogues must not advertise models without credentials."
+  (let ((harness-openai--models-cache (make-hash-table :test 'eq)))
+    (cl-letf (((symbol-function 'harness-openai--api-key) (lambda (_) nil))
+              ((symbol-function 'harness-openai--fetch-models)
+               (lambda (_) (ert-fail "No public listing without account configuration"))))
+      (dolist (endpoint '((:id openrouter :base-url "https://openrouter.ai/api/v1")
+                          (:id openai :base-url "https://api.openai.com/v1")
+                          (:id deepseek :base-url "https://api.deepseek.com")))
+        (puthash (plist-get endpoint :id) '(0 (:name "stale")) harness-openai--models-cache)
+        (should-not (harness-test-await (harness-openai--models endpoint)))
+        (should-not (gethash (plist-get endpoint :id) harness-openai--models-cache))
+        (should-not (harness-test-await (harness-openai--models endpoint t)))))))
+
+(ert-deftest harness-provider-openai-models-keep-configured-and-keyless-endpoints ()
+  "A real key, custom headers, static models or keyless host is sufficient."
+  (let ((harness-openai--models-cache (make-hash-table :test 'eq))
+        (key nil)
+        (calls 0))
+    (cl-letf (((symbol-function 'harness-openai--api-key) (lambda (_) key))
+              ((symbol-function 'harness-openai--fetch-models)
+               (lambda (_) (cl-incf calls) (harness-resolved '((:name "listed"))))))
+      (dolist (endpoint '((:id local :base-url "http://localhost:11434/v1")
+                          (:id custom :base-url "https://keyless.example/v1")
+                          (:id headers :base-url "https://openrouter.ai/api/v1"
+                           :headers (("Authorization" . "Bearer custom")))))
+        (should (equal '((:name "listed")) (harness-test-await (harness-openai--models endpoint t)))))
+      (should (equal '((:name "static"))
+                     (harness-test-await
+                      (harness-openai--models '(:id static :base-url "https://openrouter.ai/api/v1"
+                                                :models ("static"))))))
+      (setq key "configured")
+      (should (equal '((:name "listed"))
+                     (harness-test-await
+                      (harness-openai--models '(:id account :base-url "https://openrouter.ai/api/v1")))))
+      (should (= 4 calls)))))
+
+(ert-deftest harness-provider-openai-models-removed-key-clears-provider-cache ()
+  "A refresh after removing the credential clears both catalogue caches."
+  (let ((harness-providers (make-hash-table :test 'eq))
+        (harness-provider--lifecycle (make-hash-table :test 'eq))
+        (harness-provider--models-by-provider (make-hash-table :test 'eq))
+        (harness-provider--fetching (make-hash-table :test 'eq))
+        (harness-provider--models nil)
+        (harness-provider--models-promise nil)
+        (harness-provider--model-index (make-hash-table :test 'equal))
+        (harness-provider--catalogue (make-hash-table :test 'eq))
+        (harness-openai--models-cache (make-hash-table :test 'eq))
+        (key "configured"))
+    (cl-letf (((symbol-function 'harness-openai--api-key) (lambda (_) key))
+              ((symbol-function 'harness-openai--fetch-models)
+               (lambda (_) (harness-resolved '((:name "listed" :context-window 1000))))))
+      (harness-openai-register-endpoint '(:id openrouter :base-url "https://openrouter.ai/api/v1"))
+      (should (equal '("openrouter:listed")
+                     (mapcar (lambda (m) (plist-get m :id))
+                             (harness-test-await (harness-call 'provider/models t)))))
+      (setq key nil)
+      (should-not (harness-test-await (harness-call 'provider/models t)))
+      (should-not (harness-test-await (harness-call 'provider/models))))))
+
 (ert-deftest harness-provider-openai-models-openrouter-mapping ()
   (harness-openai-test-with-fake
       `(("/models"

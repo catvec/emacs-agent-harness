@@ -135,6 +135,8 @@ The environment picks the account:
       and rate_limit_event messages carry its windows
   HARNESS_FAKE_CLAUDE_AUTH=api           an API key: no quota, no
       rate limit events
+  HARNESS_FAKE_CLAUDE_AUTH=signed-out    an explicit signed-out
+      account: the initialize answer carries `"account": null'
   unset                                  an older CLI: no account in
       the initialize answer and no get_usage control request
   HARNESS_FAKE_CLAUDE_OVERAGE=1          rate limit events say the
@@ -630,7 +632,9 @@ class Fake:
         sub = msg.get("request", {}).get("subtype")
         if sub == "initialize":
             response = {"commands": [], "models": MODELS}
-            if account():
+            if AUTH == "signed-out":
+                response["account"] = None
+            elif account():
                 response["account"] = account()
             self.answer(rid, response)
             if self.needs_handshake:

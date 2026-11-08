@@ -2532,7 +2532,7 @@ once, and a change made with `setopt' reaches it."
   "`harness-set-model-all' retargets every session and the new-session default."
   (let ((calls nil))
     (cl-letf (((symbol-function 'harness-ui-refresh-models)
-               (lambda (&optional callback)
+               (lambda (&optional callback _on-error _refresh)
                  (funcall callback
                           (list (list :id "deepseek:deepseek-flash" :label "DeepSeek V4.1 Flash"
                                       :provider-label "DeepSeek" :context-window 1048576
@@ -2542,7 +2542,8 @@ once, and a change made with `setopt' reaches it."
                  (push (cons method params) calls)
                  (when callback
                    (funcall callback (and (equal method "_harness/session/set-all") '("s1" "s2"))))))
-              ((symbol-function 'completing-read) (lambda (_prompt table &rest _) (caar table))))
+              ((symbol-function 'completing-read)
+               (harness-test-choose-model "deepseek:deepseek-flash")))
       (call-interactively #'harness-set-model-all))
     (let ((config (cdr (assoc "_harness/config/set" calls)))
           (bulk (cdr (assoc "_harness/session/set-all" calls))))
@@ -2559,14 +2560,15 @@ once, and a change made with `setopt' reaches it."
   "A prefix argument switches the sessions but keeps the new-session default."
   (let ((calls nil))
     (cl-letf (((symbol-function 'harness-ui-refresh-models)
-               (lambda (&optional callback)
+               (lambda (&optional callback _on-error _refresh)
                  (funcall callback (list (list :id "deepseek:deepseek-flash" :label "DeepSeek V4.1 Flash"
                                                :provider-label "DeepSeek" :context-window 1048576)))))
               ((symbol-function 'harness-ui-call)
                (lambda (method params &optional callback _on-error)
                  (push (cons method params) calls)
                  (when callback (funcall callback nil))))
-              ((symbol-function 'completing-read) (lambda (_prompt table &rest _) (caar table))))
+              ((symbol-function 'completing-read)
+               (harness-test-choose-model "deepseek:deepseek-flash")))
       (harness-set-model-all t))
     (should-not (assoc "_harness/config/set" calls))
     (should (equal "deepseek:deepseek-flash"
@@ -2742,14 +2744,17 @@ nil and the level to \"\" everywhere."
   (dolist (command '(harness-set-model-all harness-set-thinking-all))
     (harness-ui-test-with-all nil
       (cl-letf (((symbol-function 'harness-ui-refresh-models)
-                 (lambda (&optional callback)
+                 (lambda (&optional callback _on-error _refresh)
                    (funcall callback (list (list :id "deepseek:deepseek-flash" :label "DeepSeek V4.1 Flash"
                                                  :provider-label "DeepSeek" :context-window 1048576)))))
                 ((symbol-function 'completing-read) (lambda (&rest _) "")))
         (call-interactively command))
       (should-not calls)
       (should-not set)
-      (should (equal (list (if (eq command 'harness-set-model-all) "No model chosen" "No thinking level chosen"))
+      ;; The model picker says it is loading the catalogue before it asks.
+      (should (equal (if (eq command 'harness-set-model-all)
+                         '("No model chosen" "Model catalogue loading…")
+                       '("No thinking level chosen"))
                      said)))))
 
 (ert-deftest harness-ui-set-all-without-task-mode-or-overrides ()
@@ -2800,14 +2805,15 @@ the callback).  Nothing is asked in the minibuffer."
   (declare (indent 2))
   `(let ((calls nil) (asked nil))
      (cl-letf (((symbol-function 'harness-ui-refresh-models)
-                (lambda (&optional callback)
+                (lambda (&optional callback _on-error _refresh)
                   (funcall callback (list (list :id "claude:claude-opus-5-5" :label "Claude Opus 5.5"
                                                 :provider-label "Claude Code" :context-window 1000000)))))
                ((symbol-function 'harness-ui-call)
                 (lambda (method params &optional callback _on-error)
                   (push (cons method params) calls)
                   (when callback (funcall callback (cdr (assoc method ,answers))))))
-               ((symbol-function 'completing-read) (lambda (_prompt table &rest _) (caar table)))
+               ((symbol-function 'completing-read)
+                (harness-test-choose-model "claude:claude-opus-5-5"))
                ((symbol-function 'read-multiple-choice)
                 (lambda (&rest _) (error "The switch asked in the minibuffer"))))
        (let ((harness-ui-switch-function
