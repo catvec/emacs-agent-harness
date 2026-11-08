@@ -2470,8 +2470,14 @@ Each check settles incrementally, and is announced as
 first and `provider-check/finished JOB MODEL RESULTS SUMMARY` last.  A
 result is `(:id :suite :name :status :detail :advice :sessions
 :evidence)`, its status `pass`, `fail` or `skip`; advice is for a
-failure, a skip means unverified, and a cache check also carries the
-evidence it measured.  Each model request the check makes is recorded
+failure, and a cache check also carries the evidence it measured.  A
+check that ran and measured the behavior it tests is `pass` or `fail`,
+never `skip`; an exception in the check's own work is `fail` too.  A
+`skip` means the check could not measure its claim -- an optional
+feature not advertised, missing telemetry, too few samples, a warm
+control, a dependency it needs, an unavailable account or network, or
+the request budget -- so it says nothing for or against the provider.
+Each model request the check makes is recorded
 as an internal session named `Provider check: NAME`, and `:sessions`
 names them, in call order, for the page to open: the prompt, the reply
 and the provider's own error are there, never in the result's detail.
@@ -2496,7 +2502,11 @@ come from that prefix's cache.  The evidence keeps advertised, observed,
 unsupported and unverified findings apart:
 missing telemetry is unknown, not zero, one hit is an observation, and
 unsupported needs repeated misses in two independent runs with working
-controls.  `provider/cache-evidence MODEL` answers `(:model :stale
+controls.  A completed cache run that measured misses is a `fail` of
+that check -- it ran, and the reuse it tests did not happen -- while the
+record still calls one run unverified until a second independent run;
+a run that could not measure is a `skip`.
+`provider/cache-evidence MODEL` answers `(:model :stale
 :scope :record)` from the record a run saved, with `:stale` non-nil
 when the provider, model, advertised capabilities, cache lifetime,
 prices or the synthetic request identity changed since; a record is

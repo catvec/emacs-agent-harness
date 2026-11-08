@@ -438,9 +438,10 @@ model behavior checks that ask for a tool call could never pass."
 (ert-deftest harness-provider-check-prompt-caching-is-conservative ()
   "The cache check reports observations, not a guarantee.
 With a simulated prefix cache, repeated probes and keep-warm requests
-read it while isolated controls stay cold.  Repeated misses with clean
-controls are unverified in one run, not a provider failure, and no
-telemetry is unknown rather than zero."
+read it while isolated controls stay cold.  A complete run of repeated
+misses with clean controls is a FAIL for that run, while the capability
+record still calls one run unverified, not unsupported; no telemetry is
+unknown rather than zero, and stays a SKIP."
   (harness-provider-check-test-with
     (let ((harness-provider-check-test--cache-simulate t))
       (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
@@ -453,20 +454,133 @@ telemetry is unknown rather than zero."
         (should (plist-get evidence :controls-clean))
         (should (plist-get evidence :distinct-sessions))
         (should (string-match-p "TTL unverified" (plist-get cache :detail)))))
-    ;; Repeated misses with cold controls are still unverified in one run.
+    ;; Repeated misses with cold controls are a failure of this run, but the
+    ;; record still calls one run unverified, not unsupported.
     (let ((harness-provider-check-test--cache-read 0))
       (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
              (cache (harness-provider-check-test-by-name
                      results "Exact-prefix cache reuse and keep-warm")))
-        (should (eq 'skip (plist-get cache :status)))
-        (should (string-match-p "not unsupported" (plist-get cache :detail)))))
-    ;; No telemetry is unknown, not zero.
+        (should (eq 'fail (plist-get cache :status)))
+        (should (string-match-p "unverified, not unsupported" (plist-get cache :detail)))))
+    ;; No telemetry is unknown, not zero: the check could not measure.
     (let ((harness-provider-check-test--cache-read nil))
       (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
              (cache (harness-provider-check-test-by-name
                      results "Exact-prefix cache reuse and keep-warm")))
         (should (eq 'skip (plist-get cache :status)))
         (should (string-match-p "unknown, not zero" (plist-get cache :detail)))))))
+
+(ert-deftest harness-provider-check-prompt-cache-verdict-classifies-runs ()
+  "A cache check that measured misses fails; one that could not measure skips.
+The status says whether the check ran, not whether the provider's cache
+is unsupported: a complete run of misses is FAIL with the record still
+unverified, and the detail says so."
+  (let ((verdict (lambda (&rest evidence)
+                   (harness-provider-check--prompt-cache-verdict evidence))))
+    ;; A run that could not measure the claim is a skip.
+    (let ((result (funcall verdict :environment '(quota))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "unavailable: quota" (cdr result))))
+    (let ((result (funcall verdict :errors 1 :telemetry 'present)))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "incomplete probes" (cdr result))))
+    (let ((result (funcall verdict :telemetry 'missing :repeat-samples 2
+                           :repeats '(nil nil))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "unknown, not zero" (cdr result))))
+    (let ((result (funcall verdict :telemetry 'present :repeat-samples 1
+                           :repeats '(0))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "1/2 repeat samples" (cdr result))))
+    (let ((result (funcall verdict :telemetry 'present :repeat-samples 2
+                           :repeats '(0 0) :controls-clean nil)))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "control prefix warm" (cdr result))))
+    ;; A complete measurement is a pass or a fail, never a skip.
+    (let ((result (funcall verdict :telemetry 'present :repeat-samples 2
+                           :repeats '(1000 1000) :repeat-hits 2
+                           :controls-clean t)))
+      (should (eq 'pass (car result)))
+      (should (string-match-p "reuse observed" (cdr result))))
+    (let ((result (funcall verdict :telemetry 'present :repeat-samples 2
+                           :repeats '(0 0) :repeat-hits 0 :controls-clean t
+                           :errors 0)))
+      (should (eq 'fail (car result)))
+      (should (string-match-p "repeated misses in one run" (cdr result)))
+      (should (string-match-p "unverified, not unsupported" (cdr result))))
+    (let ((result (funcall verdict :telemetry 'present :repeat-samples 2
+                           :repeats '(1000 0) :repeat-hits 1 :controls-clean t
+                           :errors 0)))
+      (should (eq 'fail (car result)))
+      (should (string-match-p "some repeats cached" (cdr result))))))
+
+(ert-deftest harness-provider-check-independent-cache-verdict-classifies-runs ()
+  "A complete independent-prefix miss run fails; an unmeasurable one skips.
+Throttling, identity mixing, failed requests, warm controls and missing
+telemetry leave the claim unmeasured; primed prefixes that missed, a
+serial-only hit or partial reuse are failures of the run."
+  (let* ((verdict (lambda (&rest evidence)
+                    (harness-provider-check--independent-cache-verdict evidence)))
+         (base '(:telemetry present :prefix-count 4 :cached-count 4
+                 :baseline-hits 4 :round-1-hits 4 :round-2-hits 4
+                 :control-hits 0 :peak-concurrency 4 :distinct-sessions t
+                 :actual 18 :errors 0 :throttled 0 :identity-mismatches 0)))
+    (let ((result (apply verdict (plist-put (copy-sequence base)
+                                            :environment '(transport)))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "unavailable: transport" (cdr result))))
+    (let ((result (apply verdict (plist-put (copy-sequence base) :throttled 2))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "throttled" (cdr result))))
+    (let ((result (apply verdict (plist-put (copy-sequence base)
+                                            :identity-mismatches 1))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "identity mismatched" (cdr result))))
+    (let ((result (apply verdict (plist-put (copy-sequence base) :errors 1))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "requests failed" (cdr result))))
+    (let ((result (apply verdict (plist-put (copy-sequence base)
+                                            :distinct-sessions nil))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "session ids repeated" (cdr result))))
+    (let ((result (apply verdict (plist-put (copy-sequence base) :prefix-count 1))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "fewer than 2" (cdr result))))
+    (let ((result (apply verdict (plist-put (copy-sequence base)
+                                            :telemetry 'missing))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "unknown, not zero" (cdr result))))
+    (let ((result (apply verdict (plist-put (copy-sequence base) :control-hits 1))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "isolation ambiguous" (cdr result))))
+    (let ((result (apply verdict (plist-put (copy-sequence base)
+                                            :peak-concurrency 1))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "did not overlap" (cdr result))))
+    ;; A complete measurement is a pass or a fail, never a skip.
+    (let ((result (apply verdict base)))
+      (should (eq 'pass (car result)))
+      (should (string-match-p "reuse observed" (cdr result))))
+    (let ((result (apply verdict (plist-put (plist-put (copy-sequence base)
+                                                       :round-1-hits 0)
+                                            :round-2-hits 0))))
+      (should (eq 'fail (car result)))
+      (should (string-match-p "serial baseline reuse" (cdr result))))
+    (let ((result (apply verdict (plist-put (plist-put (copy-sequence base)
+                                                       :cached-count 2)
+                                            :round-2-hits 2))))
+      (should (eq 'fail (car result)))
+      (should (string-match-p "partial reuse: 2/4" (cdr result)))
+      (should (string-match-p "unverified, not unsupported" (cdr result))))
+    (let* ((evidence (copy-sequence base))
+           (evidence (plist-put evidence :cached-count 0))
+           (evidence (plist-put evidence :baseline-hits 0))
+           (evidence (plist-put evidence :round-1-hits 0))
+           (evidence (plist-put evidence :round-2-hits 0))
+           (result (apply verdict evidence)))
+      (should (eq 'fail (car result)))
+      (should (string-match-p "primed prefixes missed" (cdr result)))
+      (should (string-match-p "unverified, not unsupported" (cdr result))))))
 
 (ert-deftest harness-provider-check-cache-detail-reports-tokens-and-cost ()
   "The detail names prompt, cached and output tokens and how the cost was had."
@@ -878,6 +992,92 @@ the check links to says how the call ended."
                               (string-match-p "secret-password"
                                               (plist-get node :content))))
                        (harness-call 'session/nodes session-id))))))
+
+(ert-deftest harness-provider-check-transcript-round-trip-checks-its-own-nodes ()
+  "The transcript round trip renders the harness's own transcript twice.
+It writes a thinking node with its signature and a tool call with its
+result, renders the request, reloads the transcript from the store and
+renders again: both requests must carry the same thinking signature,
+tool call and tool result."
+  (harness-provider-check-test-with-session
+    (harness-test-load-module 'agent)
+    (let* ((original (symbol-function 'harness-agent-step-request))
+           (requests nil)
+           (results
+            (cl-letf (((symbol-function 'harness-agent-step-request)
+                       (lambda (sid state on-event)
+                         (let ((request (funcall original sid state on-event)))
+                           (push request requests)
+                           request))))
+              (harness-provider-check-test-run "checkfake:model" 'provider)))
+           (round-trip (harness-provider-check-test-by-name
+                        results "Transcript round trip"))
+           (own (cl-remove-if-not
+                 (lambda (request)
+                   (cl-some (lambda (message)
+                              (cl-some (lambda (block)
+                                         (equal (plist-get block :text)
+                                                "Round trip: read a.txt."))
+                                       (plist-get message :content)))
+                            (plist-get request :messages)))
+                 requests)))
+      (should (eq 'pass (plist-get round-trip :status)))
+      (should (string-match-p "before and after a restart"
+                              (plist-get round-trip :detail)))
+      (should (= 2 (length own)))
+      (should (equal (plist-get (nth 0 own) :messages)
+                     (plist-get (nth 1 own) :messages)))
+      (let ((blocks (apply #'append
+                           (mapcar (lambda (message) (plist-get message :content))
+                                   (plist-get (nth 0 own) :messages)))))
+        (should (cl-some (lambda (block)
+                           (and (equal (plist-get block :type) "thinking")
+                                (equal (plist-get block :signature)
+                                       "signature-round-trip")))
+                         blocks))
+        (should (cl-some (lambda (block)
+                           (and (equal (plist-get block :type) "tool_use")
+                                (equal (plist-get block :id) "call-round-trip")))
+                         blocks))
+        (should (cl-some (lambda (block)
+                           (and (equal (plist-get block :type) "tool_result")
+                                (equal (plist-get block :tool_use_id)
+                                       "call-round-trip")))
+                         blocks))))))
+
+(ert-deftest harness-provider-check-transcript-round-trip-error-is-a-failure ()
+  "An exception while rendering the harness's own transcript is a FAIL.
+A SKIP would report the check's own error as an unverified result, which
+is exactly the misreporting this check exists to prevent."
+  (harness-provider-check-test-with-session
+    (harness-test-load-module 'agent)
+    (cl-letf (((symbol-function 'harness-agent-step-request)
+               (lambda (&rest _) (error "rendering broke"))))
+      (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+             (round-trip (harness-provider-check-test-by-name
+                          results "Transcript round trip")))
+        (should (eq 'fail (plist-get round-trip :status)))
+        (should (string-match-p "Harness render error"
+                                (plist-get round-trip :detail)))
+        (should (string-match-p "rendering broke"
+                                (plist-get round-trip :detail)))))))
+
+(ert-deftest harness-provider-check-transcript-round-trip-notices-a-dropped-render ()
+  "A renderer that drops the thinking and tool blocks is a FAIL.
+Rendering nothing twice is still the same request, so the check also
+asserts that the blocks it built reached the request."
+  (harness-provider-check-test-with-session
+    (harness-test-load-module 'agent)
+    (cl-letf (((symbol-function 'harness-agent-step-request)
+               (lambda (&rest _) '(:system "system" :messages nil :tools nil))))
+      (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+             (round-trip (harness-provider-check-test-by-name
+                          results "Transcript round trip")))
+        (should (eq 'fail (plist-get round-trip :status)))
+        (should (string-match-p "render missing" (plist-get round-trip :detail)))
+        (should (string-match-p "thinking signature" (plist-get round-trip :detail)))
+        (should (string-match-p "tool call" (plist-get round-trip :detail)))
+        (should (string-match-p "tool result" (plist-get round-trip :detail)))))))
 
 
 ;;;; Bounded concurrency, dependencies and cancellation
@@ -1369,6 +1569,28 @@ unprimed round would show up as a miss or as identity mixing."
                                 (mapcar (lambda (request)
                                           (plist-get request :system))
                                         (cl-set-difference requests primed)))))))))))
+
+(ert-deftest harness-provider-check-independent-prefixes-missing-is-a-failure ()
+  "A complete independent-prefix run with no reuse fails, not skips.
+Every primed prefix and the fresh controls report zero cached tokens:
+the check ran, measured every prefix, and the reuse it tests did not
+happen.  The capability record still calls one run unverified."
+  (harness-provider-check-test-with
+    (let ((harness-provider-check-test--cache-read 0))
+      (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+             (cross (harness-provider-check-test-by-name
+                     results "Independent-prefix cache reuse"))
+             (evidence (plist-get cross :evidence)))
+        (should (eq 'fail (plist-get cross :status)))
+        (should (= 4 (plist-get evidence :prefix-count)))
+        (should (zerop (plist-get evidence :cached-count)))
+        (should (zerop (plist-get evidence :baseline-hits)))
+        (should (zerop (plist-get evidence :round-1-hits)))
+        (should (zerop (plist-get evidence :round-2-hits)))
+        (should (zerop (plist-get evidence :control-hits)))
+        (should (string-match-p "primed prefixes missed" (plist-get cross :detail)))
+        (should (string-match-p "unverified, not unsupported"
+                                (plist-get cross :detail)))))))
 
 (ert-deftest harness-provider-check-independent-prefixes-reject-shared-and-mixed ()
   "One shared prefix, or one session used for two prefixes, is not evidence.

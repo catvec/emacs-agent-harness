@@ -154,13 +154,18 @@ What the check does *not* do:
   persistence point is a measured interval, not a TTL, and the report
   says "TTL unverified" in those words.  A hit after a wait neither
   measures a lifetime nor extends one.
-- It does not treat a single hit as a guarantee, or one run of misses
-  as "unsupported".  Unsupported needs repeated misses with cold
-  controls in two independent runs; a second run of the same model
-  supplies the count through the saved record.
+- It does not treat a single hit as a guarantee, or one run of misses as
+  "unsupported".  Unsupported needs repeated misses with cold controls in
+  two independent runs; a second run of the same model supplies the count
+  through the saved record.  A complete run of misses is a FAIL of the
+  check itself -- it ran, and the reuse it measures did not happen -- while
+  the record keeps that run `unverified` until the second run.
 - It does not call missing telemetry zero.  A usage event with no
   cache-read field is `missing`, and the check is SKIP: unknown, not
-  zero.
+  zero.  A run that could not measure its claim -- no telemetry, too few
+  samples, a warm control, a failed or throttled request -- is a SKIP; a
+  run that measured misses is a FAIL, never a SKIP
+  ([provider-check-status-reporting.md](provider-check-status-reporting.md)).
 
 The detail line reports, in noun phrases: repeats cached, keep-warm
 cached, whether the resumed request was cached, the persistence wait,
@@ -277,7 +282,9 @@ is deliberately asymmetric:
   reuse it needs at least two repeat samples.  A hit is an observation,
   never a guarantee.
 - **unsupported** needs repeated misses with cold controls in two
-  independent runs.  One run is unverified.
+  independent runs.  One run is unverified.  The check that measured the
+  misses is a FAIL about that run, and says "unverified, not unsupported"
+  in its detail.
 - **unverified** is everything else: no telemetry, too few samples, a
   warm control, a rate limit, a partial batch, identity mixing, an
   incomplete probe, any TTL or lifetime extension claim.  Missing
@@ -374,8 +381,10 @@ The ordinary provider suite ran on 2026-11-07 at 09:31:
   separates the control sessions from the prefix count; the twelve-
   session run below shows the final line.
 - the four skips were the transcript round trip (a pre-existing
-  renderer error in unchanged code), quota reporting (none reported),
-  provider fork (not advertised) and embeddings (no embedding model).
+  renderer error in unchanged code, fixed later in
+  [provider-check-status-reporting.md](provider-check-status-reporting.md)),
+  quota reporting (none reported), provider fork (not advertised) and
+  embeddings (no embedding model).
 
 The twelve-session cache stress ran on the final code on 2026-11-07 at
 09:38:
@@ -404,7 +413,10 @@ had settled, so they used no advertised thinking level and could not
 price their requests.  The plan now declares the catalogue dependency
 for both cache experiments, and the fake-provider suite asserts it.
 The same earlier run also showed the pre-existing transcript SKIP; its
-code is unchanged by this task.
+code was unchanged by this task, and a later change rebuilt that check
+from the harness's own node shapes, so a rendering error is a FAIL now
+and the check itself passes
+([provider-check-status-reporting.md](provider-check-status-reporting.md)).
 
 ## What remains unverified
 

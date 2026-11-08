@@ -25,10 +25,17 @@
 ;; Checks are incremental in both senses.  Each one reports PASS, FAIL or
 ;; SKIP as soon as it settles, with guidance about the feature that may need
 ;; to be removed or fixed, and the remaining checks keep running.  Nothing
-;; stops at the first failure, and a SKIP means unverified, not supported.
+;; stops at the first failure.  A SKIP means the check could not measure
+;; what it set out to -- an optional feature not advertised, missing
+;; telemetry, a dependency it needs, or an account that is out of quota or
+;; money, rate-limited, refused or unreachable -- so it says nothing for or
+;; against the provider.  A check that ran and measured the behavior it
+;; tests is a PASS or a FAIL, never a SKIP: an exception in the check's own
+;; work is a FAIL too, not an unverified result.
+;;
 ;; A check that cannot run because the account is out of quota or money, is
 ;; rate-limited, refused its credential or cannot reach the provider is a
-;; SKIP too: an exhausted plan is not a broken provider, and the report says
+;; SKIP: an exhausted plan is not a broken provider, and the report says
 ;; which of those it was without echoing the provider's error text.
 ;;
 ;; Every model request a check makes is recorded as an internal session
@@ -70,10 +77,12 @@
 ;; carries a user's conversation.  A hit is an observation, not a
 ;; guarantee; missing telemetry is unknown, not zero; one miss is not proof
 ;; that a provider lacks a cache; and no request waits out a provider's
-;; cache lifetime.  `provider/cache-evidence' reads back the conservative
-;; record those runs saved, and says when a changed provider, model,
-;; configuration or request identity made it stale.  The record changes no
-;; setting and starts no automatic keep-warm request.
+;; cache lifetime.  A complete run whose probes all missed is a FAIL about
+;; that run, while the record still needs a second independent run before it
+;; calls the capability unsupported.  `provider/cache-evidence' reads back
+;; the conservative record those runs saved, and says when a changed
+;; provider, model, configuration or request identity made it stale.  The
+;; record changes no setting and starts no automatic keep-warm request.
 
 ;;; Code:
 
@@ -1108,6 +1117,38 @@ request measures a provider's cache lifetime."
             (harness-provider-check--cost-label cost)
             (length repeats))))
 
+(defun harness-provider-check--prompt-cache-verdict (evidence)
+  "Return (STATUS . DETAIL) for exact-prefix cache EVIDENCE.
+A run that could not measure its claim -- no telemetry, too few samples,
+a warm control, an unavailable account or failed probes -- is SKIP.  A
+complete run whose repeats missed is FAIL: the check ran, and the reuse
+it measures did not happen; the record still calls one run unverified,
+not unsupported."
+  (let ((environment (plist-get evidence :environment))
+        (telemetry (plist-get evidence :telemetry))
+        (samples (plist-get evidence :repeat-samples))
+        (hits (plist-get evidence :repeat-hits)))
+    (cond
+     (environment
+      (cons 'skip (format "unavailable: %s"
+                          (mapconcat #'symbol-name environment ", "))))
+     ((and (null (plist-get evidence :repeats))
+           (> (plist-get evidence :errors) 0))
+      '(skip . "incomplete probes; nothing observed"))
+     ((not (eq telemetry 'present))
+      '(skip . "no cache telemetry; unknown, not zero"))
+     ((< samples harness-provider-check-cache-min-samples)
+      (cons 'skip (format "%d/%d repeat samples"
+                          samples harness-provider-check-cache-min-samples)))
+     ((not (plist-get evidence :controls-clean))
+      '(skip . "control prefix warm; isolation ambiguous"))
+     ((>= hits harness-provider-check-cache-min-samples)
+      '(pass . "exact-prefix reuse observed; not a guarantee"))
+     ((zerop hits)
+      '(fail . "repeated misses in one run; unverified, not unsupported"))
+     (t
+      '(fail . "some repeats cached in one run; unverified, not unsupported")))))
+
 (defun harness-provider-check--check-prompt-cache (job run)
   "Measure exact-prefix reuse, keep-warm refresh and a no-refresh control.
 Every probe is synthetic and nonce-isolated; the requests under test
@@ -1115,35 +1156,17 @@ share model, system prefix, tools and schema, thinking parameter and
 message order, and each carries a different provider session.  The
 check reports observations, not a cache guarantee: a single hit is not
 a lifetime, a single miss is not proof that a provider lacks a cache,
-and the provider's TTL remains unknown."
+and the provider's TTL remains unknown.  A complete run whose repeats
+all missed is a FAIL about that run -- the reuse it measures did not
+happen -- while the capability record calls one run unverified, not
+unsupported.  A run that could not measure (no telemetry, too few
+samples, a warm control) is a SKIP."
   (let ((specs (harness-provider-check--cache-specs job)))
     (harness-then
      (harness-provider-check--cache-sequence run specs nil)
      (lambda (results)
        (let* ((evidence (harness-provider-check--cache-evidence job specs results))
-              (environment (plist-get evidence :environment))
-              (telemetry (plist-get evidence :telemetry))
-              (samples (plist-get evidence :repeat-samples))
-              (hits (plist-get evidence :repeat-hits))
-              (verdict
-               (cond
-                (environment
-                 (cons 'skip (format "unavailable: %s"
-                                     (mapconcat #'symbol-name environment ", "))))
-                ((and (null (plist-get evidence :repeats))
-                      (> (plist-get evidence :errors) 0))
-                 '(skip . "incomplete probes; nothing observed"))
-                ((not (eq telemetry 'present))
-                 '(skip . "no cache telemetry; unknown, not zero"))
-                ((< samples harness-provider-check-cache-min-samples)
-                 (cons 'skip (format "%d/%d repeat samples"
-                                     samples harness-provider-check-cache-min-samples)))
-                ((not (plist-get evidence :controls-clean))
-                 '(skip . "control prefix warm; isolation ambiguous"))
-                ((>= hits harness-provider-check-cache-min-samples)
-                 '(pass . "exact-prefix reuse observed; not a guarantee"))
-                (t
-                 '(skip . "repeated misses in one run; not unsupported")))))
+              (verdict (harness-provider-check--prompt-cache-verdict evidence)))
          (list :status (car verdict)
                :detail (format "%s · %s"
                                (harness-provider-check--cache-detail evidence)
@@ -1492,6 +1515,57 @@ classification can call it unverified rather than a hit or a miss."
             (or (plist-get evidence :output) 0)
             (harness-provider-check--cost-label cost))))
 
+(defun harness-provider-check--independent-cache-verdict (evidence)
+  "Return (STATUS . DETAIL) for independent-prefix cache EVIDENCE.
+A run that could not measure its claim -- a throttled or failed request,
+identity mixing, repeated session ids, missing telemetry, a warm
+control, or requests that did not overlap -- is SKIP.  A complete run in
+which the primed prefixes missed is FAIL: the check ran, and the reuse
+it measures did not happen; the record still calls one run unverified,
+not unsupported."
+  (let ((environment (plist-get evidence :environment))
+        (throttled (or (plist-get evidence :throttled) 0))
+        (errors (or (plist-get evidence :errors) 0))
+        (count (or (plist-get evidence :prefix-count) 0))
+        (cached (or (plist-get evidence :cached-count) 0))
+        (baseline (or (plist-get evidence :baseline-hits) 0))
+        (round-1 (or (plist-get evidence :round-1-hits) 0))
+        (round-2 (or (plist-get evidence :round-2-hits) 0))
+        (peak (or (plist-get evidence :peak-concurrency) 0)))
+    (cond
+     (environment
+      (cons 'skip (format "unavailable: %s"
+                          (mapconcat #'symbol-name environment ", "))))
+     ((> throttled 0)
+      (cons 'skip
+            (format "%d of %d requests throttled; concurrency unverified"
+                    throttled (plist-get evidence :actual))))
+     ((> (or (plist-get evidence :identity-mismatches) 0) 0)
+      '(skip . "prefix and session identity mismatched; mixing unverified"))
+     ((> errors 0)
+      '(skip . "some requests failed; concurrency result incomplete"))
+     ((not (plist-get evidence :distinct-sessions))
+      '(skip . "session ids repeated; independent sessions unverified"))
+     ((< count 2)
+      '(skip . "fewer than 2 independent prefixes"))
+     ((not (eq (plist-get evidence :telemetry) 'present))
+      '(skip . "no cache telemetry; unknown, not zero"))
+     ((> (or (plist-get evidence :control-hits) 0) 0)
+      '(skip . "fresh control prefix read cached tokens; isolation ambiguous"))
+     ((< peak 2)
+      '(skip . "requests did not overlap; concurrency unverified"))
+     ((and (>= baseline count) (>= round-1 count) (>= round-2 count))
+      '(pass . "independent-prefix reuse observed; not a guarantee"))
+     ((and (> baseline 0) (zerop round-1) (zerop round-2))
+      '(fail . "serial baseline reuse; concurrent rounds missed"))
+     ((and (< cached count) (> (+ round-1 round-2) 0))
+      (cons 'fail
+            (format (concat "partial reuse: %d/%d prefixes cached in both"
+                            " rounds; unverified, not unsupported")
+                    cached count)))
+     (t
+      '(fail . "primed prefixes missed in one run; unverified, not unsupported")))))
+
 (defun harness-provider-check--check-independent-prefix-cache (job run)
   "Measure whether independent sessions cache their own prefixes.
 Each of the job's sessions has a different synthetic prefix, different
@@ -1502,8 +1576,11 @@ second in reverse order.  Fresh never-primed controls are asked once,
 separately.  Neither prefixes nor sessions are shared, so a hit for one
 session cannot come from another session's conversation.  A shared-prefix
 experiment would answer a different question and is not evidence here.
-Throttling, missing telemetry, identity mixing, a warm control, a partial
-batch or requests that did not overlap leave the result unverified."
+A complete run in which the primed prefixes missed is a FAIL about that
+run; the capability record still needs two independent runs before it
+calls the capability unsupported.  Throttling, missing telemetry, a warm
+control, a partial batch or requests that did not overlap could not
+measure the claim and leave it a SKIP."
   (let ((capabilities (or (plist-get (harness-provider-check-job-metadata job)
                                      :capabilities)
                           (and (harness-provider-check-job-provider job)
@@ -1547,51 +1624,8 @@ batch or requests that did not overlap leave the result unverified."
                                             round-2-results control-results))
                            (evidence (harness-provider-check--independent-evidence
                                       job specs results))
-                           (telemetry (plist-get evidence :telemetry))
-                           (environment (plist-get evidence :environment))
-                           (count (plist-get evidence :prefix-count))
-                           (cached (plist-get evidence :cached-count))
-                           (baseline (plist-get evidence :baseline-hits))
-                           (round-1-hits (plist-get evidence :round-1-hits))
-                           (round-2-hits (plist-get evidence :round-2-hits))
-                           (peak (or (plist-get evidence :peak-concurrency) 0))
-                           (verdict
-                            (cond
-                             (environment
-                              (cons 'skip (format "unavailable: %s"
-                                                  (mapconcat #'symbol-name environment
-                                                             ", "))))
-                             ((> (plist-get evidence :throttled) 0)
-                              (cons 'skip
-                                    (format "%d of %d requests throttled; concurrency unverified"
-                                            (plist-get evidence :throttled)
-                                            (plist-get evidence :actual))))
-                             ((> (plist-get evidence :identity-mismatches) 0)
-                              '(skip . "prefix and session identity mismatched; mixing unverified"))
-                             ((> (plist-get evidence :errors) 0)
-                              '(skip . "some requests failed; concurrency result incomplete"))
-                             ((not (plist-get evidence :distinct-sessions))
-                              '(skip . "session ids repeated; independent sessions unverified"))
-                             ((< count 2)
-                              '(skip . "fewer than 2 independent prefixes"))
-                             ((not (eq telemetry 'present))
-                              '(skip . "no cache telemetry; unknown, not zero"))
-                             ((> (plist-get evidence :control-hits) 0)
-                              '(skip . "fresh control prefix read cached tokens; isolation ambiguous"))
-                             ((< peak 2)
-                              '(skip . "requests did not overlap; concurrency unverified"))
-                             ((and (>= baseline count)
-                                   (>= round-1-hits count)
-                                   (>= round-2-hits count))
-                              '(pass . "independent-prefix reuse observed; not a guarantee"))
-                             ((and (> baseline 0) (zerop round-1-hits) (zerop round-2-hits))
-                              '(skip . "serial baseline hit but concurrent reuse missed; unverified"))
-                             ((and (< cached count) (> (+ round-1-hits round-2-hits) 0))
-                              (cons 'skip
-                                    (format "partial reuse: %d/%d prefixes cached in both rounds"
-                                            cached count)))
-                             (t
-                              '(skip . "primed prefixes missed in one run; not unsupported")))))
+                           (verdict (harness-provider-check--independent-cache-verdict
+                                     evidence)))
                       (list :status (car verdict)
                             :detail (format "%s · %s"
                                             (harness-provider-check--independent-detail
@@ -2196,6 +2230,20 @@ catalogue does not list, costs no fallback."
                     (format "Resolved %s." (mapconcat #'identity (nreverse notes) "; "))
                   "No tier names a model."))))))))
 
+(defun harness-provider-check--transcript-round-trip-nodes ()
+  "Return the transcript nodes the round-trip check writes.
+They are the node shapes the harness itself writes: a user message,
+thinking with its signature, an assistant message, a tool call and its
+result.  A single assistant node holding provider blocks, which the
+harness never writes, would render as nothing at all."
+  (list (list :kind 'user :content "Round trip: read a.txt.")
+        (list :kind 'thinking :content "I will read it."
+              :meta (list :signature "signature-round-trip"))
+        (list :kind 'assistant :content "Reading a.txt.")
+        (list :kind 'tool-call :call-id "call-round-trip"
+              :tool "read_file" :input (list :path "a.txt"))
+        (list :kind 'tool-result :call-id "call-round-trip" :output "hello")))
+
 (defun harness-provider-check--check-transcript-round-trip (job _run)
   "Check that the same transcript renders to the same request twice.
 The harness builds every request from the session's transcript, and a
@@ -2207,43 +2255,74 @@ again.  This makes a small session with a text message, thinking with
 its signature, and a tool call with its result; renders its request;
 writes the session to the store and reads it back as a restart does;
 renders it again; and compares what the provider would be sent.  It
-makes no request, so it checks the harness rather than the provider,
-and runs for every model."
+also fails when the request lacks the thinking signature, the tool call
+or its result, so a renderer that drops them cannot pass by dropping
+them the same way twice.  It makes no request, so it checks the harness
+rather than the provider, and runs for every model.  A failure to build
+or render the transcript is a FAIL, not a SKIP: the check exists to find
+the harness's own rendering errors, and a SKIP would report one as
+unverified."
   (let ((model (harness-provider-check-job-model job)))
     (if (not (and (harness-method-exists-p 'session/create)
                   (harness-method-exists-p 'session/append)
                   (fboundp 'harness-agent-step-request)
                   (fboundp 'harness-session-reload-nodes)))
         '(skip . "The session and agent layers are not loaded.")
-      (let ((sid (plist-get (harness-call 'session/create
-                                          :cwd (or (bound-and-true-p harness-state-directory)
-                                                   temporary-file-directory)
-                                          :model model :kind 'internal
-                                          :name "Transcript round trip")
-                            :id)))
+      (let (sid)
         (unwind-protect
             (condition-case err
                 (progn
-                  (harness-call 'session/append sid
-                                '(:kind user :content "Round trip: read a.txt."))
-                  (harness-call 'session/append sid
-                                (list :kind 'assistant
-                                      :content (list (list :type "thinking" :text "I will read it."
-                                                           :signature "signature-round-trip")
-                                                     (list :type "tool_use" :id "call-round-trip"
-                                                           :name "read_file" :input (list :path "a.txt")))))
-                  (harness-call 'session/append sid
-                                (list :kind 'tool-result :call-id "call-round-trip" :content "hello"))
+                  (setq sid (plist-get (harness-call 'session/create
+                                                     :cwd (or (bound-and-true-p harness-state-directory)
+                                                              temporary-file-directory)
+                                                     :model model :kind 'internal
+                                                     :name "Transcript round trip")
+                                       :id))
+                  (dolist (node (harness-provider-check--transcript-round-trip-nodes))
+                    (harness-call 'session/append sid node))
                   (let* ((first (harness-agent-step-request sid nil #'ignore))
                          (again (progn
                                   (harness-session-flush)
                                   (harness-session-reload-nodes sid)
                                   (harness-agent-step-request sid nil #'ignore)))
+                         (blocks (apply #'append
+                                        (mapcar (lambda (message)
+                                                  (plist-get message :content))
+                                                (plist-get first :messages))))
+                         (missing
+                          (delq nil
+                                (list (unless (cl-some
+                                               (lambda (block)
+                                                 (and (equal (plist-get block :type) "thinking")
+                                                      (equal (plist-get block :signature)
+                                                             "signature-round-trip")))
+                                               blocks)
+                                        "thinking signature")
+                                      (unless (cl-some
+                                               (lambda (block)
+                                                 (and (equal (plist-get block :type) "tool_use")
+                                                      (equal (plist-get block :id)
+                                                             "call-round-trip")))
+                                               blocks)
+                                        "tool call")
+                                      (unless (cl-some
+                                               (lambda (block)
+                                                 (and (equal (plist-get block :type) "tool_result")
+                                                      (equal (plist-get block :tool_use_id)
+                                                             "call-round-trip")))
+                                               blocks)
+                                        "tool result"))))
                          (same (and (equal (plist-get first :system) (plist-get again :system))
                                     (equal (plist-get first :messages) (plist-get again :messages))
                                     (equal (plist-get first :tools) (plist-get again :tools)))))
-                    (if same
-                        '(pass . "The same transcript rendered to the same request before and after a restart.")
+                    (cond
+                     (missing
+                      (cons 'fail
+                            (format "Transcript render missing %s"
+                                    (string-join missing " or "))))
+                     (same
+                      '(pass . "The same transcript rendered to the same request before and after a restart."))
+                     (t
                       (cons 'fail
                             (format (concat "The same transcript rendered differently the second time (%s):"
                                             " every message after the one that changed would be sent"
@@ -2252,10 +2331,13 @@ and runs for every model."
                                                        (plist-get again :system))) "system prompt")
                                           ((not (equal (plist-get first :tools)
                                                        (plist-get again :tools))) "tools")
-                                          (t "messages")))))))
-              (error (cons 'skip (format "Nothing could be rendered: %s"
-                                         (harness-error-short-message err)))))
-          (ignore-errors (harness-call 'session/delete sid)))))))
+                                          (t "messages"))))))))
+              (error
+               (cons 'fail
+                     (format "Harness render error: %s"
+                             (harness-error-short-message err)))))
+          (when sid
+            (ignore-errors (harness-call 'session/delete sid))))))))
 
 (defun harness-provider-check--check-no-thinking (job run)
   "Check that a request without thinking is accepted for JOB."
@@ -2757,9 +2839,10 @@ not taken while ordinary probes compete for request slots."
               :solo t
               :after '("catalogue")
               :timeout cache-timeout
-              :advice (concat "Repeated misses with cold controls in more than one run mean every step "
+              :advice (concat "Repeated misses with cold controls mean every step "
                               "would re-send the prompt uncached; fix the provider's cache, or use one "
-                              "that caches, before long sessions.  A single run is unverified.")
+                              "that caches, before long sessions.  One run is unverified, not "
+                              "unsupported; rerun to confirm.")
               :fn #'harness-provider-check--check-prompt-cache)
         (list :suite 'provider :id "cache-parallel"
               :name "Independent-prefix cache reuse"
@@ -2769,8 +2852,8 @@ not taken while ordinary probes compete for request slots."
               :timeout parallel-timeout
               :advice (concat "Independent sessions whose own primed prefixes miss, while fresh "
                               "controls stay cold, mean each session re-sends its prompt uncached; "
-                              "do not plan many parallel sessions around the cache.  A partial "
-                              "batch or one run is unverified.")
+                              "do not plan many parallel sessions around the cache.  One run is "
+                              "unverified; rerun to confirm.")
               :fn #'harness-provider-check--check-independent-prefix-cache)
         (list :suite 'provider :id "cache-evidence"
               :name "Cache capability evidence"

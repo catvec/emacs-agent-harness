@@ -230,18 +230,21 @@ failure, so one error does not mask a second one, and every wait has a
 timeout of its own (`harness-provider-check-timeout`).
 
 Every line is PASS, FAIL, or SKIP with feature-specific guidance.  A
-SKIP means *unverified*, not supported: for instance, an API account
-that does not report quota windows cannot verify plan quota, and no
-tool call means the tool transport was not exercised.  A request that
-could not run because the account's plan usage limit is reached, its
-balance is empty, it is rate-limited, its credential was refused or the
-provider could not be reached is a SKIP with that reason, never a
-contract FAIL: an exhausted plan is not a broken provider.  The summary
-counts all three, and a failure is shown in the warning face.  A check
-that made model requests links to them: a click or RET on its line, or
-its `[Session]` button (one per call), opens the internal session that
-recorded the call, in the harness's own list of its model calls (the
-session list's `I` shows them).  The prompt, the model's answer, and
+SKIP means *unverified*, not supported: the check could not measure its
+claim.  For instance, an API account that does not report quota windows
+cannot verify plan quota, and no tool call means the tool transport was
+not exercised.  A request that could not run because the account's plan
+usage limit is reached, its balance is empty, it is rate-limited, its
+credential was refused or the provider could not be reached is a SKIP
+with that reason, never a contract FAIL: an exhausted plan is not a
+broken provider.  A check that ran and measured the behavior it tests
+is a PASS or a FAIL, never a SKIP; an exception in the check's own work
+is a FAIL too, so a harness error cannot be reported as unverified.  The
+summary counts all three, and a failure is shown in the warning face.  A
+check that made model requests links to them: a click or RET on its
+line, or its `[Session]` button (one per call), opens the internal
+session that recorded the call, in the harness's own list of its model
+calls (the session list's `I` shows them).  The prompt, the model's answer, and
 the provider's own error are there -- a result never copies a
 provider's error text, which a plugin may have filled with a key, so a
 FAIL that says the error text is suppressed is read in its session.
@@ -259,16 +262,17 @@ exercise an optional feature the account does not expose.
 The cache checks say what one or two runs observed, and no more.  A hit
 is an observation, not a guarantee; a missing telemetry field is
 unknown, not zero; a single run of misses is not unsupported (the
-record needs a second independent run); and a request that returns
-inside a provider's cache lifetime neither measures that lifetime nor
-extends it.  The record keeps advertised, observed, unsupported and
-unverified findings apart, and `provider/cache-evidence` returns it
-with `:stale` when the provider, model, advertised capabilities, cache
-lifetime, prices or the synthetic request identity changed since it was
-made.  Nothing in the harness acts on the record: it starts no keep-warm
-request and disables no cache safeguard.  What would be a capability
-finding for the harness is a decision left to a later change with its
-own review.
+record needs a second independent run), though it is a FAIL of the check
+that measured it, with "unverified, not unsupported" in the detail; and
+a request that returns inside a provider's cache lifetime neither
+measures that lifetime nor extends it.  The record keeps advertised,
+observed, unsupported and unverified findings apart, and
+`provider/cache-evidence` returns it with `:stale` when the provider,
+model, advertised capabilities, cache lifetime, prices or the synthetic
+request identity changed since it was made.  Nothing in the harness acts
+on the record: it starts no keep-warm request and disables no cache
+safeguard.  What would be a capability finding for the harness is a
+decision left to a later change with its own review.
 
 These are **not** part of `scripts/test.sh`: that suite must stay
 offline and free.  The runner's own behavior -- incremental results,

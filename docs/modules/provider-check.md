@@ -33,10 +33,17 @@ is broken, so the contract check skips while the behavior check fails.
 Checks are incremental in both senses.  Each one reports PASS, FAIL or
 SKIP as soon as it settles, with guidance about the feature that may need
 to be removed or fixed, and the remaining checks keep running.  Nothing
-stops at the first failure, and a SKIP means unverified, not supported.
+stops at the first failure.  A SKIP means the check could not measure
+what it set out to -- an optional feature not advertised, missing
+telemetry, a dependency it needs, or an account that is out of quota or
+money, rate-limited, refused or unreachable -- so it says nothing for or
+against the provider.  A check that ran and measured the behavior it
+tests is a PASS or a FAIL, never a SKIP: an exception in the check's own
+work is a FAIL too, not an unverified result.
+
 A check that cannot run because the account is out of quota or money, is
 rate-limited, refused its credential or cannot reach the provider is a
-SKIP too: an exhausted plan is not a broken provider, and the report says
+SKIP: an exhausted plan is not a broken provider, and the report says
 which of those it was without echoing the provider's error text.
 
 Every model request a check makes is recorded as an internal session
@@ -78,10 +85,12 @@ the cache checks only.  No prefix or session is shared, and no probe
 carries a user's conversation.  A hit is an observation, not a
 guarantee; missing telemetry is unknown, not zero; one miss is not proof
 that a provider lacks a cache; and no request waits out a provider's
-cache lifetime.  `provider/cache-evidence` reads back the conservative
-record those runs saved, and says when a changed provider, model,
-configuration or request identity made it stale.  The record changes no
-setting and starts no automatic keep-warm request.
+cache lifetime.  A complete run whose probes all missed is a FAIL about
+that run, while the record still needs a second independent run before it
+calls the capability unsupported.  `provider/cache-evidence` reads back
+the conservative record those runs saved, and says when a changed
+provider, model, configuration or request identity made it stale.  The
+record changes no setting and starts no automatic keep-warm request.
 
 ## Provides
 
