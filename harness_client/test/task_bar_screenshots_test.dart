@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/app.dart';
+import 'package:harness_client/src/models/task_chat.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
@@ -172,9 +173,9 @@ Future<void> main() async {
       await tester.tap(find.text('Tasks'));
       await settle(6);
 
-      Future<void> showColumn(String column) async {
+      Future<void> showLane(String label) async {
         final tabs = find.byType(HarnessTabStrip<String>);
-        final tab = find.descendant(of: tabs, matching: find.text(column));
+        final tab = find.descendant(of: tabs, matching: find.text(label));
         final strip = find
             .descendant(of: tabs, matching: find.byType(Scrollable))
             .first;
@@ -187,13 +188,29 @@ Future<void> main() async {
         await settle(4);
       }
 
+      Future<void> showTask(String title) async {
+        final task = app.tasks!.tasks.firstWhere(
+          (task) => task.title == title,
+        );
+        await showLane(taskLaneLabel(task.laneName));
+        final lane = find
+            .descendant(
+              of: find.byType(RefreshIndicator),
+              matching: find.byType(Scrollable),
+            )
+            .first;
+        await tester.scrollUntilVisible(find.text(title), 100, scrollable: lane);
+        await tester.ensureVisible(find.text(title));
+        await tester.pump();
+      }
+
       // The queue of the project has its controls on the board; a card has
       // none: it is a way in.
       Finder onCards(Finder what) =>
           find.descendant(of: find.byType(TaskCard), matching: what);
 
-      Future<void> open(String column, String task) async {
-        await showColumn(column);
+      Future<void> open(String task) async {
+        await showTask(task);
         await tester.tap(find.text(task));
         await settle(10);
       }
@@ -205,30 +222,30 @@ Future<void> main() async {
           expect(onCards(find.byType(TextButton)), findsNothing);
           expect(find.byTooltip('Task actions'), findsNothing);
         case _Scene.boardReview:
-          await showColumn('Review');
+          await showTask('Review the emulator screenshots');
           expect(find.text('Review the emulator screenshots'), findsOneWidget);
           expect(find.byType(FilledButton), findsNothing);
           expect(onCards(find.byType(TextButton)), findsNothing);
           expect(find.byTooltip('Task actions'), findsNothing);
         case _Scene.review:
-          await open('Review', 'Review the emulator screenshots');
+          await open('Review the emulator screenshots');
           expect(find.byType(SessionScreen), findsOneWidget);
           expect(find.text('Verify and merge'), findsOneWidget);
         case _Scene.menu:
-          await open('Active', 'Build the Flutter ACP client');
+          await open('Build the Flutter ACP client');
           await tester.tap(find.byTooltip('Task actions'));
           await settle(6);
           expect(find.text('Return to queue'), findsOneWidget);
           expect(find.text('Stop'), findsOneWidget);
         case _Scene.stopAsks:
-          await open('Active', 'Build the Flutter ACP client');
+          await open('Build the Flutter ACP client');
           await tester.tap(find.byTooltip('Task actions'));
           await settle(6);
           await tester.tap(find.text('Stop'));
           await settle(6);
           expect(find.text('Stop this task?'), findsOneWidget);
         case _Scene.paused:
-          await open('Pending', 'Cache the model catalogue');
+          await open('Cache the model catalogue');
           await tester.tap(find.text('Pause'));
           await settle(8);
           expect(find.text('Resume'), findsOneWidget);
@@ -243,7 +260,7 @@ Future<void> main() async {
           await settle(6);
           expect(find.text('Paused 3 tasks.'), findsOneWidget);
         case _Scene.feedback:
-          await open('Review', 'Review the emulator screenshots');
+          await open('Review the emulator screenshots');
           await tester.tap(find.text('Send back'));
           await settle(3);
           keyboardUp.value = true;
@@ -261,10 +278,10 @@ Future<void> main() async {
           await settle(4);
           expect(find.text('Verify and merge'), findsNothing);
         case _Scene.backlog:
-          await open('Backlog', 'Write the migration notes');
+          await open('Write the migration notes');
           expect(find.text('Queue it'), findsOneWidget);
         case _Scene.stopped:
-          await open('Needs input', 'Answer the permission');
+          await open('Answer the permission');
           expect(find.text('Retry'), findsOneWidget);
       }
 

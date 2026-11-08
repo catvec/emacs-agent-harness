@@ -16,6 +16,7 @@ import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'support/board_navigation.dart';
 import 'support/fake_harness.dart';
 import 'support/tool_showcase.dart';
 import 'support/transcript_log.dart';
@@ -166,9 +167,7 @@ void main() {
     await _open(tester, harness, openSession: false, width: 2100);
     await tester.tap(find.text('Tasks'));
     await _settle(tester, 6);
-    await tester.ensureVisible(find.text('Review'));
-    await tester.tap(find.text('Review'));
-    await _settle(tester, 4);
+    await showTask(tester, 'Review the emulator screenshots');
     await tester.tap(find.text('Review the emulator screenshots'));
     await _settle(tester, 20);
     // The bar of the conversation leads to the report and draws none of it,
@@ -288,9 +287,7 @@ void main() {
     await _open(tester, harness, openSession: false, width: 2100);
     await tester.tap(find.text('Tasks'));
     await _settle(tester, 6);
-    await tester.ensureVisible(find.text('Review'));
-    await tester.tap(find.text('Review'));
-    await _settle(tester, 4);
+    await showTask(tester, 'Show the chat');
     await tester.tap(find.text('Show the chat'));
     await _settle(tester, 20);
     // The bar of the conversation leads to the report; the report is on its

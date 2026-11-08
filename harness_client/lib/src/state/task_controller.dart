@@ -48,31 +48,70 @@ class TaskController extends ChangeNotifier {
   /// no task's among them: it asks once.
   final Set<String> _asked = {};
 
+  /// The workflow columns the board holds a task in, in workflow order.
+  ///
+  /// A task that waits on the person is counted at the stage it stopped in,
+  /// not under `needs-input`, which is the lane above the columns.
   List<String> get columns {
-    const order = [
-      'needs-input',
-      'active',
-      'review',
-      'pending',
-      'merging',
-      'backlog',
-      'done',
-      'cancelled',
-    ];
     final present = {
       for (final task in tasks)
-        if (_shown(task)) task.columnName,
+        if (_shown(task)) task.stageName,
     };
     return [
-      for (final column in order)
+      for (final column in taskColumns)
         if (present.contains(column)) column,
     ];
   }
 
-  List<HarnessTask> forColumn(String column) => [
+  /// The swimlanes the board holds a task in, in the lanes' order.
+  List<String> get lanes {
+    final present = {
+      for (final task in tasks)
+        if (_shown(task)) task.laneName,
+    };
+    return [
+      for (final lane in taskLanes)
+        if (present.contains(lane)) lane,
+    ];
+  }
+
+  /// The tasks of [lane] in the workflow [column], by priority first and
+  /// then as the harness sent them.
+  List<HarnessTask> forCell(String lane, String column) => _priorityFirst([
+    for (final task in tasks)
+      if (task.laneName == lane && task.stageName == column && _shown(task))
+        task,
+  ]);
+
+  /// The tasks of [lane], wherever they stand in the workflow.
+  List<HarnessTask> forLane(String lane) => _priorityFirst([
+    for (final task in tasks)
+      if (task.laneName == lane && _shown(task)) task,
+  ]);
+
+  int countForLane(String lane) =>
+      tasks.where((task) => task.laneName == lane && _shown(task)).length;
+
+  /// How many of the board's tasks are at the workflow [column], a task
+  /// that waits on the person included.
+  int countForStage(String column) =>
+      tasks.where((task) => task.stageName == column && _shown(task)).length;
+
+  /// The tasks by priority first, then as the harness sent them: the sort
+  /// has a stable tiebreak, so a lane of one priority keeps that order.
+  List<HarnessTask> _priorityFirst(Iterable<HarnessTask> tasks) {
+    final indexed = tasks.toList().asMap().entries.toList();
+    indexed.sort((a, b) {
+      final byPriority = b.value.priorityRank.compareTo(a.value.priorityRank);
+      return byPriority != 0 ? byPriority : a.key.compareTo(b.key);
+    });
+    return [for (final entry in indexed) entry.value];
+  }
+
+  List<HarnessTask> forColumn(String column) => _priorityFirst([
     for (final task in tasks)
       if (task.columnName == column && _shown(task)) task,
-  ]..sort((a, b) => b.priorityRank.compareTo(a.priorityRank));
+  ]);
 
   int countFor(String column) =>
       tasks.where((task) => task.columnName == column && _shown(task)).length;

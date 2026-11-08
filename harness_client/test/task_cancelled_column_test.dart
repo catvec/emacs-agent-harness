@@ -124,7 +124,7 @@ void main() {
     });
   });
 
-  testWidgets('shows under a tab of its own, with Archive and no Retry', (
+  testWidgets('shows in its lane under Cancelled, with Archive and no Retry', (
     tester,
   ) async {
     final (settings, _, app) = await _rig();
@@ -138,22 +138,34 @@ void main() {
     await _settle(tester, 8);
     await tester.tap(find.text('Tasks'));
     await _settle(tester);
-    // Its tab is the last of the strip, which scrolls.
-    await tester.dragUntilVisible(
-      find.text('Cancelled'),
-      find.descendant(
-        of: find.byType(HarnessTabStrip<String>),
-        matching: find.byType(ListView),
-      ),
-      const Offset(-120, 0),
+    // It is a medium-priority task: its lane is Medium priority, a tab that
+    // scrolls, and the Cancelled stage is a section in it.
+    final tabs = find.byType(HarnessTabStrip<String>);
+    final tab = find.descendant(of: tabs, matching: find.text('Medium priority'));
+    final strip = find
+        .descendant(of: tabs, matching: find.byType(Scrollable))
+        .first;
+    await tester.scrollUntilVisible(tab, 80, scrollable: strip);
+    await tester.ensureVisible(tab);
+    await tester.pump();
+    await tester.tap(tab);
+    await _settle(tester);
+    expect(find.byType(HarnessTabStrip<String>), findsOneWidget);
+    final lane = find
+        .descendant(
+          of: find.byType(RefreshIndicator),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    await tester.scrollUntilVisible(
+      find.text('Sketch the retry schedule'),
+      100,
+      scrollable: lane,
     );
     _takeOverflows(tester);
-    // Built is not shown: bring the tab onto the screen before tapping it.
-    await tester.ensureVisible(find.text('Cancelled'));
-    await _settle(tester);
-    await tester.tap(find.text('Cancelled'));
-    await _settle(tester);
-    expect(find.text('Sketch the retry schedule'), findsOneWidget);
+    expect(find.text('Cancelled'), findsOneWidget);
+    await tester.ensureVisible(find.text('Sketch the retry schedule'));
+    await tester.pump();
     await tester.tap(find.text('Sketch the retry schedule'));
     await _settle(tester, 30);
     // Its conversation opens, with the bar that handles the task.  Over: it is

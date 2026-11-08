@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/app.dart';
+import 'package:harness_client/src/models/task_chat.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
@@ -57,18 +58,39 @@ Future<void> _openBoard(WidgetTester tester, _Rig rig) async {
   await _settle(tester, 6);
 }
 
-/// Choose the column called [label].  The tabs are a row that scrolls, and
+/// Choose the lane called [label].  The tabs are a row that scrolls, and
 /// only the ones near the screen are there: it is moved until [label] is.
-Future<void> _column(WidgetTester tester, String label) async {
-  final strip = find.byType(HarnessTabStrip<String>);
-  for (final shift in [0.0, 400.0, -400.0, -400.0, -400.0]) {
-    if (find.text(label).evaluate().isNotEmpty) break;
-    await tester.drag(strip, Offset(shift, 0));
-    await tester.pump();
-  }
-  await tester.ensureVisible(find.text(label).first);
-  await tester.tap(find.text(label).first);
+Future<void> _lane(WidgetTester tester, String label) async {
+  final tabs = find.byType(HarnessTabStrip<String>);
+  final tab = find.descendant(of: tabs, matching: find.text(label));
+  final strip = find
+      .descendant(of: tabs, matching: find.byType(Scrollable))
+      .first;
+  // From the first tab on, whichever the strip showed.
+  await tester.drag(strip, const Offset(2000, 0));
+  await tester.pump();
+  await tester.scrollUntilVisible(tab, 80, scrollable: strip);
+  // All of it, not an edge of it that a tap would miss.
+  await tester.ensureVisible(tab);
+  await tester.pump();
+  await tester.tap(tab);
   await _settle(tester, 4);
+}
+
+/// Bring the card of [title] on the board: its lane, and its stage there.
+Future<void> _showTask(WidgetTester tester, String title) async {
+  final app = tester.widget<TasksScreen>(find.byType(TasksScreen)).app;
+  final task = app.tasks!.tasks.firstWhere((task) => task.title == title);
+  await _lane(tester, taskLaneLabel(task.laneName));
+  final lane = find
+      .descendant(
+        of: find.byType(RefreshIndicator),
+        matching: find.byType(Scrollable),
+      )
+      .first;
+  await tester.scrollUntilVisible(find.text(title), 100, scrollable: lane);
+  await tester.ensureVisible(find.text(title));
+  await tester.pump();
 }
 
 /// The card of the task called [title].
@@ -105,10 +127,10 @@ Future<void> _menu(WidgetTester tester, String label) async {
   await _tap(tester, find.text(label));
 }
 
-/// Open the conversation of the task called [title], in [column] of the board:
-/// a tap on the task, where it is handled.
-Future<void> _open(WidgetTester tester, String column, String title) async {
-  await _column(tester, column);
+/// Open the conversation of the task called [title] on the board: a tap on
+/// the task, where it is handled.
+Future<void> _open(WidgetTester tester, String title) async {
+  await _showTask(tester, title);
   await tester.tap(find.text(title));
   await _settle(tester, 10);
 }
@@ -130,7 +152,7 @@ void main() {
         },
       );
       await _openBoard(tester, rig);
-      await _column(tester, 'Pending');
+      await _showTask(tester, 'Cache the model catalogue');
       expect(
         _inCard(
           'Cache the model catalogue',
@@ -151,7 +173,7 @@ void main() {
       final rig = await _rig();
       await _openBoard(tester, rig);
       const title = 'Build the Flutter ACP client';
-      await _open(tester, 'Active', title);
+      await _open(tester, title);
 
       // Stopping is in the menu, asks first, and asking again changes nothing.
       await _menu(tester, 'Stop');
@@ -176,7 +198,7 @@ void main() {
       (tester) async {
         final rig = await _rig();
         await _openBoard(tester, rig);
-        await _open(tester, 'Pending', 'Cache the model catalogue');
+        await _open(tester, 'Cache the model catalogue');
 
         await _menu(tester, 'Drop');
         expect(find.text('Drop this task?'), findsOneWidget);
@@ -200,7 +222,7 @@ void main() {
     ) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Active', 'Build the Flutter ACP client');
+      await _open(tester, 'Build the Flutter ACP client');
       // The quick one is a button; the rest is in the menu.
       expect(find.widgetWithText(OutlinedButton, 'Pause'), findsOneWidget);
       await _tap(tester, find.byTooltip('Task actions'), 4);
@@ -242,7 +264,7 @@ void main() {
     ) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Active', 'Build the Flutter ACP client');
+      await _open(tester, 'Build the Flutter ACP client');
       await _tap(tester, find.widgetWithText(OutlinedButton, 'Pause'));
       expect(rig.harness.calls('_harness/task/pause'), [
         {'id': 'task-1'},
@@ -270,7 +292,7 @@ void main() {
     testWidgets('returns a task at work to the queue', (tester) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Active', 'Build the Flutter ACP client');
+      await _open(tester, 'Build the Flutter ACP client');
       await _menu(tester, 'Return to queue');
       expect(rig.harness.calls('_harness/task/return-to-pending'), [
         {'id': 'task-1'},
@@ -288,7 +310,7 @@ void main() {
     ) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Review', 'Review the emulator screenshots');
+      await _open(tester, 'Review the emulator screenshots');
       await _tap(tester, find.widgetWithText(FilledButton, 'Verify and merge'));
       expect(rig.harness.calls('_harness/task/verify'), [
         {'id': 'task-2'},
@@ -302,7 +324,7 @@ void main() {
     ) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Pending', 'Cache the model catalogue');
+      await _open(tester, 'Cache the model catalogue');
       await _menu(tester, 'Priority · Low');
       // It is low now, so the choices are the others.
       final sheet = find.byType(BottomSheet);
@@ -328,7 +350,7 @@ void main() {
       final rig = await _rig();
       await _openBoard(tester, rig);
       // A task that is done takes a message up again, as it did from its sheet.
-      await _open(tester, 'Done', 'Ship the session list');
+      await _open(tester, 'Ship the session list');
       // The box itself, with its placeholder, and no dialog over the page.
       expect(find.text('Message'), findsOneWidget);
       expect(find.byType(AlertDialog), findsNothing);
@@ -346,7 +368,7 @@ void main() {
     ) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Review', 'Review the emulator screenshots');
+      await _open(tester, 'Review the emulator screenshots');
       await _tap(tester, find.widgetWithText(OutlinedButton, 'Send back'));
       // No dialog: the box takes the feedback, and the harness takes a
       // message to a task in review for it.
@@ -364,7 +386,7 @@ void main() {
     testWidgets('asks before marking a task complete', (tester) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Review', 'Review the emulator screenshots');
+      await _open(tester, 'Review the emulator screenshots');
       await _menu(tester, 'Mark complete');
       expect(find.text('Mark this task complete?'), findsOneWidget);
       await _tap(tester, find.text('Cancel'));
@@ -380,7 +402,7 @@ void main() {
     testWidgets('deletes a task, and its session when asked', (tester) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Active', 'Build the Flutter ACP client');
+      await _open(tester, 'Build the Flutter ACP client');
       await _menu(tester, 'Delete task…');
       expect(find.text('Delete this task?'), findsOneWidget);
       // Asked first: nothing is gone until the person says so.
@@ -404,7 +426,7 @@ void main() {
     ) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Pending', 'Cache the model catalogue');
+      await _open(tester, 'Cache the model catalogue');
       await _menu(tester, 'Delete task…');
       expect(find.text('Delete this task?'), findsOneWidget);
       // The harness takes the session of a task that never started with it.
@@ -414,7 +436,7 @@ void main() {
     testWidgets('says what the harness said when it refuses', (tester) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Review', 'Review the emulator screenshots');
+      await _open(tester, 'Review the emulator screenshots');
       // Someone verified it in Emacs while the conversation was open.
       rig.harness.tasks['task-2']!
         ..['state'] = 'done'
@@ -432,7 +454,7 @@ void main() {
     testWidgets('brings an archived task back', (tester) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      await _open(tester, 'Done', 'Ship the session list');
+      await _open(tester, 'Ship the session list');
       await _tap(tester, find.widgetWithText(FilledButton, 'Archive'));
       expect(rig.harness.calls('_harness/task/archive'), [
         {'id': 'task-6'},
@@ -462,7 +484,7 @@ void main() {
 
       await _tap(tester, find.byTooltip('Show archived tasks'));
       expect(find.byTooltip('Hide archived tasks'), findsOneWidget);
-      await _column(tester, 'Done');
+      await _showTask(tester, 'Ship the session list');
       expect(_card('Ship the session list'), findsOneWidget);
       expect(
         _inCard('Ship the session list', find.textContaining('Archived')),
@@ -588,7 +610,7 @@ void main() {
     testWidgets('is not offered what it cannot do', (tester) async {
       final rig = await _rig(taskControls: false);
       await _openBoard(tester, rig);
-      await _open(tester, 'Active', 'Build the Flutter ACP client');
+      await _open(tester, 'Build the Flutter ACP client');
       expect(find.widgetWithText(OutlinedButton, 'Pause'), findsNothing);
       await _tap(tester, find.byTooltip('Task actions'), 4);
       expect(find.text('Mark complete'), findsOneWidget);

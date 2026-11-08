@@ -181,14 +181,15 @@ time it opens. It asks again only when the harness does.
   into all reach that same session -- the one whose tools drive the
   computer the screen shows. Leaving the page leaves the run alone; only
   *Stop demo* stops it, and it stops its own run.
-- **Shows the rest of the harness.** The task board (all seven columns, queue
-  state and slot use, backlog mode, submit; a finished task's card has the
-  words of its summary, without the Markdown it was written in), spend,
+- **Shows the rest of the harness.** The task board (the workflow's columns,
+  with Needs input and the priorities as swimlanes, queue state and slot use,
+  backlog mode, submit; a finished task's card has the words of its summary,
+  without the Markdown it was written in), spend,
   tokens, live sessions, daily spend, per-model and per-project breakdowns,
   budgets, the plan quota of the providers that report one, the model
   catalogue, harness modules and the full ACP capability report.
 - **Handles a task in its conversation.** The board is a list to choose from:
-  a tap on a task, in any column, opens the conversation of its session (a
+  a tap on a task, in any lane, opens the conversation of its session (a
   page on a phone, the pane beside the list on a wide screen), and nothing on
   a card changes the task. Above the message box the conversation has a bar
   that says where the task stands (its column, priority and branch, what went
@@ -1567,7 +1568,7 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   (`test/task_scope_test.dart`, `task_board_widget_test.dart`); the sessions
   that internal sessions do not make the app read again
   (`test/session_events_test.dart`)
-- a task handled in its conversation: a tap on a task of any column opens its
+- a task handled in its conversation: a tap on a task of any lane opens its
   session, a card has nothing to push, and the bar of the conversation
   verifies, sends back (by typing), starts, queues, retries, stops, completes
   and archives, says why the harness refused, follows the task's events and

@@ -3,6 +3,32 @@ import 'project_roots.dart';
 import 'session.dart';
 import 'tool_display.dart';
 
+/// The workflow columns of the task board, in the order a task travels.
+///
+/// Backlog, Pending, Active, Review, Merging, Done, Cancelled.  The board
+/// draws them left to right; a phone draws one lane and its stages as
+/// sections in this order.  The harness decides which column a task is in;
+/// the board only says where to draw it.  A task that waits on the person
+/// is no column of its own here: it is the `needs-input` lane, drawn
+/// over its stage (see [HarnessTask.stageName]).
+const taskColumns = [
+  'backlog',
+  'pending',
+  'active',
+  'review',
+  'merging',
+  'done',
+  'cancelled',
+];
+
+/// The swimlanes of the task board, top to bottom.
+///
+/// A task that waits on the person is in the `needs-input` lane, whatever
+/// its priority; every other task is in the lane of its priority.  A lane
+/// is a row across the workflow columns, so a person can see one priority
+/// at work in every stage, or everything that waits on them at once.
+const taskLanes = ['needs-input', 'high', 'medium', 'low'];
+
 /// A task on the harness's task board.
 class HarnessTask {
   const HarnessTask({
@@ -195,17 +221,44 @@ class HarnessTask {
     return value.replaceAll('_', '-');
   }
 
-  int get columnOrder => switch (columnName) {
-    'needs-input' => 0,
-    'active' => 1,
-    'merging' => 2,
-    'review' => 3,
-    'pending' => 4,
-    'backlog' => 5,
-    'done' => 7,
-    'cancelled' => 8,
-    _ => 6,
-  };
+  /// The workflow stage the task is at.
+  ///
+  /// A task that waits on the person is the `needs-input` lane, not a stage
+  /// of its own: its stage is the one it stopped in, from its state (a
+  /// paused or returned task waits in Pending, a turn that answered with an
+  /// error is Active, a stopped write-up is in the backlog or Pending).  A
+  /// stage the board does not know of is returned as it is.
+  String get stageName {
+    if (!needsInput) return columnName;
+    if (backlog) return 'backlog';
+    return switch (state) {
+      'pending' || 'refining' => 'pending',
+      'review' => 'review',
+      'merging' => 'merging',
+      'done' => 'done',
+      _ => 'active',
+    };
+  }
+
+  /// The swimlane the task is drawn in: what waits on the person first,
+  /// else the lane of its priority.
+  String get laneName {
+    if (needsInput) return 'needs-input';
+    return switch (priority) {
+      'high' => 'high',
+      'low' => 'low',
+      _ => 'medium',
+    };
+  }
+
+  /// Where the task stands in the workflow: the place of its stage in
+  /// [taskColumns].  The ranks are spaced so that a stage a newer harness
+  /// has, and this board does not, sits after the backlog and before the
+  /// stages of tasks that are over.
+  int get columnOrder {
+    final index = taskColumns.indexOf(stageName);
+    return index < 0 ? taskColumns.indexOf('done') * 2 - 1 : index * 2;
+  }
 
   bool get needsInput => columnName == 'needs-input';
   bool get isReview => columnName == 'review';

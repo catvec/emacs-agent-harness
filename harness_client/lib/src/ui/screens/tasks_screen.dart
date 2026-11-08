@@ -34,21 +34,11 @@ class TasksScreen extends StatefulWidget {
 }
 
 class _TasksScreenState extends State<TasksScreen> {
-  String? _column;
+  /// The lane shown on a phone, until another is picked.
+  String? _lane;
 
   /// Why a tap on a task opened nothing, until it is dismissed.
   String? _notice;
-
-  static const _columns = [
-    'needs-input',
-    'active',
-    'review',
-    'pending',
-    'merging',
-    'backlog',
-    'done',
-    'cancelled',
-  ];
 
   @override
   Widget build(BuildContext context) {
@@ -59,7 +49,7 @@ class _TasksScreenState extends State<TasksScreen> {
     return AnimatedBuilder(
       animation: Listenable.merge([controller, widget.app]),
       builder: (context, _) {
-        final selected = _selectedColumn(controller);
+        final selected = _selectedLane(controller);
         return HarnessPage(
           title: 'Tasks',
           actions: [
@@ -136,10 +126,10 @@ class _TasksScreenState extends State<TasksScreen> {
                   child: _TaskBoard(
                     app: widget.app,
                     controller: controller,
-                    selectedColumn: selected,
-                    columns: _columns,
-                    onSelectColumn: (column) =>
-                        setState(() => _column = column),
+                    selectedLane: selected,
+                    stages: taskColumns,
+                    lanes: taskLanes,
+                    onSelectLane: (lane) => setState(() => _lane = lane),
                     onOpen: _openTask,
                   ),
                 ),
@@ -150,21 +140,14 @@ class _TasksScreenState extends State<TasksScreen> {
     );
   }
 
-  String _selectedColumn(TaskController controller) {
-    if (_column != null && controller.countFor(_column!) > 0) return _column!;
-    for (final column in [
-      'needs-input',
-      'active',
-      'review',
-      'pending',
-      'backlog',
-      'merging',
-      'done',
-      'cancelled',
-    ]) {
-      if (controller.countFor(column) > 0) return column;
+  /// The lane a phone shows: the one picked while it holds a task, else the
+  /// first that does (what waits on the person first, then the priorities).
+  String _selectedLane(TaskController controller) {
+    if (_lane != null && controller.countForLane(_lane!) > 0) return _lane!;
+    for (final lane in taskLanes) {
+      if (controller.countForLane(lane) > 0) return lane;
     }
-    return 'pending';
+    return 'needs-input';
   }
 
   Future<void> _newTask(BuildContext context) async {
@@ -175,7 +158,7 @@ class _TasksScreenState extends State<TasksScreen> {
       builder: (sheetContext) => _NewTaskSheet(app: widget.app),
     );
     if (created != null && mounted) {
-      setState(() => _column = created.columnName);
+      setState(() => _lane = created.laneName);
       // A task made for another project than the one the board is narrowed
       // to is not on that board: the board shows every project, where it is.
       final narrowed = controller.project;
@@ -729,64 +712,316 @@ class _TaskBoard extends StatelessWidget {
   const _TaskBoard({
     required this.app,
     required this.controller,
-    required this.selectedColumn,
-    required this.columns,
-    required this.onSelectColumn,
+    required this.selectedLane,
+    required this.stages,
+    required this.lanes,
+    required this.onSelectLane,
     required this.onOpen,
   });
 
   final AppController app;
   final TaskController controller;
-  final String selectedColumn;
-  final List<String> columns;
-  final ValueChanged<String> onSelectColumn;
+
+  /// The lane a phone shows, unless another is picked.
+  final String selectedLane;
+
+  /// The workflow stages, left to right.
+  final List<String> stages;
+
+  /// The swimlanes, top to bottom.
+  final List<String> lanes;
+  final ValueChanged<String> onSelectLane;
   final ValueChanged<HarnessTask> onOpen;
 
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 920;
     if (wide) {
-      return ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
-        itemCount: columns.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 10),
-        itemBuilder: (context, index) {
-          final column = columns[index];
-          return SizedBox(
-            width: 300,
-            child: _TaskColumn(
-              column: column,
-              tasks: controller.forColumn(column),
-              app: app,
-              onOpen: onOpen,
-            ),
-          );
-        },
+      return _TaskGrid(
+        app: app,
+        controller: controller,
+        stages: stages,
+        lanes: lanes,
+        onOpen: onOpen,
       );
     }
+    return _TaskLanes(
+      app: app,
+      controller: controller,
+      selectedLane: selectedLane,
+      stages: stages,
+      lanes: lanes,
+      onSelectLane: onSelectLane,
+      onOpen: onOpen,
+    );
+  }
+}
+
+/// The board on a wide screen: the workflow stages as columns, one swimlane
+/// a row, the tasks that wait on the person above the priorities.
+class _TaskGrid extends StatelessWidget {
+  const _TaskGrid({
+    required this.app,
+    required this.controller,
+    required this.stages,
+    required this.lanes,
+    required this.onOpen,
+  });
+
+  final AppController app;
+  final TaskController controller;
+  final List<String> stages;
+  final List<String> lanes;
+  final ValueChanged<HarnessTask> onOpen;
+
+  static const _laneWidth = 156.0;
+  static const _stageWidth = 300.0;
+  static const _gap = 10.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final brightness = Theme.of(context).brightness;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                const SizedBox(width: _laneWidth + _gap),
+                for (final stage in stages)
+                  Padding(
+                    padding: const EdgeInsets.only(right: _gap),
+                    child: SizedBox(
+                      width: _stageWidth,
+                      child: _StageHeading(
+                        stage: stage,
+                        count: controller.countForStage(stage),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            for (final lane in lanes)
+              Padding(
+                padding: const EdgeInsets.only(bottom: _gap),
+                child: _SwimLane(
+                  lane: lane,
+                  stages: stages,
+                  controller: controller,
+                  app: app,
+                  onOpen: onOpen,
+                  brightness: brightness,
+                  laneWidth: _laneWidth,
+                  stageWidth: _stageWidth,
+                  gap: _gap,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StageHeading extends StatelessWidget {
+  const _StageHeading({required this.stage, required this.count});
+
+  final String stage;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Semantics(
+      key: ValueKey('task-stage-$stage'),
+      header: true,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(4, 0, 4, 2),
+        child: Row(
+          children: [
+            HarnessDot(color: HarnessColors.column(stage, theme.brightness)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _columnLabel(stage),
+                style: HarnessText.rowTitle(context).copyWith(fontSize: 14),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text('$count', style: HarnessText.meta(context)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SwimLane extends StatelessWidget {
+  const _SwimLane({
+    required this.lane,
+    required this.stages,
+    required this.controller,
+    required this.app,
+    required this.onOpen,
+    required this.brightness,
+    required this.laneWidth,
+    required this.stageWidth,
+    required this.gap,
+  });
+
+  final String lane;
+  final List<String> stages;
+  final TaskController controller;
+  final AppController app;
+  final ValueChanged<HarnessTask> onOpen;
+  final Brightness brightness;
+  final double laneWidth;
+  final double stageWidth;
+  final double gap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          key: ValueKey('task-lane-$lane'),
+          width: laneWidth,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(4, 12, 12, 0),
+            child: Row(
+              children: [
+                HarnessDot(color: _laneColor(lane, brightness)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    taskLaneLabel(lane),
+                    style: HarnessText.rowTitle(context).copyWith(fontSize: 14),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  '${controller.countForLane(lane)}',
+                  style: HarnessText.meta(context),
+                ),
+              ],
+            ),
+          ),
+        ),
+        SizedBox(width: gap),
+        for (final stage in stages)
+          Padding(
+            padding: EdgeInsets.only(right: gap),
+            child: SizedBox(
+              width: stageWidth,
+              child: _LaneCell(
+                lane: lane,
+                stage: stage,
+                tasks: controller.forCell(lane, stage),
+                app: app,
+                onOpen: onOpen,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _LaneCell extends StatelessWidget {
+  const _LaneCell({
+    required this.lane,
+    required this.stage,
+    required this.tasks,
+    required this.app,
+    required this.onOpen,
+  });
+
+  final String lane;
+  final String stage;
+  final List<HarnessTask> tasks;
+  final AppController app;
+  final ValueChanged<HarnessTask> onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      constraints: const BoxConstraints(minHeight: 96),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final task in tasks)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: TaskCard(task: task, app: app, onTap: () => onOpen(task)),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The board on a phone: the lanes as tabs, the workflow stages as sections
+/// of the lane shown, so the tasks of a lane read in the order they travel.
+class _TaskLanes extends StatelessWidget {
+  const _TaskLanes({
+    required this.app,
+    required this.controller,
+    required this.selectedLane,
+    required this.stages,
+    required this.lanes,
+    required this.onSelectLane,
+    required this.onOpen,
+  });
+
+  final AppController app;
+  final TaskController controller;
+  final String selectedLane;
+  final List<String> stages;
+  final List<String> lanes;
+  final ValueChanged<String> onSelectLane;
+  final ValueChanged<HarnessTask> onOpen;
+
+  @override
+  Widget build(BuildContext context) {
     final present = [
-      for (final column in columns)
-        if (controller.countFor(column) > 0) column,
+      for (final lane in lanes)
+        if (controller.countForLane(lane) > 0) lane,
     ];
-    final selected = present.contains(selectedColumn)
-        ? selectedColumn
+    final selected = present.contains(selectedLane)
+        ? selectedLane
         : present.firstOrNull;
     final brightness = Theme.of(context).brightness;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // The columns of the board, as tabs: one row, from the gutter.
+        // The lanes of the board, as tabs: one row, from the gutter.
         HarnessTabStrip<String>(
           value: selected ?? '',
-          onChanged: onSelectColumn,
+          onChanged: onSelectLane,
           tabs: [
-            for (final column in present)
+            for (final lane in present)
               HarnessTab(
-                value: column,
-                label: _columnLabel(column),
-                count: controller.countFor(column),
-                color: HarnessColors.column(column, brightness),
+                value: lane,
+                label: taskLaneLabel(lane),
+                count: controller.countForLane(lane),
+                color: _laneColor(lane, brightness),
               ),
           ],
         ),
@@ -804,25 +1039,14 @@ class _TaskBoard extends StatelessWidget {
                       20,
                     ),
                     children: [
-                      for (final task in controller.forColumn(selected))
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: TaskCard(
-                            task: task,
+                      for (final stage in stages)
+                        if (controller.forCell(selected, stage).isNotEmpty)
+                          _StageSection(
+                            stage: stage,
+                            tasks: controller.forCell(selected, stage),
                             app: app,
-                            onTap: () => onOpen(task),
+                            onOpen: onOpen,
                           ),
-                        ),
-                      if (controller.countFor(selected) == 0)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 40),
-                          child: Center(
-                            child: Text(
-                              'Nothing in ${_columnLabel(selected).toLowerCase()}.',
-                              style: HarnessText.subtitle(context),
-                            ),
-                          ),
-                        ),
                     ],
                   ),
                 ),
@@ -832,15 +1056,15 @@ class _TaskBoard extends StatelessWidget {
   }
 }
 
-class _TaskColumn extends StatelessWidget {
-  const _TaskColumn({
-    required this.column,
+class _StageSection extends StatelessWidget {
+  const _StageSection({
+    required this.stage,
     required this.tasks,
     required this.app,
     required this.onOpen,
   });
 
-  final String column;
+  final String stage;
   final List<HarnessTask> tasks;
   final AppController app;
   final ValueChanged<HarnessTask> onOpen;
@@ -848,64 +1072,47 @@ class _TaskColumn extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final color = HarnessColors.column(column, theme.brightness);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(4, 2, 4, 8),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              HarnessDot(color: color),
-              const SizedBox(width: 8),
-              Text(
-                _columnLabel(column),
-                style: HarnessText.rowTitle(context).copyWith(fontSize: 14),
-              ),
-              const SizedBox(width: 6),
-              Text('${tasks.length}', style: HarnessText.meta(context)),
-            ],
-          ),
-        ),
-        Expanded(
-          child: Container(
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surfaceContainerLow.withValues(
-                alpha: 0.5,
-              ),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
-              ),
-            ),
-            child: ListView(
-              padding: const EdgeInsets.all(8),
+    final color = HarnessColors.column(stage, theme.brightness);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 2, 4, 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                for (final task in tasks)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: TaskCard(
-                      task: task,
-                      app: app,
-                      onTap: () => onOpen(task),
-                    ),
-                  ),
-                if (tasks.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 28),
-                    child: Center(
-                      child: Text('Empty', style: HarnessText.caption(context)),
-                    ),
-                  ),
+                HarnessDot(color: color),
+                const SizedBox(width: 8),
+                Text(
+                  _columnLabel(stage),
+                  style: HarnessText.rowTitle(context).copyWith(fontSize: 14),
+                ),
+                const SizedBox(width: 6),
+                Text('${tasks.length}', style: HarnessText.meta(context)),
               ],
             ),
           ),
-        ),
-      ],
+          for (final task in tasks)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: TaskCard(task: task, app: app, onTap: () => onOpen(task)),
+            ),
+        ],
+      ),
     );
   }
 }
+
+/// The color of a swimlane: what waits on the person in the color of that
+/// column, a priority in its own.
+Color _laneColor(String lane, Brightness brightness) => switch (lane) {
+  'needs-input' => HarnessColors.column('needs-input', brightness),
+  'high' => HarnessColors.oxide,
+  'medium' => HarnessColors.column('pending', brightness),
+  _ => HarnessColors.column('done', brightness),
+};
 
 /// A task on the board: what it is, where it stands, and a way in.  Tapping
 /// it opens its conversation, where it is handled (see `SessionTaskBar`):
@@ -934,7 +1141,7 @@ class TaskCard extends StatelessWidget {
       parts: [
         // What the column does not say: a pause, a wait, a task put away.
         ...taskStateParts(task),
-        if (app.selectedProject == null) projectName(app.projectOfTask(task)),
+        if (app.tasks?.project == null) projectName(app.projectOfTask(task)),
         task.branch,
         if (task.priority == 'high')
           const HarnessMetaPart(

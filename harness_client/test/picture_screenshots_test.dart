@@ -18,6 +18,7 @@ import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'support/board_navigation.dart';
 import 'support/fake_harness.dart';
 import 'support/real_fonts.dart';
 import 'support/tool_showcase.dart';
@@ -161,9 +162,7 @@ final _cases = <_Case>[
   _Case('picture-task-report', seed: _seedReview, (tester, harness) async {
     await tester.tap(find.text('Tasks'));
     await _pump(tester, 6);
-    await tester.ensureVisible(find.text('Review'));
-    await tester.tap(find.text('Review'));
-    await _pump(tester, 4);
+    await showTask(tester, 'Review the emulator screenshots');
     await tester.tap(find.text('Review the emulator screenshots'));
     await _pump(tester, 20);
     // The bar of the conversation leads to the report; the report is on its

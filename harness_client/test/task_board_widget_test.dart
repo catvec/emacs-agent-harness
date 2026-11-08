@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/app.dart';
+import 'package:harness_client/src/models/task_chat.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
+import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
+import 'package:harness_client/src/ui/screens/tasks_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support/fake_harness.dart';
@@ -49,6 +52,38 @@ Future<void> _settle(WidgetTester tester, [int rounds = 10]) async {
   }
 }
 
+/// Choose the lane called [label], a tab on a phone.
+Future<void> _lane(WidgetTester tester, String label) async {
+  final strip = find.byType(HarnessTabStrip<String>);
+  final tab = find.descendant(of: strip, matching: find.text(label));
+  final scroll = find
+      .descendant(of: strip, matching: find.byType(Scrollable))
+      .first;
+  await tester.drag(scroll, const Offset(2000, 0));
+  await tester.pump();
+  await tester.scrollUntilVisible(tab, 80, scrollable: scroll);
+  await tester.ensureVisible(tab);
+  await tester.pump();
+  await tester.tap(tab);
+  await _settle(tester, 4);
+}
+
+/// Bring the card of [title] on the board: its lane, and its stage there.
+Future<void> _showTask(WidgetTester tester, String title) async {
+  final app = tester.widget<TasksScreen>(find.byType(TasksScreen)).app;
+  final task = app.tasks!.tasks.firstWhere((task) => task.title == title);
+  await _lane(tester, taskLaneLabel(task.laneName));
+  final lane = find
+      .descendant(
+        of: find.byType(RefreshIndicator),
+        matching: find.byType(Scrollable),
+      )
+      .first;
+  await tester.scrollUntilVisible(find.text(title), 100, scrollable: lane);
+  await tester.ensureVisible(find.text(title));
+  await tester.pump();
+}
+
 /// A project that the harness has sessions in, named so that it sorts last.
 String _project(int number) => '/Users/noah/Code/zz-project-$number/';
 
@@ -92,10 +127,10 @@ void main() {
       // controls to show yet.
       expect(find.text('All projects'), findsOneWidget);
       expect(find.textContaining('working'), findsNothing);
-      await tester.ensureVisible(find.text('Review'));
-      await tester.tap(find.text('Review'));
-      await _settle(tester, 4);
+      await _showTask(tester, 'Review the emulator screenshots');
       expect(find.text('Review the emulator screenshots'), findsOneWidget);
+      // The other project's review task is a low-priority one: its own lane.
+      await _showTask(tester, 'Trim the cluster alerts');
       expect(find.text('Trim the cluster alerts'), findsOneWidget);
       // A card says whose it is.
       expect(
@@ -116,6 +151,7 @@ void main() {
         find.descendant(of: sheet, matching: find.text('other-project')),
       );
       await _settle(tester, 6);
+      await _showTask(tester, 'Trim the cluster alerts');
       expect(find.text('Trim the cluster alerts'), findsOneWidget);
       expect(find.text('Review the emulator screenshots'), findsNothing);
       expect(find.textContaining('working'), findsOneWidget);
@@ -133,7 +169,9 @@ void main() {
         ),
       );
       await _settle(tester, 6);
+      await _showTask(tester, 'Review the emulator screenshots');
       expect(find.text('Review the emulator screenshots'), findsOneWidget);
+      await _showTask(tester, 'Trim the cluster alerts');
       expect(find.text('Trim the cluster alerts'), findsOneWidget);
       expect(find.textContaining('working'), findsNothing);
       expect(rig.app.tasks!.project, isNull);

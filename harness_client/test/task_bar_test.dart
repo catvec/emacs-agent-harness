@@ -9,6 +9,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/app.dart';
+import 'package:harness_client/src/models/task_chat.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
@@ -69,10 +70,11 @@ Future<void> main() async {
     await _settle(tester, 6);
   }
 
-  /// The tab of [column], scrolled to: the strip builds the tabs it shows.
-  Future<void> showColumn(WidgetTester tester, String column) async {
+  /// The lane called [label], scrolled to: the strip builds the tabs it
+  /// shows, and a lane is a tab.
+  Future<void> showLane(WidgetTester tester, String label) async {
     final tabs = find.byType(HarnessTabStrip<String>);
-    final tab = find.descendant(of: tabs, matching: find.text(column));
+    final tab = find.descendant(of: tabs, matching: find.text(label));
     final strip = find
         .descendant(of: tabs, matching: find.byType(Scrollable))
         .first;
@@ -87,13 +89,36 @@ Future<void> main() async {
     await _settle(tester, 4);
   }
 
-  /// Tap [title] in the [column] of the board: its conversation opens.
-  Future<void> openTask(
-    WidgetTester tester,
-    String column,
-    String title,
-  ) async {
-    await showColumn(tester, column);
+  /// Bring the card of [title] on the board: its lane, and its stage there.
+  Future<void> showTask(WidgetTester tester, String title) async {
+    final app = tester.widget<TasksScreen>(find.byType(TasksScreen)).app;
+    final task = app.tasks!.tasks.firstWhere((task) => task.title == title);
+    final wide = MediaQuery.sizeOf(
+          tester.element(find.byType(TasksScreen)),
+        ).width >=
+        920;
+    if (wide) {
+      // The wide board is a grid, built whole: there are no lane tabs, and
+      // the grid's two scrolls bring the card into view.
+      await tester.ensureVisible(find.text(title));
+      await tester.pump();
+      return;
+    }
+    await showLane(tester, taskLaneLabel(task.laneName));
+    final lane = find
+        .descendant(
+          of: find.byType(RefreshIndicator),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    await tester.scrollUntilVisible(find.text(title), 100, scrollable: lane);
+    await tester.ensureVisible(find.text(title));
+    await tester.pump();
+  }
+
+  /// Tap [title] on the board: its conversation opens.
+  Future<void> openTask(WidgetTester tester, String title) async {
+    await showTask(tester, title);
     await tester.tap(find.text(title));
     await _settle(tester, 10);
   }
@@ -118,7 +143,7 @@ Future<void> main() async {
       testWidgets('opens the conversation of "$task"', (tester) async {
         await open(tester);
         expect(find.byType(SessionScreen), findsNothing);
-        await openTask(tester, column, task);
+        await openTask(tester, task);
         expect(find.byType(SessionScreen), findsOneWidget);
         expect(
           find.descendant(
@@ -140,8 +165,13 @@ Future<void> main() async {
 
     testWidgets('has nothing on the card to push', (tester) async {
       await open(tester);
-      for (final column in ['Review', 'Pending', 'Backlog', 'Active']) {
-        await showColumn(tester, column);
+      for (final title in [
+        'Review the emulator screenshots',
+        'Cache the model catalogue',
+        'Write the migration notes',
+        'Build the Flutter ACP client',
+      ]) {
+        await showTask(tester, title);
         // A card is a way in: no button of any kind on it, no menu.
         for (final kind in [
           TextButton,
@@ -155,13 +185,13 @@ Future<void> main() async {
               matching: find.byType(kind),
             ),
             findsNothing,
-            reason: '$column: $kind',
+            reason: '$title: $kind',
           );
         }
-        expect(find.byTooltip('Task actions'), findsNothing, reason: column);
-        expect(find.byTooltip('Verify task'), findsNothing, reason: column);
-        expect(find.text('Start now'), findsNothing, reason: column);
-        expect(find.text('Verify and merge'), findsNothing, reason: column);
+        expect(find.byTooltip('Task actions'), findsNothing, reason: title);
+        expect(find.byTooltip('Verify task'), findsNothing, reason: title);
+        expect(find.text('Start now'), findsNothing, reason: title);
+        expect(find.text('Verify and merge'), findsNothing, reason: title);
       }
     });
 
@@ -175,7 +205,7 @@ Future<void> main() async {
         priority: 'medium',
       );
       await _settle(tester, 6);
-      await openTask(tester, 'Pending', 'Write the changelog');
+      await openTask(tester, 'Write the changelog');
       expect(find.byType(SessionScreen), findsOneWidget);
       expect(heading(tester), 'Pending');
       expect(find.text('Start now'), findsOneWidget);
@@ -199,7 +229,7 @@ Future<void> main() async {
           ];
         },
       );
-      await openTask(tester, 'Pending', 'Cache the model catalogue');
+      await openTask(tester, 'Cache the model catalogue');
       expect(
         _inBar(find.textContaining('2 attachments', findRichText: true)),
         findsOneWidget,
@@ -210,7 +240,7 @@ Future<void> main() async {
       tester,
     ) async {
       await open(tester, sessions: false);
-      await openTask(tester, 'Review', 'Review the emulator screenshots');
+      await openTask(tester, 'Review the emulator screenshots');
       expect(find.byType(SessionScreen), findsNothing);
       expect(
         find.text(
@@ -219,7 +249,7 @@ Future<void> main() async {
         findsOneWidget,
       );
       // The notice goes with a tap on the next task that has one.
-      await showColumn(tester, 'Needs input');
+      await showTask(tester, 'Answer the permission');
       await tester.tap(find.text('Answer the permission'));
       await _settle(tester, 8);
       expect(find.byType(SessionScreen), findsOneWidget);
@@ -229,7 +259,7 @@ Future<void> main() async {
   group('the conversation of a task in review', () {
     Future<void> review(WidgetTester tester) async {
       await open(tester);
-      await openTask(tester, 'Review', 'Review the emulator screenshots');
+      await openTask(tester, 'Review the emulator screenshots');
     }
 
     testWidgets('verifies it from the bar, with the report above', (
@@ -349,7 +379,7 @@ Future<void> main() async {
       tester,
     ) async {
       await open(tester);
-      await openTask(tester, 'Backlog', 'Write the migration notes');
+      await openTask(tester, 'Write the migration notes');
       expect(heading(tester), 'Backlog');
       expect(find.text('Start now'), findsOneWidget);
       expect(find.text('Queue it'), findsOneWidget);
@@ -366,7 +396,7 @@ Future<void> main() async {
 
     testWidgets('in the backlog is started by a message too', (tester) async {
       await open(tester);
-      await openTask(tester, 'Backlog', 'Write the migration notes');
+      await openTask(tester, 'Write the migration notes');
       await tester.enterText(
         find.byKey(const Key('composer-field')),
         'Go ahead',
@@ -380,7 +410,7 @@ Future<void> main() async {
 
     testWidgets('in the backlog is started from the bar', (tester) async {
       await open(tester);
-      await openTask(tester, 'Backlog', 'Write the migration notes');
+      await openTask(tester, 'Write the migration notes');
       await tester.tap(find.text('Start now'));
       await _settle(tester, 8);
       expect(harness.tasks['task-5']!['state'], 'active');
@@ -389,7 +419,7 @@ Future<void> main() async {
 
     testWidgets('waiting for a slot is started at once', (tester) async {
       await open(tester);
-      await openTask(tester, 'Pending', 'Cache the model catalogue');
+      await openTask(tester, 'Cache the model catalogue');
       expect(heading(tester), 'Pending');
       await tester.tap(find.text('Start now'));
       await _settle(tester, 8);
@@ -403,7 +433,7 @@ Future<void> main() async {
       tester,
     ) async {
       await open(tester);
-      await openTask(tester, 'Active', 'Build the Flutter ACP client');
+      await openTask(tester, 'Build the Flutter ACP client');
       expect(heading(tester), 'Active');
       // One button, the one that undoes itself; stopping is in the menu.
       expect(_inBar(find.byType(FilledButton)), findsNothing);
@@ -434,7 +464,7 @@ Future<void> main() async {
           harness.tasks['task-4']!['error'] = 'The model said: overloaded';
         },
       );
-      await openTask(tester, 'Needs input', 'Answer the permission');
+      await openTask(tester, 'Answer the permission');
       expect(heading(tester), 'Needs input');
       expect(find.text('Its last turn ended in an error.'), findsOneWidget);
       expect(find.text('The model said: overloaded'), findsOneWidget);
@@ -456,7 +486,7 @@ Future<void> main() async {
           harness.tasks['task-4']!['conflicts'] = ['lib/a.dart', 'lib/b.dart'];
         },
       );
-      await openTask(tester, 'Needs input', 'Answer the permission');
+      await openTask(tester, 'Answer the permission');
       expect(find.text('Retry merge'), findsOneWidget);
       expect(
         find.textContaining('conflicts in lib/a.dart, lib/b.dart'),
@@ -468,7 +498,7 @@ Future<void> main() async {
   group('the conversation of a finished task', () {
     testWidgets('is put away, and brought back', (tester) async {
       await open(tester);
-      await openTask(tester, 'Done', 'Ship the session list');
+      await openTask(tester, 'Ship the session list');
       expect(heading(tester), 'Done');
       await tester.tap(find.text('Archive'));
       await _settle(tester, 8);
@@ -518,6 +548,7 @@ Future<void> main() async {
 
     testWidgets('is in the pane of a wide screen too', (tester) async {
       await open(tester, size: const Size(3000, 1800));
+      await showTask(tester, 'Review the emulator screenshots');
       await tester.tap(find.text('Review the emulator screenshots'));
       await _settle(tester, 10);
       expect(find.byType(SessionScreen), findsOneWidget);
@@ -531,7 +562,7 @@ Future<void> main() async {
       tester,
     ) async {
       await open(tester);
-      await openTask(tester, 'Review', 'Review the emulator screenshots');
+      await openTask(tester, 'Review the emulator screenshots');
       expect(find.text('Verify and merge'), findsOneWidget);
       tester.view.viewInsets = const FakeViewPadding(bottom: 900);
       addTearDown(tester.view.resetViewInsets);
@@ -546,7 +577,7 @@ Future<void> main() async {
       tester,
     ) async {
       await open(tester);
-      await openTask(tester, 'Review', 'Review the emulator screenshots');
+      await openTask(tester, 'Review the emulator screenshots');
       final bar = tester.getRect(find.byKey(_bar));
       final composer = tester.getRect(_composer);
       expect(bar.bottom, lessThanOrEqualTo(composer.top + 0.5));
@@ -568,7 +599,7 @@ Future<void> main() async {
 
     testWidgets('fits a small phone', (tester) async {
       await open(tester, size: const Size(960, 2000));
-      await openTask(tester, 'Review', 'Review the emulator screenshots');
+      await openTask(tester, 'Review the emulator screenshots');
       expect(tester.takeException(), isNull);
       final bar = tester.getRect(find.byKey(_bar));
       for (final label in ['Verify and merge', 'Send back']) {

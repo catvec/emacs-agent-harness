@@ -220,3 +220,12 @@ String taskColumnLabel(String column) => switch (column) {
   'cancelled' => 'Cancelled',
   _ => column,
 };
+
+/// A swimlane of the board in words.
+String taskLaneLabel(String lane) => switch (lane) {
+  'needs-input' => 'Needs input',
+  'high' => 'High priority',
+  'medium' => 'Medium priority',
+  'low' => 'Low priority',
+  _ => lane,
+};
