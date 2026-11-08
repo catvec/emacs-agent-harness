@@ -196,6 +196,7 @@ this file never touches a session struct.
 - `agent/prompt` ([agent](agent.md))
 - `agent/send-queue` ([agent](agent.md))
 - `agent/withdraw` ([agent](agent.md))
+- `decision/change` ([decisions](decisions.md))
 - `permission/approve-denied` ([perms](perms.md))
 - `permission/undo` ([perms](perms.md))
 - `session/get` ([session](session.md))

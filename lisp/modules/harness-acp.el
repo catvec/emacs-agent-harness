@@ -1954,7 +1954,7 @@ shows the request as before."
                           (harness-acp--option-answer (plist-get outcome :optionId)
                                                       (plist-get extra :pattern)
                                                       (plist-get extra :cover))
-                        (list :behavior 'deny :scope 'once))))
+                        (list :behavior 'deny :scope 'once :dismissed t))))
          (harness-acp--call-safely 'permission/answer sid pid answer))))))
 
 (defun harness-acp--question-answer (result)

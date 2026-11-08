@@ -2,7 +2,7 @@
 
 # decisions
 
-Lasting decisions -- answers that hold beyond their moment -- with their undo and redo, from any session.
+Lasting decisions -- answers that hold beyond their moment -- with their undo, redo and change, from any session.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-decisions.el](../../lisp/modules/harness-decisions.el)
@@ -30,10 +30,13 @@ as the undo left it.  Anything else -- the rule edited in Settings,
 another answer that recorded it again, the default changed by hand --
 ends the decision: `changed`, or `gone` when what it changed is no
 longer there at all, with a sentence saying so.  An ended decision
-offers nothing more.  So a decision has one button, and it says what
-a click does: [Undo] while done, [Redo] while undone.  A click never
-takes back a change somebody else made, and two decisions never fight
-over one setting: the one that holds it is the one whose button works.
+offers nothing more.  So a decision has a button that says what a
+click does: [Undo] while done, [Redo] while undone.  One whose kind
+kept the prompt that asked it (`decision/record` `:change`) offers
+[Change] as well: the prompt opens again and the new answer replaces
+what the decision records (`decision/change`).  A click never takes
+back a change somebody else made, and two decisions never fight over
+one setting: the one that holds it is the one whose button works.
 
 The decisions are the harness's, not a session's: one made in one
 session can be undone or redone from any other.  Notes refer to one
@@ -54,15 +57,17 @@ after a restart.
 ### Methods
 
 - `decision/attach` (id session-id node-id) — Name NODE-ID of SESSION-ID as the note that tells of decision ID.
+- `decision/change` (id) — Ask again for the answer lasting decision ID keeps; it changes nothing yet.
 - `decision/get` (id) — Return the lasting decision ID, a plist (see `decision/record`), or nil.
 - `decision/list` (&rest opts) — Return the lasting decisions kept, newest first.
 - `decision/record` (kind session-id text record &rest opts) — Keep a lasting decision of KIND, made in SESSION-ID; return it.
 - `decision/redo` (id) — Put the lasting decision ID in effect again, if nothing took its place.
+- `decision/revise` (id &rest changes) — Merge CHANGES into lasting decision ID and announce it; return the decision.
 - `decision/undo` (id) — Take back the lasting decision ID, if what it changed is still as it left it.
 
 ### Events
 
-- `decision/changed` — (DECISION) once a lasting decision is kept, named its note, undone or redone: DECISION as it is now (see `decision/record`).
+- `decision/changed` — (DECISION) once a lasting decision is kept, named its note, undone, redone or changed: DECISION as it is now (see `decision/record`).
 
 ## Uses
 

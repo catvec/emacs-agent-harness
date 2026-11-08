@@ -16,6 +16,7 @@
 (defvar harness-decisions-kept)
 (declare-function harness-decisions-define-kind "harness-decisions" (kind &rest spec))
 (declare-function harness-decisions--load "harness-decisions" ())
+(declare-function harness-decisions--find "harness-decisions" (id))
 (declare-function harness-acp--extension-allowed-p "harness-acp" (name))
 (defvar harness-acp--forwarded-events)
 
@@ -24,6 +25,17 @@
 
 (defvar harness-decisions-test--events nil
   "The decisions `decision/changed' announced, newest first.")
+
+(defvar harness-decisions-test--asked nil
+  "The decision whose change the tests' kind was last asked for.")
+
+(defun harness-decisions-test--change (decision)
+  "Ask again for the answer of the tests' DECISION; return where it asks.
+The tests' kind has no real prompt: the answer says the session and
+the pending question, and the decision is remembered in
+`harness-decisions-test--asked'."
+  (setq harness-decisions-test--asked decision)
+  (list :session (plist-get decision :session) :pending "p-asked"))
 
 (defun harness-decisions-test--flip (decision from to word)
   "Set the tests' setting from DECISION's FROM to its TO, when it holds FROM.
@@ -53,8 +65,12 @@ The tests' setting holds `after', as a decision just made left it."
        (harness-test-load-module m))
      (setq harness-decisions--entries nil
            harness-decisions-test--events nil
+           harness-decisions-test--asked nil
            harness-decisions-test--value 'after)
-     (harness-decisions-define-kind 'test :undo #'harness-decisions-test--undo :redo #'harness-decisions-test--redo)
+     (harness-decisions-define-kind 'test
+                                    :undo #'harness-decisions-test--undo
+                                    :redo #'harness-decisions-test--redo
+                                    :change #'harness-decisions-test--change)
      (harness-on 'decision/changed (lambda (d) (push d harness-decisions-test--events)))
      ,@body))
 
@@ -192,11 +208,94 @@ is attached once written; only the newest decisions are kept."
       (dotimes (_ 3) (harness-decisions-test--record))
       (should (= 3 (length (harness-call 'decision/list)))))))
 
+(ert-deftest harness-decisions-change-asks-again-when-the-prompt-was-kept ()
+  "A decision kept with the prompt that asked it offers a change: its kind
+is asked again, with the decision as it stands, and answers where the
+prompt opens.  One kept without a prompt, or of a kind that cannot ask,
+offers none; one that ended offers none either."
+  (harness-decisions-test-with
+    (let* ((change '(:prompt (:question "What goes first?" :options ("a" "b"))))
+           (d (harness-decisions-test--record :change change))
+           (id (plist-get d :id)))
+      (should (harness-json-true-p (plist-get d :changeable)))
+      (should (equal change (plist-get d :change)))
+      (should (equal '(:session "s1" :pending "p-asked") (harness-call 'decision/change id)))
+      ;; Clients get where it stands, and that it can change, not the prompt.
+      (should (equal (harness-plist-remove d :change) (harness-call 'decision/get id)))
+      (should (equal d harness-decisions-test--asked))
+      ;; A kind that cannot ask says so, and nothing moves.
+      (harness-decisions-define-kind 'test
+                                     :undo #'harness-decisions-test--undo
+                                     :redo #'harness-decisions-test--redo
+                                     :change (lambda (_d) (error "No session there")))
+      (let ((err (condition-case err
+                     (progn (harness-call 'decision/change id) nil)
+                   (harness-error err))))
+        (should (equal "Could not ask again: No session there" (cadr err))))
+      (should (eq 'done (plist-get (harness-call 'decision/get id) :state)))
+      (harness-decisions-define-kind 'test
+                                     :undo #'harness-decisions-test--undo
+                                     :redo #'harness-decisions-test--redo
+                                     :change #'harness-decisions-test--change)
+      ;; Ended, it offers no change.
+      (harness-call 'decision/undo id)
+      (setq harness-decisions-test--value 'other)
+      (should (eq 'changed (plist-get (harness-call 'decision/redo id) :outcome)))
+      (should-error (harness-call 'decision/change id) :type 'harness-error)
+      ;; Kept without a prompt: nothing to open.
+      (let ((plain (harness-decisions-test--record)))
+        (should (eq :false (plist-get plain :changeable)))
+        (should-not (plist-get plain :change))
+        (should-error (harness-call 'decision/change (plist-get plain :id)) :type 'harness-error))
+      ;; A kind no module here knows how to ask.
+      (let ((unknown (harness-call 'decision/record 'nobody "s1" "Something nobody knows" nil
+                                   :change '(:prompt (:question "Q")))))
+        (should (eq :false (plist-get unknown :changeable)))
+        (should-error (harness-call 'decision/change (plist-get unknown :id)) :type 'harness-error)))))
+
+(ert-deftest harness-decisions-change-is-kept-and-revised ()
+  "The prompt a decision keeps is saved with it and read back; a change
+replaces its text, record and state while keeping its id, session and
+note, and is announced."
+  (harness-decisions-test-with
+    (let* ((change '(:prompt (:question "What goes first?" :options ("a" "b")) :cover "wide"))
+           (d (harness-decisions-test--record :change change :node "n-1"))
+           (id (plist-get d :id)))
+      (harness-call 'decision/undo id)
+      (setq harness-decisions--entries nil)
+      (harness-decisions--load)
+      (let ((back (harness-call 'decision/get id)))
+        (should (harness-json-true-p (plist-get back :changeable)))
+        (should-not (plist-get back :change))
+        (should (equal change (plist-get (harness-decisions--find id) :change)))
+        (should (equal "n-1" (plist-get back :node)))
+        (should (eq 'undone (plist-get back :state)))
+        ;; The kind asks again after the restart, as the decision stands.
+        (should (equal '(:session "s1" :pending "p-asked") (harness-call 'decision/change id))))
+      ;; A changed answer becomes the decision's, in place.
+      (setq harness-decisions-test--events nil)
+      (let ((revised (harness-call 'decision/revise id
+                                   :id "d-other" :kind 'other :session "s2" :at 1.0
+                                   :text "Always setting the value to before"
+                                   :record '(:before before :after after)
+                                   :state 'done :result "Changed")))
+        (should (equal id (plist-get revised :id)))
+        (should (eq 'test (plist-get revised :kind)))
+        (should (equal "s1" (plist-get revised :session)))
+        (should (equal "n-1" (plist-get revised :node)))
+        (should (equal "Always setting the value to before" (plist-get revised :text)))
+        (should (eq 'done (plist-get revised :state)))
+        (should (equal "Changed" (plist-get revised :result)))
+        (should (equal (list (harness-plist-remove revised :change))
+                       harness-decisions-test--events)))
+      (should-error (harness-call 'decision/revise "d-nothere" :text "x") :type 'harness-error))))
+
 (ert-deftest harness-decisions-reach-clients ()
   "Clients call the decision methods and hear when one changes."
   (harness-test-load-module 'acp)
   (should (harness-acp--extension-allowed-p "decision/undo"))
   (should (harness-acp--extension-allowed-p "decision/redo"))
+  (should (harness-acp--extension-allowed-p "decision/change"))
   (should (harness-acp--extension-allowed-p "decision/list"))
   (should (memq 'decision/changed harness-acp--forwarded-events)))
 

@@ -18,13 +18,18 @@
 ;; change: the chat draws again the notes that refer to the decision, in
 ;; every session that shows one (harness-ui-chat.el).
 ;;
-;; A decision offers one button, which says what a click does:
+;; A decision offers the buttons that say what a click does:
 ;; [Undo] while it is done, [Redo] while it is undone, nothing once it
-;; ended (`harness-ui-decision-button').  A decision that is a switch
-;; says so in its words: the compaction before a prompt cache lapses
-;; (kind `precompact') is [Turn off] while it is on and [Turn on] once it
-;; was turned off (`harness-ui-decision-labels').  The buttons run
-;; `harness-decision-undo' and `harness-decision-redo', which M-x also
+;; ended (`harness-ui-decision-button').  One whose prompt was kept
+;; (`:changeable') offers [Change] beside them: the original prompt opens
+;; again, in the session it was answered in, with the choices it had,
+;; and the answer changes what the decision records
+;; (`harness-decision-change').  A decision that is a switch says so in
+;; its words: the compaction before a prompt cache lapses (kind
+;; `precompact') is [Turn off] while it is on and [Turn on] once it was
+;; turned off (`harness-ui-decision-labels'); a switch keeps no prompt,
+;; so it offers no change.  The buttons run `harness-decision-undo',
+;; `harness-decision-redo' and `harness-decision-change', which M-x also
 ;; offers: they ask which decision, of those that can move that way,
 ;; newest first, so a decision can be moved even where no note of it is
 ;; on screen.
@@ -127,18 +132,22 @@ That is its text, then where and when it was made."
         (format "%s (%s)" (plist-get decision :text) (string-join where ", "))
       (plist-get decision :text))))
 
-(defun harness-ui-decisions--choose (prompt state)
+(defun harness-ui-decisions--choose (prompt state &optional predicate empty)
   "Ask with PROMPT for one of the cached decisions in STATE; return its id.
-The newest are offered first.  None in STATE is a `user-error'."
+The newest are offered first.  PREDICATE, when given, takes a decision's
+id and keeps only those it accepts.  None offered is a `user-error' with
+EMPTY as its words, by default what undo and redo say when there is
+nothing to move."
   (let ((choices nil))
     (dolist (d (harness-ui-decisions state))
-      (let ((label (harness-ui-decisions--label d)))
-        (when (assoc label choices)
-          (setq label (format "%s [%s]" label (plist-get d :id))))
-        (push (cons label (plist-get d :id)) choices)))
+      (when (or (null predicate) (funcall predicate (plist-get d :id)))
+        (let ((label (harness-ui-decisions--label d)))
+          (when (assoc label choices)
+            (setq label (format "%s [%s]" label (plist-get d :id))))
+          (push (cons label (plist-get d :id)) choices))))
     (setq choices (nreverse choices))
     (unless choices
-      (user-error (if (eq state 'done) "Nothing to undo" "Nothing to redo")))
+      (user-error (or empty (if (eq state 'done) "Nothing to undo" "Nothing to redo"))))
     (cdr (assoc (completing-read
                  prompt
                  (lambda (string pred action)
@@ -168,6 +177,63 @@ echo area says which.  Interactively, ask which decision, of those
 undone, newest first."
   (interactive (list (harness-ui-decisions--choose "Redo: " 'undone)))
   (harness-ui-decisions--move id 'redo))
+
+;;;; Change
+
+(defun harness-ui-decision-changeable-p (id)
+  "Non-nil when decision ID can ask again for the answer it keeps.
+That is a decision `done' or `undone' whose kind kept the prompt that
+asked it, which the harness says in `:changeable'.  A decision kept
+before prompts were saved has no change, and neither has one that
+ended."
+  (let ((decision (harness-ui-decision id)))
+    (and decision
+         (memq (harness-decision-state (plist-get decision :state)) '(done undone))
+         (harness-json-true-p (plist-get decision :changeable))
+         t)))
+
+(defun harness-ui-decision-change-help (id)
+  "Return what the [Change] of decision ID says it does, in a few words.
+A decision whose kind the UI knows says what its prompt was about."
+  (pcase (plist-get (harness-ui-decision id) :kind)
+    ('permission "The original permission prompt, with its choices")
+    ('cowboy "The original cold-cache question, with its choices")
+    (_ "The original prompt, with its choices")))
+
+(defun harness-ui-decisions--show-session (session-id)
+  "Show SESSION-ID where the UI shows sessions, unless it shows it already.
+The UI's open-session function makes the buffer, loading the session
+when it is not drawn yet, so a prompt waiting there is drawn with it."
+  (when (and (stringp session-id) (functionp harness-ui-open-session-function))
+    (let ((buffer (ignore-errors (funcall harness-ui-open-session-function session-id))))
+      (when (and (buffer-live-p buffer) (not (harness-ui-view-shown-p buffer)))
+        (ignore-errors (harness-ui-display-session session-id))))))
+
+(defun harness-ui-decisions--change (id)
+  "Ask the harness for the prompt decision ID keeps, and show it.
+The prompt opens again in the session the answer was made in, with the
+choices it had (`decision/change'); answering it changes the decision,
+and dismissing it leaves the decision as it is.  The echo area says the
+prompt opened; the session is shown when the UI did not show it."
+  (harness-ui-call "_harness/decision/change" (list :id id)
+                   (lambda (result)
+                     (harness-ui-decisions--show-session (plist-get result :session))
+                     (message "Prompt opened"))))
+
+;;;###autoload
+(defun harness-decision-change (id)
+  "Ask again for the answer the lasting decision ID keeps.
+The original prompt opens in the session it was answered in, with the
+choices it had; answering it changes the rule, grant or default the
+decision holds, and dismissing it leaves the decision as it is.  Only
+a decision `done' or `undone' whose prompt was kept offers this: one
+that ended, or was kept before prompts were saved, cannot.  A click on
+a note's [Change] does the same.  Interactively, ask which decision, of
+those that offer a change, newest first."
+  (interactive (list (harness-ui-decisions--choose
+                      "Change: " nil #'harness-ui-decision-changeable-p
+                      "Nothing to change")))
+  (harness-ui-decisions--change id))
 
 ;;;; The button
 
@@ -226,22 +292,34 @@ says `:strike nil' of, and for a decision the UI has not heard of."
     (_ "Make this decision again")))
 
 (defun harness-ui-decision-button (id state &optional help)
-  "Return the button decision ID offers in STATE, or nil when it offers none.
+  "Return the buttons decision ID offers in STATE, or nil when it offers none.
 It is [Undo] while STATE is `done', which runs `harness-decision-undo',
 and [Redo] while it is `undone', which runs `harness-decision-redo'; an
-ended decision offers nothing.  A decision of a kind that reads as a
-switch says so instead (`harness-ui-decision-label'): [Turn off] and
-\[Turn on].  STATE is the decision's, or what a note says of it when the
-cache does not know it.  HELP is the tooltip, by default
-`harness-ui-decision-help'.  A click or RET runs it, in any buffer
-\(`harness-ui-action-button')."
-  (pcase state
-    ('done (harness-ui-action-button (harness-ui-decision-label id 'undo)
-                                     (lambda () (harness-decision-undo id))
-                                     :help (or help (harness-ui-decision-help id 'undo))))
-    ('undone (harness-ui-action-button (harness-ui-decision-label id 'redo)
-                                       (lambda () (harness-decision-redo id))
-                                       :help (or help (harness-ui-decision-help id 'redo))))))
+ended decision offers nothing.  A decision whose prompt was kept offers
+[Change] beside it, which asks again for the original answer
+\(`harness-decision-change'); a switch, which keeps no prompt, offers no
+change.  A decision of a kind that reads as a switch says so instead
+\(`harness-ui-decision-label'): [Turn off] and [Turn on].  STATE is the
+decision's, or what a note says of it when the cache does not know it.
+HELP is the tooltip of the undo or redo button, by default
+`harness-ui-decision-help'; the tooltip of [Change] tells of the
+decision's kind (`harness-ui-decision-change-help').  A click or RET
+runs either, in any buffer (`harness-ui-action-button')."
+  (let ((move (pcase state
+                ('done (harness-ui-action-button (harness-ui-decision-label id 'undo)
+                                                 (lambda () (harness-decision-undo id))
+                                                 :help (or help (harness-ui-decision-help id 'undo))))
+                ('undone (harness-ui-action-button (harness-ui-decision-label id 'redo)
+                                                   (lambda () (harness-decision-redo id))
+                                                   :help (or help (harness-ui-decision-help id 'redo))))))
+        (change (and (memq state '(done undone))
+                     (harness-ui-decision-changeable-p id)
+                     (harness-ui-action-button "[Change]"
+                                               (lambda () (harness-decision-change id))
+                                               :help (harness-ui-decision-change-help id)))))
+    (cond ((and move change) (concat move " " change))
+          (move move)
+          (t change))))
 
 ;;;; The module
 
@@ -270,7 +348,7 @@ The views then draw their notes without buttons."
   (run-hook-with-args 'harness-ui-decision-functions nil nil))
 
 (harness-define-module 'ui-decisions
-  :doc "Lasting decisions in the UI: the cache the notes' [Undo] and [Redo] read, and the commands that move one."
+  :doc "Lasting decisions in the UI: the cache the notes' [Undo], [Redo] and [Change] read, and the commands that move one."
   :requires '(ui)
   :init #'harness-ui-decisions--init
   :shutdown #'harness-ui-decisions--shutdown)

@@ -1621,7 +1621,7 @@ events say what is left; with CALLS-ONLY the harness's own questions stay."
         ;; Only what waits for a tool call.
         (should (= 2 (harness-call 'session/pending-dismiss id "its turn ended" t)))
         (should (equal `((question ,id ,q nil)
-                         (permission ,id ,p (:behavior deny :scope once :reason "its turn ended")))
+                         (permission ,id ,p (:behavior deny :scope once :reason "its turn ended" :dismissed t)))
                        (reverse (car calls))))
         (should (equal (list own) (mapcar (lambda (it) (plist-get it :id)) (harness-call 'session/pending id))))
         (should (eq 'blocked (plist-get (harness-call 'session/get id) :status)))

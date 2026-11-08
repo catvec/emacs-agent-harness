@@ -22,6 +22,7 @@
 (defvar harness-ui-decisions--cache)
 (defvar harness-ui-decision-functions)
 (defvar harness-ui-event-functions)
+(defvar harness-ui-open-session-function)
 (defvar harness-ui-connected-hook)
 
 (declare-function harness-decisions-define-kind "harness-decisions" (kind &rest spec))
@@ -36,8 +37,11 @@
 (declare-function harness-ui-decisions--init "harness-ui-decisions" ())
 (declare-function harness-ui-decisions--shutdown "harness-ui-decisions" ())
 (declare-function harness-ui-decision-button "harness-ui-decisions" (id state &optional help))
+(declare-function harness-ui-decision-changeable-p "harness-ui-decisions" (id))
+(declare-function harness-ui-decision-change-help "harness-ui-decisions" (id))
 (declare-function harness-decision-undo "harness-ui-decisions" (id))
 (declare-function harness-decision-redo "harness-ui-decisions" (id))
+(declare-function harness-decision-change "harness-ui-decisions" (id))
 
 (defvar harness-ui-decisions-test--value nil
   "The setting the tests' kind of decision switches: `before' or `after'.")
@@ -194,17 +198,21 @@ nothing more is offered, and asking again repeats why."
       (should (eq 'changed (plist-get (harness-ui-decision id) :state))))))
 
 (ert-deftest harness-ui-decisions-commands-ask-which ()
-  "Interactively, undo offers the decisions in effect and redo the undone ones.
-The newest come first, each with where and when it was made; with none
-to offer, the command says so."
+  "Interactively, undo offers the decisions in effect, redo the undone ones,
+and change those whose prompt was kept.  The newest come first, each
+with where and when it was made; the changed ones keep their move's
+label; with none to offer, the command says so."
   (harness-ui-decisions-test-with
     (let ((harness-ui--sessions (make-hash-table :test 'equal))
           (offered nil)
           (sent nil))
       (dolist (d '((:id "d-old" :kind "test" :state "done" :text "Always A" :at 100.0 :session "s1")
-                   (:id "d-new" :kind "test" :state "done" :text "Always B" :at 200.0)
-                   (:id "d-back" :kind "test" :state "undone" :text "Always C" :at 150.0)
-                   (:id "d-end" :kind "test" :state "changed" :text "Always D" :at 300.0)))
+                   (:id "d-new" :kind "test" :state "done" :text "Always B" :at 200.0
+                    :changeable t :change '(:prompt (:question "Q")))
+                   (:id "d-back" :kind "test" :state "undone" :text "Always C" :at 150.0
+                    :changeable t :change '(:prompt (:question "Q")))
+                   (:id "d-end" :kind "test" :state "changed" :text "Always D" :at 300.0
+                    :changeable t :change '(:prompt (:question "Q")))))
         (harness-ui-decisions-store d))
       (puthash "s1" '(:id "s1" :name "Work") harness-ui--sessions)
       (cl-letf (((symbol-function 'completing-read)
@@ -223,6 +231,11 @@ to offer, the command says so."
         (should (equal 1 (length offered)))
         (should (string-prefix-p "Always C (" (car offered)))
         (should (equal '("_harness/decision/redo" (:id "d-back")) (car sent)))
+        ;; Change offers only what kept a prompt and still stands.
+        (call-interactively #'harness-decision-change)
+        (should (equal 2 (length offered)))
+        (should (string-prefix-p "Always B (" (car offered)))
+        (should (equal '("_harness/decision/change" (:id "d-new")) (car sent)))
         ;; Two that read alike are told apart by their ids.
         (harness-ui-decisions-store '(:id "d-twin" :kind "test" :state "done" :text "Always A" :at 100.0 :session "s1"))
         (call-interactively #'harness-decision-undo)
@@ -232,7 +245,9 @@ to offer, the command says so."
         (should (equal "Nothing to undo"
                        (cadr (should-error (call-interactively #'harness-decision-undo) :type 'user-error))))
         (should (equal "Nothing to redo"
-                       (cadr (should-error (call-interactively #'harness-decision-redo) :type 'user-error))))))))
+                       (cadr (should-error (call-interactively #'harness-decision-redo) :type 'user-error))))
+        (should (equal "Nothing to change"
+                       (cadr (should-error (call-interactively #'harness-decision-change) :type 'user-error))))))))
 
 (ert-deftest harness-ui-decisions-button-says-what-a-click-does ()
   "A decision offers [Undo] while done and [Redo] while undone, nothing once ended.
@@ -276,6 +291,64 @@ caller says it; a click or RET moves that decision."
             (goto-char (1- (point-max)))
             (harness-ui-action-push)
             (should (equal '("_harness/decision/redo" (:id "d-c")) (car sent)))))))))
+
+(ert-deftest harness-ui-decisions-a-change-asks-again-with-the-original-prompt ()
+  "A decision that kept its prompt offers [Change] beside its move, in both
+states, with a tooltip that says what its kind asked.  A click asks the
+harness again and shows the session the prompt opens in; a decision
+that kept no prompt offers its move alone."
+  (harness-ui-decisions-test-with
+    (let ((sent nil) (shown nil))
+      (dolist (d '((:id "d-p" :kind "permission" :state "done"
+                    :text "Always allowing every bash call"
+                    :changeable t :change '(:prompt (:question "Q")))
+                   (:id "d-c" :kind "cowboy" :state "undone"
+                    :text "Always starting afresh"
+                    :changeable t :change '(:prompt (:question "Q")))
+                   (:id "d-t" :kind "test" :state "done" :text "Always testing"
+                    :changeable t :change '(:prompt (:question "Q")))
+                   (:id "d-old" :kind "permission" :state "done"
+                    :text "Always allowing every bash call")
+                   (:id "d-end" :kind "permission" :state "changed"
+                    :text "Always allowing every bash call"
+                    :changeable t :change '(:prompt (:question "Q")))))
+        (harness-ui-decisions-store d))
+      (should (harness-ui-decision-changeable-p "d-p"))
+      (should (harness-ui-decision-changeable-p "d-c"))
+      (should-not (harness-ui-decision-changeable-p "d-old"))
+      (should-not (harness-ui-decision-changeable-p "d-end"))
+      (should-not (harness-ui-decision-changeable-p "d-nowhere"))
+      (let ((undo (harness-ui-decision-button "d-p" 'done))
+            (redo (harness-ui-decision-button "d-c" 'undone)))
+        (should (equal "[Undo] [Change]" undo))
+        (should (equal "[Redo] [Change]" redo))
+        (let ((pos (string-match "\\[Change\\]" undo)))
+          (should (= pos 7))
+          (should (eq 'button (get-text-property pos 'face undo)))
+          (should (equal "The original permission prompt, with its choices"
+                         (get-text-property pos 'help-echo undo))))
+        (should (equal "The original cold-cache question, with its choices"
+                       (get-text-property (string-match "\\[Change\\]" redo) 'help-echo redo)))
+        (should (equal "The original prompt, with its choices"
+                       (harness-ui-decision-change-help "d-t")))
+        (should (equal "[Undo] [Change]" (harness-ui-decision-button "d-t" 'done)))
+        ;; A decision without a prompt offers its move alone.
+        (should (equal "[Undo]" (harness-ui-decision-button "d-old" 'done)))
+        (should-not (harness-ui-decision-button "d-end" 'changed)))
+      ;; A click asks the harness again, and shows the prompt's session.
+      (let ((harness-ui-open-session-function (lambda (_sid) (current-buffer))))
+        (cl-letf (((symbol-function 'harness-ui-call)
+                   (lambda (method params callback &optional _on-error)
+                     (push (list method params) sent)
+                     (funcall callback '(:session "s1"))))
+                  ((symbol-function 'harness-ui-display-session)
+                   (lambda (sid &rest _) (push sid shown))))
+          (with-temp-buffer
+            (insert (harness-ui-decision-button "d-p" 'done))
+            (goto-char (1+ (string-match "\\[Change\\]" (buffer-string))))
+            (harness-ui-action-push))))
+      (should (equal '("_harness/decision/change" (:id "d-p")) (car sent)))
+      (should (equal '("s1") shown)))))
 
 (declare-function harness-ui-decision-label "harness-ui-decisions" (id way))
 (declare-function harness-ui-decision-strikes-p "harness-ui-decisions" (id))

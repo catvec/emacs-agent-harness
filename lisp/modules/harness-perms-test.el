@@ -4592,6 +4592,16 @@ The call goes into the transcript first, as the agent puts it there."
     (harness-call 'permission/answer sid (plist-get (car (harness-call 'session/pending sid)) :id) answer)
     (harness-test-await p)))
 
+(defun harness-perms-test--prompted (sid tool input)
+  "Run TOOL with INPUT in SID and return (PROCESS . PROMPT) once it asks.
+The call goes into the transcript first, as the agent puts it there."
+  (let* ((call-id (harness-short-id))
+         (p (progn
+              (harness-call 'session/append sid (list :kind 'tool-call :tool tool :call-id call-id :input input))
+              (harness-call 'tools/execute sid (list :id call-id :name tool :input input)))))
+    (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "the prompt")
+    (cons p (car (harness-call 'session/pending sid)))))
+
 (defun harness-perms-test--notes (sid)
   "Return the notes of lasting answers in SID's transcript, oldest first."
   (cl-remove-if-not #'harness-node-permission (harness-call 'session/nodes sid)))
@@ -5005,6 +5015,206 @@ same: it is taken into the decisions where it stands, and names its decision."
                                                                   :result "Undone: no longer always allowing every t_exec call, in every session"))))))
       (should (eq 'done (car (harness-perms-test--redo sid note))))
       (should (equal '((:tool "t_exec" :behavior allow)) harness-perms-rules)))))
+
+(defun harness-perms-test--change (id)
+  "Ask again for the answer decision ID keeps; return its answer.
+The answer is (SESSION . PENDING-ID)."
+  (let ((r (harness-call 'decision/change id)))
+    (cons (plist-get r :session) (plist-get r :pending))))
+
+(defun harness-perms-test--change-prompt (id)
+  "Ask again for the answer decision ID keeps; return the prompt that opens."
+  (let ((answer (harness-perms-test--change id)))
+    (car (harness-call 'session/pending (car answer)))))
+
+(ert-deftest harness-perms-change-asks-again-with-the-original-prompt ()
+  "A lasting answer offers [Change]: the prompt that asked it opens again,
+with its choices and the call it was about, and the answer replaces the
+rule the decision records, its text and its note.  A second click while
+the prompt waits opens nothing new."
+  (harness-perms-test--with-decisions
+    (let* ((asked (harness-perms-test--prompted sid "t_exec" '(:command "make")))
+           (pid (plist-get (cdr asked) :id))
+           (original (plist-get (cdr asked) :payload)))
+      (harness-call 'permission/answer sid pid "allow-always")
+      (harness-test-await (car asked))
+      (let* ((note (car (last (harness-perms-test--notes sid))))
+             (id (harness-node-decision note))
+             (decision (harness-call 'decision/get id)))
+        (should id)
+        (should (eq 'permission (plist-get decision :kind)))
+        (should (harness-json-true-p (plist-get decision :changeable)))
+        ;; The original prompt again, in the session it was answered in.
+        (let ((answer (harness-perms-test--change id)))
+          (should (equal (cons sid (cdr answer)) answer)))
+        (let* ((again (harness-perms-test--change-prompt id))
+               (payload (plist-get again :payload)))
+          (should (eq 'permission (plist-get again :kind)))
+          (dolist (key '(:tool :input :options :title :reason :paths :cwd :commands :covers :ladder :cover))
+            (should (equal (plist-get payload key) (plist-get original key))))
+          ;; No call of the old prompt's: a turn ending does not dismiss it.
+          (should-not (plist-get payload :call-id))
+          ;; Asked for again while it waits: the one prompt.
+          (should (= 1 (length (harness-call 'session/pending sid))))
+          ;; Answered for this session: the rule moves from every session to this one.
+          (let ((result (harness-call 'permission/answer sid (plist-get again :id) "allow-session")))
+            (should (eq 'done (plist-get result :outcome)))
+            (should (equal "Changed: allowing every t_exec call to make for this session"
+                           (plist-get result :message))))
+          (should-not harness-perms-rules)
+          (should (equal '((:tool "t_exec" :commands (("make")) :behavior allow))
+                         (gethash sid harness-perms--session-rules)))
+          (should-not (harness-call 'session/pending sid))
+          (let ((changed (harness-call 'decision/get id)))
+            (should (eq 'done (plist-get changed :state)))
+            (should (equal "Allowing every t_exec call to make for this session" (plist-get changed :text)))
+            (should (equal '(:scope session :rule (:tool "t_exec" :commands (("make")) :behavior allow))
+                           (plist-get changed :record)))
+            (should (equal "Changed: allowing every t_exec call to make for this session"
+                           (plist-get changed :result))))
+          ;; The note tells of the changed answer, and keeps its decision.
+          (let ((fresh (harness-call 'session/node sid (plist-get note :id))))
+            (should (equal "Allowing every t_exec call to make for this session" (plist-get fresh :content)))
+            (should (equal id (harness-node-decision fresh)))
+            (should (equal '(:scope session :rule (:tool "t_exec" :commands (("make")) :behavior allow)
+                             :undo offered)
+                           (harness-node-permission fresh))))
+          ;; Changed again, to deny for every session.
+          (harness-call 'permission/answer sid
+                        (plist-get (harness-perms-test--change-prompt id) :id) "deny-always")
+          (should (equal '((:tool "t_exec" :commands (("make")) :behavior deny)) harness-perms-rules))
+          (should-not (gethash sid harness-perms--session-rules))
+          (let ((changed (harness-call 'decision/get id)))
+            (should (equal "Always denying every t_exec call to make, in every session" (plist-get changed :text)))
+            (should (equal '(:scope always :rule (:tool "t_exec" :commands (("make")) :behavior deny))
+                           (plist-get changed :record)))))))))
+
+(ert-deftest harness-perms-change-keeps-the-decision-when-dismissed ()
+  "A changed prompt dismissed, by the session or for lack of an answer,
+changes nothing: the rule stays and the decision as it was."
+  (harness-perms-test--with-decisions
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
+    (let* ((note (car (last (harness-perms-test--notes sid))))
+           (id (harness-node-decision note))
+           (before (harness-call 'decision/get id)))
+      (let ((prompt (harness-perms-test--change-prompt id)))
+        (harness-call 'permission/answer sid (plist-get prompt :id)
+                      (list :behavior 'deny :scope 'once :dismissed t)))
+      (should (equal before (harness-call 'decision/get id)))
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior allow)) harness-perms-rules))
+      (should-not (harness-call 'session/pending sid))
+      ;; Dismissed with the session's requests, as a turn ending does.
+      (harness-perms-test--change-prompt id)
+      (harness-call 'session/pending-dismiss sid "its turn ended")
+      (should (equal before (harness-call 'decision/get id)))
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior allow)) harness-perms-rules)))))
+
+(ert-deftest harness-perms-change-leaves-what-changed-since ()
+  "A decision whose rule was changed since ends, and the changed answer is
+not applied: what somebody else put there stays."
+  (harness-perms-test--with-decisions
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
+    (let* ((note (car (last (harness-perms-test--notes sid))))
+           (id (harness-node-decision note))
+           (prompt (harness-perms-test--change-prompt id)))
+      (setq harness-perms-rules (list '(:tool "t_exec" :commands (("make")) :behavior deny)))
+      (let ((result (harness-call 'permission/answer sid (plist-get prompt :id) "allow-session")))
+        (should (eq 'changed (plist-get result :outcome)))
+        (should (equal (concat "Not changed: the saved rule for t_exec (make) has changed since"
+                               " (in Settings, say), so it stays as it is")
+                       (plist-get result :message))))
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior deny)) harness-perms-rules))
+      (should-not (gethash sid harness-perms--session-rules))
+      (let ((decision (harness-call 'decision/get id)))
+        (should (eq 'changed (plist-get decision :state)))
+        (should (equal "Always allowing every t_exec call to make, in every session" (plist-get decision :text))))
+      (should (eq 'changed (plist-get (harness-perms-test--record sid note) :undo))))))
+
+(ert-deftest harness-perms-change-works-from-undone-and-checks-it-still-stands ()
+  "A decision undone can be changed, and the new answer takes effect; one
+whose rule was recorded again since ends without applying it."
+  (harness-perms-test--with-decisions
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
+    (let* ((note (car (last (harness-perms-test--notes sid))))
+           (id (harness-node-decision note)))
+      (should (eq 'undone (plist-get (harness-call 'decision/undo id) :outcome)))
+      (harness-call 'permission/answer sid
+                    (plist-get (harness-perms-test--change-prompt id) :id) "deny-session")
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior deny))
+                     (gethash sid harness-perms--session-rules)))
+      (let ((decision (harness-call 'decision/get id)))
+        (should (eq 'done (plist-get decision :state)))
+        (should (equal "Denying every t_exec call to make for this session" (plist-get decision :text))))
+      (should (equal "Denying every t_exec call to make for this session"
+                     (plist-get (harness-call 'session/node sid (plist-get note :id)) :content)))
+      ;; Undone, then its old rule recorded again: it ends, and nothing is applied.
+      (should (eq 'undone (plist-get (harness-call 'decision/undo id) :outcome)))
+      (should-not (gethash sid harness-perms--session-rules))
+      (harness-perms-add-rule sid '(:tool "t_exec" :commands (("make")) :behavior deny) 'session)
+      (let ((result (harness-call 'permission/answer sid
+                                  (plist-get (harness-perms-test--change-prompt id) :id) "allow-always")))
+        (should (eq 'changed (plist-get result :outcome)))
+        (should (equal "Not changed: this session has that rule for t_exec (make) again already"
+                       (plist-get result :message))))
+      (should-not harness-perms-rules)
+      (should (equal '((:tool "t_exec" :commands (("make")) :behavior deny))
+                     (gethash sid harness-perms--session-rules)))
+      (should (eq 'changed (plist-get (harness-call 'decision/get id) :state))))))
+
+(ert-deftest harness-perms-change-a-directory-grant ()
+  "A grant's prompt asks again for its directory and pattern, and the answer
+grants or denies it anew, for the session or every one."
+  (harness-perms-test--with-decisions
+    (let* ((a (harness-test-temp-dir))
+           (asked (harness-perms-test--prompted sid "t_read" (list :path (expand-file-name "f.txt" a))))
+           (original (plist-get (cdr asked) :payload)))
+      (harness-call 'permission/answer sid (plist-get (cdr asked) :id) "allow-session")
+      (harness-test-await (car asked))
+      (let* ((note (car (last (harness-perms-test--notes sid))))
+             (id (harness-node-decision note))
+             (again (harness-perms-test--change-prompt id))
+             (payload (plist-get again :payload)))
+        (should (equal (plist-get original :dir) (plist-get payload :dir)))
+        (should (equal (plist-get original :pattern) (plist-get payload :pattern)))
+        (should (equal (plist-get original :options) (plist-get payload :options)))
+        (should (equal (plist-get original :title) (plist-get payload :title)))
+        (should-not (plist-get payload :call-id))
+        ;; For every session now.
+        (harness-call 'permission/answer sid (plist-get again :id) "allow-always")
+        (should (equal (list a) harness-allowed-directories))
+        (should-not (plist-get (harness-call 'session/get sid) :allowed-dirs))
+        (let ((decision (harness-call 'decision/get id)))
+          (should (eq 'done (plist-get decision :state)))
+          (should (equal (format "Always allowing %s, in every session" (abbreviate-file-name a))
+                         (plist-get decision :text))))
+        ;; And to deny it, which records a rule for the pattern.
+        (let* ((third (harness-perms-test--change-prompt id))
+               (pattern (plist-get (plist-get third :payload) :pattern)))
+          (harness-call 'permission/answer sid (plist-get third :id) "deny-session")
+          (should-not harness-allowed-directories)
+          (should (equal (list (list :path pattern :behavior 'deny))
+                         (gethash sid harness-perms--session-rules)))
+          (should (equal (format "Denying %s to every tool for this session"
+                                 (abbreviate-file-name pattern))
+                         (plist-get (harness-call 'decision/get id) :text))))))))
+
+(ert-deftest harness-perms-change-is-not-offered-for-a-decision-without-a-prompt ()
+  "A decision taken in from a note written before decisions were kept keeps
+no prompt, so there is nothing to ask again."
+  (harness-perms-test--with-decisions
+    (harness-perms-add-rule sid '(:tool "t_exec" :behavior allow) 'always)
+    (let ((note (harness-call 'session/append sid
+                              (list :kind 'hint :content "Always allowing every t_exec call, in every session"
+                                    :meta (list :permission (list :scope 'always
+                                                                  :rule '(:tool "t_exec" :behavior allow)
+                                                                  :undo 'offered))))))
+      (harness-perms-test--undo sid note)
+      (let* ((fresh (harness-call 'session/node sid (plist-get note :id)))
+             (decision (harness-call 'decision/get (harness-node-decision fresh))))
+        (should decision)
+        (should (eq :false (plist-get decision :changeable)))
+        (should-not (plist-get decision :change))
+        (should-error (harness-call 'decision/change (plist-get decision :id)) :type 'harness-error)))))
 
 (ert-deftest harness-perms-a-call-an-answer-denies-names-its-decision ()
   "A call a lasting answer's rule denies, in any session, names the answer's

@@ -140,8 +140,10 @@ would lie before the compaction node, where the model never reads it.
 - `config/get` ([config](config.md)), when it is loaded
 - `config/set` ([config](config.md)), when it is loaded
 - `decision/attach` ([decisions](decisions.md)), when it is loaded
+- `decision/get` ([decisions](decisions.md))
 - `decision/list` ([decisions](decisions.md)), when it is loaded
 - `decision/record` ([decisions](decisions.md)), when it is loaded
+- `decision/revise` ([decisions](decisions.md))
 - `provider/model` ([provider](provider.md)), when it is loaded
 - `question/ask` ([tools-question](tools-question.md)), when it is loaded
 - `question/cancel` ([tools-question](tools-question.md)), when it is loaded
@@ -149,7 +151,9 @@ would lie before the compaction node, where the model never reads it.
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
 - `session/hint` ([session](session.md))
+- `session/node` ([session](session.md))
 - `session/set-status` ([session](session.md))
+- `session/update-node` ([session](session.md))
 
 ### Events it handles
 

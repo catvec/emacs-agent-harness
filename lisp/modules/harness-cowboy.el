@@ -526,6 +526,12 @@ naming it (see `harness-cowboy--words').  Nil when it names none."
 ;; while they still hold what the answer set; redo sets them again while
 ;; they still hold what the undo put back.  Settings changed by hand in
 ;; between are left as they are, and the decision ends there.
+;;
+;; The question is kept with the decision (`:change': its text, options
+;; and what the panel shows of the cache, but not the message that
+;; waited), so [Change] asks it again in the session it was answered in;
+;; the new "always" answer replaces the default, the decision and its
+;; hint, and dismissing the question changes nothing.
 
 (defun harness-cowboy--settings ()
   "Return what the cold-cache settings hold now, as a decision records them.
@@ -560,33 +566,38 @@ cannot be saved, as when the policy sets it."
               "ignore it and send the whole context"
             (harness-cowboy--choice-text choice nil))))
 
-(defun harness-cowboy--record-decision (session-id choice before)
+(defun harness-cowboy--record-decision (session-id choice before &optional question)
   "Keep the \"always\" answer of CHOICE in SESSION-ID as a lasting decision.
-BEFORE is what the settings held before it.  Return the decision's id,
-or nil without the decisions module or when keeping it failed (logged)."
+BEFORE is what the settings held before it.  QUESTION is the question
+that asked it, saved so the decision can ask again ([Change]).  Return
+the decision's id, or nil without the decisions module or when keeping
+it failed (logged)."
   (when (harness-method-exists-p 'decision/record)
     (condition-case err
         (plist-get (harness-call 'decision/record 'cowboy session-id (harness-cowboy--decision-text choice)
                                  (list :choice (symbol-name choice) :before before
-                                       :after (list :default (symbol-name choice) :ask :false)))
+                                       :after (list :default (symbol-name choice) :ask :false))
+                                 :change (and (consp question)
+                                              (list :prompt (harness-plist-remove question :waiting-message))))
                    :id)
       (error (harness-log 'warn "cowboy: could not keep the answer in %s as a decision: %s"
                           session-id (harness-error-short-message err))
              nil))))
 
-(defun harness-cowboy--remember (choice &optional session-id)
+(defun harness-cowboy--remember (choice &optional session-id question)
   "Make CHOICE the default and stop asking, as an \"always\" answer says.
 Both settings are saved as the settings page saves them (`config/set'),
 and the answer, given in SESSION-ID, is kept as a lasting decision with
 the settings before it, which can be undone and redone from any
-session (`harness-cowboy--record-decision').  Return (:decision ID)
-once saved, ID nil when no decision was kept, else (:failed WHY): an
-option the policy sets, say, which then stays as it is."
+session (`harness-cowboy--record-decision').  QUESTION is the question
+that asked it, saved with the decision.  Return (:decision ID) once
+saved, ID nil when no decision was kept, else (:failed WHY): an option
+the policy sets, say, which then stays as it is."
   (let ((before (harness-cowboy--settings)))
     (condition-case err
         (progn
           (harness-cowboy--set-settings (list :default (symbol-name choice) :ask :false))
-          (list :decision (harness-cowboy--record-decision session-id choice before)))
+          (list :decision (harness-cowboy--record-decision session-id choice before question)))
       (error (let ((msg (harness-error-short-message err)))
                (harness-log 'warn "cowboy: could not make %s the default: %s" choice msg)
                (list :failed msg))))))
@@ -631,12 +642,149 @@ answer set again.  Return (OUTCOME . MESSAGE), as
            (cons 'changed "Not redone: the cold-cache settings are so again already (another answer, say), so they stay as they are"))
           (t (cons 'changed "Not redone: the cold-cache settings changed since (in Settings, say), so they stay as they are")))))
 
+(defvar harness-cowboy--changes (make-hash-table :test 'equal)
+  "Decision id -> the pending id of the question that asks it again.")
+
+(defun harness-cowboy--revise-note (decision choice)
+  "Make the note of DECISION say it now takes CHOICE.
+The note is the hint written where the \"always\" answer was given; its
+decision is the same, and its text follows the changed answer."
+  (let ((sid (plist-get decision :session))
+        (node-id (plist-get decision :node)))
+    (when (and (stringp sid) (stringp node-id)
+               (harness-method-exists-p 'session/node)
+               (harness-method-exists-p 'session/update-node)
+               (harness-call 'session/exists-p sid))
+      (condition-case err
+          (when-let* ((node (harness-call 'session/node sid node-id)))
+            (let ((text (condition-case nil
+                            (harness-cowboy--hint-text
+                             choice 'always (harness-call 'session/get sid)
+                             (harness-cowboy--estimate sid))
+                          (error (harness-cowboy--decision-text choice)))))
+              (harness-call 'session/update-node sid node-id :content text)))
+        (error (harness-log 'warn "cowboy: could not revise the note of %s: %s"
+                            (plist-get decision :id) (harness-error-short-message err)))))))
+
+(defun harness-cowboy--change-check (decision)
+  "Return (OUTCOME . MESSAGE) saying whether a changed answer may go on.
+It checks that DECISION still stands where it did, without recording
+the new answer: a decision `done' is undone, putting the settings back
+as before it while they still hold what it set, and one `undone' must
+still hold what its undo put back.  OUTCOME is `undone' or `done' when
+the settings are as the decision left them, `changed' -- with the
+sentence a redo would give -- when they are not, which ends it, or
+`failed' when the undo itself could not be made, which leaves it."
+  (let* ((record (plist-get decision :record))
+         (now (harness-cowboy--settings))
+         (state (plist-get decision :state)))
+    (cond
+     ((eq state 'done)
+      (condition-case err
+          (harness-cowboy--decision-undo decision)
+        (error (cons 'failed (format "Could not change: %s"
+                                     (harness-error-short-message err))))))
+     ((harness-cowboy--settings-equal now (plist-get record :before))
+      (list 'done))
+     ((harness-cowboy--settings-equal now (plist-get record :after))
+      (cons 'changed "Not changed: the cold-cache settings are so again already (another answer, say), so they stay as they are"))
+     (t (cons 'changed "Not changed: the cold-cache settings changed since (in Settings, say), so they stay as they are")))))
+
+(defun harness-cowboy--apply-change (decision text dismissed)
+  "Make DECISION the choice TEXT answers, unless DISMISSED or `hold'.
+The decision keeps its id and its original \"before\" settings, unless
+the settings were changed since its last move, which ends it; its
+record, text and note take the new choice, and the settings hold it
+without asking."
+  (let ((id (plist-get decision :id))
+        (sid (plist-get decision :session)))
+    (when (and (not dismissed)
+               (harness-call 'session/exists-p sid))
+      (let ((parsed (harness-cowboy-parse-answer text)))
+        (when (or (null parsed) (eq (car parsed) 'hold))
+          (message "Answer unchanged"))
+        (when (and parsed (not (eq (car parsed) 'hold)))
+          (let* ((fresh (harness-call 'decision/get id))
+                 (state (plist-get fresh :state)))
+            (when (memq state '(done undone))
+              (let ((checked (harness-cowboy--change-check fresh)))
+                (cond
+                 ((memq (car checked) '(done undone))
+                  (let* ((choice (car parsed))
+                         (record (plist-get fresh :record))
+                         (before (or (plist-get record :before)
+                                     (harness-cowboy--settings)))
+                         (after (list :default (symbol-name choice) :ask :false)))
+                    (condition-case err
+                        (progn
+                          (harness-cowboy--set-settings after)
+                          (harness-cowboy--revise-note fresh choice)
+                          (let ((message (format "Changed: %s"
+                                                 (downcase (harness-cowboy--decision-text choice)))))
+                            (harness-call 'decision/revise
+                                          id
+                                          :text (harness-cowboy--decision-text choice)
+                                          :record (list :choice (symbol-name choice)
+                                                        :before before :after after)
+                                          :state 'done :result message :moved-at (float-time))
+                            (message "%s" message)))
+                      (error
+                       (harness-log 'warn "cowboy: could not change %s: %s" id
+                                   (harness-error-short-message err))
+                       ;; What the old decision holds is what stands again.
+                       (when (eq state 'done)
+                         (ignore-errors
+                           (harness-cowboy--set-settings (plist-get record :after))))
+                       (harness-call 'session/hint sid
+                                     (format "Could not change the cold-cache answer: %s"
+                                             (harness-error-short-message err)))))))
+                 ((memq (car checked) '(changed gone))
+                  ;; What the decision left is not there any more: it ends
+                  ;; here, as it would on a redo, and nothing is changed.
+                  (let ((message (if (string-prefix-p "Not undone: " (cdr checked))
+                                     (concat "Not changed: "
+                                             (substring (cdr checked) (length "Not undone: ")))
+                                   (cdr checked))))
+                    (harness-call 'decision/revise id
+                                  :state (car checked) :result message
+                                  :moved-at (float-time))
+                    (message "%s" message)))
+                 (t (message "%s" (cdr checked))))))))))))
+
+(defun harness-cowboy--decision-change (decision)
+  "Ask again what goes first, for the \"always\" answer DECISION keeps.
+Return (:session SESSION-ID :pending PID), as
+`harness-decisions-define-kind' says.  The question is the one that
+asked the answer, with its choices and prices.  Its answer changes the
+settings and the decision; a dismissed question, or `hold', changes
+nothing."
+  (let* ((id (plist-get decision :id))
+         (sid (plist-get decision :session))
+         (snapshot (plist-get decision :change))
+         (prompt (plist-get snapshot :prompt)))
+    (unless (and (stringp sid) (consp prompt))
+      (signal 'harness-error (list "This answer kept no prompt to ask again")))
+    (unless (and (harness-method-exists-p 'question/ask)
+                 (harness-call 'session/exists-p sid))
+      (signal 'harness-error (list "The session the answer was made in is gone")))
+    (or (and (gethash id harness-cowboy--changes)
+             (list :session sid :pending (gethash id harness-cowboy--changes)))
+        (let ((pid (harness-call 'question/ask
+                                 sid
+                                 (harness-plist-remove prompt :waiting-message)
+                                 (lambda (text dismissed)
+                                   (remhash id harness-cowboy--changes)
+                                   (harness-cowboy--apply-change decision text dismissed)))))
+          (puthash id pid harness-cowboy--changes)
+          (list :session sid :pending pid)))))
+
 (declare-function harness-decisions-define-kind "harness-decisions" (kind &rest spec))
 
 (with-eval-after-load 'harness-decisions
   (harness-decisions-define-kind 'cowboy
                                  :undo #'harness-cowboy--decision-undo
-                                 :redo #'harness-cowboy--decision-redo))
+                                 :redo #'harness-cowboy--decision-redo
+                                 :change #'harness-cowboy--decision-change))
 
 (defun harness-cowboy--live-decision ()
   "Return the id of the \"always\" decision the settings hold now, or nil.
@@ -719,16 +867,16 @@ dismissed question holds the message."
          (from (plist-get message :from))
          (default (harness-cowboy--default))
          (choices (mapcar #'car harness-cowboy-choices))
+         (question (list :question (harness-cowboy--question-text session estimate from note)
+                         :options (mapcar (lambda (c) (harness-cowboy--option c estimate default)) choices)
+                         :allow-free-text t
+                         :cowboy (harness-cowboy--info session-id session estimate from default message)
+                         :waiting-message message))
          (answered nil)
          (pid nil))
     (setq pid
           (harness-call
-           'question/ask session-id
-           (list :question (harness-cowboy--question-text session estimate from note)
-                 :options (mapcar (lambda (c) (harness-cowboy--option c estimate default)) choices)
-                 :allow-free-text t
-                 :cowboy (harness-cowboy--info session-id session estimate from default message)
-                 :waiting-message message)
+           'question/ask session-id question
            (lambda (text dismissed)
              (setq answered t)
              (when (equal (plist-get (gethash session-id harness-cowboy--asking) :pid) pid)
@@ -746,7 +894,7 @@ dismissed question holds the message."
                                        session-id (harness-error-short-message err))
                           (funcall settle 'hold 'user))))
                 ((and (cdr parsed) (not (eq (car parsed) 'hold)))
-                 (let* ((saved (harness-cowboy--remember (car parsed) session-id))
+                 (let* ((saved (harness-cowboy--remember (car parsed) session-id question))
                         (failed (plist-get saved :failed)))
                    (when failed
                      (harness-call 'session/hint session-id

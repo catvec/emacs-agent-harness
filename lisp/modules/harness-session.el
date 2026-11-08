@@ -2730,7 +2730,7 @@ there -- is taken off the list all the same."
           ("permission"
            (when (harness-method-exists-p 'permission/answer)
              (harness-call 'permission/answer id pid
-                           (list :behavior 'deny :scope 'once :reason reason)))))
+                           (list :behavior 'deny :scope 'once :reason reason :dismissed t)))))
       (error (harness-log 'warn "session %s: dismissing request %s failed: %s"
                           id pid (harness-error-short-message err))))
     (when (cl-find pid (harness-session-pending (harness-session--get id))

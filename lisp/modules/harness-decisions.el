@@ -20,10 +20,13 @@
 ;; another answer that recorded it again, the default changed by hand --
 ;; ends the decision: `changed', or `gone' when what it changed is no
 ;; longer there at all, with a sentence saying so.  An ended decision
-;; offers nothing more.  So a decision has one button, and it says what
-;; a click does: [Undo] while done, [Redo] while undone.  A click never
-;; takes back a change somebody else made, and two decisions never fight
-;; over one setting: the one that holds it is the one whose button works.
+;; offers nothing more.  So a decision has a button that says what a
+;; click does: [Undo] while done, [Redo] while undone.  One whose kind
+;; kept the prompt that asked it (`decision/record' `:change') offers
+;; [Change] as well: the prompt opens again and the new answer replaces
+;; what the decision records (`decision/change').  A click never takes
+;; back a change somebody else made, and two decisions never fight over
+;; one setting: the one that holds it is the one whose button works.
 ;;
 ;; The decisions are the harness's, not a session's: one made in one
 ;; session can be undone or redone from any other.  Notes refer to one
@@ -58,21 +61,26 @@ An older one is forgotten: the notes about it then offer no button.")
   "The lasting decisions, newest first; each a plist (see `decision/record').")
 
 (defvar harness-decisions--kinds (make-hash-table :test 'eq)
-  "Kind -> (:undo FN :redo FN), as `harness-decisions-define-kind' gives them.")
+  "Kind -> (:undo FN :redo FN :change FN).
+As `harness-decisions-define-kind' gives them.")
 
 (defun harness-decisions-define-kind (kind &rest spec)
-  "Make decisions of KIND, a symbol, undone and redone as SPEC says.
-SPEC is (:undo FN :redo FN).  Each FN is called with the decision, a
-plist as `decision/record' describes, whose `:record' says what it
-changed, and returns (OUTCOME . MESSAGE).  The undo's OUTCOME is
-`undone' once it took the decision back, the redo's `done' once it put
-it in effect again; either is `changed' when what the decision changed
-was changed since by something else, which is then left as it is, or
-`gone' when it is no longer there at all.  MESSAGE says what happened
-in a sentence, or is nil for the default one.  A FN that signals moves
-nothing.  The module that owns the setting defines its kind as it
-loads; a decision of a kind no module defines can be neither undone
-nor redone.  Return KIND."
+  "Make decisions of KIND, a symbol, undone, redone and changed as SPEC says.
+SPEC is (:undo FN :redo FN :change FN).  Each FN is called with the
+decision, a plist as `decision/record' describes, whose `:record' says
+what it changed.  The undo and redo FNs return (OUTCOME . MESSAGE).
+The undo's OUTCOME is `undone' once it took the decision back, the
+redo's `done' once it put it in effect again; either is `changed' when
+what the decision changed was changed since by something else, which is
+then left as it is, or `gone' when it is no longer there at all.
+MESSAGE says what happened in a sentence, or is nil for the default one.
+A FN that signals moves nothing.  The change FN asks the user again for
+the answer the decision keeps, and returns (:session SESSION-ID :pending
+PID); it changes nothing until that answer arrives.  Without it, and
+without the prompt saved with the decision, the decision offers no
+change.  The module that owns the setting defines its kind as it loads;
+a decision of a kind no module defines can be neither undone nor
+redone.  Return KIND."
   (puthash kind spec harness-decisions--kinds)
   kind)
 
@@ -103,15 +111,33 @@ nor redone.  Return KIND."
                       (list :decisions (harness-json-array harness-decisions--entries)))
       (error (harness-log 'warn "decisions: saving failed: %s" (harness-error-message err))))))
 
+(defun harness-decisions--public (decision)
+  "Return DECISION as the harness sends it, without the prompt it kept.
+`:changeable' tells that [Change] is offered, and `decision/change'
+opens the prompt in the harness; the snapshot itself -- the call's
+input among it -- stays here."
+  (and decision (harness-plist-remove decision :change)))
+
+(defun harness-decisions--change-p (decision)
+  "Non-nil when DECISION can ask again for the answer it keeps.
+That is when its kind defines a change function and the prompt that
+asked the question was saved with it.  A decision made before prompts
+were saved, and one of a kind no module here knows, cannot."
+  (and (functionp (plist-get (gethash (plist-get decision :kind) harness-decisions--kinds) :change))
+       (consp (plist-get decision :change))
+       t))
+
 (defun harness-decisions--read (entry)
   "Return ENTRY, a decision as the store gave it back, or nil when it is none.
-Its kind and state are symbols again."
+Its kind and state are symbols again, and `:changeable' a boolean."
   (let ((id (plist-get entry :id))
         (kind (harness-decisions--sym (plist-get entry :kind)))
         (state (harness-decision-state (plist-get entry :state)))
-        (text (plist-get entry :text)))
+        (text (plist-get entry :text))
+        (changeable (harness-json-true-p (plist-get entry :changeable))))
     (when (and (stringp id) kind state (stringp text))
-      (append (list :kind kind :state state) (harness-plist-remove entry :kind :state)))))
+      (append (list :kind kind :state state :changeable (if changeable t :false))
+              (harness-plist-remove entry :kind :state :changeable)))))
 
 (defun harness-decisions--load ()
   "Read the decisions back from the store."
@@ -134,7 +160,7 @@ Nil when there is no decision ID."
                   harness-decisions--entries))
     (when new
       (harness-decisions--save)
-      (harness-emit 'decision/changed new))
+      (harness-emit 'decision/changed (harness-decisions--public new)))
     new))
 
 (harness-defmethod decision/record (kind session-id text record &rest opts)
@@ -147,31 +173,43 @@ the note in SESSION-ID's transcript that tells of it, when it is
 written already (`decision/attach' names it later); `:state' another
 state to start in and `:result' the sentence that goes with it, for a
 decision kept only now of a note written before decisions were (see
-harness-perms.el); `:at' when it was made.  `decision/changed'
-announces it.  Only the newest `harness-decisions-kept' are kept.  A
-decision is the plist
+harness-perms.el); `:change' the prompt that asked the answer, as its
+kind needs to ask it again (`harness-decisions-define-kind'), which
+makes the decision `:changeable'; `:at' when it was made.
+`decision/changed' announces it.  Only the newest
+`harness-decisions-kept' are kept.  A decision is the plist
 
   (:id ID :kind KIND :text TEXT :record RECORD
    :session SESSION-ID :node NODE-ID :at FLOAT
-   :state done|undone|changed|gone :result TEXT :moved-at FLOAT)
+   :state done|undone|changed|gone :result TEXT :moved-at FLOAT
+   :changeable BOOL :change SNAPSHOT)
 
-where `:result' says how its last undo or redo went, and `:moved-at'
-when."
-  (let ((kind (harness-decisions--sym kind))
-        (state (or (harness-decision-state (plist-get opts :state)) 'done)))
+where `:result' says how its last undo or redo went, `:moved-at' when,
+`:changeable' tells whether it offers [Change], and `:change' is what
+that asks again with.  Both are left out of a decision that offers no
+change.  `:change' is the harness's alone: what is announced and
+returned to clients has `:changeable' but not the prompt."
+  (let* ((kind (harness-decisions--sym kind))
+         (state (or (harness-decision-state (plist-get opts :state)) 'done))
+         (change (plist-get opts :change))
+         (changeable (and change
+                          (functionp (plist-get (gethash kind harness-decisions--kinds) :change)))))
     (unless kind
       (signal 'harness-error (list "A decision needs a kind")))
     (unless (and (stringp text) (not (string-blank-p text)))
       (signal 'harness-error (list "A decision needs a text that says what it does")))
-    (let ((decision (list :id (harness-decisions--new-id) :kind kind :text text :record record
-                          :session session-id :node (plist-get opts :node)
-                          :at (or (plist-get opts :at) (float-time))
-                          :state state :result (plist-get opts :result) :moved-at nil)))
+    (let ((decision (append
+                     (list :id (harness-decisions--new-id) :kind kind :text text :record record
+                           :session session-id :node (plist-get opts :node)
+                           :at (or (plist-get opts :at) (float-time))
+                           :state state :result (plist-get opts :result) :moved-at nil
+                           :changeable (if changeable t :false))
+                     (and changeable (list :change change)))))
       (push decision harness-decisions--entries)
       (when (> (length harness-decisions--entries) harness-decisions-kept)
         (setq harness-decisions--entries (seq-take harness-decisions--entries harness-decisions-kept)))
       (harness-decisions--save)
-      (harness-emit 'decision/changed decision)
+      (harness-emit 'decision/changed (harness-decisions--public decision))
       decision)))
 
 (harness-defmethod decision/attach (id session-id node-id)
@@ -183,8 +221,10 @@ the decision; signal a `harness-error' when there is no decision ID."
       (signal 'harness-error (list (format "No decision %s" id)))))
 
 (harness-defmethod decision/get (id)
-  "Return the lasting decision ID, a plist (see `decision/record'), or nil."
-  (harness-decisions--find id))
+  "Return the lasting decision ID, a plist (see `decision/record'), or nil.
+Its `:changeable' says whether it offers [Change]; the prompt it kept
+stays in the harness, and `decision/change' opens it."
+  (harness-decisions--public (harness-decisions--find id)))
 
 (harness-defmethod decision/list (&rest opts)
   "Return the lasting decisions kept, newest first.
@@ -201,7 +241,8 @@ that session; `:limit' at most that many."
                       (or (null state) (eq state (plist-get d :state)))
                       (or (null session) (equal session (plist-get d :session)))))
                harness-decisions--entries)))
-    (if (and (natnump limit) (> (length out) limit)) (seq-take out limit) out)))
+    (mapcar #'harness-decisions--public
+            (if (and (natnump limit) (> (length out) limit)) (seq-take out limit) out))))
 
 ;;;; Undo and redo
 
@@ -289,16 +330,61 @@ ends `changed' or `gone' and the setting stays as it is.  Return
 `harness-decisions--move' says."
   (harness-decisions--move id 'redo))
 
+(harness-defmethod decision/change (id)
+  "Ask again for the answer lasting decision ID keeps; it changes nothing yet.
+Only a decision `done' or `undone' whose kind can ask again, and which
+was kept with the prompt that asked it, offers this.  Its kind opens
+the original prompt again, answerable with the choices it had, and
+returns (:session SESSION-ID :pending PID): the answer then replaces
+what the decision records, or leaves it as it is when nobody answers.
+A decision `changed' or `gone' offers no change, and neither does one
+kept before prompts were saved.  Signal a `harness-error' when the
+decision cannot be asked about now."
+  (let* ((decision (or (harness-decisions--find id)
+                       (signal 'harness-error
+                               (list (format "No decision %s: it was never kept, or was forgotten as too old" id)))))
+         (state (harness-decision-state (plist-get decision :state)))
+         (fn (plist-get (gethash (plist-get decision :kind) harness-decisions--kinds) :change)))
+    (cond
+     ((not (memq state '(done undone)))
+      (signal 'harness-error (list "This decision ended, so it offers no change")))
+     ((not (functionp fn))
+      (signal 'harness-error
+              (list (format "No module here knows how to change decisions of kind %s"
+                            (plist-get decision :kind)))))
+     ((not (harness-decisions--change-p decision))
+      (signal 'harness-error (list "This decision kept no prompt to ask again")))
+     (t
+      (let ((answer (condition-case err
+                        (funcall fn decision)
+                      (error (signal 'harness-error
+                                     (list (format "Could not ask again: %s"
+                                                   (harness-error-short-message err))))))))
+        (unless (and (plist-get answer :session) (plist-get answer :pending))
+          (signal 'harness-error (list "The original prompt could not be opened")))
+        answer)))))
+
+(harness-defmethod decision/revise (id &rest changes)
+  "Merge CHANGES into lasting decision ID and announce it; return the decision.
+This is how a kind replaces what its decision records once a changed
+answer arrived: it keeps the id, its session and its note, and takes
+the new text, record and prompt.  `:id', `:kind', `:session' and `:at'
+cannot be changed.  Signal a `harness-error' when there is no decision
+ID."
+  (let ((changes (harness-plist-remove changes :id :kind :session :at)))
+    (or (harness-decisions--update id changes)
+        (signal 'harness-error (list (format "No decision %s" id))))))
+
 ;;;; The module
 
 (defun harness-decisions--init ()
   "Read the decisions kept back from the store."
   (harness-decisions--load))
 
-(harness-declare-event 'decision/changed "(DECISION) once a lasting decision is kept, named its note, undone or redone: DECISION as it is now (see `decision/record').")
+(harness-declare-event 'decision/changed "(DECISION) once a lasting decision is kept, named its note, undone, redone or changed: DECISION as it is now (see `decision/record').")
 
 (harness-define-module 'decisions
-  :doc "Lasting decisions -- answers that hold beyond their moment -- with their undo and redo, from any session."
+  :doc "Lasting decisions -- answers that hold beyond their moment -- with their undo, redo and change, from any session."
   :requires '(store)
   :init #'harness-decisions--init)
 

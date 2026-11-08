@@ -457,7 +457,7 @@ Return what became of it, in words, or nil when nothing could answer."
       ("permission"
        (when (harness-method-exists-p 'permission/answer)
          (harness-call 'permission/answer id pid
-                       (list :behavior 'deny :scope 'once
+                       (list :behavior 'deny :scope 'once :dismissed t
                              :reason (format (concat "nobody answered this permission prompt in %s, so the harness "
                                                      "denied it; your parent session was told. Do not wait for it: "
                                                      "find another way, or finish and say in your report that you "

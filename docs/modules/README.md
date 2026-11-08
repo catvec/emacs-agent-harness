@@ -124,7 +124,7 @@ and supervisor load only when they are named.
 | [container-runtime](container-runtime.md) |  |  | Container runtimes for stacks: Docker over its socket, or rootless Podman, with a selectable backend. |
 | [cost-compare](cost-compare.md) |  | [usage](usage.md), [provider](provider.md) | What the recorded usage would have cost at other models' prices. |
 | [cowboy](cowboy.md) |  | [session](session.md), [agent](agent.md), [compaction](compaction.md) | Ask what goes first when a message meets a session whose prompt cache went cold. |
-| [decisions](decisions.md) |  | [store](store.md) | Lasting decisions -- answers that hold beyond their moment -- with their undo and redo, from any session. |
+| [decisions](decisions.md) |  | [store](store.md) | Lasting decisions -- answers that hold beyond their moment -- with their undo, redo and change, from any session. |
 | [demo](demo.md) | when named | [tools](tools.md), [tasks](tasks.md), [session](session.md), [agent](agent.md) | Start a hand-in's demo on its workspace computer: the VNC screen, the takeover, and the presenter that drives it. |
 | [fallback](fallback.md) |  | [store](store.md), [session](session.md), [provider](provider.md) | Carry on with another provider when one runs out of quota or money. |
 | [gremlin](gremlin.md) |  |  | Opt-in chaos fixtures and the budgeted run that contains them. |
@@ -225,7 +225,7 @@ and supervisor load only when they are named.
 | [ui-config](ui-config.md) | by default | [ui](ui.md) | Settings page: every harness setting, edited globally or for the project. |
 | [ui-cost-compare](ui-cost-compare.md) |  | [ui](ui.md), [ui-usage](ui-usage.md) | Compare what the recorded usage would have cost at other models' prices. |
 | [ui-cowboy](ui-cowboy.md) |  | [ui](ui.md), [ui-pending](ui-pending.md), [ui-carry](ui-carry.md) | The cold-cache question as a panel: what goes first, at what cost. |
-| [ui-decisions](ui-decisions.md) |  | [ui](ui.md) | Lasting decisions in the UI: the cache the notes' [Undo] and [Redo] read, and the commands that move one. |
+| [ui-decisions](ui-decisions.md) |  | [ui](ui.md) | Lasting decisions in the UI: the cache the notes' [Undo], [Redo] and [Change] read, and the commands that move one. |
 | [ui-dirs](ui-dirs.md) |  | [ui-access](ui-access.md) | Obsolete: the directories of a session are a section of its access view (ui-access), which this loads. |
 | [ui-handoff](ui-handoff.md) |  | [ui](ui.md), [ui-chat](ui-chat.md), [ui-carry](ui-carry.md) | The question of a model switch: choose how to carry the conversation over. |
 | [ui-insights](ui-insights.md) |  | [ui](ui.md), [ui-usage](ui-usage.md) | The Insights report: figures and a written summary of your work with the agents, for any provider. |

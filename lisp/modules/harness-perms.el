@@ -455,6 +455,20 @@ See `harness-perms--judge-waiting'.")
 (defvar harness-perms--steered nil
   "Recent call ids whose denial already steered a non-interactive session.")
 
+(defvar harness-perms--change-snapshot nil
+  "The original prompt of the answer being recorded, as [Change] asks it again.
+It is the prompt `permission/answer' is answering, while a lasting answer
+of it is recorded (`harness-perms--note-recorded').")
+
+(defvar harness-perms--revising nil
+  "The decision [Change] is revising, while its new answer is applied.
+See `harness-perms--answer-change'.")
+
+(defvar harness-perms--revised nil
+  "What the new answer being applied by [Change] records, or nil.
+A plist (:record RECORD :text TEXT :new BOOL), set by
+`harness-perms--note-recorded' while `harness-perms--revising'.")
+
 (defconst harness-perms-options '(allow-once allow-session allow-always deny-once deny-always)
   "Answer options offered to the user for a permission request.
 The prompt is about the call, not about where it reaches: the rule
@@ -2649,8 +2663,12 @@ properties to the entry kept until then."
                                        :reason reason
                                        :options options)))
          (pending (harness-perms--with-summary sid pending))
+         (change (list :prompt pending :dir dir :pattern pattern
+                       :explicit (and (plist-get waiting :explicit) t)))
          (pid (harness-call 'session/pending-add sid pending)))
-    (puthash pid (append (list :session-id sid :request request :next next :dir dir :pattern pattern) waiting)
+    (puthash pid (append (list :session-id sid :request request :next next :dir dir :pattern pattern
+                               :change change)
+                         waiting)
              harness-perms--waiting)
     (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid))))
 
@@ -4741,9 +4759,12 @@ where it runs."
                                                    :reason (harness-perms--judge-prompt-reason decision)
                                                    :options (harness-perms--tool-options)))))
              (pending (harness-perms--with-summary sid pending))
+             (change (list :prompt pending :paths paths :cwd cwd :rule-commands commands
+                           :ladder steps :cover (plist-get ladder :default)))
              (pid (harness-call 'session/pending-add sid pending)))
         (puthash pid (list :session-id sid :request request :next next :paths paths :cwd cwd
-                           :rule-commands commands :ladder steps :cover (plist-get ladder :default))
+                           :rule-commands commands :ladder steps :cover (plist-get ladder :default)
+                           :change change)
                  harness-perms--waiting)
         (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid)))))))
 
@@ -4798,16 +4819,19 @@ call on."
       (signal 'harness-error (list (format "no pending permission %s" pending-id))))
     (remhash pending-id harness-perms--waiting)
     (setq waiting (harness-perms--answered-by waiting by))
-    (cond
-     ((plist-get waiting :dir)
-      (let ((answer (harness-perms--parse-answer answer)))
-        (harness-perms--resolve session-id pending-id answer)
-        (harness-perms--answer-dir session-id waiting answer)))
-     ((plist-get waiting :user-only)
-      (harness-perms--answer-user-only session-id pending-id waiting answer))
-     ((plist-get waiting :confirm)
-      (harness-perms--answer-confirm session-id pending-id waiting answer))
-     (t (harness-perms--answer-tool session-id pending-id waiting answer)))))
+    (let ((harness-perms--change-snapshot (plist-get waiting :change)))
+      (cond
+       ((plist-get waiting :changing)
+        (harness-perms--answer-change session-id pending-id waiting answer))
+       ((plist-get waiting :dir)
+        (let ((answer (harness-perms--parse-answer answer)))
+          (harness-perms--resolve session-id pending-id answer)
+          (harness-perms--answer-dir session-id waiting answer)))
+       ((plist-get waiting :user-only)
+        (harness-perms--answer-user-only session-id pending-id waiting answer))
+       ((plist-get waiting :confirm)
+        (harness-perms--answer-confirm session-id pending-id waiting answer))
+       (t (harness-perms--answer-tool session-id pending-id waiting answer))))))
 
 (defun harness-perms--answered-by (waiting by)
   "Return WAITING, a prompt answered by BY, handing its decision on so named.
@@ -4936,7 +4960,11 @@ it can be undone and redone from any session (see \"Lasting answers as
 decisions\" below).  Without the session module there is no transcript,
 and nothing is written; a note that cannot be written is logged, and
 the answer goes on.  Return the note, or nil."
-  (when (harness-method-exists-p 'session/append)
+  (when harness-perms--revising
+    (setq harness-perms--revised
+          (list :record record :text (harness-perms--recorded-text record) :new new)))
+  (when (and (not harness-perms--revising)
+             (harness-method-exists-p 'session/append))
     (condition-case err
         (let* ((text (harness-perms--recorded-text record))
                (decision (and new (harness-perms--record-decision session-id record text)))
@@ -5185,6 +5213,16 @@ does, OUTCOME `done' once redone."
 ;; for one saved, in any, the call's result names the decision in its
 ;; `:meta' `:decided-by' (`harness-perms--rule-decision'), and the chat
 ;; offers the decision's undo there too.
+;;
+;; The prompt that asked a lasting answer is kept with its decision
+;; (`:change', from the waiting entry as it was answered), so the answer
+;; can be given again: [Change] opens that prompt once more, in the
+;; session it was answered in, and the new answer takes back what the
+;; decision recorded and records what was chosen instead -- a rule or a
+;; grant, for the session or always -- while the setting is still as the
+;; decision left it.  A one-time answer records nothing new, so the
+;; decision ends undone; a prompt dismissed changes nothing.  What the
+;; prompt shows is the call as it was, not a new one: nothing runs again.
 
 (declare-function harness-decisions-define-kind "harness-decisions" (kind &rest spec))
 
@@ -5194,7 +5232,8 @@ RECORD is what the answer recorded, TEXT what its note says.  Nil
 without the decisions module, or when keeping it failed (logged)."
   (when (harness-method-exists-p 'decision/record)
     (condition-case err
-        (harness-call 'decision/record 'permission session-id text record)
+        (harness-call 'decision/record 'permission session-id text record
+                      :change harness-perms--change-snapshot)
       (error (harness-log 'warn "perms: could not keep the answer in %s as a decision: %s"
                           session-id (harness-error-message err))
              nil))))
@@ -5225,15 +5264,11 @@ the note says (`:undo' `offered' is `done'), and the note names it."
   (or (not (harness-method-exists-p 'session/exists-p))
       (harness-call 'session/exists-p session-id)))
 
-(defun harness-perms--redo-rule (session-id rule scope)
-  "Record RULE for SESSION-ID with SCOPE again, unless something took its place.
-That is as the answer did, while the rules SCOPE keeps have none for
-the same tool and path: one that is there -- recorded again since, by
-another answer or in Settings, or saying something else now -- stays
-as it is.  A session's rule needs its session, and a saved one the
-saved rules not set by the policy.  Return (OUTCOME . MESSAGE):
-OUTCOME is `done', `changed' or `gone', and MESSAGE says why when it is
-not `done'."
+(defun harness-perms--redo-rule-check (session-id rule scope)
+  "Return (OUTCOME . MESSAGE) saying whether RULE can be recorded again.
+OUTCOME `done' means nothing took its place and it may be recorded, by
+`harness-perms--redo-rule' or a changed answer; anything else says why
+it may not (`harness-perms--redo-rule' tells of the cases)."
   (let* ((always (eq scope 'always))
          (key (harness-perms--rule-key rule))
          (subject #'harness-perms--rule-subject-key)
@@ -5253,17 +5288,28 @@ not `done'."
                              (if always "the saved rule" "this session's rule")
                              (harness-perms--rule-subject rule)
                              (if always " (in Settings, say)" ""))))
-     (t (harness-perms-add-rule session-id rule scope)
-        (list 'done)))))
+     (t (list 'done)))))
 
-(defun harness-perms--redo-dir (session-id dir scope)
-  "Grant DIR to SESSION-ID with SCOPE again, as the answer did, unless covered.
-That is while no entry of the grants SCOPE keeps -- the session's, or
-with `always' `harness-allowed-directories' -- covers DIR: one that does,
-granted again since or a parent added in Settings, stays as it is.  A
-session's grant needs its session, and a saved one the allowed
-directories not set by the policy.  Return (OUTCOME . MESSAGE) as
-`harness-perms--redo-rule' does."
+(defun harness-perms--redo-rule (session-id rule scope)
+  "Record RULE for SESSION-ID with SCOPE again, unless something took its place.
+That is as the answer did, while the rules SCOPE keeps have none for
+the same tool and path: one that is there -- recorded again since, by
+another answer or in Settings, or saying something else now -- stays
+as it is.  A session's rule needs its session, and a saved one the
+saved rules not set by the policy.  Return (OUTCOME . MESSAGE):
+OUTCOME is `done', `changed' or `gone', and MESSAGE says why when it is
+not `done'; see `harness-perms--redo-rule-check'."
+  (let ((result (harness-perms--redo-rule-check session-id rule scope)))
+    (if (eq (car result) 'done)
+        (progn (harness-perms-add-rule session-id rule scope)
+               (list 'done))
+      result)))
+
+(defun harness-perms--redo-dir-check (session-id dir scope)
+  "Return (OUTCOME . MESSAGE) saying whether DIR can be granted again.
+OUTCOME `done' means nothing covers DIR and it may be granted, by
+`harness-perms--redo-dir' or a changed answer; anything else says why
+it may not (`harness-perms--redo-dir' tells of the cases)."
   (let* ((session (harness-perms--session session-id))
          (always (eq scope 'always))
          (entries (if always (default-value 'harness-allowed-directories) (harness-perms--granted session)))
@@ -5281,8 +5327,21 @@ directories not set by the policy.  Return (OUTCOME . MESSAGE) as
       (cons 'changed (format "Not redone: %s covers %s now, so %s stay as they are"
                              (harness-abbreviate-file-name cover) (harness-abbreviate-file-name dir)
                              (if always "the allowed directories" "this session's directories"))))
-     (t (harness-call 'permission/allow-dir session-id dir (and always 'always))
-        (list 'done)))))
+     (t (list 'done)))))
+
+(defun harness-perms--redo-dir (session-id dir scope)
+  "Grant DIR to SESSION-ID with SCOPE again, as the answer did, unless covered.
+That is while no entry of the grants SCOPE keeps -- the session's, or
+with `always' `harness-allowed-directories' -- covers DIR: one that does,
+granted again since or a parent added in Settings, stays as it is.  A
+session's grant needs its session, and a saved one the allowed
+directories not set by the policy.  Return (OUTCOME . MESSAGE) as
+`harness-perms--redo-rule' does."
+  (let ((result (harness-perms--redo-dir-check session-id dir scope)))
+    (if (eq (car result) 'done)
+        (progn (harness-call 'permission/allow-dir session-id dir (and (eq scope 'always) 'always))
+               (list 'done))
+      result)))
 
 (defun harness-perms--decision-undo (decision)
   "Undo the lasting answer DECISION keeps: the `:undo' of the `permission' kind.
@@ -5314,10 +5373,255 @@ and offers its undo again once redone."
                               (cdr result))
     result))
 
+(defun harness-perms--downcase-first (text)
+  "Return TEXT with its first letter in lower case."
+  (if (string-empty-p text) text (concat (downcase (substring text 0 1)) (substring text 1))))
+
+(defun harness-perms--restore-record (session-id record)
+  "Record RECORD for SESSION-ID again, as `harness-perms--redo-rule' does.
+RECORD is a lasting answer's record, as `harness-node-permission'
+describes.  Return (OUTCOME . MESSAGE)."
+  (let ((scope (harness-perms--record-scope record))
+        (dir (plist-get record :dir)))
+    (if (stringp dir)
+        (harness-perms--redo-dir session-id dir scope)
+      (harness-perms--redo-rule session-id (harness-perms--rule-from-record (plist-get record :rule))
+                                scope))))
+
+(defun harness-perms--revise-note (session-id node-id record text)
+  "Make note NODE-ID of SESSION-ID say what lasting answer RECORD does now.
+TEXT is the note's new text.  The note keeps its decision, and offers
+its undo again (`harness-perms--note-recorded')."
+  (when (and (stringp session-id) (stringp node-id)
+             (harness-method-exists-p 'session/node)
+             (harness-method-exists-p 'session/update-node)
+             (harness-call 'session/exists-p session-id))
+    (condition-case err
+        (when-let* ((node (harness-call 'session/node session-id node-id)))
+          (harness-call 'session/update-node session-id node-id
+                        :content text
+                        :meta (plist-put (copy-sequence (plist-get node :meta))
+                                         :permission
+                                         (append (harness-plist-remove record :undo :result)
+                                                 (list :undo 'offered)))))
+      (error (harness-log 'warn "perms: could not revise note %s of %s: %s"
+                          node-id session-id (harness-error-short-message err))))))
+
+(defun harness-perms--apply-change-record (session-id waiting answer)
+  "Record what ANSWER to WAITING changes, as the original prompt would.
+WAITING is the prompt [Change] opened, and ANSWER the choice made
+there.  A lasting answer records its rule or grant, for the session or
+always; a one-time one records nothing.  The caller takes back what the
+decision recorded before."
+  (let* ((scope (plist-get answer :scope))
+         (behavior (plist-get answer :behavior))
+         (snapshot (plist-get waiting :change))
+         (payload (plist-get (plist-get snapshot :prompt) :payload))
+         (dir (plist-get snapshot :dir)))
+    (if (stringp dir)
+        (let* ((session (harness-perms--session session-id))
+               (pattern (or (harness-perms--answered-pattern session waiting answer)
+                            (harness-perms--default-pattern dir)))
+               (grant (harness-perms--grant-form pattern)))
+          (if (eq behavior 'allow)
+              (harness-perms--allow-dir-noted session-id grant scope)
+            (harness-perms--add-rule-noted session-id
+                                            (list :path pattern :behavior 'deny)
+                                            scope)))
+      (let* ((tool (plist-get payload :tool))
+             (ladder (plist-get waiting :ladder))
+             (cover (if ladder
+                        (plist-get (harness-perms--chosen-cover ladder (plist-get waiting :cover)
+                                                                (plist-get answer :cover))
+                                   :rule)
+                      (and (plist-get waiting :rule-commands)
+                           (list :commands (plist-get waiting :rule-commands))))))
+        (when tool
+          (harness-perms--add-rule-noted
+           session-id
+           (append (list :tool tool) cover (list :behavior behavior))
+           scope))))))
+
+(defun harness-perms--change-blocked-text (text)
+  "Return TEXT, why a changed answer does not apply, worded for a change.
+It is the text `harness-perms--redo-rule-check' gives, about a redo,
+said of a change."
+  (let ((text (or text "Nothing to change")))
+    (cond ((string-prefix-p "Not undone: " text)
+           (concat "Not changed: " (substring text (length "Not undone: "))))
+          ((string-prefix-p "Not redone: " text)
+           (concat "Not changed: " (substring text (length "Not redone: "))))
+          ((string-prefix-p "Nothing to undo: " text)
+           (concat "Nothing to change: " (substring text (length "Nothing to undo: "))))
+          ((string-prefix-p "Nothing to redo: " text)
+           (concat "Nothing to change: " (substring text (length "Nothing to redo: "))))
+          (t text))))
+
+(defun harness-perms--record-change-check (session-id record)
+  "Return (OUTCOME . MESSAGE) saying whether RECORD still stands as undone.
+RECORD is a lasting answer's record, as `harness-node-permission'
+describes.  Its undo left the rule or the grant gone; this checks that
+nothing took their place since, as redoing it would, without recording
+anything.  OUTCOME `done' means a changed answer may go on."
+  (let* ((scope (harness-perms--record-scope record))
+         (dir (plist-get record :dir))
+         (result (if (stringp dir)
+                     (harness-perms--redo-dir-check session-id dir scope)
+                   (harness-perms--redo-rule-check
+                    session-id (harness-perms--rule-from-record (plist-get record :rule)) scope))))
+    (cons (car result) (harness-perms--change-blocked-text (cdr result)))))
+
+(defun harness-perms--change-answer (decision waiting answer)
+  "Apply ANSWER to the prompt [Change] opened for DECISION.
+WAITING is the prompt.  The decision must still stand where it did
+when the prompt opened: what it recorded is taken back first, else it
+must still be as its undo left it, and only then is what ANSWER
+chooses recorded; the decision takes the new text and record, with its
+note.  A one-time answer leaves no lasting answer, so the decision is
+undone and offers its redo.  Return (:outcome OUTCOME :message TEXT
+:decision DECISION)."
+  (catch 'harness-perms-change-ended
+    (let* ((id (plist-get decision :id))
+           (session-id (plist-get decision :session))
+           (node (plist-get decision :node))
+           (record (plist-get decision :record))
+           (state (plist-get decision :state))
+           (was-done (eq state 'done))
+           (lasting (memq (plist-get answer :scope) '(session always)))
+           (old-text (plist-get decision :text)))
+      ;; Take back what it recorded, so the new answer can take its place.
+      (when was-done
+        (let* ((result (harness-perms--undo-record session-id record))
+               (message (harness-perms--change-blocked-text (cdr result))))
+          (unless (eq (car result) 'undone)
+            (harness-perms--mark-note session-id node (car result) message)
+            (let ((new (harness-call 'decision/revise id
+                                     :state (car result) :result message
+                                     :moved-at (float-time))))
+              (throw 'harness-perms-change-ended
+                     (list :outcome (car result) :message message :decision new))))))
+      ;; Undone, it must still be as the undo left it: a rule or grant
+      ;; another answer took up since ends the decision, as a redo would.
+      (when (eq state 'undone)
+        (let ((result (harness-perms--record-change-check session-id record)))
+          (unless (eq (car result) 'done)
+            (harness-perms--mark-note session-id node (car result) (cdr result))
+            (let ((new (harness-call 'decision/revise id
+                                     :state (car result) :result (cdr result)
+                                     :moved-at (float-time))))
+              (throw 'harness-perms-change-ended
+                     (list :outcome (car result) :message (cdr result) :decision new))))))
+      (let* ((harness-perms--revising id)
+             (harness-perms--revised nil)
+             (failure nil))
+        (when lasting
+          (condition-case err
+              (harness-perms--apply-change-record session-id waiting answer)
+            (error (setq failure (harness-error-short-message err)))))
+        (cond
+         (failure
+          (when was-done (ignore-errors (harness-perms--restore-record session-id record)))
+          (let ((message (format "Could not change: %s" failure)))
+            (harness-perms--mark-note session-id node (if was-done 'offered 'undone) message)
+            (list :outcome (if was-done 'done 'undone) :message message :decision decision)))
+         ((and lasting (plist-get harness-perms--revised :new))
+          (let* ((new-record (plist-get harness-perms--revised :record))
+                 (new-text (plist-get harness-perms--revised :text))
+                 (message (format "Changed: %s"
+                                  (harness-perms--downcase-first new-text))))
+            (harness-perms--revise-note session-id node new-record new-text)
+            (let ((new (harness-call 'decision/revise id
+                                     :text new-text :record new-record
+                                     :state 'done :result message :moved-at (float-time))))
+              (list :outcome 'done :message message :decision new))))
+         (lasting
+          (when was-done (ignore-errors (harness-perms--restore-record session-id record)))
+          (let ((message "Not changed: what it would record is there already"))
+            (harness-perms--mark-note session-id node (if was-done 'offered 'undone) message)
+            (list :outcome state :message message :decision decision)))
+         (t
+          ;; A one-time answer records nothing new: what the decision
+          ;; recorded goes, as on an undo, and nothing takes its place.
+          (let ((message (if was-done
+                             (format "Undone: no longer %s"
+                                     (harness-perms--downcase-first old-text))
+                           "Unchanged: no lasting answer")))
+            (harness-perms--mark-note session-id node (if was-done 'undone state) message)
+            (let ((new (harness-call 'decision/revise id
+                                     :state (if was-done 'undone state)
+                                     :result message :moved-at (float-time))))
+              (list :outcome (if was-done 'undone state) :message message :decision new)))))))))
+
+(defun harness-perms--answer-change (session-id pending-id waiting answer)
+  "Answer the prompt [Change] opened, PENDING-ID of SESSION-ID, with ANSWER.
+WAITING is it.  The answer replaces what its decision records, or
+leaves it as it is when dismissed.  Return (:outcome OUTCOME :message
+TEXT :decision DECISION)."
+  (let* ((id (plist-get waiting :changing))
+         (parsed (harness-perms--parse-answer answer))
+         (dismissed (and (listp answer) (harness-json-true-p (plist-get answer :dismissed))))
+         (decision (and (harness-method-exists-p 'decision/get)
+                        (harness-call 'decision/get id))))
+    (harness-perms--resolve session-id pending-id parsed)
+    (cond
+     ((null decision)
+      (list :outcome 'gone :message "Nothing to change: the answer is no longer kept"))
+     ((not (memq (plist-get decision :state) '(done undone)))
+      (list :outcome (plist-get decision :state)
+            :message "Nothing to change: the answer ended" :decision decision))
+     (dismissed
+      (list :outcome (plist-get decision :state)
+            :message "Unchanged: the answer is as it was" :decision decision))
+     (t (harness-perms--change-answer decision waiting parsed)))))
+
+(defun harness-perms--decision-change (decision)
+  "Ask again for the lasting answer DECISION keeps.
+Return (:session SESSION-ID :pending PID), as
+`harness-decisions-define-kind' says.  The prompt that asked the answer
+is shown again in the session it was made in, with the choices it had;
+the answer changes the rule or grant, and a dismissed prompt changes
+nothing.  A prompt already waiting for this decision is reused."
+  (let* ((id (plist-get decision :id))
+         (sid (plist-get decision :session))
+         (snapshot (plist-get decision :change))
+         (prompt (plist-get snapshot :prompt))
+         (payload (and (consp prompt) (plist-get prompt :payload))))
+    (unless (and (stringp sid) (consp payload))
+      (signal 'harness-error (list "This answer kept no prompt to ask again")))
+    (unless (and (harness-method-exists-p 'session/pending-add)
+                 (harness-method-exists-p 'session/exists-p)
+                 (harness-call 'session/exists-p sid))
+      (signal 'harness-error (list "The session the answer was made in is gone")))
+    (or (let (found)
+          (maphash (lambda (pid waiting)
+                     (when (and (equal id (plist-get waiting :changing))
+                                (equal sid (plist-get waiting :session-id)))
+                       (setq found (list :session sid :pending pid))))
+                   harness-perms--waiting)
+          found)
+        (let* ((payload (harness-plist-remove payload :call-id :summary :summarizing))
+               (prompt (list :kind 'permission :payload payload))
+               (pid (harness-call 'session/pending-add sid prompt)))
+          (puthash pid
+                   (list :session-id sid :changing id :user-only t
+                         :paths (plist-get snapshot :paths)
+                         :cwd (plist-get snapshot :cwd)
+                         :rule-commands (plist-get snapshot :rule-commands)
+                         :ladder (plist-get snapshot :ladder)
+                         :cover (plist-get snapshot :cover)
+                         :dir (plist-get snapshot :dir)
+                         :pattern (plist-get snapshot :pattern)
+                         :explicit (plist-get snapshot :explicit)
+                         :change snapshot)
+                   harness-perms--waiting)
+          (harness-emit 'permission/requested sid (plist-put (copy-sequence prompt) :id pid))
+          (list :session sid :pending pid)))))
+
 (with-eval-after-load 'harness-decisions
   (harness-decisions-define-kind 'permission
                                  :undo #'harness-perms--decision-undo
-                                 :redo #'harness-perms--decision-redo))
+                                 :redo #'harness-perms--decision-redo
+                                 :change #'harness-perms--decision-change))
 
 (defun harness-perms--rule-decision-id (rule session-id)
   "Return the id of the lasting decision in effect that recorded RULE, or nil.

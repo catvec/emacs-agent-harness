@@ -284,9 +284,10 @@ needs from them are looked up with `harness-method-exists-p`.
 - `agent/running` ([agent](agent.md)), when it is loaded
 - `config/get` ([config](config.md))
 - `decision/attach` ([decisions](decisions.md))
-- `decision/get` ([decisions](decisions.md))
+- `decision/get` ([decisions](decisions.md)), when it is loaded
 - `decision/list` ([decisions](decisions.md)), when it is loaded
 - `decision/record` ([decisions](decisions.md)), when it is loaded
+- `decision/revise` ([decisions](decisions.md))
 - `provider/complete` ([provider](provider.md)), when it is loaded
 - `provider/tier-model` ([provider](provider.md)), when it is loaded
 - `sandbox/confined-p` ([sandbox](sandbox.md)), when it is loaded

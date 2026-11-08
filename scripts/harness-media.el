@@ -2230,8 +2230,9 @@ The left session's agent asked to run a command and was answered
 same command later, and the rule denied it: its call says which
 answer decided it.  [Undo] was clicked on the right, so both offer
 [Redo] now, the answer struck through, and the echo area says what the
-undo did.  With HARNESS_MEDIA_STEPS, the pictures before the click and
-after a [Redo] on the left are taken too.  The answer is undone and the
+undo did.  With HARNESS_MEDIA_STEPS, the pictures before the click,
+after a [Redo] on the left, and of the original prompt a [Change] on
+the left asks again are taken too.  The answer is undone and the
 sessions are deleted after, so no other picture shows them."
   (let ((answered (harness-media--new-session :name "Prepare the 2.4 release" :model "claude:claude-sonnet-5"
                                               :permission-mode 'ask))
@@ -2250,7 +2251,12 @@ sessions are deleted after, so no other picture shows them."
       (harness-media--capture "chat-decisions")
       (harness-media--push lb "[Redo]")
       (harness-media--both (list lb rb) "[Undo]" "both chats to offer [Undo] again")
-      (harness-media--step "chat-decisions-redone"))
+      (harness-media--step "chat-decisions-redone")
+      ;; [Change] asks the prompt that made the answer again.
+      (harness-media--push lb "[Change]")
+      (harness-media--both (list lb) "[Always allow]" "the original prompt again")
+      (harness-media--step "chat-decisions-change")
+      (harness-call 'session/pending-dismiss answered "the picture is taken"))
     ;; The rule goes with the pictures: the ones after run commands.
     (dolist (decision (harness-call 'decision/list :kind 'permission :state 'done))
       (harness-call 'decision/undo (plist-get decision :id)))
@@ -2274,8 +2280,9 @@ The left session's cache went cold and the question was answered
 \"always\" start afresh: its note offers [Undo].  The right session's
 cache went cold too, and nobody was asked: its note says the default
 went first and which answer decided that, with the same [Undo].  With
-HARNESS_MEDIA_STEPS, the pictures after an [Undo] on the right and a
-[Redo] on the left are taken too.  The answer is undone after, asking
+HARNESS_MEDIA_STEPS, the pictures after an [Undo] on the right, a
+[Redo] on the left, and of the question a [Change] on the left asks
+again are taken too.  The answer is undone after, asking
 again with the brief summary the default, and the sessions are deleted."
   (let ((answered (harness-media--cold-session
                    "Paginate the orders list" "GET /orders sends every order at once. How should we paginate it?"
@@ -2296,7 +2303,12 @@ again with the brief summary the default, and the sessions are deleted."
       (harness-media--step "chat-decisions-cold-undone")
       (harness-media--push lb "[Redo]")
       (harness-media--both (list lb rb) "[Undo]" "both chats to offer [Undo] again")
-      (harness-media--step "chat-decisions-cold-redone"))
+      (harness-media--step "chat-decisions-cold-redone")
+      ;; [Change] asks the cold-cache question again.
+      (harness-media--push lb "[Change]")
+      (harness-media--both (list lb) "Choose what goes first" "the cold-cache question again")
+      (harness-media--step "chat-decisions-cold-change")
+      (harness-call 'question/cancel answered (harness-call 'cowboy/asking answered)))
     (dolist (decision (harness-call 'decision/list :kind 'cowboy :state 'done))
       (harness-call 'decision/undo (plist-get decision :id)))
     (dolist (id (list answered unasked)) (harness-call 'session/delete id))))

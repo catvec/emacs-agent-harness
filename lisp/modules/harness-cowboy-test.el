@@ -839,6 +839,10 @@ time."
   (let ((p (harness-call 'agent/prompt sid "one")))
     (harness-cowboy-test--answer sid text)
     (harness-test-await p 10))
+  (harness-cowboy-test--always-note sid))
+
+(defun harness-cowboy-test--always-note (sid)
+  "Return SID's newest hint saying a choice now holds without asking, or nil."
   (car (last (harness-cowboy-test--hint-nodes sid "as you chose, from now on without asking"))))
 
 (defun harness-cowboy-test--move (way id)
@@ -881,6 +885,116 @@ the old default, redo stops asking again, and undo works once more."
         (should (harness-cowboy-test--question sid))
         (harness-cowboy-test--answer sid "carry on")
         (harness-test-await p 10)))))
+
+(ert-deftest harness-cowboy-change-asks-the-question-again ()
+  "An \"always\" answer's decision offers [Change]: the cold-cache question
+opens again, with its choices and what it says of the cache, and the
+answer changes the default, the decision and its hint.  The question is
+kept with the decision, so it is still asked after a restart."
+  (harness-cowboy-test-with-decisions
+    (let* ((sid (harness-cowboy-test-session))
+           (p (harness-call 'agent/prompt sid "one"))
+           (first (harness-cowboy-test--question sid)))
+      (harness-cowboy-test--answer sid "always start afresh")
+      (harness-test-await p 10)
+      (let* ((hint (harness-cowboy-test--always-note sid))
+             (id (harness-node-decision hint))
+             (decision (harness-call 'decision/get id)))
+        (should id)
+        (should (harness-json-true-p (plist-get decision :changeable)))
+        ;; Kept across a restart, the question asks again all the same.
+        (setq harness-decisions--entries nil)
+        (harness-decisions--load)
+        (should (harness-json-true-p (plist-get (harness-call 'decision/get id) :changeable)))
+        (let ((answer (harness-call 'decision/change id)))
+          (should (equal sid (plist-get answer :session)))
+          (should (stringp (plist-get answer :pending))))
+        (let* ((again (harness-cowboy-test--question sid))
+               (payload (plist-get again :payload))
+               (original (plist-get first :payload)))
+          ;; The question the original panel showed, choice for choice.
+          (dolist (key '(:question :options :allow-free-text :cowboy))
+            (should (equal (plist-get payload key) (plist-get original key))))
+          (should-not (plist-get payload :waiting-message))
+          ;; Asked for again while it waits: the one question.
+          (should (= 1 (length (harness-call 'question/pending sid))))
+          (should (equal (plist-get again :id)
+                         (plist-get (harness-call 'decision/change id) :pending)))
+          (harness-call 'question/answer sid (plist-get again :id)
+                        (list :answer "always write a transcript"))
+          (should (eq 'transcript harness-cowboy-default))
+          (should-not harness-cowboy-ask)
+          (let ((changed (harness-call 'decision/get id)))
+            (should (eq 'done (plist-get changed :state)))
+            (should (equal (concat "Always writing the conversation to a transcript file first"
+                                   " when the prompt cache is cold, without asking")
+                           (plist-get changed :text)))
+            (should (equal '(:choice "transcript" :before (:default "brief" :ask t)
+                                      :after (:default "transcript" :ask :false))
+                           (plist-get changed :record)))
+            (should (equal (concat "Changed: always writing the conversation to a transcript file first"
+                                   " when the prompt cache is cold, without asking")
+                           (plist-get changed :result))))
+          ;; The hint says the new choice, and still names the decision.
+          (let ((fresh (harness-call 'session/node sid (plist-get hint :id))))
+            (should (equal id (harness-node-decision fresh)))
+            (should (string-match-p "writing the conversation to a transcript file first"
+                                    (plist-get fresh :content)))
+            (should (string-match-p "as you chose, from now on without asking"
+                                    (plist-get fresh :content)))))))))
+
+(ert-deftest harness-cowboy-change-keeps-the-decision-when-dismissed ()
+  "A changed cold-cache question dismissed changes nothing: the default and
+the decision stay as they were, and the question can be asked again."
+  (harness-cowboy-test-with-decisions
+    (let* ((sid (harness-cowboy-test-session))
+           (hint (harness-cowboy-test--always sid "always start afresh"))
+           (id (harness-node-decision hint))
+           (before (harness-call 'decision/get id)))
+      (harness-call 'decision/change id)
+      (let ((question (harness-cowboy-test--question sid)))
+        (harness-call 'question/cancel sid (plist-get question :id)))
+      (should (equal before (harness-call 'decision/get id)))
+      (should (eq 'fresh harness-cowboy-default))
+      (should-not harness-cowboy-ask)
+      (harness-call 'decision/change id)
+      (should (harness-cowboy-test--question sid))
+      (harness-call 'question/cancel sid (plist-get (harness-cowboy-test--question sid) :id)))))
+
+(ert-deftest harness-cowboy-change-leaves-settings-changed-since ()
+  "A changed answer does not overwrite settings somebody changed since the
+decision's last move: it ends instead, done or undone."
+  (harness-cowboy-test-with-decisions
+    (let* ((sid (harness-cowboy-test-session))
+           (hint (harness-cowboy-test--always sid "always start afresh"))
+           (id (harness-node-decision hint)))
+      ;; In effect, and the default changed by hand since.
+      (setq harness-cowboy-default 'carry-on)
+      (harness-call 'decision/change id)
+      (harness-call 'question/answer sid
+                    (plist-get (harness-cowboy-test--question sid) :id)
+                    (list :answer "always write a transcript"))
+      (should (eq 'carry-on harness-cowboy-default))
+      (should-not harness-cowboy-ask)
+      (let ((decision (harness-call 'decision/get id)))
+        (should (eq 'changed (plist-get decision :state)))
+        (should (equal (concat "Not changed: the cold-cache settings changed since"
+                               " (in Settings, say), so they stay as they are")
+                       (plist-get decision :result))))
+      ;; Undone, and changed by hand since: nothing is applied either.
+      (setq harness-cowboy-default 'brief harness-cowboy-ask t)
+      (let* ((sid (harness-cowboy-test-session))
+             (hint (harness-cowboy-test--always sid "always start afresh"))
+             (id (harness-node-decision hint)))
+        (harness-call 'decision/undo id)
+        (setq harness-cowboy-default 'carry-on)
+        (harness-call 'decision/change id)
+        (harness-call 'question/answer sid
+                      (plist-get (harness-cowboy-test--question sid) :id)
+                      (list :answer "always start afresh"))
+        (should (eq 'carry-on harness-cowboy-default))
+        (should (eq t harness-cowboy-ask))
+        (should (eq 'changed (plist-get (harness-call 'decision/get id) :state)))))))
 
 (ert-deftest harness-cowboy-default-method-says-what-goes-first-unasked ()
   "`cowboy/default' is the compaction option the user saved: the choice, whether

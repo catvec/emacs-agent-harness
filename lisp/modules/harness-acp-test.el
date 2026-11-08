@@ -1212,7 +1212,7 @@ labelled image 1; an image without one, from any other client, has none."
       (harness-test-wait (lambda () (= 2 (cl-count "session/request_permission" harness-acp-test-messages :key #'car :test #'equal))))
       (funcall (nth 2 (car harness-acp-test-messages)) (list :outcome (list :outcome "cancelled")))
       (harness-test-wait (lambda () (= 2 (length recorded))))
-      (should (equal (list sid "p2" '(:behavior deny :scope once)) (car recorded))))))
+      (should (equal (list sid "p2" '(:behavior deny :scope once :dismissed t)) (car recorded))))))
 
 (ert-deftest harness-acp-local-permission-request-carries-its-summary ()
   "A request says in `_harness' that a summary of its call is on its way, or

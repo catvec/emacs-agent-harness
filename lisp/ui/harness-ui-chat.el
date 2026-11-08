@@ -150,9 +150,12 @@
 (declare-function harness-ui-decision-help "harness-ui-decisions" (id way))
 (declare-function harness-ui-decision-label "harness-ui-decisions" (id way))
 (declare-function harness-ui-decision-strikes-p "harness-ui-decisions" (id))
+(declare-function harness-ui-decision-changeable-p "harness-ui-decisions" (id))
+(declare-function harness-ui-decision-change-help "harness-ui-decisions" (id))
 (declare-function harness-ui-decisions-store "harness-ui-decisions" (decision))
 (declare-function harness-decision-undo "harness-ui-decisions" (id))
 (declare-function harness-decision-redo "harness-ui-decisions" (id))
+(declare-function harness-decision-change "harness-ui-decisions" (id))
 (declare-function harness-access "harness-ui-access" (&optional session-id section))
 (defvar harness-state-directory)
 (defvar harness-ui-decision-functions)
@@ -3061,12 +3064,13 @@ says nothing, and its decision offers nothing until the UI hears of it."
       (if (eq undo 'offered) 'done (harness-decision-state undo)))))
 
 (defun harness-chat--decision-tail (id decision state record indent face)
-  "Return what ends a line naming decision ID: its button, or how it ended.
+  "Return what ends a line naming decision ID: its buttons, or how it ended.
 STATE is where the decision stands (`harness-chat--decision-state'):
-`done' ends the line in [Undo], `undone' in [Redo].  `changed' and
-`gone' put what the decision's last move said -- DECISION's `:result',
-else RECORD's, the permission note's own -- on a line of its own,
-INDENT first, in FACE.  Any other STATE adds nothing."
+`done' ends the line in [Undo], `undone' in [Redo], and a decision whose
+prompt was kept in [Change] beside it.  `changed' and `gone' put what
+the decision's last move said -- DECISION's `:result', else RECORD's,
+the permission note's own -- on a line of its own, INDENT first, in
+FACE.  Any other STATE adds nothing."
   (pcase state
     ((or 'done 'undone)
      (concat "  " (harness-chat--decision-button id state (harness-chat--decision-help id state record))))
@@ -3107,18 +3111,68 @@ something that happened, which turning the switch off takes back
 nothing of (`harness-ui-decision-strikes-p')."
   (or (not (fboundp 'harness-ui-decision-strikes-p)) (harness-ui-decision-strikes-p id)))
 
+(defun harness-chat--decision-changeable-p (id)
+  "Non-nil when decision ID offers [Change]: its prompt was kept, and it stands.
+See `harness-ui-decision-changeable-p'; without the UI's decisions
+module the cache is read here, from the decision as it was announced."
+  (cond ((fboundp 'harness-ui-decision-changeable-p)
+         (harness-ui-decision-changeable-p id))
+        (t
+         (let ((decision (harness-chat--decision id)))
+           (and decision
+                (memq (harness-decision-state (plist-get decision :state)) '(done undone))
+                (harness-json-true-p (plist-get decision :changeable))
+                t)))))
+
+(defun harness-chat--decision-change-help (id)
+  "Return what the [Change] of decision ID says it does.
+A decision whose kind the UI knows says what its prompt was about
+\(`harness-ui-decision-change-help')."
+  (if (fboundp 'harness-ui-decision-change-help)
+      (harness-ui-decision-change-help id)
+    "The original prompt, with its choices"))
+
 (defun harness-chat--decision-button (id state help)
-  "Return the button of decision ID in STATE, or \"\".
+  "Return the buttons of decision ID in STATE, or \"\".
 It is [Undo] while STATE is `done' and [Redo] while it is `undone' --
 [Turn off] and [Turn on] for a decision that is a switch
-\(`harness-chat--decision-label') -- HELP its tooltip; a click moves
-the decision that way (`harness-chat--move-decision')."
-  (pcase state
-    ('done (harness-chat--button (harness-chat--decision-label id 'undo)
-                                 (lambda () (harness-chat--move-decision id 'undo)) :help help))
-    ('undone (harness-chat--button (harness-chat--decision-label id 'redo)
-                                   (lambda () (harness-chat--move-decision id 'redo)) :help help))
-    (_ "")))
+\(`harness-chat--decision-label') -- HELP the tooltip of that button; a
+click moves the decision that way (`harness-chat--move-decision').  A
+decision whose prompt was kept offers [Change] beside it, which asks
+again for the original answer (`harness-chat--change-decision')."
+  (let ((move (pcase state
+                ('done (harness-chat--button (harness-chat--decision-label id 'undo)
+                                             (lambda () (harness-chat--move-decision id 'undo))
+                                             :help help))
+                ('undone (harness-chat--button (harness-chat--decision-label id 'redo)
+                                               (lambda () (harness-chat--move-decision id 'redo))
+                                               :help help))))
+        (change (and (memq state '(done undone))
+                     (harness-chat--decision-changeable-p id)
+                     (harness-chat--button "[Change]"
+                                           (lambda () (harness-chat--change-decision id))
+                                           :help (harness-chat--decision-change-help id)))))
+    (cond ((and move change) (concat move " " change))
+          (move move)
+          (t ""))))
+
+(defun harness-chat--change-decision (id)
+  "Ask again for the prompt decision ID keeps, from a note's [Change].
+The original prompt opens in the session it was answered in, with the
+choices it had: the UI's decisions module asks the harness and shows
+that session (`harness-decision-change').  Without it the request is
+made from here, and the session shown."
+  (cond
+   ((fboundp 'harness-decision-change) (harness-decision-change id))
+   (t
+    (harness-ui-call "_harness/decision/change" (list :id id)
+                     (lambda (result)
+                       (let ((sid (plist-get result :session)))
+                         (when (stringp sid)
+                           (let ((buffer (ignore-errors (harness-chat-buffer sid))))
+                             (unless (and buffer (harness-ui-view-shown-p buffer))
+                               (ignore-errors (harness-ui-display-session sid))))))
+                       (message "Prompt opened"))))))
 
 (defun harness-chat--move-decision (id way)
   "Ask the harness to move decision ID one step WAY, `undo' or `redo'.
@@ -3145,8 +3199,9 @@ NODE is a hint or a tool result written where a decision took effect,
 perhaps in another session -- a cold cache compacted unasked as its
 default says, a call its rule refused -- whose `:meta' `:decided-by'
 names the decision (`harness-node-decided-by').  The line is
-\"decided by: \", the decision's text and its button: [Undo] while it
-is in effect, [Redo], the text struck through, once undone.  Once it
+\"decided by: \", the decision's text and its buttons: [Undo] while it
+is in effect, [Redo], the text struck through, once undone, and
+[Change] when the decision kept its prompt.  Once it
 ended, what its last move said follows on a line of its own.  INDENT
 starts each line, FACE draws them.  Nothing when the UI has not heard
 of the decision."
