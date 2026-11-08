@@ -12,6 +12,8 @@ import 'src/ui/app_scope.dart';
 import 'src/ui/screens/connect_screen.dart';
 import 'src/ui/screens/home_shell.dart';
 import 'src/ui/theme/harness_theme.dart';
+import 'src/ui/widgets/buddy_window_host.dart';
+import 'src/ui/widgets/voice_settings_sheet.dart';
 import 'src/ui/widgets/workspace_buddy.dart';
 import 'src/ui/widgets/workspace_call_bar.dart';
 
@@ -82,6 +84,30 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
         buddy: buddy,
       ),
     );
+  }
+
+  /// The buddy window's way into the workspace: the app comes forward on its
+  /// workspace tab.  It is the same call and the same page, not a copy of
+  /// either.
+  void _openWorkspaceFromBuddy() {
+    _app.buddyWindow.presentMainWindow();
+    _app.requestedTab.value = 'workspace';
+  }
+
+  /// The buddy window's Voice settings control.  It brings the app forward,
+  /// which hides the away buddy, and opens the one settings sheet the app
+  /// already has; a change is applied to the running call.
+  Future<void> _openBuddySettings() async {
+    _app.buddyWindow.presentMainWindow();
+    final context = _navigator.currentState?.context;
+    final buddy = _app.workspaceBuddy;
+    if (context == null || buddy == null) return;
+    final next = await showVoiceSettingsSheet(
+      context,
+      settings: _app.settings.voiceSettings,
+      harnessAddress: _app.address ?? _app.settings.address,
+    );
+    if (next != null) await buddy.applyVoiceSettings(next);
   }
 
   /// A phone puts a connection to sleep without a word while the app is
@@ -189,11 +215,18 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
                 DefaultCupertinoLocalizations.delegate,
               ],
               builder: (context, child) {
-                final content = WorkspaceCallBarHost(
+                Widget content = WorkspaceCallBarHost(
                   app: _app,
                   onOpenCallView: _openCallView,
                   child: child ?? const SizedBox.shrink(),
                 );
+                content = BuddyWindowHost(
+                  app: _app,
+                  onOpenWorkspace: _openWorkspaceFromBuddy,
+                  onOpenSettings: _openBuddySettings,
+                  child: content,
+                );
+                content = _app.buddyWindow.wrap(content);
                 if (style == HarnessPlatformStyle.cupertino) {
                   return CupertinoTheme(
                     data: HarnessTheme.cupertino(Theme.of(context).brightness),

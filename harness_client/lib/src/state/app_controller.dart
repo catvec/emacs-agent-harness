@@ -13,6 +13,7 @@ import '../models/quota.dart';
 import '../models/server_info.dart';
 import '../models/session.dart';
 import '../models/task.dart';
+import '../desktop/buddy_window.dart';
 import '../models/workspace.dart';
 import '../services/harness_api.dart';
 import '../services/device_name.dart';
@@ -98,8 +99,10 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     this.handshakeTimeout = const Duration(seconds: 12),
     this.probeTimeout = const Duration(seconds: 5),
     this.workspaceBuddyBackendFactory,
+    BuddyWindowService? buddyWindow,
   }) : _connector = connector,
-       _openUrl = urlOpener ?? _launchInBrowser;
+       _openUrl = urlOpener ?? _launchInBrowser,
+       buddyWindow = buddyWindow ?? createBuddyWindowService();
 
   final SettingsController settings;
   final AcpConnector? _connector;
@@ -121,6 +124,14 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   /// app leaves null for the real voice backends; a test passes a scripted
   /// factory so no platform channel is loaded.
   final WorkspaceBuddyBackendFactory? workspaceBuddyBackendFactory;
+
+  /// The desktop buddy's own window, where the platform has one.  A test
+  /// passes a fake so no window is created.
+  final BuddyWindowService buddyWindow;
+
+  /// A tab the shell should select: the buddy window's workspace action
+  /// brings the app forward and asks for the workspace page.
+  final ValueNotifier<String> requestedTab = ValueNotifier<String>('');
 
   /// What was typed and not sent yet, which outlives the screens: see
   /// [DraftStore].
@@ -1812,6 +1823,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     pictures.clear();
     capabilities = null;
     signingInWith = null;
+    buddyWindow.destroy();
     workspaceBuddy?.dispose();
     workspaceBuddy = null;
     for (final controller in _sessions.values) {
@@ -1893,9 +1905,12 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     _wakeReconnect();
     _subscription?.cancel();
     _degradedSubscription?.cancel();
+    buddyWindow.destroy();
+    buddyWindow.dispose();
     workspaceBuddy?.dispose();
     workspaceBuddy = null;
     windowActive.dispose();
+    requestedTab.dispose();
     for (final controller in _sessions.values) {
       controller.dispose();
     }

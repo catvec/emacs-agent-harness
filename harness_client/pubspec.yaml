@@ -58,6 +58,7 @@ dependencies:
   url_launcher: ^6.3.3
   collection: ^1.19.1
   flutter_svg: ^2.3.0
+  nativeapi_flutter: ^0.5.10
 
 dev_dependencies:
   flutter_test:

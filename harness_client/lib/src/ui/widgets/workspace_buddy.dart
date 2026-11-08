@@ -164,6 +164,7 @@ class WorkspaceBuddy extends StatelessWidget {
     required this.onOpenWorkspace,
     required this.onOpenSettings,
     this.onDragUpdate,
+    this.onDragStart,
     this.maxHeight,
   });
 
@@ -171,6 +172,10 @@ class WorkspaceBuddy extends StatelessWidget {
   final VoidCallback onOpenWorkspace;
   final VoidCallback onOpenSettings;
   final ValueChanged<Offset>? onDragUpdate;
+
+  /// Starts a native window drag instead of moving a card inside the app.
+  final VoidCallback? onDragStart;
+
   final double? maxHeight;
 
   @override
@@ -189,6 +194,7 @@ class WorkspaceBuddy extends StatelessWidget {
         onOpenWorkspace: onOpenWorkspace,
         onOpenSettings: onOpenSettings,
         onDragUpdate: onDragUpdate,
+        onDragStart: onDragStart,
         maxHeight: maxHeight,
       ),
     );
@@ -211,6 +217,7 @@ class WorkspaceBuddyView extends StatelessWidget {
     required this.onOpenWorkspace,
     required this.onOpenSettings,
     this.onDragUpdate,
+    this.onDragStart,
     this.maxHeight,
   });
 
@@ -225,6 +232,7 @@ class WorkspaceBuddyView extends StatelessWidget {
   final VoidCallback onOpenWorkspace;
   final VoidCallback onOpenSettings;
   final ValueChanged<Offset>? onDragUpdate;
+  final VoidCallback? onDragStart;
   final double? maxHeight;
 
   /// The width of the card at the current text scale, bounded so that it
@@ -320,6 +328,7 @@ class WorkspaceBuddyView extends StatelessWidget {
       child: GestureDetector(
         key: const Key('buddy-drag-handle'),
         behavior: HitTestBehavior.opaque,
+        onPanStart: onDragStart == null ? null : (_) => onDragStart!(),
         onPanUpdate: onDragUpdate == null
             ? null
             : (details) => onDragUpdate!(details.delta),

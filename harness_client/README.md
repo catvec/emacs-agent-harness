@@ -1363,12 +1363,20 @@ On a desktop 920 px wide or wider, the workspace header also has a *Buddy*
 action.  It is an opt-in for one workspace, kept on the device
 (`workspaceBuddies` in SharedPreferences): one workspace can have it while
 another does not, and the next run of the app restores it.  The opt-in is
-for the **away card** only: a compact card that shows while the window is
-not the one in use -- behind another window, or minimized -- and no call
-view is open.  The in-call bar stays above the pages while it is shown, so
-a call is never without its microphone line and `End`.  While the window is
-in use, the card is not built at all.  Turning the buddy on shows the card
-(when away) and starts no call.  Turning it off, or the card's own
+for the **away card** only: a compact card that shows while the main window
+is not the one in use -- behind another window, or minimized -- and no call
+view is open.  On a desktop the card is a small window of its own:
+frameless, always-on-top where the platform honours it, absent from the
+taskbar, and non-activating, so clicking or dragging it neither brings the
+app forward nor makes it vanish.  A compositor that gives the clicked
+window the focus anyway still keeps the card; it hides when the main window
+takes the focus back.  It is the same engine and the same call, not a
+second one.  The in-call bar stays above the pages while it is shown,
+so a call is never without its microphone line and `End`.  With its own
+window, the card is hidden while the app is in use, not destroyed; the
+fallback below stays, because it is the only surface that can be clicked.
+Turning the buddy on shows the card (when away) and starts no call.
+Turning it off, or the card's own
 `off` control, removes the card; it does not end a running call, whose bar
 keeps the microphone state and `End` in sight.  Opening the card's `Start`
 starts the workspace call; `End`, `Mute`/`Unmute`, `Pause`/`Resume`,
@@ -1377,22 +1385,27 @@ smaller place.  Narrowing the window below 920 px removes the card without
 ending the call; the bar is there at every width.  On a phone the card is
 never built.
 
-The in-app card says only what the call reports.  Its microphone line is
+The compact card says only what the call reports.  Its microphone line is
 separate from the status, so a muted or paused call cannot look like it is
 recording.  A level meter appears only after the provider reports a level;
 there is no upload, transfer or transcoding stage to invent.  The status and
 microphone lines are live regions; every control has a label and a tooltip;
-`Tab` reaches all of them, and the status transition is `Duration.zero`
-under reduced motion.  The card lives in the app's own window (no native
-always-on-top window, tray icon or global shortcut), is dragged by its
-header and is clamped to the window.
+the status transition is `Duration.zero` under reduced motion.  The card is
+dragged by its header: in its own window that moves the window, and in the
+fallback it is clamped to the app's window.  There is no tray icon and no
+global shortcut.
 
-An in-app surface cannot be drawn while the operating system has minimized
-the window.  The call keeps its identity and its state, the OS's own
-microphone indicator stays on, and the in-call bar with `Mic live` and `End`
-is there the moment the window is shown again.  A small always-on-top window
-that survives a minimize is a native companion, a separate feature that
-needs explicit approval and a platform build.
+The card's window is not minimized with the app's main window, so it can
+stay in sight while the main window is minimized; whether the engine keeps
+painting it is the platform's business.  The call keeps its identity and
+its state, the OS's own microphone indicator stays on, and the in-call bar
+with `Mic live` and `End` is there the moment the main window is shown
+again.  Where the platform cannot open the window -- the web, a compositor
+that refuses it, or `HARNESS_BUDDY_WINDOW=off` -- the card stays in the app's
+own window while the buddy is on, so it can still be clicked and dragged;
+because a window that took focus would hide the card again, that window is
+non-focusable, and the bar and call view carry the keyboard path to the
+call's controls.
 
 The design, the event-to-copy mapping and the limits are in
 [docs/design/workspace-voice-buddy.md](../docs/design/workspace-voice-buddy.md).

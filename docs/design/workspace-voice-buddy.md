@@ -5,8 +5,10 @@ page is the design for a workspace's live voice call on a desktop and a
 phone: one call, the full view that belongs to it, a bar at the top of the
 app for as long as it runs, and -- on a desktop, opt-in, when the window is
 not the one in use -- a compact away card.  It reuses the voice stack and
-the workspace client that already exist; it adds no second microphone, no
-second call and no operating-system window, tray icon or shortcut.
+the workspace client that already exist; it adds no second microphone and
+no second call.  On a desktop the away card is a window of its own: it is
+the same Flutter engine and the same controller, drawn over the app and
+left on screen when it is clicked.  It adds no tray icon and no shortcut.
 
 The first slice put one compact card in the corner of the app and used it
 for every call, whether the app was in use or not.  Review made the shape
@@ -106,48 +108,79 @@ repeated under it.
 
 The compact card is the desktop's away surface, and it is the part the
 workspace opts into (see **Workspace-scoped opt-in**).  It shows only
-while the app's window is **not active** -- behind another window, or
+while the app's main window is **not active** -- behind another window, or
 reporting `hidden`/`paused` -- and there is no call view on top of it.
-While the window is the one in use, the card is not built at all; the
-bar and the call view are the call's surfaces.  When the window is away
-the bar stays as well, so a call over a pushed page is never without its
-microphone line and `End`.  On a phone the card is never built.
+While the main window is the one in use, the card is not shown; the bar
+and the call view are the call's surfaces.  When the window is away the
+bar stays as well, so a call over a pushed page is never without its
+microphone line and `End`.  On a phone the card is never shown.
 
 The card keeps the first slice's content and behaviour: workspace and
 thread identity, the connection, the reported status, the microphone
 line and level meter, `Start`/`End`, `Mute`/`Unmute`, `Pause`/`Resume`,
 `Interrupt`, `Voice settings`, `Retry` and its own `off` control.  It is
-dragged by its header and clamped to the window, does not take focus when
-it appears, and is an in-app surface, not a native window.
+dragged by its header, does not take focus when it appears, and its close
+control removes it without ending the call.
+
+On a desktop the card is drawn in a **window of its own**: a frameless,
+always-on-top window that is absent from the taskbar and **does not
+activate**, so pressing a control or dragging its header neither brings
+the app forward nor makes the card disappear.  This is the fix for the
+first version's blindness to its own clicks: the card was in the app's
+window and the away rule removed it the moment clicking it made that
+window active.  The window is a second view of the same Flutter engine
+and the same `WorkspaceBuddyController` -- not a second engine, a second
+call or a copy of the state.  It is placed at the bottom-right of the
+primary display's work area on first show and keeps wherever it is
+dragged to afterwards.  A compositor that activates the window on a click
+anyway does not bring the card back under the away rule: while the card's
+window is the active one, the main window is still not the one in use, so
+the card stays; it hides when activation goes back to the main window.
+
+A platform that cannot open a window -- the web, or a compositor that
+refuses one -- gets the **persistent in-app card** instead.  That card
+stays on screen while the buddy is on, not only while the window is away,
+because an away-only in-app card cannot be clicked: the click focuses the
+app, and the card would go before the click arrives.  A window that fails
+to open falls back to the persistent card for the rest of the run; a
+window the compositor destroys is made again the next time it is wanted.
+The `HARNESS_BUDDY_WINDOW=off` environment variable forces the fallback
+on a machine whose compositor cannot draw a non-activating window.
 
 ### Minimized and unfocused
 
 A desktop window that is **unfocused but visible** reports
-`AppLifecycleState.inactive`; the away card appears beside the bar, and
-the card is there on screen in the window.  A window that is **minimized**
-reports `hidden` (and then `paused`); the operating system draws none of
-the app's widgets, so neither the bar nor the card can be painted over the
-desktop.  This is a limit of an in-app surface, not a hidden call: the
-call keeps its identity and its state, the OS's own microphone indicator
-stays on, and the in-call bar -- with `Mic live` and `End` -- is there the
-moment the window is shown again.  A small always-on-top window that
-survives a minimize is a native companion, a separate feature that needs
-the person's explicit approval and a platform build; this change does not
-create one.  It also does not take `alwaysOnTop`, a tray icon, a global
-shortcut or a startup item.
+`AppLifecycleState.inactive`; the away card appears beside the bar.  A
+window that is **minimized** reports `hidden` (and then `paused`); the
+main window draws nothing, but the away card is a top-level window of its
+own and is not minimized with the main one.  The call keeps its identity
+and its state and the OS's own microphone indicator stays on; the card
+is the surface that stays in sight, and the in-call bar -- with `Mic
+live` and `End` -- is there the moment the main window is shown again.
+Whether the engine keeps painting the small window while the main one is
+minimized is the platform's business; the fallback card, being in the
+main window, cannot be drawn there at all.
+
+The window is still a surface of this app and obeys the same rule: it is
+shown only while the buddy is on and the main window is not in use.  It
+does not take `alwaysOnTop` from the rest of the app, a tray icon, a
+global shortcut or a startup item.
 
 ## Research: desktop surface patterns
 
-The choice of an in-app surface was made before the code, and it still
-holds for the call's surfaces.  The review's "only when minimized or not
-focused" is honoured for a visible, unfocused window, and the minimize
-case is stated as the limit above rather than hidden behind a native
-window nobody approved.
+The call's full view and bar stay in the app's window.  The away card
+was first drawn there as well; the review of that slice found the limit
+the person hit: clicking an in-app card focuses the app, the away
+rule then removes the card, and a drag cannot finish.  The card is now a
+separate native window where the platform has one, and remains an in-app
+card only as the fallback where it cannot have one.  The call view and
+the bar are still not windows, and no surface starts a second call.
 
 | Pattern | What it gives | Cost / limit | Sources |
 | --- | --- | --- | --- |
-| **In-app surfaces** (this design) | A full view, a bar and a card in the app's own window; no new permission or plugin; keyboard focus, semantics and theming work as everywhere else; drag and clamp inside the window | Only visible while the app is; cannot float above other applications or paint while minimized | Flutter's desktop support and `Stack`/`Overlay` APIs |
-| **Native always-on-top window** (`window_manager` plus a second window) | Stays above other apps; can skip the taskbar; can have a hidden title bar | A native window level, focus and close lifecycle per OS; asks the user to accept a window that deliberately covers other work; always-on-top is exactly the intrusive default the task forbids without approval; plugin and platform-specific runner work | `window_manager` (window levels, `alwaysOnTop`, `skipTaskbar`), Flutter's multi-window package |
+| **In-app surfaces** (fallback; the call's full view and bar) | A full view, a bar and, where no native window is possible, a persistent card in the app's own window; no new permission or plugin; keyboard focus, semantics and theming work as everywhere else; drag and clamp inside the window | Only visible while the app is; cannot float above other applications or paint while minimized; an away-only card cannot be clicked without hiding itself | Flutter's desktop support and `Stack`/`Overlay` APIs |
+| **Native always-on-top window, same engine** (this design for the away card) | Stays above other apps where the platform honours it; skips the taskbar; has no title bar; does not activate when clicked or dragged; the same engine and `WorkspaceBuddyController` keep the card and the call in one state | A native window level, focus and close lifecycle per OS; always-on-top is a request the compositor may ignore (notably on Wayland); the window is non-focusable, so its card is pointer-only and keyboard access stays in the bar and call view | Flutter's windowing API (`RegularWindowController`, experimental), `nativeapi` window properties |
+| **Native window through `window_manager` alone** | Window levels, `alwaysOnTop`, `skipTaskbar` for the main window | It manages one window; a second window needs Flutter's windowing API or a multi-window package anyway | `window_manager` |
 | **System tray / menu bar extra** (`tray_manager`) | A tiny persistent icon with a menu | Not consistently available (`tray_manager` documents that GNOME shows no icon without the AppIndicator extension); a menu is poor for a live microphone indicator and an urgent End; Microsoft's own notification-area guidance says the area is not for quick command access or critical information | `tray_manager`; Microsoft "Notifications and the Notification Area" |
 | **Separate small window** (`desktop_multi_window`) | A real second window, can be placed by the window manager | Each window is a Flutter engine with its own plugin registration and method channels; the same app state and voice controller do not cross engines without a bridge; more OS integration and permissions than the feature needs | `desktop_multi_window` |
 | **Bottom sheet / dialog inside a page** | Simple | Takes the screen or blocks the page; not a persistent presence; cannot stay while the user reads another page | Material/Flutter conventions; the app already uses sheets for focused tasks |
@@ -239,11 +272,15 @@ no call ──Call/Start──▶ starting ──backend started──▶ listen
   call is not ended: the in-call bar is the surface at every width, with
   the microphone line and End.  The workspace page's `Call` opens the same
   call's view instead of a second one.
-- **Window focus.**  The app records whether its window is the one in
-  use (`AppLifecycleState.resumed`).  A desktop that is not active also
-  gets the away card; when it is active again the card goes.  The bar is
-  there in both cases.  The call itself is untouched by the change; no
-  surface starts or stops it on a focus change.
+- **Window focus.**  The app records whether its main window is the one
+  in use (`AppLifecycleState.resumed`).  A desktop that is not active also
+  gets the away card, in its own non-activating window; when the app is
+  active again the card is hidden, not destroyed.  Clicking or dragging
+  the card does not change the app's lifecycle, so the card does not take
+  itself away.  The bar is there in both cases.  The call itself is
+  untouched by the change; no surface starts or stops it on a focus
+  change.  A platform with no native window shows the persistent in-app
+  card while the buddy is on, because there is no other way to click it.
 - **Disposal.**  Closing the app, losing the workspace or the shell
   disposing the controller removes the listeners and closes the voice
   controller, which releases the microphone.  Stopped controllers are kept
@@ -274,6 +311,7 @@ full call view keep their hover tooltips.
 | Bar secondary controls | `Mute` / `Unmute`, semantics tooltip `Microphone · <microphone state>`; `Call view`, semantics tooltip `Call · view`; `Retry`, semantics tooltip `Call · retry` |
 | Microphone control tooltip | `Microphone · live`, `Microphone · muted`, `Microphone · starting`, `Microphone · paused`, `Microphone · closing` or `Microphone · off`, from `BuddyMic` and not from the phase |
 | Card heading | `Buddy` |
+| Native window title | `Buddy` (the same word as the heading; the window is frameless where the platform allows) |
 | Semantics of the card | `Workspace buddy` |
 | Card connection pill | `Connected` / `Reconnecting` / `Offline` |
 | Connection tooltip | `Connection · <address>` (address is data) |
@@ -308,11 +346,13 @@ existing explanatory setting descriptions.
 Layout: the bar is 56 px high on a phone and 60 px on a wide screen,
 growing by a bounded amount (up to 80 px) when the text does; it takes
 the status bar into its own top padding, and the pages below lose that
-padding while it is shown.  The card is 312 px wide, grows by a bounded
-amount with the text scale, is anchored bottom-right by default,
-draggable by its header and clamped inside the window.  At 920 px it fits
-beside the page; at 1024, 1280 and 1440 it is a corner surface, not a
-page.  On a phone the card is not built at all; the bar is.
+padding while it is shown.  The card is 312 px wide and grows by a
+bounded amount with the text scale.  In its own window it is placed
+bottom-right of the primary display's work area, draggable by its header,
+and sized to its content; the fallback card is anchored bottom-right by
+default, draggable by its header and clamped inside the app's window.  At
+920 px it fits beside the page; at 1024, 1280 and 1440 it is a corner
+surface, not a page.  On a phone the card is not built at all; the bar is.
 
 ### Controls and their meaning
 
@@ -408,10 +448,12 @@ needed` before progress states, `Ended` only after an ended controller.
 
 - A call in progress is visible at all times the app can be seen: the bar
   says `In a call` above every page, with the microphone line and `End`,
-  on a phone too.  The card appears when the window is not in use, still
-  with the microphone line.  Neither a minimized window nor a locked
-  screen is drawn by the app; the OS's own microphone indicator remains
-  the indicator there.
+  on a phone too.  The card appears when the main window is not in use,
+  still with the microphone line.  The separate card window is drawn by
+  the compositor when the main window is minimized or another app is in
+  use; the main window's own surfaces are not, and a locked screen is not
+  drawn by the app.  The OS's own microphone indicator remains the
+  indicator in every case.
 - The surfaces show a textual microphone state and a distinct icon as
   well as colour: `Mic live` versus `Mic muted` versus `Mic off`.  Colour
   is never the only cue.  The pattern follows the platform privacy
@@ -427,12 +469,17 @@ needed` before progress states, `Ended` only after an ended controller.
   The bar's icon-only controls are named `Mute`/`Unmute`, `End`,
   `Call view` and `Retry`; its identity is a `Call · view` button.
 - Keyboard: the bar is in the normal focus traversal above the pages;
-  the card is in the traversal when it is the away surface.  `Tab`
-  reaches the bar's identity and controls, and `Enter`/`Space` activate a
+  `Tab` reaches its identity and controls, and `Enter`/`Space` activate a
   focused control.  The call view keeps its own `M`, `P`, `E` and
   `Escape` bindings; in an attached view `Escape` minimizes and `E` ends.
-  `Interrupt` is a visible button in the card and the call view, so it is
-  reachable without a keyboard
+  The native buddy window is deliberately non-focusable, because a window
+  that took focus would make the app active and the card would be hidden;
+  its card is pointer-operated.  Nothing is keyboard-only lost: while a
+  call runs, the bar offers the identity, `Mute`/`Unmute`, `End`,
+  `Retry` and `Call view`; the call view has `Pause`, `Interrupt`, `Voice
+  settings` and End, and the workspace's `Call` starts a call.  The
+  fallback in-app card is in the traversal when it is on screen.  A
+  visible control is reachable without a keyboard in the call view
   ([WCAG 2.1.1 Keyboard](https://www.w3.org/TR/WCAG22/#keyboard),
   [2.4.7 Focus Visible](https://www.w3.org/TR/WCAG22/#focus-visible).)
 - Reduced motion: the card's status transition uses `Duration.zero` when
@@ -476,6 +523,16 @@ Deterministic, with scripted audio only:
   motion; 920, 1024, 1280 and 1440 widths at 100%, 150% and 200% text;
   no card while the window is active; no card on a phone; narrowing the
   window leaves the call in the bar, not ended; off is not End.
+- **Own window:** the window is asked for only while the buddy is on, the
+  main window is away, no call view is open and the width is a desktop
+  one; it is hidden, not destroyed, when the app comes forward; the same
+  `WorkspaceBuddyController` is behind the card and the call; the window
+  content drags the native window instead of a card; a window that cannot
+  open leaves the persistent in-app card, and that card stays on screen
+  while the app is in use and can be dragged; the workspace action brings
+  the app forward on its workspace page.  The widget-test engine cannot
+  open a native window: a fake service tests the seam, and the Linux
+  build compiles the real one.
 - **Integration:** a desktop opts in and sees the card only when the
   window is away; a phone keeps `Call` and gets the bar when the call
   view is minimized; the view is the same call (one backend); the bar
@@ -504,13 +561,15 @@ harness method changes.
 | App host | the selected workspace and thread, connection, address, settings, session bridge and the per-workspace preference; the backend factory seam for tests; `windowActive` | `lib/src/state/app_controller.dart`, `lib/app.dart` |
 | Bar | `WorkspaceCallBarHost`, `WorkspaceCallBar`, `WorkspaceCallBarView`, the visible predicate and `openWorkspaceCallView` | `lib/src/ui/widgets/workspace_call_bar.dart`, `lib/app.dart` |
 | Call view | attached mode, `Minimize`, End through the owner, no dispose of the owner's controller | `lib/src/ui/screens/voice_screen.dart` |
-| Away card | the card, its drag-and-clamp layer, the away/focus rule, no narrow-width End | `lib/src/ui/widgets/workspace_buddy.dart`, `lib/src/ui/screens/home_shell.dart` |
+| Away card | the card, its in-app drag-and-clamp layer, the away/focus rule, no narrow-width End | `lib/src/ui/widgets/workspace_buddy.dart`, `lib/src/ui/screens/home_shell.dart` |
+| Own window | the service seam, the native window (frameless, always-on-top request, no taskbar, non-activating) and the unsupported fallback; window view, placement and drag | `lib/src/desktop/buddy_window.dart`, `lib/src/desktop/buddy_window_native.dart`, `lib/src/desktop/buddy_window_unsupported.dart` |
+| Window host | when the window is wanted, the same controller, the persistent fallback, the workspace tab request and the settings sheet from the window | `lib/src/ui/widgets/buddy_window_host.dart`, `lib/app.dart`, `lib/main.dart` |
 | Workspace | `Call` starts or opens the shared call; `Buddy` opts into the away card | `lib/src/ui/screens/workspace_screen.dart` |
 | Preference | `workspaceBuddies` read, written and restored per workspace id | `lib/src/state/settings_controller.dart` |
 | Copy inventory regression | every rendered word, semantics label and tooltip; no sentences; no transfer or transcoding words | `test/workspace_call_bar_test.dart`, `test/workspace_buddy_widget_test.dart` |
 | Mapping tests | every status, precedence, simultaneous input/output, microphone truth, unknown phase | `test/voice_buddy_test.dart` |
 | Controller tests | opt-in/out, restore, double Start, End during start and every phase, prompt send, lost call, disconnect, workspace change, disposal, denial, Retry, off keeps the call | `test/workspace_buddy_controller_test.dart` |
-| Integration | the bar on a phone, minimize, the same call, focus hand-over, narrowing, End, the away opt-in | `test/workspace_shell_test.dart` |
+| Integration | the bar on a phone, minimize, the same call, focus hand-over, narrowing, End, the away opt-in, the own window, its fallback and the workspace tab | `test/workspace_shell_test.dart`, `test/support/buddy_window_fakes.dart` |
 | Call view tests | attached minimize and End through the owner | `test/voice_ui_test.dart` |
 | Preference tests | per-workspace write, restore and a choice made while the store is still being read | `test/settings_controller_test.dart` |
 | Pictures | `workspace-call-bar-desktop`, `workspace-call-bar-phone`, `workspace-buddy-away`, `workspace-buddy-scale-150`, `workspace-buddy-problem`, `workspace-buddy-reduced-motion`, `workspace-phone` | `test/workspace_screenshots_test.dart`, `screenshots/` |
@@ -528,20 +587,32 @@ report.
   network loss mid-utterance or live provider is verified here.  Those
   remain manual hardware checks (see
   [voice-turn-taking.md](../voice-turn-taking.md#deterministic-tests-and-what-they-do-not-cover)).
-- No native window, tray, always-on-top, global shortcut or startup
-  persistence.  Adding one is a separate feature that needs the user's
-  explicit approval and a platform build; the current surfaces
-  deliberately do not.  In particular, an in-app surface cannot be drawn
-  while the OS has minimized the window: the call and its state persist,
-  the OS's microphone indicator remains, and the bar is there when the
-  window returns.  A small always-on-top companion that survives a
-  minimize would be that separate, approved native feature.
+- The away card's window is a desktop feature of the Flutter client.  On
+  the web there is no native window and the persistent in-app card is the
+  only surface; there, and on a compositor that refuses the window, the
+  card stays over the page rather than vanishing under the pointer.
+- Always-on-top is a request.  X11 window managers and macOS honour it;
+  Wayland compositors generally do not, so the small window may be
+  covered by the window the person raises later.  It is still a separate,
+  non-activating window: clicking or dragging it does not hide it.  The
+  `HARNESS_BUDDY_WINDOW=off` switch keeps the in-app fallback for a
+  machine whose compositor cannot draw the window at all.
+- The window uses Flutter's experimental windowing API and `nativeapi`
+  for the window properties.  The API is pinned with the SDK
+  (`.flutter-version`); a Flutter upgrade may change it.  The window is
+  non-focusable by design, so its card is pointer-operated and what has no
+  keyboard path is reached through the bar or the call view (see Privacy
+  and accessibility).
+- A native window cannot be opened in the widget-test engine: the seam is
+  tested with a fake and the real window is compiled and smoke-run, not
+  exercised for pixels.  The pictures of the card come from the same
+  widget the window draws.
 - Window focus is reported by Flutter's app lifecycle.  A desktop
   embedder that reports no `inactive` state would leave the card unshown
   and the bar in place; the call is never affected.
 - The buddy is one surface for one selected workspace.  Several
-  workspaces at once, call-back when a routine finishes, and a native
-  companion are the workspace mode's staged design, not this slice.
+  workspaces at once and call-back when a routine finishes are the
+  workspace mode's staged design, not this slice.
 - The bar's icon controls carry accessible names and semantics tooltips,
   not hover popups: the bar is above the navigator and has no overlay of
   its own.  The card and the full call view keep their hover tooltips.
@@ -554,6 +625,8 @@ Desktop surfaces and the host OS:
 - [Flutter app lifecycle](https://api.flutter.dev/flutter/dart-ui/AppLifecycleState.html) (`resumed`, `inactive`, `hidden`, `paused`)
 - [`AppLifecycleListener`](https://api.flutter.dev/flutter/widgets/AppLifecycleListener-class.html)
 - [Flutter `OverlayPortal`](https://api.flutter.dev/flutter/widgets/OverlayPortal-class.html)
+- [Flutter windowing API](https://github.com/flutter/flutter/blob/master/packages/flutter/lib/src/widgets/_window.dart) (`WindowManager`, `RegularWindowController`; experimental in Flutter 3.47)
+- [`nativeapi`](https://pub.dev/packages/nativeapi) and [`nativeapi_flutter`](https://pub.dev/packages/nativeapi_flutter) (window properties such as always-on-top, non-activating and focusable)
 - [`window_manager`](https://pub.dev/packages/window_manager) (Linux, macOS, Windows; window levels, `alwaysOnTop`, `skipTaskbar`)
 - [`desktop_multi_window`](https://pub.dev/packages/desktop_multi_window) (a Flutter engine per window)
 - [`tray_manager`](https://github.com/leanflutter/tray_manager) (system tray; the documented GNOME limitation)

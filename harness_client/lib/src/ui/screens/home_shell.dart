@@ -37,6 +37,27 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
   String _tab = 'sessions';
 
+  @override
+  void initState() {
+    super.initState();
+    widget.app.requestedTab.addListener(_buddyRequestedTab);
+  }
+
+  @override
+  void didUpdateWidget(HomeShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.app != widget.app) {
+      oldWidget.app.requestedTab.removeListener(_buddyRequestedTab);
+      widget.app.requestedTab.addListener(_buddyRequestedTab);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.app.requestedTab.removeListener(_buddyRequestedTab);
+    super.dispose();
+  }
+
   /// The compact buddy's settings use the same voice sheet as the full
   /// voice screen; a change is saved and applied to a running call.
   Future<void> _openBuddySettings() async {
@@ -50,30 +71,44 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
     if (next != null) await buddy.applyVoiceSettings(next);
   }
 
-  /// The away buddy floats over whichever shell is showing, only while the
-  /// window is not the one in use.  While it is, the in-call bar and the
-  /// full call view are the call's surfaces; below the desktop breakpoint
-  /// the bar is, so no microphone is left behind an absent card.
+  /// The buddy as the app draws it when it has no window of its own.  On a
+  /// desktop the separate window is the buddy's surface; where that is
+  /// impossible (the web, or a compositor that refuses one), the card has to
+  /// stay over the page, because an away-only in-app card would vanish the
+  /// moment the person clicked it.  The call's bar is not touched by either:
+  /// it is the app's own surface.
   Widget _withBuddy(Widget child) {
     final buddy = widget.app.workspaceBuddy;
     if (buddy == null) return child;
     return ValueListenableBuilder<bool>(
-      valueListenable: widget.app.windowActive,
-      builder: (context, active, _) => Stack(
-        fit: StackFit.expand,
-        children: [
-          child,
-          Positioned.fill(
-            child: WorkspaceBuddyLayer(
-              controller: buddy,
-              away: !active,
-              onOpenWorkspace: () => _select('workspace'),
-              onOpenSettings: _openBuddySettings,
+      valueListenable: widget.app.buddyWindow.available,
+      builder: (context, available, _) {
+        if (available) return child;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            child,
+            Positioned.fill(
+              child: WorkspaceBuddyLayer(
+                controller: buddy,
+                onOpenWorkspace: () => _select('workspace'),
+                onOpenSettings: _openBuddySettings,
+              ),
             ),
-          ),
-        ],
-      ),
+          ],
+        );
+      },
     );
+  }
+
+  /// The buddy window's workspace action comes through the app, because the
+  /// window is outside this shell.  Select the tab it asks for; an empty
+  /// request is the idle state.
+  void _buddyRequestedTab() {
+    final tab = widget.app.requestedTab.value;
+    if (tab.isEmpty || !mounted) return;
+    widget.app.requestedTab.value = '';
+    _select(tab);
   }
 
   List<_Tab> _tabs(AppController app) => [

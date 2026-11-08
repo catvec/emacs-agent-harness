@@ -1008,10 +1008,14 @@ attaches the call to the thread.
 At a desktop width the header also offers the per-workspace `Buddy` opt-in
 (the [compact buddy design](design/workspace-voice-buddy.md)).  It is kept in the
 device's `workspaceBuddies` preference, restores after a restart without
-starting a call, and turns the page's `Call` over to the card.  The card
-owns at most one `VoiceController` -- `WorkspaceBuddyController` --
-and ends its call on the way out; a phone never creates it.  The desktop
-card and its tests are `lib/src/ui/widgets/workspace_buddy.dart`,
+starting a call, and shows the call's compact away card while the main
+window is not in use.  The card owns at most one `VoiceController` --
+`WorkspaceBuddyController` -- and ends its call on the way out; a phone
+never creates it.  On a desktop the card is a non-activating window of the
+same engine (`lib/src/desktop/buddy_window.dart` and its native
+implementation), with the in-app card as the fallback.  The card, its
+mapping and its tests are `lib/src/ui/widgets/workspace_buddy.dart`,
+`lib/src/ui/widgets/buddy_window_host.dart`,
 `lib/src/voice/voice_buddy.dart` and
 `lib/src/state/workspace_buddy_controller.dart`.
 

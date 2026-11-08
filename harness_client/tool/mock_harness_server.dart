@@ -5,7 +5,7 @@
 //   dart run tool/mock_harness_server.dart [--port 4277] [--standard]
 //                                          [--token hs1_SECRET]
 //                                          [--approve-after 3] [--tools]
-//                                          [--task-sessions]
+//                                          [--task-sessions] [--workspace]
 //
 // The client connects to ws://127.0.0.1:PORT/acp.  With --token the server
 // behaves like the real harness's listener for other devices: an upgrade that
@@ -34,6 +34,7 @@ Future<void> main(List<String> arguments) async {
   var approveAfter = 3;
   var tools = false;
   var taskSessions = false;
+  var workspace = false;
   String? token;
   for (var index = 0; index < arguments.length; index++) {
     final argument = arguments[index];
@@ -49,11 +50,13 @@ Future<void> main(List<String> arguments) async {
       tools = true;
     } else if (argument == '--task-sessions') {
       taskSessions = true;
+    } else if (argument == '--workspace') {
+      workspace = true;
     } else if (argument == '--help' || argument == '-h') {
       stdout.writeln(
         'usage: dart run tool/mock_harness_server.dart '
         '[--port 4277] [--standard] [--token hs1_SECRET] [--approve-after 3] '
-        '[--tools] [--task-sessions]',
+        '[--tools] [--task-sessions] [--workspace]',
       );
       return;
     }
@@ -88,6 +91,7 @@ Future<void> main(List<String> arguments) async {
       signIn: token != null,
       issueSecret: token,
       knownSecrets: token == null ? null : {token},
+      workspace: workspace,
     );
     if (taskSessions) {
       harness.seedTaskSessions();
