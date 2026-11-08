@@ -52,7 +52,13 @@ static void my_application_activate(GApplication* application) {
     gtk_window_set_title(window, "Harness");
   }
 
-  gtk_window_set_default_size(window, 1280, 720);
+  // A window the size of a desktop, and the smallest it may be made: the
+  // pages need room for the navigation pane beside the chat.
+  gtk_window_set_default_size(window, 1280, 820);
+  GdkGeometry geometry = {};
+  geometry.min_width = 760;
+  geometry.min_height = 560;
+  gtk_window_set_geometry_hints(window, nullptr, &geometry, GDK_HINT_MIN_SIZE);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(

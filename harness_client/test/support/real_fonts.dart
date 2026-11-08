@@ -40,8 +40,27 @@ Future<void> _load(String family, Iterable<File> files) async {
   final loader = FontLoader(family);
   for (final file in files) {
     final bytes = file.readAsBytesSync();
-    loader.addFont(Future.value(ByteData.sublistView(Uint8List.fromList(bytes))));
+    loader.addFont(
+      Future.value(ByteData.sublistView(Uint8List.fromList(bytes))),
+    );
   }
+  await loader.load();
+}
+
+/// A font shipped with the tests (see test/fonts/README.md), loaded under the
+/// family the look names it by.
+Future<void> _loadTestFont(String family, List<String> names) async {
+  final files = [for (final name in names) File('test/fonts/$name')]
+      .where((file) => file.existsSync())
+      .toList();
+  if (files.isEmpty) return;
+  await _load(family, files);
+}
+
+/// A font the app's own packages bundle as an asset: the Cupertino icons.
+Future<void> _loadAsset(String family, String key) async {
+  final data = await rootBundle.load(key);
+  final loader = FontLoader(family)..addFont(Future.value(data));
   await loader.load();
 }
 
@@ -66,11 +85,33 @@ Future<bool> loadRealFonts() async {
   if (roboto.isEmpty || !icons.existsSync()) return false;
   await _load('Roboto', roboto);
   await _load('MaterialIcons', [icons]);
+  // The icons of the Apple look, which are an asset of `cupertino_icons`;
+  // without them every Cupertino icon is a square.
+  // An icon names its package, so the engine's family is the package path.
+  await _loadAsset(
+    'packages/cupertino_icons/CupertinoIcons',
+    'packages/cupertino_icons/assets/CupertinoIcons.ttf',
+  );
   // A style that names the test font itself (`Ahem`) is drawn in Roboto too.
   await _load('Ahem', roboto);
   // The font of an iPhone, which the app's Cupertino theme names: Roboto
   // stands for it, as it stands for the phone's own in the Material theme.
   for (final name in const ['.SF Pro Text', '.SF Pro Display']) {
+    await _load(name, roboto);
+  }
+  // The fonts the desktop looks name: Segoe UI Variable on Windows, which
+  // Selawik stands in for (Microsoft's metric-compatible open face), and
+  // Cantarell on GNOME.  This machine has neither, and a test that draws a
+  // look whose family is not loaded draws squares.
+  const selawik = ['Selawik-Regular.ttf', 'Selawik-Semibold.ttf'];
+  await _loadTestFont('Segoe UI Variable Text', selawik);
+  await _loadTestFont('Segoe UI', selawik);
+  await _loadTestFont('Cantarell', [
+    'Cantarell-Regular.ttf',
+    'Cantarell-Bold.ttf',
+  ]);
+  // The rest of the fallback chain, which this machine lacks too.
+  for (final name in const ['Ubuntu', 'Noto Sans']) {
     await _load(name, roboto);
   }
   // What a phone calls `monospace`: any fixed-width font the machine has.

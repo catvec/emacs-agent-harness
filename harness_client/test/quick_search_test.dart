@@ -435,7 +435,7 @@ void main() {
             'reconnect',
             'disconnect',
             'remember-connection',
-            'platform-feel',
+            'look',
           ]),
         );
       },
@@ -549,7 +549,7 @@ void main() {
         ('task-actions', 'tasks'),
         ('queue-controls', 'tasks'),
         ('disconnect', 'settings'),
-        ('platform-feel', 'settings'),
+        ('look', 'settings'),
         ('remember-connection', 'settings'),
         ('attach-images', 'tasks'),
       ]) {

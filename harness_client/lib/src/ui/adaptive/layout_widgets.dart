@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../theme/harness_theme.dart';
 import 'adaptive_widgets.dart';
+import 'platform_style.dart';
 
 // How information is laid out.  A short vocabulary, used the same way on
 // every page:
@@ -549,6 +550,15 @@ class HarnessNotice extends StatelessWidget {
   }
 }
 
+/// The corner a card has under the look: Fluent's 8 points, Adwaita's 12,
+/// and the client's own 16 on Android and Apple.
+double _cardRadius(BuildContext context) =>
+    switch (HarnessStyle.maybeOf(context)?.style) {
+      HarnessPlatformStyle.windows => 8,
+      HarnessPlatformStyle.linux => 12,
+      _ => 16,
+    };
+
 /// The surface that groups things: one fill, one border, one radius.
 class HarnessCard extends StatelessWidget {
   const HarnessCard({
@@ -556,7 +566,7 @@ class HarnessCard extends StatelessWidget {
     required this.child,
     this.padding = const EdgeInsets.all(HarnessSpace.lg),
     this.margin,
-    this.radius = 16,
+    this.radius,
     this.color,
     this.borderColor,
   });
@@ -564,22 +574,37 @@ class HarnessCard extends StatelessWidget {
   final Widget child;
   final EdgeInsetsGeometry padding;
   final EdgeInsetsGeometry? margin;
-  final double radius;
+
+  /// The corner, when it is not the look's own ([_cardRadius]).
+  final double? radius;
   final Color? color;
   final Color? borderColor;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final look = HarnessStyle.maybeOf(context)?.style;
     return Container(
       margin: margin,
       padding: padding,
       decoration: BoxDecoration(
         color: color ?? theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(radius),
+        borderRadius: BorderRadius.circular(radius ?? _cardRadius(context)),
         border: Border.all(
           color: borderColor ?? theme.colorScheme.outlineVariant,
         ),
+        // Fluent lifts a card a little off the page; Adwaita keeps it flat.
+        boxShadow: look == HarnessPlatformStyle.windows
+            ? [
+                BoxShadow(
+                  color: Colors.black.withValues(
+                    alpha: theme.brightness == Brightness.dark ? 0.30 : 0.05,
+                  ),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ]
+            : null,
       ),
       child: child,
     );
@@ -605,8 +630,20 @@ class HarnessCardList extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(_cardRadius(context)),
         border: Border.all(color: theme.colorScheme.outlineVariant),
+        boxShadow:
+            HarnessStyle.maybeOf(context)?.style == HarnessPlatformStyle.windows
+            ? [
+                BoxShadow(
+                  color: Colors.black.withValues(
+                    alpha: theme.brightness == Brightness.dark ? 0.30 : 0.05,
+                  ),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ]
+            : null,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

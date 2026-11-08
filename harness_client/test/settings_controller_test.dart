@@ -106,6 +106,36 @@ void main() {
     expect(settings.token, 's3cret');
   });
 
+  test('each desktop look is kept, and a damaged one keeps System', () async {
+    for (final (platform, stored) in const [
+      (PreviewPlatform.windows, 'windows'),
+      (PreviewPlatform.linux, 'linux'),
+    ]) {
+      SharedPreferences.setMockInitialValues({});
+      final settings = SettingsController();
+      await settings.load();
+      expect(settings.useCupertino, isFalse);
+      await settings.setPreviewPlatform(platform);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('previewPlatform'), stored);
+
+      // The next run of the app starts from it.
+      final again = SettingsController();
+      await again.load();
+      expect(again.previewPlatform, platform);
+      expect(again.useCupertino, isFalse, reason: 'a desktop look is Material');
+    }
+
+    SharedPreferences.setMockInitialValues({'previewPlatform': 'beos'});
+    final damaged = SettingsController();
+    await damaged.load();
+    expect(
+      damaged.previewPlatform,
+      PreviewPlatform.system,
+      reason: 'a look the app does not know is no look at all',
+    );
+  });
+
   test('corrupt stored values keep the defaults', () async {
     SharedPreferences.setMockInitialValues({
       'themeMode': 7,

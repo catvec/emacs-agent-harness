@@ -203,43 +203,46 @@ class SettingsScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: HarnessSpace.lg),
                     _SettingRow(
-                      icon: Icons.phone_iphone_rounded,
-                      title: 'Platform feel',
-                      subtitle:
-                          'Cupertino controls on Apple platforms, Material 3 '
-                          'elsewhere.',
-                      below: HarnessSegmented<PreviewPlatform>(
-                        options: const [
-                          (PreviewPlatform.system, 'System'),
-                          (PreviewPlatform.material, 'Android'),
-                          (PreviewPlatform.cupertino, 'Apple'),
-                        ],
+                      key: const Key('setting-look'),
+                      icon: Icons.devices_rounded,
+                      title: 'Look',
+                      subtitle: 'System, or a platform\'s controls',
+                      below: HarnessSelect<PreviewPlatform>(
+                        key: const Key('look-select'),
+                        title: 'Look',
+                        hint: 'System',
+                        icon: Icons.devices_rounded,
                         value: settings.previewPlatform,
+                        options: const [
+                          HarnessMenuItem(
+                            value: PreviewPlatform.system,
+                            label: 'System',
+                          ),
+                          HarnessMenuItem(
+                            value: PreviewPlatform.material,
+                            label: 'Android',
+                          ),
+                          HarnessMenuItem(
+                            value: PreviewPlatform.cupertino,
+                            label: 'Apple',
+                          ),
+                          HarnessMenuItem(
+                            value: PreviewPlatform.windows,
+                            label: 'Windows',
+                          ),
+                          HarnessMenuItem(
+                            value: PreviewPlatform.linux,
+                            label: 'Linux',
+                          ),
+                        ],
                         onChanged: settings.setPreviewPlatform,
                       ),
                     ),
-                    const SizedBox(height: HarnessSpace.md),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.only(top: 1),
-                          child: Icon(
-                            Icons.info_outline_rounded,
-                            size: 14,
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            settings.useCupertino
-                                ? 'Cupertino navigation, sheets and typography are active.'
-                                : 'Material 3 navigation, sheets and typography are active.',
-                            style: HarnessText.caption(context),
-                          ),
-                        ),
-                      ],
+                    const SizedBox(height: HarnessSpace.sm),
+                    Text(
+                      _look(settings.previewPlatform).label,
+                      key: const Key('look-active'),
+                      style: HarnessText.caption(context),
                     ),
                   ],
                 ),
@@ -441,10 +444,7 @@ class SettingsScreen extends StatelessWidget {
     final caps = app.capability;
     final diagnostics = const JsonEncoder.withIndent('  ').convert({
       'app': 'Harness 1.0.0',
-      'platformStyle':
-          HarnessStyle.of(context).style == HarnessPlatformStyle.cupertino
-          ? 'cupertino'
-          : 'material',
+      'platformStyle': HarnessStyle.lookOf(context).name,
       'address': app.address,
       'phase': app.phase.name,
       'agent': caps?.agentName,
@@ -462,6 +462,15 @@ class SettingsScreen extends StatelessWidget {
     await Clipboard.setData(ClipboardData(text: diagnostics));
   }
 }
+
+/// The look a choice in Settings shows, for the caption under it.
+HarnessPlatformStyle _look(PreviewPlatform platform) => switch (platform) {
+  PreviewPlatform.system => HarnessPlatformStyle.current,
+  PreviewPlatform.material => HarnessPlatformStyle.material,
+  PreviewPlatform.cupertino => HarnessPlatformStyle.cupertino,
+  PreviewPlatform.windows => HarnessPlatformStyle.windows,
+  PreviewPlatform.linux => HarnessPlatformStyle.linux,
+};
 
 /// One setting: its icon, its name and what it does, and what changes it,
 /// which is either at the far edge ([trailing], a switch) or under the text,

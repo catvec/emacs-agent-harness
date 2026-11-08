@@ -188,7 +188,9 @@ class HarnessPage extends StatelessWidget {
               ),
         leading: leading,
         actions: headerActions,
-        centerTitle: centerTitle,
+        // GNOME's own header bars are centred; Windows' are at the start,
+        // unless a page asks for something else.
+        centerTitle: centerTitle || HarnessStyle.isLinux(context),
       ),
       body: SafeArea(top: false, child: content),
       resizeToAvoidBottomInset: resizeToAvoidBottomInset,
@@ -1104,6 +1106,19 @@ class HarnessSectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final look = HarnessStyle.lookOf(context);
+    // Android's label is the brand's: small, spaced, upper case.  A desktop
+    // names a group of settings the way its own settings app does: a line of
+    // ordinary bold text, a little larger on GNOME.
+    final style = switch (look) {
+      HarnessPlatformStyle.windows => HarnessText.rowTitle(
+        context,
+      ).copyWith(fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 0),
+      HarnessPlatformStyle.linux => HarnessText.rowTitle(
+        context,
+      ).copyWith(fontSize: 15, fontWeight: FontWeight.w700, letterSpacing: 0),
+      _ => HarnessText.label(context),
+    };
     return Padding(
       padding: padding,
       child: Row(
@@ -1111,7 +1126,10 @@ class HarnessSectionHeader extends StatelessWidget {
         textBaseline: TextBaseline.alphabetic,
         children: [
           Expanded(
-            child: Text(label.toUpperCase(), style: HarnessText.label(context)),
+            child: Text(
+              look.isDesktop ? label : label.toUpperCase(),
+              style: style,
+            ),
           ),
           if (trailing != null) trailing!,
         ],

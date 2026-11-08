@@ -130,6 +130,10 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
       await widget.settings.setPreviewPlatform(PreviewPlatform.cupertino);
     } else if (platform == 'material' || platform == 'android') {
       await widget.settings.setPreviewPlatform(PreviewPlatform.material);
+    } else if (platform == 'windows' || platform == 'fluent') {
+      await widget.settings.setPreviewPlatform(PreviewPlatform.windows);
+    } else if (platform == 'linux' || platform == 'adwaita') {
+      await widget.settings.setPreviewPlatform(PreviewPlatform.linux);
     }
     switch (query['theme']) {
       case 'light':
@@ -155,9 +159,16 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
     return AnimatedBuilder(
       animation: widget.settings,
       builder: (context, _) {
-        final style = widget.settings.useCupertino
-            ? HarnessPlatformStyle.cupertino
-            : HarnessPlatformStyle.material;
+        // The platform's own look unless Settings previews another: Apple's
+        // on iOS and macOS, Android's on Android, Fluent on Windows and
+        // Adwaita on Linux.
+        final style = switch (widget.settings.previewPlatform) {
+          PreviewPlatform.material => HarnessPlatformStyle.material,
+          PreviewPlatform.cupertino => HarnessPlatformStyle.cupertino,
+          PreviewPlatform.windows => HarnessPlatformStyle.windows,
+          PreviewPlatform.linux => HarnessPlatformStyle.linux,
+          PreviewPlatform.system => HarnessPlatformStyle.current,
+        };
         return HarnessStyle(
           style: style,
           child: HarnessScope(
@@ -167,8 +178,8 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
               navigatorKey: _navigator,
               title: 'Harness',
               debugShowCheckedModeBanner: false,
-              theme: _themed(HarnessTheme.material(Brightness.light)),
-              darkTheme: _themed(HarnessTheme.material(Brightness.dark)),
+              theme: _themed(HarnessTheme.platform(style, Brightness.light)),
+              darkTheme: _themed(HarnessTheme.platform(style, Brightness.dark)),
               themeMode: widget.settings.themeMode,
               locale: const Locale('en'),
               supportedLocales: const [Locale('en')],

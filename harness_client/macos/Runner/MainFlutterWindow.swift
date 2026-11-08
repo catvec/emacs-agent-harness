@@ -4,9 +4,12 @@ import FlutterMacOS
 class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
-    let windowFrame = self.frame
     self.contentViewController = flutterViewController
-    self.setFrame(windowFrame, display: true)
+    // A window the size of a desktop, and the smallest it may be made: the
+    // pages need room for the navigation pane beside the chat.
+    self.contentMinSize = NSSize(width: 760, height: 560)
+    self.setContentSize(NSSize(width: 1280, height: 820))
+    self.center()
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 

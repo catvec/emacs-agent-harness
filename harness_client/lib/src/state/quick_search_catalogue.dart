@@ -461,11 +461,11 @@ List<QuickCommand> quickCommands(AppController app, {String? project}) {
       where: 'settings',
     ),
     screen(
-      'platform-feel',
+      'look',
       'settings',
-      'Settings tab › Appearance › Platform feel',
-      'Switch between Android and Apple styling',
-      'Material 3 controls or Cupertino ones; follows the system by default.',
+      'Settings tab › Appearance › Look',
+      'Platform look',
+      'System, or Material 3, Cupertino, Fluent or Adwaita controls.',
       where: 'settings',
     ),
   ];

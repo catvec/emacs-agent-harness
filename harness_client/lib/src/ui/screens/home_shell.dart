@@ -381,6 +381,13 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
         mainAxisSize: MainAxisSize.min,
         children: [
           ConnectionBanner(app: app),
+          // Fluent's bar is a panel of the window, with a rule above it.
+          if (HarnessStyle.isWindows(context))
+            Divider(
+              height: 1,
+              thickness: 1,
+              color: theme.colorScheme.outlineVariant,
+            ),
           _withFittedLabels(
             fitted,
             NavigationBar(
@@ -530,7 +537,15 @@ class _Sidebar extends StatelessWidget {
   Widget build(BuildContext context) {
     final cupertino = HarnessStyle.isCupertino(context);
     final theme = Theme.of(context);
-    final width = MediaQuery.sizeOf(context).width >= 1180 ? 264.0 : 228.0;
+    // Windows' navigation pane is a little wider than GNOME's, and GNOME's
+    // a little wider than Android's.
+    final look = HarnessStyle.lookOf(context);
+    final wide = MediaQuery.sizeOf(context).width >= 1180;
+    final width = switch (look) {
+      HarnessPlatformStyle.windows => wide ? 300.0 : 256.0,
+      HarnessPlatformStyle.linux => wide ? 268.0 : 232.0,
+      _ => wide ? 264.0 : 228.0,
+    };
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -628,12 +643,19 @@ class _Sidebar extends StatelessWidget {
         child: SafeArea(right: false, child: content),
       );
     }
-    return Material(
-      color: theme.colorScheme.surfaceContainerLowest,
-      child: SizedBox(
-        width: width,
-        child: SafeArea(right: false, child: content),
+    // A desktop pane is a panel of the window, with a rule where the page
+    // starts; Android's sidebar is the page's own surface.
+    final desktop =
+        HarnessStyle.isWindows(context) || HarnessStyle.isLinux(context);
+    return Container(
+      width: width,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLowest,
+        border: desktop
+            ? Border(right: BorderSide(color: theme.colorScheme.outlineVariant))
+            : null,
       ),
+      child: SafeArea(right: false, child: content),
     );
   }
 }
@@ -647,34 +669,71 @@ class _SidebarSearch extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cupertino = HarnessStyle.isCupertino(context);
+    final windows = HarnessStyle.isWindows(context);
+    final linux = HarnessStyle.isLinux(context);
     final theme = Theme.of(context);
     final muted = theme.colorScheme.onSurfaceVariant;
+    // The field is a Fluent search box, a GNOME search entry, or the app's
+    // own row: its corners, padding and type follow the look.
+    final radius = windows
+        ? 4.0
+        : linux
+        ? 8.0
+        : 12.0;
     return Semantics(
       button: true,
       label: QuickSearchEntry.buttonLabel,
       child: HarnessTap(
         key: const Key('sidebar-quick-search'),
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(radius),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+          padding: EdgeInsets.symmetric(
+            horizontal: windows
+                ? 12
+                : linux
+                ? 14
+                : 13,
+            vertical: windows
+                ? 8
+                : linux
+                ? 9
+                : 11,
+          ),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
+            color: windows || linux
+                ? theme.colorScheme.surfaceContainerLow
+                : null,
+            borderRadius: BorderRadius.circular(radius),
             border: Border.all(color: theme.colorScheme.outlineVariant),
           ),
           child: Row(
             children: [
               Icon(
                 cupertino ? CupertinoIcons.search : Icons.search_rounded,
-                size: 19,
+                size: windows
+                    ? 18
+                    : linux
+                    ? 20
+                    : 19,
                 color: muted,
               ),
-              const SizedBox(width: 11),
+              SizedBox(
+                width: windows
+                    ? 10
+                    : linux
+                    ? 12
+                    : 11,
+              ),
               Expanded(
                 child: Text(
                   'Search',
                   style: TextStyle(
-                    fontSize: 14,
+                    fontSize: windows
+                        ? 13
+                        : linux
+                        ? 15
+                        : 14,
                     fontWeight: FontWeight.w500,
                     color: muted,
                   ),
@@ -704,50 +763,128 @@ class _SidebarItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cupertino = HarnessStyle.isCupertino(context);
+    final windows = HarnessStyle.isWindows(context);
+    final linux = HarnessStyle.isLinux(context);
     final theme = Theme.of(context);
-    final color = selected
-        ? (cupertino
-              ? CupertinoTheme.of(context).primaryColor
-              : theme.colorScheme.onPrimaryContainer)
-        : theme.colorScheme.onSurfaceVariant;
+    final primary = cupertino
+        ? CupertinoTheme.of(context).primaryColor
+        : theme.colorScheme.primary;
+    // Fluent's rows are compact, GNOME's are roomy, Android's are in between.
+    final fontSize = windows
+        ? 13.0
+        : linux
+        ? 15.0
+        : 14.0;
+    final iconSize = windows
+        ? 18.0
+        : linux
+        ? 20.0
+        : 19.0;
+    final gap = windows
+        ? 10.0
+        : linux
+        ? 12.0
+        : 11.0;
+    final vertical = windows
+        ? 8.0
+        : linux
+        ? 10.0
+        : 11.0;
+    final horizontal = windows
+        ? 12.0
+        : linux
+        ? 14.0
+        : 13.0;
+    final weight = selected
+        ? (linux
+              ? FontWeight.w700
+              : windows
+              ? FontWeight.w600
+              : FontWeight.w700)
+        : (windows ? FontWeight.w400 : FontWeight.w500);
+    // Each look marks the page in use the way its own system does: a tint
+    // and a bar at the start on Windows, a tinted pill on GNOME, the
+    // primary container on Android, an accent wash on Apple.
+    final radius = windows
+        ? 4.0
+        : linux
+        ? 10.0
+        : 12.0;
+    final selectedColor = windows
+        ? theme.colorScheme.surfaceContainerHigh
+        : linux
+        ? primary.withValues(alpha: 0.16)
+        : cupertino
+        ? primary.withValues(alpha: 0.12)
+        : theme.colorScheme.primaryContainer;
+    final color = !selected
+        ? theme.colorScheme.onSurfaceVariant
+        : cupertino
+        ? primary
+        : windows || linux
+        ? theme.colorScheme.onSurface
+        : theme.colorScheme.onPrimaryContainer;
+    final iconColor = selected && (windows || linux) ? primary : color;
     return Semantics(
       button: true,
       selected: selected,
       label: tab.label,
       child: HarnessTap(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(radius),
         child: AnimatedContainer(
+          key: Key('sidebar-item-${tab.id}'),
           duration: const Duration(milliseconds: 160),
-          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
-          decoration: BoxDecoration(
-            color: selected
-                ? (cupertino
-                      ? CupertinoTheme.of(context).primaryColor
-                            .withValues(alpha: 0.12)
-                      : theme.colorScheme.primaryContainer)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
+          padding: EdgeInsets.symmetric(
+            horizontal: horizontal,
+            vertical: vertical,
           ),
-          child: Row(
+          decoration: BoxDecoration(
+            color: selected ? selectedColor : Colors.transparent,
+            borderRadius: BorderRadius.circular(radius),
+          ),
+          child: Stack(
             children: [
-              Icon(
-                cupertino ? tab.cupertinoIcon : tab.materialIcon,
-                size: 19,
-                color: color,
+              Row(
+                children: [
+                  Icon(
+                    cupertino ? tab.cupertinoIcon : tab.materialIcon,
+                    size: iconSize,
+                    color: iconColor,
+                  ),
+                  SizedBox(width: gap),
+                  Expanded(
+                    child: Text(
+                      tab.label,
+                      style: TextStyle(
+                        fontSize: fontSize,
+                        fontWeight: weight,
+                        color: color,
+                      ),
+                    ),
+                  ),
+                  if (badge > 0) HarnessBadge(count: badge),
+                ],
               ),
-              const SizedBox(width: 11),
-              Expanded(
-                child: Text(
-                  tab.label,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                    color: color,
+              // Fluent's selection mark: a bar at the leading edge, over the
+              // row's padding, so the name does not move when it is chosen.
+              if (selected && windows)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: Container(
+                      key: const Key('sidebar-accent-bar'),
+                      width: 3,
+                      height: 16,
+                      decoration: BoxDecoration(
+                        color: primary,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
                   ),
                 ),
-              ),
-              if (badge > 0) HarnessBadge(count: badge),
             ],
           ),
         ),

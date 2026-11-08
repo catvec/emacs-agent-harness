@@ -159,7 +159,12 @@ class _SessionsScreenState extends State<SessionsScreen> {
                         children: [
                           Text(
                             'Sessions',
-                            style: HarnessText.pageTitle(context),
+                            // A desktop names the pane the way it names a
+                            // page: Fluent's 20-point semibold, GNOME's
+                            // small bold.
+                            style: HarnessStyle.lookOf(context).isDesktop
+                                ? Theme.of(context).appBarTheme.titleTextStyle
+                                : HarnessText.pageTitle(context),
                           ),
                           const SizedBox(width: HarnessSpace.sm),
                           Text(
@@ -469,7 +474,16 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final style = HarnessText.label(context);
+    final look = HarnessStyle.lookOf(context);
+    final style = switch (look) {
+      HarnessPlatformStyle.windows => HarnessText.rowTitle(
+        context,
+      ).copyWith(fontSize: 13, fontWeight: FontWeight.w600, letterSpacing: 0),
+      HarnessPlatformStyle.linux => HarnessText.rowTitle(
+        context,
+      ).copyWith(fontSize: 14, fontWeight: FontWeight.w700, letterSpacing: 0),
+      _ => HarnessText.label(context),
+    };
     return Padding(
       // On the gutter, the left edge of the avatars below it.
       padding: const EdgeInsets.fromLTRB(
@@ -482,7 +496,7 @@ class _SectionLabel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.baseline,
         textBaseline: TextBaseline.alphabetic,
         children: [
-          Text(label.toUpperCase(), style: style),
+          Text(look.isDesktop ? label : label.toUpperCase(), style: style),
           const SizedBox(width: 6),
           Text(
             '$count',

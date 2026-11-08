@@ -7,7 +7,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../voice/voice_settings.dart';
 
-enum PreviewPlatform { system, material, cupertino }
+/// The look this device shows: the platform's own, or one chosen in
+/// Settings.  [material] is Android's Material 3, [cupertino] is the Apple
+/// look of iOS and macOS, [windows] is Fluent, [linux] is libadwaita.
+enum PreviewPlatform { system, material, cupertino, windows, linux }
 
 /// What sends what is written in the message box.  [enter] is the app's own
 /// key; [ctrlCctrlC] is Emacs's, for a person whose hands already know it.
@@ -240,7 +243,9 @@ class SettingsController extends ChangeNotifier {
 
   bool get useCupertino => switch (_previewPlatform) {
     PreviewPlatform.cupertino => true,
-    PreviewPlatform.material => false,
+    PreviewPlatform.material ||
+    PreviewPlatform.windows ||
+    PreviewPlatform.linux => false,
     PreviewPlatform.system =>
       defaultTargetPlatform == TargetPlatform.iOS ||
           defaultTargetPlatform == TargetPlatform.macOS,
@@ -301,6 +306,8 @@ class SettingsController extends ChangeNotifier {
         _previewPlatform = switch (prefs.getString('previewPlatform')) {
           'material' => PreviewPlatform.material,
           'cupertino' => PreviewPlatform.cupertino,
+          'windows' => PreviewPlatform.windows,
+          'linux' => PreviewPlatform.linux,
           _ => PreviewPlatform.system,
         };
       });
@@ -387,6 +394,8 @@ class SettingsController extends ChangeNotifier {
       PreviewPlatform.system => 'system',
       PreviewPlatform.material => 'material',
       PreviewPlatform.cupertino => 'cupertino',
+      PreviewPlatform.windows => 'windows',
+      PreviewPlatform.linux => 'linux',
     });
   }
 

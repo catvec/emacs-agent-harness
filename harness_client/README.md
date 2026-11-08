@@ -342,8 +342,10 @@ time it opens. It asks again only when the harness does.
   | ![A conversation's header with the search button at its end](screenshots/android-quick-search-way-in-chat.png) | ![The answer in words, then the actions that do it](screenshots/android-quick-search-answer.png) | ![Tasks, a session and an order waiting for a yes](screenshots/android-quick-search-tasks.png) |
 - **Feels at home on the platform.** Material 3 with warm paper surfaces on
   Android; Cupertino navigation, tab bar, switches, sheets, typography and
-  motion on iOS and macOS. Wide screens get a sidebar and a list/detail split.
-  Theme and a System/Android/Apple preview are in Settings.
+  motion on iOS and macOS; Fluent 2 on Windows and Adwaita on Linux, each
+  with its own font, palette, corners and header. Wide screens get a sidebar
+  and a list/detail split. Theme and a System/Android/Apple/Windows/Linux
+  **Look** are in Settings. See [Looks](#looks).
 - **Connects the way the harness is reached.** ACP over WebSocket (`ws://`
   and `wss://`, or the `https://` URL of a harness behind a TLS proxy) or
   ACP's line-framed TCP (`tcp://`) on desktop; the browser build uses
@@ -855,7 +857,58 @@ e2e/                  Playwright mobile-emulated flows and screenshots
   input, durations, evidence and `HandInReport`.
 - `HarnessStyle` is the native-feel switch. Widgets choose Material or
   Cupertino controls from it; it follows the real platform and can be
-  previewed in Settings or with `?platform=cupertino` on the web.
+  previewed in Settings or with `?platform=cupertino` on the web. The look
+  model is four values, `HarnessPlatformStyle` (`material`, `cupertino`,
+  `windows`, `linux`), each with the theme that draws it. See [Looks](#looks).
+
+## Looks
+
+The same pages are drawn in the look of the platform the app runs on, chosen
+once and carried by every screen:
+
+![The four looks: Windows Fluent, Linux Adwaita, macOS Cupertino, Android Material 3](../docs/evidence/desktop-looks/desktop-looks-compared.png)
+
+| Look | Platform | What it follows |
+|---|---|---|
+| **Material 3** | Android | The Material 3 theme with the app's warm paper surfaces. |
+| **Cupertino** | iOS, macOS | Cupertino navigation, tab bar, switches, sheets and motion. |
+| **Fluent** | Windows | Fluent 2: Segoe UI Variable Text, a Mica-like canvas (`#F3F3F3` light, `#202020` dark) with a distinct navigation pane (`#EBEBEB`), 4-point controls, 8-point cards lifted by a hairline shadow, accent blue (`#0067C0` light, `#60CDFF` dark), a header at the start in a 48-point bar, 14-point section titles, compact rows, and a bar at the leading edge of the page in use. |
+| **Adwaita** | Linux | libadwaita: Cantarell, an off-white window whose sidebar is the window itself (`#F6F5F4` light, `#242424` dark), 6-point controls, 12-point cards, Adwaita blue (`#3584E4` light, `#78AEED` dark), a centred bold header in a 48-point bar, 15-point section titles, roomy rows, and a pill around the page in use. |
+
+The page is the same under all four; what changes is the theme under it
+(`HarnessTheme.windows` and `.linux` in
+`lib/src/ui/theme/harness_theme.dart`, and `HarnessTheme.platform`), the font
+each names, the corners of controls, cards and the bottom bar, and the way the
+sidebar marks the page in use. Light and dark follow the app's Theme setting,
+so a Windows or GNOME desktop in its dark mode gets the dark Fluent or Adwaita
+palette.
+
+**Settings › Look** chooses one by hand (System, Android, Apple, Windows,
+Linux) for a preview or a screenshot; **System**, the default, follows the
+platform (`HarnessPlatformStyle.forTarget`). The web build takes
+`?platform=windows` or `?platform=linux` (`fluent` and `adwaita` too), as it
+took `cupertino` and `material`.
+
+The desktop runners open at a desktop's size and keep the panes whole: a
+window is 1280×820 and may be made no smaller than 760×560
+(`macos/Runner/MainFlutterWindow.swift`, `linux/runner/my_application.cc`,
+`windows/runner/main.cpp` and `SetMinimumSize` in `win32_window.cpp`).
+
+`tool/demo_looks.sh` serves the web build with the mock harness and prints the
+URL of each look, for a browser to compare them side by side.
+
+| Windows (Fluent) | Linux (Adwaita) |
+|---|---|
+| ![Settings under Fluent](../docs/evidence/desktop-looks/desktop-windows-settings.png) | ![Settings under Adwaita](../docs/evidence/desktop-looks/desktop-linux-settings.png) |
+| ![The session list under Fluent](../docs/evidence/desktop-looks/desktop-windows-sessions.png) | ![The session list under Adwaita](../docs/evidence/desktop-looks/desktop-linux-sessions.png) |
+
+| Apple (Cupertino) | Android (Material 3) |
+|---|---|
+| ![The session list under Cupertino](../docs/evidence/desktop-looks/desktop-macos-sessions.png) | ![The session list under Material 3](../docs/evidence/desktop-looks/desktop-android-sessions.png) |
+
+| A narrow window: Fluent | The Look row |
+|---|---|
+| ![The bottom bar on Windows](../docs/evidence/desktop-looks/desktop-windows-narrow.png) | ![System, Android, Apple, Windows, Linux](../docs/evidence/desktop-looks/desktop-look-menu.png) |
 
 ## Layout
 
