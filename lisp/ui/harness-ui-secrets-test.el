@@ -38,7 +38,13 @@
 (defvar harness-ui-secrets-report-buffer-name)
 
 (declare-function harness-redact-secret "harness-ui-secrets")
-(declare-function harness-secrets-add-source "harness-ui-secrets")
+(declare-function harness-secrets-add-source "harness-ui-secrets" (&optional kind))
+(declare-function harness-ui-secrets--open-add "harness-ui-secrets" (&optional kind))
+(declare-function harness-ui-secrets--add-widget "harness-ui-secrets" (key))
+(declare-function harness-ui-secrets--add-register "harness-ui-secrets" ())
+(declare-function harness-ui-secrets--render-add "harness-ui-secrets" ())
+(declare-function widget-value-set "wid-edit" (widget value))
+(declare-function widget-apply "wid-edit" (widget property &rest args))
 (declare-function harness-secrets-list-sources "harness-ui-secrets")
 (declare-function harness-redactions "harness-ui-secrets")
 (declare-function harness-ui-secrets-redact "harness-ui-secrets")
@@ -244,6 +250,34 @@ They stay there after BODY."
 (defun harness-ui-secrets-test--said ()
   "Return the messages shown so far, oldest first."
   (reverse harness-ui-secrets-test--messages))
+
+(defun harness-ui-secrets-test--form-field (key)
+  "Return the new-source form's widget for KEY."
+  (with-current-buffer harness-ui-secrets-add-buffer-name
+    (harness-ui-secrets--add-widget key)))
+
+(defun harness-ui-secrets-test--form-set (key value)
+  "Set the new-source form's field KEY to VALUE."
+  (with-current-buffer harness-ui-secrets-add-buffer-name
+    (widget-value-set (harness-ui-secrets--add-widget key) value)))
+
+(defun harness-ui-secrets-test--form-press (key)
+  "Press the new-source form's button KEY."
+  (with-current-buffer harness-ui-secrets-add-buffer-name
+    (widget-apply (harness-ui-secrets--add-widget key) :notify)))
+
+(defun harness-ui-secrets-test--form-copy ()
+  "Return the new-source form's text, its field padding and blank lines gone."
+  (with-current-buffer harness-ui-secrets-add-buffer-name
+    (mapconcat #'identity
+               (delq nil
+                     (mapcar (lambda (line)
+                               (let ((line (string-trim
+                                            (replace-regexp-in-string "[[:space:]]+" " " line))))
+                                 (unless (string-empty-p line) line)))
+                             (split-string (buffer-substring-no-properties (point-min) (point-max))
+                                           "\n" t)))
+               "\n")))
 
 (defun harness-ui-secrets-test--engine (params)
   "Answer `_harness/secrets/redact' with PARAMS as the engine does: 3 found.
@@ -1187,12 +1221,12 @@ and `plain' a buffer of the user's."
           (goto-char (point-min))
           (while (and (not (eobp)) (not (equal "src-abc" (tabulated-list-get-id)))) (forward-line 1))
           (let ((reads (length (harness-ui-secrets-test--calls "_harness/secrets/sources"))))
-            (harness-ui-secrets-test-asking (list (cons "Stop masking spaces" t))
+            (harness-ui-secrets-test-asking (list (cons "Source removal: spaces · harness-wide masking and file isolation? " t))
               (harness-ui-secrets-remove-source))
             (should (equal '((:id "src-abc"))
                            (mapcar #'cadr (harness-ui-secrets-test--calls "_harness/secrets/remove-source"))))
             (should (> (length (harness-ui-secrets-test--calls "_harness/secrets/sources")) reads))))
-        (should (cl-some (lambda (m) (string-match-p "No longer masking spaces" m))
+        (should (cl-some (lambda (m) (string-match-p "Source removed: spaces" m))
                          (harness-ui-secrets-test--said)))))))
 
 (defun harness-ui-secrets-test--cut-cells ()
@@ -1202,6 +1236,204 @@ and `plain' a buffer of the user's."
       (when (stringp (get-text-property pos 'display))
         (cl-incf cut)))
     cut))
+
+(ert-deftest harness-ui-secrets-new-source-form-shows-what-it-registers ()
+  "The form names the kind, fields, label and harness-wide scope with their copy."
+  (harness-ui-secrets-test-with
+    (harness-ui-secrets--open-add 'json)
+    (with-current-buffer harness-ui-secrets-add-buffer-name
+      (should (derived-mode-p 'harness-ui-secrets-add-mode))
+      (should (equal (concat "New secret source\n"
+                             "Where it can be read\n"
+                             "(*) JSON file and path\n"
+                             "( ) File and regexp\n"
+                             "( ) Environment variable\n"
+                             "( ) Command output\n"
+                             "File [Choose file…]\n"
+                             "JSON path [Read keys…]\n"
+                             "Label\n"
+                             "Masking\n"
+                             "Harness-wide\n"
+                             "[Register] [Cancel]")
+                     (harness-ui-secrets-test--form-copy)))
+      ;; A typed secret is not offered: a source is a place to read one.
+      (should-not (string-match-p "Type it" (buffer-string)))
+      (should (eq 'json (widget-value (harness-ui-secrets-test--form-field 'kind))))
+      (should (equal "File holding the secret"
+                     (widget-get (harness-ui-secrets-test--form-field 'file) :help-echo)))
+      (should (equal "Path in the file · Keys from Read keys"
+                     (widget-get (harness-ui-secrets-test--form-field 'json-path) :help-echo)))
+      (should (equal "File to read"
+                     (widget-get (harness-ui-secrets-test--form-field 'file-button) :help-echo)))
+      (should (equal "Keys of the file"
+                     (widget-get (harness-ui-secrets-test--form-field 'json-path-button) :help-echo)))
+      (should (equal "Label for the placeholder · default from the source"
+                     (widget-get (harness-ui-secrets-test--form-field 'label) :help-echo)))
+      (should (equal "Register · harness-wide masking"
+                     (widget-get (harness-ui-secrets-test--form-field 'register) :help-echo)))
+      (should (equal "Cancel · no source"
+                     (widget-get (harness-ui-secrets-test--form-field 'cancel) :help-echo)))
+      ;; The fields hold what the user puts there.
+      (harness-ui-secrets-test--form-set 'file "/vault/credentials.json")
+      (harness-ui-secrets-test--form-set 'json-path "token")
+      (harness-ui-secrets-test--form-set 'label "deployment")
+      (should (equal "deployment" (widget-value (harness-ui-secrets-test--form-field 'label))))
+      (should (equal "/vault/credentials.json"
+                     (widget-value (harness-ui-secrets-test--form-field 'file)))))))
+
+(ert-deftest harness-ui-secrets-new-source-form-offers-each-way ()
+  "Each kind shows the fields it names, and no others."
+  (harness-ui-secrets-test-with
+    (dolist (case '((json file json-path)
+                    (regexp file regexp)
+                    (env env)
+                    (command command)))
+      (harness-ui-secrets--open-add (nth 0 case))
+      (with-current-buffer harness-ui-secrets-add-buffer-name
+        (should (eq (nth 0 case) (widget-value (harness-ui-secrets-test--form-field 'kind))))
+        (should (string-match-p
+                 (concat "(\\*) " (nth 1 (assoc (nth 0 case) harness-ui-secrets--add-kinds)))
+                 (harness-ui-secrets-test--form-copy)))
+        (dolist (key '(file json-path regexp env command))
+          (should (eq (not (null (harness-ui-secrets-test--form-field key)))
+                      (and (memq key (cdr case)) t))))
+        (should (harness-ui-secrets-test--form-field 'label))
+        (should (harness-ui-secrets-test--form-field 'register))
+        (should (harness-ui-secrets-test--form-field 'cancel))))))
+
+(ert-deftest harness-ui-secrets-new-source-form-keeps-what-was-typed-when-the-way-changes ()
+  "Another way shows its own fields, and what was typed for the last is still there."
+  (harness-ui-secrets-test-with
+    (harness-ui-secrets--open-add 'json)
+    (harness-ui-secrets-test--form-set 'file "/vault/credentials.json")
+    (harness-ui-secrets-test--form-set 'label "deployment")
+    (with-current-buffer harness-ui-secrets-add-buffer-name
+      (setq harness-ui-secrets--add-error "File · none"))
+    (cl-letf (((symbol-function 'harness-run-soon)
+               (lambda (function &rest args) (apply function args))))
+      (let ((kind (harness-ui-secrets-test--form-field 'kind)))
+        (widget-value-set kind 'env)
+        (widget-apply kind :notify kind)
+        (with-current-buffer harness-ui-secrets-add-buffer-name
+          (should (eq 'env (widget-value (harness-ui-secrets-test--form-field 'kind))))
+          (should (equal "deployment"
+                         (widget-value (harness-ui-secrets-test--form-field 'label))))
+          (should (equal "/vault/credentials.json" harness-ui-secrets--add-file))
+          (should-not harness-ui-secrets--add-error))
+        (widget-value-set kind 'json)
+        (widget-apply kind :notify kind)))
+    (with-current-buffer harness-ui-secrets-add-buffer-name
+      (should (equal "/vault/credentials.json"
+                     (widget-value (harness-ui-secrets-test--form-field 'file)))))))
+
+(ert-deftest harness-ui-secrets-new-source-form-registers-a-reference-never-a-value ()
+  "The form sends where the secret is read, never a value."
+  (harness-ui-secrets-test-with
+    (harness-ui-secrets-test-collecting
+      (harness-ui-secrets-test-answering
+          (list (cons "_harness/secrets/add-source"
+                      (lambda (params)
+                        (list :id "src-new" :label (plist-get (plist-get params :ref) :label)
+                              :values 2 :fingerprints '("aaaaaaaa" "bbbbbbbb"))))
+                (cons "_harness/secrets/sources" (lambda (_) nil)))
+        (harness-ui-secrets--open-add 'env)
+        (harness-ui-secrets-test--form-set 'env "MY_TOKEN")
+        (harness-ui-secrets-test--form-set 'label "my token")
+        (harness-ui-secrets-test--form-press 'register)
+        (let ((call (car (harness-ui-secrets-test--calls "_harness/secrets/add-source"))))
+          (should (equal '(:ref (:env "MY_TOKEN" :label "my token")) (cadr call))))
+        (should-not (harness-ui-secrets-test--asked 'read-passwd))
+        (should (member "Masking 2 values of my token: sha256 aaaaaaaa, bbbbbbbb"
+                        (harness-ui-secrets-test--said)))
+        (should-not (get-buffer harness-ui-secrets-add-buffer-name))))))
+
+(ert-deftest harness-ui-secrets-new-source-form-failure-stays-on-the-form ()
+  "A source that cannot be read is not added, and the form says why."
+  (harness-ui-secrets-test-with
+    (harness-ui-secrets-test-collecting
+      (harness-ui-secrets-test-answering
+          (list (cons "_harness/secrets/add-source"
+                      (lambda (_)
+                        (list 'harness-ui-secrets-test--fail
+                              (list 'acp-error -32000 "MY_TOKEN is not set" nil)))))
+        (harness-ui-secrets--open-add 'env)
+        (harness-ui-secrets-test--form-set 'env "MY_TOKEN")
+        (harness-ui-secrets-test--form-press 'register)
+        (with-current-buffer harness-ui-secrets-add-buffer-name
+          ;; A narrow window folds the reason rather than cutting it off.
+          (let ((copy (harness-ui-secrets-test--form-copy)))
+            (should (string-match-p "Source addition failed" copy))
+            (should (string-match-p "MY_TOKEN is not set" copy)))
+          (should (string-match-p "\\[Register\\]" (buffer-string)))
+          (should-not (string-match-p "Registering" (buffer-string))))
+        (should (cl-some (lambda (m) (string-match-p "Source addition failed: MY_TOKEN is not set" m))
+                         (harness-ui-secrets-test--said)))))))
+
+(ert-deftest harness-ui-secrets-new-source-form-checks-what-it-needs ()
+  "Missing parts stay on the form as noun phrases, and a full one is sent."
+  (harness-ui-secrets-test-with
+    (harness-ui-secrets-test-collecting
+      (harness-ui-secrets-test-answering
+          (list (cons "_harness/secrets/add-source"
+                      (lambda (_) (list :id "src-new" :values 1 :fingerprints '("aaaaaaaa")))))
+        (harness-ui-secrets--open-add 'regexp)
+        (harness-ui-secrets-test--form-press 'register)
+        (with-current-buffer harness-ui-secrets-add-buffer-name
+          (should (string-match-p "File · none" (buffer-string))))
+        (should-not (harness-ui-secrets-test--calls "_harness/secrets/add-source"))
+        (harness-ui-secrets-test--form-set 'file "/vault/.env")
+        (harness-ui-secrets-test--form-press 'register)
+        (with-current-buffer harness-ui-secrets-add-buffer-name
+          (should (string-match-p "Regexp · none" (buffer-string))))
+        (harness-ui-secrets-test--form-set 'regexp "TOKEN=.*")
+        (harness-ui-secrets-test--form-press 'register)
+        (with-current-buffer harness-ui-secrets-add-buffer-name
+          (should (string-match-p "Regexp · no capture group" (buffer-string))))
+        (harness-ui-secrets-test--form-set 'regexp "TOKEN=\\(.*\\)")
+        (harness-ui-secrets-test--form-press 'register)
+        (should (equal '(:file "/vault/.env" :regexp "TOKEN=\\(.*\\)" :label ".env")
+                       (plist-get (cadr (car (harness-ui-secrets-test--calls
+                                              "_harness/secrets/add-source")))
+                                  :ref)))))))
+
+(ert-deftest harness-ui-secrets-registering-the-source-once ()
+  "Registering shows its state, and a second request waits for the answer."
+  (harness-ui-secrets-test-with
+    (let (calls)
+      (cl-letf (((symbol-function 'harness-ui-secrets--submit-source)
+                 (lambda (source label &optional _after _on-error)
+                   (push (list (plist-get source :ref) label) calls))))
+        (harness-ui-secrets--open-add 'env)
+        (harness-ui-secrets-test--form-set 'env "MY_TOKEN")
+        (harness-ui-secrets-test--form-press 'register)
+        (with-current-buffer harness-ui-secrets-add-buffer-name
+          (should (string-match-p "\\[Registering…\\]" (buffer-string)))
+          (harness-ui-secrets--add-register)
+          (should (= 1 (length calls))))))))
+
+(ert-deftest harness-ui-secrets-adding-a-source-redraws-an-access-view ()
+  "A source added from a session's Secrets page is shown there at once."
+  (harness-ui-secrets-test-with
+    (let ((access (generate-new-buffer " *harness access test*"))
+          refreshed)
+      (unwind-protect
+          (progn
+            (with-current-buffer access
+              (setq major-mode 'harness-ui-access-mode)
+              (set (make-local-variable 'harness-ui-access--page) 'secrets))
+            (cl-letf (((symbol-function 'harness-ui-access-refresh)
+                       (lambda (buffer) (push buffer refreshed))))
+              (harness-ui-secrets--refresh-views))
+            (should (equal (list access) refreshed))
+            ;; A page that does not show the sources is not asked again.
+            (with-current-buffer access
+              (set (make-local-variable 'harness-ui-access--page) 'overview))
+            (setq refreshed nil)
+            (cl-letf (((symbol-function 'harness-ui-access-refresh)
+                       (lambda (buffer) (push buffer refreshed))))
+              (harness-ui-secrets--refresh-views))
+            (should-not refreshed))
+        (kill-buffer access)))))
 
 (ert-deftest harness-ui-secrets-sources-list-shows-the-json-path-that-tells-sources-apart ()
   "The Source column grows to the longest source, so a long file name does not hide the path.
@@ -1236,47 +1468,30 @@ does not show; the column stops growing at its limit."
             (should (= harness-ui-secrets--source-width-limit (cadr (aref tabulated-list-format 1))))
             (should (= 1 (harness-ui-secrets-test--cut-cells)))))))))
 
-(ert-deftest harness-ui-secrets-add-source-sends-a-reference-never-a-value ()
-  "A source is named by where it is read; typing the secret is not offered."
+(ert-deftest harness-ui-secrets-source-removal-confirmation-and-failure-copy ()
+  "Removal names its harness-wide consequences; cancellation and failures keep it."
   (harness-ui-secrets-test-with
     (harness-ui-secrets-test-collecting
-      (harness-ui-secrets-test-answering
-          (list (cons "_harness/secrets/add-source"
-                      (lambda (params)
-                        (list :id "src-new" :label (plist-get (plist-get params :ref) :label)
-                              :values 2 :fingerprints '("aaaaaaaa" "bbbbbbbb"))))
-                (cons "_harness/secrets/sources" (lambda (_) nil)))
-        (harness-ui-secrets-test-asking
-            (list (cons "Where is the secret?"
-                        (lambda (_prompt choices &rest _)
-                          (should-not (member "Type it (hidden)" choices))
-                          (should (member "Command output" choices))
-                          "Environment variable"))
-                  (cons "Environment variable" "MY_TOKEN")
-                  (cons "Label for the placeholder" "my token"))
-          (harness-secrets-add-source))
-        (let ((call (car (harness-ui-secrets-test--calls "_harness/secrets/add-source"))))
-          (should (equal '(:ref (:env "MY_TOKEN" :label "my token")) (cadr call))))
-        (should-not (harness-ui-secrets-test--asked 'read-passwd))
-        (should (member "Masking 2 values of my token: sha256 aaaaaaaa, bbbbbbbb"
-                        (harness-ui-secrets-test--said)))))))
-
-(ert-deftest harness-ui-secrets-add-source-failure-is-reported ()
-  "A source that cannot be read is not added, and the harness's message says why."
-  (harness-ui-secrets-test-with
-    (harness-ui-secrets-test-collecting
-      (harness-ui-secrets-test-answering
-          (list (cons "_harness/secrets/add-source"
-                      (lambda (_)
-                        (list 'harness-ui-secrets-test--fail
-                              (list 'acp-error -32000 "MY_TOKEN is not set" nil)))))
-        (harness-ui-secrets-test-asking
-            (list (cons "Where is the secret?" "Environment variable")
-                  (cons "Environment variable" "MY_TOKEN")
-                  (cons "Label for the placeholder" ""))
-          (harness-secrets-add-source))
-        (should (cl-some (lambda (m) (string-match-p "was not added: MY_TOKEN is not set" m))
-                         (harness-ui-secrets-test--said)))))))
+      (let ((source '(:id "src-test" :label "deploy" :origin "stored"))
+            failures)
+        (harness-ui-secrets-test-answering
+            (list (cons "_harness/secrets/remove-source"
+                        (lambda (_) (list 'harness-ui-secrets-test--fail
+                                           '(acp-error -32000 "source unavailable" nil)))))
+          (harness-ui-secrets-test-asking
+              (list (cons "Source removal: deploy · harness-wide masking and file isolation? " nil))
+            (harness-ui-secrets-remove source))
+          (should-not (harness-ui-secrets-test--calls "_harness/secrets/remove-source"))
+          (harness-ui-secrets-test-asking
+              (list (cons "Source removal: deploy · harness-wide masking and file isolation? " t))
+            (harness-ui-secrets-remove source nil (lambda (text) (push text failures))))
+          (should (equal '("Source removal failed: source unavailable") failures))
+          (should (member "Source removal failed: source unavailable" (harness-ui-secrets-test--said))))
+        (should (equal '(user-error "Secret source unavailable")
+                       (should-error (harness-ui-secrets-remove nil) :type 'user-error)))
+        (should (equal '(user-error "Configuration source · harness-secrets-sources")
+                       (should-error (harness-ui-secrets-remove '(:id "config-1" :origin "config"))
+                                     :type 'user-error)))))))
 
 (ert-deftest harness-ui-secrets-redactions-lists-what-was-run ()
   "The log shows when, who asked, why, the secrets by fingerprint and the counts."

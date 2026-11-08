@@ -2,7 +2,7 @@
 
 # ui-access
 
-The jail and permissions view of a session, in four pages: its settings and directories, its tools, its rules and the judgements of its calls, each drawn as the chat draws it.
+The jail and permissions view of a session, in five pages: settings and directories, tools, rules, judgements and secret protection.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-access.el](../../lisp/ui/harness-ui-access.el)
@@ -16,8 +16,8 @@ The jail and permissions view of a session, in four pages: its settings and dire
 `harness-access` (C-c h j) says what a session may reach, in one
 place, and changes it.  Clicking the permission mode on a chat's
 settings line (Ask, Accept Edits, Auto, YOLO) opens it too.  It is
-four pages, a buffer each, that share a strip under the title --
-Overview, Tools, Rules, Judgements, also the keys 1 to 4 -- so the
+five pages, a buffer each, that share a strip under the title --
+Overview, Tools, Rules, Judgements, Secrets, also the keys 1 to 5 -- so the
 first page holds what most visits are for and the long lists are a
 click away rather than all on one screen:
 
@@ -40,8 +40,9 @@ click away rather than all on one screen:
   revoke a grant, restore one given up; new ones are allowed, for
   writing or for reading only, and the session moves to another
   working directory (`harness-directories`, C-c h d, opens the page
-  here).  Details end it: a line each for the tools, the rules and
-  the judgements, with what they hold, each a link to its page.
+  here).  Details end it: a line each for the tools, the rules, the
+  judgements and the secret protection, with what they hold, each a
+  link to its page.
 - Tools: those the session is offered, those it is not and why,
   and those that belong to other kinds of session.  A tool is turned
   off for the session, and on again, here.
@@ -57,6 +58,12 @@ click away rather than all on one screen:
   decided, by who decided, by tool and by text.  A call that waits
   for an answer is listed as waiting; the answer is the session's
   chat's, where the request is, not this view's.
+- Secrets: whether output masking and source-file isolation are on,
+  the detectors in force, the harness-wide registered sources with
+  their management actions, and the files this session's direct
+  `read_file` calls had secrets masked in.  A registered source and an
+  observed file stay apart, and there is no project scan; the page says
+  so (docs/secrets-view.md).
 
 What you change here takes effect at once, and the session's
 transcript says so.  The agent cannot change any of it this way: it
@@ -98,6 +105,7 @@ window shows when it is shown again.
 - `harness-ui-access-show-overview` — Show the Overview page of this view's session: its settings and directories.
 - `harness-ui-access-show-page` — Show PAGE of this view's session in place of this one.
 - `harness-ui-access-show-rules` — Show the Rules page of this view's session: its permission rules.
+- `harness-ui-access-show-secrets` — Show this session's secret detections and the harness-wide secret sources.
 - `harness-ui-access-show-tools` — Show the Tools page of this view's session: what it is offered, and not.
 - `harness-ui-access-take-away` — Take the directory at point away from the session, as its first button does.
 - `harness-ui-access-toggle` — Fold or unfold the call at point, or move to the next button.
@@ -137,7 +145,9 @@ window shows when it is shown again.
 
 ### Hooks it adds to
 
+- `harness-ui-connected-hook` → `harness-ui-access--reconnected`
 - `harness-ui-event-functions` → `harness-ui-access--on-event`
+- `harness-ui-redraw-hook` → `harness-ui-access--redraw`
 - `harness-ui-update-functions` → `harness-ui-access--on-update`
 - `window-buffer-change-functions` → `harness-ui-access--shown`
 

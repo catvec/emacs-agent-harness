@@ -478,12 +478,18 @@ user is not asked to approve a run that cannot work.
 
 ### In the access view
 
-The Secrets group of the jail details page is stage 5.  It will list
-each secret with its label, fingerprint, source description, last use
-and an error, with no values and no reveal action.
-`secret-sandbox/secrets` is the method behind it; the prompts stay in
-the chat, and this change does not edit
-`lisp/ui/harness-ui-access.el`.
+The access view has a Secrets page.  It says whether output masking is
+on and whether this build hides source files, lists the harness-wide
+registered sources (add, remove, redact, history, settings), and lists
+the files this session's direct `read_file` calls had secrets masked
+in, with labels, fingerprints and counts.  It shows no value, no raw
+tool output and no guessed file for shell or grep output.
+
+What the page does not yet show is the locked-run view of each secret:
+its per-secret availability, source problem and last use.  Those stay
+with `list_secrets` in the chat and `secret-sandbox/secrets`; a later
+change can add them to the same page without a second list of secrets.
+The prompts for a locked run stay in the chat.
 
 ## Tests
 
@@ -524,7 +530,7 @@ macOS.
 | 2. The locked profile | `sandbox/wrap`'s `:profile`, `:env` and `:hide`; `sandbox/profiles`; bwrap implements `locked`; MXC implements it; systemd-run signals; the module makes the per-call directory and runs through `secret-sandbox/run`. | Done. |
 | 3. Output withheld | stdout, stderr, the exit status and the duration are dropped; the result is one fixed sentence; a masking failure cannot leak because there is no output to mask; the run refuses when masking is off, since the value's other routes still need it. | Done. |
 | 4. The request tool and the prompt | `run_with_secret` with its schema, description, subject and handler; the priority-21 stage through `harness-perms-confirm`, allow-once/deny-once, the non-interactive denial, the backend and source pre-checks. | Done. |
-| 5. The access view | The Secrets group in the jail details page: label, fingerprint, source, last use, an error. | Not done.  It waits for t-tizx77bw; `secret-sandbox/secrets` returns the data, and this change does not edit `lisp/ui/harness-ui-access.el`. |
+| 5. The access view | The Secrets page: masking and isolation state, registered sources with management, and this session's file-output detections.  The locked-run list (label, source problem, last use) is still `list_secrets`. | Partly done.  The visibility and source management are in the access view; the per-secret locked-run list has no production consumer of `secret-sandbox/secrets` yet. |
 | 6. Tests, docs and the whole check | The tests above, the module page, the README link, this page. | Done. |
 
 Order mattered and still does: masking before the tool, and the profile

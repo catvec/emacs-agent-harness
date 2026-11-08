@@ -417,7 +417,7 @@ their own: none of their lists is on the Overview."
     (harness-ui-access-test-open sid)
     (let ((text (harness-ui-access-test-text)))
       (should (string-match-p "\\`Jail & permissions of " text))
-      (should (string-match-p "^Overview  ·  Tools  ·  Rules  ·  Judgements$" text)))
+      (should (string-match-p "^Overview  ·  Tools  ·  Rules  ·  Judgements  ·  Secrets$" text)))
     (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network"
                    (harness-ui-access-test-setting 'mode)))
     (should (equal "Interaction (x) Interactive ( ) Non-interactive Prompts for undecided calls"
@@ -1227,6 +1227,7 @@ goes back to the Overview, and from the Overview leaves the view."
           (should (get-text-property (match-beginning 0) 'harness-ui-action))))
       ;; The keys.
       (dolist (case '(("3" rules "^Rules  first match, after the jail")
+                      ("5" secrets "^Protection$")
                       ("4" judgements "^Judgements  ")
                       ("2" tools "^Tools  [0-9]+ offered")
                       ("1" overview "^Settings$")))
@@ -1236,8 +1237,8 @@ goes back to the Overview, and from the Overview leaves the view."
           (set-buffer buffer)
           (harness-test-wait (lambda () harness-ui-access--describe) 5 "the page")
           (harness-ui-access-test-wait-text (nth 2 case))))
-      ;; Four buffers, one a page, and each the session's.
-      (should (= 4 (length (harness-ui-access--buffers sid))))
+      ;; Five buffers, one a page, and each the session's.
+      (should (= 5 (length (harness-ui-access--buffers sid))))
       ;; q from another page goes back to the Overview; from the Overview it leaves.
       (set-buffer (harness-ui-access-test-page-buffer sid 'judgements))
       (cl-letf (((symbol-function 'harness-ui-quit-view) (lambda () (setq left t))))
@@ -1253,7 +1254,7 @@ goes back to the Overview, and from the Overview leaves the view."
 page: the tools, the rules, the judgements."
   (harness-ui-access-test-with
     (harness-ui-access-test-open sid)
-    (dolist (page '(tools rules judgements))
+    (dolist (page '(tools rules judgements secrets))
       (let* ((anchor (cons 'detail page))
              (start (harness-ui-access--find-anchor anchor))
              (end (or (next-single-property-change start 'harness-ui-access-anchor) (point-max))))
@@ -1261,7 +1262,7 @@ page: the tools, the rules, the judgements."
         ;; The whole row is the link, and its tooltip names the key.
         (should-not (text-property-not-all (+ start 2) (1- end) 'harness-ui-action
                                            (get-text-property (+ start 2) 'harness-ui-action)))
-        (should (string-match-p "([234])\\'" (get-text-property (+ start 2) 'help-echo)))
+        (should (string-match-p "([2345])\\'" (get-text-property (+ start 2) 'help-echo)))
         (set-buffer (harness-ui-access-test-page-buffer sid 'overview))
         (harness-ui-access-test-click (capitalize (symbol-name page)) start)
         (let ((buffer (harness-ui-access-test-page-buffer sid page)))
@@ -1290,6 +1291,7 @@ none.  No page asks for the requests the session waits on."
         (dolist (case `((overview ("_harness/access/describe") ("_harness/access/judgements" . 1))
                         (tools ("_harness/access/describe"))
                         (rules ("_harness/access/describe"))
+                        (secrets ("_harness/access/describe"))
                         (judgements ("_harness/access/describe")
                                     ("_harness/access/judgements" . ,harness-ui-access-judgements-limit))))
           (setq asked nil)
@@ -1321,7 +1323,7 @@ fetches once a window shows it.  The page that is shown follows at once."
                             (get-buffer-window (or buffer (current-buffer)) t)
                             t))))
             (harness-ui-access--on-event "access/changed" (list sid)))
-          (should harness-ui-access--stale)
+          (harness-test-wait (lambda () harness-ui-access--stale) 5 "the hidden page marked stale")
           (should (equal "Network (x) On ( ) Off" (harness-ui-access-test-setting 'network))))
         (set-buffer tools)
         (harness-ui-access-show-overview)
@@ -1523,6 +1525,210 @@ the answer made in the chat's.  The demo provider is the cheap model."
       (harness-ui-access-test-open sid 'judgements)
       (harness-ui-access-test-wait-text "✓ allowed by you · handle w1")
       (should-not (string-match-p "? waiting" (harness-ui-access-test-text))))))
+
+;;;; Secrets: exact rendered copy, actions and asynchronous state
+
+(defun harness-ui-access-test-copy-lines (text)
+  "Return TEXT's nonblank lines with layout padding normalized."
+  (delq nil (mapcar (lambda (line)
+                     (let ((line (string-trim (replace-regexp-in-string "[ \t]+" " " line))))
+                       (unless (string-empty-p line) line)))
+                   (split-string text "\n"))))
+
+(defun harness-ui-access-test-secret-copy (status)
+  "Draw STATUS and return the exact rendered secret page copy."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (harness-ui-access--insert-secrets status))
+  (harness-ui-access-test-copy-lines (harness-ui-access-test-text)))
+
+(defun harness-ui-access-test-help (label)
+  "Return the tooltip at LABEL in this buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (should (search-forward label nil t))
+    (get-text-property (match-beginning 0) 'help-echo)))
+
+(ert-deftest harness-ui-access-secrets-empty-and-state-copy ()
+  "No sources is not inactive masking; all page states and tooltips are exact."
+  (harness-ui-access-test-with
+    (harness-test-load-module 'ui-secrets)
+    (harness-test-load-module 'ui-config)
+    (harness-ui-access-test-open sid 'secrets)
+    (let* ((status '(:available t :masking t :detectors ("github-token" "secret-assignment")))
+           (expected '("Protection" "Output masking On" "Tool-output detection · no project scan"
+                       "File isolation No source-file isolation" "Detectors github-token · secret-assignment"
+                       "Registered sources Harness-wide"
+                       "[New source…] [Sources] [Redaction…] [History] [Settings]"
+                       "No registered sources" "Detected in tool output This session · current harness run"
+                       "0 masked values · 0 withheld" "No detections yet" "[Refresh]")))
+      (should (equal expected (harness-ui-access-test-secret-copy status)))
+      (dolist (pair '(("[New source…]" . "New secret source · harness-wide")
+                      ("[Sources]" . "Registered secret sources")
+                      ("[Redaction…]" . "Stored-secret redaction")
+                      ("[History]" . "Redaction history")
+                      ("[Settings]" . "Harness settings")
+                      ("[Refresh]" . "Secret status refresh (g)")))
+        (should (equal (cdr pair) (harness-ui-access-test-help (car pair)))))
+      (should (equal "Masking on · 0 sources · 0 masked values" (harness-ui-access--secrets-summary status)))
+      (setq status (plist-put status :masking :false))
+      (setq expected (mapcar (lambda (s) (if (equal s "Output masking On") "Output masking Off" s)) expected))
+      (should (equal expected (harness-ui-access-test-secret-copy status)))
+      (should (equal "Masking off · 0 sources · 0 masked values" (harness-ui-access--secrets-summary status)))
+      (should (equal '("Protection" "Secret extension inactive" "[Refresh]")
+                     (harness-ui-access-test-secret-copy '(:available :false))))
+      (should (equal "Extension inactive" (harness-ui-access--secrets-summary nil)))
+      (should (equal '("Protection" "Secret status unavailable" "[Refresh]")
+                     (harness-ui-access-test-secret-copy '(:available t :error "backend payload"))))
+      (should (equal "Status unavailable" (harness-ui-access--secrets-summary '(:error "backend payload"))))
+      (setq harness-ui-access--describe nil harness-ui-access--error nil)
+      (harness-ui-access--render)
+      (should (equal "Loading…\n" (harness-ui-access-test-text)))
+      (setq harness-ui-access--error "backend payload")
+      (harness-ui-access--render)
+      (should (equal "Secret status unavailable\n[Refresh]\n" (harness-ui-access-test-text)))
+      (should (equal "Secret status refresh (g)" (harness-ui-access-test-help "[Refresh]")))
+      (setq harness-ui-access--describe nil)
+      (cl-letf (((symbol-function 'harness-ui-session) (lambda (_) nil)))
+        (should (equal " Jail & permissions: Secrets"
+                       (substring-no-properties (harness-ui-access--header)))))
+      (let ((inhibit-read-only t)) (erase-buffer) (harness-ui-access--insert-strip))
+      (should (equal "Overview  ·  Tools  ·  Rules  ·  Judgements  ·  Secrets\n" (harness-ui-access-test-text)))
+      (should (equal "Secret sources and detected tool output (5)" (harness-ui-access-test-help "Secrets")))
+      (should (eq #'harness-ui-access-show-secrets (key-binding (kbd "5")))))))
+
+(ert-deftest harness-ui-access-secrets-source-and-detection-copy ()
+  "Sources and observed files remain separate; raw tool output is never drawn."
+  (harness-ui-access-test-with
+    (harness-test-load-module 'ui-secrets)
+    (harness-test-load-module 'ui-config)
+    (harness-ui-access-test-open sid 'secrets)
+    (let* ((source '(:id "src-test" :label "deploy" :origin "stored" :values 1
+                     :source "file /vault/deploy.json, JSON path token" :file "/vault/deploy.json"
+                     :fingerprints ("aabbccdd") :error "missing file"))
+           (status (list :available t :masking t :file-isolation t :sources (list source)
+                         :masked-count 3 :withheld-count 1
+                         :detections '((:tool "read_file" :file "/project/.env" :at 1700000000.0
+                                        :content "raw output excluded"
+                                        :masked ((:label "github-token" :fingerprint "12345678" :count 2)))
+                                       (:tool "bash" :at 1700000000.0
+                                        :masked ((:label "deploy" :fingerprint "aabbccdd" :count 1)))))))
+      (cl-letf (((symbol-function 'harness-ui-tool-label)
+                 (lambda (name) name))
+                ((symbol-function 'harness-ui-access--time) (lambda (_) "12:00:00")))
+        (should
+         (equal '("Protection" "Output masking On" "Tool-output detection · no project scan"
+                  "File isolation Source-file isolation enabled" "Detectors No active detectors"
+                  "Registered sources Harness-wide"
+                  "[New source…] [Sources] [Redaction…] [History] [Settings]"
+                  "deploy 1 value · Stored [Removal…]"
+                  "file /vault/deploy.json, JSON path token" "sha256:aabbccdd"
+                  "Source unreadable · previous values retained" "missing file"
+                  "Detected in tool output This session · current harness run" "3 masked values · 1 withheld"
+                  "Read file · /project/.env · 12:00:00" "github-token · sha256:12345678 · 2 matches"
+                  "Bash · Unknown file · 12:00:00" "deploy · sha256:aabbccdd · 1 match" "[Refresh]")
+                (harness-ui-access-test-secret-copy status))))
+      (should (equal "Source removal · harness-wide masking and file isolation"
+                     (harness-ui-access-test-help "[Removal…]")))
+      (setq source (plist-put source :origin "config"))
+      (setq source (plist-put source :values 0))
+      (let ((inhibit-read-only t)) (erase-buffer) (harness-ui-access--insert-secret-source source))
+      (should (equal '("deploy 0 values · Configuration" "file /vault/deploy.json, JSON path token"
+                       "sha256:aabbccdd" "Source unreadable" "missing file")
+                     (harness-ui-access-test-copy-lines (harness-ui-access-test-text))))
+      ;; Long paths and names fit even a narrow view; their tooltips retain the full data.
+      (cl-letf (((symbol-function 'harness-ui-access--width) (lambda () 42)))
+        (setq source (plist-put source :source (concat "/vault/" (make-string 150 ?x))))
+        (let ((inhibit-read-only t)) (erase-buffer) (harness-ui-access--insert-secret-source source))
+        (dolist (line (split-string (harness-ui-access-test-text) "\n"))
+          (should (<= (string-width line) 42)))
+        (should (equal (plist-get source :source)
+                       (harness-ui-access-test-help "/vault/")))))))
+
+(ert-deftest harness-ui-access-secrets-dispatch-actions-and-errors ()
+  "Page actions reuse the source/redaction UI and retain failed changes in the page."
+  (harness-ui-access-test-with
+    (harness-test-load-module 'ui-secrets)
+    (harness-test-load-module 'ui-config)
+    (harness-ui-access-test-open sid 'secrets)
+    (let ((buffer (current-buffer)) called)
+      (cl-letf (((symbol-function 'harness-secrets-add-source)
+                 (lambda (&optional _kind) (interactive) (push 'new called)))
+                ((symbol-function 'harness-ui-secrets-remove)
+                 (lambda (source _after on-error)
+                   (push (plist-get source :id) called) (funcall on-error "Source removal failed: unavailable")))
+                ((symbol-function 'harness-ui-access-refresh) (lambda (&optional b) (should (eq buffer b))))
+                ((symbol-function 'harness-settings) (lambda (&optional _directory scope) (interactive) (push scope called))))
+        (harness-ui-access-test-secret-copy
+         '(:available t :masking t :sources ((:id "src-test" :label "deploy" :origin "stored" :values 1))))
+        (harness-ui-access-test-push "[New source…]")
+        (harness-ui-access-test-push "[Removal…]")
+        (should (equal "Source removal failed: unavailable" harness-ui-access--secret-error))
+        (harness-ui-access-test-secret-copy '(:available t :masking t))
+        (should (member "Source removal failed: unavailable"
+                        (harness-ui-access-test-copy-lines (harness-ui-access-test-text))))
+        (harness-ui-access-test-push "[Settings]")
+        (should (equal '(global "src-test" new) called))))))
+
+(ert-deftest harness-ui-access-secrets-ignores-stale-fetches ()
+  "The older response cannot replace a newer protection state, even after buffer death."
+  (harness-ui-access-test-with
+    (let ((buffer (harness-ui-access--buffer sid 'secrets)) callbacks)
+      (with-current-buffer buffer
+        (cl-letf (((symbol-function 'harness-ui-call)
+                   (lambda (_method _params callback &optional _on-error) (push callback callbacks))))
+          (harness-ui-access-refresh)
+          (should (equal "Loading…\n" (harness-ui-access-test-text)))
+          (harness-ui-access-refresh))
+        (funcall (car callbacks) (list :session (list :id sid) :secrets '(:available t :masking t)))
+        (funcall (cadr callbacks) (list :session (list :id sid) :secrets '(:available nil)))
+        (should (harness-json-true-p (plist-get (plist-get harness-ui-access--describe :secrets) :masking)))
+        (kill-buffer buffer)
+        (funcall (car callbacks) '(:secrets (:available nil)))))))
+
+(ert-deftest harness-ui-access-secrets-refetches-when-connection-replaced-mid-load ()
+  "A first fetch on a replaced connection does not leave the page loading."
+  (harness-ui-access-test-with
+    (let ((buffer (harness-ui-access--buffer sid 'secrets))
+          (old (list 'connection 'old))
+          (new (list 'connection 'new))
+          callbacks)
+      (with-current-buffer buffer
+        ;; The view opens before a connection exists; the first request
+        ;; establishes it, and the buffer cannot record which one it was.
+        (let ((harness-ui-connection nil))
+          (cl-letf (((symbol-function 'harness-ui-call)
+                     (lambda (_method _params callback &optional _on-error)
+                       (setq harness-ui-connection old)
+                       (push callback callbacks))))
+            (harness-ui-access-refresh)
+            (should (= 1 (length callbacks)))
+            (should (equal "Loading…\n" (harness-ui-access-test-text)))
+            (setq harness-ui-connection new)
+            (harness-ui-access--reconnected)
+            (should (= 2 (length callbacks)))
+            ;; The answer the old connection owed is dropped; the new one draws.
+            (funcall (nth 1 callbacks) (list :session (list :id sid) :secrets '(:available nil)))
+            (should (equal "Loading…\n" (harness-ui-access-test-text)))
+            (funcall (nth 0 callbacks)
+                     (list :session (list :id sid) :secrets '(:available t :masking t :sources nil)))
+            (should (string-match-p "^Protection$" (harness-ui-access-test-text)))))))))
+
+(ert-deftest harness-ui-access-secrets-events-refresh-the-right-views ()
+  "Detections belong to one session; registry changes affect every access view."
+  (harness-ui-access-test-with
+    (let* ((other (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id))
+           (one (harness-ui-access--buffer sid 'secrets))
+           (two (harness-ui-access--buffer other 'overview)) scheduled)
+      (cl-letf (((symbol-function 'harness-ui-access--schedule) (lambda (b) (push b scheduled))))
+        (harness-ui-access--on-event "secrets/detected" (list sid))
+        (should (equal (list one) scheduled))
+        (setq scheduled nil)
+        (harness-ui-access--on-event "secrets/sources-changed" nil)
+        (should (equal (sort (mapcar #'buffer-name (list one two)) #'string<)
+                       (sort (mapcar #'buffer-name scheduled) #'string<))))
+      (should (memq 'secrets/detected harness-acp--forwarded-events))
+      (should (memq 'secrets/sources-changed harness-acp--forwarded-events)))))
 
 (provide 'harness-ui-access-test)
 ;;; harness-ui-access-test.el ends here

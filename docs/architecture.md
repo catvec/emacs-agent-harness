@@ -14263,7 +14263,11 @@ over, dropping ~126k tokens of prompt cache", from the sessions with
 no deadline: the harness vacuums a large search index before it
 answers.  `harness-secrets-add-source` asks `_harness/secrets/add-source`
 for the same kinds of source but the typed value (that would put it on
-disk), `harness-secrets-list-sources` shows `_harness/secrets/sources` in
+disk); the access view's Secrets page and the source list open
+`harness-secrets-add-source`, a form in `harness-ui-secrets-add-mode`
+that names the way to read the secret, its fields, the label and
+harness-wide masking, and registers only on `[Register]`.
+`harness-secrets-list-sources` shows `_harness/secrets/sources` in
 `*harness secrets*` (`a` adds, `d` stops masking the source at point,
 `g` reads again, `l` lists redactions), and `harness-redactions` shows
 `_harness/secrets/log` in `*harness redactions*` (`RET` shows one

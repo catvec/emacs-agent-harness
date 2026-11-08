@@ -90,15 +90,16 @@ ring, a terminal's scrollback, a screenshot.
 
 - `harness-redact-secret` — Take a secret out of everything the harness stored of its sessions.
 - `harness-redactions` — List the redactions the harness has run, newest first.
-- `harness-secrets-add-source` — Add a source to the secrets that tool output is masked of.
+- `harness-secrets-add-source` — Register a source of the secrets that tool output is masked of.
 - `harness-secrets-list-sources` — List the sources of the secrets that tool output is masked of.
 - `harness-ui-secrets-log-reload` — Read the redactions again.
 - `harness-ui-secrets-log-visit` — Show the redaction at point whole.
 - `harness-ui-secrets-reload` — Read the sources again.
-- `harness-ui-secrets-remove-source` — Stop masking the source at point, one added with `harness-secrets-add-source`.
+- `harness-ui-secrets-remove-source` — Remove the stored secret source at point after confirmation.
 
 ### Options
 
+- `harness-ui-secrets-add-buffer-name` — Name of the buffer that names a source before it is registered.
 - `harness-ui-secrets-log-buffer-name` — Name of the buffer that lists the redactions the harness has run.
 - `harness-ui-secrets-report-buffer-name` — Name of the buffer that shows what a redaction found and did.
 - `harness-ui-secrets-sources-buffer-name` — Name of the buffer that lists the sources of the secrets masked.
@@ -122,4 +123,5 @@ ring, a terminal's scrollback, a screenshot.
 ### Hooks it adds to
 
 - `harness-ui-event-functions` → `harness-ui-secrets--on-event`
+- `window-size-change-functions` → `harness-ui-secrets--add-on-resize`
 

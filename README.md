@@ -215,6 +215,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - A permission panel that parts the lasting answers from Allow and Deny
   - Live access introspection: `session_info` reports the session's permission mode, writable and read-only directories with their sources, network, tools turned off, Linux capabilities and standing allow/deny rules
   - The access view names a sub-agent worktree among a session's directories, with buttons to give it up or make it writable
+  - The access view's Secrets page shows masking and source-file isolation, the harness-wide registered sources with add and remove controls, and the files this session's `read_file` calls had secrets masked in, with labels, fingerprints and counts
 - Usage, cost, quota tracking
   - A cost reads in one of two units everywhere it shows -- the session
     list, the task board, the chat, the usage and Insights pages, the

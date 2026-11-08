@@ -1577,6 +1577,16 @@ with `:backend'; and `:why', what stands in the way of raising one now
                      ((null grantable)
                       "the user lets agents ask for no capability (harness-sandbox-grantable-capabilities is empty)")))))
 
+(defun harness-access--secrets (session-id)
+  "Describe optional secret masking for SESSION-ID without exposing errors.
+A missing module is distinct from one whose status could not be read.
+Never copy an unexpected error payload, which may quote a secret."
+  (if (not (harness-method-exists-p 'secrets/status))
+      (list :available nil)
+    (condition-case nil
+        (harness-call 'secrets/status session-id)
+      (error (list :available t :error "Secret status unavailable")))))
+
 (defun harness-access-describe (session-id)
   "Return everything about SESSION-ID's access, as `access/describe' does."
   (let* ((session (harness-access--session session-id))
@@ -1587,6 +1597,7 @@ with `:backend'; and `:why', what stands in the way of raising one now
                          :kind (plist-get session :kind) :status (plist-get session :status)
                          :parent-id (plist-get session :parent-id))
           :sandbox (harness-access--sandbox session)
+          :secrets (harness-access--secrets session-id)
           :mode (plist-get rules :mode)
           :mode-pinned (and (harness-policy-pinned-p 'harness-permission-mode) t)
           :non-interactive (plist-get rules :non-interactive)
@@ -1623,8 +1634,10 @@ own) and `:read-only-by' (another module's policy), `:profile',
 `:grantable' those an agent may ask for with `:docs', each (:name :doc
 :scope), `:enforced' whether the jail enforces them here, with
 `:backend', and `:why' what stands in the way of raising one now, or
-nil), `:dirs' (`permission/dirs' entries with `:read-only', and the
-directories it gave up with `:dropped'), `:inspect' and `:skills'
+nil), `:secrets' (`secrets/status' for this session, or `:available'
+nil without that module), `:dirs' (`permission/dirs' entries with
+`:read-only', and the directories it gave up with `:dropped'),
+`:inspect' and `:skills'
 \(directories every read may reach), `:tools' (`:on', `:off' entries with
 `:why', `:builtin'), `:never-ask' and `:rules' (`:session', `:always',
 `:pinned')."

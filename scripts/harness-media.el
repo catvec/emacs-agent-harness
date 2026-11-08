@@ -2498,7 +2498,7 @@ Return the session's id."
 
 (defun harness-media--access-view (id page)
   "Show PAGE of the access view of session ID in the whole frame; return its buffer.
-PAGE is `overview', `tools', `rules' or `judgements'."
+PAGE is `overview', `tools', `rules', `judgements' or `secrets'."
   (harness-media--view (lambda () (harness-access id (unless (eq page 'overview) page)))
                        (lambda ()
                          (let ((buffer (current-buffer)))
@@ -2556,6 +2556,59 @@ have pages of their own."
 The tools it is offered, the web gone with the network the agent gave up
 and the sub-agents turned off by the user listed apart, by why."
   (harness-media--access-shot "access-tools" 'tools))
+
+(defun harness-media-shot-access-secrets ()
+  "The Secrets page of the access view, with a real file-output detection.
+The registered source is a fake deployment token in a file of the
+scratch HOME, and the detection is a direct read of a fake GitHub token
+inside the demo project.  Both are removed with the session after."
+  (let* ((id (harness-media--new-session :name "Audit the API key checks"
+                                       :model "claude:claude-sonnet-5"
+                                       :permission-mode 'ask))
+         (file (expand-file-name ".env.audit" harness-media-project))
+         (vault (expand-file-name "~/ops/credentials.json"))
+         source buffer)
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory vault) t)
+          (with-temp-file vault
+            (insert (format "{\"token\": \"media-deploy-%s\"}\n" (make-string 24 ?7))))
+          (setq source (harness-call 'secrets/add-source
+                                     (list :file vault :json-path "token" :label "deployment")))
+          (with-temp-file file
+            (insert "API_KEY=" (concat "ghp_" (make-string 36 ?A)) "\n"))
+          (harness-await
+           (harness-as-promise
+            (harness-call 'tools/execute id
+                          (list :id "secret-read" :name "read_file"
+                                :input (list :path (file-name-nondirectory file)))))
+           30)
+          (setq buffer (harness-media--access-view id 'secrets))
+          (harness-media--capture "access-secrets"))
+      (when source (ignore-errors (harness-call 'secrets/remove-source (plist-get source :id))))
+      (dolist (path (list file vault))
+        (when (file-exists-p path) (delete-file path)))
+      (ignore-errors (harness-call 'session/delete id))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(defun harness-media-shot-access-secrets-new ()
+  "The form that registers a secret source, filled in.
+It names the ways to say where a secret can be read, the fields of the
+one chosen -- a JSON file and path here -- the label its placeholder
+takes, that masking is harness-wide, and the Register and Cancel
+buttons.  Nothing is registered: the picture shows what comes before."
+  (harness-media--view
+   (lambda ()
+     (harness-secrets-add-source))
+   (lambda ()
+     (with-current-buffer harness-ui-secrets-add-buffer-name
+       (widget-value-set (harness-ui-secrets--add-widget 'file) "~/ops/credentials.json")
+       (widget-value-set (harness-ui-secrets--add-widget 'json-path) "deploy.token")
+       (widget-value-set (harness-ui-secrets--add-widget 'label) "deployment")
+       (harness-ui-secrets--add-collect))))
+  (harness-media--capture "access-secrets-new")
+  (when (get-buffer harness-ui-secrets-add-buffer-name)
+    (kill-buffer harness-ui-secrets-add-buffer-name)))
 
 (defun harness-media-shot-access-judgements ()
   "The Judgements page of that session's view.
@@ -4937,6 +4990,8 @@ names."
     ("access" . harness-media-shot-access)
     ("access-tools" . harness-media-shot-access-tools)
     ("access-judgements" . harness-media-shot-access-judgements)
+    ("access-secrets" . harness-media-shot-access-secrets)
+    ("access-secrets-new" . harness-media-shot-access-secrets-new)
     ;; Last: they add a commit to the slow-request task's branch and the
     ;; threads of its review, which no other picture shows.
     ("review" . harness-media-shot-review)

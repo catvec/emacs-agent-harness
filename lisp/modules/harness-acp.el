@@ -246,7 +246,7 @@ it can answer for another one.")
     fallback/changed fallback/switched
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
-    session/nodes-removed session/redacted secrets/redacted
+    session/nodes-removed session/redacted secrets/redacted secrets/detected secrets/sources-changed
     session/moved session/ext-changed session/pending-updated supervisor/changed
     question/answered task/changed task/deleted task/review task/done task/queue task/backlog-mode
     permission/dir-allowed permission/dir-revoked

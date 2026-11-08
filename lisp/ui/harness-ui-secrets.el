@@ -83,6 +83,8 @@
 (require 'crm)
 (require 'tabulated-list)
 (require 'transient)
+(require 'wid-edit)
+(require 'cus-edit)
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-redaction)
@@ -90,6 +92,7 @@
 
 (declare-function harness-chat--buffer-for "harness-ui-chat" (sid))
 (declare-function harness-chat--load "harness-ui-chat" (&optional keep-bottom))
+(declare-function harness-ui-access-refresh "harness-ui-access" (&optional buffer))
 
 (defgroup harness-ui-secrets nil
   "Redacting secrets from what the harness stored." :group 'harness-ui)
@@ -100,6 +103,10 @@
 
 (defcustom harness-ui-secrets-sources-buffer-name "*harness secrets*"
   "Name of the buffer that lists the sources of the secrets masked."
+  :type 'string :group 'harness-ui-secrets)
+
+(defcustom harness-ui-secrets-add-buffer-name "*harness new secret source*"
+  "Name of the buffer that names a source before it is registered."
   :type 'string :group 'harness-ui-secrets)
 
 (defcustom harness-ui-secrets-log-buffer-name "*harness redactions*"
@@ -252,17 +259,22 @@ is typed, and sent as typed for the harness to expand."
                    (read-file-name prompt nil nil nil)
                  (string-trim (read-string (concat prompt "(a path on the harness's machine) "))))))
     (when (or (string-empty-p file) (directory-name-p file))
-      (user-error "Name a file"))
+      (user-error "File · none"))
     (if local (expand-file-name file) file)))
+
+(defun harness-ui-secrets--capture-group-p (regexp)
+  "Non-nil when REGEXP has a group that captures the secret.
+That is a group, \\(, not followed by ?, or by ?N: (a numbered one).  A
+shy group, \\(?:, captures nothing."
+  (and (stringp regexp)
+       (string-match-p "\\\\(\\(?:[^?]\\|\\?[0-9]+:\\)" regexp)))
 
 (defun harness-ui-secrets--read-regexp ()
   "Read a regexp with one capture group around the secret."
   (let ((regexp (read-string "Regexp with one group around the secret, \\(...\\): ")))
     (when (string-empty-p regexp)
       (user-error "Give a regexp"))
-    ;; A group that captures: \( not followed by ?, or by ?N: (a numbered
-    ;; one).  A shy group, \(?:, does not.
-    (unless (string-match-p "\\\\(\\(?:[^?]\\|\\?[0-9]+:\\)" regexp)
+    (unless (harness-ui-secrets--capture-group-p regexp)
       (user-error "The regexp needs a capture group, \\(...\\), around the secret"))
     regexp))
 
@@ -307,7 +319,7 @@ string in the file a secret, it is asked about again."
 The file's shape comes from the harness, which reads the file: the paths
 are keys and types, never values.  K runs when the answer arrives."
   (let ((file (harness-ui-secrets--read-file "JSON file that holds the secret: ")))
-    (message "Reading the keys of %s…" (abbreviate-file-name file))
+    (message "Keys of %s…" (abbreviate-file-name file))
     (harness-ui-call
      "_harness/secrets/shape" (list :file file)
      (lambda (shape)
@@ -321,6 +333,31 @@ are keys and types, never values.  K runs when the answer arrives."
          (message "Harness: cannot read the keys of %s: %s" (abbreviate-file-name file)
                   (harness-ui-secrets--error-text err)))))))
 
+(defun harness-ui-secrets--read-source-of-kind (kind k)
+  "Ask for the parts of KIND, a source kind, then call K with the source.
+K is called at once, except for a JSON file, whose keys come from the
+harness first."
+  (pcase kind
+    ('json (harness-ui-secrets--read-json k))
+    ('regexp
+     (let* ((file (harness-ui-secrets--read-file "File that holds the secret: "))
+            (regexp (harness-ui-secrets--read-regexp)))
+       (funcall k (harness-ui-secrets--source (list :file file :regexp regexp)))))
+    ('env
+     (let ((name (string-trim (read-string "Environment variable of the harness: "))))
+       (when (string-empty-p name) (user-error "Give the name of a variable"))
+       (funcall k (harness-ui-secrets--source (list :env name)))))
+    ('literal
+     (harness-ui-secrets--require-local "A typed secret")
+     (let ((value (read-passwd "Secret to redact (hidden): " t)))
+       (when (string-empty-p value) (user-error "Nothing was typed"))
+       (funcall k (harness-ui-secrets--source (list :literal value) :unsafe t :value value))))
+    ('command
+     (let ((command (string-trim (read-string "Shell command that prints the secret (the harness runs it): "))))
+       (when (string-empty-p command) (user-error "Give a command"))
+       (funcall k (harness-ui-secrets--source (list :command command) :unsafe t))))
+    (_ (user-error "Unknown way to name a secret"))))
+
 (defun harness-ui-secrets--read-source (allow-literal k)
   "Ask where the secret is, then call K with the source.
 ALLOW-LITERAL says whether it may be typed; a secret typed in is for a
@@ -330,26 +367,7 @@ file, whose keys come from the harness first."
                                 harness-ui-secrets--kinds))
          (choice (completing-read "Where is the secret? " (mapcar #'car choices) nil t nil nil (caar choices)))
          (kind (cdr (assoc choice choices))))
-    (pcase kind
-      ('json (harness-ui-secrets--read-json k))
-      ('regexp
-       (let* ((file (harness-ui-secrets--read-file "File that holds the secret: "))
-              (regexp (harness-ui-secrets--read-regexp)))
-         (funcall k (harness-ui-secrets--source (list :file file :regexp regexp)))))
-      ('env
-       (let ((name (string-trim (read-string "Environment variable of the harness: "))))
-         (when (string-empty-p name) (user-error "Give the name of a variable"))
-         (funcall k (harness-ui-secrets--source (list :env name)))))
-      ('literal
-       (harness-ui-secrets--require-local "A typed secret")
-       (let ((value (read-passwd "Secret to redact (hidden): " t)))
-         (when (string-empty-p value) (user-error "Nothing was typed"))
-         (funcall k (harness-ui-secrets--source (list :literal value) :unsafe t :value value))))
-      ('command
-       (let ((command (string-trim (read-string "Shell command that prints the secret (the harness runs it): "))))
-         (when (string-empty-p command) (user-error "Give a command"))
-         (funcall k (harness-ui-secrets--source (list :command command) :unsafe t))))
-      (_ (user-error "Unknown way to name a secret")))))
+    (harness-ui-secrets--read-source-of-kind kind k)))
 
 (defun harness-ui-secrets--read-label (source)
   "Ask for the label of SOURCE's placeholder; its default comes from the path."
@@ -753,6 +771,16 @@ Redacting cannot recall what the model provider already received."
              (setq harness-ui-secrets--entries (append sources nil))
              (harness-ui-secrets--render-sources))))))))
 
+(defun harness-ui-secrets--refresh-views ()
+  "Read the sources again, and redraw the access views that show them."
+  (harness-ui-secrets--refresh-sources)
+  (when (fboundp 'harness-ui-access-refresh)
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (and (derived-mode-p 'harness-ui-access-mode)
+                   (eq (buffer-local-value 'harness-ui-access--page buffer) 'secrets))
+          (harness-ui-access-refresh buffer))))))
+
 (defun harness-ui-secrets--source-row (source)
   "Return the tabulated list entry for SOURCE, a plist `secrets/sources' gave."
   (list (plist-get source :id)
@@ -823,7 +851,7 @@ a value.
 (put 'harness-ui-secrets-sources-mode 'harness-menu-group
      '("Secret sources"
        ["Sources"
-        (". a" "Add a source" harness-secrets-add-source)
+        (". a" "New source…" harness-secrets-add-source)
         (". d" "Stop masking the source at point" harness-ui-secrets-remove-source)
         (". l" "Redactions that were run" harness-redactions)
         (". g" "Read the sources again" harness-ui-secrets-reload)]))
@@ -849,55 +877,445 @@ There is never a value in it."
   (interactive)
   (harness-ui-secrets--refresh-sources (current-buffer)))
 
+(defun harness-ui-secrets-remove (source &optional after on-error)
+  "Remove the registered SOURCE after confirmation.
+AFTER receives the result; ON-ERROR receives a safe failure string.
+Configuration sources remain owned by `harness-secrets-sources'."
+  (let* ((id (or (plist-get source :id) (user-error "Secret source unavailable")))
+         (label (or (plist-get source :label) id)))
+    (when (equal (format "%s" (plist-get source :origin)) "config")
+      (user-error "Configuration source · harness-secrets-sources"))
+    (when (y-or-n-p (format "Source removal: %s · harness-wide masking and file isolation? " label))
+      (harness-ui-call
+       "_harness/secrets/remove-source" (list :id id)
+       (lambda (result)
+         (message "Source removed: %s" label)
+         (harness-ui-secrets--refresh-views)
+         (when after (funcall after result)))
+       (lambda (err)
+         (unless (harness-ui-connection-replaced-p err)
+           (let ((text (format "Source removal failed: %s" (harness-ui-secrets--error-text err))))
+             (message "%s" text)
+             (when on-error (funcall on-error text)))))))))
+
 (defun harness-ui-secrets-remove-source ()
-  "Stop masking the source at point, one added with `harness-secrets-add-source'.
-The sources of `harness-secrets-sources' are the option's to change."
+  "Remove the stored secret source at point after confirmation."
   (interactive)
   (let* ((id (or (tabulated-list-get-id) (user-error "No source at point")))
          (source (cl-find id harness-ui-secrets--entries
-                          :key (lambda (e) (plist-get e :id)) :test #'equal))
-         (label (or (plist-get source :label) id)))
-    (when (equal (format "%s" (plist-get source :origin)) "config")
-      (user-error "%s comes from harness-secrets-sources: change that option instead" label))
-    (when (y-or-n-p (format "Stop masking %s? " label))
-      (harness-ui-call "_harness/secrets/remove-source" (list :id id)
-                       (lambda (_)
-                         (message "No longer masking %s" label)
-                         (harness-ui-secrets--refresh-sources))))))
+                          :key (lambda (e) (plist-get e :id)) :test #'equal)))
+    (harness-ui-secrets-remove source)))
+
+;;;; Adding a source
+
+(defvar-local harness-ui-secrets--add-kind 'json
+  "The way the new-source form names its source.")
+(defvar-local harness-ui-secrets--add-file ""
+  "The file the new-source form reads its secret from.")
+(defvar-local harness-ui-secrets--add-json-path ""
+  "The JSON path the new-source form reads its secret at.")
+(defvar-local harness-ui-secrets--add-regexp ""
+  "The regexp the new-source form reads its secret with.")
+(defvar-local harness-ui-secrets--add-env ""
+  "The environment variable the new-source form reads its secret from.")
+(defvar-local harness-ui-secrets--add-command ""
+  "The command whose output is the new-source form's secret.")
+(defvar-local harness-ui-secrets--add-label ""
+  "The label the new-source form gives its placeholder.")
+(defvar-local harness-ui-secrets--add-error nil
+  "Why the new-source form cannot register its source, or nil.")
+(defvar-local harness-ui-secrets--add-pending nil
+  "Non-nil while the new-source form waits for its source to be added.")
+(defvar-local harness-ui-secrets--add-fields nil
+  "The widgets of the new-source form, by the name of what they hold.")
+(defvar-local harness-ui-secrets--add-room-width nil
+  "The width the new-source form was last drawn for, or nil.")
+
+(defconst harness-ui-secrets--add-kinds
+  '((json "JSON file and path")
+    (regexp "File and regexp")
+    (env "Environment variable")
+    (command "Command output"))
+  "The ways the new-source form names a source, as it offers them.")
+
+(defun harness-ui-secrets--add-room ()
+  "Return the columns the new-source form has for its fields."
+  (let ((window (or (get-buffer-window (current-buffer) (selected-frame))
+                    (get-buffer-window (current-buffer) t))))
+    (max 24 (- (if window (window-body-width window) 80) 2))))
+
+(defun harness-ui-secrets--add-field-size (&optional button)
+  "Return the width of a form field, leaving room for its label and BUTTON."
+  (max 8 (min 52 (- (harness-ui-secrets--add-room)
+                    14 (if button 16 0)))))
+
+(defun harness-ui-secrets--add-widget (key)
+  "Return the form widget that holds KEY, or nil."
+  (cdr (assq key harness-ui-secrets--add-fields)))
+
+(defun harness-ui-secrets--add-widget-value (key)
+  "Return what the form widget that holds KEY holds, or nil."
+  (when-let* ((widget (harness-ui-secrets--add-widget key)))
+    (format "%s" (widget-value widget))))
+
+(defun harness-ui-secrets--add-collect ()
+  "Keep what the new-source form's fields hold in its state."
+  (when-let* ((value (harness-ui-secrets--add-widget-value 'file)))
+    (setq harness-ui-secrets--add-file value))
+  (when-let* ((value (harness-ui-secrets--add-widget-value 'json-path)))
+    (setq harness-ui-secrets--add-json-path value))
+  (when-let* ((value (harness-ui-secrets--add-widget-value 'regexp)))
+    (setq harness-ui-secrets--add-regexp value))
+  (when-let* ((value (harness-ui-secrets--add-widget-value 'env)))
+    (setq harness-ui-secrets--add-env value))
+  (when-let* ((value (harness-ui-secrets--add-widget-value 'command)))
+    (setq harness-ui-secrets--add-command value))
+  (when-let* ((value (harness-ui-secrets--add-widget-value 'label)))
+    (setq harness-ui-secrets--add-label value)))
+
+(defun harness-ui-secrets--add-ref ()
+  "Return the reference the new-source form names.
+Signal a `user-error' with the noun phrase of what is missing."
+  (let ((file (string-trim harness-ui-secrets--add-file)))
+    (pcase harness-ui-secrets--add-kind
+      ('json
+       (when (string-empty-p file) (user-error "File · none"))
+       (let ((path (string-trim harness-ui-secrets--add-json-path)))
+         (when (string-empty-p path) (user-error "JSON path · none"))
+         (list :file file :json-path path)))
+      ('regexp
+       (when (string-empty-p file) (user-error "File · none"))
+       (let ((regexp (string-trim harness-ui-secrets--add-regexp)))
+         (when (string-empty-p regexp) (user-error "Regexp · none"))
+         (unless (harness-ui-secrets--capture-group-p regexp)
+           (user-error "Regexp · no capture group"))
+         (list :file file :regexp regexp)))
+      ('env
+       (let ((name (string-trim harness-ui-secrets--add-env)))
+         (when (string-empty-p name) (user-error "Variable · none"))
+         (list :env name)))
+      ('command
+       (let ((command (string-trim harness-ui-secrets--add-command)))
+         (when (string-empty-p command) (user-error "Command · none"))
+         (list :command command))))))
+
+(defun harness-ui-secrets--add-set-kind (widget &rest _)
+  "Show the fields of the source kind WIDGET chose."
+  (let ((kind (widget-value widget))
+        (buffer (current-buffer)))
+    (harness-run-soon
+     (lambda ()
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (harness-ui-secrets--add-collect)
+           (setq harness-ui-secrets--add-kind kind
+                 harness-ui-secrets--add-error nil)
+           (harness-ui-secrets--render-add)))))))
+
+(defun harness-ui-secrets--add-insert-field (key name value help &optional button)
+  "Insert one field of the new-source form.
+KEY names the widget; NAME labels it; VALUE is its text; HELP is its
+tooltip.  BUTTON, when non-nil, is (LABEL HELP ACTION) put after it."
+  (widget-insert "  ")
+  (push (cons key (widget-create 'editable-field
+                                 :format "%t %v"
+                                 :tag (propertize (string-pad name 12) 'face 'harness-dim-face)
+                                 :size (harness-ui-secrets--add-field-size button)
+                                 :value (or value "")
+                                 :help-echo help))
+        harness-ui-secrets--add-fields)
+  (when button
+    (widget-insert " ")
+    (push (cons (intern (format "%s-button" key))
+                (widget-create 'push-button
+                               :format "[%t]"
+                               :tag (nth 0 button)
+                               :help-echo (nth 1 button)
+                               :notify (nth 2 button)))
+          harness-ui-secrets--add-fields))
+  (widget-insert "\n"))
+
+(defun harness-ui-secrets--add-choose-file ()
+  "Choose the file the new-source form reads its secret from."
+  (interactive)
+  (harness-ui-secrets--add-collect)
+  (condition-case err
+      (let ((file (harness-ui-secrets--read-file "File that holds the secret: ")))
+        (setq harness-ui-secrets--add-file file
+              harness-ui-secrets--add-error nil)
+        (harness-ui-secrets--render-add))
+    (user-error (message "%s" (error-message-string err)))))
+
+(defun harness-ui-secrets--add-choose-path ()
+  "Read the keys of the form's file and choose the JSON path of the secret."
+  (interactive)
+  (harness-ui-secrets--add-collect)
+  (let ((file (string-trim harness-ui-secrets--add-file))
+        (buffer (current-buffer)))
+    (if (string-empty-p file)
+        (progn
+          (setq harness-ui-secrets--add-error "File · none")
+          (harness-ui-secrets--render-add))
+      (message "Keys of %s…" (abbreviate-file-name file))
+      (harness-ui-call
+       "_harness/secrets/shape" (list :file file)
+       (lambda (shape)
+         (message nil)
+         (harness-ui-secrets--callback
+          (lambda ()
+            (when (buffer-live-p buffer)
+              (with-current-buffer buffer
+                (condition-case err
+                    (when-let* ((path (harness-ui-secrets--choose-path file shape)))
+                      (setq harness-ui-secrets--add-json-path path
+                            harness-ui-secrets--add-error nil))
+                  (user-error
+                   (setq harness-ui-secrets--add-error (error-message-string err))))
+                (harness-ui-secrets--render-add))))))
+       (lambda (err)
+         (unless (harness-ui-connection-replaced-p err)
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (setq harness-ui-secrets--add-error
+                     (format "Keys · %s" (harness-ui-secrets--error-text err)))
+               (harness-ui-secrets--render-add)))))))))
+
+(defun harness-ui-secrets--render-add ()
+  "Draw the new-source form from its state."
+  (harness-ui-secrets--add-collect)
+  (let* ((room (harness-ui-secrets--add-room))
+         (kind harness-ui-secrets--add-kind)
+         (inhibit-read-only t)
+         (inhibit-modification-hooks t))
+    (erase-buffer)
+    (remove-overlays)
+    (setq widget-field-new nil widget-field-list nil
+          widget-field-last nil widget-field-was nil
+          harness-ui-secrets--add-fields nil)
+    (widget-insert "\n " (propertize "New secret source" 'face 'bold) "\n\n ")
+    (widget-insert (propertize "Where it can be read" 'face 'harness-dim-face) "\n")
+    (push (cons 'kind
+                (apply #'widget-create 'radio-button-choice
+                       :value kind
+                       :format "%v"
+                       :entry-format "  %b %v"
+                       :notify #'harness-ui-secrets--add-set-kind
+                       (mapcar (lambda (entry)
+                                 (list 'item :tag (nth 1 entry) :value (car entry)))
+                               harness-ui-secrets--add-kinds)))
+          harness-ui-secrets--add-fields)
+    (widget-insert "\n")
+    (pcase kind
+      ('json
+       (harness-ui-secrets--add-insert-field
+        'file "File" harness-ui-secrets--add-file
+        "File holding the secret"
+        '("Choose file…" "File to read" #'harness-ui-secrets--add-choose-file))
+       (harness-ui-secrets--add-insert-field
+        'json-path "JSON path" harness-ui-secrets--add-json-path
+        "Path in the file · Keys from Read keys"
+        '("Read keys…" "Keys of the file" #'harness-ui-secrets--add-choose-path)))
+      ('regexp
+       (harness-ui-secrets--add-insert-field
+        'file "File" harness-ui-secrets--add-file
+        "File holding the secret"
+        '("Choose file…" "File to read" #'harness-ui-secrets--add-choose-file))
+       (harness-ui-secrets--add-insert-field
+        'regexp "Regexp" harness-ui-secrets--add-regexp
+        "Regexp with one capture group, \\(...\\)"))
+      ('env
+       (harness-ui-secrets--add-insert-field
+        'env "Variable" harness-ui-secrets--add-env
+        "Variable of the harness process"))
+      ('command
+       (harness-ui-secrets--add-insert-field
+        'command "Command" harness-ui-secrets--add-command
+        "Command the harness runs · output only")))
+    (harness-ui-secrets--add-insert-field
+     'label "Label" harness-ui-secrets--add-label
+     "Label for the placeholder · default from the source")
+    (widget-insert "\n " (propertize "Masking" 'face 'harness-dim-face)
+                   "\n  Harness-wide\n")
+    (when harness-ui-secrets--add-error
+      (let ((text (harness-ui-one-line harness-ui-secrets--add-error)))
+        (widget-insert "\n")
+        (dolist (line (split-string (harness-ui-secrets--add-fold text (- room 4)) "\n"))
+          (widget-insert "  " (propertize line 'face 'harness-failure-face) "\n"))))
+    (widget-insert "\n ")
+    (if harness-ui-secrets--add-pending
+        (widget-insert (propertize "[Registering…]" 'face 'harness-dim-face))
+      (push (cons 'register
+                  (widget-create 'push-button
+                                 :format "[%t]"
+                                 :tag "Register"
+                                 :help-echo "Register · harness-wide masking"
+                                 :notify (lambda (&rest _) (harness-ui-secrets--add-register))))
+            harness-ui-secrets--add-fields))
+    (widget-insert "  ")
+    (push (cons 'cancel
+                (widget-create 'push-button
+                               :format "[%t]"
+                               :tag "Cancel"
+                               :help-echo "Cancel · no source"
+                               :notify (lambda (&rest _) (harness-ui-secrets--add-cancel))))
+          harness-ui-secrets--add-fields)
+    (widget-insert "\n")
+    (widget-setup)
+    (harness-ui-secrets--add-install-field-map)
+    (setq harness-ui-secrets--add-room-width room)
+    (goto-char (point-min))))
+
+(defun harness-ui-secrets--add-fold (text width)
+  "Return TEXT folded to WIDTH columns."
+  (with-temp-buffer
+    (insert text)
+    (let ((fill-column (max 10 width)))
+      (fill-region (point-min) (point-max)))
+    (buffer-string)))
+
+(defun harness-ui-secrets--add-cancel ()
+  "Close the new-source form without registering anything."
+  (interactive)
+  (harness-ui-quit-view))
+
+(defun harness-ui-secrets--add-register ()
+  "Register the source the new-source form names."
+  (interactive)
+  (unless harness-ui-secrets--add-pending
+    (harness-ui-secrets--add-collect)
+    (setq harness-ui-secrets--add-error nil)
+    (condition-case err
+        (let* ((ref (harness-ui-secrets--add-ref))
+               (source (harness-ui-secrets--source ref))
+               (typed (string-trim harness-ui-secrets--add-label))
+               (label (if (string-empty-p typed) (plist-get source :label) typed))
+               (buffer (current-buffer)))
+          (setq harness-ui-secrets--add-label label
+                harness-ui-secrets--add-pending t)
+          (when-let* ((widget (harness-ui-secrets--add-widget 'label)))
+            (widget-value-set widget label))
+          (harness-ui-secrets--render-add)
+          (harness-ui-secrets--submit-source
+           source label
+           (lambda (_added)
+             (when (buffer-live-p buffer) (kill-buffer buffer)))
+           (lambda (text)
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (setq harness-ui-secrets--add-error text
+                       harness-ui-secrets--add-pending nil)
+                 (harness-ui-secrets--render-add))))))
+      (user-error
+       (setq harness-ui-secrets--add-error (error-message-string err))
+       (harness-ui-secrets--render-add)))))
+
+(defun harness-ui-secrets--add-on-resize (window)
+  "Draw the new-source form again when WINDOW changes its width."
+  (let ((buffer (current-buffer)))
+    (when (and (eq (window-buffer window) buffer)
+               (not (equal (harness-ui-secrets--add-room)
+                           harness-ui-secrets--add-room-width)))
+      (harness-debounce
+       (list 'harness-ui-secrets-add-fit buffer) 0.1
+       (lambda ()
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (harness-ui-secrets--render-add))))))))
+
+(defvar harness-ui-secrets-add-field-map
+  (let ((map (copy-keymap custom-field-keymap)))
+    (define-key map (kbd "C-c C-c") #'harness-ui-secrets--add-register)
+    map)
+  "Keymap of the new-source form's fields.")
+
+(defun harness-ui-secrets--add-install-field-map ()
+  "Give every field of the new-source form `harness-ui-secrets-add-field-map'."
+  (dolist (overlay (overlays-in (point-min) (point-max)))
+    (when (and (overlay-get overlay 'local-map)
+               (or (overlay-get overlay 'field) (overlay-get overlay 'real-field)))
+      (overlay-put overlay 'local-map harness-ui-secrets-add-field-map))))
+
+(defvar harness-ui-secrets-add-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'harness-ui-secrets--add-register)
+    (define-key map (kbd "q") #'harness-ui-secrets--add-cancel)
+    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "TAB") #'widget-forward)
+    (define-key map (kbd "<backtab>") #'widget-backward)
+    map)
+  "Keymap of `harness-ui-secrets-add-mode'.")
+
+(define-derived-mode harness-ui-secrets-add-mode special-mode "New secret"
+  "Major mode of the new-source form.
+It names where the secret can be read, gives it a label and registers it
+for harness-wide masking.  TAB moves between its fields,
+\\[harness-ui-secrets--add-register] registers it, and
+\\[harness-ui-secrets--add-cancel] closes it.
+
+\\{harness-ui-secrets-add-mode-map}"
+  (setq truncate-lines t
+        buffer-read-only nil)
+  (add-hook 'window-size-change-functions #'harness-ui-secrets--add-on-resize nil t))
+
+(defun harness-ui-secrets--open-add (&optional kind)
+  "Show the new-source form, with KIND chosen when it is given."
+  (let ((buffer (get-buffer-create harness-ui-secrets-add-buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'harness-ui-secrets-add-mode)
+        (harness-ui-secrets-add-mode))
+      (setq harness-ui-secrets--add-kind (or kind 'json)
+            harness-ui-secrets--add-file ""
+            harness-ui-secrets--add-json-path ""
+            harness-ui-secrets--add-regexp ""
+            harness-ui-secrets--add-env ""
+            harness-ui-secrets--add-command ""
+            harness-ui-secrets--add-label ""
+            harness-ui-secrets--add-error nil
+            harness-ui-secrets--add-pending nil
+            harness-ui-secrets--add-fields nil)
+      (harness-ui-secrets--render-add))
+    (harness-ui-display-view buffer)
+    (with-current-buffer buffer (harness-ui-secrets--render-add))
+    buffer))
 
 ;;;###autoload
-(defun harness-secrets-add-source ()
-  "Add a source to the secrets that tool output is masked of.
-You say where the secret can be read -- a JSON path in a file, a regexp
-with a group around it in a file, an environment variable of the harness
-or a command that prints it -- and what to call it.  The harness reads
-the value now, to prove the source names one, and again whenever the
-file or the variable changes; it keeps the source, never the value, and
-replaces every occurrence of the value in what a tool returns by
-[redacted: LABEL sha256:FINGERPRINT] before anything stores or shows it.
-A secret cannot be typed here: that would put it on disk.  The sources
-are listed by `harness-secrets-list-sources'."
+(defun harness-secrets-add-source (&optional kind)
+  "Register a source of the secrets that tool output is masked of.
+KIND, when given, is one of `json', `regexp', `env' or `command'.
+The form names where the secret can be read -- a JSON file and path, a
+file and regexp, an environment variable of the harness, or a command
+that prints it -- and what to call it.  The harness reads the value now,
+to prove the source names one, and again whenever the file or the
+variable changes; it keeps the source, never the value, and replaces
+every occurrence of the value in what a tool returns by [redacted:
+LABEL sha256:FINGERPRINT] before anything stores or shows it.  A secret
+cannot be typed here: that would put it on disk.  The sources are listed
+by `harness-secrets-list-sources'."
   (interactive)
-  (harness-ui-secrets--read-source
-   nil
-   (lambda (source)
-     (let ((label (harness-ui-secrets--read-label source)))
-       (harness-ui-call
-        "_harness/secrets/add-source"
-        (list :ref (append (plist-get source :ref) (list :label label)))
-        (lambda (added)
-          (harness-ui-secrets--callback
-           (lambda ()
-             (let ((count (or (plist-get added :values) 0)))
-               (if (plist-get added :error)
-                   (message "Added %s, but it cannot be read now: %s" label (plist-get added :error))
-                 (message "Masking %s of %s: sha256 %s"
-                          (harness-ui-secrets--n count "value") label
-                          (string-join (append (plist-get added :fingerprints) nil) ", "))))
-             (harness-ui-secrets--refresh-sources))))
-        (lambda (err)
-          (unless (harness-ui-connection-replaced-p err)
-            (message "Harness: the source was not added: %s" (harness-ui-secrets--error-text err)))))))))
+  (harness-ui-secrets--open-add kind))
+
+(defun harness-ui-secrets--submit-source (source label &optional after on-error)
+  "Send SOURCE, a reference, with LABEL to the harness.
+AFTER receives the added source; ON-ERROR receives a safe failure string."
+  (harness-ui-call
+   "_harness/secrets/add-source"
+   (list :ref (append (plist-get source :ref) (list :label label)))
+   (lambda (added)
+     (harness-ui-secrets--callback
+      (lambda ()
+        (let ((count (or (plist-get added :values) 0)))
+          (if (plist-get added :error)
+              (message "Source added: %s · unreadable: %s" label (plist-get added :error))
+            (message "Masking %s of %s: sha256 %s"
+                     (harness-ui-secrets--n count "value") label
+                     (string-join (append (plist-get added :fingerprints) nil) ", "))))
+        (harness-ui-secrets--refresh-views)
+        (when after (funcall after added)))))
+   (lambda (err)
+     (unless (harness-ui-connection-replaced-p err)
+       (let ((text (format "Source addition failed: %s" (harness-ui-secrets--error-text err))))
+         (message "%s" text)
+         (when on-error (funcall on-error text)))))))
 
 ;;;; The redactions that were run
 

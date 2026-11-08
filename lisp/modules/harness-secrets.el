@@ -646,6 +646,7 @@ later whether the entries still hold what it was built from."
 (defun harness-secrets--refresh ()
   "Look at every source again; read those that are new or changed.
 The index is rebuilt when any of them is."
+  (harness-secrets--check-activity-state)
   (let ((harness-secrets--refreshing t)
         (now (float-time))
         (old harness-secrets--entries)
@@ -698,12 +699,15 @@ as it was."
                   :origin (plist-get entry :origin)
                   :values (length secrets)
                   :fingerprints (mapcar (lambda (s) (plist-get s :fingerprint)) secrets))
+            (when-let* ((file (plist-get (plist-get entry :ref) :file)))
+              (and (stringp file) (list :file (harness-absolute-file-name file))))
             (and (plist-get entry :error) (list :error (plist-get entry :error))))))
 
 (harness-defmethod secrets/sources ()
   "List the sources of the secrets that tool output is masked of, without a value.
 Each is (:id ID :label LABEL :source DESCRIPTION :origin ORIGIN :values N
-:fingerprints (F...) :error MESSAGE).  ORIGIN is `config' for a source of
+:fingerprints (F...) :file FILE :error MESSAGE).  FILE is present only
+for a file source, made absolute.  ORIGIN is `config' for a source of
 `harness-secrets-sources' (its ID is config-N) and `stored' for one added
 with `secrets/add-source'.  DESCRIPTION names the file and the path or
 regexp, or the variable; N is how many values it holds and F the first 8
@@ -741,6 +745,7 @@ source already there changes nothing.  Return the source as
         ;; The entry just read stands in for the one the refresh would read.
         (setq harness-secrets--entries (append harness-secrets--entries (list entry)))
         (harness-secrets--refresh)
+        (harness-emit 'secrets/sources-changed)
         (harness-secrets--describe-entry
          (cl-find id harness-secrets--entries :key (lambda (e) (plist-get e :id)) :test #'equal))))))
 
@@ -754,11 +759,139 @@ the setting's to change."
       (harness-secrets--write-stored
        (cl-remove id stored :key (lambda (s) (plist-get s :id)) :test #'equal))
       (harness-secrets--refresh)
+      (harness-emit 'secrets/sources-changed)
       (list :id id :removed t))
      ((and (stringp id) (string-prefix-p "config-" id))
       (signal 'harness-error
               (list (format "%s is a source of harness-secrets-sources: change that option" id))))
      (t (signal 'harness-error (list (format "No stored source %s" id)))))))
+
+;;;; Session activity
+
+(defconst harness-secrets--activity-limit 50
+  "Most recent detections retained for each session, in memory only.")
+
+(defconst harness-secrets--activity-hits-limit 100
+  "Most labels and fingerprints retained for a single detection.
+The occurrence counts include all hits, even when this limit cuts the list.")
+
+(defvar harness-secrets--activity (make-hash-table :test 'equal)
+  "Session id -> value-free masking activity, in memory only.
+Each entry has `:detections', `:masked-count' and `:withheld-count'.
+Nil is the bucket for calls made without a session.")
+
+(defvar harness-secrets--activity-state nil
+  "The state directory whose activity `harness-secrets--activity' holds.")
+
+(defun harness-secrets--check-activity-state ()
+  "Discard activity when the harness's state directory changes."
+  (unless (equal harness-secrets--activity-state harness-state-directory)
+    (clrhash harness-secrets--activity)
+    (setq harness-secrets--activity-state harness-state-directory)))
+
+(defun harness-secrets--forget-session (session-id &rest _)
+  "Discard the masking activity of deleted SESSION-ID."
+  (remhash session-id harness-secrets--activity))
+
+(defun harness-secrets--detection-file (session-id call)
+  "Return the file directly read by CALL in SESSION-ID, or nil.
+Only `read_file' names its output's file unambiguously.  A grep's path
+may be a directory, and shell output has no reliable file provenance.
+Resolve against the real session's directory and host, without looking
+up a remote home or falling back to another directory for a missing
+session.  A call without a session uses the tools' default directory."
+  (when (equal (plist-get call :name) "read_file")
+    (let* ((path (plist-get (plist-get call :input) :path))
+           (session (if session-id
+                        (and (harness-method-exists-p 'session/get)
+                             (ignore-errors (harness-call 'session/get session-id)))
+                      (list :cwd default-directory)))
+           (cwd (plist-get session :cwd))
+           (host (plist-get session :host)))
+      (when (and (stringp path) (not (string-empty-p path)) (stringp cwd))
+        (condition-case nil
+            (let ((file (harness-absolute-file-name path cwd)))
+              (if (and host (not (harness-file-remote-p file)))
+                  (concat host file)
+                file))
+          (error nil))))))
+
+(defun harness-secrets--record-activity (session-id call hits &optional withheld)
+  "Record value-free masking HITS of CALL for SESSION-ID.
+WITHHELD records a result that could not be checked, without its error
+payload.  Only tool result/progress filters call this: registry reads,
+log masking and direct calls of `harness-secrets-mask-text' do not.
+Neither the output nor the call's input is retained, apart from the
+path of a direct file read.  The record and its hit list are bounded;
+occurrence counts are cumulative for this session in this process.
+Bookkeeping never signals: a status failure must not bypass masking."
+  (condition-case nil
+      (harness-secrets--record-activity-1 session-id call hits withheld)
+    (error nil)))
+
+(defun harness-secrets--record-activity-1 (session-id call hits withheld)
+  "Record SESSION-ID's CALL, HITS and WITHHELD activity.
+The non-signalling `harness-secrets--record-activity' is the filter's entry."
+  (harness-secrets--check-activity-state)
+  (let* ((activity (gethash session-id harness-secrets--activity))
+         (count (cl-loop for hit in hits sum (or (plist-get hit :count) 0)))
+         (safe-hits (mapcar (lambda (hit)
+                              (list :label (plist-get hit :label)
+                                    :fingerprint (plist-get hit :fingerprint)
+                                    :count (plist-get hit :count)))
+                            (take harness-secrets--activity-hits-limit hits))))
+    (setq activity (plist-put activity :masked-count (+ (or (plist-get activity :masked-count) 0) count))
+          activity (plist-put activity :withheld-count (+ (or (plist-get activity :withheld-count) 0)
+                                                          (if withheld 1 0))))
+    (when hits
+      (setq activity
+            (plist-put activity :detections
+                       (take harness-secrets--activity-limit
+                             (cons (list :tool (or (plist-get call :name) "tool output")
+                                         :call-id (plist-get call :id)
+                                         :file (harness-secrets--detection-file session-id call)
+                                         :at (float-time)
+                                         :masked safe-hits :masked-total count)
+                                   (plist-get activity :detections))))))
+    (puthash session-id activity harness-secrets--activity)
+    (harness-emit 'secrets/detected session-id)))
+
+(harness-defmethod secrets/status (&optional session-id)
+  "Describe secret masking and SESSION-ID's observed tool output, without values.
+Sources and settings are harness-wide.  `:available' is t while this
+module is loaded, `:masking' says whether output filtering is on, and
+`:file-isolation' whether the optional secret-sandbox module is loaded
+(not whether a locked run can use a particular source).  `:detectors'
+lists the selected detector names and `:sources' is `secrets/sources'.
+`:detections' holds at most 50 recent tool-output detections, newest
+first, each (:tool :call-id :file :at :masked :masked-total).  Only a
+direct `read_file' detection has a file; shell and grep results do not.
+`:masked' has at most 100 (:label :fingerprint :count) entries, never
+values or surrounding text.  `:masked-total' includes any hits omitted
+by that bound.  `:masked-count' and `:withheld-count' are cumulative
+counts for the session in this process; progress, notes and final
+results are separate masking passes.  No project scan is implied.
+Without SESSION-ID the activity is that of calls made without a session."
+  (let ((sources (harness-call 'secrets/sources))
+        (installed (and (member #'harness-secrets--filter-output
+                               (mapcar #'cdr (gethash 'tools/output harness--filters)))
+                        t)))
+    (harness-secrets--check-activity-state)
+    (let ((activity (gethash session-id harness-secrets--activity)))
+      (list :available (and installed t)
+            ;; The switch alone is not masking: a disabled module keeps its
+            ;; methods, so `:available' says whether its filters are installed.
+            :masking (and installed harness-secrets-mask t)
+            :file-isolation (and (when-let* ((m (gethash 'secret-sandbox harness--modules)))
+                                   (eq (harness-module-state m) 'ready))
+                                 (harness-method-exists-p 'secret-sandbox/status)
+                                 t)
+            :detectors (mapcar (lambda (d) (harness-secrets--detector-name (car d)))
+                               (harness-secrets--active-detectors))
+            :sources sources
+            :detections (copy-tree (plist-get activity :detections))
+            :masked-count (or (plist-get activity :masked-count) 0)
+            :withheld-count (or (plist-get activity :withheld-count) 0)))))
 
 ;;;; Masking
 
@@ -903,12 +1036,13 @@ text around it.  A TEXT that is not a string is returned as it is."
   "[output withheld: it could not be checked for secrets]"
   "What stands in for text that masking failed on.")
 
-(defun harness-secrets--filter-output (result &rest _)
+(defun harness-secrets--filter-output (result &optional session-id call)
   "Take the secrets out of the output of RESULT, the `tools/output' filter.
 Return RESULT with the secrets in its `:content' masked, and what was
 masked added to its `:meta' as `:masked' (see `harness-secrets-mask-text'
-for its shape).  A result masking fails on has its output withheld: a
-secret must not get through for the want of a check."
+for its shape).  Record value-free activity for SESSION-ID and CALL.
+A result masking fails on has its output withheld: a secret must not
+get through for the want of a check."
   (let ((content (plist-get result :content)))
     (if (not (and harness-secrets-mask (stringp content) (not (string-empty-p content))))
         result
@@ -916,23 +1050,29 @@ secret must not get through for the want of a check."
           (pcase-let ((`(,masked . ,hits) (harness-secrets-mask-text content)))
             (if (null hits)
                 result
+              (harness-secrets--record-activity session-id call hits)
               (let ((meta (plist-get result :meta))
                     (new (plist-put (copy-sequence result) :content masked)))
                 (plist-put new :meta (plist-put (copy-sequence meta) :masked
                                                 (append (plist-get meta :masked) hits))))))
         (error
+         (harness-secrets--record-activity session-id call nil t)
          (harness-log 'error "secrets: masking a tool result failed (%s); its output is withheld"
                       (if (consp err) (car err) err))
          (plist-put (plist-put (copy-sequence result) :content harness-secrets--withheld)
                     :is-error t))))))
 
-(defun harness-secrets--filter-text (text &rest _)
-  "Take the secrets out of TEXT, the `tools/output-text' filter."
+(defun harness-secrets--filter-text (text &optional session-id)
+  "Take secrets out of TEXT, the `tools/output-text' filter for SESSION-ID.
+Record only its labels, fingerprints and counts, without file provenance."
   (if (not (and harness-secrets-mask (stringp text) (not (string-empty-p text))))
       text
     (condition-case err
-        (car (harness-secrets-mask-text text))
+        (pcase-let ((`(,masked . ,hits) (harness-secrets-mask-text text)))
+          (when hits (harness-secrets--record-activity session-id nil hits))
+          masked)
       (error
+       (harness-secrets--record-activity session-id nil nil t)
        (harness-log 'error "secrets: masking tool text failed (%s); it is withheld"
                     (if (consp err) (car err) err))
        harness-secrets--withheld))))
@@ -969,11 +1109,17 @@ for any other call; REQUEST is the call."
 
 ;;;; Installing
 
+(harness-declare-event 'secrets/detected
+                       "(SESSION-ID) after tool output was masked or withheld; no value or output in the event.")
+(harness-declare-event 'secrets/sources-changed
+                       "() after a stored secret source was added or removed; references, never values, in secrets/sources.")
+
 (defun harness-secrets--install ()
   "Install the filters of masking.  Safe to call again."
   (harness-add-filter 'tools/output #'harness-secrets--filter-output 5)
   (harness-add-filter 'tools/output-text #'harness-secrets--filter-text 5)
   (harness-add-filter 'permission/decide #'harness-secrets--write-guard 3)
+  (harness-on 'session/deleted #'harness-secrets--forget-session)
   (setq harness-log-filter-function #'harness-secrets--filter-log))
 
 (defun harness-secrets--uninstall ()
@@ -982,6 +1128,7 @@ for any other call; REQUEST is the call."
   (harness-remove-filter 'tools/output #'harness-secrets--filter-output)
   (harness-remove-filter 'tools/output-text #'harness-secrets--filter-text)
   (harness-remove-filter 'permission/decide #'harness-secrets--write-guard)
+  (harness-off (cons 'session/deleted #'harness-secrets--forget-session))
   (when (eq harness-log-filter-function #'harness-secrets--filter-log)
     (setq harness-log-filter-function nil)))
 

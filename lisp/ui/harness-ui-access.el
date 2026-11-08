@@ -5,8 +5,8 @@
 ;; `harness-access' (C-c h j) says what a session may reach, in one
 ;; place, and changes it.  Clicking the permission mode on a chat's
 ;; settings line (Ask, Accept Edits, Auto, YOLO) opens it too.  It is
-;; four pages, a buffer each, that share a strip under the title --
-;; Overview, Tools, Rules, Judgements, also the keys 1 to 4 -- so the
+;; five pages, a buffer each, that share a strip under the title --
+;; Overview, Tools, Rules, Judgements, Secrets, also the keys 1 to 5 -- so the
 ;; first page holds what most visits are for and the long lists are a
 ;; click away rather than all on one screen:
 ;;
@@ -29,8 +29,9 @@
 ;;   revoke a grant, restore one given up; new ones are allowed, for
 ;;   writing or for reading only, and the session moves to another
 ;;   working directory (`harness-directories', C-c h d, opens the page
-;;   here).  Details end it: a line each for the tools, the rules and
-;;   the judgements, with what they hold, each a link to its page.
+;;   here).  Details end it: a line each for the tools, the rules, the
+;;   judgements and the secret protection, with what they hold, each a
+;;   link to its page.
 ;; - Tools: those the session is offered, those it is not and why,
 ;;   and those that belong to other kinds of session.  A tool is turned
 ;;   off for the session, and on again, here.
@@ -46,6 +47,12 @@
 ;;   decided, by who decided, by tool and by text.  A call that waits
 ;;   for an answer is listed as waiting; the answer is the session's
 ;;   chat's, where the request is, not this view's.
+;; - Secrets: whether output masking and source-file isolation are on,
+;;   the detectors in force, the harness-wide registered sources with
+;;   their management actions, and the files this session's direct
+;;   `read_file' calls had secrets masked in.  A registered source and an
+;;   observed file stay apart, and there is no project scan; the page says
+;;   so (docs/secrets-view.md).
 ;;
 ;; What you change here takes effect at once, and the session's
 ;; transcript says so.  The agent cannot change any of it this way: it
@@ -66,6 +73,9 @@
 (require 'harness-ui-pending)
 
 (declare-function harness-decision-undo "harness-ui-decisions")
+(declare-function harness-secrets-add-source "harness-ui-secrets" (&optional kind))
+(declare-function harness-ui-secrets-remove "harness-ui-secrets" (source &optional after on-error))
+(declare-function harness-settings "harness-ui-config" (&optional directory scope))
 
 (defgroup harness-ui-access nil
   "The jail and permissions view of a session."
@@ -110,10 +120,11 @@ Not underlined, which would hide the underscores of the names."
   '((overview "Overview" "Settings and directories of the session")
     (tools "Tools" "Tools offered to the session, and those withheld")
     (rules "Rules" "Permission rules of the session")
-    (judgements "Judgements" "Judged calls of the session"))
+    (judgements "Judgements" "Judged calls of the session")
+    (secrets "Secrets" "Secret sources and detected tool output"))
   "The pages of the access view, as (PAGE TITLE DESCRIPTION).
 They are in the order the strip names them.  A page is a buffer of its
-own (`harness-ui-access--buffer'); the keys 1 to 4 show them in this
+own (`harness-ui-access--buffer'); the keys 1 to 5 show them in this
 order.")
 
 (defconst harness-ui-access--refresh-delay 0.3
@@ -145,6 +156,9 @@ Each is a string, or nil for any.")
 
 (defvar-local harness-ui-access--generation 0
   "Bumped by every fetch, so the answer to an older one is dropped.")
+
+(defvar-local harness-ui-access--connection nil
+  "The UI connection `harness-ui-access--fetch' last asked for this buffer.")
 
 (defvar-local harness-ui-access--timer nil
   "Timer of the fetch the buffer waits to make, or nil.")
@@ -214,13 +228,14 @@ Interactively the current buffer's session, or one you choose.  The
 view's first page, the Overview, holds the session's settings -- its
 permission mode, whether it asks you, the network, writing, the Linux
 capabilities of its commands and its sandbox -- and its directories, and
-a line each for its tools, rules and judgements, which have pages of
-their own.  SECTION, a symbol, names what to show: `tools', `rules' or
-`judgements' open that page; `settings' (also `jail') and `directories'
-put point at that section of the Overview.  Return the buffer."
+a line each for its tools, rules, judgements and secret protection,
+which have pages of their own.  SECTION, a symbol, names what to show:
+`tools', `rules', `secrets' or `judgements' open that page; `settings'
+\(also `jail') and `directories' put point at that section of the
+Overview.  Return the buffer."
   (interactive)
   (let* ((sid (or session-id (harness-ui-current-session-id)))
-         (page (if (memq section '(tools rules judgements)) section 'overview))
+         (page (if (memq section '(tools rules judgements secrets)) section 'overview))
          (buffer (harness-ui-access--buffer sid page)))
     (with-current-buffer buffer
       (setq harness-ui-access--goto (and (eq page 'overview) (if (eq section 'jail) 'settings section)))
@@ -253,6 +268,8 @@ BUFFER is the current buffer by default."
       (setq harness-ui-access--timer nil
             harness-ui-access--stale nil)
       (harness-ui-view-drawn)
+      (unless (or harness-ui-access--describe harness-ui-access--deleted)
+        (harness-ui-access--render))
       (if harness-ui-access--deleted
           (harness-ui-access--render)
         (harness-ui-access--fetch buffer)))))
@@ -264,6 +281,7 @@ and the Judgements pages also ask for the judgements -- the Overview
 for their counts only, the newest one beside them.  The Tools and Rules
 pages draw none, and ask for none."
   (with-current-buffer buffer
+    (setq harness-ui-access--connection harness-ui-connection)
     (let* ((sid harness-ui-session-id)
            (page harness-ui-access--page)
            (judged (and (memq page '(overview judgements)) t))
@@ -1150,14 +1168,163 @@ what is on it, wrapped under itself in a narrow window."
             "\n")
     (put-text-property start (point) 'harness-ui-access-anchor (cons 'detail page))))
 
+;;;; Drawing: secrets
+
+(defvar-local harness-ui-access--secret-error nil
+  "Why a secret-source action failed in this view, or nil.")
+
+(defun harness-ui-access--secrets-summary (status)
+  "Return the short protection state of the secrets STATUS."
+  (cond ((plist-get status :error) "Status unavailable")
+        ((not (harness-ui-access--true-p (plist-get status :available))) "Extension inactive")
+        (t (let ((count (length (plist-get status :sources))))
+             (format "Masking %s · %d %s · %d masked %s"
+                     (if (harness-ui-access--true-p (plist-get status :masking)) "on" "off")
+                     count (if (= count 1) "source" "sources")
+                     (or (plist-get status :masked-count) 0)
+                     (if (= (or (plist-get status :masked-count) 0) 1) "value" "values"))))))
+
+(defun harness-ui-access--secret-line (text &optional face)
+  "Insert one line of secret metadata TEXT, fitted with its full text as a tooltip."
+  (let* ((text (harness-ui-one-line text))
+         (width (- (harness-ui-access--width) 4)))
+    (insert "    " (propertize (truncate-string-to-width text width nil nil "…")
+                               'face (or face 'harness-dim-face) 'help-echo text) "\n")))
+
+(defun harness-ui-access--secret-result (buffer error)
+  "Return a source-action callback for BUFFER, with ERROR indicating failure."
+  (lambda (result)
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq harness-ui-access--secret-error (and error result))
+        (harness-ui-access-refresh buffer)))))
+
+(defun harness-ui-access--insert-secret-source (source)
+  "Insert the registered SOURCE, with a removal control for stored sources."
+  (let ((start (point))
+        (buffer (current-buffer))
+        (stored (equal (harness-ui-access--str (plist-get source :origin)) "stored")))
+    (insert "  ")
+    (harness-ui-access--wrap
+     (delq nil
+           (list (propertize (truncate-string-to-width (harness-ui-one-line (or (plist-get source :label) "secret"))
+                                                       (- (harness-ui-access--width) 4) nil nil "…")
+                            'face 'bold)
+                 (let ((count (or (plist-get source :values) 0)))
+                   (format "%d %s · %s" count (if (= count 1) "value" "values")
+                           (if stored "Stored" "Configuration")))
+                 (and stored (fboundp 'harness-ui-secrets-remove)
+                      (harness-ui-access--button
+                       "[Removal…]"
+                       (lambda ()
+                         (harness-ui-secrets-remove
+                          source (harness-ui-access--secret-result buffer nil)
+                          (harness-ui-access--secret-result buffer t)))
+                       "Source removal · harness-wide masking and file isolation"))))
+     (harness-ui-access--width) "    " "  ")
+    (harness-ui-access--secret-line (or (plist-get source :source) (plist-get source :file) "Unknown source"))
+    (when-let* ((fingerprints (plist-get source :fingerprints)))
+      (harness-ui-access--secret-line
+       (concat "sha256:" (string-join (append fingerprints nil) " "))))
+    (when (plist-get source :error)
+      (harness-ui-access--secret-line
+       (if (> (or (plist-get source :values) 0) 0)
+           "Source unreadable · previous values retained" "Source unreadable")
+       'harness-failure-face)
+      (harness-ui-access--secret-line (plist-get source :error)))
+    (put-text-property start (point) 'harness-ui-access-anchor (cons 'source (plist-get source :id)))))
+
+(defun harness-ui-access--insert-secrets (status)
+  "Insert protection status, registered sources and session detections from STATUS."
+  (harness-ui-access--heading "Protection" 'protection)
+  (cond
+   ((plist-get status :error)
+    (insert (propertize "  Secret status unavailable\n" 'face 'harness-failure-face)))
+   ((not (harness-ui-access--true-p (plist-get status :available)))
+    (insert (propertize "  Secret extension inactive\n" 'face 'harness-caution-face)))
+   (t
+    (harness-ui-access--setting
+     'masking "Output masking"
+     (propertize (if (harness-ui-access--true-p (plist-get status :masking)) "On" "Off")
+                 'face (if (harness-ui-access--true-p (plist-get status :masking))
+                           'harness-success-face 'harness-failure-face))
+     "Tool-output detection · no project scan")
+    (harness-ui-access--setting
+     'secret-isolation "File isolation"
+     (if (harness-ui-access--true-p (plist-get status :file-isolation))
+         "Source-file isolation enabled" "No source-file isolation"))
+    (let* ((detectors (mapcar #'harness-ui-one-line (plist-get status :detectors)))
+           (shown (take 4 detectors))
+           (text (if detectors
+                     (concat (string-join shown " · ")
+                             (if (> (length detectors) (length shown))
+                                 (format " +%d" (- (length detectors) (length shown))) ""))
+                   "No active detectors")))
+      (harness-ui-access--setting
+       'detectors "Detectors"
+       (propertize (truncate-string-to-width
+                    text (max 10 (- (harness-ui-access--width) harness-ui-access--label-width 2))
+                    nil nil "…")
+                   'help-echo (or (string-join detectors " · ") "No active detectors"))))
+    (harness-ui-access--heading "Registered sources" 'sources "Harness-wide")
+    (insert "  ")
+    (harness-ui-access--wrap
+     (delq nil
+           (list
+            (and (commandp 'harness-secrets-add-source)
+                 (harness-ui-access--button "[New source…]" #'harness-secrets-add-source
+                                            "New secret source · harness-wide"))
+            (and (commandp 'harness-secrets-list-sources)
+                 (harness-ui-access--button "[Sources]" 'harness-secrets-list-sources "Registered secret sources"))
+            (and (commandp 'harness-redact-secret)
+                 (harness-ui-access--button "[Redaction…]" 'harness-redact-secret "Stored-secret redaction"))
+            (and (commandp 'harness-redactions)
+                 (harness-ui-access--button "[History]" 'harness-redactions "Redaction history"))
+            (and (commandp 'harness-settings)
+                 (harness-ui-access--button "[Settings]" (lambda () (harness-settings nil 'global)) "Harness settings"))))
+     (harness-ui-access--width) "  " " ")
+    (when harness-ui-access--secret-error
+      (harness-ui-access--secret-line harness-ui-access--secret-error 'harness-failure-face))
+    (if-let* ((sources (plist-get status :sources)))
+        (mapc #'harness-ui-access--insert-secret-source sources)
+      (insert (propertize "  No registered sources\n" 'face 'harness-dim-face)))
+    (harness-ui-access--heading "Detected in tool output" 'detections "This session · current harness run")
+    (insert (format "  %d masked %s · %d withheld\n"
+                    (or (plist-get status :masked-count) 0)
+                    (if (= (or (plist-get status :masked-count) 0) 1) "value" "values")
+                    (or (plist-get status :withheld-count) 0)))
+    (if-let* ((detections (plist-get status :detections)))
+        (dolist (item detections)
+          (harness-ui-access--secret-line
+           (format "%s · %s · %s"
+                   (if (member (plist-get item :tool) '(nil "tool output"))
+                       "Tool output"
+                     (let* ((name (plist-get item :tool))
+                            (label (harness-ui-tool-label name)))
+                       (if (equal label name)
+                           (let ((text (replace-regexp-in-string "[-_]" " " label)))
+                             (concat (upcase (substring text 0 1)) (substring text 1)))
+                         label)))
+                   (or (plist-get item :file) "Unknown file")
+                   (harness-ui-access--time (plist-get item :at))) 'default)
+          (dolist (hit (plist-get item :masked))
+            (harness-ui-access--secret-line
+             (format "%s · sha256:%s · %d %s" (plist-get hit :label)
+                     (plist-get hit :fingerprint) (plist-get hit :count)
+                     (if (= (plist-get hit :count) 1) "match" "matches")))))
+      (insert (propertize "  No detections yet\n" 'face 'harness-dim-face)))))
+  (insert "\n  " (harness-ui-access--button "[Refresh]" #'harness-ui-access-refresh "Secret status refresh (g)") "\n"))
+
 (defun harness-ui-access--insert-details (d j)
   "Insert the details of the session described as D.
-They are its tools, rules and judgements, each a line that says what is
-on its page, and opens it.  J is what `access/judgements' said."
+They are its tools, rules, judgements and secret protection, each a line
+that says what is on its page, and opens it.  J is what
+`access/judgements' said."
   (harness-ui-access--heading "Details" 'details)
   (harness-ui-access--insert-detail 'tools (harness-ui-access--tools-summary d t))
   (harness-ui-access--insert-detail 'rules (harness-ui-access--rules-summary d))
-  (harness-ui-access--insert-detail 'judgements (harness-ui-access--judgements-summary j)))
+  (harness-ui-access--insert-detail 'judgements (harness-ui-access--judgements-summary j))
+  (harness-ui-access--insert-detail 'secrets (harness-ui-access--secrets-summary (plist-get d :secrets))))
 
 ;;;; Drawing: the judgements
 
@@ -1299,6 +1466,9 @@ EXPANDED are the ids of the calls to draw unfolded."
                                       (format "«%s»" name)
                                     (substring harness-ui-session-id 0 (min 8 (length harness-ui-session-id)))))
                           'face 'harness-dim-face)))
+     ((and harness-ui-access--error (eq harness-ui-access--page 'secrets))
+      (insert (propertize "Secret status unavailable\n" 'face 'harness-failure-face)
+              (harness-ui-access--button "[Refresh]" #'harness-ui-access-refresh "Secret status refresh (g)") "\n"))
      (harness-ui-access--error
       (insert (propertize (format "Access unreadable: %s\n" harness-ui-access--error)
                           'face 'harness-failure-face)
@@ -1310,6 +1480,7 @@ EXPANDED are the ids of the calls to draw unfolded."
       (pcase harness-ui-access--page
         ('tools (harness-ui-access--insert-tools d))
         ('rules (harness-ui-access--insert-rules d))
+        ('secrets (harness-ui-access--insert-secrets (plist-get d :secrets)))
         ('judgements
          (harness-ui-access--insert-judgements harness-ui-access--judgements expanded))
         (_
@@ -1320,7 +1491,7 @@ EXPANDED are the ids of the calls to draw unfolded."
                      (when-let* ((pos (and spot (harness-ui-access--find-anchor (car spot)))))
                        (min (point-max) (+ pos (cdr spot)))))))
       (cond
-       (harness-ui-access--goto
+       ((and harness-ui-access--goto d)
         (let ((pos (or (harness-ui-access--find-anchor (cons 'section harness-ui-access--goto)) (point-min))))
           (setq harness-ui-access--goto nil)
           (goto-char pos)
@@ -1373,11 +1544,11 @@ first, then the session, and the name stays."
 
 (defun harness-ui-access-show-page (page &optional filter)
   "Show PAGE of this view's session in place of this one.
-PAGE is one of `harness-ui-access--pages': `overview', `tools', `rules'
-or `judgements'.  FILTER, a plist as `harness-ui-access--filter' holds,
-is the filter the Judgements page starts with.  The page is drawn from
-what the harness says now; it takes the position this one had
-\(`harness-ui-display-view')."
+PAGE is one of `harness-ui-access--pages': `overview', `tools',
+`rules', `secrets' or `judgements'.  FILTER, a plist as
+`harness-ui-access--filter' holds, is the filter the Judgements page
+starts with.  The page is drawn from what the harness says now; it
+takes the position this one had (`harness-ui-display-view')."
   (interactive (list (harness-ui-access--read-page)))
   (when harness-ui-access--deleted
     (user-error "Session deleted"))
@@ -1410,6 +1581,11 @@ what the harness says now; it takes the position this one had
   "Show the Judgements page of this view's session: every call the chain judged."
   (interactive)
   (harness-ui-access-show-page 'judgements))
+
+(defun harness-ui-access-show-secrets ()
+  "Show this session's secret detections and the harness-wide secret sources."
+  (interactive)
+  (harness-ui-access-show-page 'secrets))
 
 (defun harness-ui-access-quit ()
   "Go back from this page to the Overview, or put the view away from the Overview.
@@ -1892,12 +2068,15 @@ Past the last button the first is next, as TAB goes round a form."
     map)
   "Keymap of `harness-ui-access-mode'.")
 
+;; At top level too, so a live reload adds the page to an existing keymap.
+(define-key harness-ui-access-mode-map (kbd "5") #'harness-ui-access-show-secrets)
+
 (define-derived-mode harness-ui-access-mode special-mode "Access"
   "Major mode of a page of a session's access view (`harness-access').
 The Overview lists the session's settings -- permission mode, whether
 it asks you, network, writing, the Linux capabilities of its commands
 and its sandbox -- and its directories, and changes them; the Tools,
-Rules and Judgements pages list what its name says.  The keys 1 to 4
+Rules, Judgements and Secrets pages list what their names say.  The keys 1 to 5
 show the pages, q goes back to the Overview.
 
 \\{harness-ui-access-mode-map}"
@@ -1915,6 +2094,7 @@ show the pages, q goes back to the Overview.
         (". 2" "Tools" harness-ui-access-show-tools)
         (". 3" "Rules" harness-ui-access-show-rules)
         (". 4" "Judgements" harness-ui-access-show-judgements)
+        (". 5" "Secrets" harness-ui-access-show-secrets)
         (". q" "Back to the Overview" harness-ui-access-quit)]
        ["Settings"
         (". M" "Permission mode" harness-ui-access-set-mode)
@@ -1940,11 +2120,13 @@ show the pages, q goes back to the Overview.
 ;;;; Following the session
 
 (defconst harness-ui-access--session-events
-  '("access/changed" "access/judged" "session/moved" "session/pending-changed" "session/ext-changed")
+  '("access/changed" "access/judged" "session/moved" "session/pending-changed" "session/ext-changed"
+    "secrets/detected")
   "Events about one session, its id first, that change what its view shows.")
 
 (defconst harness-ui-access--global-events
-  '("permission/dir-allowed" "permission/dir-revoked" "config/changed" "decision/changed")
+  '("permission/dir-allowed" "permission/dir-revoked" "config/changed" "decision/changed"
+    "secrets/sources-changed" "harness/reloaded")
   "Events that may change what every view shows: a grant may be for every session.")
 
 (defun harness-ui-access--on-event (event args)
@@ -1969,8 +2151,34 @@ the session changed."
                 '("_harness/node" "tool_call_update" "current_mode_update" "_harness/session"))
     (mapc #'harness-ui-access--schedule (harness-ui-access--buffers session-id))))
 
+(defun harness-ui-access--redraw ()
+  "Draw shown access views with the new code, and mark hidden ones stale."
+  (dolist (buffer (harness-ui-access--buffers))
+    (with-current-buffer buffer
+      (when harness-ui-access--describe
+        (if (get-buffer-window buffer t)
+            (harness-ui-access--render)
+          (setq harness-ui-access--stale t))))))
+
+(defun harness-ui-access--reconnected ()
+  "Fetch access views again when the connection they asked through is gone.
+A view whose first fetch is still in flight when the connection is
+replaced has nothing to keep, and is fetched again rather than left
+loading.  A view that asked while no connection had been made yet is
+fetched once more when one is: the request may have gone out on it, but
+the buffer cannot know which connection that was."
+  (dolist (buffer (harness-ui-access--buffers))
+    (with-current-buffer buffer
+      (when (not (eq harness-ui-access--connection harness-ui-connection))
+        ;; The answer to the request made on the old connection is dropped.
+        (cl-incf harness-ui-access--generation)
+        (setq harness-ui-access--secret-error nil)
+        (harness-ui-access--fetch buffer)))))
+
 (defun harness-ui-access--init ()
   "Wire the access views into the UI, and bind j and d in `harness-ui-map'."
+  (add-hook 'harness-ui-redraw-hook #'harness-ui-access--redraw)
+  (add-hook 'harness-ui-connected-hook #'harness-ui-access--reconnected)
   (add-hook 'harness-ui-event-functions #'harness-ui-access--on-event)
   (add-hook 'harness-ui-update-functions #'harness-ui-access--on-update)
   (define-key harness-ui-map (kbd "j") #'harness-access)
@@ -1978,11 +2186,13 @@ the session changed."
 
 (defun harness-ui-access--shutdown ()
   "Unwire the access views."
+  (remove-hook 'harness-ui-redraw-hook #'harness-ui-access--redraw)
+  (remove-hook 'harness-ui-connected-hook #'harness-ui-access--reconnected)
   (remove-hook 'harness-ui-event-functions #'harness-ui-access--on-event)
   (remove-hook 'harness-ui-update-functions #'harness-ui-access--on-update))
 
 (harness-define-module 'ui-access
-  :doc "The jail and permissions view of a session, in four pages: its settings and directories, its tools, its rules and the judgements of its calls, each drawn as the chat draws it."
+  :doc "The jail and permissions view of a session, in five pages: settings and directories, tools, rules, judgements and secret protection."
   :requires '(ui ui-chat ui-pending)
   :init #'harness-ui-access--init
   :shutdown #'harness-ui-access--shutdown)

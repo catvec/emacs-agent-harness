@@ -1513,5 +1513,33 @@ read-only session's commands; given up, it is not passed any more."
           (should-not (funcall adds))
           (should-not (harness-access-test-profile sid)))))))
 
+;;;; Optional secrets status
+
+(ert-deftest harness-access-secrets-status-is-optional-and-session-scoped ()
+  "Access reports an absent module, or the optional module's session status."
+  (harness-access-test-with
+    (let ((sid (harness-access-test-session))
+          (asked nil))
+      (should-not (harness-method-exists-p 'secrets/status))
+      (should (equal '(:available nil) (plist-get (harness-call 'access/describe sid) :secrets)))
+      (harness-register-method 'secrets/status
+        (lambda (session-id)
+          (push session-id asked)
+          (list :available t :masking t :masked-count 3 :detections nil)))
+      (should (equal '(:available t :masking t :masked-count 3 :detections nil)
+                     (plist-get (harness-call 'access/describe sid) :secrets)))
+      (should (equal (list sid) asked)))))
+
+(ert-deftest harness-access-secrets-status-failure-without-error-payload ()
+  "An optional status failure cannot leak an unexpected secret-shaped error."
+  (harness-access-test-with
+    (let ((sid (harness-access-test-session))
+          (secret (concat "ghp_" (make-string 36 ?b))))
+      (harness-register-method 'secrets/status (lambda (_) (error "%s" secret)))
+      (let ((description (harness-call 'access/describe sid)))
+        (should (equal '(:available t :error "Secret status unavailable") (plist-get description :secrets)))
+        (should-not (string-search secret (format "%S" description)))
+        (should (plist-get description :dirs))))))
+
 (provide 'harness-access-test)
 ;;; harness-access-test.el ends here

@@ -25,6 +25,7 @@
 (defvar harness-secrets-detectors)
 (defvar harness-secrets-extra-detectors)
 (defvar harness-secrets--refresh-interval)
+(defvar harness-secrets--retry-interval)
 (defvar harness-secrets--checked)
 (defvar harness-secrets--entries)
 (defvar harness-tools-max-output-chars)
@@ -988,6 +989,243 @@ tool printed."
         (should (equal (format "1. a result mentioning %s"
                                (harness-secrets-mask-test--placeholder secret "builtin-seen"))
                        (plist-get result :output)))))))
+
+;;;; Value-free status and observed tool output
+
+(ert-deftest harness-secrets-status-sources-and-detectors-without-values ()
+  "Status names registered files and detector settings, never the values."
+  (harness-secrets-mask-test-with
+    (let* ((secret (harness-secrets-mask-test--fake))
+           (file (harness-secrets-mask-test--key-file secret))
+           (harness-secrets-sources (list (harness-secrets-mask-test--source file "registered")))
+           (harness-secrets-detectors '(github-token))
+           (status (harness-call 'secrets/status "s1")))
+      (should (eq t (plist-get status :available)))
+      (should (eq t (plist-get status :masking)))
+      (should-not (plist-get status :file-isolation))
+      (should (equal '("github-token") (plist-get status :detectors)))
+      (should (equal file (plist-get (car (plist-get status :sources)) :file)))
+      (should (equal (harness-call 'secrets/sources) (plist-get status :sources)))
+      (should-not (string-search secret (format "%S" status)))
+      (should-not (plist-get status :detections))
+      (should (equal 0 (plist-get status :masked-count)))
+      (should (equal 0 (plist-get status :withheld-count)))
+      ;; Isolation is the optional module, not a method left behind by a
+      ;; module that was disabled.
+      (harness-register-method 'secret-sandbox/status (lambda () (error "No invocation")))
+      (should-not (plist-get (harness-call 'secrets/status "s1") :file-isolation))
+      (harness-define-module 'secret-sandbox :doc "test" :requires nil :init nil)
+      (harness-module-start 'secret-sandbox)
+      (unwind-protect
+          (should (eq t (plist-get (harness-call 'secrets/status "s1") :file-isolation)))
+        (harness-module-disable 'secret-sandbox))
+      (should-not (plist-get (harness-call 'secrets/status "s1") :file-isolation)))))
+
+(ert-deftest harness-secrets-status-does-not-claim-a-disabled-extension ()
+  "A disabled module keeps its methods but not its filters: status says so."
+  (harness-secrets-mask-test-with
+    (should (eq t (plist-get (harness-call 'secrets/status "s1") :available)))
+    (unwind-protect
+        (progn
+          (harness-module-disable 'secrets)
+          (let ((status (harness-call 'secrets/status "s1")))
+            (should-not (plist-get status :available))
+            (should-not (plist-get status :masking))))
+      ;; A disabled module never starts again, so restore its filters directly.
+      (setf (harness-module-state (gethash 'secrets harness--modules)) 'ready)
+      (harness-secrets--install))))
+
+(ert-deftest harness-secrets-status-file-provenance-and-session-isolation ()
+  "Only a direct read has file provenance, and other sessions see no activity."
+  (harness-secrets-mask-test-with
+    (let* ((token (concat "ghp_" (make-string 36 ?b)))
+           (path (expand-file-name "observed.env" dir))
+           (result (list :content (concat "Unretained surrounding text " token)))
+           (events nil))
+      (harness-register-method 'session/get (lambda (id) (list :id id :cwd dir)))
+      (harness-on 'secrets/detected (lambda (sid) (push sid events)))
+      (harness-secrets--filter-output result "s1" '(:name "read_file" :id "read" :input (:path "observed.env")))
+      (harness-secrets--filter-output result "s1" '(:name "grep" :id "search" :input (:path "project/")))
+      (harness-secrets--filter-output result "s1" '(:name "bash" :id "shell" :input (:command "cat ./observed.env")))
+      (let* ((status (harness-call 'secrets/status "s1"))
+             (detections (plist-get status :detections))
+             (text (format "%S" status)))
+        (should (equal '("shell" "search" "read") (mapcar (lambda (d) (plist-get d :call-id)) detections)))
+        (should (equal (list nil nil path) (mapcar (lambda (d) (plist-get d :file)) detections)))
+        (should (equal 3 (plist-get status :masked-count)))
+        (should (cl-every (lambda (d) (numberp (plist-get d :at))) detections))
+        (should (cl-every (lambda (d) (equal 1 (plist-get d :masked-total))) detections))
+        (should-not (string-search token text))
+        (should-not (string-search "Unretained surrounding text" text))
+        (should-not (string-search "cat ./observed.env" text))
+        ;; Detected output does not declare a source or mark a file for isolation.
+        (should-not (plist-get status :sources)))
+      (should (equal '("s1" "s1" "s1") events))
+      (should-not (plist-get (harness-call 'secrets/status "s2") :detections))
+      (should (equal 0 (plist-get (harness-call 'secrets/status "s2") :masked-count)))
+      (should-not (plist-get (harness-call 'secrets/status) :detections)))))
+
+(ert-deftest harness-secrets-status-real-read-and-progress ()
+  "Real read_file results and progress/notes reach the activity filters."
+  (harness-secrets-mask-test-with
+    (let* ((token (concat "ghp_" (make-string 36 ?b)))
+           (path (expand-file-name "observed.env" dir)))
+      (with-temp-file path (insert token))
+      (harness-secrets-mask-test--call "read_file" :path "observed.env")
+      (let ((entry (car (plist-get (harness-call 'secrets/status) :detections))))
+        (should (equal path (plist-get entry :file)))
+        (should (equal "read_file" (plist-get entry :tool))))
+      (harness-secrets-mask-test--call "mask_report" :text token)
+      (let* ((status (harness-call 'secrets/status))
+             (entries (plist-get status :detections)))
+        (should (equal '("tool output" "tool output" "read_file")
+                       (mapcar (lambda (e) (plist-get e :tool)) entries)))
+        (should-not (plist-get (car entries) :file))
+        (should-not (plist-get (car entries) :call-id))
+        (should (equal 3 (plist-get status :masked-count)))))))
+
+(ert-deftest harness-secrets-status-observation-never-connects-or-guesses-a-cwd ()
+  "Remote home paths are metadata only, and missing sessions have no provenance."
+  (harness-secrets-mask-test-with
+    (let ((result (list :content (concat "ghp_" (make-string 36 ?b))))
+          (call '(:name "read_file" :id "c1" :input (:path "keys.env"))))
+      (harness-register-method 'session/get (lambda (_) (list :cwd "/ssh:box.invalid:~/project/")))
+      (harness-test-without-connections
+        (harness-secrets--filter-output result "remote" call))
+      (should (equal "/ssh:box.invalid:~/project/keys.env"
+                     (plist-get (car (plist-get (harness-call 'secrets/status "remote") :detections)) :file)))
+      (harness-register-method 'session/get (lambda (_) (list :cwd dir :host "/ssh:box.invalid:")))
+      (harness-secrets--filter-output result "hosted" call)
+      (should (equal (concat "/ssh:box.invalid:" (expand-file-name "keys.env" dir))
+                     (plist-get (car (plist-get (harness-call 'secrets/status "hosted") :detections)) :file)))
+      (harness-register-method 'session/get (lambda (_) (error "Unknown session")))
+      (harness-secrets--filter-output result "missing" call)
+      (should-not (plist-get (car (plist-get (harness-call 'secrets/status "missing") :detections)) :file)))))
+
+(ert-deftest harness-secrets-status-activity-bounds-and-lifetime ()
+  "Activity is bounded per session, cleared on deletion and state changes."
+  (harness-secrets-mask-test-with
+    (let ((result (list :content (concat "ghp_" (make-string 36 ?b)))))
+      (dotimes (i 55)
+        (harness-secrets--filter-output result "s1" (list :id (format "c%d" i) :name "mask_echo")))
+      (let* ((status (harness-call 'secrets/status "s1"))
+             (entries (plist-get status :detections)))
+        (should (equal 50 (length entries)))
+        (should (equal "c54" (plist-get (car entries) :call-id)))
+        (should (equal "c5" (plist-get (car (last entries)) :call-id)))
+        (should (equal 55 (plist-get status :masked-count))))
+      (harness-secrets--filter-output result "s2" '(:id "other" :name "mask_echo"))
+      (harness-emit 'session/deleted "s1")
+      (should-not (plist-get (harness-call 'secrets/status "s1") :detections))
+      (should (equal 1 (plist-get (harness-call 'secrets/status "s2") :masked-count)))
+      (let ((harness-state-directory (harness-test-temp-dir)))
+        (should-not (plist-get (harness-call 'secrets/status "s2") :detections)))
+      ;; Going back is not an invitation to recover stale records.
+      (should-not (plist-get (harness-call 'secrets/status "s2") :detections)))))
+
+(ert-deftest harness-secrets-status-one-results-hit-list-is-bounded ()
+  "A result cannot retain an unbounded list of distinct fingerprints."
+  (harness-secrets-mask-test-with
+    (let* ((tokens (cl-loop for i below 110 collect (concat "ghp_" (format "%036d" i))))
+           (result (list :content (string-join tokens " "))))
+      (harness-secrets--filter-output result "s1" '(:id "large" :name "mask_echo"))
+      (let* ((status (harness-call 'secrets/status "s1"))
+             (entry (car (plist-get status :detections))))
+        (should (equal 100 (length (plist-get entry :masked))))
+        (should (equal 110 (plist-get entry :masked-total)))
+        (should (equal 110 (plist-get status :masked-count)))))))
+
+(ert-deftest harness-secrets-status-only-actual-output-filtering-counts ()
+  "A log/direct mask is not tool activity, and disabled filtering is visible."
+  (harness-secrets-mask-test-with
+    (let ((token (concat "ghp_" (make-string 36 ?b))))
+      (harness-secrets-mask-text token)
+      (harness-log 'info "Direct log %s" token)
+      (should (equal 0 (plist-get (harness-call 'secrets/status) :masked-count)))
+      (let ((harness-secrets-mask nil))
+        (should (equal token (plist-get (harness-secrets--filter-output (list :content token) "s1") :content)))
+        (should (equal token (harness-secrets--filter-text token "s1")))
+        (let ((status (harness-call 'secrets/status "s1")))
+          (should-not (plist-get status :masking))
+          (should-not (plist-get status :detections))
+          (should (equal 0 (plist-get status :masked-count))))))))
+
+(ert-deftest harness-secrets-status-check-failures-withhold-output-without-error-payload ()
+  "A failed check is counted without keeping its potentially secret error."
+  (harness-secrets-mask-test-with
+    (let ((secret (harness-secrets-mask-test--fake))
+          (events nil))
+      (harness-on 'secrets/detected (lambda (sid) (push sid events)))
+      (cl-letf (((symbol-function 'harness-secrets-mask-text) (lambda (_) (error "%s" secret))))
+        (should (equal "[output withheld: it could not be checked for secrets]"
+                       (plist-get (harness-secrets--filter-output (list :content secret) "s1") :content)))
+        (should (equal "[output withheld: it could not be checked for secrets]"
+                       (harness-secrets--filter-text secret "s1"))))
+      (let ((status (harness-call 'secrets/status "s1")))
+        (should (equal 2 (plist-get status :withheld-count)))
+        (should (equal 0 (plist-get status :masked-count)))
+        (should-not (plist-get status :detections))
+        (should-not (string-search secret (format "%S" status))))
+      (should (equal '("s1" "s1") events)))))
+
+(ert-deftest harness-secrets-status-bookkeeping-failure-never-bypasses-masking ()
+  "A failing activity recorder cannot return the original tool output."
+  (harness-secrets-mask-test-with
+    (let ((token (concat "ghp_" (make-string 36 ?b))))
+      (cl-letf (((symbol-function 'harness-secrets--record-activity-1)
+                 (lambda (&rest _) (error "%s" token))))
+        (let ((result (harness-secrets-mask-test--call "mask_echo" :text token)))
+          (should-not (string-search token (plist-get result :content)))
+          (should (string-search "[redacted: github-token" (plist-get result :content))))
+        (should-not (string-search token (harness-secrets--filter-text token "s1")))
+        ;; A masking failure still withholds, even when the status counter fails too.
+        (cl-letf (((symbol-function 'harness-secrets-mask-text) (lambda (_) (error "%s" token))))
+          (should (equal "[output withheld: it could not be checked for secrets]"
+                         (plist-get (harness-secrets--filter-output (list :content token) "s1") :content)))
+          (should (equal "[output withheld: it could not be checked for secrets]"
+                         (harness-secrets--filter-text token "s1"))))))))
+
+(ert-deftest harness-secrets-status-source-changes-and-unreadable-previous-values ()
+  "Source mutations emit events, while failed reads retain their last values."
+  (harness-secrets-mask-test-with
+    (let* ((secret (harness-secrets-mask-test--fake))
+           (file (harness-secrets-mask-test--key-file secret))
+           (ref (harness-secrets-mask-test--source file "stored"))
+           (events nil)
+           (harness-secrets--retry-interval 0))
+      (harness-on 'secrets/sources-changed (lambda (&rest args) (push args events)))
+      (let* ((added (harness-call 'secrets/add-source ref))
+             (id (plist-get added :id)))
+        (should (equal '(nil) events))
+        (harness-call 'secrets/add-source ref)
+        (should (equal 1 (length events)))
+        (delete-file file)
+        (let* ((status (harness-call 'secrets/status "s1"))
+               (source (car (plist-get status :sources))))
+          (should (equal file (plist-get source :file)))
+          (should (plist-get source :error))
+          (should (equal 1 (plist-get source :values)))
+          (should-not (string-search secret (format "%S" status)))
+          (should-not (string-search secret (car (harness-secrets-mask-text secret)))))
+        (harness-call 'secrets/remove-source id)
+        (should (equal 2 (length events)))
+        (should-not (plist-get (harness-call 'secrets/status "s1") :sources))))))
+
+(ert-deftest harness-secrets-status-does-not-rerun-command-sources ()
+  "Opening or refreshing status leaves already resolved commands untouched."
+  (harness-secrets-mask-test-with
+    (let* ((secret (harness-secrets-mask-test--fake))
+           (harness-secrets-sources (list (list :command "hidden command" :label "command source")))
+           (calls 0))
+      (cl-letf (((symbol-function 'harness-redaction-resolve)
+                 (lambda (_)
+                   (cl-incf calls)
+                   (list :source "command output" :secrets (list (harness-redaction-secret secret "command source"))))))
+        (dotimes (_ 3)
+          (let ((text (format "%S" (harness-call 'secrets/status "s1"))))
+            (should-not (string-search secret text))
+            (should-not (string-search "hidden command" text))))
+        (should (equal 1 calls))))))
 
 (provide 'harness-secrets-mask-test)
 ;;; harness-secrets-mask-test.el ends here

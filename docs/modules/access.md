@@ -183,6 +183,7 @@ a call was judged.
 - `sandbox/capabilities` ([sandbox](sandbox.md)), when it is loaded
 - `sandbox/capability-name` ([sandbox](sandbox.md)), when it is loaded
 - `sandbox/status` ([sandbox](sandbox.md)), when it is loaded
+- `secrets/status` ([secrets](secrets.md)), when it is loaded
 - `session/get` ([session](session.md))
 - `session/list` ([session](session.md))
 - `session/nodes` ([session](session.md))

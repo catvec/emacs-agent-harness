@@ -95,6 +95,12 @@ was stored before.
 - `secrets/remove-source` (id) — Remove the stored source ID, as `secrets/sources` lists it.
 - `secrets/shape` (file &optional json-path) — Return the shape of the JSON document FILE, without any of its values.
 - `secrets/sources` — List the sources of the secrets that tool output is masked of, without a value.
+- `secrets/status` (&optional session-id) — Describe secret masking and SESSION-ID's observed tool output, without values.
+
+### Events
+
+- `secrets/detected` — (SESSION-ID) after tool output was masked or withheld; no value or output in the event.
+- `secrets/sources-changed` — () after a stored secret source was added or removed; references, never values, in secrets/sources.
 
 ### Options
 
@@ -107,8 +113,19 @@ was stored before.
 
 ### Methods it calls
 
+- `secret-sandbox/status` ([secret-sandbox](secret-sandbox.md)), when it is loaded
+- `session/get` ([session](session.md)), when it is loaded
 - `store/load` ([store](store.md))
 - `store/save` ([store](store.md))
+
+### Events it handles
+
+- `session/deleted` → `harness-secrets--forget-session`
+
+### Events it emits
+
+- `secrets/detected`
+- `secrets/sources-changed`
 
 ### Filter chains it joins
 
