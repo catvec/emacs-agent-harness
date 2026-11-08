@@ -44,7 +44,8 @@ goes over the wire.
   looked at. The version is a `Versions` menu when the task has more than one:
   `v2 · 9a8b7c6`, `v1 · 0a1b2c3`. An earlier one says `Earlier version`; it is
   read as it was, and has no viewed or approved marks, because a mark of an
-  old tree would be a lie about the new one.
+  old tree would be a lie about the new one. `New thread` in the summary
+  starts a thread on the change as a whole, with no line to pick.
 - Two tabs, `Files` and `Threads`, each with its count. They are a
   `HarnessTabStrip`, which scrolls rather than squeezing its labels when the
   screen is narrow or the text is large.
@@ -56,7 +57,8 @@ goes over the wire.
   with a list icon while the tree shows, `File tree` with a tree icon while
   the flat list shows. A search field filters by path. Directories fold, and
   keep their fold while the review is open.
-- The threads on the change as a whole at the end of the list.
+- The threads on the change as a whole at the end of the list, with their
+  own `New thread`.
 - A bottom bar with the draft count and one full-width way to the feedback,
   `Feedback` or `Replies`, never a row of small desktop buttons.
 - A banner for a newer revision than the one on screen: it says what is
@@ -73,13 +75,17 @@ icon when the keyboard is up and the bar is one line.
 `lib/src/ui/screens/review_file_screen.dart` shows one file:
 
 - The name and path, the git letter and the counts, the viewed and approved
-  marks as labelled pills, and the file's threads as a third pill.
+  marks as labelled pills, and the file's threads as a third pill. `New
+  thread` beside them writes about the file as a whole, with no line picked:
+  the place it records is the file.
 - Next and previous file in the header. They step over approved files while
   `Skip approved` is on, and wrap round the list.
 - The diff (`review_diff_view.dart`): unified on a phone, with an optional
   split view only when the window is at least 700 points wide. Hunk headers,
   both line numbers and a readable `+`/`-` prefix; additions and deletions
-  have ink of their own, so the meaning does not rest on a tint.
+  have ink of their own, so the meaning does not rest on a tint. With that
+  room the controls say what they do (`Comment on lines`, `Wrap lines`,
+  `Split view`); on a phone they are icons with tooltips.
 - Wrap on or off; off, each line pans horizontally and every visible line
   pans together. Wrap is the deliberate control for long code; the line is
   never clipped without a way to read it.
@@ -227,11 +233,11 @@ below are the ones the widget tests assert (`review_screen_test.dart`,
 | Where | Copy |
 |---|---|
 | Task bar | `Changes, threads and feedback`, `Review` |
-| Review heading | `Review`, `Replies`, `Revision 9a8b7c6`, `v2 · 9a8b7c6`, `34 files · +556 −120`, `2/34 viewed`, `1/34 approved`, `4 open · 1 to review` |
+| Review heading | `Review`, `Replies`, `Revision 9a8b7c6`, `v2 · 9a8b7c6`, `34 files · +556 −120`, `2/34 viewed`, `1/34 approved`, `4 open · 1 to review`, `New thread` |
 | Tabs, filters, menus | `Files`, `Threads`, `All`, `Open`, `To review`, `Closed`, `Drafts`, `File tree`, `Flat list`, `Skip approved: on`, `Skip approved: off`, `Review`, `Reload`, `Report` |
 | Tooltips | `Search files`, `Hide file search`, `Refresh review`, `Review actions`, `Previous file`, `Next file`, `Select lines`, `Wrap lines`, `No wrap`, `Split view`, `Unified view`, `Previous hunk`, `Next hunk`, `Previous thread`, `Next thread` |
-| File status and marks | `Added`, `Deleted`, `Modified`, `Renamed`, `Copied`, `Type changed`, `Viewed`, `Not viewed`, `Approved`, `Not approved`, `Threads`, `Binary file`, `No text diff`, `Earlier revision` |
-| Diff | `Hunk 1/2`, `Line 42`, `Lines 40–42`, `Added line 42`, `Deleted line 38`, `End of file marker`, `Loading diff`, `Diff unavailable`, `No diff`, `No changes in this file`, `Retry` |
+| File status and marks | `Added`, `Deleted`, `Modified`, `Renamed`, `Copied`, `Type changed`, `Viewed`, `Not viewed`, `Approved`, `Not approved`, `Threads`, `New thread`, `Binary file`, `No text diff`, `Earlier revision` |
+| Diff | `Comment on lines`, `Wrap lines`, `No wrap`, `Split view`, `Unified view`, `Hunk 1/2`, `Line 42`, `Lines 40–42`, `Added line 42`, `Deleted line 38`, `End of file marker`, `Loading diff`, `Diff unavailable`, `No diff`, `No changes in this file`, `Retry` |
 | Threads | `Reply`, `Quote`, `Edit`, `Delete`, `Resolve`, `Reopen`, `Mark reviewed`, `To review`, `Show more`, `Show less`, `1 earlier reply`, `5 earlier replies`, `Show in the diff`, `Send`, `Drop`, `Draft`, `Last thread closed` |
 | Conversation replies | `Thread`, `New thread`, `Open`, `Closed`, `Reply`, `Reply to thread`, `Open thread`, `Cancel reply`, `Show more`, `Show less`, `Message`, `Agent`, `You`, `Plan`, `Thinking`, `Tool call`, `Hand-in report`, `Change`, `Buffer`, `Another session`, `No message`, `No change`, `No review thread` |
 | Versions | `Versions`, `Earlier version`, `v1 · 0a1b2c3`, `Revision 9a8b7c6` |
@@ -305,8 +311,8 @@ rewritten into a noun phrase.
   test/review_screenshots_test.dart` writes `screenshots/review-files.png`,
   `review-diff.png`, `review-comment-keyboard.png`,
   `review-thread-keyboard.png`, `review-wide-split.png`,
-  `review-320-text2.png` and `review-task-bar.png`, drawn with the fonts of
-  a phone.
+  `review-new-thread.png`, `review-320-text2.png` and `review-task-bar.png`,
+  drawn with the fonts of a phone.
 - Conversation replies: `test/chat_thread_test.dart` for the strict form, the
   `<thread>` data of a message, a local echo, the reply's data and the card at
   320 points and twice the text; `test/chat_thread_screen_test.dart` for a

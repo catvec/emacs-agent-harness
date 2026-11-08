@@ -1177,18 +1177,27 @@ class ReviewController extends ChangeNotifier {
     }
   }
 
-  /// A thread on the change as a whole, or on lines of [file].
+  /// A thread on the change as a whole, on [file], or at [location].
+  ///
+  /// A thread on a file and one on the change are two drafts, as a thread on
+  /// one file is not the thread on another; a thread at a line shares the
+  /// draft of a comment on that line, since it is the same comment.
   ReviewDraft newThreadDraft({
     ReviewLocation? location,
     ChangedFile? file,
     String? revision,
   }) {
     final place =
-        location ?? (file == null ? null : ReviewLocation(file: file.path));
+        location ??
+        (file == null
+            ? null
+            : ReviewLocation(file: file.path, oldFile: file.oldPath));
     final shown = revision ?? changes?.revision;
-    final key = place?.line == null
+    final key = place == null || place.file.isEmpty
         ? _newCommentKey(shown, null)
-        : _newCommentKey(shown, '${place!.file}:${place.side}:${place.line}');
+        : place.line == null
+        ? _newCommentKey(shown, '${place.file}:file')
+        : _newCommentKey(shown, '${place.file}:${place.side}:${place.line}');
     return draftFor(key, location: place, revision: shown);
   }
 

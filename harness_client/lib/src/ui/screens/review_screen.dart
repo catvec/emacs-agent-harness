@@ -110,6 +110,25 @@ class _ReviewScreenState extends State<ReviewScreen> {
     );
   }
 
+  /// A thread on the change as a whole: what there is to say about the work
+  /// rather than about one line of it.
+  Future<void> _newThread() async {
+    final controller = _controller;
+    if (controller == null) return;
+    await showReviewComposer(
+      context,
+      controller: controller,
+      draft: controller.newThreadDraft(),
+      title: 'New thread',
+      hint: 'Comment',
+      saveLabel: 'Save',
+      onSaved: () {},
+    );
+    if (!mounted) return;
+    final notice = controller.notice;
+    if (notice != null && !notice.error) controller.clearNotice();
+  }
+
   Future<void> _more(ReviewController controller) async {
     final choice = await showHarnessMenu<String>(
       context: context,
@@ -219,6 +238,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
               _Summary(
                 controller: controller,
                 onVersions: () => _chooseVersion(controller),
+                onNewThread: _newThread,
               ),
               if (_filtering && _tab == ReviewTab.files)
                 Padding(
@@ -295,6 +315,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
                         onOpenThreads: () =>
                             setState(() => _tab = ReviewTab.threads),
                         onOpenThread: _openThread,
+                        onNewThread: _newThread,
                       )
                     : ReviewThreadsList(
                         controller: controller,
@@ -315,10 +336,11 @@ class _ReviewScreenState extends State<ReviewScreen> {
 }
 
 class _Summary extends StatelessWidget {
-  const _Summary({required this.controller, this.onVersions});
+  const _Summary({required this.controller, this.onVersions, this.onNewThread});
 
   final ReviewController controller;
   final VoidCallback? onVersions;
+  final VoidCallback? onNewThread;
 
   @override
   Widget build(BuildContext context) {
@@ -379,9 +401,9 @@ class _Summary extends StatelessWidget {
                           key: const ValueKey('review-revision'),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: HarnessText.meta(context).copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
+                          style: HarnessText.meta(
+                            context,
+                          ).copyWith(color: theme.colorScheme.onSurfaceVariant),
                         ),
                       ),
                       if (controller.hasVersions)
@@ -430,6 +452,19 @@ class _Summary extends StatelessWidget {
               ),
             ],
           ),
+          if (onNewThread != null) ...[
+            const SizedBox(height: HarnessSpace.xs),
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: HarnessTextButton(
+                key: const ValueKey('review-new-thread'),
+                label: 'New thread',
+                icon: Icons.add_comment_outlined,
+                dense: true,
+                onPressed: onNewThread,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -562,6 +597,7 @@ class _FilesPane extends StatelessWidget {
     required this.onOpenFile,
     required this.onOpenThreads,
     required this.onOpenThread,
+    required this.onNewThread,
   });
 
   final ReviewController controller;
@@ -569,6 +605,7 @@ class _FilesPane extends StatelessWidget {
   final ValueChanged<String> onOpenFile;
   final VoidCallback onOpenThreads;
   final ValueChanged<ReviewThread> onOpenThread;
+  final VoidCallback onNewThread;
 
   @override
   Widget build(BuildContext context) {
@@ -624,6 +661,7 @@ class _FilesPane extends StatelessWidget {
                   threads: wholeChange,
                   onOpen: onOpenThreads,
                   onOpenThread: onOpenThread,
+                  onNewThread: onNewThread,
                 );
               }
               final row = rows[index];
@@ -932,12 +970,14 @@ class _WholeChangeRow extends StatelessWidget {
     required this.threads,
     required this.onOpen,
     required this.onOpenThread,
+    required this.onNewThread,
   });
 
   final ReviewController controller;
   final List<ReviewThread> threads;
   final VoidCallback onOpen;
   final ValueChanged<ReviewThread> onOpenThread;
+  final VoidCallback onNewThread;
 
   @override
   Widget build(BuildContext context) {
@@ -983,6 +1023,12 @@ class _WholeChangeRow extends StatelessWidget {
               onPressed: onOpen,
             ),
           ],
+          HarnessTextButton(
+            key: const ValueKey('review-new-thread-change'),
+            label: 'New thread',
+            icon: Icons.add_comment_outlined,
+            onPressed: onNewThread,
+          ),
         ],
       ),
     );

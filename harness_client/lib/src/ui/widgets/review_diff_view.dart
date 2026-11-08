@@ -539,6 +539,9 @@ class _ReviewDiffViewState extends State<ReviewDiffView> {
     // At a large text size the words are wider than the phone: "Hunk 1/2"
     // keeps its place in a third of the room, and the arrows do the rest.
     final compact = MediaQuery.textScalerOf(context).scale(13) > 16;
+    // With the room for it, a control says what it does in words: an icon
+    // alone is a guess, and on a desktop it is a small target in a wide bar.
+    final labelled = wide;
     return Container(
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerLow,
@@ -551,42 +554,82 @@ class _ReviewDiffViewState extends State<ReviewDiffView> {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Row(
         children: [
-          HarnessIconButton(
-            key: const ValueKey('diff-select-lines'),
-            icon: Icons.format_list_numbered_rounded,
-            label: 'Select lines',
-            selected: _selecting,
-            onPressed: () {
-              if (_selecting) {
-                _cancelSelection();
-              } else {
-                final first = _rows.indexWhere(
-                  (row) => row.kind == _RowKind.line,
-                );
-                if (first >= 0) _startSelection(first);
-              }
-            },
-          ),
-          HarnessIconButton(
-            key: const ValueKey('diff-wrap'),
-            icon: Icons.wrap_text_rounded,
-            label: widget.controller.wrapLines ? 'No wrap' : 'Wrap lines',
-            selected: widget.controller.wrapLines,
-            onPressed: () =>
-                widget.controller.setWrapLines(!widget.controller.wrapLines),
-          ),
-          if (wide)
-            HarnessIconButton(
-              key: const ValueKey('diff-split'),
-              icon: Icons.view_column_outlined,
-              label: widget.controller.splitView
-                  ? 'Unified view'
-                  : 'Split view',
-              selected: widget.controller.splitView,
-              onPressed: () =>
-                  widget.controller.setSplitView(!widget.controller.splitView),
+          Expanded(
+            child: Wrap(
+              spacing: HarnessSpace.xs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                if (labelled) ...[
+                  HarnessTextButton(
+                    key: const ValueKey('diff-select-lines'),
+                    label: 'Comment on lines',
+                    icon: Icons.add_comment_outlined,
+                    dense: true,
+                    onPressed: () {
+                      if (_selecting) {
+                        _cancelSelection();
+                      } else {
+                        final first = _rows.indexWhere(
+                          (row) => row.kind == _RowKind.line,
+                        );
+                        if (first >= 0) _startSelection(first);
+                      }
+                    },
+                  ),
+                  HarnessTextButton(
+                    key: const ValueKey('diff-wrap'),
+                    label: widget.controller.wrapLines
+                        ? 'No wrap'
+                        : 'Wrap lines',
+                    icon: Icons.wrap_text_rounded,
+                    dense: true,
+                    onPressed: () => widget.controller.setWrapLines(
+                      !widget.controller.wrapLines,
+                    ),
+                  ),
+                  HarnessTextButton(
+                    key: const ValueKey('diff-split'),
+                    label: widget.controller.splitView
+                        ? 'Unified view'
+                        : 'Split view',
+                    icon: Icons.view_column_outlined,
+                    dense: true,
+                    onPressed: () => widget.controller.setSplitView(
+                      !widget.controller.splitView,
+                    ),
+                  ),
+                ] else ...[
+                  HarnessIconButton(
+                    key: const ValueKey('diff-select-lines'),
+                    icon: Icons.format_list_numbered_rounded,
+                    label: 'Select lines',
+                    selected: _selecting,
+                    onPressed: () {
+                      if (_selecting) {
+                        _cancelSelection();
+                      } else {
+                        final first = _rows.indexWhere(
+                          (row) => row.kind == _RowKind.line,
+                        );
+                        if (first >= 0) _startSelection(first);
+                      }
+                    },
+                  ),
+                  HarnessIconButton(
+                    key: const ValueKey('diff-wrap'),
+                    icon: Icons.wrap_text_rounded,
+                    label: widget.controller.wrapLines
+                        ? 'No wrap'
+                        : 'Wrap lines',
+                    selected: widget.controller.wrapLines,
+                    onPressed: () => widget.controller.setWrapLines(
+                      !widget.controller.wrapLines,
+                    ),
+                  ),
+                ],
+              ],
             ),
-          const Spacer(),
+          ),
           if (hunks.length > 1) ...[
             HarnessIconButton(
               key: const ValueKey('diff-hunk-previous'),

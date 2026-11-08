@@ -92,13 +92,35 @@ class _ReviewFileScreenState extends State<ReviewFileScreen> {
       revision: diff.revision,
       diff: diff,
     );
+    await _compose(draft, title: 'Comment', hint: 'Comment', saveLabel: 'Save');
+  }
+
+  /// A thread of the file's own, with no line picked: what is wrong with the
+  /// file as a whole says so without making the reader select a line.
+  Future<void> _newThread() async {
+    final file = _file;
+    if (file == null) return;
+    await _compose(
+      controller.newThreadDraft(file: file),
+      title: 'New thread',
+      hint: 'Comment',
+      saveLabel: 'Save',
+    );
+  }
+
+  Future<void> _compose(
+    ReviewDraft draft, {
+    required String title,
+    required String hint,
+    required String saveLabel,
+  }) async {
     await showReviewComposer(
       context,
       controller: controller,
       draft: draft,
-      title: 'Comment',
-      hint: 'Comment',
-      saveLabel: 'Save',
+      title: title,
+      hint: hint,
+      saveLabel: saveLabel,
       onSaved: () {},
     );
     if (!mounted) return;
@@ -249,6 +271,7 @@ class _ReviewFileScreenState extends State<ReviewFileScreen> {
                 approved: approved,
                 threads: threads.length,
                 onThreads: _threadsOfFile,
+                onNewThread: _newThread,
               ),
               Expanded(
                 child: ReviewDiffView(
@@ -389,6 +412,7 @@ class _FileActions extends StatelessWidget {
     required this.approved,
     required this.threads,
     required this.onThreads,
+    required this.onNewThread,
   });
 
   final ReviewController controller;
@@ -397,6 +421,7 @@ class _FileActions extends StatelessWidget {
   final bool approved;
   final int threads;
   final VoidCallback onThreads;
+  final VoidCallback onNewThread;
 
   @override
   Widget build(BuildContext context) {
@@ -453,6 +478,12 @@ class _FileActions extends StatelessWidget {
             count: threads,
             icon: Icons.forum_outlined,
             onTap: onThreads,
+          ),
+          HarnessPill(
+            key: const ValueKey('review-file-new-thread'),
+            label: 'New thread',
+            icon: Icons.add_comment_outlined,
+            onTap: onNewThread,
           ),
         ],
       ),

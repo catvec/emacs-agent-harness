@@ -269,6 +269,120 @@ void main() {
     );
   });
 
+  testWidgets('a new thread on a file needs no line picked', (tester) async {
+    final rig = await _rig();
+    await _pumpFile(tester, rig, 'lib/src/ui/chat_screen.dart');
+    expect(
+      find.byKey(const ValueKey('review-file-new-thread')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('review-file-new-thread')));
+    await _settle(tester, 6);
+    // The page says what is written, and the thread's place is the file.
+    expect(find.text('New thread'), findsWidgets);
+    expect(find.text('Comment'), findsWidgets);
+    await tester.enterText(
+      find.byKey(const ValueKey('review-composer-field')),
+      'The whole file needs a pass.',
+    );
+    await tester.tap(find.byKey(const ValueKey('review-composer-save')));
+    await _settle(tester);
+    final op = rig.harness.reviewData.operations.last;
+    expect(op['op'], 'add-comment');
+    final comment = asMap(op['comment']);
+    expect(comment['body'], 'The whole file needs a pass.');
+    expect(comment['revision'], reviewTip);
+    final location = asMap(comment['location']);
+    expect(location['file'], 'lib/src/ui/chat_screen.dart');
+    expect(location.containsKey('line'), isFalse);
+    expect(location.containsKey('end-line'), isFalse);
+    expect(
+      rig.harness.reviewData.threads.any((thread) {
+        final comments = thread['comments'] as List;
+        return comments.any(
+          (comment) =>
+              (comment as Map)['body'] == 'The whole file needs a pass.',
+        );
+      }),
+      isTrue,
+    );
+  });
+
+  testWidgets('a new thread on the change starts from the review', (
+    tester,
+  ) async {
+    final rig = await _rig();
+    await _pump(tester, rig);
+    await tester.tap(find.byKey(const ValueKey('review-new-thread')));
+    await _settle(tester, 6);
+    expect(find.text('New thread'), findsOneWidget);
+    expect(find.text('The change'), findsWidgets);
+    await tester.enterText(
+      find.byKey(const ValueKey('review-composer-field')),
+      'The change misses its tests.',
+    );
+    await tester.tap(find.byKey(const ValueKey('review-composer-save')));
+    await _settle(tester);
+    final op = rig.harness.reviewData.operations.last;
+    expect(op['op'], 'add-comment');
+    final comment = asMap(op['comment']);
+    expect(comment['body'], 'The change misses its tests.');
+    expect(comment['revision'], reviewTip);
+    expect(comment.containsKey('location'), isFalse);
+  });
+
+  testWidgets('the threads tab starts a thread of its own', (tester) async {
+    final rig = await _rig();
+    await _pump(tester, rig);
+    await tester.tap(find.text('Threads'));
+    await _settle(tester, 6);
+    final button = find.byKey(const ValueKey('review-new-thread'));
+    expect(button, findsOneWidget);
+    await tester.tap(button);
+    await _settle(tester, 6);
+    expect(find.byKey(const ValueKey('review-composer-field')), findsOneWidget);
+    expect(find.text('New thread'), findsOneWidget);
+  });
+
+  testWidgets('a file thread and a change thread are two drafts', (
+    tester,
+  ) async {
+    final rig = await _rig();
+    final controller = rig.app.reviewFor(rig.task)!;
+    await controller.load();
+    final file = controller.changes!.file('lib/src/ui/chat_screen.dart')!;
+    final onFile = controller.newThreadDraft(file: file);
+    final onChange = controller.newThreadDraft();
+    expect(onFile.key, isNot(onChange.key));
+    expect(onFile.location!.file, file.path);
+    expect(onFile.location!.line, isNull);
+    expect(onChange.location, isNull);
+    onFile.text = 'About the file.';
+    expect(onChange.text, isEmpty);
+    expect(controller.localDrafts.length, 1);
+  });
+
+  testWidgets('a wide diff names its controls in words', (tester) async {
+    final rig = await _rig();
+    await _pumpFile(tester, rig, 'lib/src/ui/chat_screen.dart', width: 900);
+    expect(find.text('Comment on lines'), findsOneWidget);
+    expect(find.text('Wrap lines'), findsOneWidget);
+    expect(find.text('Split view'), findsOneWidget);
+    // Each control keeps its word when it is on.
+    await tester.tap(find.byKey(const ValueKey('diff-wrap')));
+    await tester.pump();
+    expect(find.text('No wrap'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('diff-split')));
+    await _settle(tester, 4);
+    expect(find.text('Unified view'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _pumpFile(tester, rig, 'lib/src/ui/chat_screen.dart', width: 320);
+    expect(find.byTooltip('Select lines'), findsOneWidget);
+    expect(find.text('Comment on lines'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('a comment on an approved file takes the approval off', (
     tester,
   ) async {

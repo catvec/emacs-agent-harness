@@ -5,9 +5,9 @@
 // writes a PNG for each case: the files of a review at 360 points, the
 // unified diff with its hunk header, line numbers and two threads marked, the comment composer with the keyboard up, a thread with
 // its reply box and the keyboard, the review at 900 points with two columns,
-// the files at 320 points read at twice the size, and the task bar that leads
-// into the review.  Without HARNESS_SHOTS the cases still draw and check that
-// nothing overflows, and write nothing.
+// a new thread on the change, the files at 320 points read at twice the size,
+// and the task bar that leads into the review.  Without HARNESS_SHOTS the
+// cases still draw and check that nothing overflows, and write nothing.
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -253,6 +253,27 @@ void main() {
         tester,
         await _picture(tester, frame),
         '$shots/review-320-text2.png',
+      );
+    }
+  });
+
+  testWidgets('draws a new thread on the change', (tester) async {
+    final rig = await _rig();
+    final frame = await _pumpReview(tester, rig);
+    await tester.tap(find.byKey(const ValueKey('review-new-thread')));
+    await _settle(tester, 6);
+    await tester.enterText(
+      find.byKey(const ValueKey('review-composer-field')),
+      'The whole change needs a test for the composer.',
+    );
+    await tester.pump();
+    expect(find.text('New thread'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(
+        tester,
+        await _picture(tester, frame),
+        '$shots/review-new-thread.png',
       );
     }
   });
