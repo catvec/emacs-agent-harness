@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../models/activity.dart';
 import '../../models/resources.dart';
@@ -19,11 +19,13 @@ import '../format.dart';
 import '../navigation.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
+import '../harness_keys.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/activity_bar.dart';
 import '../widgets/interaction_card.dart';
 import '../widgets/markdown_view.dart';
 import '../widgets/message_composer.dart';
+import '../widgets/quick_search_entry.dart';
 import '../widgets/workspace_buddy.dart';
 import '../widgets/vnc_takeover.dart';
 import '../widgets/workspace_graph.dart';
@@ -70,6 +72,9 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   _FailedSend? _failed;
   bool _retrying = false;
   final _composerText = TextEditingController();
+
+  /// The message box itself, for the Emacs C-c commands of the screen.
+  final _composerKey = GlobalKey<MessageComposerState>();
 
   /// Whether the desktop desk is folded to its rail.  The chat takes the
   /// room the screen had, and the rail keeps the way back.
@@ -243,6 +248,45 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         });
       }),
     );
+  }
+
+  /// What the screen's Emacs C-c prefix runs, as the harness's own chat binds
+  /// it, where the workspace has the function: send, stop, search, copy the
+  /// last reply, jump to the end.
+  Map<LogicalKeyboardKey, VoidCallback> _keyCommands(BuildContext context) => {
+    LogicalKeyboardKey.keyC: () => _composerKey.currentState?.sendNow(),
+    LogicalKeyboardKey.keyK: _stopTurn,
+    LogicalKeyboardKey.keyS: () => QuickSearchEntry.maybeOf(context)?.open(),
+    LogicalKeyboardKey.keyW: _copyLastReply,
+    LogicalKeyboardKey.keyE: () => _scrollToEnd(immediate: true),
+  };
+
+  void _stopTurn() {
+    final controller = _controller;
+    if (controller != null) unawaited(controller.cancel());
+  }
+
+  /// Copy the agent's latest message of this thread, as the Emacs chat's
+  /// C-c C-w does.
+  void _copyLastReply() {
+    final controller = _controller;
+    if (controller == null) return;
+    final thread = controller.activeThread?.id;
+    for (final entry in controller.entries.reversed) {
+      if (!entry.isAgent) continue;
+      if (thread != null && entry.thread.isNotEmpty && entry.thread != thread) {
+        continue;
+      }
+      final words = entry.text.trim();
+      if (words.isEmpty) continue;
+      unawaited(Clipboard.setData(ClipboardData(text: words)));
+      ScaffoldMessenger.maybeOf(context)
+          ?.showSnackBar(const SnackBar(content: Text('Last reply copied')));
+      return;
+    }
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(const SnackBar(content: Text('Nothing to copy')));
   }
 
   Future<void> _newThread() async {
@@ -442,21 +486,24 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             ),
           ],
         ];
-        return HarnessPage(
-          title: workspace?.name ?? 'Workspace',
-          subtitle: _subtitle(context, controller, thread),
-          actions: actions,
-          body: LayoutBuilder(
-            builder: (context, constraints) {
-              final width = constraints.maxWidth;
-              if (width < 720) {
-                return _compact(context, controller);
-              }
-              if (width < 1100) {
-                return _medium(context, controller);
-              }
-              return _expanded(context, controller);
-            },
+        return HarnessKeyLayer(
+          commands: _keyCommands(context),
+          child: HarnessPage(
+            title: workspace?.name ?? 'Workspace',
+            subtitle: _subtitle(context, controller, thread),
+            actions: actions,
+            body: LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth;
+                if (width < 720) {
+                  return _compact(context, controller);
+                }
+                if (width < 1100) {
+                  return _medium(context, controller);
+                }
+                return _expanded(context, controller);
+              },
+            ),
           ),
         );
       },
@@ -944,6 +991,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   }) {
     final thread = controller.activeThread;
     final box = MessageComposer(
+      key: _composerKey,
+      autofocus: harnessControlKeyboard,
       drafts: widget.app.drafts,
       draftKey:
           'workspace:${controller.current?.id}:${controller.selectedThread}',

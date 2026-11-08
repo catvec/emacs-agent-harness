@@ -56,6 +56,9 @@ void main() {
     expect(settings.previewPlatform, PreviewPlatform.system);
     expect(settings.showThinking, isTrue);
     expect(settings.rememberConnection, isTrue);
+    expect(settings.sendKey, SendKey.enter);
+    expect(settings.emacsEditing, isFalse);
+    expect(settings.harnessKeys, isFalse);
     expect(settings.address, isEmpty);
     expect(settings.token, isEmpty);
 
@@ -82,6 +85,9 @@ void main() {
       'previewPlatform': 'cupertino',
       'showThinking': false,
       'rememberConnection': false,
+      'sendKey': 'ctrlCctrlC',
+      'emacsEditing': true,
+      'harnessKeys': true,
       'address': 'ws://192.168.1.20:4276/acp',
       'token': 's3cret',
     });
@@ -93,6 +99,9 @@ void main() {
     expect(settings.previewPlatform, PreviewPlatform.cupertino);
     expect(settings.showThinking, isFalse);
     expect(settings.rememberConnection, isFalse);
+    expect(settings.sendKey, SendKey.ctrlCctrlC);
+    expect(settings.emacsEditing, isTrue);
+    expect(settings.harnessKeys, isTrue);
     expect(settings.address, 'ws://192.168.1.20:4276/acp');
     expect(settings.token, 's3cret');
   });
@@ -108,6 +117,39 @@ void main() {
     expect(settings.loadError, isNotNull);
     expect(settings.themeMode, ThemeMode.system);
     expect(settings.showThinking, isTrue);
+  });
+
+  test('the keys of the message box are kept, and the defaults win when '
+      'a stored one is damaged', () async {
+    SharedPreferences.setMockInitialValues({});
+    final settings = SettingsController();
+    await settings.load();
+    await settings.setSendKey(SendKey.ctrlCctrlC);
+    await settings.setEmacsEditing(true);
+    await settings.setHarnessKeys(true);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('sendKey'), 'ctrlCctrlC');
+    expect(prefs.getBool('emacsEditing'), isTrue);
+    expect(prefs.getBool('harnessKeys'), isTrue);
+
+    // The next run of the app starts from them.
+    final again = SettingsController();
+    await again.load();
+    expect(again.sendKey, SendKey.ctrlCctrlC);
+    expect(again.emacsEditing, isTrue);
+    expect(again.harnessKeys, isTrue);
+
+    SharedPreferences.setMockInitialValues({
+      'sendKey': 7,
+      'emacsEditing': 'yes',
+      'harnessKeys': 1,
+    });
+    final damaged = SettingsController();
+    await damaged.load();
+    expect(damaged.loadError, isNotNull, reason: 'the first damaged value');
+    expect(damaged.sendKey, SendKey.enter);
+    expect(damaged.emacsEditing, isFalse);
+    expect(damaged.harnessKeys, isFalse);
   });
 
   test('a corrupt value does not make the device forget its harness', () async {

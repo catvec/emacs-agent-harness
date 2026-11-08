@@ -26,6 +26,11 @@ class HarnessScope extends InheritedWidget {
   static SettingsController settingsOf(BuildContext context) =>
       of(context).settings;
 
+  /// The settings, for a widget that also works outside the app's scope (a
+  /// test of the widget alone), where there are none.
+  static SettingsController? maybeSettingsOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<HarnessScope>()?.settings;
+
   @override
   bool updateShouldNotify(HarnessScope oldWidget) =>
       oldWidget.app != app || oldWidget.settings != settings;

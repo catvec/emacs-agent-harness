@@ -285,6 +285,58 @@ class SettingsScreen extends StatelessWidget {
                   ],
                 ),
               ),
+              const HarnessSectionHeader(label: 'Keys'),
+              HarnessCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _SettingRow(
+                      icon: Icons.send_rounded,
+                      title: 'Send with',
+                      subtitle: 'Enter, or C-c C-c as in Emacs.',
+                      below: HarnessSegmented<SendKey>(
+                        key: const Key('settings-send-with'),
+                        options: const [
+                          (SendKey.enter, 'Enter'),
+                          (SendKey.ctrlCctrlC, 'C-c C-c'),
+                        ],
+                        value: settings.sendKey,
+                        onChanged: settings.setSendKey,
+                      ),
+                    ),
+                    const SizedBox(height: HarnessSpace.lg),
+                    _SettingRow(
+                      icon: Icons.keyboard_alt_outlined,
+                      title: 'Emacs editing',
+                      subtitle:
+                          'C-a, C-e, C-k, C-y, M-f and M-b in text fields.',
+                      trailing: HarnessSwitch(
+                        key: const Key('settings-emacs-editing'),
+                        value: settings.emacsEditing,
+                        onChanged: settings.setEmacsEditing,
+                      ),
+                    ),
+                    Divider(
+                      height: 1,
+                      color: theme.colorScheme.outlineVariant.withValues(
+                        alpha: 0.8,
+                      ),
+                    ),
+                    _SettingRow(
+                      icon: Icons.keyboard_command_key_rounded,
+                      title: 'Harness keys',
+                      subtitle:
+                          'C-c commands: send, stop, attach, search, copy '
+                          'reply, bottom.',
+                      trailing: HarnessSwitch(
+                        key: const Key('settings-harness-keys'),
+                        value: settings.harnessKeys,
+                        onChanged: settings.setHarnessKeys,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
               if (app.canSetNonInteractiveEverywhere) ...[
                 const HarnessSectionHeader(label: 'Conversations'),
                 HarnessCard(

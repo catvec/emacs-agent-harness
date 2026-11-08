@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../models/chat_thread.dart';
 import '../../models/session.dart';
@@ -21,6 +22,7 @@ import '../adaptive/layout_widgets.dart';
 import '../adaptive/platform_style.dart';
 import '../app_scope.dart';
 import '../format.dart';
+import '../harness_keys.dart';
 import '../navigation.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/activity_bar.dart';
@@ -29,6 +31,7 @@ import '../widgets/connection_banner.dart';
 import '../widgets/interaction_card.dart';
 import '../widgets/message_composer.dart';
 import '../widgets/queued_messages.dart';
+import '../widgets/quick_search_entry.dart';
 import '../widgets/quota_widgets.dart';
 import '../widgets/task_bar.dart';
 import '../widgets/transcript_view.dart';
@@ -79,6 +82,10 @@ class _SessionScreenState extends State<SessionScreen> {
   /// The focus of the message box, for what asks for something to be typed
   /// in it: a task's *Send back* is feedback, written there.
   final _composerFocus = FocusNode();
+
+  /// The message box itself, for the Emacs C-c commands of the screen: they
+  /// send, attach images, and leave the box as it was.
+  final _composerKey = GlobalKey<MessageComposerState>();
 
   /// The voice screen is a route of its own; a second tap while it opens must
   /// not stack another one.
@@ -316,6 +323,34 @@ class _SessionScreenState extends State<SessionScreen> {
     ScaffoldMessenger.maybeOf(context)
         ?.showSnackBar(SnackBar(content: Text(text)));
   }
+
+  /// What the screen's Emacs C-c prefix runs, as the harness's own chat binds
+  /// it: send, stop, attach, search, copy the last reply, jump to the end.
+  Map<LogicalKeyboardKey, VoidCallback> _keyCommands(BuildContext context) => {
+    LogicalKeyboardKey.keyC: () => _composerKey.currentState?.sendNow(),
+    LogicalKeyboardKey.keyK: () => unawaited(_controller.cancel()),
+    LogicalKeyboardKey.keyA: () => _composerKey.currentState?.attachNow(),
+    LogicalKeyboardKey.keyS: () => QuickSearchEntry.maybeOf(context)?.open(),
+    LogicalKeyboardKey.keyW: _copyLastReply,
+    LogicalKeyboardKey.keyE: _jumpToBottom,
+  };
+
+  /// Copy the agent's latest message, as the Emacs chat's C-c C-w does.
+  void _copyLastReply() {
+    for (final item in _controller.transcript.displayItems.reversed) {
+      if (!item.isAssistant || item.isThinking) continue;
+      final words = item.bodyText.trim();
+      if (words.isEmpty) continue;
+      unawaited(Clipboard.setData(ClipboardData(text: words)));
+      _notice('Last reply copied');
+      return;
+    }
+    _notice('Nothing to copy');
+  }
+
+  /// The list follows what the running turn writes; this takes the person
+  /// back to its end.
+  void _jumpToBottom() => setState(() => _scrollTick++);
 
   Future<void> _rename() async {
     final current = _controller.summary?.displayTitle ?? '';
@@ -610,26 +645,32 @@ class _SessionScreenState extends State<SessionScreen> {
                 summary: summary,
               );
         if (widget.embedded) {
-          return Material(
-            type: MaterialType.transparency,
-            child: Column(
-              children: [
-                _EmbeddedHeader(
-                  title: title,
-                  subtitle: context_,
-                  actions: _actions(context),
-                  onClose: _app.closeSession,
-                ),
-                Expanded(child: body),
-              ],
+          return HarnessKeyLayer(
+            commands: _keyCommands(context),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Column(
+                children: [
+                  _EmbeddedHeader(
+                    title: title,
+                    subtitle: context_,
+                    actions: _actions(context),
+                    onClose: _app.closeSession,
+                  ),
+                  Expanded(child: body),
+                ],
+              ),
             ),
           );
         }
-        return HarnessPage(
-          title: title,
-          subtitle: context_,
-          actions: _actions(context),
-          body: body,
+        return HarnessKeyLayer(
+          commands: _keyCommands(context),
+          child: HarnessPage(
+            title: title,
+            subtitle: context_,
+            actions: _actions(context),
+            body: body,
+          ),
         );
       },
     );
@@ -809,6 +850,8 @@ class _SessionScreenState extends State<SessionScreen> {
         Offstage(
           offstage: question,
           child: MessageComposer(
+            key: _composerKey,
+            autofocus: harnessControlKeyboard,
             focusNode: _composerFocus,
             tight: tightKeyboard,
             // What a message does here, where it is not the usual: for a task

@@ -1418,6 +1418,56 @@ the way.
 | The task board, a card | The first words of the summary, without its syntax (`markdownPreview` in `lib/src/ui/format.dart`): a heading, a paragraph and an item of a list are told apart by a dot, a link is its text, a code span its code, and words that only look like syntax (`snake_case`, `2 * 3`, `List<String>`) stay. A row of a list has no room for a heading. |
 | A question | The question of the card that asks one. |
 
+## Keys
+
+A phone taps to send and an on-screen keyboard writes; a desktop, or a tablet
+with a keyboard, can also be driven as the Emacs harness is. **Settings ›
+Keys** has three choices, and each one changes nothing on a phone without a
+keyboard.
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Send with** | `Enter` | The key that sends: `Enter`, or `C-c C-c` as in Emacs. The other one writes a new line, the arrow always sends, and the box's hint says which key it is. |
+| **Emacs editing** | off | Every text field edits its words with Emacs's keys. A mark of the field's own makes movement select; the kill ring is shared by the fields. |
+| **Harness keys** | off | `C-c` commands for the app's functions, as the Emacs chat binds them. |
+
+| Settings › Keys | The message box set to `C-c C-c` |
+|---|---|
+| ![The Keys section: Send with Enter or C-c C-c, Emacs editing, Harness keys](screenshots/keys-settings.png) | ![The message box whose hint says C-c C-c to send](screenshots/keys-composer.png) |
+
+The pictures are written by `HARNESS_SHOTS=screenshots flutter test
+test/keyboard_screenshots_test.dart`; `tool/keys_demo.sh` opens the same
+Settings section and a message box in a window of their own on the Linux
+desktop, with no harness to sign in to.
+
+`Emacs editing` covers `C-a`, `C-e`, `C-f`, `C-b`, `C-n`, `C-p`, `C-k`,
+`C-y`, `C-w`, `C-d`, `C-t`, `C-o`, `C-space`, `C-g`, and with Alt (Meta)
+`M-f`, `M-b`, `M-d`, `M-w`, `M-y`, `M-Backspace`, `M-<` and `M->`. It does
+not take `C-c`: with only this switch on, `Ctrl+C` still copies.
+
+`Harness keys` takes `C-c` as a prefix for:
+
+| Key | What it runs |
+|---|---|
+| `C-c C-c` | Send the message |
+| `C-c C-k` | Stop the running turn |
+| `C-c C-a` | Attach images |
+| `C-c C-s` | Open the quick search |
+| `C-c C-w` | Copy the agent's last reply |
+| `C-c C-e` | Jump to the end of the conversation |
+
+The prefix needs a Control key, so it is active on the web and on macOS,
+Windows and Linux, and does nothing on a phone. While it is on, `Ctrl+C` in a
+text field is the prefix rather than copy; that is why it is a switch of its
+own, and off by default. A key after `C-c` that the screen does not bind does
+nothing, as Emacs's beep does, and is never typed into the text. The other
+bindings of the Emacs chat have no function in this client yet and are not
+bound (queueing a message, todos, recaps, the parent session, redraw, the
+overflow list, burying the view).
+
+The design, the combinations and the tests are in
+[docs/flutter-keyboard.md](../docs/flutter-keyboard.md).
+
 ## Testing
 
 ```sh

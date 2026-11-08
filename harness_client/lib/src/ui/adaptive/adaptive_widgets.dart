@@ -4,6 +4,8 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../app_scope.dart';
+import '../emacs_keys.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/quick_search_entry.dart';
 import 'platform_style.dart';
@@ -515,7 +517,7 @@ class HarnessTextButton extends StatelessWidget {
   }
 }
 
-class HarnessTextField extends StatelessWidget {
+class HarnessTextField extends StatefulWidget {
   const HarnessTextField({
     super.key,
     this.controller,
@@ -534,6 +536,8 @@ class HarnessTextField extends StatelessWidget {
     this.autofocus = false,
     this.style,
     this.contentPadding,
+    this.emacsKeys,
+    this.onEdited,
   });
 
   final TextEditingController? controller;
@@ -553,32 +557,97 @@ class HarnessTextField extends StatelessWidget {
   final TextStyle? style;
   final EdgeInsets? contentPadding;
 
+  /// Whether the field answers Emacs's editing keys.  Null: the device's
+  /// setting ([SettingsController.emacsEditing]).  A field given no
+  /// controller of its own keeps one anyway, so that the keys have words to
+  /// move through.
+  final bool? emacsKeys;
+
+  /// Runs after an Emacs key changed the words or the cursor: what the
+  /// screen draws from them (a send button that waits for a word) is drawn
+  /// again.  A typed letter needs no call: the field reports it on its own.
+  final VoidCallback? onEdited;
+
+  @override
+  State<HarnessTextField> createState() => _HarnessTextFieldState();
+}
+
+class _HarnessTextFieldState extends State<HarnessTextField> {
+  TextEditingController? _ownController;
+  final EmacsEditing _emacs = EmacsEditing();
+
+  TextEditingController get _text => widget.controller ?? _ownController!;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.controller == null) _ownController = TextEditingController();
+  }
+
+  @override
+  void didUpdateWidget(HarnessTextField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.controller == oldWidget.controller) return;
+    final before =
+        oldWidget.controller?.value ??
+        _ownController?.value ??
+        const TextEditingValue();
+    _ownController?.dispose();
+    _ownController = widget.controller == null
+        ? TextEditingController.fromValue(before)
+        : null;
+  }
+
+  @override
+  void dispose() {
+    _ownController?.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent event, bool emacsKeys) {
+    if (!emacsKeys) return KeyEventResult.ignored;
+    if (!_emacs.handle(_text, event)) return KeyEventResult.ignored;
+    widget.onEdited?.call();
+    return KeyEventResult.handled;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final emacsKeys =
+        widget.emacsKeys ??
+        HarnessScope.maybeSettingsOf(context)?.emacsEditing ??
+        false;
+    final Widget field;
     if (HarnessStyle.isCupertino(context)) {
-      return CupertinoTextField(
-        controller: controller,
-        focusNode: focusNode,
-        placeholder: hint,
-        obscureText: obscure,
-        maxLines: maxLines,
-        minLines: minLines,
-        keyboardType: keyboardType,
-        textInputAction: textInputAction,
-        onChanged: onChanged,
-        onSubmitted: onSubmitted,
-        enabled: enabled,
-        autofocus: autofocus,
-        style: style ?? CupertinoTheme.of(context).textTheme.textStyle,
+      field = CupertinoTextField(
+        controller: _text,
+        focusNode: widget.focusNode,
+        placeholder: widget.hint,
+        obscureText: widget.obscure,
+        maxLines: widget.maxLines,
+        minLines: widget.minLines,
+        keyboardType: widget.keyboardType,
+        textInputAction: widget.textInputAction,
+        onChanged: widget.onChanged,
+        onSubmitted: widget.onSubmitted,
+        enabled: widget.enabled,
+        autofocus: widget.autofocus,
+        style: widget.style ?? CupertinoTheme.of(context).textTheme.textStyle,
         padding:
-            contentPadding ??
+            widget.contentPadding ??
             const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-        prefix: prefix == null
+        prefix: widget.prefix == null
             ? null
-            : Padding(padding: const EdgeInsets.only(left: 12), child: prefix),
-        suffix: suffix == null
+            : Padding(
+                padding: const EdgeInsets.only(left: 12),
+                child: widget.prefix,
+              ),
+        suffix: widget.suffix == null
             ? null
-            : Padding(padding: const EdgeInsets.only(right: 8), child: suffix),
+            : Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: widget.suffix,
+              ),
         decoration: BoxDecoration(
           color: CupertinoColors.secondarySystemBackground.resolveFrom(context),
           borderRadius: BorderRadius.circular(14),
@@ -587,26 +656,33 @@ class HarnessTextField extends StatelessWidget {
           ),
         ),
       );
+    } else {
+      field = TextField(
+        controller: _text,
+        focusNode: widget.focusNode,
+        obscureText: widget.obscure,
+        maxLines: widget.maxLines,
+        minLines: widget.minLines,
+        keyboardType: widget.keyboardType,
+        textInputAction: widget.textInputAction,
+        onChanged: widget.onChanged,
+        onSubmitted: widget.onSubmitted,
+        enabled: widget.enabled,
+        autofocus: widget.autofocus,
+        style: widget.style,
+        decoration: InputDecoration(
+          hintText: widget.hint,
+          prefixIcon: widget.prefix,
+          suffixIcon: widget.suffix,
+          contentPadding: widget.contentPadding,
+        ),
+      );
     }
-    return TextField(
-      controller: controller,
-      focusNode: focusNode,
-      obscureText: obscure,
-      maxLines: maxLines,
-      minLines: minLines,
-      keyboardType: keyboardType,
-      textInputAction: textInputAction,
-      onChanged: onChanged,
-      onSubmitted: onSubmitted,
-      enabled: enabled,
-      autofocus: autofocus,
-      style: style,
-      decoration: InputDecoration(
-        hintText: hint,
-        prefixIcon: prefix,
-        suffixIcon: suffix,
-        contentPadding: contentPadding,
-      ),
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: (node, event) => _onKey(node, event, emacsKeys),
+      child: field,
     );
   }
 }

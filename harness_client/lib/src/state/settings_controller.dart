@@ -9,6 +9,11 @@ import '../voice/voice_settings.dart';
 
 enum PreviewPlatform { system, material, cupertino }
 
+/// What sends what is written in the message box.  [enter] is the app's own
+/// key; [ctrlCctrlC] is Emacs's, for a person whose hands already know it.
+/// Either way the send button sends; the other key writes a new line.
+enum SendKey { enter, ctrlCctrlC }
+
 /// How the new-task sheet is set: the priority of the next task, and whether
 /// it is written up first, planned first, or made to work in the project's
 /// main tree instead of a worktree of its own.
@@ -90,6 +95,9 @@ class SettingsController extends ChangeNotifier {
   bool _showThinking = true;
   bool _rememberConnection = true;
   bool _reconnectOnLaunch = true;
+  SendKey _sendKey = SendKey.enter;
+  bool _emacsEditing = false;
+  bool _harnessKeys = false;
   String _address = '';
   String _token = '';
   NewTaskChoices _newTaskChoices = const NewTaskChoices();
@@ -111,6 +119,9 @@ class SettingsController extends ChangeNotifier {
   /// overwrite them.
   bool _detailsChanged = false;
   bool _flagChanged = false;
+
+  /// Likewise for the keys of the message box and of the app.
+  bool _keysChanged = false;
 
   /// Likewise for [newTaskChoices].
   bool _choicesChanged = false;
@@ -138,6 +149,19 @@ class SettingsController extends ChangeNotifier {
   PreviewPlatform get previewPlatform => _previewPlatform;
   bool get showThinking => _showThinking;
   bool get rememberConnection => _rememberConnection;
+
+  /// What sends a message: Enter, or Emacs's C-c C-c.
+  SendKey get sendKey => _sendKey;
+
+  /// Whether a text field edits its words with Emacs's keys: C-a and C-e at
+  /// the line's ends, C-k and C-y to kill and yank, M-f and M-b by word.
+  bool get emacsEditing => _emacsEditing;
+
+  /// Whether C-c commands run the app's own functions, as the Emacs harness
+  /// binds them: C-c C-c sends, C-c C-k stops the turn, C-c C-a attaches,
+  /// C-c C-s searches, C-c C-w copies the last reply, C-c C-e jumps to the
+  /// end of the conversation.
+  bool get harnessKeys => _harnessKeys;
 
   /// How the new-task sheet was last left, which is how it starts the next
   /// time it opens, in this run of the app and in the next ones.  It is the
@@ -283,6 +307,21 @@ class SettingsController extends ChangeNotifier {
       read('showThinking', () {
         _showThinking = prefs.getBool('showThinking') ?? true;
       });
+      read('sendKey', () {
+        if (_keysChanged) return;
+        _sendKey = switch (prefs.getString('sendKey')) {
+          'ctrlCctrlC' => SendKey.ctrlCctrlC,
+          _ => SendKey.enter,
+        };
+      });
+      read('emacsEditing', () {
+        if (_keysChanged) return;
+        _emacsEditing = prefs.getBool('emacsEditing') ?? false;
+      });
+      read('harnessKeys', () {
+        if (_keysChanged) return;
+        _harnessKeys = prefs.getBool('harnessKeys') ?? false;
+      });
       // How the new-task sheet was left, a value at a time as well: a damaged
       // one keeps its default and costs the others nothing.  A choice made
       // while the store was still answering is kept over what it holds.
@@ -355,6 +394,35 @@ class SettingsController extends ChangeNotifier {
     _showThinking = value;
     notifyListeners();
     await _setBool('showThinking', value);
+  }
+
+  /// Keep what sends a message.  The message box and its hints listen, so a
+  /// change takes effect without leaving the screen.
+  Future<void> setSendKey(SendKey key) {
+    _keysChanged = true;
+    if (key == _sendKey) return Future.value();
+    _sendKey = key;
+    notifyListeners();
+    return _setString('sendKey', switch (key) {
+      SendKey.enter => 'enter',
+      SendKey.ctrlCctrlC => 'ctrlCctrlC',
+    });
+  }
+
+  Future<void> setEmacsEditing(bool value) {
+    _keysChanged = true;
+    if (value == _emacsEditing) return Future.value();
+    _emacsEditing = value;
+    notifyListeners();
+    return _setBool('emacsEditing', value);
+  }
+
+  Future<void> setHarnessKeys(bool value) {
+    _keysChanged = true;
+    if (value == _harnessKeys) return Future.value();
+    _harnessKeys = value;
+    notifyListeners();
+    return _setBool('harnessKeys', value);
   }
 
   /// Keep [choices] as how the new-task sheet is set.  The sheet calls this

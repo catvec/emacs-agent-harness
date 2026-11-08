@@ -1,12 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../state/drafts.dart';
 import '../../state/prompt_attachment.dart';
+import '../../state/settings_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/platform_style.dart';
+import '../app_scope.dart';
+import '../harness_keys.dart';
 import '../theme/harness_theme.dart';
 import 'image_attachments.dart';
 
@@ -33,6 +37,7 @@ class MessageComposer extends StatefulWidget {
     this.focusNode,
     this.hint,
     this.textController,
+    this.autofocus = false,
   });
 
   /// Takes the message to send.  Whether it was taken: where it was not
@@ -100,12 +105,18 @@ class MessageComposer extends StatefulWidget {
   /// field; the field disposes only one it made itself.
   final TextEditingController? textController;
 
+  /// Takes the keyboard on a desktop when the conversation opens, so that
+  /// its keys work without a tap first.  Never on a phone: a keyboard that
+  /// comes up over the conversation before a word is typed is in the way.
+  final bool autofocus;
+
   @override
-  State<MessageComposer> createState() => _MessageComposerState();
+  MessageComposerState createState() => MessageComposerState();
 }
 
-class _MessageComposerState extends State<MessageComposer> {
-  late final TextEditingController _text = widget.textController ??
+class MessageComposerState extends State<MessageComposer> {
+  late final TextEditingController _text =
+      widget.textController ??
       TextEditingController(text: widget.drafts?.text(widget.draftKey) ?? '');
   bool get _ownsText => widget.textController == null;
   FocusNode? _ownFocus;
@@ -113,6 +124,23 @@ class _MessageComposerState extends State<MessageComposer> {
   final _attachments = <PromptAttachment>[];
   String? _attachmentError;
   bool _picking = false;
+
+  /// What sends a message, as the settings have it.  It is read on each
+  /// build, so a change on the settings page shows here without leaving the
+  /// conversation.
+  SendKey _sendKey = SendKey.enter;
+
+  /// Whether C-c commands are on: the screen's key layer then sends, and
+  /// this box only answers Enter, or C-c C-c when that is the send key and
+  /// there is no layer to do it.
+  bool _harnessKeys = false;
+
+  /// C-c C-c, for a conversation whose screen has no Emacs key layer (a
+  /// field of this app alone), or one whose layer is switched off.
+  final _prefix = EmacsPrefix();
+
+  /// Whether this platform's keyboard has the keys the hints speak of.
+  bool get _desktop => harnessControlKeyboard;
 
   bool get _canSend =>
       widget.enabled &&
@@ -201,6 +229,20 @@ class _MessageComposerState extends State<MessageComposer> {
     _focus.requestFocus();
   }
 
+  /// Sends what is in the box, as the arrow does.  A screen's C-c C-c calls
+  /// it when the Emacs key layer owns that binding.
+  void sendNow() {
+    if (!_canSend) return;
+    unawaited(_send());
+  }
+
+  /// Opens the image picker, where the harness takes pictures, as the
+  /// attachment button does.
+  void attachNow() {
+    if (!widget.canAttach || widget.running || _picking) return;
+    unawaited(_pickImages());
+  }
+
   Future<void> _queue() async {
     if (!_canQueue) return;
     final text = _text.text;
@@ -235,22 +277,16 @@ class _MessageComposerState extends State<MessageComposer> {
   }
 
   /// Whether there is a physical keyboard to say how to send with.
-  bool get _keyboardHint =>
-      (kIsWeb ||
-          defaultTargetPlatform == TargetPlatform.macOS ||
-          defaultTargetPlatform == TargetPlatform.linux) &&
-      MediaQuery.sizeOf(context).width >= 600;
+  bool get _keyboardHint => _desktop && MediaQuery.sizeOf(context).width >= 600;
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
-    final desktop =
-        kIsWeb ||
-        defaultTargetPlatform == TargetPlatform.macOS ||
-        defaultTargetPlatform == TargetPlatform.linux ||
-        defaultTargetPlatform == TargetPlatform.windows;
-    if (!desktop) return KeyEventResult.ignored;
+    if (!_desktop) return KeyEventResult.ignored;
     if (event.logicalKey == LogicalKeyboardKey.enter &&
         !HardwareKeyboard.instance.isShiftPressed) {
+      // Enter sends unless the box was set to send with C-c C-c, where it
+      // writes the new line it does in Emacs.
+      if (_sendKey != SendKey.enter) return KeyEventResult.ignored;
       // Enter does what the box's main action does: send, or queue the words
       // for the turn that runs.
       if (widget.running) {
@@ -259,6 +295,11 @@ class _MessageComposerState extends State<MessageComposer> {
         _send();
       }
       return KeyEventResult.handled;
+    }
+    // Without a screen's key layer, or with it switched off, the box answers
+    // C-c C-c itself when that is the send key.
+    if (_sendKey == SendKey.ctrlCctrlC && !_harnessKeys) {
+      return _prefix.handle(event);
     }
     return KeyEventResult.ignored;
   }
@@ -307,7 +348,11 @@ class _MessageComposerState extends State<MessageComposer> {
               ? 'Message for the next turn'
               : 'The agent is working…')
         : widget.hint ??
-              (_keyboardHint ? 'Message · Enter to send' : 'Message');
+              (_keyboardHint
+                  ? (_sendKey == SendKey.ctrlCctrlC
+                        ? 'Message · C-c C-c to send'
+                        : 'Message · Enter to send')
+                  : 'Message');
     return Focus(
       onKeyEvent: _onKey,
       child: HarnessTextField(
@@ -319,7 +364,11 @@ class _MessageComposerState extends State<MessageComposer> {
         minLines: 1,
         keyboardType: TextInputType.multiline,
         textInputAction: TextInputAction.newline,
+        autofocus: widget.autofocus,
         onChanged: (_) => setState(() {}),
+        onEdited: () {
+          if (mounted) setState(() {});
+        },
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 15,
           vertical: 11,
@@ -391,6 +440,14 @@ class _MessageComposerState extends State<MessageComposer> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cupertino = HarnessStyle.isCupertino(context);
+    final settings = HarnessScope.maybeSettingsOf(context);
+    _sendKey = settings?.sendKey ?? SendKey.enter;
+    _harnessKeys = settings?.harnessKeys ?? false;
+    // The box answers C-c C-c itself only when no key layer of the screen
+    // does: a layer has the commands of the whole screen, this box one.
+    _prefix.commands = _sendKey == SendKey.ctrlCctrlC && !_harnessKeys
+        ? {LogicalKeyboardKey.keyC: sendNow}
+        : const {};
     // A phone at a large text size has no room for a line of advice under the
     // controls: the words being written keep that height instead.
     final largeText = MediaQuery.textScalerOf(context).scale(15) > 19.5;
@@ -544,7 +601,9 @@ class _MessageComposerState extends State<MessageComposer> {
                   padding: const EdgeInsets.only(left: 4, top: 6),
                   child: Text(
                     _keyboardHint
-                        ? 'Enter to send · Shift + Enter for a new line'
+                        ? (_sendKey == SendKey.ctrlCctrlC
+                              ? 'C-c C-c to send · Enter for a new line'
+                              : 'Enter to send · Shift + Enter for a new line')
                         : 'The harness may ask before it runs a tool.',
                     style: HarnessText.caption(context),
                   ),

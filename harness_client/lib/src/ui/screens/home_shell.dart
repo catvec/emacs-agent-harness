@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../state/app_controller.dart';
 import '../../state/quick_search_catalogue.dart';
@@ -8,6 +9,7 @@ import '../adaptive/layout_widgets.dart';
 import '../adaptive/mark.dart';
 import '../adaptive/platform_style.dart';
 import '../format.dart';
+import '../harness_keys.dart';
 import '../navigation.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/connection_banner.dart';
@@ -262,11 +264,16 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
     // What the shell has to say (a failed action, a session that needs an
     // answer) is not laid over the pages: each page puts it in its own flow,
     // under its header (see [HarnessChrome]).
-    final body = HarnessChrome(
-      notices: _notices,
-      child: IndexedStack(
-        index: index < 0 ? 0 : index,
-        children: [for (final tab in tabs) _screen(tab.id)],
+    final body = HarnessKeyLayer(
+      // The search is the one function every page of the shell has; a
+      // conversation adds its own commands in its own layer.
+      commands: {LogicalKeyboardKey.keyS: _openQuickSearch},
+      child: HarnessChrome(
+        notices: _notices,
+        child: IndexedStack(
+          index: index < 0 ? 0 : index,
+          children: [for (final tab in tabs) _screen(tab.id)],
+        ),
       ),
     );
 
