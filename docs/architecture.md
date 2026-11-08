@@ -422,9 +422,11 @@ each), worktrees, usage, and the chat, session list and pending
 requests of the UI.  Everything else is
 enabled by the user, Doom style, with `harness-enable-modules` (which
 sets `harness-enabled-modules`), or at once with `M-x
-harness-enable-module`; `harness-enabled-modules` t loads every module.
-`harness--selected-modules` decides, the same way on both sides of the
-process split, from every module file of either side
+harness-enable-module`; `harness-enabled-modules` t loads every module
+but the off-by-default ones (`harness-off-by-default-modules`: demo and
+supervisor out of the box), which a list naming them loads all the
+same.  `harness--selected-modules` decides, the same way on both sides
+of the process split, from every module file of either side
 (`harness--module-sources`):
 
 - The core and the enabled modules load, with what each brings along
@@ -434,6 +436,10 @@ process split, from every module file of either side
   included, so they load compiled -- and its other half, `ui-NAME` for
   `NAME` and `NAME` for `ui-NAME`.  They are read from the source
   without loading it (`harness--module-header`).
+- `harness-off-by-default-modules` leaves its modules out when
+  `harness-enabled-modules` is t; a name in that list is explicit and
+  loads them, and so does a module that loads and requires one.  A
+  module's UI half goes with it (`harness-module-off-by-default-p`).
 - `harness-disabled-modules` leaves its modules out, with their UI
   halves, whatever brings them; a module requiring one fails to start.
 - Each side then loads the files of its own directories

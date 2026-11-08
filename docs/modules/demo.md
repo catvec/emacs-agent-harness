@@ -6,7 +6,7 @@ Start a hand-in's demo on its workspace computer: the VNC screen, the takeover, 
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-demo.el](../../lisp/modules/harness-demo.el)
-- **Loaded:** when enabled (see `harness-enable-modules`)
+- **Loaded:** only when named
 - **Requires:** [tools](tools.md), [tasks](tasks.md), [session](session.md), [agent](agent.md)
 
 ## About

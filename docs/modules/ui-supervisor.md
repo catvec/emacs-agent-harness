@@ -6,7 +6,7 @@ Supervisor mode: the chat header's segment and the V key that toggles it.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-supervisor.el](../../lisp/ui/harness-ui-supervisor.el)
-- **Loaded:** when enabled (see `harness-enable-modules`)
+- **Loaded:** only when named
 - **Requires:** [ui](ui.md), [ui-chat](ui-chat.md)
 - **Brings along:** [supervisor](supervisor.md) (the rest of it)
 

@@ -5005,6 +5005,9 @@ names."
         harness-process nil
         ;; The pictures show every feature.
         harness-enabled-modules t
+        ;; Every module, the off-by-default ones (demo and supervisor)
+        ;; included: the pictures show them too.
+        harness-off-by-default-modules nil
         ;; Every agent is scripted, so recaps are seeded for the pictures
         ;; instead (`harness-media--seed-recaps').  A busy machine --
         ;; this run's own, or whatever else it is doing -- would have

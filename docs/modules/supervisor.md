@@ -6,7 +6,7 @@ Supervisor mode: sessions that plan and delegate, enforced by the harness.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-supervisor.el](../../lisp/modules/harness-supervisor.el)
-- **Loaded:** when enabled (see `harness-enable-modules`)
+- **Loaded:** only when named
 - **Requires:** [session](session.md), [agent](agent.md), [tools](tools.md), [readonly](readonly.md)
 - **Brings along:** [ui-supervisor](ui-supervisor.md) (its UI), [small](small.md) (its file requires it)
 

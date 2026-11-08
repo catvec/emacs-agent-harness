@@ -901,6 +901,7 @@ are fitted by."
             (harness--library-files nil)
             (harness-process nil)
             (harness-enabled-modules t)
+            (harness-off-by-default-modules nil)
             (harness-disabled-modules nil))
         (should (harness-start))
         (should (eq 'pong (harness-call 'demo/ping)))
@@ -954,6 +955,7 @@ while the module stays ready with what it set up before."
                 (harness--library-files nil)
                 (harness-process nil)
                 (harness-enabled-modules t)
+                (harness-off-by-default-modules nil)
                 (harness-disabled-modules nil))
             (should (harness-start))
             (should (equal '(harness-core-test--a) harness-core-test--reload-hook))
@@ -1454,19 +1456,32 @@ the enabled and disabled lists select them as they do the harness's own."
       (delete-directory config t))))
 
 (ert-deftest harness-loader-loads-supervisor-mode-and-readonly-by-default ()
-  "By default supervisor mode loads, beside the readonly module it shares.
+  "Supervisor mode ships off by default; the readonly module it shares loads.
 The task board's write-ups and plans use that module too, so it loads
-on its own, and taking supervisor mode's two modules out leaves it in."
+on its own.  A name in `harness-enabled-modules' loads supervisor mode
+with its UI half, and taking its two modules out leaves readonly in."
   (let* ((harness-enabled-modules t)
+         (harness-off-by-default-modules
+          (eval (car (get 'harness-off-by-default-modules 'standard-value)) t))
          (harness-disabled-modules (eval (car (get 'harness-disabled-modules 'standard-value)) t))
          (harness-extra-module-directories nil)
          (harness-process nil)
          (harness-module-directories '("lisp/modules" "lisp/ui"))
          (files (harness--module-files)))
     (should-not harness-disabled-modules)
-    (dolist (file '("lisp/modules/harness-supervisor.el" "lisp/ui/harness-ui-supervisor.el"
-                    "lisp/modules/harness-readonly.el" "lisp/modules/harness-tasks.el"))
+    (should (equal '(demo supervisor) harness-off-by-default-modules))
+    (dolist (file '("lisp/modules/harness-demo.el"
+                    "lisp/modules/harness-supervisor.el" "lisp/ui/harness-ui-supervisor.el"))
+      (should-not (member (harness--path file) files)))
+    (dolist (file '("lisp/modules/harness-readonly.el" "lisp/modules/harness-tasks.el"))
       (should (member (harness--path file) files)))
+    (let ((harness-enabled-modules '(supervisor)))
+      (let ((files (harness--module-files)))
+        (should (member (harness--path "lisp/modules/harness-supervisor.el") files))
+        (should (member (harness--path "lisp/ui/harness-ui-supervisor.el") files))))
+    (let ((harness-enabled-modules '(demo)))
+      (let ((files (harness--module-files)))
+        (should (member (harness--path "lisp/modules/harness-demo.el") files))))
     (let ((harness-disabled-modules '(supervisor ui-supervisor)))
       (let ((files (harness--module-files)))
         (should-not (member (harness--path "lisp/modules/harness-supervisor.el") files))
@@ -1708,6 +1723,7 @@ other half.  Each module notes its initialisation in
                  (harness-core-modules '(base ui))
                  (harness-enabled-modules nil)
                  (harness-disabled-modules nil)
+                 (harness-off-by-default-modules nil)
                  (harness-started nil)
                  (load-path load-path))
              ,@body))
@@ -1727,8 +1743,8 @@ other half.  Each module notes its initialisation in
   "Out of the box only the core loads; each module enabled brings what it needs.
 That is the modules and libraries it requires, by its :requires or by
 its file's requires, and its other half, ui-NAME for NAME and NAME for
-ui-NAME.  t loads every module, and a disabled module stays out with
-its UI half, whatever brings it."
+ui-NAME.  t loads every module but the off-by-default ones, and a
+disabled module stays out with its UI half, whatever brings it."
   (harness-core-test-with-module-tree
     (should (equal '(base ui) (harness-core-test--loads)))
     (let ((harness-enabled-modules '(extra)))
@@ -1739,8 +1755,24 @@ its UI half, whatever brings it."
       (should (equal '(base ui-solo ui) (harness-core-test--loads))))
     (let ((harness-enabled-modules t))
       (should (equal '(base extra feat lib other ui-feat ui-solo ui) (harness-core-test--loads))))
+    ;; Off by default: t leaves the module out, a module that loads and
+    ;; requires it brings it along, and a name in `harness-enabled-modules'
+    ;; loads it.
+    (let ((harness-enabled-modules t)
+          (harness-off-by-default-modules '(other)))
+      (should (equal '(base extra feat lib ui-feat ui-solo ui) (harness-core-test--loads))))
+    (let ((harness-enabled-modules t)
+          (harness-off-by-default-modules '(other ui-solo)))
+      (should (equal '(base extra feat lib ui-feat ui) (harness-core-test--loads))))
+    (let ((harness-enabled-modules '(other))
+          (harness-off-by-default-modules '(other)))
+      (should (equal '(base other ui) (harness-core-test--loads))))
+    (let ((harness-enabled-modules t)
+          (harness-off-by-default-modules '(feat)))
+      (should (equal '(base extra feat lib other ui-feat ui-solo ui) (harness-core-test--loads))))
     (let ((harness-enabled-modules '(extra))
-          (harness-disabled-modules '(feat)))
+          (harness-disabled-modules '(feat))
+          (harness-off-by-default-modules '(feat)))
       (should (equal '(base extra lib ui) (harness-core-test--loads))))
     (let ((harness-enabled-modules t)
           (harness-disabled-modules '(feat base)))
@@ -1872,6 +1904,60 @@ enabled says it runs on until a restart."
                      (sort (copy-sequence (plist-get result :stale)) #'string<))))
     (should (harness-module-ready-p 'extra))
     (harness-stop)))
+
+(ert-deftest harness-enable-module-takes-an-off-by-default-module-off-the-list ()
+  "With t, enabling an off-by-default module takes it off the list for the session.
+It is listed as available first, starts at once, and `t' still says
+every module; one `t' loads already is still refused."
+  (harness-core-test-with-module-tree
+    (setq harness-enabled-modules t
+          harness-off-by-default-modules '(other ui-solo))
+    (should (harness-start))
+    (let ((section (harness--modules-not-loaded)))
+      (should (string-match-p "not loaded" (car section)))
+      (should (equal '((other available "The other module.") (ui-solo available "The ui-solo module."))
+                     (mapcar (lambda (d) (list (plist-get d :name) (plist-get d :state) (plist-get d :doc)))
+                             (harness-test-await (cdr section))))))
+    (harness-enable-module 'other)
+    (should-not (memq 'other harness-off-by-default-modules))
+    (should (memq 'ui-solo harness-off-by-default-modules))
+    (should (harness-module-ready-p 'other))
+    (should (eq t harness-enabled-modules))
+    ;; Its UI half is still off by default until it is named or enabled.
+    (should (harness-module-off-by-default-p 'ui-solo))
+    (harness-enable-module 'ui-solo)
+    (should (harness-module-ready-p 'ui-solo))
+    (should-not (memq 'ui-solo harness-off-by-default-modules))
+    ;; A module every module already loads says so.
+    (should-error (harness-enable-module 'feat) :type 'user-error)
+    (harness-stop)))
+
+(ert-deftest harness-loader-ships-demo-and-supervisor-off-by-default ()
+  "The demo and walkthrough module and supervisor mode load only when named.
+`harness-enabled-modules' t, the setting that asks for every module,
+leaves both out, with the UI half of supervisor; a list naming one
+loads it, with what it requires and its UI half."
+  (let* ((sources (harness--module-sources))
+         (harness-enabled-modules t)
+         (harness-disabled-modules nil))
+    (should (equal '(demo supervisor) harness-off-by-default-modules))
+    (should (harness-module-off-by-default-p 'demo))
+    (should (harness-module-off-by-default-p 'supervisor))
+    (should (harness-module-off-by-default-p 'ui-supervisor))
+    (should-not (memq 'demo (harness--selected-modules sources)))
+    (should-not (memq 'supervisor (harness--selected-modules sources)))
+    (should-not (memq 'ui-supervisor (harness--selected-modules sources)))
+    (let ((harness-enabled-modules '(demo)))
+      (should (memq 'demo (harness--selected-modules sources))))
+    (let ((harness-enabled-modules '(supervisor)))
+      (should (memq 'supervisor (harness--selected-modules sources)))
+      (should (memq 'ui-supervisor (harness--selected-modules sources))))
+    (let ((harness-enabled-modules '(ui-supervisor)))
+      (should (memq 'supervisor (harness--selected-modules sources))))
+    ;; Setting the list to nil makes t load everything again.
+    (let ((harness-off-by-default-modules nil))
+      (should (memq 'demo (harness--selected-modules sources)))
+      (should (memq 'supervisor (harness--selected-modules sources))))))
 
 ;;;; Vendored libraries
 

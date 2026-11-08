@@ -258,7 +258,7 @@ once, in the first.")
   '(harness-process harness-server-address
     harness-module-directories harness-extra-module-directories
     harness-plugin-modules
-    harness-enabled-modules harness-disabled-modules
+    harness-enabled-modules harness-disabled-modules harness-off-by-default-modules
     harness-state-directory harness-server-emacs harness-server-forward-variables
     harness-server-init-file harness-corporate-mode)
   "Harness options `config/describe' leaves out, besides the `harness-acp-' ones.

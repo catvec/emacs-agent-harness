@@ -438,11 +438,21 @@ the quoting would otherwise pair it with a backquote before it."
   (if (plist-get scan :ui) "the UI (your Emacs)" "the harness process"))
 
 (defun harness-module-docs--loaded (name)
-  "Say whether module NAME loads by default, or nil when that is not known."
+  "Say how module NAME loads, or nil when that is not known."
   (when (fboundp 'harness-module-default-p)
-    (if (harness-module-default-p name)
-        "by default"
-      "when enabled (see `harness-enable-modules`)")))
+    (cond ((harness-module-default-p name) "by default")
+          ((and (fboundp 'harness-module-off-by-default-p)
+                (harness-module-off-by-default-p name))
+           "only when named")
+          (t "when enabled (see `harness-enable-modules`)"))))
+
+(defun harness-module-docs--loaded-cell (name)
+  "Say in a table how module NAME loads: \"by default\", \"when named\", or nil."
+  (when (fboundp 'harness-module-default-p)
+    (cond ((harness-module-default-p name) "by default")
+          ((and (fboundp 'harness-module-off-by-default-p)
+                (harness-module-off-by-default-p name))
+           "when named"))))
 
 (defun harness-module-docs--source (file dir)
   "Return FILE as a Markdown link relative to DIR, or as a path.
@@ -748,7 +758,7 @@ the groups of `harness-enable-modules', each with what it is."
                              collect (let ((name (plist-get s :name)))
                                        (append (list (harness-module-docs--link name all))
                                                (and (fboundp 'harness-module-default-p)
-                                                    (list (if (harness-module-default-p name) "by default" "")))
+                                                    (list (harness-module-docs--loaded-cell name)))
                                                (list (or (harness-module-docs--links (plist-get s :requires) all) "")
                                                      (or (harness-module-docs--line (plist-get s :doc)) "")))))))))
     (concat
@@ -766,7 +776,10 @@ the groups of `harness-enable-modules', each with what it is."
           "your init file enables them, after `(require 'harness)`: copy this,\n"
           "uncomment the modules you want, and restart the harness. A module\n"
           "brings along what it requires and its UI (tasks loads the task board,\n"
-          "ui-tasks); `(setq harness-enabled-modules t)` loads every module.\n\n"
+          "ui-tasks). `(setq harness-enabled-modules t)` loads every module but\n"
+          "the ones marked *when named*: `harness-off-by-default-modules` leaves\n"
+          "them out, so that demo, which runs a hand-in's demo and its walkthrough,\n"
+          "and supervisor load only when they are named.\n\n"
           "```elisp\n" (harness-module-docs-template all) "```\n\n")
        "")
      "## The harness process\n\n" (funcall modules nil)

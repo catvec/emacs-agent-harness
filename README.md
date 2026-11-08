@@ -60,7 +60,7 @@ To use Emacs agent harness:
    Configure the features you want via `(harness-enable-modules ...)`:
    ```elisp
    (harness-enable-modules
-       :features tasks merge supervisor notifications tasks-notify
+       :features tasks merge notifications tasks-notify
        :providers openai deepseek
        :tools sessions handin web
        :ui btw tree)
@@ -86,7 +86,7 @@ scripts/harness-server
 It prints `HARNESS-ACP-ADDRESS HOST:PORT` when it listens. `HARNESS_SERVER_CONFIG` may name a file of Emacs Lisp forms loaded before it starts, for modules and settings an init file would set:
 
 ```elisp
-(setq harness-enabled-modules '(tasks merge supervisor))
+(setq harness-enabled-modules '(tasks merge notifications))
 ;; Optional: its own sessions and tasks, if another harness uses the default.
 (setq harness-state-directory "~/.local/state/harness-server/")
 ```
@@ -155,7 +155,7 @@ The `(harness-enable-modules ...)` function helps enable and load modules of you
 
 ``` elisp
 (harness-enable-modules
-    :features tasks merge supervisor notifications tasks-notify
+    :features tasks merge notifications tasks-notify
     :providers openai deepseek
     :tools sessions handin web
     :ui btw tree)
@@ -163,7 +163,7 @@ The `(harness-enable-modules ...)` function helps enable and load modules of you
 
 See [`docs/modules/README.md`](./docs/modules/README.md) for a full list of modules by category.
 
-You can set the `harness-enabled-modules` variable to `t` in order to load all modules distributed with the harness.
+You can set the `harness-enabled-modules` variable to `t` in order to load all modules distributed with the harness, except the modules off by default: `demo`, which runs a hand-in's demo and opens the walkthrough presenter, and `supervisor`. They load when `harness-enable-modules` names them, or when you take them off `harness-off-by-default-modules`.
 
 A non-comprehensive list of all the different functionality offered by modules shipped with the harness:
 

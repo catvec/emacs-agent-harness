@@ -30,10 +30,13 @@
 ;;    :features tasks merge
 ;;    :tools web)
 ;;
-;; (`harness-enabled-modules' t loads every module.)  A module brings
-;; the modules it requires along, and its other half: ui-tasks, the task
-;; board, with tasks.  M-x harness-enable-module enables one at once,
-;; and M-x harness-describe-module says what one does.
+;; (`harness-enabled-modules' t loads every module but the off-by-default
+;; ones, `harness-off-by-default-modules': demo and supervisor.  A name
+;; in `harness-enabled-modules' loads one of those all the same.)  A
+;; module brings the modules it requires along, and its other half:
+;; ui-tasks, the task board, with tasks.  M-x harness-enable-module
+;; enables one at once, and M-x harness-describe-module says what one
+;; does.
 ;;
 ;; Libraries that are not the harness's -- compose-quote, which the
 ;; compose box quotes with -- live under lisp/vendor, a directory each,
@@ -166,12 +169,32 @@ each task's worktree back with merge, leaves it to be enabled too.
 
 `harness-enable-modules' sets this from a list grouped as in Doom
 Emacs's init.el, and \\[harness-enable-module] enables one module now.
-nil, the default, loads only the core; t loads every module, as the
-harness did before it had a core.  The harness process reads this when
-it starts, so after changing it run \\[harness-restart]."
-  :type '(choice (const :tag "Every module" t)
+nil, the default, loads only the core; t loads every module except the
+off-by-default ones (`harness-off-by-default-modules': demo and
+supervisor out of the box), which a list naming them loads all the
+same.  The harness process reads this when it starts, so after changing
+it run \\[harness-restart]."
+  :type '(choice (const :tag "Every module but the off-by-default ones" t)
                  (repeat :tag "These, besides the core" symbol))
   :group 'harness)
+
+(defcustom harness-off-by-default-modules '(demo supervisor)
+  "Modules `harness-enabled-modules' t leaves out: they load only when named.
+A module here does not load merely because every module is asked for.
+It loads when `harness-enabled-modules' names it, when a module that
+loads requires it or is its other half, and when
+\\[harness-enable-module] enables it.  A list in
+`harness-enabled-modules' is explicit and loads an off-by-default
+module it names.
+
+The `demo' module runs a hand-in's demo on its workspace computer and
+opens the presenter that walks the reviewer through it, and
+`supervisor' makes sessions plan and delegate.  Neither is what a
+harness should do unasked, so both ship here.  Set this to nil for t to
+load them too.  `harness-disabled-modules' keeps a module out
+altogether, whatever this says.  The harness process reads this when it
+starts, so after changing it run \\[harness-restart]."
+  :type '(repeat symbol) :group 'harness)
 
 (defcustom harness-disabled-modules nil
   "Modules never to load, by name, whatever else would load them.
@@ -489,6 +512,16 @@ It does when it names NAME, or the module whose UI half NAME is."
       (and (harness--ui-module-p name)
            (memq (harness--module-other-half name) harness-disabled-modules))))
 
+(defun harness-module-off-by-default-p (name)
+  "Non-nil when module NAME loads only when named, not with `t'.
+`harness-off-by-default-modules' names it, or the module whose UI half
+NAME is.  Such a module loads when `harness-enabled-modules' names it,
+when a module that loads requires it or is its other half
+\(`harness--module-closure'), and when \\[harness-enable-module] enables
+it; not merely because every module is asked for."
+  (or (memq name harness-off-by-default-modules)
+      (memq (harness--module-other-half name) harness-off-by-default-modules)))
+
 (defun harness--module-closure (sources names)
   "Return NAMES and what they bring along, among SOURCES.
 SOURCES is ((NAME . FILE) ...), as `harness--module-sources' returns.
@@ -512,13 +545,18 @@ brings.  Names SOURCES lacks stay in the list, which is in no order."
 (defun harness--selected-modules (sources)
   "Return the names of the modules of SOURCES that load, on either side.
 SOURCES is ((NAME . FILE) ...), as `harness--module-sources' returns.
-With `harness-enabled-modules' t, every one; else
-`harness-core-modules' and `harness-enabled-modules', with what they
-bring along (`harness--module-closure').  `harness-disabled-modules'
-leaves its modules out, and their UI halves."
+With `harness-enabled-modules' t, every one but the off-by-default ones
+\(`harness-off-by-default-modules') and what they alone bring along;
+else `harness-core-modules' and `harness-enabled-modules', with what
+they bring along (`harness--module-closure').  In both cases
+`harness-disabled-modules' leaves its modules out, and their UI halves."
   (if (eq harness-enabled-modules t)
-      (cl-loop for (name . _) in sources
-               unless (harness--module-disabled-p name) collect name)
+      (let ((selected (harness--module-closure
+                       sources (cl-loop for (name . _) in sources
+                                        unless (or (harness--module-disabled-p name)
+                                                   (harness-module-off-by-default-p name))
+                                        collect name))))
+        (cl-loop for (name . _) in sources when (memq name selected) collect name))
     (let ((selected (harness--module-closure
                      sources (append harness-core-modules (ensure-list harness-enabled-modules)))))
       (cl-loop for (name . _) in sources when (memq name selected) collect name))))
@@ -782,16 +820,22 @@ Return the names of the modules started."
 (defun harness-enable-module (name)
   "Enable module NAME now: load it, with what it brings along, and start it.
 NAME is added to `harness-enabled-modules' for this Emacs session; to
-keep it, add it to `harness-enable-modules' in your init file.  The
-harness in this Emacs loads it at once.  A harness process loads its
-part when it restarts, which you are offered when there is one.
-`harness-disabled-modules' is left as it is: a module it names cannot
-be enabled."
+keep it, add it to `harness-enable-modules' in your init file.  A
+module `harness-off-by-default-modules' names is one `t' leaves out:
+with `harness-enabled-modules' t, this takes it off that list for this
+Emacs session instead, and to keep it, remove it from
+`harness-off-by-default-modules' in your init file, or name it in
+`harness-enable-modules'.  The harness in this Emacs loads it at once.
+A harness process loads its part when it restarts, which you are
+offered when there is one.  `harness-disabled-modules' is left as it
+is: a module it names cannot be enabled."
   (interactive (list (harness--read-module "Enable module: ")))
   (let* ((sources (harness--module-sources))
-         (before (harness--selected-modules sources)))
+         (before (harness--selected-modules sources))
+         (off-by-default (and (eq harness-enabled-modules t)
+                              (harness-module-off-by-default-p name))))
     (cond
-     ((eq harness-enabled-modules t)
+     ((and (eq harness-enabled-modules t) (not off-by-default))
       (user-error "Every module loads already: `harness-enabled-modules' is t"))
      ((not (assq name sources))
       (user-error "No module %s" name))
@@ -800,12 +844,22 @@ be enabled."
      ((memq name before)
       (message "Module %s loads already" name))
      (t
-      (setq harness-enabled-modules (append (ensure-list harness-enabled-modules) (list name)))
+      (if off-by-default
+          (setq harness-off-by-default-modules
+                (delq name (delq (harness--module-other-half name)
+                                 harness-off-by-default-modules)))
+        (setq harness-enabled-modules
+              (append (ensure-list harness-enabled-modules) (list name))))
       (let* ((added (cl-set-difference (harness--selected-modules sources) before))
              (remote (and harness-process
                           (cl-remove-if #'harness--ui-module-p added)))
-             (keep (format-message "add %s to `harness-enable-modules' in your init file to keep it"
-                                   name)))
+             (keep (if off-by-default
+                       (format-message
+                        "remove %s from `harness-off-by-default-modules' in your init file to keep it"
+                        name)
+                     (format-message
+                      "add %s to `harness-enable-modules' in your init file to keep it"
+                      name))))
         (when harness-started
           (harness--load-new-modules))
         (cond
@@ -826,18 +880,17 @@ be enabled."
   "Return (TITLE . PROMISE) of the modules that could be enabled, or nil.
 For `harness-describe-modules-functions': PROMISE resolves to them,
 described as `harness-module-descriptions' describes modules."
-  (unless (eq harness-enabled-modules t)
-    (let* ((sources (harness--module-sources))
-           (selected (harness--selected-modules sources))
-           (off (cl-loop for (name . file) in sources
-                         unless (or (memq name selected) (harness--module-disabled-p name))
-                         collect (list :name name :state 'available
-                                       :doc (plist-get (harness--module-header file) :doc)
-                                       :file file))))
-      (when off
-        (cons (substitute-command-keys
-               "Modules not loaded, enabled with `harness-enable-modules' or \\[harness-enable-module]")
-              (harness-resolved off))))))
+  (let* ((sources (harness--module-sources))
+         (selected (harness--selected-modules sources))
+         (off (cl-loop for (name . file) in sources
+                       unless (or (memq name selected) (harness--module-disabled-p name))
+                       collect (list :name name :state 'available
+                                     :doc (plist-get (harness--module-header file) :doc)
+                                     :file file))))
+    (when off
+      (cons (substitute-command-keys
+             "Modules not loaded, enabled with `harness-enable-modules' or \\[harness-enable-module]")
+            (harness-resolved off)))))
 
 (add-hook 'harness-describe-modules-functions #'harness--modules-not-loaded t)
 

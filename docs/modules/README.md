@@ -14,7 +14,10 @@ The modules marked *by default* below always load: the core
 your init file enables them, after `(require 'harness)`: copy this,
 uncomment the modules you want, and restart the harness. A module
 brings along what it requires and its UI (tasks loads the task board,
-ui-tasks); `(setq harness-enabled-modules t)` loads every module.
+ui-tasks). `(setq harness-enabled-modules t)` loads every module but
+the ones marked *when named*: `harness-off-by-default-modules` leaves
+them out, so that demo, which runs a hand-in's demo and its walkthrough,
+and supervisor load only when they are named.
 
 ```elisp
 (harness-enable-modules
@@ -122,7 +125,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [cost-compare](cost-compare.md) |  | [usage](usage.md), [provider](provider.md) | What the recorded usage would have cost at other models' prices. |
 | [cowboy](cowboy.md) |  | [session](session.md), [agent](agent.md), [compaction](compaction.md) | Ask what goes first when a message meets a session whose prompt cache went cold. |
 | [decisions](decisions.md) |  | [store](store.md) | Lasting decisions -- answers that hold beyond their moment -- with their undo and redo, from any session. |
-| [demo](demo.md) |  | [tools](tools.md), [tasks](tasks.md), [session](session.md), [agent](agent.md) | Start a hand-in's demo on its workspace computer: the VNC screen, the takeover, and the presenter that drives it. |
+| [demo](demo.md) | when named | [tools](tools.md), [tasks](tasks.md), [session](session.md), [agent](agent.md) | Start a hand-in's demo on its workspace computer: the VNC screen, the takeover, and the presenter that drives it. |
 | [fallback](fallback.md) |  | [store](store.md), [session](session.md), [provider](provider.md) | Carry on with another provider when one runs out of quota or money. |
 | [gremlin](gremlin.md) |  |  | Opt-in chaos fixtures and the budgeted run that contains them. |
 | [handoff](handoff.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md) | Warn before a lossy switch to a hosted-loop provider, and hand the conversation over. |
@@ -167,7 +170,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [small](small.md) | by default |  | One-off model calls the harness makes on its own, tried again like a step of a turn when they fail transiently. |
 | [stacks](stacks.md) |  |  | Compose stacks that modules and plugins declare: start, stop, state, dynamic ports and the harness server's network. |
 | [store](store.md) | by default |  | JSON, JSONL and SQLite persistence under the state directory. |
-| [supervisor](supervisor.md) |  | [session](session.md), [agent](agent.md), [tools](tools.md), [readonly](readonly.md) | Supervisor mode: sessions that plan and delegate, enforced by the harness. |
+| [supervisor](supervisor.md) | when named | [session](session.md), [agent](agent.md), [tools](tools.md), [readonly](readonly.md) | Supervisor mode: sessions that plan and delegate, enforced by the harness. |
 | [tasks](tasks.md) |  | [store](store.md), [project](project.md), [session](session.md), [agent](agent.md) | Task mode: one session per task, through review and the merge queue, with a limit of tasks at once per project, started by priority. |
 | [tasks-notify](tasks-notify.md) |  | [tasks](tasks.md), [notifications](notifications.md) | Notifies you when a task's work waits for your review or a task is done (and, opt-in, when one needs your input). |
 | [tasks-search](tasks-search.md) |  | [tasks](tasks.md), [provider](provider.md), [session-search](session-search.md) | Search the harness with a cheap model: tasks and actions on them, sessions, commands and an answer in words. |
@@ -247,7 +250,7 @@ ui-tasks); `(setq harness-enabled-modules t)` loads every module.
 | [ui-sessions](ui-sessions.md) | by default | [ui](ui.md) | Session list buffer. |
 | [ui-slots](ui-slots.md) |  | [ui](ui.md), [ui-tasks](ui-tasks.md) | The task slots page: the tasks that hold slots as the session list lists sessions, who is using the machine's tool slots, the queue and its waits by priority. |
 | [ui-sticky-compose](ui-sticky-compose.md) |  | [ui](ui.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) | The compose box, docked in the mode line of a chat window scrolled away from it, while you compose. |
-| [ui-supervisor](ui-supervisor.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Supervisor mode: the chat header's segment and the V key that toggles it. |
+| [ui-supervisor](ui-supervisor.md) | when named | [ui](ui.md), [ui-chat](ui-chat.md) | Supervisor mode: the chat header's segment and the V key that toggles it. |
 | [ui-tasks](ui-tasks.md) |  | [ui](ui.md) | Task mode: a kanban of one-session tasks with a compose box. |
 | [ui-tasks-search](ui-tasks-search.md) |  | [ui-tasks](ui-tasks.md), [ui-quick-search](ui-quick-search.md) | The task board's search: find tasks, sessions and commands or act on tasks in words, answered by a cheap model. |
 | [ui-todo-sync](ui-todo-sync.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Sync a session's todo list by hand, or switch the sync on or off for it: /todos in a chat. |

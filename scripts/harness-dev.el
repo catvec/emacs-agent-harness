@@ -137,8 +137,12 @@ Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
   (require 'harness)
   ;; Every module, so that every feature can be tried, unless
   ;; HARNESS_DEV_MODULES=default asks for the defaults: the core only.
+  ;; The two modules that ship off even with `harness-enabled-modules'
+  ;; t, demo and supervisor, load here too: the point of this instance
+  ;; is to try them.
   (unless (equal (getenv "HARNESS_DEV_MODULES") "default")
-    (setq harness-enabled-modules t))
+    (setq harness-enabled-modules t
+          harness-off-by-default-modules nil))
   ;; HARNESS_DEV_SERVER_ADDRESS points this UI at a harness server
   ;; elsewhere, as a user's `harness-server-address' would at start.
   (let ((address (getenv "HARNESS_DEV_SERVER_ADDRESS")))
