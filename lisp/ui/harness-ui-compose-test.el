@@ -1125,7 +1125,7 @@ saying what each answers."
                      (goto-char (point-min))
                      (buffer-substring-no-properties (point) (line-end-position)))))
     (should (looking-at-p "The build is green"))
-    (should (string-match-p "Reply quote" header-line-format))
+    (should (string-match-p "Reply quote" (harness-compose-edit-thread--header)))
     ;; Split after the first line of the quote.
     (goto-char (point-min))
     (search-forward "The build is green.")
@@ -1221,6 +1221,56 @@ card with nothing to answer."
       (should (eq (current-buffer) (get-buffer "*compose test*")))
       (should (= 1 (length harness-compose-attachments)))
       (should (equal "\n[reply 1]\nAnswer." (harness-compose-text))))))
+
+(ert-deftest harness-ui-compose-edit-thread-header-fits-with-exact-copy-and-overflow ()
+  (harness-ui-compose-test-with
+    (with-temp-buffer
+      (harness-compose-edit-thread-mode)
+      (cl-letf (((symbol-function 'harness-ui-header-string-width) #'string-width))
+        (should (equal "  Reply quote · M-RET split · C-c [ elide · C-c C-c apply · C-c C-k cancel"
+                       (substring-no-properties (harness-compose-edit-thread--header 100))))
+        (should-not harness-ui--header-overflow)
+        (let ((narrow (harness-compose-edit-thread--header 39)))
+          (should (equal "  Reply quote · C-c C-k cancel …" (substring-no-properties narrow)))
+          (should (<= (string-width narrow) 39))
+          (should (equal "Overflow (mouse-1)" (get-text-property (1- (length narrow)) 'help-echo narrow)))
+          (should (equal '("· M-RET split" "· C-c [ elide" "· C-c C-c apply")
+                         (mapcar (lambda (item) (plist-get item :label)) harness-ui--header-overflow)))
+          (should (equal '(harness-compose-edit-thread-split harness-compose-edit-thread-elide
+                          harness-compose-edit-thread-apply)
+                         (mapcar (lambda (item) (plist-get item :command)) harness-ui--header-overflow))))))))
+
+(ert-deftest harness-ui-compose-edit-thread-side-window-placement-and-cleanup ()
+  "Both Apply and Cancel remove the editor, not just its buffer."
+  (harness-ui-compose-test-with
+    (let* ((box (current-buffer))
+           (terminal (generate-new-buffer " *compose terminal*"))
+           (main (selected-window)))
+      (unwind-protect
+          (progn
+            (switch-to-buffer terminal)
+            (let* ((session (display-buffer-in-side-window
+                             box '((side . right) (slot . 0) (window-width . 0.5))))
+                   (main-edges (window-edges main)))
+              (select-window session)
+              (harness-compose-add-thread (list harness-ui-compose-test--ref))
+              (dolist (finish '(harness-compose-edit-thread-apply
+                               harness-compose-edit-thread-cancel))
+                (harness-compose-edit-thread)
+                (let ((editor (selected-window)))
+                  (should (= (nth 3 (window-edges session))
+                             (nth 1 (window-edges editor))))
+                  (should (equal '(:eval (harness-compose-edit-thread--header))
+                                 header-line-format))
+                  (funcall finish)
+                  (should-not (window-live-p editor))
+                  (should-not (get-buffer "*Reply 1 quote*"))
+                  (should (eq session (selected-window)))
+                  (should (eq box (current-buffer)))
+                  (should (eq terminal (window-buffer main)))
+                  (should (equal main-edges (window-edges main)))
+                  (should (= 2 (length (window-list nil 'nomini))))))))
+        (when (buffer-live-p terminal) (kill-buffer terminal))))))
 
 ;;;; Links dropped on the box
 

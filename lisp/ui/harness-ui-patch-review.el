@@ -7043,6 +7043,34 @@ a whole."
        (lambda (written)
          (harness-ui-patch-review--comment-added review file where written))))))
 
+(defun harness-ui-patch-review--ediff-surface-p (&optional review)
+  "Non-nil when REVIEW has an Ediff visible on the selected frame.
+REVIEW defaults to this buffer's review.  Its report and threads pane
+use the same reply placement as its versions and control panel."
+  (when-let* ((review (or review (harness-ui-patch-review--review-here)))
+              (state (harness-ui-patch-review--r-ediff review)))
+    (cl-some (lambda (key)
+               (when-let* ((buffer (plist-get state key))
+                           ((buffer-live-p buffer)))
+                 (get-buffer-window buffer (selected-frame))))
+             '(:control :a :b))))
+
+(defun harness-ui-patch-review--read-with-string-edit (prompt initial callback &optional point)
+  "Read a comment in a buffer of its own, placed where the review is.
+PROMPT, INITIAL, CALLBACK and POINT are as
+`change-review-ui-read-with-string-edit' takes them.  A harness review
+uses `harness-ui-display-reply-buffer' placement; other change-review
+sets keep their ordinary display behavior."
+  (let* ((review (harness-ui-patch-review--review-here))
+         (display-buffer-overriding-action
+          (if review
+              (cons (if (harness-ui-patch-review--ediff-surface-p review)
+                        #'harness-ui-reply--display-ediff
+                      #'harness-ui-reply--display-buffer)
+                    nil)
+            display-buffer-overriding-action)))
+    (change-review-ui-read-with-string-edit prompt initial callback point)))
+
 (defun harness-ui-patch-review--read-comment (prompt callback)
   "Read a comment with PROMPT, then call CALLBACK with what was written.
 It is read in a buffer of its own, so it may run to several lines:
@@ -7825,6 +7853,11 @@ the review again."
   "Show the changes of a task in review in its report."
   (harness-ui-patch-review--drop-stale-reviews)
   (setq harness-ui-patch-review--active t)
+  ;; A comment or reply is read in a split that does not take an Ediff
+  ;; window's place or land in another session's; a reader the user chose
+  ;; is left as it is.
+  (when (eq change-review-ui-read-function #'change-review-ui-read-with-string-edit)
+    (setq change-review-ui-read-function #'harness-ui-patch-review--read-with-string-edit))
   ;; Before the review banner: the changes are read, then the work is
   ;; verified or sent back.
   (add-hook 'harness-ui-report-panel-functions #'harness-ui-patch-review--panel -10)
@@ -7852,6 +7885,8 @@ the review again."
 (defun harness-ui-patch-review--shutdown ()
   "Take the changes out of the reports again, ending the Ediffs of them."
   (setq harness-ui-patch-review--active nil)
+  (when (eq change-review-ui-read-function #'harness-ui-patch-review--read-with-string-edit)
+    (setq change-review-ui-read-function #'change-review-ui-read-with-string-edit))
   (remove-hook 'harness-ui-report-panel-functions #'harness-ui-patch-review--panel)
   (remove-hook 'harness-ui-event-functions #'harness-ui-patch-review--on-event)
   (remove-hook 'change-review-changed-functions #'harness-ui-patch-review--on-comment)

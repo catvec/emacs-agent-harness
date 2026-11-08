@@ -3311,6 +3311,21 @@ target at point and the region covers none."
     map)
   "Keys of the buffer that edits what a reply in a thread answers.")
 
+(defun harness-compose-edit-thread--header (&optional width)
+  "Return the quote editor's header, fitted to WIDTH or its window.
+Keep Cancel longest; the overflow menu retains every hidden command."
+  (harness-ui-fit-header
+   (list '("  Reply quote" t)
+         (list (substitute-command-keys " · \\[harness-compose-edit-thread-split] split")
+               10 nil #'harness-compose-edit-thread-split)
+         (list (substitute-command-keys " · \\[harness-compose-edit-thread-elide] elide")
+               10 nil #'harness-compose-edit-thread-elide)
+         (list (substitute-command-keys " · \\[harness-compose-edit-thread-apply] apply")
+               20 nil #'harness-compose-edit-thread-apply)
+         (list (substitute-command-keys " · \\[harness-compose-edit-thread-cancel] cancel")
+               30 nil #'harness-compose-edit-thread-cancel))
+   width t))
+
 (define-derived-mode harness-compose-edit-thread-mode text-mode "Thread-Quote"
   "Edit what a reply in a thread answers.
 The quote is a section per reference, each headed by what it is, the
@@ -3321,9 +3336,7 @@ the next.  C-c C-c applies, C-c C-k cancels and C-c C-r starts again
 from the quote as it was."
   (setq-local buffer-read-only nil)
   (visual-line-mode 1)
-  (setq-local header-line-format
-              (substitute-command-keys
-               "  Reply quote · \\[harness-compose-edit-thread-split] split · \\[harness-compose-edit-thread-elide] elide · \\[harness-compose-edit-thread-apply] apply · \\[harness-compose-edit-thread-cancel] cancel")))
+  (setq-local header-line-format '(:eval (harness-compose-edit-thread--header))))
 
 (defun harness-compose-edit-thread--insert-head (text &optional ref note)
   "Insert TEXT as a read-only line of the quote editor.
@@ -3399,7 +3412,7 @@ words is no reply and is left out."
                   harness-compose-edit-thread--data data)
       (harness-compose-edit-thread--insert-quote data)
       (set-buffer-modified-p nil))
-    (pop-to-buffer buffer '((display-buffer-below-selected) (window-height . 0.45)))
+    (harness-ui-display-reply-buffer buffer)
     buffer))
 
 (defun harness-compose-edit-thread-reset ()
@@ -3526,7 +3539,7 @@ part gets its own card and the words written under it."
     (unless (buffer-live-p box) (user-error "The compose box this reply is in is gone"))
     (with-current-buffer box
       (harness-compose--edit-thread-replace att parts))
-    (kill-buffer (current-buffer))
+    (quit-windows-on (current-buffer) t)
     (when (buffer-live-p box)
       (set-buffer box)
       ;; The box's window kept the point it had before the quote opened:
@@ -3544,7 +3557,7 @@ part gets its own card and the words written under it."
     (when (and (buffer-modified-p)
                (not (y-or-n-p "Leave the quote as it was, and lose the changes? ")))
       (user-error "Cancelled"))
-    (kill-buffer (current-buffer))
+    (quit-windows-on (current-buffer) t)
     (when (buffer-live-p box)
       (set-buffer box)
       ;; The box's window kept the point it had before the quote opened:

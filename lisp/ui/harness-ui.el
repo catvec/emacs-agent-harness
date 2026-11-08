@@ -4778,6 +4778,101 @@ and keeps the position it had (`harness-ui--display-overridden')."
       (with-current-buffer buffer (setq-local harness-ui-position position))
       buffer)))
 
+(defun harness-ui-reply--direction (window)
+  "Return where a reply editor splits from WINDOW: `below' or `right'.
+Follow WINDOW's sibling orientation, or Emacs's
+`split-window-preferred-direction' and frame shape when it is alone.
+Side windows split along their side, as Emacs side-window slots do."
+  (cond
+   ((memq (window-parameter window 'window-side) '(left right)) 'below)
+   ((memq (window-parameter window 'window-side) '(top bottom)) 'right)
+   ((window-combined-p window t) 'right)
+   ((window-combined-p window) 'below)
+   (t (pcase (and (boundp 'split-window-preferred-direction)
+                  split-window-preferred-direction)
+        ('vertical 'below)
+        ('horizontal 'right)
+        (_ (if (> (frame-pixel-width (window-frame window))
+                  (frame-pixel-height (window-frame window)))
+               'right
+             'below))))))
+
+(defun harness-ui-reply--split-side (buffer reference direction)
+  "Show BUFFER in a new side-window slot after REFERENCE in DIRECTION.
+Use the same splitting machinery as `display-buffer-in-side-window',
+but never its fallback that replaces an occupied slot.  Slot numbers
+may be fractional, so insertion leaves every existing slot in place."
+  (let* ((slot (window-parameter reference 'window-slot))
+         (next (window-next-sibling reference))
+         (next-slot (and next (window-parameter next 'window-slot)))
+         (previous (window-prev-sibling reference))
+         (previous-slot (and previous (window-parameter previous 'window-slot)))
+         (new-slot (if next-slot (/ (+ slot next-slot) 2.0)
+                     (+ slot (if (if previous-slot (< slot previous-slot)
+                                   (window--sides-reverse-on-frame-p
+                                    (window-frame reference)))
+                                 -1 1))))
+         (window--sides-inhibit-check t)
+         (window-combination-limit nil)
+         (window-combination-resize 'side)
+         (window (ignore-errors (split-window reference nil direction))))
+    (when (window-live-p window)
+      (set-window-parameter window 'window-slot new-slot)
+      (with-current-buffer buffer (setq window--sides-shown t))
+      (window--display-buffer buffer window 'window '((dedicated . side))))))
+
+(defun harness-ui-reply--split (buffer reference direction &optional size)
+  "Show BUFFER in a new split of REFERENCE in DIRECTION, or return nil.
+SIZE is as in `split-window', nil for half of REFERENCE.  Record the
+new window for `quit-window', so quitting gives the space back."
+  (let* ((window-combination-resize nil)
+         (window (ignore-errors (split-window reference size direction))))
+    (when (window-live-p window)
+      (window--display-buffer buffer window 'window nil))))
+
+(defun harness-ui-reply--display-buffer (buffer _alist)
+  "Display BUFFER in a split beside or below the selected window.
+Reuse BUFFER's window on this frame, never an unrelated window.  With
+no room for a split, stop rather than falling through to Emacs's
+arbitrary-window fallback."
+  (let* ((reference (selected-window))
+         (direction (harness-ui-reply--direction reference)))
+    (or (get-buffer-window buffer (selected-frame))
+        (if (window-parameter reference 'window-side)
+            (harness-ui-reply--split-side buffer reference direction)
+          (or (harness-ui-reply--split buffer reference direction)
+              (harness-ui-reply--split buffer reference
+                                       (if (eq direction 'below) 'right 'below))))
+        (user-error "No room for a reply window"))))
+
+(defun harness-ui-reply--display-ediff (buffer _alist)
+  "Display BUFFER in the bottom half of Ediff's main area.
+Keep the versions, control panel and all side windows visible."
+  (let* ((main (window-main-window (selected-frame)))
+         (height (window-total-height main)))
+    (or (get-buffer-window buffer (selected-frame))
+        (harness-ui-reply--split buffer main 'below (- (max 1 (/ height 2))))
+        (user-error "No room for a reply window"))))
+
+(defun harness-ui-display-reply-buffer (buffer &optional ediff)
+  "Show BUFFER as a reply editor in a split, and select its window.
+EDIFF non-nil puts it in the bottom half of the frame's main area,
+below the control panel and versions.  Otherwise split from the
+selected window: below a stacked session, right of a side-by-side one,
+and by Emacs's `split-window-preferred-direction' from a window alone.
+A side-window session gets a new slot on its own side: below on the
+left or right, to the right on the top or bottom.
+
+Never replace another buffer or select another frame.  Quitting BUFFER
+removes the new window and gives the space back."
+  (let ((display-buffer-overriding-action
+         (cons (if ediff
+                   #'harness-ui-reply--display-ediff
+                 #'harness-ui-reply--display-buffer)
+               nil)))
+    (pop-to-buffer buffer)
+    buffer))
+
 (defun harness-ui-display-session (id &optional position frame)
   "Display session ID in POSITION using `harness-ui-open-session-function'.
 FRAME is the frame to show it in, the selected one by default

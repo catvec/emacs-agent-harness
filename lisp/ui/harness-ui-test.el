@@ -4345,5 +4345,226 @@ list draws a thousand of at every redraw."
           (should (equal "41.9k/200k" (substring-no-properties lazy)))
           (should (string-match-p "in use: 150k of" (help lazy))))))))
 
+;;;; Where a reply is written
+
+(ert-deftest harness-ui-reply-editor-splits-below-a-stacked-session ()
+  "A reply editor opens below a session that is stacked over another window.
+The window already below it -- a terminal's, say -- is not taken: the
+reply gets a split of its own between them, and quitting it gives the
+space back."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((session (generate-new-buffer " *reply session*"))
+          (below (generate-new-buffer " *reply terminal*"))
+          (editor-buffer (generate-new-buffer " *reply editor*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer session)
+            (let ((session-window (selected-window)))
+              (let ((below-window (split-window-below)))
+                (set-window-buffer below-window below))
+              (select-window session-window)
+              (harness-ui-display-reply-buffer editor-buffer)
+              (let ((editor (selected-window))
+                    (below-window (get-buffer-window below)))
+                (should (eq editor-buffer (window-buffer editor)))
+                (should (eq below (window-buffer below-window)))
+                (should (window-live-p below-window))
+                (should (= 3 (length (window-list nil 'nomini))))
+                (should (= (nth 1 (window-edges editor))
+                           (nth 3 (window-edges session-window))))
+                (should (= (nth 3 (window-edges editor))
+                           (nth 1 (window-edges below-window))))
+                (should (= (window-total-width editor)
+                           (window-total-width session-window)))
+                (quit-window 'kill)
+                (should-not (window-live-p editor))
+                (should (eq below (window-buffer below-window))))))
+        (dolist (buffer (list session below editor-buffer))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(ert-deftest harness-ui-reply-editor-splits-right-of-a-side-by-side-session ()
+  "A reply editor opens to the right of a session beside another window,
+between the session and the window that was on its right."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((session (generate-new-buffer " *reply session*"))
+          (right (generate-new-buffer " *reply other*"))
+          (editor-buffer (generate-new-buffer " *reply editor*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer session)
+            (let ((session-window (selected-window)))
+              (let ((right-window (split-window-right)))
+                (set-window-buffer right-window right))
+              (select-window session-window)
+              (harness-ui-display-reply-buffer editor-buffer)
+              (let ((editor (selected-window))
+                    (right-window (get-buffer-window right)))
+                (should (eq editor-buffer (window-buffer editor)))
+                (should (eq right (window-buffer right-window)))
+                (should (= 3 (length (window-list nil 'nomini))))
+                (should (= (nth 0 (window-edges editor))
+                           (nth 2 (window-edges session-window))))
+                (should (= (nth 2 (window-edges editor))
+                           (nth 0 (window-edges right-window))))
+                (should (= (nth 1 (window-edges editor))
+                           (nth 1 (window-edges session-window))))
+                (should (= (nth 3 (window-edges editor))
+                           (nth 3 (window-edges session-window))))
+                (quit-window 'kill)
+                (should-not (window-live-p editor))
+                (should (eq right (window-buffer right-window))))))
+        (dolist (buffer (list session right editor-buffer))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(ert-deftest harness-ui-reply-editor-takes-the-bottom-half-beside-an-ediff ()
+  "Beside an Ediff a reply opens full-width below the control panel, in the
+bottom half of Ediff's main area, and no version or the panel loses its
+window.  Quitting the reply gives Ediff the room back."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((old (generate-new-buffer " *reply old version*"))
+          (new (generate-new-buffer " *reply new version*"))
+          (control (generate-new-buffer " *reply control*"))
+          (editor-buffer (generate-new-buffer " *reply editor*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer old)
+            (let ((version-window (split-window-right)))
+              (set-window-buffer version-window new))
+            (let ((control-window (split-window-below 8 (frame-root-window))))
+              (set-window-buffer control-window control)
+              (select-window control-window))
+            (let* ((windows (window-list nil 'nomini))
+                   (main-height (window-total-height (window-main-window))))
+              (harness-ui-display-reply-buffer editor-buffer t)
+              (let ((editor (selected-window))
+                    (control-window (get-buffer-window control)))
+                (should (eq editor-buffer (window-buffer editor)))
+                (should (window-live-p control-window))
+                (dolist (window windows)
+                  (should (window-live-p window)))
+                (should (= (nth 0 (window-edges editor))
+                           (nth 0 (window-edges control-window))))
+                (should (= (nth 2 (window-edges editor))
+                           (nth 2 (window-edges control-window))))
+                (should (= (nth 1 (window-edges editor))
+                           (nth 3 (window-edges control-window))))
+                (should (<= (abs (- (window-total-height editor)
+                                    (/ main-height 2)))
+                            1))
+                (quit-window 'kill)
+                (should-not (window-live-p editor))
+                (should (window-live-p control-window))
+                (should (= 3 (length (window-list nil 'nomini)))))))
+        (dolist (buffer (list old new control editor-buffer))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(ert-deftest harness-ui-reply-editor-follows-emacs-preference-and-reuses-its-window ()
+  (dolist (preference '(vertical horizontal))
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((split-window-preferred-direction preference)
+            (session (selected-window))
+            (buffer (generate-new-buffer " *reply editor*"))
+            ;; Even a user rule asking to take over the session must not
+            ;; replace its buffer when opening the editor.
+            (display-buffer-alist '(("reply editor" display-buffer-same-window))))
+        (unwind-protect
+            (progn
+              (harness-ui-display-reply-buffer buffer)
+              (let ((editor (selected-window)))
+                (should (= 2 (length (window-list nil 'nomini))))
+                (if (eq preference 'vertical)
+                    (should (= (nth 3 (window-edges session))
+                               (nth 1 (window-edges editor))))
+                  (should (= (nth 2 (window-edges session))
+                             (nth 0 (window-edges editor)))))
+                (select-window session)
+                (harness-ui-display-reply-buffer buffer)
+                (should (eq editor (selected-window)))
+                (should (= 2 (length (window-list nil 'nomini))))
+                (quit-window 'kill)
+                (should-not (window-live-p editor))))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(ert-deftest harness-ui-reply-editor-falls-back-only-within-its-session ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((split-window-preferred-direction 'horizontal)
+          (window-min-width (frame-width))
+          (session (selected-window))
+          (buffer (generate-new-buffer " *reply editor*")))
+      (unwind-protect
+          (progn
+            (harness-ui-display-reply-buffer buffer)
+            (should (= (nth 3 (window-edges session))
+                       (nth 1 (window-edges (selected-window)))))
+            (quit-window 'kill))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest harness-ui-reply-editor-keeps-side-window-sessions-on-their-side ()
+  "A right/left session opens below; a top/bottom session opens right.
+An occupied neighboring slot, including reversed top/bottom slots, is
+never replaced.  Quitting leaves the main area and both slots intact."
+  (dolist (side '(right left bottom top))
+    (dolist (reversed '(nil t))
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((window-sides-reversed reversed)
+               (session (generate-new-buffer " *side session*"))
+               (other (generate-new-buffer " *side terminal*"))
+               (buffer (generate-new-buffer " *side reply*"))
+               (main (selected-window))
+               (main-buffer (window-buffer main)))
+          (unwind-protect
+              (let* ((reference (display-buffer-in-side-window session `((side . ,side) (slot . 0))))
+                     (neighbor (display-buffer-in-side-window other `((side . ,side) (slot . 1))))
+                     (main-edges (window-edges main)))
+                (select-window reference)
+                ;; A user's ordinary-window nesting policy must not
+                ;; create an invalid nested side-window combination.
+                (let ((window-combination-limit t))
+                  (harness-ui-display-reply-buffer buffer))
+                (let ((editor (selected-window)))
+                  (should (eq side (window-parameter editor 'window-side)))
+                  (should (buffer-local-value 'window--sides-shown buffer))
+                  (should (eq other (window-buffer neighbor)))
+                  (should (eq main-buffer (window-buffer main)))
+                  (should (equal main-edges (window-edges main)))
+                  (should (eq editor (window-next-sibling reference)))
+                  (should (= 4 (length (window-list nil 'nomini))))
+                  (if (memq side '(left right))
+                      (should (= (nth 3 (window-edges reference))
+                                 (nth 1 (window-edges editor))))
+                    (should (= (nth 2 (window-edges reference))
+                               (nth 0 (window-edges editor)))))
+                  ;; Exercise native side-window validation after insertion.
+                  (should (eq neighbor (display-buffer-in-side-window
+                                        other `((side . ,side) (slot . 1)))))
+                  (quit-window 'kill editor)
+                  (should-not (window-live-p editor))
+                  (should (eq session (window-buffer reference)))
+                  (should (eq other (window-buffer neighbor)))
+                  (should (equal main-edges (window-edges main)))))
+            (mapc (lambda (b) (when (buffer-live-p b) (kill-buffer b)))
+                  (list session other buffer))))))))
+
+(ert-deftest harness-ui-reply-editor-no-room-preserves-the-layout-and-exact-copy ()
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((buffer (generate-new-buffer " *reply editor*"))
+          (window-min-height (frame-height))
+          (window-min-width (frame-width))
+          (layout (harness-ui-test--layout)))
+      (unwind-protect
+          (progn
+            (should (equal '(user-error "No room for a reply window")
+                           (should-error (harness-ui-display-reply-buffer buffer)
+                                         :type 'user-error)))
+            (should (equal layout (harness-ui-test--layout))))
+        (kill-buffer buffer)))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

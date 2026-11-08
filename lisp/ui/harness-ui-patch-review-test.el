@@ -7335,10 +7335,19 @@ the report was open or not, and the thread may be named by the start of its id."
   (harness-ui-patch-review-test-with-task
     (let* ((popout (harness-ui-patch-review-test--changes board id))
            (review (gethash id harness-ui-patch-review--reviews))
-           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
-           (eighteen (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?"))
-           (thread-id (change-review-thread-id (harness-ui-patch-review-test--thread-of review eighteen))))
+           ;; A fixed shared prefix reproduces the collision that made
+           ;; truncating random ids to four characters intermittently fail.
+           (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                          :thread "t-c9aaaaaa"))
+           (eighteen (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "Why eighteen?"
+                                                               :thread "t-c9bbbbbb"))
+           (thread (harness-ui-patch-review-test--thread-of review eighteen))
+           (thread-id (change-review-thread-id thread))
+           (short-id (change-review-ui-thread-short-id (harness-ui-patch-review--r-set review) thread)))
       (ignore two)
+      (should (equal "t-c9bb" short-id))
+      (should-not (change-review-find-thread (harness-ui-patch-review--r-set review)
+                                             (substring thread-id 0 4)))
       (harness-ui-patch-review-test--wait-harness-threads id 2)
       (harness-ui-patch-review-test--wait-text popout "Why eighteen\?")
       ;; The report open, with point at its top.
@@ -7349,7 +7358,7 @@ the report was open or not, and the thread may be named by the start of its id."
       ;; The report gone, the link opens it again, at the thread: by the start of its id.
       (harness-ui-popout-close (list 'report id))
       (should-not (harness-ui-popout-buffer (list 'report id)))
-      (harness-ui-patch-review-show-thread id (substring thread-id 0 4))
+      (harness-ui-patch-review-show-thread id short-id)
       (let ((opened (harness-test-wait (lambda () (harness-ui-popout-buffer (list 'report id)))
                                        5 "the report to open")))
         (harness-test-wait (lambda () (harness-ui-patch-review-test--at-thread-p opened thread-id))
@@ -7560,6 +7569,70 @@ Both line comments' after-strings and file comments' before-strings count."
                       (should-not (buffer-modified-p))))
                 (kill-buffer buffer)))))))))
 
+(ert-deftest harness-ui-patch-review-editor-opens-at-the-bottom-of-ediff ()
+  "Control, versions, threads and report use the same bottom-half editor.
+Every existing buffer stays visible, and aborting returns the space."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews)))
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (frame (selected-frame))
+             (ediff-buffers (harness-ui-patch-review--ediff-buffers review))
+             (origins (append ediff-buffers
+                              (list popout (harness-ui-patch-review--threads-pane-buffer review))))
+             editor)
+        (unwind-protect
+            (dolist (origin (seq-filter #'buffer-live-p origins))
+              (select-window (get-buffer-window origin frame))
+              (let* ((windows (window-list frame 'nomini))
+                     (main (window-main-window frame))
+                     (main-height (window-total-height main))
+                     (main-width (window-total-width main)))
+                (should (eq change-review-ui-read-function
+                            #'harness-ui-patch-review--read-with-string-edit))
+                (should (harness-ui-patch-review--ediff-surface-p))
+                (if (eq origin control)
+                    (call-interactively #'harness-ui-patch-review-comment)
+                  ;; Replies and edits use this same reader, from every view.
+                  (change-review-ui-read "Reply" "" #'ignore))
+                (setq editor (selected-window))
+                (should (string-prefix-p "*edit string*"
+                                         (buffer-name (window-buffer editor))))
+                (let ((control-window (get-buffer-window control frame)))
+                  (dolist (window windows)
+                    (should (window-live-p window)))
+                  (dolist (buffer (seq-filter #'buffer-live-p origins))
+                    (should (get-buffer-window buffer frame)))
+                  (should (= (nth 0 (window-edges editor))
+                             (nth 0 (window-edges control-window))))
+                  (should (= (nth 2 (window-edges editor))
+                             (nth 2 (window-edges control-window))))
+                  (should (= (nth 1 (window-edges editor))
+                             (nth 3 (window-edges control-window))))
+                  (should (= main-width (window-total-width editor)))
+                  (should (<= (abs (- (window-total-height editor) (/ main-height 2))) 1)))
+                (with-selected-window editor (string-edit-abort))
+                (should-not (window-live-p editor))
+                (should (= (length windows) (length (window-list frame 'nomini))))
+                (dolist (window windows)
+                  (should (window-live-p window)))))
+          (when (and editor (window-live-p editor))
+            (with-selected-window editor (string-edit-abort)))
+          (when (get-buffer-window control frame)
+            (with-current-buffer control
+              (ignore-errors (harness-ui-patch-review-ediff-quit)))))))))
+
+(ert-deftest harness-ui-patch-review-reader-leaves-other-change-sets-alone ()
+  (with-temp-buffer
+    (let* ((action '(display-buffer-same-window))
+           (display-buffer-overriding-action action)
+           seen)
+      (cl-letf (((symbol-function 'change-review-ui-read-with-string-edit)
+                 (lambda (&rest args)
+                   (setq seen (cons display-buffer-overriding-action args)))))
+        (harness-ui-patch-review--read-with-string-edit "Reply" "Quote" #'ignore 'end))
+      (should (equal (list action "Reply" "Quote" #'ignore 'end) seen)))))
 ;;;; Bounded tool navigation
 
 (defmacro harness-ui-patch-review-test-with-tool-review (&rest body)
