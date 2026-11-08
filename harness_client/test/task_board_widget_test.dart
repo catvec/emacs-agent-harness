@@ -6,6 +6,7 @@ import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support/fake_harness.dart';
+import 'support/real_fonts.dart';
 
 const _main = '/Users/noah/Code/emacs-agent-harness/';
 const _other = '/Users/noah/Code/other-project/';
@@ -75,6 +76,9 @@ void _manyProjects(FakeHarness harness) {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  // Drawn with the fonts of a phone: the test font's letters are all
+  // squares, and the sheet's rows do not fit at the widths a phone has.
+  setUpAll(() async => loadRealFonts());
 
   testWidgets(
     'the task board opens on every project, and a project narrows it',
@@ -143,48 +147,51 @@ void main() {
     await _pump(tester, rig);
     await tester.tap(find.text('Tasks'));
     await _settle(tester, 6);
-    // With every project on the board, in the one of the latest work.
+    // With every project on the board, in the one of the latest work,
+    // which is a choice: a dropdown, and the path it fills.
     await tester.tap(find.byIcon(Icons.add_rounded));
     await _settle(tester, 4);
     expect(find.text('Submit task'), findsOneWidget);
+    expect(find.byKey(const Key('task-project')), findsOneWidget);
     expect(find.text(_main), findsOneWidget);
     expect(find.text(_other), findsNothing);
     Navigator.of(tester.element(find.text('Submit task'))).pop();
     await _settle(tester, 4);
     expect(find.text('Submit task'), findsNothing);
 
-    // With the board on one project, in that one.
+    // With the board on one project, in that one, and nothing to choose.
     await rig.app.tasks!.load(project: _other);
     await _settle(tester, 4);
     await tester.tap(find.byIcon(Icons.add_rounded));
     await _settle(tester, 4);
     expect(find.text('Submit task'), findsOneWidget);
-    expect(find.text(_other), findsOneWidget);
+    expect(find.byKey(const Key('task-project')), findsNothing);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('task-project-fixed')),
+        matching: find.text('other-project'),
+      ),
+      findsOneWidget,
+    );
     expect(find.text(_main), findsNothing);
+    expect(find.text(_other), findsNothing);
   });
 
   testWidgets(
-    'a task made for another project than the board shows is on the board',
+    'a task made on a narrowed board goes to its project, whatever the '
+    'draft said',
     (tester) async {
       final rig = await _rig();
       await _pump(tester, rig);
       await tester.tap(find.text('Tasks'));
       await _settle(tester, 6);
-      await rig.app.tasks!.load(project: _other);
-      await _settle(tester, 4);
 
-      Future<void> makeTask(String prompt, {String? inProject}) async {
+      Future<void> openSheet() async {
         await tester.tap(find.byIcon(Icons.add_rounded));
         await _settle(tester, 4);
-        if (inProject != null) {
-          await tester.tap(
-            find.descendant(
-              of: find.byType(BottomSheet),
-              matching: find.text(inProject),
-            ),
-          );
-          await _settle(tester, 2);
-        }
+      }
+
+      Future<void> send(String prompt) async {
         await tester.enterText(
           find.byWidgetPredicate(
             (widget) => widget is TextField && (widget.minLines ?? 1) > 1,
@@ -196,23 +203,33 @@ void main() {
         await _settle(tester, 8);
       }
 
-      // A task for the project the board is narrowed to joins it.
-      await makeTask('Renew the certificates');
-      expect(rig.app.tasks!.project, _other);
+      // A draft begun with another project chosen on the board of every
+      // project ...
+      await openSheet();
+      await tester.tap(find.byKey(const Key('task-project')));
+      await _settle(tester, 4);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(BottomSheet).last,
+          matching: find.text('other-project'),
+        ),
+      );
+      await _settle(tester, 3);
+      Navigator.of(tester.element(find.text('Submit task'))).pop();
+      await _settle(tester, 4);
+
+      // ... is the narrowed board's when the board is narrowed: the sheet
+      // asks nothing, and the task is of the project that is on it.
+      await rig.app.tasks!.load(project: _main);
+      await _settle(tester, 4);
+      await openSheet();
+      expect(find.byKey(const Key('task-project')), findsNothing);
+      await send('Renew the certificates');
+      expect(rig.harness.calls('_harness/task/submit').last['cwd'], _main);
+      expect(rig.app.tasks!.project, _main);
       expect(
         rig.app.tasks!.tasks.map((task) => task.title),
         contains('Renew the certificates'),
-      );
-
-      // One for another project is not on it, so the board shows them all.
-      await makeTask(
-        'Cache the project list',
-        inProject: 'emacs-agent-harness',
-      );
-      expect(rig.app.tasks!.project, isNull);
-      expect(
-        rig.app.tasks!.tasks.map((task) => task.title),
-        containsAll(['Renew the certificates', 'Cache the project list']),
       );
     },
   );

@@ -807,21 +807,23 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
             if (projects.isNotEmpty) ...[
               Text('PROJECT', style: HarnessText.label(context)),
               const SizedBox(height: 7),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
+              HarnessSelect<String>(
+                key: const Key('session-project'),
+                options: [
                   for (final project in projects)
-                    HarnessPill(
+                    HarnessMenuItem(
+                      value: project,
                       label: projectName(project),
                       icon: Icons.folder_outlined,
-                      selected: _project == project,
-                      onTap: () => setState(() {
-                        _project = project;
-                        _cwd.text = project;
-                      }),
                     ),
                 ],
+                value: _project,
+                hint: 'No project chosen',
+                title: 'Projects',
+                onChanged: (project) => setState(() {
+                  _project = project;
+                  _cwd.text = project;
+                }),
               ),
               const SizedBox(height: 10),
             ],

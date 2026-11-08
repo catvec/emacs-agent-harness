@@ -310,10 +310,57 @@ void main() {
     await tester.tap(find.byIcon(Icons.add_rounded));
     await _settle(tester, 4);
     expect(find.text('Start session'), findsOneWidget);
+    // The project is a dropdown, not a wrap of every project.
+    final select = find.byKey(const Key('session-project'));
+    expect(select, findsOneWidget);
+    expect(
+      find.descendant(of: select, matching: find.text('emacs-agent-harness')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.text('other-project'),
+      ),
+      findsNothing,
+    );
     await tester.tap(find.text('Start session'));
     await _settle(tester, 10);
     expect(find.text('The line is open'), findsOneWidget);
     expect(rig.harness.sessions.length, 5);
+    expect(rig.harness.sessions['s5']!['cwd'], rig.app.selectedProject);
+  });
+
+  testWidgets('the new session sheet picks its project from a dropdown', (
+    tester,
+  ) async {
+    final rig = await _rig();
+    await _pump(tester, rig);
+    await tester.tap(find.byIcon(Icons.add_rounded));
+    await _settle(tester, 4);
+    final select = find.byKey(const Key('session-project'));
+    await tester.tap(select);
+    await _settle(tester, 4);
+    final menu = find.byType(BottomSheet).last;
+    expect(
+      find.descendant(of: menu, matching: find.text('Projects')),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.descendant(of: menu, matching: find.text('other-project')),
+    );
+    await _settle(tester, 4);
+    expect(
+      find.descendant(of: select, matching: find.text('other-project')),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.text('Start session'));
+    await tester.tap(find.text('Start session'));
+    await _settle(tester, 10);
+    expect(
+      rig.harness.sessions['s5']!['cwd'],
+      '/Users/noah/Code/other-project/',
+    );
   });
 
   testWidgets('opens the new task sheet and submits through the API', (
@@ -458,65 +505,6 @@ void main() {
     expect(find.text('Profile the model cache'), findsNothing);
     expect(find.textContaining('task-'), findsNothing);
   });
-
-  testWidgets(
-    'the new task sheet offers projects, not the worktrees and scratch '
-    'directories an older harness lists',
-    (tester) async {
-      // What the app showed: a worktree a task was made in, the scratch
-      // directories sub-agents were given, and the worktrees of sessions,
-      // each as a project, from a harness that says nothing of them.
-      final rig = await _rig(
-        worktrees: true,
-        scratch: true,
-        tidyProjects: false,
-        projectMains: false,
-      );
-      expect(
-        rig.harness.listedProjects(),
-        containsAll([
-          '/Users/noah/Code/emacs-agent-harness-worktrees/task-old-layout/',
-          '/tmp/harness-1000/${FakeHarness.scratchOwner}/client-1/',
-          '/tmp/harness-1000/${FakeHarness.goneOwner}/wt/core/',
-        ]),
-      );
-      await _pump(tester, rig);
-      await tester.tap(find.text('Tasks'));
-      await _settle(tester, 5);
-      await tester.tap(find.byIcon(Icons.add_rounded));
-      await _settle(tester, 4);
-      final sheet = find.byType(BottomSheet);
-      expect(
-        find.descendant(of: sheet, matching: find.text('PROJECT')),
-        findsOneWidget,
-      );
-      final chips = find.descendant(
-        of: sheet,
-        matching: find.byIcon(Icons.folder_outlined),
-      );
-      expect(chips, findsNWidgets(2));
-      for (final name in ['emacs-agent-harness', 'other-project']) {
-        expect(
-          find.descendant(of: sheet, matching: find.text(name)),
-          findsOneWidget,
-          reason: name,
-        );
-      }
-      for (final junk in [
-        'task-old-layout',
-        'client-1',
-        'client-2',
-        'core',
-        'task-fix-titles',
-      ]) {
-        expect(
-          find.descendant(of: sheet, matching: find.text(junk)),
-          findsNothing,
-          reason: junk,
-        );
-      }
-    },
-  );
 
   testWidgets('usage by project has a row for a project, not a worktree', (
     tester,

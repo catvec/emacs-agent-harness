@@ -611,6 +611,101 @@ class HarnessTextField extends StatelessWidget {
   }
 }
 
+/// A field that names the choice it holds, and opens the choices when it is
+/// tapped: a dropdown in the style of a text field.  The choices are a menu,
+/// which scrolls when there are more than fit.
+class HarnessSelect<T extends Object> extends StatelessWidget {
+  const HarnessSelect({
+    super.key,
+    required this.options,
+    required this.value,
+    required this.onChanged,
+    this.hint,
+    this.title,
+    this.icon = Icons.folder_outlined,
+  });
+
+  final List<HarnessMenuItem<T>> options;
+  final T? value;
+  final ValueChanged<T> onChanged;
+
+  /// What the field says while nothing is chosen.
+  final String? hint;
+
+  /// What the menu is called, above its choices.
+  final String? title;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    String? label;
+    for (final option in options) {
+      if (option.value == value) label = option.label;
+    }
+    final theme = Theme.of(context);
+    final muted = theme.colorScheme.onSurfaceVariant;
+    final text = label == null
+        ? HarnessText.body(context).copyWith(color: muted)
+        : HarnessText.body(context);
+    final row = Row(
+      children: [
+        Icon(icon, size: 18, color: muted),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            label ?? hint ?? '',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: text,
+          ),
+        ),
+        Icon(Icons.expand_more_rounded, size: 20, color: muted),
+      ],
+    );
+    final field = HarnessStyle.isCupertino(context)
+        ? Container(
+            constraints: const BoxConstraints(minHeight: 46),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+            decoration: BoxDecoration(
+              color: CupertinoColors.secondarySystemBackground.resolveFrom(
+                context,
+              ),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: CupertinoColors.separator.resolveFrom(context),
+              ),
+            ),
+            child: row,
+          )
+        : InputDecorator(
+            decoration: const InputDecoration(
+              contentPadding: EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 12,
+              ),
+            ),
+            child: row,
+          );
+    return Semantics(
+      button: true,
+      label: label ?? hint,
+      child: HarnessTap(
+        borderRadius: BorderRadius.circular(14),
+        onTap: () async {
+          final chosen = await showHarnessMenu<T>(
+            context: context,
+            title: title,
+            items: options,
+          );
+          if (chosen == null || !context.mounted) return;
+          onChanged(chosen);
+        },
+        child: field,
+      ),
+    );
+  }
+}
+
 class HarnessSwitch extends StatelessWidget {
   const HarnessSwitch({
     super.key,
@@ -1391,7 +1486,16 @@ Future<T?> showHarnessMenu<T>({
                     Icon(item.icon, size: 18),
                     const SizedBox(width: 8),
                   ],
-                  Text(item.label),
+                  // A project's name can be longer than the sheet is wide,
+                  // and the action sheet does not scroll: it is cut, not
+                  // spilled over the sheet's edge.
+                  Flexible(
+                    child: Text(
+                      item.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
                 ],
               ),
             ),

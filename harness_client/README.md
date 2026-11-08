@@ -230,13 +230,14 @@ time it opens. It asks again only when the harness does.
   temporary directory of its session (`harness-UID/ID/...`). The app folds
   each worktree into the checkout it was made from, and a scratch directory
   into the project of the session whose directory it is, so the project
-  pickers and filters (the new task sheet's among them), the session and task
-  rows, and the Usage "Projects" list have one entry per project, and a
-  project's usage adds up the spend of its worktrees. The harness says which
-  checkout a directory belongs to (`project/mains`, which reads the
-  repository's own `.git` files, wherever the worktree was made, and answers
-  for none, `""`, for a scratch directory whose session is gone); the app asks
-  about every directory it knows, the ones `insights/projects` lists too, once.
+  pickers and filters (the new task and new session sheets' dropdowns among
+  them), the session and task rows, and the Usage "Projects" list have one
+  entry per project, and a project's usage adds up the spend of its
+  worktrees. The harness says which checkout a directory belongs to
+  (`project/mains`, which reads the repository's own `.git` files, wherever
+  the worktree was made, and answers for none, `""`, for a scratch directory
+  whose session is gone); the app asks about every directory it knows, the
+  ones `insights/projects` lists too, once.
   Where the harness has no answer, because it is older or the directory is
   gone, the path says what it can: the `PROJECT/.worktrees/BRANCH` layout, the
   `PROJECT-worktrees/BRANCH` one the harness made worktrees in first, and a
@@ -246,15 +247,16 @@ time it opens. It asks again only when the harness does.
   all the projects the harness works in, each card saying whose it is, so
   that what is running in a project nobody opened the app on is not out of
   sight. The project pill narrows it to one (and back); only then does the
-  board show that project's queue, which is the project's alone, and a task
-  made for another project than the narrowed board's widens it to every
-  project, where the task is. A choice of
-  "All projects" in a project menu stays: the events of the harness, which
-  refresh the app every few seconds, do not turn it back. Every project
-  menu, like every other menu, scrolls, so that no project in a long list is
-  out of reach. The app does not read all the sessions again when the harness
-  makes or ends a record of a model call of its own (an `internal` session),
-  which it does every few seconds.
+  board show that project's queue, which is the project's alone. A task made
+  while the board is narrowed is that project's: its sheet says which
+  project, and offers no other. Opened on every project, the sheet names the
+  project in a dropdown, one of them at a time, rather than as a pill for
+  each on the sheet. A choice of "All projects" in a project menu stays: the
+  events of the harness, which refresh the app every few seconds, do not turn
+  it back. Every project menu, like every other menu, scrolls, so that no
+  project in a long list is out of reach. The app does not read all the
+  sessions again when the harness makes or ends a record of a model call of
+  its own (an `internal` session), which it does every few seconds.
 - **Offers everything the board in Emacs does, in the conversation.** The bar
   of a task's conversation offers what the harness will take for the task
   where it stands, the same sets as the cards of the board in Emacs
@@ -1436,8 +1438,13 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   not heard of (`test/task_session_test.dart`); pictures of the board and of
   the conversation, drawn with the fonts of a phone and written where
   `HARNESS_SHOTS` says (`test/task_bar_screenshots_test.dart`)
-- the new task sheet's project row against a harness that lists worktrees and
-  scratch directories as projects
+- the sheets that make work and how they pick a project
+  (`test/project_picker_test.dart`): a task sheet on a board narrowed to a
+  project says which one, offers no other and sends the task there, whatever
+  a draft begun elsewhere said; on every project the project is a dropdown,
+  and a new session picks its project the same way; and the dropdown's menu
+  holds projects, not the worktrees and scratch directories an older harness
+  lists
 - transcript replay, streaming, thought blocks and plan
 - the order of a transcript (`test/transcript_order_test.dart`): a system note
   such as *non-interactive on* stands between the messages around it while the

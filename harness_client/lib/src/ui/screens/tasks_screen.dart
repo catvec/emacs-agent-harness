@@ -1039,6 +1039,10 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
   late final TextEditingController _cwd;
   String? _project;
 
+  /// The project the board is narrowed to, if it is: then the task goes to
+  /// it, and the sheet offers no other.
+  late final String? _fixedProject;
+
   /// The four choices below the description.  The sheet starts them as they
   /// were left, which the settings keep (see [_setChoice]).
   late String _priority;
@@ -1067,8 +1071,13 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
     // It starts in the project the board is narrowed to, else the one of the
     // latest work.
     final start = widget.app.tasks?.project ?? widget.app.selectedProject;
-    _cwd = TextEditingController(text: resumed ? draft.cwd : start ?? '');
-    _project = resumed ? draft.project : start;
+    // A narrowed board leaves nothing to choose: every task of the sheet is
+    // the board's project's, whatever a draft begun elsewhere said.
+    _fixedProject = widget.app.tasks?.project;
+    _cwd = TextEditingController(
+      text: _fixedProject ?? (resumed ? draft.cwd : start ?? ''),
+    );
+    _project = _fixedProject ?? (resumed ? draft.project : start);
     if (resumed) _attachments.addAll(draft.attachments);
     // How the last task was set, not the defaults: whoever files high
     // priority tasks for the main tree does not pick them again each time.
@@ -1248,36 +1257,69 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
             // written here is kept, and goes when the connection is back.
             ConnectionBanner(app: app, padding: const EdgeInsets.only(top: 12)),
             const SizedBox(height: 16),
-            if (app.projects.isNotEmpty) ...[
+            if (_fixedProject != null) ...[
+              // The board is narrowed to a project: the task is of it, so
+              // the sheet says which one and offers nothing else.
               Text('PROJECT', style: HarnessText.label(context)),
               const SizedBox(height: 7),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
-                  for (final project in app.projects)
-                    HarnessPill(
-                      label: projectName(project),
-                      icon: Icons.folder_outlined,
-                      selected: _project == project,
-                      onTap: () => _choose(() {
-                        _project = project;
-                        _cwd.text = project;
-                      }),
+              Container(
+                key: const Key('task-project-fixed'),
+                constraints: const BoxConstraints(minHeight: 40),
+                alignment: AlignmentDirectional.centerStart,
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.folder_outlined,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
-                ],
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        projectName(_fixedProject),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: HarnessText.body(context),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 14),
+            ] else ...[
+              if (app.projects.isNotEmpty) ...[
+                Text('PROJECT', style: HarnessText.label(context)),
+                const SizedBox(height: 7),
+                HarnessSelect<String>(
+                  key: const Key('task-project'),
+                  options: [
+                    for (final project in app.projects)
+                      HarnessMenuItem(
+                        value: project,
+                        label: projectName(project),
+                        icon: Icons.folder_outlined,
+                      ),
+                  ],
+                  value: _project,
+                  hint: 'No project chosen',
+                  title: 'Projects',
+                  onChanged: (project) => _choose(() {
+                    _project = project;
+                    _cwd.text = project;
+                  }),
+                ),
+                const SizedBox(height: 8),
+              ],
+              HarnessTextField(
+                controller: _cwd,
+                hint: '/absolute/path/to/project',
+                prefix: const Icon(Icons.folder_open_rounded, size: 18),
+                onChanged: (_) {
+                  if (_project != null) _choose(() => _project = null);
+                },
+              ),
+              const SizedBox(height: 14),
             ],
-            HarnessTextField(
-              controller: _cwd,
-              hint: '/absolute/path/to/project',
-              prefix: const Icon(Icons.folder_open_rounded, size: 18),
-              onChanged: (_) {
-                if (_project != null) _choose(() => _project = null);
-              },
-            ),
-            const SizedBox(height: 14),
             Text('WHAT SHOULD IT DO?', style: HarnessText.label(context)),
             const SizedBox(height: 7),
             HarnessTextField(
