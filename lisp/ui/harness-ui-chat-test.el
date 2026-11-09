@@ -11939,6 +11939,148 @@ that line scrolled away."
             (should-not (string-search (harness-chat--time-label t1)
                                        (substring-no-properties (harness-chat--header))))))))))
 
+;;;### Testing the time line's lifecycle
+
+(defun harness-ui-chat-test--all-nodes ()
+  "Return the nodes this buffer draws, oldest first."
+  (mapcar (lambda (id) (harness-chat-block-node (gethash id harness-chat--blocks)))
+          (reverse harness-chat--order)))
+
+(ert-deftest harness-ui-chat-timestamps-the-time-line-survives-a-rebuilt-transcript ()
+  "The pinned time line is drawn again after the transcript is rebuilt.
+A rebuild deletes every overlay of the buffer, the line's own among them
+(see `harness-chat--reset-buffer'), so the cache that holds it must not
+keep a deleted one: it has no start, and the redisplay hook that draws
+the line would signal (wrong-type-argument number-or-marker-p nil) on
+every redisplay while an agent streams, and stop the rest of the hook."
+  (harness-ui-chat-test-with
+    (let* ((now (float-time))
+           (t1 (- now 1800)) (t2 (- now 1700))
+           (sid (harness-ui-chat-test-session)))
+      (harness-ui-chat-test--append sid 'user "one" t1)
+      (harness-ui-chat-test--append sid 'assistant "two" t2)
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (set-window-buffer (selected-window) buf)
+          (cl-labels ((pin ()
+                           "Pin the time of the first message, its body at the top."
+                           (let ((first (gethash (car (last harness-chat--order))
+                                                 harness-chat--blocks)))
+                             (goto-char (marker-position (harness-chat-block-start first)))
+                             (set-window-start (selected-window) (1+ (line-end-position)) t)
+                             (harness-chat--refresh-time-bar (selected-window))))
+                      (cached ()
+                              "Return what the cache holds for the selected window."
+                              (alist-get (selected-window) harness-chat--time-bars)))
+            ;; The body of the first message at the top: its time is pinned.
+            (pin)
+            (should (harness-ui-chat-test-time-bar))
+            (let ((first (cached))
+                  (nodes (harness-ui-chat-test--all-nodes)))
+              (should (overlay-buffer first))
+              ;; The transcript is rebuilt whole, as a reload or a redraw does.
+              (harness-chat--render-nodes nodes)
+              (should-not (overlay-buffer first))
+              ;; Every overlay the cache holds is one of this buffer: no
+              ;; deleted one waits there for the next redisplay.
+              (should (cl-every (lambda (entry) (overlay-buffer (cdr entry)))
+                                harness-chat--time-bars))
+              (pin)
+              (let ((second (cached)))
+                (should (overlay-buffer second))
+                (should (eq (overlay-buffer second) buf))
+                (should (string-search (harness-chat--time-clock t1)
+                                       (harness-ui-chat-test-time-bar)))
+                (should (= (overlay-start second)
+                           (harness-chat--first-whole-line (selected-window))))))))))))
+
+
+(ert-deftest harness-ui-chat-timestamps-a-dead-cached-time-line-is-replaced ()
+  "A cached time line whose overlay is gone is made anew, not reused.
+The cache returns the entry of a window that shows the buffer, and
+one whose overlay was deleted has no start: comparing it to the
+line of the window would signal
+(wrong-type-argument number-or-marker-p nil)."
+  (harness-ui-chat-test-with
+    (let* ((now (float-time))
+           (t1 (- now 1800))
+           (sid (harness-ui-chat-test-session)))
+      (harness-ui-chat-test--append sid 'user "one" t1)
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (set-window-buffer (selected-window) buf)
+          (let ((pin (lambda ()
+                       (let ((first (gethash (car (last harness-chat--order))
+                                             harness-chat--blocks)))
+                         (goto-char (marker-position (harness-chat-block-start first)))
+                         (set-window-start (selected-window) (1+ (line-end-position)) t)
+                         (harness-chat--refresh-time-bar (selected-window))))))
+            (funcall pin)
+            (let ((dead (alist-get (selected-window) harness-chat--time-bars)))
+              (should (overlay-buffer dead))
+              ;; Deleted behind the cache's back.
+              (delete-overlay dead)
+              (should-not (overlay-buffer dead))
+              (funcall pin)
+              (let ((fresh (alist-get (selected-window) harness-chat--time-bars)))
+                (should (overlay-buffer fresh))
+                (should (eq (overlay-buffer fresh) buf))
+                (should-not (eq fresh dead))
+                (should (string-search (harness-chat--time-clock t1)
+                                       (harness-ui-chat-test-time-bar)))
+                (should (= (overlay-start fresh)
+                           (harness-chat--first-whole-line (selected-window))))))))))))
+
+
+(ert-deftest harness-ui-chat-timestamps-two-windows-keep-a-live-line-each ()
+  "A chat in two windows has a line of its own, and a live one still.
+A window that was deleted leaves its entry behind, and the line of
+the window that replaced it is made anew there rather than reused
+with no position to compare at."
+  (harness-ui-chat-test-with
+    (save-window-excursion
+      (delete-other-windows)
+      (let* ((now (float-time))
+             (t1 (- now 1800))
+             (t2 (- now 1700))
+             (sid (harness-ui-chat-test-session)))
+        (harness-ui-chat-test--append sid 'user "one" t1)
+        (harness-ui-chat-test--append sid 'assistant "two" t2)
+        (let* ((buf (harness-ui-chat-test-open sid))
+               (one (selected-window))
+               (two (split-window-below)))
+          (unwind-protect
+              (progn
+                (set-window-buffer one buf)
+                (set-window-buffer two buf)
+                (cl-flet ((pin (window)
+                               (with-current-buffer buf
+                                 (let ((first (gethash (car (last harness-chat--order))
+                                                       harness-chat--blocks)))
+                                   (goto-char (marker-position (harness-chat-block-start first)))
+                                   (set-window-start window (1+ (line-end-position)) t)
+                                   (harness-chat--refresh-time-bar window)))))
+                  (pin one)
+                  (pin two)
+                  (with-current-buffer buf
+                    ;; Each window has a line of its own, in this buffer.
+                    (let ((a (alist-get one harness-chat--time-bars))
+                          (b (alist-get two harness-chat--time-bars)))
+                      (should (overlay-buffer a))
+                      (should (overlay-buffer b))
+                      (should-not (eq a b)))
+                    ;; A window goes: its line goes with it, and no
+                    ;; deleted one waits in the cache.
+                    (delete-window two)
+                    (pin one)
+                    (should (cl-every (lambda (entry) (overlay-buffer (cdr entry)))
+                                      harness-chat--time-bars))
+                    (should (= 1 (length harness-chat--time-bars)))
+                    ;; The line that stays is the live window's own.
+                    (should (string-search (harness-chat--time-clock t1)
+                                           (harness-ui-chat-test-time-bar one))))))
+            (when (window-live-p two) (delete-window two))))))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
 

@@ -5393,9 +5393,14 @@ own.  The BTW module says what a side conversation is for with it.")
     (harness-chat--replace-region (point-min) (1- (marker-position harness-chat--transcript-start)) text)))
 
 (defun harness-chat--reset-buffer ()
-  "Empty the buffer and every rendering structure."
+  "Empty the buffer and every rendering structure.
+The window-specific overlays go with the text they drew:
+a cache that kept one would hand a deleted overlay back,
+and the redisplay hook drawing it signals a nil position
+(`harness-chat--time-bar')."
   (harness-chat--cancel-all-renders)
   (mapc #'delete-overlay (overlays-in (point-min) (point-max)))
+  (setq harness-chat--time-bars nil)
   (let ((inhibit-read-only t) (buffer-undo-list t))
     (erase-buffer)
     (insert (propertize "\n" 'read-only t 'rear-nonsticky t)))
@@ -7104,16 +7109,31 @@ newline that ends one."
         (forward-line 1)
         (unless (eobp) (point))))))
 
+(defun harness-chat--time-bar-live-p (overlay window)
+  "Non-nil when OVERLAY still draws WINDOW's line in this buffer.
+One a rebuild deleted behind the cache's back, or one made
+elsewhere, has no start or no buffer of this kind: reused, its
+line would signal \(wrong-type-argument number-or-marker-p nil)
+from the redisplay hook that draws it."
+  (and (overlayp overlay)
+       (eq (overlay-buffer overlay) (current-buffer))
+       (eq (overlay-get overlay 'window) window)))
+
 (defun harness-chat--time-bar (window)
   "Return WINDOW's time-line overlay, making it if need be.
 The overlay is window-specific: a chat shown in two windows has a line
-of its own in each."
-  (or (alist-get window harness-chat--time-bars)
+of its own in each.  A cached one this buffer no longer holds is made
+anew (`harness-chat--time-bar-live-p')."
+  (let ((cached (alist-get window harness-chat--time-bars)))
+    (if (harness-chat--time-bar-live-p cached window)
+        cached
       (let ((ov (make-overlay (point-min) (point-min) nil t t)))
         (overlay-put ov 'window window)
         (overlay-put ov 'harness-chat-time-bar t)
-        (push (cons window ov) harness-chat--time-bars)
-        ov)))
+        (setq harness-chat--time-bars
+              (cons (cons window ov)
+                    (assq-delete-all window harness-chat--time-bars)))
+        ov))))
 
 (defun harness-chat--refresh-time-bar (&optional window)
   "Draw the pinned time line under WINDOW's header line.
@@ -7127,16 +7147,20 @@ or the line it stands on changed."
     (when (and (window-live-p w)
                (eq (window-buffer w) (current-buffer)))
       ;; Drop the overlays of windows that are gone, or show another
-      ;; buffer: kept, one would draw its line again in a window that
-      ;; shows this buffer later, at a position that is not its top.
+      ;; buffer, and those a rebuild deleted behind the cache's back:
+      ;; kept, one would draw its line again in a window that shows this
+      ;; buffer later, at a position that is not its top, and one no
+      ;; longer in the buffer has no position to compare at all.
       (dolist (entry harness-chat--time-bars)
         (unless (and (window-live-p (car entry))
-                     (eq (window-buffer (car entry)) (current-buffer)))
-          (delete-overlay (cdr entry))))
+                     (eq (window-buffer (car entry)) (current-buffer))
+                     (harness-chat--time-bar-live-p (cdr entry) (car entry)))
+          (when (overlayp (cdr entry)) (delete-overlay (cdr entry)))))
       (setq harness-chat--time-bars
             (cl-remove-if-not (lambda (entry)
                                 (and (window-live-p (car entry))
-                                     (eq (window-buffer (car entry)) (current-buffer))))
+                                     (eq (window-buffer (car entry)) (current-buffer))
+                                     (harness-chat--time-bar-live-p (cdr entry) (car entry))))
                               harness-chat--time-bars))
       (let ((ov (harness-chat--time-bar w))
             (time (harness-chat--top-time w))
