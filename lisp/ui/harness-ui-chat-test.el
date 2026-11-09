@@ -3108,6 +3108,79 @@ The call and its result appear as any tool call's would."
         (harness-chat--append-local-block "hint" "again")
         (should harness-chat--unseen)))))
 
+(ert-deftest harness-ui-chat-notice-check-skips-unchanged-windows ()
+  "Reading and typing do not lay the windows out again for the notice.
+The post-command hook checks the windows only once what they show moved,
+or the text outside the box changed; a key in the box is neither."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window)))
+      (dotimes (i 30) (harness-call 'session/hint sid (format "line %d" i)))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 30 (length harness-chat--order))))
+                         5 "hints rendered")
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (set-window-start w (point-min))
+        (set-window-point w (point-min))
+        (harness-chat--post-command)
+        (should harness-chat--notice)
+        (should harness-chat--notice-check)
+        (let ((checks 0))
+          (cl-letf (((symbol-function 'harness-chat--at-bottom-p)
+                     (lambda (&rest _) (cl-incf checks) nil)))
+            ;; The window did not move, and nothing arrived.
+            (harness-chat--post-command)
+            (harness-chat--post-command)
+            (should (= 0 checks))
+            ;; A key in the box moves point, not the window or its text.
+            (goto-char harness-compose-end)
+            (insert "draft")
+            (harness-chat--post-command)
+            (should (= 0 checks))
+            ;; A message arriving outside the box is a reason to look.
+            (let ((inhibit-read-only t))
+              (save-excursion
+                (goto-char harness-chat--transcript-end)
+                (insert (propertize "Late line\n" 'read-only t))))
+            (harness-chat--post-command)
+            (should (= 1 checks))))))))
+
+(ert-deftest harness-ui-chat-following-windows-are-measured-once-until-they-move ()
+  "A burst of streamed messages lays a following window out once.
+The window start, scroll and size decide whether it still follows, so
+text arriving at its end does not measure it again; a scroll does."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window)))
+      (dotimes (i 30) (harness-call 'session/hint sid (format "line %d" i)))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 30 (length harness-chat--order))))
+                         5 "hints rendered")
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (goto-char harness-compose-end)
+        (set-window-point w harness-compose-end)
+        (harness-chat-scroll-to-bottom)
+        (let ((checks 0)
+              (bottom (symbol-function 'harness-chat--at-bottom-p)))
+          (cl-letf (((symbol-function 'harness-chat--at-bottom-p)
+                     (lambda (&rest args)
+                       (cl-incf checks)
+                       (apply bottom args))))
+            ;; Scrolling to the bottom noted the window as following.
+            (should (harness-chat--following-p w))
+            (should (= 0 checks))
+            ;; More text at the end: still following, not measured again.
+            (harness-chat--append-local-block "hint" "later")
+            (should (harness-chat--following-p w))
+            (should (= 0 checks))
+            ;; Scrolling the window changes what it shows.
+            (set-window-start w (point-min))
+            (set-window-point w (point-min))
+            (should-not (harness-chat--following-p w))
+            (should (= 1 checks))))))))
+
 (ert-deftest harness-ui-chat-redraw-preserves-independent-window-positions ()
   "A scrolled reader stays put through tail and transcript redraws."
   (harness-ui-chat-test-with
@@ -11204,6 +11277,33 @@ Only the blocks holding a table are drawn again."
           (should (equal (list (harness-chat-block-id table)) rerendered))
           (should (string-search "A plain answer" (harness-ui-chat-test-block-text plain)))
           (harness-ui-chat-test-check-markers))))))
+
+(ert-deftest harness-ui-chat-table-detection-stays-inside-its-block ()
+  "Looking for a table in one block never walks the blocks after it.
+A transcript without tables would otherwise be walked from every block
+to its end whenever a window changed width, which is quadratic in the
+messages a long thread has."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (harness-chat--append-local-block "assistant" "A plain answer, with no table in it.")
+        (harness-chat--append-local-block
+         "assistant" "| key | value |\n|---|---|\n| x | y |\n")
+        (let* ((plain (gethash (nth 1 harness-chat--order) harness-chat--blocks))
+               (table (gethash (car harness-chat--order) harness-chat--blocks))
+               (search (symbol-function 'text-property-search-forward))
+               (limits nil))
+          (cl-letf (((symbol-function 'text-property-search-forward)
+                     (lambda (&rest args)
+                       (push (point-max) limits)
+                       (apply search args))))
+            (should-not (harness-chat--block-has-table-p plain))
+            (should (harness-chat--block-has-table-p table)))
+          ;; The search saw only each block's own text: its end, not the buffer's.
+          (should (equal (list (marker-position (harness-chat-block-end plain))
+                               (marker-position (harness-chat-block-end table)))
+                         (nreverse limits))))))))
 
 (ert-deftest harness-ui-chat-resize-schedules-a-refit-only-when-the-room-changed ()
   "A window's size change has the tables drawn again only for a new width.

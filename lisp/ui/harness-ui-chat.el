@@ -375,6 +375,12 @@ the panels this buffer draws and for redraw decisions.")
 `harness-chat--update-notice' keeps it, from the post-command hook and
 `window-scroll-functions'; the header line (`harness-chat--header')
 reads it, as it must not measure the window itself.")
+(defvar-local harness-chat--notice-check nil
+  "What the windows and the text outside the box looked like at the last notice check.
+`harness-chat--post-command' measures the windows again only when this
+changed, or when content arrived while scrolled up.  Typing in the box
+moves no window start, so a key it takes is not a reason to lay the
+transcript out again.")
 (defvar-local harness-chat--dead nil "Non-nil once the session was deleted.")
 (defvar-local harness-chat--render-timers nil "Node id -> throttle timer.")
 (defvar-local harness-chat--render-cost 0
@@ -931,7 +937,7 @@ while the reader is up there; pinning would take their point away from
 what they read.  A point in the box is a reader following the newest
 output."
   (let ((w (or window (car (harness-chat--windows)))))
-    (and (harness-chat--at-bottom-p w)
+    (and (harness-chat--following-at-bottom-p w)
          (or (null w)
              (not (eq (window-buffer w) (current-buffer)))
              (null harness-compose-start)
@@ -941,6 +947,47 @@ output."
 (defvar harness-chat--to-pin nil
   "Windows to pin to the end of their chat once a slice of messages is handled.
 `harness-chat--pin-soon' collects them while `harness-acp-receiving'.")
+
+(defvar-local harness-chat--following-cache nil
+  "Window -> (STATE . FOLLOWING), the last answer of `harness-chat--following-p'.
+STATE is the window's start, scroll and size, taken when the answer was
+measured.  A message that streams in does not move them, so the windows
+are laid out once for a burst of chunks, not once per chunk; a scroll or
+a resize changes STATE and the next check measures the window again.")
+
+(defun harness-chat--following-state (window)
+  "Return what decides whether WINDOW still shows the newest content.
+Its buffer, start, vscroll and size: scrolling or resizing changes one
+of them, while text streamed in at the end does not."
+  (list (window-buffer window) (window-start window) (window-vscroll window t)
+        (window-body-width window t) (window-body-height window t)))
+
+(defun harness-chat--following-at-bottom-p (window)
+  "Return `harness-chat--at-bottom-p' for WINDOW, measured again only when it moved.
+A following window stays following while its text streams in; one that
+was scrolled up stays so until its start, scroll or size changes."
+  (if (or (null window) (not (window-live-p window)))
+      (harness-chat--at-bottom-p window)
+    (let* ((state (harness-chat--following-state window))
+           (cached (and harness-chat--following-cache
+                        (gethash window harness-chat--following-cache)))
+           (following (if (equal state (car-safe cached))
+                          (cdr cached)
+                        (harness-chat--at-bottom-p window))))
+      (unless harness-chat--following-cache
+        (setq harness-chat--following-cache (make-hash-table :test 'eq)))
+      (puthash window (cons state following) harness-chat--following-cache)
+      following)))
+
+(defun harness-chat--remember-following (window)
+  "Note that WINDOW now shows the newest content.
+`harness-chat--pin' calls this once it has scrolled WINDOW to the end,
+so the chunks after it need not lay the window out to learn the same."
+  (when (and window (window-live-p window) (eq (window-buffer window) (current-buffer)))
+    (unless harness-chat--following-cache
+      (setq harness-chat--following-cache (make-hash-table :test 'eq)))
+    (puthash window (cons (harness-chat--following-state window) t)
+             harness-chat--following-cache)))
 
 (defun harness-chat--bottom-windows ()
   "Return the windows of this buffer that are at the bottom.
@@ -959,7 +1006,8 @@ A transcript shorter than the window stays at the top."
     ;; `harness-compose-pad-window' size it again for the new start.
     (harness-compose-repad window)
     (with-selected-window window
-      (save-excursion (goto-char (point-max)) (recenter -1)))))
+      (save-excursion (goto-char (point-max)) (recenter -1)))
+    (harness-chat--remember-following window)))
 
 (defun harness-chat--pin-soon (window)
   "Pin WINDOW to the end of the buffer, once whatever is under way is done.
@@ -1220,11 +1268,16 @@ region of the screen is a region of (`harness-chat--region-refs')."
     rendered))
 
 (defun harness-chat--block-has-table-p (block)
-  "Non-nil when the rendering of BLOCK holds a Markdown table."
+  "Non-nil when the rendering of BLOCK holds a Markdown table.
+The search is narrowed to BLOCK: a transcript without tables would
+otherwise be walked once more from every block to its end each time a
+window changes width (`harness-chat--refresh-tables')."
   (save-excursion
-    (goto-char (harness-chat-block-start block))
-    (and (text-property-search-forward 'harness-md-block 'table t)
-         (<= (point) (harness-chat-block-end block)))))
+    (save-restriction
+      (narrow-to-region (harness-chat-block-start block)
+                        (harness-chat-block-end block))
+      (goto-char (point-min))
+      (and (text-property-search-forward 'harness-md-block 'table t) t))))
 
 (defun harness-chat--on-window-size (&optional _window)
   "Have the tables and the settings line drawn again for a window's new room.
@@ -5359,6 +5412,7 @@ own.  The BTW module says what a side conversation is for with it.")
         harness-chat--compaction-toggle-id nil
         harness-chat--unfinished nil
         harness-chat--sending nil
+        harness-chat--following-cache (make-hash-table :test 'eq)
         harness-compose-start nil
         harness-compose-end nil
         harness-chat--transcript-start (copy-marker (point-max))
@@ -8350,18 +8404,39 @@ the id of a session written in a message is a link to it.
         ("C-c C-r" "Redraw" harness-chat-redraw)
         ("C-c C-z" "Previous buffer" harness-ui-bury)]))
 
+(defun harness-chat--notice-state ()
+  "Return the windows' positions and the text outside the box, for the notice.
+A scrolling window moves its start, and text that arrives while scrolled
+up changes the tally outside the box: either is a reason to measure the
+windows again.  Point moving in the box is not (`harness-chat--notice-check')."
+  (list (harness-compose--outside-tick)
+        (mapcar (lambda (window)
+                  (list window (window-start window) (window-vscroll window t)
+                        (window-body-height window t)))
+                (harness-chat--windows))))
+
 (defun harness-chat--post-command ()
   "Keep the newer-messages notice current.
+Measuring the windows lays out what they show, so it is done only when
+they moved or the text outside the box changed: typing in the box, or
+reading with point where it is, costs no layout of the transcript.
 Point moved onto an option of a question with diagrams shows its diagram."
-  (when (and harness-chat--unseen (harness-chat--at-bottom-p (selected-window)))
-    (setq harness-chat--unseen nil))
-  (harness-chat--update-notice)
+  (let ((state (and (eq (window-buffer (selected-window)) (current-buffer))
+                    (harness-chat--notice-state))))
+    (unless (and state (not harness-chat--unseen)
+                 (equal state harness-chat--notice-check))
+      (when (and harness-chat--unseen (harness-chat--at-bottom-p (selected-window)))
+        (setq harness-chat--unseen nil))
+      (harness-chat--update-notice)
+      (setq harness-chat--notice-check state)))
   (with-demoted-errors "harness-chat: %S"
     (harness-ui-pending--follow-option)))
 
 (defun harness-chat--on-kill ()
   "Forget the buffer and its timers."
   (harness-chat--cancel-all-renders)
+  (when harness-chat--following-cache
+    (clrhash harness-chat--following-cache))
   (when harness-chat--history-timer (cancel-timer harness-chat--history-timer))
   (when (eq (gethash harness-ui-session-id harness-chat--buffers) (current-buffer))
     (remhash harness-ui-session-id harness-chat--buffers)))

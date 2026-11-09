@@ -3599,6 +3599,70 @@ rather than always taking the invisible-point branch of follow."
       (should (funcall visible (point) window))
       (should (funcall visible (1- (point-max)) window)))))
 
+(ert-deftest harness-ui-compose-follow-does-not-lay-out-the-whole-buffer ()
+  "A window already below the buffer's start measures no text above it.
+The box follows the bottom of a long transcript; laying the whole
+transcript out from its start to learn that it is taller than the window
+makes every key typed in the box wait on the messages above it."
+  (harness-ui-compose-test-with
+    (harness-compose-setup :bottom t)
+    (let* ((window (selected-window))
+           (host (mapconcat #'identity
+                            (make-list (+ 4 (window-body-height window)) "A host line above the box.")
+                            "\n")))
+      ;; The transcript above the box, not the box, is long.
+      (let ((inhibit-read-only t))
+        (save-excursion (goto-char (point-min)) (insert host "\n")))
+      (harness-compose-set "draft")
+      (goto-char harness-compose-end)
+      (set-window-point window (point))
+      (harness-compose-pad-window window)
+      (should (> (window-start window) (point-min)))
+      (let ((froms nil)
+            (measure (symbol-function 'harness-ui-text-height)))
+        (cl-letf (((symbol-function 'harness-ui-text-height)
+                   (lambda (w from to limit)
+                     (push from froms)
+                     (funcall measure w from to limit))))
+          ;; New text above changes the follow's tally.
+          (let ((inhibit-read-only t))
+            (save-excursion
+              (goto-char (point-min))
+              (insert (propertize "One more host line.\n" 'read-only t))))
+          (harness-compose-repad window)
+          (harness-compose-pad-window window))
+        (should-not (member (point-min) froms))))))
+
+(ert-deftest harness-ui-compose-follow-leaves-a-visible-box-alone ()
+  "A box and the line under it that show already are not measured again.
+The follow has nothing to scroll to, so it should not lay out the
+transcript to decide that."
+  (harness-ui-compose-test-with
+    (harness-compose-setup :bottom t)
+    (harness-ui-compose-test--insert-footer)
+    (let* ((window (selected-window))
+           (host (mapconcat #'identity
+                            (make-list (+ 4 (window-body-height window)) "A host line above the box.")
+                            "\n")))
+      (let ((inhibit-read-only t))
+        (save-excursion (goto-char (point-min)) (insert host "\n")))
+      (harness-compose-set "draft")
+      (goto-char harness-compose-end)
+      (set-window-point window (point))
+      (harness-compose-pad-window window)
+      (should (> (window-start window) (point-min)))
+      ;; A change outside the box makes the follow check again.
+      (let ((inhibit-read-only t))
+        (save-excursion
+          (goto-char (point-min))
+          (insert (propertize "A host line.\n" 'read-only t))))
+      (harness-compose-repad window)
+      (cl-letf (((symbol-function 'pos-visible-in-window-p) (lambda (&rest _) t))
+                ((symbol-function 'harness-ui-text-height)
+                 (lambda (&rest _) (error "The follow laid the buffer out"))))
+        (harness-compose-pad-window window))
+      (should (equal "draft" (harness-compose-text))))))
+
 ;;;; Tokens of files and tasks
 
 (defun harness-ui-compose-test--chip (token)

@@ -1350,8 +1350,20 @@ commands, rather than scroll."
                (pt (window-point window))
                (anchor (if harness-compose--pad-at harness-compose-end (point-max))))
           (cond
-           ((<= (funcall height (point-min)) room)
-            (unless (= start (point-min)) (set-window-start window (point-min) t)))
+           ;; A buffer shorter than the window shows from its start.  Only
+           ;; a window that starts there can show the whole buffer: one
+           ;; that starts lower has at least a screen of text above it, so
+           ;; measuring from the buffer's start would only lay that text
+           ;; out again to learn what the window's start already says.
+           ((and (= start (point-min))
+                 (<= (funcall height (point-min)) room))
+            nil)
+           ;; The box and the host's lines under it show already: nothing
+           ;; pushes them out, so a key typed in the box costs no layout
+           ;; of the transcript above it.
+           ((and (pos-visible-in-window-p pt window)
+                 (pos-visible-in-window-p (max (point-min) (1- end)) window))
+            nil)
            ;; Grown past the bottom.  Point's line goes there instead when
            ;; the box from point on is taller than the window.
            ((not (pos-visible-in-window-p pt window))
