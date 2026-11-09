@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/ui/adaptive/platform_style.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
+import 'package:harness_client/src/ui/widgets/buddy_window_host.dart';
 import 'package:harness_client/src/ui/widgets/workspace_buddy.dart';
 import 'package:harness_client/src/voice/voice_buddy.dart';
 import 'package:harness_client/src/voice/voice_models.dart';
@@ -778,6 +779,116 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('workspace-buddy')), findsNothing);
     expect(rig.controller.running, isTrue, reason: 'off is not End');
+    await tester.runAsync(() => rig.controller.end());
+    rig.controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('opting in draws no card until a call starts', (tester) async {
+    final rig = BuddyRig();
+    await rig.controller.enable();
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: HarnessTheme.material(Brightness.light),
+        home: Scaffold(
+          body: Stack(
+            children: [
+              const Positioned.fill(
+                child: ColoredBox(color: Color(0xFF10123A)),
+              ),
+              Positioned.fill(
+                child: WorkspaceBuddyLayer(
+                  away: true,
+                  controller: rig.controller,
+                  onOpenWorkspace: () {},
+                  onOpenSettings: () {},
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(rig.controller.enabled, isTrue);
+    expect(rig.controller.running, isFalse);
+    expect(find.byKey(const Key('workspace-buddy')), findsNothing);
+
+    await rig.controller.start();
+    await tester.pump();
+    expect(rig.controller.running, isTrue);
+    expect(find.byKey(const Key('workspace-buddy')), findsOneWidget);
+
+    await tester.runAsync(() => rig.controller.end());
+    await tester.pump();
+    expect(find.byKey(const Key('workspace-buddy')), findsNothing);
+    rig.controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('a taller card is reported to the window, and scrolls', (
+    tester,
+  ) async {
+    final rig = BuddyRig();
+    await rig.controller.enable();
+    await rig.controller.start();
+    // A native window starts at the height it was opened with; the card here
+    // is taller than that viewport, as a running or failed card may be.
+    tester.view.physicalSize = const Size(320, 140);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final sizes = <Size>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: HarnessTheme.material(Brightness.light),
+        home: BuddyWindowContent(
+          buddy: rig.controller,
+          width: 320,
+          theme: HarnessTheme.material(Brightness.light),
+          textScaler: TextScaler.noScaling,
+          disableAnimations: true,
+          startDrag: () {},
+          onActivated: (_) {},
+          onContentSize: sizes.add,
+          onOpenWorkspace: () {},
+          onOpenSettings: () async {},
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final card = tester.getSize(find.byKey(const Key('workspace-buddy')));
+    expect(card.height, greaterThan(140));
+    expect(sizes, isNotEmpty);
+    expect(sizes.last, card);
+    expect(
+      tester.takeException(),
+      isNull,
+      reason: 'the window scrolls the card; it does not overflow it',
+    );
+
+    // The viewport stays the window's size, and the whole card is reachable.
+    final viewport = tester.getSize(
+      find.byKey(const Key('buddy-window-scroll')),
+    );
+    expect(viewport.height, 140);
+    final before = tester.getTopLeft(find.byKey(const Key('workspace-buddy')));
+    await tester.drag(
+      find.byKey(const Key('buddy-window-scroll')),
+      const Offset(0, -60),
+    );
+    await tester.pump();
+    final after = tester.getTopLeft(find.byKey(const Key('workspace-buddy')));
+    expect(after.dy, lessThan(before.dy));
+
     await tester.runAsync(() => rig.controller.end());
     rig.controller.dispose();
     await tester.pump();

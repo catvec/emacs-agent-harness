@@ -61,6 +61,10 @@ dependencies:
   collection: ^1.19.1
   flutter_svg: ^2.3.0
   nativeapi_flutter: ^0.5.10
+  # The Linux buddy window's own GTK calls and size, and the Plasma window
+  # rules that keep it above other windows on a Wayland session.
+  ffi: ^2.2.0
+  dbus: ^0.8.0
 
 dev_dependencies:
   flutter_test:

@@ -16,6 +16,7 @@ class FakeBuddyWindowService implements BuddyWindowService {
   bool failOnShow;
 
   final List<BuddyWindowRequest> requests = <BuddyWindowRequest>[];
+  final List<Size> contentSizes = <Size>[];
   int showCalls = 0;
   int hideCalls = 0;
   int destroyCalls = 0;
@@ -57,6 +58,9 @@ class FakeBuddyWindowService implements BuddyWindowService {
 
   @override
   void hide() => hideCalls++;
+
+  @override
+  void reportContentSize(Size size) => contentSizes.add(size);
 
   @override
   void destroy() => destroyCalls++;

@@ -107,9 +107,13 @@ repeated under it.
 ### The away card
 
 The compact card is the desktop's away surface, and it is the part the
-workspace opts into (see **Workspace-scoped opt-in**).  It shows only
-while the app's main window is **not active** -- behind another window, or
-reporting `hidden`/`paused` -- and there is no call view on top of it.
+workspace opts into (see **Workspace-scoped opt-in**).  It is a call's
+surface: it shows only while the workspace has a call (starting, running,
+failed or ending), the app's main window is **not active** -- behind
+another window, or reporting `hidden`/`paused` -- and there is no call view
+on top of it.  Opting a workspace in starts no call and draws no card; the
+card appears when a call starts, and a failed call keeps it so its problem
+and `Retry` stay in sight.
 While the main window is the one in use, the card is not shown; the bar
 and the call view are the call's surfaces.  When the window is away the
 bar stays as well, so a call over a pushed page is never without its
@@ -139,13 +143,54 @@ the card stays; it hides when activation goes back to the main window.
 
 A platform that cannot open a window -- the web, or a compositor that
 refuses one -- gets the **persistent in-app card** instead.  That card
-stays on screen while the buddy is on, not only while the window is away,
-because an away-only in-app card cannot be clicked: the click focuses the
-app, and the card would go before the click arrives.  A window that fails
-to open falls back to the persistent card for the rest of the run; a
-window the compositor destroys is made again the next time it is wanted.
-The `HARNESS_BUDDY_WINDOW=off` environment variable forces the fallback
-on a machine whose compositor cannot draw a non-activating window.
+stays on screen while the buddy is on and the workspace has a call, not
+only while the window is away, because an away-only in-app card cannot be clicked: the
+click focuses the app, and the card would go before the click arrives.
+A window that fails to open falls back to the persistent card for the
+rest of the run; a window the compositor destroys is made again the next
+time it is wanted.  The `HARNESS_BUDDY_WINDOW=off` environment variable
+forces the fallback on a machine whose compositor cannot draw a
+non-activating window.
+
+### The Linux window
+
+The decisions that produced this window, and the failures they answer,
+are in [buddy-window-fixes.md](buddy-window-fixes.md).
+
+On Linux the card's window is the `GtkWindow` Flutter's windowing API
+makes, handled through GTK directly
+(`lib/src/desktop/buddy_window_linux.dart`) because the windowing API
+exposes no frame, size or stacking policy of its own.  Three things are
+set there, and each answers one of the reported failures of the first
+native window:
+
+- **Frame.**  The window gets a client-side titlebar with zero height and
+  no controls, so GTK draws the window and the window manager adds no
+  title bar or top bar of its own.  The card's surface reaches every
+  edge; the small GTK shadow around a client-side frame stays, which is
+  what a floating card wants.  On X11 the same client-side decoration
+  keeps the window manager's frame off.
+- **Size.**  The window is opened at the card's fixed width and a
+  provisional height of 120 px.  The card is laid out without a height
+  limit, measured after layout and reported back through
+  `BuddyWindowService.reportContentSize`; the window is then made that
+  height, bounded to 120–720 px.  A running card, and the taller card of
+  a failed call with its problem and `Retry`, are shown whole instead of
+  being clipped by a height chosen before the first frame.  Content
+  taller than the maximum scrolls inside the card's own scroll view
+  rather than overflowing the window.
+- **Stacking and placement.**  On X11, `gtk_window_set_keep_above` is
+  honoured, as are the skip-taskbar and non-activating hints, and the
+  window is placed at the bottom-right of the primary monitor's work
+  area.  A Wayland compositor has no client request for keep-above, and
+  GTK's property is ignored there; the compositor also places the window
+  itself.  Plasma gets the missing properties from a small KWin script
+  loaded over D-Bus (`lib/src/desktop/plasma_window_rules.dart`), which
+  matches only this app's pid and the window caption `Buddy` and sets
+  `keepAbove`, `skipTaskbar` and `noBorder`; the script is unloaded when
+  the card is disposed.  Other Wayland compositors keep the card as a
+  normal non-activating window: above the other windows at the moment it
+  is shown, but not guaranteed to stay there (see **Limits**).
 
 ### Minimized and unfocused
 
@@ -162,9 +207,9 @@ minimized is the platform's business; the fallback card, being in the
 main window, cannot be drawn there at all.
 
 The window is still a surface of this app and obeys the same rule: it is
-shown only while the buddy is on and the main window is not in use.  It
-does not take `alwaysOnTop` from the rest of the app, a tray icon, a
-global shortcut or a startup item.
+shown only while the buddy is on, the workspace has a call, and the main
+window is not in use.  It does not take `alwaysOnTop` from the rest of the app, a tray
+icon, a global shortcut or a startup item.
 
 ## Research: desktop surface patterns
 
@@ -179,7 +224,7 @@ the bar are still not windows, and no surface starts a second call.
 | Pattern | What it gives | Cost / limit | Sources |
 | --- | --- | --- | --- |
 | **In-app surfaces** (fallback; the call's full view and bar) | A full view, a bar and, where no native window is possible, a persistent card in the app's own window; no new permission or plugin; keyboard focus, semantics and theming work as everywhere else; drag and clamp inside the window | Only visible while the app is; cannot float above other applications or paint while minimized; an away-only card cannot be clicked without hiding itself | Flutter's desktop support and `Stack`/`Overlay` APIs |
-| **Native always-on-top window, same engine** (this design for the away card) | Stays above other apps where the platform honours it; skips the taskbar; has no title bar; does not activate when clicked or dragged; the same engine and `WorkspaceBuddyController` keep the card and the call in one state | A native window level, focus and close lifecycle per OS; always-on-top is a request the compositor may ignore (notably on Wayland); the window is non-focusable, so its card is pointer-only and keyboard access stays in the bar and call view | Flutter's windowing API (`RegularWindowController`, experimental), `nativeapi` window properties |
+| **Native always-on-top window, same engine** (this design for the away card) | Stays above other apps where the platform honours it; skips the taskbar; has no title bar; does not activate when clicked or dragged; the same engine and `WorkspaceBuddyController` keep the card and the call in one state | A native window level, focus and close lifecycle per OS; always-on-top is a request the compositor may ignore (notably on Wayland; Plasma gets it through KWin's own scripting); the window is non-focusable, so its card is pointer-only and keyboard access stays in the bar and call view | Flutter's windowing API (`RegularWindowController`, experimental), `nativeapi` window properties, GTK 3 (`gtk_window_set_titlebar`, `gtk_window_resize`), KWin scripting |
 | **Native window through `window_manager` alone** | Window levels, `alwaysOnTop`, `skipTaskbar` for the main window | It manages one window; a second window needs Flutter's windowing API or a multi-window package anyway | `window_manager` |
 | **System tray / menu bar extra** (`tray_manager`) | A tiny persistent icon with a menu | Not consistently available (`tray_manager` documents that GNOME shows no icon without the AppIndicator extension); a menu is poor for a live microphone indicator and an urgent End; Microsoft's own notification-area guidance says the area is not for quick command access or critical information | `tray_manager`; Microsoft "Notifications and the Notification Area" |
 | **Separate small window** (`desktop_multi_window`) | A real second window, can be placed by the window manager | Each window is a Flutter engine with its own plugin registration and method channels; the same app state and voice controller do not cross engines without a bridge; more OS integration and permissions than the feature needs | `desktop_multi_window` |
@@ -280,7 +325,8 @@ no call ──Call/Start──▶ starting ──backend started──▶ listen
   itself away.  The bar is there in both cases.  The call itself is
   untouched by the change; no surface starts or stops it on a focus
   change.  A platform with no native window shows the persistent in-app
-  card while the buddy is on, because there is no other way to click it.
+  card while the buddy is on and the workspace has a call, because there is
+  no other way to click it.
 - **Disposal.**  Closing the app, losing the workspace or the shell
   disposing the controller removes the listeners and closes the voice
   controller, which releases the microphone.  Stopped controllers are kept
@@ -521,28 +567,39 @@ Deterministic, with scripted audio only:
   region labels; toggled/enabled semantics and the focus action; focus
   order and Enter; loading/empty/error/permission-denied states; reduced
   motion; 920, 1024, 1280 and 1440 widths at 100%, 150% and 200% text;
-  no card while the window is active; no card on a phone; narrowing the
-  window leaves the call in the bar, not ended; off is not End.
-- **Own window:** the window is asked for only while the buddy is on, the
-  main window is away, no call view is open and the width is a desktop
-  one; it is hidden, not destroyed, when the app comes forward; the same
-  `WorkspaceBuddyController` is behind the card and the call; the window
-  content drags the native window instead of a card; a window that cannot
-  open leaves the persistent in-app card, and that card stays on screen
-  while the app is in use and can be dragged; the workspace action brings
-  the app forward on its workspace page.  The widget-test engine cannot
-  open a native window: a fake service tests the seam, and the Linux
-  build compiles the real one.
+  no card on opting in alone, and none on a phone; no card while the
+  window is active; narrowing the window leaves the call in the bar, not
+  ended; off is not End.
+- **Own window:** the window is asked for only while the workspace has a
+  call, the buddy is on, the main window is away, no call view is open and
+  the width is a desktop one; opting in with no call opens no window and
+  draws no card; it is hidden, not destroyed, when the app comes forward; the
+  same `WorkspaceBuddyController` is behind the card and the call; the
+  card's measured height is reported back and a taller card grows the
+  window, while content beyond the maximum scrolls; the window content
+  drags the native window instead of a card; a window that cannot open
+  leaves the persistent in-app card, and that card stays on screen while
+  the app is in use and can be dragged; the workspace action brings the
+  app forward on its workspace page.  The widget-test engine cannot open
+  a native window: a fake service tests the seam, the Linux build compiles
+  the real one, and `tool/buddy_window_probe.dart` draws the real card in
+  the real window for a compositor to be observed.
+- **Window rules:** the KWin script names this app's pid and the `Buddy`
+  caption and sets keep-above, skip-taskbar and no-border; a caption is
+  escaped as a JavaScript string.
 - **Integration:** a desktop opts in and sees the card only when the
-  window is away; a phone keeps `Call` and gets the bar when the call
-  view is minimized; the view is the same call (one backend); the bar
-  stays and the card appears on focus loss and goes on focus; narrowing
-  leaves the bar; `End` in the bar ends the call.
+  workspace has a call and the window is away; a phone keeps `Call` and gets the bar when
+  the call view is minimized; the view is the same call (one backend);
+  the bar stays and the card appears on focus loss and goes on focus;
+  narrowing leaves the bar; `End` in the bar ends the call.
 - **Screenshots:** the real widgets with a scripted backend: the desktop
   in-call bar, the phone in-call bar, the away card, 150% text, reduced
   motion and a failure.  The README labels them as scripted/backend-only.
   No real microphone, speaker, device, provider key or OS window is
-  exercised.
+  exercised by those.  The window itself was captured by the probe from
+  its own layer tree under a nested KWin session, and the window
+  properties were read back from KWin in the same runs: see
+  [the evidence](../evidence/buddy-window/README.md).
 - **Repository:** `flutter analyze`, the whole Flutter test suite,
   `scripts/test.sh`, `scripts/lint.sh`, and
   `harness_client/tool/check_build.sh` for the committed tree.
@@ -562,14 +619,18 @@ harness method changes.
 | Bar | `WorkspaceCallBarHost`, `WorkspaceCallBar`, `WorkspaceCallBarView`, the visible predicate and `openWorkspaceCallView` | `lib/src/ui/widgets/workspace_call_bar.dart`, `lib/app.dart` |
 | Call view | attached mode, `Minimize`, End through the owner, no dispose of the owner's controller | `lib/src/ui/screens/voice_screen.dart` |
 | Away card | the card, its in-app drag-and-clamp layer, the away/focus rule, no narrow-width End | `lib/src/ui/widgets/workspace_buddy.dart`, `lib/src/ui/screens/home_shell.dart` |
-| Own window | the service seam, the native window (frameless, always-on-top request, no taskbar, non-activating) and the unsupported fallback; window view, placement and drag | `lib/src/desktop/buddy_window.dart`, `lib/src/desktop/buddy_window_native.dart`, `lib/src/desktop/buddy_window_unsupported.dart` |
-| Window host | when the window is wanted, the same controller, the persistent fallback, the workspace tab request and the settings sheet from the window | `lib/src/ui/widgets/buddy_window_host.dart`, `lib/app.dart`, `lib/main.dart` |
+| Own window | the service seam, the native window and the unsupported fallback; window view, placement and drag | `lib/src/desktop/buddy_window.dart`, `lib/src/desktop/buddy_window_native.dart`, `lib/src/desktop/buddy_window_unsupported.dart` |
+| Linux window | the `GtkWindow` behind the window: zero-height client-side frame, non-activating and skip-taskbar hints, keep-above request, content-sized window, X11 placement and drag, bringing the app forward | `lib/src/desktop/buddy_window_linux.dart` |
+| Plasma rules | the KWin script loaded over D-Bus that gives the Linux window keep-above, no taskbar entry and no border on a Plasma Wayland session, and is unloaded with the card | `lib/src/desktop/plasma_window_rules.dart` |
+| Window host | when the window is wanted, the same controller, the card's measured height, the persistent fallback, the workspace tab request and the settings sheet from the window | `lib/src/ui/widgets/buddy_window_host.dart`, `lib/app.dart`, `lib/main.dart` |
 | Workspace | `Call` starts or opens the shared call; `Buddy` opts into the away card | `lib/src/ui/screens/workspace_screen.dart` |
 | Preference | `workspaceBuddies` read, written and restored per workspace id | `lib/src/state/settings_controller.dart` |
 | Copy inventory regression | every rendered word, semantics label and tooltip; no sentences; no transfer or transcoding words | `test/workspace_call_bar_test.dart`, `test/workspace_buddy_widget_test.dart` |
 | Mapping tests | every status, precedence, simultaneous input/output, microphone truth, unknown phase | `test/voice_buddy_test.dart` |
 | Controller tests | opt-in/out, restore, double Start, End during start and every phase, prompt send, lost call, disconnect, workspace change, disposal, denial, Retry, off keeps the call | `test/workspace_buddy_controller_test.dart` |
-| Integration | the bar on a phone, minimize, the same call, focus hand-over, narrowing, End, the away opt-in, the own window, its fallback and the workspace tab | `test/workspace_shell_test.dart`, `test/support/buddy_window_fakes.dart` |
+| Integration | the bar on a phone, minimize, the same call, focus hand-over, narrowing, End, the away opt-in, no card before a call, the own window, its fallback and the workspace tab | `test/workspace_shell_test.dart`, `test/workspace_buddy_widget_test.dart`, `test/support/buddy_window_fakes.dart` |
+| Window rules tests | the script's pid and caption match, the three properties, and caption escaping | `test/plasma_window_rules_test.dart` |
+| Window probe | the real card in the real Linux window with a scripted call: frame, size, stacking and placement, `--failed` for the taller card | `tool/buddy_window_probe.dart` |
 | Call view tests | attached minimize and End through the owner | `test/voice_ui_test.dart` |
 | Preference tests | per-workspace write, restore and a choice made while the store is still being read | `test/settings_controller_test.dart` |
 | Pictures | `workspace-call-bar-desktop`, `workspace-call-bar-phone`, `workspace-buddy-away`, `workspace-buddy-scale-150`, `workspace-buddy-problem`, `workspace-buddy-reduced-motion`, `workspace-phone` | `test/workspace_screenshots_test.dart`, `screenshots/` |
@@ -592,11 +653,21 @@ report.
   only surface; there, and on a compositor that refuses the window, the
   card stays over the page rather than vanishing under the pointer.
 - Always-on-top is a request.  X11 window managers and macOS honour it;
-  Wayland compositors generally do not, so the small window may be
+  Plasma on Wayland is given it through KWin's scripting interface, which
+  this app loads itself and unloads with the card; other Wayland
+  compositors have no client request for it, so the small window may be
   covered by the window the person raises later.  It is still a separate,
   non-activating window: clicking or dragging it does not hide it.  The
   `HARNESS_BUDDY_WINDOW=off` switch keeps the in-app fallback for a
   machine whose compositor cannot draw the window at all.
+- The Linux window's frame comes from a zero-height GTK titlebar and its
+  height from the card's measured size.  Both are GTK 3 details of this
+  embedder, reached through FFI because Flutter's windowing API has no
+  policy for either: a future Flutter/Gtk embedder could make them
+  unnecessary, and the window then falls back to the API's own frame and
+  size.  The KWin script is Plasma-specific; there is no equivalent for
+  GNOME, Sway or a tiling compositor, where the card stays a normal
+  window.
 - The window uses Flutter's experimental windowing API and `nativeapi`
   for the window properties.  The API is pinned with the SDK
   (`.flutter-version`); a Flutter upgrade may change it.  The window is
@@ -606,7 +677,13 @@ report.
 - A native window cannot be opened in the widget-test engine: the seam is
   tested with a fake and the real window is compiled and smoke-run, not
   exercised for pixels.  The pictures of the card come from the same
-  widget the window draws.
+  widget the window draws.  `tool/buddy_window_probe.dart` runs the real
+  card in the real window; it was observed under a nested Wayland
+  compositor (`kwin_wayland --virtual`) as a Plasma session and as a GNOME
+  session, and its frame, size and stacking were read back from KWin's
+  window model.  The X11 path could not be observed here: Xwayland on this
+  machine crashes in its NVIDIA EGL initialisation, so the X11 hints are
+  the GTK documentation's, not a screenshot's.
 - Window focus is reported by Flutter's app lifecycle.  A desktop
   embedder that reports no `inactive` state would leave the card unshown
   and the bar in place; the call is never affected.

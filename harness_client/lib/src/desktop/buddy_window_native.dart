@@ -5,18 +5,23 @@
 // ignore_for_file: implementation_imports, invalid_use_of_internal_member
 
 import 'dart:async';
+import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+// The Flutter windowing API keeps the native GtkWindow handle here.
 import 'package:flutter/src/foundation/_features.dart' show isWindowingEnabled;
 import 'package:flutter/src/widgets/_window.dart' as fw;
+import 'package:flutter/src/widgets/_window_linux.dart' as fw_linux;
 import 'package:nativeapi_flutter/nativeapi_flutter.dart' as na;
 import 'package:nativeapi_flutter/nativeapi_flutter.dart' hide WindowManager;
 import 'package:nativeapi_flutter/windowing.dart';
 
 import '../state/workspace_buddy_controller.dart';
 import 'buddy_window.dart';
+import 'buddy_window_linux.dart';
+import 'plasma_window_rules.dart';
 
 /// Opens a buddy window on a desktop that can have one.  A platform with no
 /// windowing support, or a run that asked for the in-app card, gets the
@@ -42,6 +47,14 @@ BuddyWindowService createBuddyWindowService() {
 /// left and its next appearance does not pay for a new view.  It is
 /// destroyed when the call's controller is destroyed or another controller
 /// takes its place.
+///
+/// On Linux the card is the window's content from corner to corner: the
+/// window's frame is client-side and zero-height (see [BuddyWindowGtk]), its
+/// size follows the card in [reportContentSize], and a Plasma session gives
+/// it keep-above through KWin's own rules.  Other desktops honour the
+/// window properties where their compositors allow it; the card is still
+/// usable where they do not, because the app never relies on the window
+/// manager to decide visibility.
 class _NativeBuddyWindowService implements BuddyWindowService {
   _NativeBuddyWindowService() {
     try {
@@ -50,10 +63,16 @@ class _NativeBuddyWindowService implements BuddyWindowService {
       debugPrint('Harness: could not find the main window: $error');
     }
     _delegate = _BuddyWindowDelegate(
-      onClose: () => _window?.hide(),
+      onClose: hide,
       onDestroyed: _windowDestroyed,
     );
   }
+
+  /// The height a window has before its card has been measured.  The card's
+  /// first layout reports its real height, and the window follows it.
+  static const double _initialHeight = 120;
+  static const double _minHeight = 120;
+  static const double _maxHeight = 720;
 
   final _available = ValueNotifier<bool>(true);
   final _activated = ValueNotifier<bool>(false);
@@ -65,9 +84,12 @@ class _NativeBuddyWindowService implements BuddyWindowService {
   fw.WindowEntry? _entry;
   na.Window? _window;
   na.Window? _mainWindow;
+  BuddyWindowGtk? _gtk;
+  PlasmaWindowRules? _plasma;
   WorkspaceBuddyController? _boundTo;
   BuddyWindowRequest? _request;
   double _width = 0;
+  Size _contentSize = Size.zero;
   bool _placed = false;
   bool _destroying = false;
   bool _disposed = false;
@@ -105,8 +127,9 @@ class _NativeBuddyWindowService implements BuddyWindowService {
       } else if (request.width != _width) {
         _width = request.width;
         _controller?.setConstraints(_constraintsFor(request.width));
+        _resizeToCard();
       }
-      _window?.showInactive();
+      _showWindow();
     } catch (error) {
       debugPrint('Harness: could not open the buddy window: $error');
       _fallBack();
@@ -118,11 +141,23 @@ class _NativeBuddyWindowService implements BuddyWindowService {
     if (registry == null) {
       throw StateError('the app has no window registry');
     }
-    final controller = fw.RegularWindowController.sizedToContent(
-      constraints: _constraintsFor(request.width),
-      title: 'Buddy',
-      delegate: _delegate,
-    );
+    // On Linux the window's size belongs to the card: the fixed-size
+    // constructor gives it the card's width and a provisional height, and
+    // [reportContentSize] replaces the height with the one the card asks
+    // for.  Flutter's sized-to-content window is still the right thing on
+    // the platforms where it works.
+    final controller = Platform.isLinux
+        ? fw.RegularWindowController(
+            size: Size(request.width, _initialHeight),
+            constraints: _constraintsFor(request.width),
+            title: 'Buddy',
+            delegate: _delegate,
+          )
+        : fw.RegularWindowController.sizedToContent(
+            constraints: _constraintsFor(request.width),
+            title: 'Buddy',
+            delegate: _delegate,
+          );
     final window = controller.nativeWindow;
     if (window == null) {
       controller.destroy();
@@ -133,7 +168,7 @@ class _NativeBuddyWindowService implements BuddyWindowService {
     _window = window;
     _boundTo = request.controller;
     _width = request.width;
-    _style(window);
+    _styleWindow(controller, window);
     final entry = fw.WindowEntry(
       controller: controller,
       // The request is read when the window is built, not captured: a later
@@ -143,16 +178,49 @@ class _NativeBuddyWindowService implements BuddyWindowService {
     );
     _entry = entry;
     registry.register(entry);
-    _placeWhenReady();
+    _installPlasmaRules();
+    if (!Platform.isLinux) _placeWhenReady();
   }
 
   /// The card's width is fixed; its height follows the content.
   BoxConstraints _constraintsFor(double width) => BoxConstraints(
     minWidth: width,
     maxWidth: width,
-    minHeight: 120,
-    maxHeight: 720,
+    minHeight: _minHeight,
+    maxHeight: _maxHeight,
   );
+
+  void _styleWindow(fw.RegularWindowController controller, na.Window window) {
+    if (Platform.isLinux) {
+      final handle = _linuxHandle(controller);
+      if (handle != null) {
+        final gtk = BuddyWindowGtk(handle);
+        _gtk = gtk;
+        gtk.makeFrameless();
+        gtk.makeNonActivating();
+        gtk.hideFromTaskbar();
+        gtk.setResizable(false);
+        // X11 honours this; Wayland leaves it to the compositor, and Plasma
+        // gets its keep-above from the KWin rules instead.
+        gtk.keepAbove(true);
+        return;
+      }
+    }
+    _style(window);
+  }
+
+  /// The GtkWindow behind Flutter's own window controller.
+  static ffi.Pointer<ffi.Void>? _linuxHandle(
+    fw.RegularWindowController controller,
+  ) {
+    if (controller is! fw_linux.WindowControllerLinux) return null;
+    try {
+      return (controller as fw_linux.WindowControllerLinux).windowHandle;
+    } catch (error) {
+      debugPrint('Harness: could not reach the buddy window: $error');
+      return null;
+    }
+  }
 
   void _style(na.Window window) {
     window.setFrameless(true);
@@ -168,7 +236,109 @@ class _NativeBuddyWindowService implements BuddyWindowService {
     window.backgroundColor = const Color(0x00000000).toNative();
   }
 
+  void _installPlasmaRules() {
+    if (_disposed || !Platform.isLinux) return;
+    if (!PlasmaWindowRules.isSupported) return;
+    final rules = PlasmaWindowRules(pid: pid, caption: 'Buddy');
+    _plasma = rules;
+    unawaited(rules.install());
+  }
+
+  @override
+  void reportContentSize(Size size) {
+    // Other platforms keep Flutter's sized-to-content window: only the Linux
+    // window is sized here, because it is the one the platform does not size.
+    if (!Platform.isLinux) return;
+    if (_disposed || _controller == null) return;
+    // A first frame with no laid-out card is not a size to follow.
+    if (size.width < 80 || size.height < 40) return;
+    final width = _width.roundToDouble();
+    final height = size.height.clamp(_minHeight, _maxHeight).roundToDouble();
+    if (height == _contentSize.height && width == _contentSize.width) {
+      _schedulePlacement();
+      return;
+    }
+    _contentSize = Size(width, height);
+    _resizeToCard();
+    _schedulePlacement();
+  }
+
+  /// The window follows the card: the card's width, and the height it asked
+  /// for.  A card taller than the window's maximum scrolls inside it.
+  void _resizeToCard() {
+    if (_disposed || _controller == null) return;
+    // macOS and Windows use Flutter's sized-to-content window; only the
+    // Linux window is sized here.
+    if (!Platform.isLinux) return;
+    final height = _contentSize.height > 0
+        ? _contentSize.height.round()
+        : _initialHeight.round();
+    try {
+      if (_gtk case final gtk?) {
+        gtk.setSize(_width.round(), height);
+      } else {
+        _controller?.setSize(
+          Size(_width, height.toDouble()),
+        );
+      }
+    } catch (error) {
+      debugPrint('Harness: could not size the buddy window: $error');
+    }
+  }
+
+  void _showWindow() {
+    final gtk = _gtk;
+    if (gtk != null) {
+      _resizeToCard();
+      gtk.show();
+      // A window that is being mapped can ignore a resize until the
+      // compositor has configured it; the card's own height is applied
+      // again after that first configure.
+      _resizeAfterMap();
+      return;
+    }
+    _window?.showInactive();
+  }
+
+  void _resizeAfterMap() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(
+        Future<void>.delayed(const Duration(milliseconds: 80), () {
+          if (_disposed) return;
+          _resizeToCard();
+          unawaited(
+            Future<void>.delayed(const Duration(milliseconds: 160), () {
+              if (!_disposed) _resizeToCard();
+            }),
+          );
+        }),
+      );
+    });
+  }
+
+  void _schedulePlacement() {
+    if (_placed || _disposed) return;
+    if (_gtk == null) return;
+    _placed = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(
+        Future<void>.delayed(const Duration(milliseconds: 120), () {
+          if (_disposed || _gtk == null) return;
+          final height = _contentSize.height > 0
+              ? _contentSize.height.round()
+              : _initialHeight.round();
+          _gtk!.placeBottomRight(_width.round(), height);
+        }),
+      );
+    });
+  }
+
   void _startDrag() {
+    final gtk = _gtk;
+    if (gtk != null) {
+      gtk.startDrag();
+      return;
+    }
     try {
       _window?.startDragging();
     } catch (error) {
@@ -214,6 +384,12 @@ class _NativeBuddyWindowService implements BuddyWindowService {
 
   @override
   void hide() {
+    final gtk = _gtk;
+    if (gtk != null) {
+      gtk.hide();
+      reportActivated(false);
+      return;
+    }
     try {
       _window?.hide();
     } catch (error) {
@@ -231,13 +407,17 @@ class _NativeBuddyWindowService implements BuddyWindowService {
     final entry = _entry;
     final registry = _registry;
     final controller = _controller;
+    final plasma = _plasma;
     _entry = null;
     _registry = null;
     _controller = null;
     _window = null;
+    _gtk = null;
+    _plasma = null;
     _boundTo = null;
     _request = null;
     _width = 0;
+    _contentSize = Size.zero;
     _placed = false;
     reportActivated(false);
     try {
@@ -246,6 +426,7 @@ class _NativeBuddyWindowService implements BuddyWindowService {
     try {
       controller?.destroy();
     } catch (_) {}
+    if (plasma != null) unawaited(plasma.dispose());
     _destroying = false;
   }
 
@@ -253,20 +434,26 @@ class _NativeBuddyWindowService implements BuddyWindowService {
     if (_destroying) return;
     // The compositor took the window away.  Let the card be made again when
     // it is next wanted.
+    final plasma = _plasma;
     _entry = null;
     _registry = null;
     _controller = null;
     _window = null;
+    _gtk = null;
+    _plasma = null;
     _boundTo = null;
     _request = null;
     _width = 0;
+    _contentSize = Size.zero;
     _placed = false;
     reportActivated(false);
+    if (plasma != null) unawaited(plasma.dispose());
   }
 
   /// A window that cannot be made leaves the persistent in-app card as the
-  /// surface.  It stays while the buddy is on, because an away-only card in
-  /// the window cannot be clicked without the click hiding it.
+  /// surface.  It stays while the buddy is on and the workspace has a call,
+  /// because an away-only card in the window cannot be clicked without the
+  /// click hiding it.
   void _fallBack() {
     _destroyWindow();
     if (_disposed) return;
@@ -275,6 +462,11 @@ class _NativeBuddyWindowService implements BuddyWindowService {
 
   @override
   void presentMainWindow() {
+    final gtk = _gtk;
+    if (gtk != null) {
+      gtk.presentMainWindow();
+      return;
+    }
     try {
       final window =
           _mainWindow ?? na.WindowManager.instance.getCurrent();

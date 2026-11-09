@@ -1378,19 +1378,25 @@ On a desktop 920 px wide or wider, the workspace header also has a *Buddy*
 action.  It is an opt-in for one workspace, kept on the device
 (`workspaceBuddies` in SharedPreferences): one workspace can have it while
 another does not, and the next run of the app restores it.  The opt-in is
-for the **away card** only: a compact card that shows while the main window
-is not the one in use -- behind another window, or minimized -- and no call
-view is open.  On a desktop the card is a small window of its own:
-frameless, always-on-top where the platform honours it, absent from the
-taskbar, and non-activating, so clicking or dragging it neither brings the
-app forward nor makes it vanish.  A compositor that gives the clicked
+for the **away card** only: a compact card that shows while the workspace
+has a call (starting, running, failed or ending), the main window is not
+the one in use -- behind another window, or minimized -- and no call view
+is open.  Opting in starts no call and shows no card until one starts; a
+failed call keeps the card, with its problem and `Retry`.  On a desktop the card is a small window of its
+own: frameless, always-on-top where the platform honours it, absent from
+the taskbar, and non-activating, so clicking or dragging it neither brings
+the app forward nor makes it vanish.  On Linux the window is made
+frameless by a zero-height client-side titlebar and its height follows the
+card's measured content, so a taller card grows the window instead of
+overflowing it; a Plasma Wayland session gets keep-above from KWin's own
+window rules, and other Wayland compositors leave the window above only
+until something else is raised.  A compositor that gives the clicked
 window the focus anyway still keeps the card; it hides when the main window
 takes the focus back.  It is the same engine and the same call, not a
 second one.  The in-call bar stays above the pages while it is shown,
 so a call is never without its microphone line and `End`.  With its own
 window, the card is hidden while the app is in use, not destroyed; the
 fallback below stays, because it is the only surface that can be clicked.
-Turning the buddy on shows the card (when away) and starts no call.
 Turning it off, or the card's own
 `off` control, removes the card; it does not end a running call, whose bar
 keeps the microphone state and `End` in sight.  Opening the card's `Start`
@@ -1417,7 +1423,8 @@ its state, the OS's own microphone indicator stays on, and the in-call bar
 with `Mic live` and `End` is there the moment the main window is shown
 again.  Where the platform cannot open the window -- the web, a compositor
 that refuses it, or `HARNESS_BUDDY_WINDOW=off` -- the card stays in the app's
-own window while the buddy is on, so it can still be clicked and dragged;
+own window while the buddy is on and the workspace has a call, so it can
+still be clicked and dragged;
 because a window that took focus would hide the card again, that window is
 non-focusable, and the bar and call view carry the keyboard path to the
 call's controls.

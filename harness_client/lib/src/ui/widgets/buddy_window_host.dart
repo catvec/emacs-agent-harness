@@ -75,7 +75,11 @@ class _BuddyWindowHostState extends State<BuddyWindowHost> {
 
   bool _visible(BuildContext context, WorkspaceBuddyController buddy) {
     if (!widget.app.buddyWindow.available.value) return false;
-    if (!buddy.enabled || buddy.callViewOpen) return false;
+    // The card is the away surface of a call, not of the workspace's opt-in.
+    // Opting in with no call leaves the card out of the way until one starts;
+    // a starting, ending or failed call keeps it, so a problem and Retry are
+    // not hidden with the window.
+    if (!buddy.enabled || !buddy.inCall || buddy.callViewOpen) return false;
     // A compositor that activates the card window when it is clicked makes
     // the app resume; the main window is still not the one in use, so the
     // card stays while its own window is the active one.  Once that window
@@ -142,6 +146,7 @@ class _BuddyWindowHostState extends State<BuddyWindowHost> {
             disableAnimations: disableAnimations,
             startDrag: startDrag,
             onActivated: app.buddyWindow.reportActivated,
+            onContentSize: app.buddyWindow.reportContentSize,
             onOpenWorkspace: widget.onOpenWorkspace,
             onOpenSettings: widget.onOpenSettings,
           ),
@@ -156,7 +161,7 @@ class _BuddyWindowHostState extends State<BuddyWindowHost> {
 
 /// The card as the native window draws it: the app's theme in a transparent
 /// root, the same compact view, and a drag that moves the window.
-class BuddyWindowContent extends StatelessWidget {
+class BuddyWindowContent extends StatefulWidget {
   const BuddyWindowContent({
     super.key,
     required this.buddy,
@@ -166,6 +171,7 @@ class BuddyWindowContent extends StatelessWidget {
     required this.disableAnimations,
     required this.startDrag,
     required this.onActivated,
+    required this.onContentSize,
     required this.onOpenWorkspace,
     required this.onOpenSettings,
   });
@@ -177,21 +183,54 @@ class BuddyWindowContent extends StatelessWidget {
   final bool disableAnimations;
   final VoidCallback? startDrag;
   final ValueChanged<bool> onActivated;
+
+  /// The card's size after layout.  The window follows it, so a taller state
+  /// grows the window instead of overflowing it.
+  final ValueChanged<Size> onContentSize;
   final VoidCallback onOpenWorkspace;
   final Future<void> Function() onOpenSettings;
 
   @override
+  State<BuddyWindowContent> createState() => _BuddyWindowContentState();
+}
+
+class _BuddyWindowContentState extends State<BuddyWindowContent> {
+  final GlobalKey _cardKey = GlobalKey();
+  Size? _reported;
+  bool _scheduled = false;
+
+  /// The card is laid out with an unbounded height inside the window's
+  /// scroll view, so its own height is the one to make the window, not the
+  /// viewport's.  Measure it after the frame, never during one.
+  void _scheduleMeasure() {
+    if (_scheduled || !mounted) return;
+    _scheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scheduled = false;
+      if (!mounted) return;
+      final box = _cardKey.currentContext?.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) return;
+      final size = box.size;
+      if (size.width <= 0 || size.height <= 0) return;
+      if (size == _reported) return;
+      _reported = size;
+      widget.onContentSize(size);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    _scheduleMeasure();
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: theme,
+      theme: widget.theme,
       color: Colors.transparent,
       builder: (context, child) {
         final data = MediaQuery.maybeOf(context) ?? const MediaQueryData();
         return MediaQuery(
           data: data.copyWith(
-            textScaler: textScaler,
-            disableAnimations: disableAnimations,
+            textScaler: widget.textScaler,
+            disableAnimations: widget.disableAnimations,
           ),
           child: child ?? const SizedBox.shrink(),
         );
@@ -199,14 +238,28 @@ class BuddyWindowContent extends StatelessWidget {
       home: Material(
         type: MaterialType.transparency,
         child: SizedBox(
-          width: width,
-          child: _ActivatedReporter(
-            onChanged: onActivated,
-            child: WorkspaceBuddy(
-              controller: buddy,
-              onOpenWorkspace: onOpenWorkspace,
-              onOpenSettings: () => unawaited(onOpenSettings()),
-              onDragStart: startDrag,
+          width: widget.width,
+          child: SingleChildScrollView(
+            key: const Key('buddy-window-scroll'),
+            child: NotificationListener<SizeChangedLayoutNotification>(
+              onNotification: (_) {
+                _scheduleMeasure();
+                return true;
+              },
+              child: SizeChangedLayoutNotifier(
+                child: KeyedSubtree(
+                  key: _cardKey,
+                  child: _ActivatedReporter(
+                    onChanged: widget.onActivated,
+                    child: WorkspaceBuddy(
+                      controller: widget.buddy,
+                      onOpenWorkspace: widget.onOpenWorkspace,
+                      onOpenSettings: () => unawaited(widget.onOpenSettings()),
+                      onDragStart: widget.startDrag,
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ),

@@ -108,15 +108,21 @@ class _WorkspaceBuddyLayerState extends State<WorkspaceBuddyLayer> {
     });
   }
 
-  /// Below the desktop breakpoint, or while the window is the one in use,
-  /// the card is not built.  The call stays in the in-call bar, which is at
-  /// every width: no microphone is left behind a surface that is not there.
+  /// Below the desktop breakpoint, while the workspace has no call, or while
+  /// the window is the one in use, the card is not built.  The call stays in
+  /// the in-call bar, which is at every width: no microphone is left behind
+  /// a surface that is not there.
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: widget.controller,
       builder: (context, _) {
         if (!widget.controller.enabled) return const SizedBox.shrink();
+        // The card is a call's away surface: opting the workspace in is not
+        // a call, so no card is drawn until one starts.  A starting, ending
+        // or failed call still has the card, so its problem and Retry stay
+        // in sight.
+        if (!widget.controller.inCall) return const SizedBox.shrink();
         if (!widget.away) return const SizedBox.shrink();
         if (widget.controller.callViewOpen) return const SizedBox.shrink();
         final width = MediaQuery.maybeOf(context)?.size.width ?? 0;

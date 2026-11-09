@@ -70,6 +70,11 @@ abstract class BuddyWindowService {
   /// Hides the buddy window, keeping it ready to be shown again.
   void hide();
 
+  /// The card's measured size in its native window.  The window's width is
+  /// fixed and its height follows the card, so that a taller state -- a
+  /// problem and its Retry -- grows the window instead of overflowing it.
+  void reportContentSize(Size size);
+
   /// Unregisters and destroys the buddy window.
   void destroy();
 
@@ -110,6 +115,9 @@ class UnsupportedBuddyWindowService implements BuddyWindowService {
 
   @override
   void hide() {}
+
+  @override
+  void reportContentSize(Size size) {}
 
   @override
   void destroy() {}

@@ -73,10 +73,17 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('without a window the card stays over the page', (
+  testWidgets('without a window the call keeps its card over the page', (
     tester,
   ) async {
-    final app = await _rig();
+    final backends = <FakeBackend>[];
+    final app = await _rig(
+      buddyFactory: (settings, address, bridge) {
+        final backend = FakeBackend();
+        backends.add(backend);
+        return backend;
+      },
+    );
     tester.view.physicalSize = const Size(1440, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -94,15 +101,25 @@ void main() {
 
     await tester.tap(find.byKey(const Key('workspace-buddy-action')));
     await _settle(tester);
-    // The test engine has no native window.  The card is the only surface
-    // that can be clicked, so it is here while the app is in use, not only
-    // while it is away.
-    expect(find.byKey(const Key('workspace-buddy')), findsOneWidget);
-    expect(find.byKey(const Key('buddy-status-off')), findsOneWidget);
-    expect(find.text('Mic off'), findsOneWidget);
-    expect(find.byTooltip('Call'), findsOneWidget);
+    // Opting in is not a call: the card is a call's surface, so no card and
+    // no recording until one runs.
+    expect(find.byKey(const Key('workspace-buddy')), findsNothing);
+    expect(find.byKey(const Key('buddy-status-off')), findsNothing);
     expect(app.workspaceBuddy!.voice, isNull, reason: 'no call was started');
     expect(app.settings.isWorkspaceBuddyEnabled('w1'), isTrue);
+
+    await tester.tap(find.byTooltip('Call'));
+    await _settle(tester);
+    await tester.tap(find.byKey(const Key('voice-close')));
+    await _settle(tester);
+
+    // The test engine has no native window.  The card is the only surface
+    // that can be clicked, so it is here while the app is in use too.
+    expect(find.byKey(const Key('workspace-buddy')), findsOneWidget);
+    expect(find.byKey(const Key('buddy-status-listening')), findsOneWidget);
+    expect(find.text('Mic live'), findsWidgets);
+    expect(app.workspaceBuddy!.running, isTrue);
+    expect(backends.single.started, isTrue);
 
     // A drag on the header moves the card and does not take it away.
     final before = tester.getTopLeft(find.byKey(const Key('workspace-buddy')));
@@ -117,11 +134,25 @@ void main() {
       isNot(before),
     );
 
+    // Off removes the card and keeps the call: the in-call bar is its
+    // surface, with the microphone line and End.
     await tester.tap(find.byKey(const Key('buddy-off')));
     await _settle(tester);
     expect(find.byKey(const Key('workspace-buddy')), findsNothing);
-    expect(find.byTooltip('Call'), findsOneWidget);
+    expect(app.workspaceBuddy!.running, isTrue, reason: 'off is not End');
+    expect(backends.single.stopped, isFalse);
+    expect(find.byKey(const Key('workspace-call-bar')), findsOneWidget);
     expect(app.settings.isWorkspaceBuddyEnabled('w1'), isFalse);
+
+    await tester.tap(find.byKey(const Key('call-bar-end')));
+    await tester.runAsync(() async {
+      for (var i = 0; i < 20 && app.workspaceBuddy!.running; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+    });
+    await _settle(tester);
+    expect(app.workspaceBuddy!.running, isFalse);
+    expect(backends.single.stopped, isTrue);
     expect(tester.takeException(), isNull);
   });
 
@@ -303,7 +334,10 @@ void main() {
     tester,
   ) async {
     final window = FakeBuddyWindowService();
-    final app = await _rig(buddyWindow: window);
+    final app = await _rig(
+      buddyWindow: window,
+      buddyFactory: (settings, address, bridge) => FakeBackend(),
+    );
     tester.view.physicalSize = const Size(1440, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -320,6 +354,16 @@ void main() {
     await _settle(tester);
     await tester.tap(find.byKey(const Key('workspace-buddy-action')));
     await _settle(tester);
+
+    // Opting in is not a call: no card, and no window to carry one.
+    expect(window.showCalls, 0);
+    expect(find.byKey(const Key('workspace-buddy')), findsNothing);
+
+    await tester.tap(find.byTooltip('Call'));
+    await _settle(tester);
+    await tester.tap(find.byKey(const Key('voice-close')));
+    await _settle(tester);
+    expect(app.workspaceBuddy!.running, isTrue);
 
     // The main window is the one in use: the separate window is not wanted,
     // and there is no in-app card to cover the page.
@@ -338,7 +382,7 @@ void main() {
     app.windowActive.value = true;
     await _settle(tester);
     expect(window.hideCalls, greaterThanOrEqualTo(1));
-    expect(app.workspaceBuddy!.running, isFalse);
+    expect(app.workspaceBuddy!.running, isTrue);
 
     // Away again: the same window, not a second one.
     app.windowActive.value = false;
@@ -384,7 +428,10 @@ void main() {
     tester,
   ) async {
     final window = FakeBuddyWindowService();
-    final app = await _rig(buddyWindow: window);
+    final app = await _rig(
+      buddyWindow: window,
+      buddyFactory: (settings, address, bridge) => FakeBackend(),
+    );
     app.settings.setWorkspaceBuddyEnabled('w1', true);
     tester.view.physicalSize = const Size(1440, 900);
     tester.view.devicePixelRatio = 1;
@@ -396,6 +443,10 @@ void main() {
     await _settle(tester);
     await tester.tap(find.text('Workspace').last);
     await _settle(tester);
+    await tester.tap(find.byTooltip('Call'));
+    await _settle(tester);
+    await tester.tap(find.byKey(const Key('voice-close')));
+    await _settle(tester);
     app.windowActive.value = false;
     await _settle(tester);
     final request = window.lastRequest;
@@ -404,6 +455,7 @@ void main() {
     var drags = 0;
     var openedWorkspace = 0;
     var openedSettings = 0;
+    final contentSizes = <Size>[];
     await tester.pumpWidget(
       MaterialApp(
         theme: HarnessTheme.material(Brightness.light),
@@ -417,6 +469,7 @@ void main() {
             disableAnimations: false,
             startDrag: () => drags++,
             onActivated: (_) {},
+            onContentSize: contentSizes.add,
             onOpenWorkspace: () => openedWorkspace++,
             onOpenSettings: () async => openedSettings++,
           ),
@@ -425,7 +478,14 @@ void main() {
     );
     await tester.pump();
     expect(find.byKey(const Key('workspace-buddy')), findsOneWidget);
-    expect(find.byKey(const Key('buddy-status-off')), findsOneWidget);
+    expect(find.byKey(const Key('buddy-status-listening')), findsOneWidget);
+
+    // The card's own height is what the native window is made: the content
+    // is laid out without a height limit, and reports the size it asked for.
+    await tester.pump();
+    expect(contentSizes, isNotEmpty);
+    final card = tester.getSize(find.byKey(const Key('workspace-buddy')));
+    expect(contentSizes.last, card);
 
     await tester.drag(
       find.byKey(const Key('buddy-drag-handle')),
@@ -446,7 +506,10 @@ void main() {
     tester,
   ) async {
     final window = FakeBuddyWindowService(available: false);
-    final app = await _rig(buddyWindow: window);
+    final app = await _rig(
+      buddyWindow: window,
+      buddyFactory: (settings, address, bridge) => FakeBackend(),
+    );
     tester.view.physicalSize = const Size(1440, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -458,6 +521,14 @@ void main() {
     await tester.tap(find.text('Workspace').last);
     await _settle(tester);
     await tester.tap(find.byKey(const Key('workspace-buddy-action')));
+    await _settle(tester);
+
+    // Opting in is not a call: the fallback card is not on screen either.
+    expect(find.byKey(const Key('workspace-buddy')), findsNothing);
+
+    await tester.tap(find.byTooltip('Call'));
+    await _settle(tester);
+    await tester.tap(find.byKey(const Key('voice-close')));
     await _settle(tester);
 
     // No window to carry it: the card is on screen while the app is in use,
@@ -480,7 +551,10 @@ void main() {
     tester,
   ) async {
     final window = FakeBuddyWindowService(failOnShow: true);
-    final app = await _rig(buddyWindow: window);
+    final app = await _rig(
+      buddyWindow: window,
+      buddyFactory: (settings, address, bridge) => FakeBackend(),
+    );
     tester.view.physicalSize = const Size(1440, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -492,6 +566,10 @@ void main() {
     await tester.tap(find.text('Workspace').last);
     await _settle(tester);
     await tester.tap(find.byKey(const Key('workspace-buddy-action')));
+    await _settle(tester);
+    await tester.tap(find.byTooltip('Call'));
+    await _settle(tester);
+    await tester.tap(find.byKey(const Key('voice-close')));
     await _settle(tester);
     app.windowActive.value = false;
     await _settle(tester);
