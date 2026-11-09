@@ -19,7 +19,7 @@ compose box a chat uses.  It talks to the harness only through ACP:
 `_harness/workspace/prompt`, and the `workspace/*` events.
 
 The timeline is the workspace's, not a session's.  Each entry knows
-the episode it belongs to, so `Open episode` opens the ordinary
+the episode it belongs to, so `Episode` opens the ordinary
 session behind the thread when the user wants the full transcript.
 
 ## Provides
@@ -50,6 +50,9 @@ session behind the thread when the user wants the full transcript.
 
 ### Methods it calls
 
+- `computer/list` ([computers](computers.md))
+- `computer/release-control` ([computers](computers.md))
+- `computer/take-control` ([computers](computers.md))
 - `knowledge/status` ([workspace-knowledge](workspace-knowledge.md))
 - `workspace/cancel` ([workspace](workspace.md))
 - `workspace/create` ([workspace](workspace.md))
@@ -63,6 +66,7 @@ session behind the thread when the user wants the full transcript.
 
 - `agent/turn-ended` → `harness-ui-workspace--on-event`
 - `agent/turn-started` → `harness-ui-workspace--on-event`
+- `computers/changed` → `harness-ui-workspace--on-event`
 - `session/deleted` → `harness-ui-workspace--on-event`
 - `session/pending-changed` → `harness-ui-workspace--on-event`
 - `session/status` → `harness-ui-workspace--on-event`

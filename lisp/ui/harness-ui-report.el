@@ -83,13 +83,13 @@
 ;; `harness-ui-report-panel-functions' draws a panel at the end of the
 ;; report and `harness-ui-report-compose-functions' gives it a compose
 ;; box.  The review module puts the banner a task's session shows there,
-;; [Verify] and [Send back], with the box taking the feedback, so work
+;; [Verification] and [Return], with the box taking the feedback, so work
 ;; can be accepted from its report.
 ;;
 ;; What cannot be drawn does not take the rest down.  A piece of evidence
 ;; that fails says so in a line and the others draw; a report that fails
 ;; says so and its panels draw; a panel that fails says so and the panels
-;; after it draw -- the review banner's [Verify] and [Send back] come
+;; after it draw -- the review banner's [Verification] and [Return] come
 ;; after the changes, and the work must be acceptable whether or not they
 ;; could be read.  The line is short, whatever the error carries
 ;; (`harness-error-short-message'): an `args-out-of-range' names the
@@ -163,7 +163,7 @@ Each is called with the TASK the popout shows, in the popout buffer, on
 every draw, and returns a string, or nil for nothing.  The strings go
 after the evidence, in order, read-only, above the compose box when
 there is one.  The review module shows a task's review banner this way:
-the one its session shows, with [Verify] and [Send back].")
+the one its session shows, with [Verification] and [Return].")
 
 (defvar harness-ui-report-compose-functions nil
   "Functions giving a report popout a compose box.
@@ -1276,7 +1276,7 @@ or one recorded for a round that handed none in (`:missing').  What
 cannot be drawn says so in a line and the report goes on: a piece of
 evidence that cannot be drawn leaves the others, and a report that
 cannot be drawn leaves the panels after it, which hold what is done
-with the work -- [Verify] and [Send back]."
+with the work -- [Verification] and [Return]."
   (let ((evidence (append (and report (plist-get report :evidence)) nil)))
     (condition-case err
         (cond
@@ -1339,7 +1339,7 @@ The popout's panels: the hooks are the popout's host, and a report drawn
 as a string among a view's own text (`harness-ui-report-string') leaves
 them out, the view drawing what it wants of them itself.  A panel that
 fails says so in a line, and the panels after it are drawn all the same:
-the review banner's [Verify] and [Send back] must not go because the
+the review banner's [Verification] and [Return] must not go because the
 changes above them could not be read."
   (run-hook-wrapped 'harness-ui-report-panel-functions
                     (lambda (fn)

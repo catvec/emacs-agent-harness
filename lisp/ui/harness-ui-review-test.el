@@ -205,20 +205,20 @@ gives the task another script."
       bad)))
 
 (ert-deftest harness-ui-review-banner-shows-and-verifies ()
-  "A task in review says so in its session, and its [Verify] accepts the work."
+  "A task in review says so in its session, and its [Verification] accepts the work."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
       (with-current-buffer chat
         (should-not (string-match-p "waiting for you" (buffer-string)))
         (should (string-match-p "Fix the flaky test" (buffer-string)))
-        (should (string-search "[Verify]  C-c C-v" (buffer-string)))
-        (should (string-search "[Send back]  C-c C-x" (buffer-string)))
+        (should (string-search "[Verification]  C-c C-v" (buffer-string)))
+        (should (string-search "[Return]  C-c C-x" (buffer-string)))
         ;; The keys show as keys.  Their face was named after one gone, and
         ;; each redisplay of the banner logged "Invalid face reference".
         (let ((key (save-excursion
                      (goto-char (point-min))
-                     (search-forward "[Verify]  C-c C-v")
+                     (search-forward "[Verification]  C-c C-v")
                      (- (point) (length "C-c C-v")))))
           (should (memq 'harness-ui-key-face (ensure-list (get-text-property key 'face)))))
         (should-not (harness-ui-review-test--undefined-faces chat))
@@ -260,13 +260,13 @@ gives the task another script."
 (ert-deftest harness-ui-review-banner-sends-back-with-the-box ()
   "The banner's box writes the feedback: C-c C-c sends the task back to work.
 The box sends as it always does: the harness takes a message to a task
-in review for the feedback that sends it back, [Send back] pressed or
+in review for the feedback that sends it back, [Return] pressed or
 not.  The banner goes as soon as the task is back at work."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
       (with-current-buffer chat
-        ;; [Send back] says what the box is for; the box itself is the chat's.
+        ;; [Return] says what the box is for; the box itself is the chat's.
         (harness-ui-review-reject)
         (should (equal harness-ui-review--feedback-hint harness-chat-placeholder))
         (should-not harness-chat-send-function)
@@ -308,7 +308,7 @@ not.  The banner goes as soon as the task is back at work."
 (ert-deftest harness-ui-review-banner-shows-the-changes-others-draw ()
   "What `harness-ui-review-changes-functions' return goes in the banner of a task
 in review, between the report and the buttons, indented as the banner's text; a
-function that fails says so in a line and the banner stays, [Verify] with it."
+function that fails says so in a line and the banner stays, [Verification] with it."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
@@ -322,7 +322,7 @@ function that fails says so in a line and the banner stays, [Verify] with it."
           (should (< (string-match "^▾ Evidence" text)
                      (string-match "^Changes of the task$" text)
                      (string-match "^  a file$" text)
-                     (string-match "\\[Verify\\]" text))))
+                     (string-match "\\[Verification\\]" text))))
         ;; Drawn with the banner's text: on the review background, indented.
         (with-current-buffer chat
           (let ((pos (save-excursion (goto-char (point-min)) (search-forward "Changes of the task") (match-beginning 0))))
@@ -335,7 +335,7 @@ function that fails says so in a line and the banner stays, [Verify] with it."
         (with-current-buffer chat (funcall harness-compose-redraw-function))
         (let ((text (harness-ui-review-test--text chat)))
           (should (string-search "The changes could not be drawn: No git here" text))
-          (should (string-search "[Verify]  C-c C-v" text))
+          (should (string-search "[Verification]  C-c C-v" text))
           (should (string-search "Ready for review" text))))
       ;; None: the banner is what it was.
       (let ((harness-ui-review-changes-functions nil))
@@ -446,7 +446,7 @@ shows it in full, expanded, between its heading and its buttons."
                    (funcall at "The flaky test is fixed.") (funcall at "Evidence (4)")
                    (funcall at "a note") (funcall at "(fix-flaky)") (funcall at "the fix")
                    (funcall at "[tool call]") (funcall at "[Open in the session]")
-                   (funcall at "[Verify]")))
+                   (funcall at "[Verification]")))
         ;; The problem is its own labelled section, each on its own line.
         (should (string-match-p "^Problem$" tail))
         (should (string-match-p "^Reproduction$" tail))
@@ -485,9 +485,9 @@ when the task leaves review."
           (should (harness-chat-block-result block))
           (should (harness-chat-block-collapsed block))
           (should (overlay-get (harness-chat-block-fold block) 'invisible))))
-      ;; [Keep working] takes the task out of review; the banner goes and
+      ;; [Working phase] takes the task out of review; the banner goes and
       ;; the call opens again, its body the report it handed in.
-      (harness-ui-review-test--push chat "[Keep working]")
+      (harness-ui-review-test--push chat "[Working phase]")
       (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
                          10 "the task to leave review")
       (harness-test-wait
@@ -893,7 +893,7 @@ The board's record is the one the wire gives, as the UI sees it."
     popout))
 
 (ert-deftest harness-ui-review-keeps-working-when-asked ()
-  "The banner offers [Keep working]: the task leaves review at once.
+  "The banner offers [Working phase]: the task leaves review at once.
 Its report stands for the next hand-in, and the banner and its keys go;
 C-c C-g in the report popout does the same."
   (harness-ui-review-test-with
@@ -901,7 +901,7 @@ C-c C-g in the report popout does the same."
       (harness-ui-review-test--wait-report chat)
       (with-current-buffer chat
         (goto-char harness-chat--transcript-end)
-        (should (search-forward "[Keep working]" nil t))
+        (should (search-forward "[Working phase]" nil t))
         (should (eq 'harness-ui-review-keep-working (key-binding (kbd "C-c C-g"))))
         (push-button (match-beginning 0)))
       (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
@@ -925,9 +925,9 @@ C-c C-v, anywhere in the popout, accepts the work, and the popout closes."
       (with-current-buffer popout
         (let ((text (buffer-string)))
           (should (string-match-p "Ready for review" text))
-          (should (string-match-p "\\[Verify\\]" text))
-          (should (string-match-p "\\[Send back\\]" text))
-          (should (string-match-p "C-c C-c in the box sends it back" text))
+          (should (string-match-p "\\[Verification\\]" text))
+          (should (string-match-p "\\[Return\\]" text))
+          (should (string-match-p "C-c C-c in the box: return with feedback" text))
           ;; The report shows already: its banner has no [Review Changes].
           (should-not (string-match-p "\\[Review Changes\\]" text))
           ;; After the evidence, on the review background, as in the session.
@@ -952,14 +952,14 @@ C-c C-v, anywhere in the popout, accepts the work, and the popout closes."
       (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
 
 (ert-deftest harness-ui-review-report-popout-sends-back ()
-  "[Send back] in a report goes to its box, whose C-c C-c sends the task
+  "[Return] in a report goes to its box, whose C-c C-c sends the task
 back with what it holds, closing the popout; once handed in again, the
 report opens anew."
   (harness-ui-review-test-with
     (let ((popout (harness-ui-review-test--report board id)))
       (with-current-buffer popout
         (goto-char (point-min))
-        (search-forward "[Send back]")
+        (search-forward "[Return]")
         (push-button (1- (point)))
         (should (harness-compose-in-p))
         (insert "the chart is cut off")
@@ -1066,7 +1066,7 @@ lines are the ones that draw, each where its image goes."
                                                       (lambda (_ value) (eq 'image (car-safe value)))))))))))
 
 (ert-deftest harness-ui-review-verify-closes-the-report ()
-  "[Verify] in the session's banner closes the report its [Review Changes] popped out.
+  "[Verification] in the session's banner closes the report its [Review Changes] popped out.
 The popout goes as the task turns verified: its buffer and its window."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid))
@@ -1077,28 +1077,28 @@ The popout goes as the task turns verified: its buffer and its window."
         (let ((popout (harness-ui-popout-buffer key)))
           (should popout)
           (should (get-buffer-window popout))
-          (harness-ui-review-test--push chat "[Verify]")
+          (harness-ui-review-test--push chat "[Verification]")
           (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
         (should-not (harness-ui-popout-buffer key))
         (should (= windows (length (window-list nil 'nomini)))))
       (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
 
 (ert-deftest harness-ui-review-board-verify-closes-the-report ()
-  "[Verify] on the board's card closes the report its [Review Changes] popped out."
+  "[Verification] on the board's card closes the report its [Review Changes] popped out."
   (harness-ui-review-test-with
     (let ((key (list 'report id)))
       (with-current-buffer board (harness-ui-tasks--render))
       (harness-ui-review-test--push board "[Review Changes]")
       (let ((popout (harness-ui-popout-buffer key)))
         (should popout)
-        (harness-ui-review-test--push board "[Verify]")
+        (harness-ui-review-test--push board "[Verification]")
         (harness-test-wait (lambda () (not (buffer-live-p popout))) 5 "the report to close"))
       (should-not (harness-ui-popout-buffer key))
       (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
 
 (ert-deftest harness-ui-review-send-back-closes-the-report ()
   "Sending the work back from the session's banner closes the report too.
-[Send back] leaves it open while the feedback is written; sending that
+[Return] leaves it open while the feedback is written; sending that
 closes it."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid))
@@ -1107,7 +1107,7 @@ closes it."
       (harness-ui-review-test--push chat "[Review Changes]")
       (let ((popout (harness-ui-popout-buffer key)))
         (should popout)
-        (harness-ui-review-test--push chat "[Send back]")
+        (harness-ui-review-test--push chat "[Return]")
         (should (buffer-live-p popout))
         (with-current-buffer chat
           (goto-char harness-compose-end)
@@ -1125,7 +1125,7 @@ closes it."
       (harness-ui-review-test--push board "[Review Changes]")
       (let ((popout (harness-ui-popout-buffer key)))
         (should popout)
-        (harness-ui-review-test--push board "[Send back]")
+        (harness-ui-review-test--push board "[Return]")
         (should (buffer-live-p popout))
         (with-current-buffer board
           (goto-char harness-compose-end)
@@ -1197,17 +1197,17 @@ in a line, the message being right above, with no [Review Changes]."
             (should-not (string-search "Evidence (" text))
             ;; It is reviewed from there as any report.
             (should (string-search "Ready for review" text))
-            (should (string-search "[Verify]" text)))
+            (should (string-search "[Verification]" text)))
           (harness-ui-popout-close key))
         (let ((chat (harness-ui-review-test--open-session sid)))
           (harness-ui-review-test--wait-text chat "Ready for review")
-          (harness-test-wait (lambda () (string-search "No report: the turn ended without hand_in"
+          (harness-test-wait (lambda () (string-search "No report · turn ended without hand_in"
                                                        (harness-ui-review-test--tail chat)))
                              5 "the banner to say no report was handed in")
           (let ((tail (harness-ui-review-test--tail chat)))
             (should-not (string-search "[Review Changes]" tail))
             (should-not (string-search "Not handed in" tail))
-            (should (string-search "[Verify]" tail))))))))
+            (should (string-search "[Verification]" tail))))))))
 
 ;;;; When a part of the review cannot be drawn
 
@@ -1222,7 +1222,7 @@ names the record whole, and the record holds the task's hand-in."
 (ert-deftest harness-ui-review-report-keeps-its-banner-when-a-panel-fails ()
   "A panel of the report that cannot draw says so in one short line -- the error
 may carry the task's whole hand-in -- and the panels after it draw all the same:
-the review banner with [Verify] and [Send back], and the box under it."
+the review banner with [Verification] and [Return], and the box under it."
   (harness-ui-review-test-with
     (let ((harness-ui-report-panel-functions
            (cons (lambda (_task)
@@ -1236,8 +1236,8 @@ the review banner with [Verify] and [Send back], and the box under it."
         ;; The report above the line, the banner under it.
         (should (< (string-search "Evidence (4)" text) (string-search "could not be drawn" text)))
         (should (< (string-search "could not be drawn" text) (string-search "Ready for review" text)))
-        (should (string-search "[Verify]" text))
-        (should (string-search "[Send back]" text))
+        (should (string-search "[Verification]" text))
+        (should (string-search "[Return]" text))
         (with-current-buffer popout
           (should (harness-compose-live-p))
           (should (eq 'harness-ui-review-verify (key-binding (kbd "C-c C-v")))))))))
@@ -1256,7 +1256,7 @@ and the banner after them draw."
         (should (string-search "a note" text))
         (should (string-search "(fix-flaky)" text))
         (should (string-search "[tool call]" text))
-        (should (string-search "[Verify]" text))))))
+        (should (string-search "[Verification]" text))))))
 
 (defun harness-ui-review-test--report-opened (board id)
   "Pop out the report of task ID as BOARD's [Review Changes] does; return its buffer.
@@ -1274,8 +1274,8 @@ accepts or sends the work back is there under it."
              (text (harness-ui-review-test--text popout)))
         (should (string-search "The report could not be drawn: The summary will not draw" text))
         (should (string-search "Ready for review" text))
-        (should (string-search "[Verify]" text))
-        (should (string-search "[Send back]" text))))))
+        (should (string-search "[Verification]" text))
+        (should (string-search "[Return]" text))))))
 
 (ert-deftest harness-ui-review-banner-says-short-why-the-changes-failed ()
   "The changes of the banner that cannot be drawn say so in one short line, the
@@ -1291,8 +1291,8 @@ under it is drawn."
           (should (string-search "The changes could not be drawn: Args out of range: \"#<harness-ui-review-test--review>\", 33"
                                  text))
           (should-not (string-search "xxxxxxxxxx" text))
-          (should (string-search "[Verify]  C-c C-v" text))
-          (should (string-search "[Send back]  C-c C-x" text)))
+          (should (string-search "[Verification]  C-c C-v" text))
+          (should (string-search "[Return]  C-c C-x" text)))
         (with-current-buffer chat
           (should (harness-compose-live-p))
           (let ((pos (save-excursion (goto-char (point-min))
@@ -1317,7 +1317,7 @@ feedback is typed, do not go with one panel's error."
             (should (string-search "A panel of this session could not be drawn: Args out of range: \"#<harness-ui-review-test--review>\", 33"
                                    tail))
             (should-not (string-search "xxxxxxxxxx" tail))
-            (should (string-search "[Verify]  C-c C-v" tail)))
+            (should (string-search "[Verification]  C-c C-v" tail)))
           (should (harness-compose-live-p)))))))
 
 (ert-deftest harness-ui-review-banner-hears-the-task-when-another-listener-fails ()

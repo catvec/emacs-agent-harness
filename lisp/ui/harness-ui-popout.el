@@ -174,13 +174,13 @@ a permission's y and n.
      '("Popout"
        ["Popout"
         (". q" "Close" harness-ui-popout-quit)
-        (". g" "Draw again" harness-ui-popout-redraw)
-        ("C-c C-c" "Send the box" harness-ui-popout-submit)
-        ("C-c ." "A key of the panel above, from the box" harness-compose-panel-key)
-        ("C-c >" "Reply in a thread" harness-quote-reply)
-        ("C-c <" "Out of a reply to your message, and back" harness-compose-toggle-reply)
-        ("M-RET" "Split a quote to answer inline" compose-quote-split)
-        ("C-c [" "Elide part of a quote: [...]" compose-quote-elide)]))
+        (". g" "Redraw" harness-ui-popout-redraw)
+        ("C-c C-c" "Box send" harness-ui-popout-submit)
+        ("C-c ." "Panel key, from the box" harness-compose-panel-key)
+        ("C-c >" "Thread reply" harness-quote-reply)
+        ("C-c <" "Reply exit" harness-compose-toggle-reply)
+        ("M-RET" "Quote split" compose-quote-split)
+        ("C-c [" "Quote elision" compose-quote-elide)]))
 
 (defun harness-ui-popout--header ()
   "Return the header line: the title, then a [close] button.

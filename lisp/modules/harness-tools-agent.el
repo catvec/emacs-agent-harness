@@ -67,6 +67,15 @@ Keep the plan short and concrete; update the todo list (todo_write) as steps com
 
 ;;;; Sub-agents
 
+(defvar harness-tools-agent--spawn-order 0
+  "The last order number a sub-agent was given.
+It is how `harness-tools-agent--child-entries' names sub-agents in the
+order they were spawned, whatever order the hash table visits them in.")
+
+(defun harness-tools-agent--next-spawn-order ()
+  "Return the next sub-agent order number."
+  (cl-incf harness-tools-agent--spawn-order))
+
 (defvar harness-tools-agent--children (make-hash-table :test 'equal)
   "Child session id -> what a spawn_agent call knows of a running child.
 A plist (:parent PARENT-ID :name NAME :worktree PATH :branch BRANCH
@@ -125,7 +134,8 @@ is forgotten."
               (puthash cid (list :parent parent
                                  :name (or (plist-get link :name) (plist-get s :name))
                                  :worktree (plist-get link :worktree) :branch (plist-get link :branch)
-                                 :result nil :stopped (plist-get link :stopped) :unwatch nil :adopted t)
+                                 :result nil :stopped (plist-get link :stopped) :unwatch nil :adopted t
+                                 :order (harness-tools-agent--next-spawn-order))
                        harness-tools-agent--children)
               (harness-log 'info "tools-agent: sub-agent %s reports to %s when it is done, after the restart"
                            (harness-tools-agent--short-id cid) (harness-tools-agent--short-id parent)))
@@ -182,7 +192,10 @@ in `harness-tools-agent--children'."
                (when (equal (plist-get entry :parent) session-id)
                  (push (cons cid entry) entries)))
              harness-tools-agent--children)
-    (nreverse entries)))
+    (sort entries
+          (lambda (a b)
+            (< (or (plist-get (cdr a) :order) 0)
+               (or (plist-get (cdr b) :order) 0))))))
 
 (defun harness-tools-agent--running-children (session-id)
   "Return the names of the sub-agents of SESSION-ID still running."
@@ -687,6 +700,7 @@ own once its turn ends and nothing of it is outstanding any more."
             (let* ((cid (plist-get child :id))
                    (entry (list :parent sid :name (plist-get child :name)
                                 :worktree worktree :branch branch :result nil :stopped nil
+                                :order (harness-tools-agent--next-spawn-order)
                                 :unwatch (harness-tools-agent--watch-child cid (plist-get ctx :note)))))
               ;; From here the call itself names its sub-agent, not only its
               ;; result: the chat links it while the call still runs.  A call

@@ -232,7 +232,7 @@ void main() {
       expect(find.text('The parser is split in three.'), findsOneWidget);
       expect(find.text('Agreed: three parts, not two.'), findsOneWidget);
       expect(find.byTooltip('Reply to thread'), findsOneWidget);
-      expect(find.byTooltip('Open thread'), findsOneWidget);
+      expect(find.byTooltip('Thread'), findsOneWidget);
     });
 
     testWidgets('a new thread says so, and has no state', (tester) async {
@@ -256,17 +256,17 @@ void main() {
           thread: ChatThread(id: 't-1', response: answer),
         ),
       );
-      expect(find.text('Show more'), findsOneWidget);
+      expect(find.text('More'), findsOneWidget);
       expect(find.textContaining('THE END'), findsNothing);
-      await tester.ensureVisible(find.text('Show more'));
+      await tester.ensureVisible(find.text('More'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Show more'));
+      await tester.tap(find.text('More'));
       await tester.pumpAndSettle();
       expect(find.textContaining('THE END'), findsOneWidget);
-      expect(find.text('Show less'), findsOneWidget);
-      await tester.ensureVisible(find.text('Show less'));
+      expect(find.text('Less'), findsOneWidget);
+      await tester.ensureVisible(find.text('Less'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Show less'));
+      await tester.tap(find.text('Less'));
       await tester.pumpAndSettle();
       expect(find.textContaining('THE END'), findsNothing);
     });
@@ -281,8 +281,8 @@ void main() {
       );
       expect(find.text('The answer.'), findsOneWidget);
       expect(find.textContaining('THE QUOTE END'), findsNothing);
-      expect(find.text('Show more'), findsOneWidget);
-      await tester.tap(find.text('Show more'));
+      expect(find.text('More'), findsOneWidget);
+      await tester.tap(find.text('More'));
       await tester.pumpAndSettle();
       expect(find.textContaining('THE QUOTE END'), findsOneWidget);
     });

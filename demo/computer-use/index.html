@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Computer use demo</title>
+<style>
+  html,body{margin:0;height:100%;background:#10152b;color:#f4ecdd;font:22px/1.5 system-ui,sans-serif}
+  main{max-width:760px;margin:0 auto;padding:64px 32px}
+  h1{font-size:44px;margin:0 0 8px} p{color:#a9b0d0}
+  label{display:block;margin:32px 0 8px;font-size:16px;letter-spacing:.08em;text-transform:uppercase;color:#7fd1ff}
+  input{width:100%;box-sizing:border-box;padding:16px;border:1px solid #3c4677;background:#0a0b2e;color:#f4ecdd;font-size:24px}
+  button{margin-top:20px;padding:14px 28px;border:0;background:#7fd1ff;color:#0a0b2e;font-size:20px;font-weight:700;cursor:pointer}
+  #said{margin-top:28px;font-size:28px;color:#ffd58a;min-height:40px}
+  .dot{display:inline-block;width:12px;height:12px;border-radius:50%;background:#7fd1ff;margin-right:10px}
+</style>
+</head>
+<body>
+<main>
+  <h1><span class="dot"></span>Computer use</h1>
+  <p>A real X11 desktop, served over RFB. The agent sees it with <code>computer_view</code>, and drives this form with <code>computer_keyboard</code> and <code>computer_pointer</code>.</p>
+  <label for="who">Your name</label>
+  <input id="who" placeholder="Type here">
+  <button id="go" onclick="document.getElementById('said').textContent = 'Hello, ' + (document.getElementById('who').value || 'stranger') + '.'">Say hello</button>
+  <div id="said"></div>
+</main>
+</body>
+</html>

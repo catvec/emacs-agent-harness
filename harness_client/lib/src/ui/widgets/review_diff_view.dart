@@ -18,7 +18,7 @@ import 'review_style.dart';
 /// when the reviewer asks ([ReviewController.wrapLines]); on a wide screen
 /// a split view is offered too ([ReviewController.splitView]).
 ///
-/// A comment is made on a line or a range: *Select lines*, then a tap for
+/// A comment is made on a line or a range: *Line selection*, then a tap for
 /// the first line and another for the last, or a long press anywhere.  The
 /// comment keeps its place as a unified-diff excerpt and the revision of the
 /// diff it was read at, and the file's threads are drawn under their line.
@@ -602,7 +602,7 @@ class _ReviewDiffViewState extends State<ReviewDiffView> {
                   HarnessIconButton(
                     key: const ValueKey('diff-select-lines'),
                     icon: Icons.format_list_numbered_rounded,
-                    label: 'Select lines',
+                    label: 'Line selection',
                     selected: _selecting,
                     onPressed: () {
                       if (_selecting) {

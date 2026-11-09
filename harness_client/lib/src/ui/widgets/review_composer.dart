@@ -674,7 +674,7 @@ class _ReviewFeedbackScreenState extends State<ReviewFeedbackScreen> {
         : await widget.controller.deleteComment(entry.commentId!);
     if (!ok && mounted) {
       ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(const SnackBar(content: Text('Delete failed')));
+          ?.showSnackBar(const SnackBar(content: Text('Deletion failure')));
     }
   }
 }

@@ -438,7 +438,7 @@ has not started, whose session has held its priority since submission."
            (labels (mapcar (lambda (s) (plist-get (funcall plist s) :description)) suffixes)))
       (should (equal "Priority" (plist-get (aref column (- (length column) 2)) :description)))
       (should (equal '("+" "-" "y" "Y") keys))
-      (should (equal '("Raise priority" "Lower priority" "Set priority…"
+      (should (equal '("Priority raise" "Priority lower" "Priority…"
                        "Priority for all sessions…")
                      labels))
       (should (eq #'harness-set-permission-mode

@@ -305,7 +305,7 @@ Future<void> main() async {
       await _settle(tester, 10);
       // The conversation draws that last message, and its bar says that it is
       // all there is: no report was handed in.
-      expect(find.textContaining('No report was handed in'), findsOneWidget);
+      expect(find.textContaining('No report'), findsOneWidget);
       _expectNoSyntax();
       expect(_run('finished').style?.fontWeight, FontWeight.w700);
       expect(_run('tests').style?.fontFamily, 'monospace');

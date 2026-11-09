@@ -851,7 +851,7 @@ The RMS is mapped from -60 dBFS..0 dBFS onto 0..1."
 (put 'harness-ui-media-recording-mode 'harness-menu-group
      '("Audio"
        ["Recording"
-        ("C-c C-r" "Stop recording" harness-record-audio)]))
+        ("C-c C-r" "Recording stop" harness-record-audio)]))
 
 (defun harness-ui-media--recording-finished (proc event)
   "Sentinel of the recorder PROC: hand the file over when it exits with EVENT."

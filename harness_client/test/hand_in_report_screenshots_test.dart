@@ -4,7 +4,7 @@
 //
 // writes a PNG for each case there: the conversation of a task, tapped on the
 // board, with the report line on its bar, the page "View report" opens, the
-// page the session's "Open full view" opens (the same page, drawn the same,
+// page the session's "Full view" opens (the same page, drawn the same,
 // the screenshots the task handed in among its evidence drawn), the two side
 // by side from their top,
 // from where their evidence begins (the screenshots), a screen further on
@@ -252,7 +252,7 @@ Future<void> main() async {
       await _write(tester, card, path('report-session-card'));
       const taskWay = 'Tasks > the task > View report';
       const sessionWay =
-          'Sessions > the task\'s session > hand-in > Open full view';
+          'Sessions > the task\'s session > hand-in > Full view';
       Future<void> both(String name, ui.Image left, ui.Image right) async {
         await _write(
           tester,

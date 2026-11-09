@@ -273,10 +273,10 @@ void main() {
     expect(
       said.data,
       contains(
-        'photo.bmp is not a picture a task takes (PNG, JPEG, GIF, WEBP)',
+        'Unsupported image · photo.bmp · PNG, JPEG, GIF, WEBP',
       ),
     );
-    expect(said.data, contains('wallpaper.png is larger than 10 MB'));
+    expect(said.data, contains('Image too large · wallpaper.png'));
     // It is said as an error: in the error colour, not the muted one.
     final theme = Theme.of(
       tester.element(find.byKey(const Key('task-attachment-error'))),
@@ -298,7 +298,7 @@ void main() {
     final said = tester.widget<Text>(
       find.byKey(const Key('task-attachment-error')),
     );
-    expect(said.data, contains('cannot open the photo picker'));
+    expect(said.data, contains('Photo picker unavailable'));
     expect(said.data, contains('no photo library here'));
     expect(find.text('Attach images'), findsOneWidget);
   });

@@ -316,7 +316,7 @@ void main() {
       );
       await _settle(tester);
       expect(_failed, findsOneWidget);
-      expect(find.text('The picture could not be loaded'), findsOneWidget);
+      expect(find.text('Picture load failure'), findsOneWidget);
       expect(
         find.text('big.png is 20 MiB, larger than the 16 MiB a picture may be'),
         findsOneWidget,

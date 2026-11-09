@@ -165,7 +165,8 @@ is never used for any other failure.")
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "priority/"
     "secrets/" "commit-msg/" "errors/"
     "decision/" "access/" "patch-review/" "tool-slots/" "cache/" "link/" "todo-sync/"
-    "event-watch/" "chatgpt-plan/" "model-complexity/" "memory/" "demo/")
+    "event-watch/" "chatgpt-plan/" "model-complexity/" "memory/" "demo/"
+    "computer/")
   "Bus method name prefixes callable as `_harness/NAME'.
 Modules of the user's own add theirs to
 `harness-acp-extra-method-prefixes'.")
@@ -249,6 +250,7 @@ it can answer for another one.")
     session/nodes-removed session/redacted secrets/redacted secrets/detected secrets/sources-changed
     session/moved session/ext-changed session/pending-updated supervisor/changed
     question/answered task/changed task/deleted task/review task/done task/queue task/backlog-mode
+    computers/changed
     permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked
     decision/changed access/changed access/judged patch-review/changed tool-slots/changed
@@ -276,6 +278,11 @@ and returns nil when the method is not its own, else a value or a
 promise: once it resolves the client is authenticated; a rejection
 \(an `acp-error' list) is the answer the client gets.  They are asked
 before `harness-acp-token' is compared, whatever the params hold.")
+
+(defvar harness-acp-client-left-functions nil
+  "Functions called with a client after it disconnects.
+They let a module forget what the client lent or bound: the Emacs of a
+client leaves with it, and so does the MCP of the computer it ran on.")
 
 (defvar harness-acp-initialized-functions nil
   "Functions called with a client and the params of its `initialize'.
@@ -914,6 +921,9 @@ lisp/harness-emacs-endpoint.el for the tools.  Not callable over ACP."
   (when (memq client harness-acp--clients)
     (setq harness-acp--clients (delq client harness-acp--clients))
     (harness-acp--detach-emacs client "The user's Emacs disconnected before it answered.")
+    (dolist (fn harness-acp-client-left-functions)
+      (condition-case err (funcall fn client)
+        (error (harness-log 'warn "acp: %s on client left failed: %S" fn err))))
     (let ((pending (harness-acp-client-pending client)) cbs)
       (maphash (lambda (_ cb) (push cb cbs)) pending)
       (clrhash pending)

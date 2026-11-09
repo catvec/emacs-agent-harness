@@ -183,7 +183,7 @@ answer what it waits on and what it asks; the running ones follow."
         (should (commandp (harness-ui-children-test--mouse1 panel pos)))
         (should (eq 'harness-status-blocked-face
                     (get-text-property (harness-ui-children-test--at panel "Blocked") 'face panel)))
-        (should (equal "needs your permission"
+        (should (equal "permission"
                        (get-text-property (harness-ui-children-test--at panel "Blocked") 'help-echo panel))))
       (dolist (label '("[Allow]" "[Deny]"))
         (let ((pos (harness-ui-children-test--at panel label)))

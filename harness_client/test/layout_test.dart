@@ -100,9 +100,9 @@ void main() {
       final rig = await _rig();
       await _pump(tester, rig);
       await _needsAnswer(tester, rig);
-      // "Needs you" is the first section of the list: it is not said twice.
+      // "Your input" is the first section of the list: it is not said twice.
       expect(find.byType(HarnessNotice), findsNothing);
-      expect(find.text('NEEDS YOU'), findsOneWidget);
+      expect(find.text('YOUR INPUT'), findsOneWidget);
     });
 
     testWidgets('comes and goes without the page under it losing its place', (
@@ -385,7 +385,7 @@ void main() {
       await tester.tap(find.text('Settings'));
       await _settle(tester);
       await tester.scrollUntilVisible(
-        find.text('Show thinking'),
+        find.text('Thinking display'),
         200,
         scrollable: find
             .descendant(
@@ -451,7 +451,7 @@ void main() {
                   dropWhatDoesNotFit: true,
                   style: TextStyle(fontSize: 10),
                   parts: [
-                    HarnessMetaPart('Needs you', weight: FontWeight.w600),
+                    HarnessMetaPart('Your input', weight: FontWeight.w600),
                     'emacs-agent-harness',
                     'Task: Answer the permission',
                   ],
@@ -469,7 +469,7 @@ void main() {
       expect(has('emacs-agent-harness'), findsOneWidget);
       expect(has('Task'), findsNothing, reason: 'the last fact goes whole');
       await show(110);
-      expect(has('Needs you'), findsOneWidget);
+      expect(has('Your input'), findsOneWidget);
       expect(has('emacs'), findsNothing);
     });
 

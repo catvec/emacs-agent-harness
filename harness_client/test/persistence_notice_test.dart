@@ -93,10 +93,10 @@ void main() {
   ) async {
     final (settings, app) = await _launch(store: StrippedStore());
     await _open(tester, settings, app);
-    expect(find.text('Your agents,\nwithin reach.'), findsOneWidget);
+    expect(find.text('Agent harness\nclient'), findsOneWidget);
     expect(find.byKey(_problem), findsOneWidget);
     expect(
-      find.text('This device cannot remember the harness'),
+      find.text('Settings not kept'),
       findsOneWidget,
     );
     // Why, and what it means for the person.
@@ -108,7 +108,7 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.textContaining('asked for again each time the app opens'),
+      find.textContaining('needed at each start'),
       findsOneWidget,
     );
     // Above the form, which is still there and still works.
@@ -138,7 +138,7 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.text('Stay signed in: keep the address and session here.'),
+      find.text('Remembered connection · address and session kept'),
       findsNothing,
     );
   });
@@ -147,7 +147,7 @@ void main() {
     final (settings, app) = await _launch();
     await _open(tester, settings, app);
     expect(find.byKey(_problem), findsNothing);
-    expect(find.text('This device cannot remember the harness'), findsNothing);
+    expect(find.text('Settings not kept'), findsNothing);
 
     await _connect(tester);
     final row = await _rememberRow(tester);
@@ -155,7 +155,7 @@ void main() {
       find.descendant(
         of: row,
         matching: find.text(
-          'Stay signed in: keep the address and session here.',
+          'Remembered connection · address and session kept',
         ),
       ),
       findsOneWidget,

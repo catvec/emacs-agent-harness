@@ -9,7 +9,9 @@ import '../../state/app_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../format.dart';
+import '../navigation.dart';
 import '../theme/harness_theme.dart';
+import 'computers_screen.dart';
 
 class ServerScreen extends StatelessWidget {
   const ServerScreen({super.key, required this.app});
@@ -48,6 +50,10 @@ class ServerScreen extends StatelessWidget {
             ),
             children: [
               _ServerHero(app: app, caps: caps),
+              if (caps.computers) ...[
+                const HarnessSectionHeader(label: 'Computers'),
+                _ComputersEntry(app: app),
+              ],
               const HarnessSectionHeader(label: 'What this client sees'),
               _FeatureTable(caps: caps),
               if (app.server?.version != null || caps.harnessInfo) ...[
@@ -67,7 +73,7 @@ class ServerScreen extends StatelessWidget {
               const HarnessSectionHeader(label: 'Events forwarded'),
               _EventsCard(
                 values: caps.events.toList()..sort(),
-                empty: 'No enhanced events.',
+                empty: 'No enhanced events',
               ),
               const HarnessSectionHeader(label: 'Raw initialize'),
               _RawCard(caps: caps),
@@ -182,6 +188,65 @@ class _ServerHero extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// The way into the computers page: the machines the harness may use, their
+/// screens and resources, and what the open session may do there.
+class _ComputersEntry extends StatelessWidget {
+  const _ComputersEntry({required this.app});
+
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return HarnessCardList(
+      children: [
+        HarnessTap(
+          onTap: () => Navigator.of(context).push(
+            harnessRoute(
+              context,
+              (context) => ComputersScreen(app: app),
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 13, 16, 13),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.devices_other_rounded,
+                  size: 19,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Machines',
+                        style: HarnessText.rowTitle(context),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Screens, pointer, keyboard, resources',
+                        style: HarnessText.meta(context),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  size: 20,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -473,7 +538,7 @@ class _MethodsCard extends StatelessWidget {
         children: [
           if (methods.isEmpty)
             Text(
-              'No extension methods. Standard ACP only.',
+              'No extension methods · standard ACP',
               style: HarnessText.subtitle(context),
             ),
           for (var index = 0; index < groups.length; index++)

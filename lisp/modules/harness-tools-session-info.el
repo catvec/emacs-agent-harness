@@ -196,6 +196,35 @@ rules come first."
                   ""))
       "    none (no standing allow or deny rule applies)")))
 
+(defun harness-tools-session-info--computer-lines (access)
+  "Return the computers lines of `session_info' for ACCESS.
+ACCESS is the plist `access/describe' gives; its `:computers' is
+`computer/access'."
+  (let* ((computers (plist-get access :computers))
+         (entries (plist-get computers :computers))
+         (preferred (plist-get computers :preferred)))
+    (concat
+     "  Computers:\n"
+     (if entries
+         (concat
+          (mapconcat
+           (lambda (entry)
+             (format "    %s · %s · %s · %s · capabilities: %s%s\n"
+                     (or (plist-get entry :name) (plist-get entry :id))
+                     (or (plist-get entry :kind) "computer")
+                     (if (plist-get entry :connected) "connected" "not connected")
+                     (if (plist-get entry :allowed)
+                         (format "may use (%s)" (or (plist-get entry :why) "a grant"))
+                       "may not use")
+                     (or (string-join (or (plist-get entry :capabilities-allowed) nil) ", ")
+                         "none")
+                     (if (plist-get entry :window)
+                         (format " · window %s" (plist-get entry :window)) "")))
+           entries "")
+          (format "  Preferred computer: %s\n" (or preferred "none")))
+       "    none registered\n")
+     (format "  Computer default: %s\n" (or (plist-get computers :policy) "local")))))
+
 (defun harness-tools-session-info--access-text (access)
   "Return the access section of `session_info' for ACCESS."
   (let ((read-only-by (plist-get access :read-only-by))
@@ -218,7 +247,8 @@ rules come first."
              (harness-tools-session-info--names-text caps)
              (if (and caps (not caps-enforced)) " (not enforced by the sandbox)" ""))
      (format "  Standing rules:\n%s\n"
-             (harness-tools-session-info--rules-lines access)))))
+             (harness-tools-session-info--rules-lines access))
+     (harness-tools-session-info--computer-lines access))))
 
 (defun harness-tools-session-info--describe (_input ctx)
   "Handler of the session_info tool: describe the session in CTX."

@@ -388,6 +388,39 @@ names, the task of the session it names, or the task of the session the text is 
 
 ;;;; The method
 
+(ert-deftest harness-linking-resolves-a-computer ()
+  "A computer link names the registered computer and its screen share."
+  (harness-test-load-module 'computers)
+  (let* ((record (harness-call 'computer/register-remote "box" :host "box.example.test"
+                               :vnc "http://127.0.0.1:6080/vnc_lite.html"))
+         (id (plist-get record :id))
+         (answer (harness-linking-resolve (format "harness:computer/%s" id))))
+    (should (equal "computer" (plist-get answer :kind)))
+    (should (equal id (plist-get answer :computer)))
+    (should (equal "computer box" (plist-get answer :label)))
+    (should (equal (format "harness:computer/%s" id) (plist-get answer :url)))
+    (should (equal "http://127.0.0.1:6080/vnc_lite.html" (plist-get answer :vnc)))
+    ;; A name, and the screen spelling, name the same computer.
+    (should (equal id (plist-get (harness-linking-resolve "harness:screen/box") :computer)))))
+
+(ert-deftest harness-linking-says-why-a-computer-is-not-found ()
+  (harness-test-load-module 'computers)
+  (let ((answer (harness-linking-resolve "harness:computer/no-such-box")))
+    (should (stringp (plist-get answer :error)))
+    (should (string-match-p "computer_list" (plist-get answer :error)))))
+
+(ert-deftest harness-linking-writes-a-computer-link-out-in-full ()
+  (harness-test-load-module 'computers)
+  (let* ((record (harness-call 'computer/register-remote "box" :host "box.example.test"))
+         (id (plist-get record :id)))
+    (pcase-let ((`(,text . ,problems)
+                 (harness-linking-canonicalize
+                  "Go to [browser screen share](harness:screen/box) and sign in.")))
+      (should-not problems)
+      (should (equal (format "Go to [browser screen share](harness:computer/%s) and sign in." id)
+                     text)))))
+
+
 (ert-deftest harness-linking-the-method-answers-a-ui ()
   "`link/resolve' is `harness-linking-resolve' with the url and the session, and a UI may call it."
   (harness-linking-test-with-story

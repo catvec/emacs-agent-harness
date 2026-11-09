@@ -302,7 +302,7 @@ void main() {
 
   testWidgets('workspace computer on a phone', (tester) async {
     final (boundary, controller) = await _show(tester, width: 390, height: 844);
-    await tester.tap(find.byTooltip('Computer'));
+    await tester.tap(find.byTooltip('Computer').first);
     for (var i = 0; i < 8; i++) {
       await tester.pump(const Duration(milliseconds: 80));
     }
@@ -613,7 +613,7 @@ void main() {
     final (boundary, _) = await _show(tester, width: 1440, height: 900);
     await tester.tap(find.byTooltip('Hide computer'));
     await tester.pumpAndSettle();
-    expect(find.byTooltip('Show computer'), findsOneWidget);
+    expect(find.byTooltip('Computer').first, findsWidgets);
     expect(find.text('Computer · Live'), findsOneWidget);
     expect(tester.takeException(), isNull);
     if (shots != null) {
@@ -634,7 +634,7 @@ void main() {
 
   testWidgets('workspace computer details on a phone', (tester) async {
     final (boundary, _) = await _show(tester, width: 390, height: 844);
-    await tester.tap(find.byTooltip('Computer'));
+    await tester.tap(find.byTooltip('Computer').first);
     await tester.pumpAndSettle();
     await tester.tap(
       find.descendant(

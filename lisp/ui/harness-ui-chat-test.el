@@ -2036,7 +2036,7 @@ stepped over."
           (should (equal root-seed (plist-get (harness-chat--session) :parent-id)))
           (should-not (harness-chat--parent-id))
           (should-not (harness-chat--parent-segment))
-          (should (equal "This session was started from a seed conversation, which is not opened"
+          (should (equal "Seed conversation · not opened"
                          (error-message-string
                           (should-error (harness-up-to-parent) :type 'user-error)))))))))
 
@@ -4071,7 +4071,7 @@ It says so before it shows or makes a session."
           (insert "a\n\n\nb")
           (setq-local transient-mark-mode t)
           (let ((err (should-error (harness-prompt-region) :type 'user-error)))
-            (should (equal "Select the text to prompt with first" (cadr err))))
+            (should (equal "No selected text" (cadr err))))
           ;; A mark that is not active selects nothing.
           (set-mark 2)
           (goto-char 5)
@@ -4087,7 +4087,7 @@ It says so before it shows or makes a session."
         ;; In a chat just as well.
         (with-current-buffer (harness-ui-chat-test-open (harness-ui-chat-test-session))
           (let ((err (should-error (harness-prompt-region) :type 'user-error)))
-            (should (equal "Select the text to prompt with first" (cadr err)))))
+            (should (equal "No selected text" (cadr err)))))
         (should-not shown)))))
 
 (ert-deftest harness-ui-chat-prompt-region-prefix-chooses-the-session ()
@@ -6081,8 +6081,8 @@ has none of this."
           (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "from the box")) 'harness-dim-face))
           (should (harness-ui-chat-test-face-at (- end 2) 'harness-ui-key-face))
           ;; The buttons: their tooltips name the keys.
-          (should (string-match-p "edit it (e)\\'" (harness-ui-chat-test-prop buf "[edit]" 'help-echo)))
-          (should (string-match-p "does not get it (d)\\'" (harness-ui-chat-test-prop buf "[delete]" 'help-echo)))
+          (should (string-match-p "Edit · message back in the box (e)" (harness-ui-chat-test-prop buf "[edit]" 'help-echo)))
+          (should (string-match-p "Message deletion · model does not see it (d)" (harness-ui-chat-test-prop buf "[delete]" 'help-echo)))
           (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "[edit] e")) 'harness-ui-key-face))
           ;; The message is a panel of the box, whole.
           (let ((start (text-property-any harness-chat--transcript-end (point-max) 'harness-chat-steering id)))
@@ -6352,12 +6352,12 @@ session's agent or the harness sent is not the user's to edit."
                                                 (list :type "audio" :mime "audio/ogg" :path "/tmp/a.ogg")))
         (dolist (id '("s2" "s3"))
           (let ((err (should-error (funcall edit id) :type 'user-error)))
-            (should (string-match-p "attachment that cannot be put back" (cadr err)))))
+            (should (string-match-p "Attachment not restorable · resend" (cadr err)))))
         (should-not calls)
         ;; Not the user's message: [delete] only.
         (funcall feed "s4" "rebase please" nil (harness-sender-system "tasks"))
         (let ((err (should-error (funcall edit "s4") :type 'user-error)))
-          (should (string-match-p "Only a message you wrote" (cadr err))))
+          (should (string-match-p "Your messages only" (cadr err))))
         (should-not calls)
         (should (equal "" (harness-compose-text)))
         ;; Nothing waits that the session does not list.
@@ -6639,13 +6639,13 @@ and a popout's tooltips and menus say the same (their own tests)."
         (should (eq 'harness-compose-end-of-buffer (key-binding (kbd "M->"))))
         ;; The menu lists them with the chat's own keys.
         (let ((entries (harness-ui-chat-test--menu-entries)))
-          (dolist (entry '(("C-c ." "A key of the panel above, from the box" harness-compose-panel-key)
-                           (". e" "Edit a queued message: back into the box" harness-chat-edit-queued)
-                           (". d" "Delete a queued message" harness-chat-remove-queued)
-                           (". s" "Send a queued message now" harness-chat-send-queued)
-                           ("C-c C-a" "Attach file or task" harness-compose-add-attachment)
-                           ("M-<" "Top of the box, then the buffer" harness-compose-beginning-of-buffer)
-                           ("M->" "Bottom of the box, then the buffer" harness-compose-end-of-buffer)))
+          (dolist (entry '(("C-c ." "Panel key, from the box" harness-compose-panel-key)
+                           (". e" "Queued message edit" harness-chat-edit-queued)
+                           (". d" "Queued message removal" harness-chat-remove-queued)
+                           (". s" "Queued message send" harness-chat-send-queued)
+                           ("C-c C-a" "File or task attachment" harness-compose-add-attachment)
+                           ("M-<" "Box top, then buffer" harness-compose-beginning-of-buffer)
+                           ("M->" "Box bottom, then buffer" harness-compose-end-of-buffer)))
             (should (member entry entries))
             (should (fboundp (nth 2 entry)))))
         ;; The documentation of the mode describes them.
@@ -7955,7 +7955,7 @@ box, and the popout of the same request draws the same block."
         (with-current-buffer buf
           (should (harness-ui-chat-test-find
                    buf (concat "   [Allow] y  [Deny] n  \n"
-                               "   Lasting answers (s, a, N) cover:\n"
+                               "   Lasting answers (s, a, N)\n"
                                (funcall line nil "every bash call with this exact command")
                                (funcall line t "every make call (any arguments)")
                                (funcall line nil "every bash call (any command)")
@@ -9768,7 +9768,7 @@ buttons in it work.  Clearing the hook takes the panel away again."
         (add-hook 'harness-chat-panel-functions
                   (lambda ()
                     (concat " review banner  "
-                            (propertize "[Verify]" 'harness-chat-action (lambda () (setq clicked t)))
+                            (propertize "[Verification]" 'harness-chat-action (lambda () (setq clicked t)))
                             "\n"))
                   nil t)
         (harness-chat--render-tail)
@@ -9777,7 +9777,7 @@ buttons in it work.  Clearing the hook takes the panel away again."
           (should (< pos harness-compose-start))
           (should (harness-ui-chat-test-face-at pos 'harness-chat-panel-face))
           (should (get-text-property pos 'read-only))
-          (goto-char (1- (harness-ui-chat-test-find buf "[Verify]")))
+          (goto-char (1- (harness-ui-chat-test-find buf "[Verification]")))
           (harness-chat-push))
         (should clicked)
         (setq-local harness-chat-panel-functions nil)

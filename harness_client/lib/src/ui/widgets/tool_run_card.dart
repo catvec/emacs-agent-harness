@@ -106,7 +106,7 @@ class ToolRunCard extends StatelessWidget {
                               children: [
                                 if (run.failed > 0)
                                   HarnessStatusLabel(
-                                    label: '${run.failed} failed',
+                                    label: '${run.failed} failure',
                                     color: theme.colorScheme.error,
                                     icon: Icons.error_outline_rounded,
                                   ),

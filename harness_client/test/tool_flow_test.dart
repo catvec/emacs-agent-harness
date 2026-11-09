@@ -108,12 +108,12 @@ void main() {
     // The failed one is a command, which is on it: it is in a run, and the
     // run's line says one of its calls failed, without being opened.
     await tester.dragUntilVisible(
-      find.text('1 failed'),
+      find.text('1 failure'),
       _list,
       const Offset(0, 120),
       maxIteration: 40,
     );
-    expect(find.text('1 failed'), findsOneWidget);
+    expect(find.text('1 failure'), findsOneWidget);
     expect(find.text('Failed'), findsNothing);
     // Opened, the call says it failed, and why.
     await tester.tap(find.text('Bash ×2'));

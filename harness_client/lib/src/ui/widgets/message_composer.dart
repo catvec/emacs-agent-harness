@@ -269,7 +269,7 @@ class MessageComposerState extends State<MessageComposer> {
       if (!mounted) return;
       setState(
         () => _attachmentError =
-            'This platform cannot open the photo picker: ${error.toString().split('\n').first}',
+            'Photo picker unavailable · ${error.toString().split('\n').first}',
       );
     } finally {
       if (mounted) setState(() => _picking = false);
@@ -340,18 +340,18 @@ class MessageComposerState extends State<MessageComposer> {
   /// squeeze the words into a column of one letter.
   Widget _field(ThemeData theme, {required int maxLines}) {
     final hint = widget.offline
-        ? 'Reconnecting… what you type is kept'
+        ? 'Reconnecting · draft kept'
         : widget.awaitingAnswer
-        ? 'Answer above to continue'
+        ? 'Answer above'
         : widget.running
         ? (widget.canQueue && widget.onQueue != null
               ? 'Message for the next turn'
-              : 'The agent is working…')
+              : 'Agent working…')
         : widget.hint ??
               (_keyboardHint
                   ? (_sendKey == SendKey.ctrlCctrlC
-                        ? 'Message · C-c C-c to send'
-                        : 'Message · Enter to send')
+                        ? 'Message · C-c C-c'
+                        : 'Message · Enter')
                   : 'Message');
     return Focus(
       onKeyEvent: _onKey,
@@ -602,9 +602,9 @@ class MessageComposerState extends State<MessageComposer> {
                   child: Text(
                     _keyboardHint
                         ? (_sendKey == SendKey.ctrlCctrlC
-                              ? 'C-c C-c to send · Enter for a new line'
-                              : 'Enter to send · Shift + Enter for a new line')
-                        : 'The harness may ask before it runs a tool.',
+                              ? 'C-c C-c · send · Enter · newline'
+                              : 'Enter · send · Shift+Enter · newline')
+                        : 'Harness approval · possible before a tool',
                     style: HarnessText.caption(context),
                   ),
                 ),

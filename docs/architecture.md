@@ -420,10 +420,11 @@ to sessions, messages and threads (`linking`), the file, shell and
 Emacs tools with the permissions and the sandbox that guard them, the
 pictures tools return, kept as the tool saw them (`images`), the
 MCP host that starts tool servers inside that sandbox and attaches the
-Emacs a client lends (`mcp`), the
+Emacs a client lends (`mcp`), the computers a session may use and the
+tools that use them (`computers`, `tools-computers`), the
 question, plan, todo, session info and sub-agent tools (a module
-each), worktrees, usage, and the chat, session list and pending
-requests of the UI.  Everything else is
+each), worktrees, usage, and the chat, session list, computers page and
+pending requests of the UI.  Everything else is
 enabled by the user, Doom style, with `harness-enable-modules` (which
 sets `harness-enabled-modules`), or at once with `M-x
 harness-enable-module`; `harness-enabled-modules` t loads every module
@@ -1343,9 +1344,11 @@ simple tier of the provider of the model they would otherwise use; a
 `PROVIDER:NAME`; nil for that model itself),
 `harness-allowed-directories`, `harness-sandbox-policy`,
 `harness-non-interactive`, `harness-supervisor`,
+`harness-computers-access` and `harness-computer` (see computers),
 `harness-commit-msg-strip-attribution` (see commit-msg).  A module
-defines some of them, `harness-supervisor` the supervisor module and
-`harness-commit-msg-strip-attribution` the commit-msg module: until it
+defines some of them, `harness-supervisor` the supervisor module,
+`harness-computers-access` and `harness-computer` the computers module,
+and `harness-commit-msg-strip-attribution` the commit-msg module: until it
 is loaded the key takes part in nothing, and every reader of the layers
 skips it (`harness-config--layered-keys`).  `harness-budget` has a
 global value only: it is one budget for all sessions together (see
@@ -3321,6 +3324,8 @@ Several things about plugins made this more than writing a file:
   :paths (lambda (input &optional ctx) (list …)) ; paths touched, for the jail
   :coalescable t                          ; may be folded into a summary block in the UI
   :subject (lambda (input) "x.el")        ; what a call is about, or nil
+  :computer (lambda (input) "local")      ; the computer it runs on, if any
+  :capability "view"                      ; the computer-use capability it needs
   :handler (lambda (input ctx) …))        ; → RESULT | string | promise
 ```
 
@@ -3334,6 +3339,22 @@ connecting to a host.  A paths function that fails (an argument that is no
 path) does not mean the call touches nothing: the request carries
 `:paths-error` and the call is refused before the chain
 (`harness-tools--unjudgeable-refusal`).
+
+`:computer` says which computer a call runs on: a name, a plist
+`(:computer NAME :capability NAME :window NAME :input BOOL)`, or a
+function of the input (and the context, when it takes two arguments)
+returning one of those.  Nil is a call that runs on no computer -- one
+about the harness itself, or the network.  The harness puts it in the
+permission REQUEST as `:computer`, and the computers module's stage at 7
+judges it before the handler runs; a tool whose computer function fails
+is refused before the chain, as one whose paths cannot be told is.  The
+public spec says `:requires-computer` and `:capability` for a UI that
+shows what a call needs.  A tool that runs in the harness's own sandbox
+(`bash`, the file tools, `elisp`) has no computer and says so; a
+computer's MCP tools are dispatched with its own id.  The gate runs at
+stage 7, and `tools/execute` puts the tool's computer fields in the
+request before the chain sees it; the computer the gate resolved is
+given to the handler as `:computer` in its context.
 
 A tool has two names: NAME, the identifier the model calls it by, and
 its `:label`, a short name in sentence case for people ("Read file",
@@ -3374,7 +3395,7 @@ under it, refuses the whole message for one raw byte anywhere in it,
 which otherwise leaves the model with no answer to its call at all.
 
 - `tools/list &optional SESSION-ID` → TOOL-SPECs `(:name :label
-  :description :schema :kind :coalescable)`, filtered through sync
+  :description :schema :kind :coalescable :requires-computer :capability)`, filtered through sync
   filter `agent/tools` (value: list of names; args: session).  Without
   SESSION-ID every registered tool: how UIs learn the labels.  A tool
   a plugin module defines (`harness-module-plugin-p` of its
@@ -3486,7 +3507,7 @@ which otherwise leaves the model with no answer to its call at all.
 Async filter `permission/decide`: value is a DECISION
 `(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
-:paths (…))`.  Chain (priority): 4 access gate (the access module: a
+:paths (…) :computer SUBJECT)`.  Chain (priority): 4 access gate (the access module: a
 tool turned off for the session, or one that would reach the network in
 a session that gave it up, is denied for good, `drop_access` is allowed
 for good (whatever it gives up, a Linux capability of the commands
@@ -3496,7 +3517,11 @@ access), 5 dir-request, 5 escalation (the access module:
 `request_directory_access` is, a capability included), 6
 away-request, 6
 session-move (the session tools: the user confirms every
-`session_move`), 8 supervisor (the supervisor module,
+`session_move`), 7 computer (the computers module: a call whose
+`computer` the session may not use, whose computer is not connected,
+which lacks the capability the tool needs, or which drives a computer a
+person has taken control of, is denied for good; see computers), 8
+supervisor (the supervisor module,
 a plugin's stage: a session in supervisor mode is denied, for good, a
 call to any tool off its allowlist, in every permission mode; see
 supervisor), 10 jail, 20 mode, 25 write-up (the tasks module: a backlog
@@ -4307,9 +4332,12 @@ half `ui-access`, the access view).
   `:tools-off` (names), `:read-dirs` (directories it may only read),
   `:dropped` (directories it gave up: its cwd, worktree, temporary
   directory or one of `harness-allowed-directories`, for this session
-  only) and `:caps` (the canonical names of the Linux capabilities, such
+  only), `:caps` (the canonical names of the Linux capabilities, such
   as `CAP_SYS_PTRACE`, the user gave its bash and elisp commands, in the
-  order given).  `:caps` is a grant where the others restrict:
+  order given), `:computers` (grants of a computer to the session, each
+  `(:computer ID :capabilities (NAMES…) :window NAME)`) and
+  `:computers-off` (computers it may not use at all; the computers
+  module's stage at 7 enforces both, see computers).  `:caps` is a grant where the others restrict:
   `harness-access--normalise` stores it only when it has names (once
   each), and a profile of it alone is a profile -- the stages that
   return early for a session without one still pass its calls and its
@@ -4354,8 +4382,8 @@ half `ui-access`, the access view).
   sandbox's (see sandbox); when this filter fails the commands run
   offline and with none.
 - `request_escalation` (`attribute` one of directory, read_directory,
-  writes, network, tool, permission_mode, non_interactive, capability;
-  `value`; `reason`) asks the user for more.  Its stage at 5 makes every
+  writes, network, tool, permission_mode, non_interactive, capability,
+  computer; `value`; `reason`) asks the user for more.  Its stage at 5 makes every
   decision final, so no mode, rule or judge sees it: a directory goes
   through the prompt of `request_directory_access`
   (`harness-perms-decide-dir-request`), the rest through
@@ -4476,6 +4504,98 @@ half `ui-access`, the access view).
   agents ask for it, the session may write -- and signals a
   `harness-error` saying why when one fails, so the profile never holds
   a capability the sandbox would not pass on.
+
+### computers
+
+The machines a session can use, apart from the clients that show it
+(harness-computers.el, core module `computers`, with its client half
+lisp/harness-computer-endpoint.el and its UI half ui-computers).  A
+client speaks ACP; a computer offers tools, as MCP servers a client on it
+runs, and resources, as data it reports.  A session runs on no computer:
+it uses the tools of the computers it may reach.  The design, the
+alternatives and the parts staged for later are in
+[computers.md](computers.md).
+
+- The record is the store document `computers.json`, one plist per
+  computer: `:id` (stable, `cmp-HOST-RANDOM`), `:name`, `:kind`
+  (`client`, `ssh`), `:state` (`connected`, `registered`,
+  `disconnected`), `:connected` (a client serves it now), `:host` and
+  `:user` for an SSH record, `:capabilities` (the computer-use
+  capabilities its implementation has), `:window-scoped`, `:servers`
+  (the MCP servers it runs), `:resources`, `:vnc`, `:control`
+  (`(:holder :since)` while a person has its pointer and keyboard),
+  `:registered-at` and `:last-seen`.  The runtime keys `:client`, `:mcp`
+  and `:mcp-token` never reach the store; a record read at start has no
+  client and reads `registered` or `disconnected` until one attaches it.
+  A store written by an older harness may hold a computer `local` that
+  the server made for itself; it is dropped when the registry is read.
+- The server has no computer of its own.  A client registers the machine
+  it runs on with `computer/register`, carrying its description, a
+  256-bit secret, its resources and its servers -- the server's own
+  machine included.  Nothing is registered on a client's behalf.  The
+  record keeps a salted SHA-256 of the secret, never the secret;
+  `computer/attach` presents it again and gets a fresh MCP token.
+  `computer/register-remote` records an SSH computer for the user
+  without a client there; it stays `registered` until a client on that
+  machine attaches (the harness-launched SSH provider is staged).
+- The MCP servers of a computer are `:external` servers of the MCP host,
+  attached over the ACP connection of its client: every message is
+  `_harness/computer/mcp {computer, server, message, token}`, and the
+  client answers with its server's response.  The harness sends the
+  computer a message only on the connection of the client bound to the
+  record (`harness-computers--client-hosts-record-p`), and the token
+  binds the other direction.  See mcp.
+- Methods: `computer/list`, `computer/get`, `computer/access`,
+  `computer/resources`, `computer/projects`, `computer/register`,
+  `computer/register-remote`, `computer/attach`, `computer/update`,
+  `computer/unregister`, `computer/grant`, `computer/revoke`,
+  `computer/grant-capability`, `computer/set-preference`,
+  `computer/take-control` and `computer/release-control` are callable
+  over ACP.  `computers/check SESSION-ID &rest SUBJECT`,
+  `computers/call COMPUTER TOOL INPUT &optional SERVER` and
+  `computers/tools COMPUTER &optional SERVER` are the harness's own and
+  not callable over ACP.  Event `computers/changed (ID WHAT)`, `WHAT`
+  one of `registered`, `updated`, `attached`, `disconnected`,
+  `granted`, `revoked`, `preferred`, `control`, `removed`, is forwarded
+  to UIs.
+- `harness-computers-access (session-id)` is the effective access: a
+  plist of `:session`, `:policy` (`auto`, `all` or `none`, from
+  `harness-computers-access` at the session's directory), `:preferred`
+  (the id of `harness-computer` or the session's own choice),
+  `:revoked`, `:computers` (each `:id`, `:name`, `:kind`, `:state`,
+  `:connected`, `:allowed`, `:why`, `:grant`, `:window`,
+  `:capabilities-allowed`, `:control`) and `:available`.  The defaults
+  are least privilege: the computer of the client the session was made
+  from (`:client-computer`, recorded, not a pin); the computers of the
+  resources it works on; every computer for a workspace episode; nothing
+  with the policy `none`.  A session's grants
+  add and its revocations take away.  `computers/check` answers one
+  call's requirement in the words the model reads
+  (`:ok`, or `:reason` and `:hint`).
+- The permission gate is stage 7 of `permission/decide`
+  (`harness-computers--gate`, `harness-permission-stage` `computer`): a
+  request whose `:computer` is nil passes; a call to a computer the
+  session may not use, not connected, without the capability the tool
+  needs, or driving a computer a person controls is denied for good,
+  with the way to ask.  `request_escalation` (attribute `computer`,
+  value an id or name, optional `capabilities` and `window') asks the
+  user, and `drop_access` (attribute `computer`) gives a computer up.
+  A person taking control with `computer/take-control` is not a session
+  permission: every client may see and drive every computer it can
+  reach, and the gate only keeps the agent's input out while somebody
+  else has it.
+- Resources are `(:id :kind :name :path :branch :computer
+  :computer-name :project)`; a path belongs to one computer.  Kinds are
+  `git-repo`, `directory`, `display`, `gpu`, `audio`, and anything a
+  client names.  The same repository can be a resource of several
+  computers.  `computer/projects` is the computer-independent list of
+  git repositories the computers report; it is empty until a client
+  registers a computer that offers one.
+- `session_info` (tools-session-info) adds the computers section: the
+  policy, the preferred computer, and each computer with its kind, its
+  state, whether the session may use it and why, its allowed
+  capabilities and its window.  `access/describe` carries the same
+  `computer/access` plist as `:computers`.
 
 ### decisions
 
@@ -7514,7 +7634,7 @@ priority).
   `pending` with `:backlog t`, whose column is the backlog, apart from
   the queued pending tasks: the scheduler never starts it, only
   `task/start`, so the backlog survives restarts; `task/queue` (the
-  board's [Queue it]) puts it back in that queue, the write-up kept.
+  board's [Queue]) puts it back in that queue, the write-up kept.
   Who does that is the project's backlog mode: the user in `manual`
   mode, the default, and in `auto` mode the write-up's own end.
   `--finish-refinement` then hands the task to
@@ -10235,7 +10355,11 @@ profile lacks), is started by its first call, stopped when idle for
 when the session's sandbox changes, since mounts are fixed at start.
 With the policy `required` and no backend a call fails; the host never
 runs a server unconfined then.  The Emacs a client lends is an `:external`
-server the host does not start (see acp).  `mcp/servers` and `mcp/stop` are
+server the host does not start (see acp).  So is a computer's tool
+server (see computers): its transport is the ACP connection of the client
+that runs on that computer, every message an ACP request
+`_harness/computer/mcp`, and the host's handshake, tools list, calls,
+progress and timeouts are the same as for a process.  `mcp/servers` and `mcp/stop` are
 not callable over ACP.
 
 A server the host starts belongs to its harness instance alone.  The
@@ -11376,6 +11500,44 @@ serves), and tasks keeps one for its title requests (limit
 `harness-tasks--naming-concurrency`, rank the priority of the request's
 task; see Titles under tasks).
 
+### tools-computers
+
+The tools that use a computer (harness-tools-computers.el, core module
+`tools-computers`; the computers themselves are in computers).  They are
+the fixed computer-use vocabulary, and what a computer answers is its
+implementation's MCP server, reached over the ACP connection of its
+client:
+
+- `computer_list` (meta) -- the computers, their state, capabilities,
+  resources and the session's standing, and the git repositories among
+  them; `computer_tools` (meta) the extra tools a computer's server
+  lists.
+- `computer_view`, `computer_windows` (read) -- a screen capture, as an
+  attachment and an image, and the windows with their ids, applications,
+  titles and rectangles.  Both are coalescable; a capture's chat block is
+  not folded, since it shows media.
+- `computer_pointer`, `computer_keyboard`, `computer_clipboard` (exec) --
+  move, click, scroll, drag; type and press; read and write.
+- `computer_call` (exec) -- one of the extra tools a computer offers,
+  capability `exec`.
+- `computer_use` (meta) -- the session's preferred computer, the one a
+  nameless call uses; a preference, not a pin.
+
+Each names a computer in `:computer` or leaves it to the session's
+preference, and declares the computer and capability it needs through the
+`:computer` function on the tool (see tools): so the permission chain's
+stage at 7 judges it, and the gate's refusal is the answer when the
+session may not use that computer or lacks the capability.  A handler
+checks again with `computers/check`, for a call that did not go through
+the chain, and turns a missing computer, a missing capability, a
+disconnected computer or a person's control into a tool error that says
+what to do: `computer_list`, `request_escalation` (attribute `computer`),
+or a client on that machine.  A capture is written into the session's
+temporary directory (`computer-<call-id>.png`), since the bytes come over
+MCP and the model reads a file.  The module adds one line to the system
+prompt naming the tools and the way to ask for a computer, the same for
+every session, so a prompt cache survives.
+
 ### tool-slots
 
 A plugin of its own -- a module, not part of tools-shell or tools-ssh --
@@ -12037,7 +12199,15 @@ method id, params → nil for a method not its own, else a value or a
 promise) answer `authenticate` for them; once the answer resolves the
 client is authenticated.  `harness-acp-initialized-functions` (client,
 params) run on every `initialize` before its answer is made, so the
-methods a client is offered may depend on what it says of itself.
+methods a client is offered may depend on what it says of itself.  A
+client that says where it runs, in
+`clientCapabilities._harness.computer`, has that recorded as the computer
+it is on (`harness-computers-computer-info`): a fact about the client, not
+a registration, and what a session it makes may use.  A client on the
+harness's own machine registers its computer like any other; nothing is
+lent on connect.  The `computer/` methods and the `computers/changed` event are
+the computers module's (see computers); the ACP server forwards the event
+like its own.
 
 Corporate mode (`harness-corporate-mode`): `acp/start` refuses an
 address beyond this machine whatever `harness-acp-allow-remote` says,
@@ -12372,6 +12542,22 @@ no session cache, board or conversation tree
 before, as the cache forgets a session before its `session/deleted`
 comes); the cache hears of them from the `_harness/session` updates.
 The session list shows them only when asked (I).
+
+The computers page (module `ui-computers`, `C-c h E`, `harness-computers`)
+talks ACP only: `_harness/computer/list` with the page's session,
+`_harness/computer/access` for that session and
+`_harness/computer/resources` for the resources, refreshed when a
+`computers/changed` event arrives or the page's `g` runs.  It draws the
+computer this client runs on (its endpoint's name, capabilities and
+registration state, from the client's own endpoint, not from the
+harness), the registered computers, the session's grants and the
+resources, with a button for every action: `[Registration]`, `[Refresh]`,
+`[Computer list]`, `[View]`, `[Control]`/`[Give back]`,
+`[Unregistration]`, a capability toggle per capability, `[Grant]`,
+`[Revocation]` and `[Preference]`.  `[View]` opens the VNC URL a computer
+offers; it is not a session permission.  Its copy is nouns and noun
+phrases, and `lisp/ui/harness-ui-computers-test.el` checks the exact
+rendered words and tooltips.
 
 Pending requests (`harness-ui-pending`): the permission prompts and
 questions a session waits on, held per session -- fed both by the ACP
@@ -13261,7 +13447,7 @@ settings, through `harness-chat-settings-functions'
 (`harness-ui-tasks--queue-items'): "In progress", "Needs input", or
 "Pending #3" with what holds it -- "paused", "quota · resets 19:00",
 "budget" -- and "queue suspended", then its buttons: [Pause],
-[Resume] and [Start now], in the order the card gives them, running
+[Resume] and [Start], in the order the card gives them, running
 the same `_harness/task/pause', `_resume' and `_start' the board's
 buttons do (`harness-ui-tasks-session-pause', `-resume',
 `-start-now'); a session that is no task's, or whose task is archived,
@@ -13518,7 +13704,7 @@ its own under `harness-state-directory/clips/` deduplicated by the
 SHA-1 of the bytes, which `M-y` goes back through and
 `C-u M-x harness-compose-attach-clipboard` picks from; `yank-media`
 attaches them too (`harness-compose-yank-media`).  The box binds no
-`C-c C-v`: in a chat that is the review banner's [Verify], so the two
+`C-c C-v`: in a chat that is the review banner's [Verification], so the two
 never fight, and other MIME types are chosen from with
 `M-x harness-compose-attach-clipboard`.
 Inline chips and tokens: an attachment gets a token in the text, where
@@ -14443,7 +14629,7 @@ the [cancel] beside it), shows the message icon and names where it
 sends ("Message to session “X”", "Refine “X” with feedback",
 "Answer “…”", "Send back “X” with feedback");
 composing a task, new or edited, keeps the plain box.  A task in
-review shows [Verify] and [Send back]: `v`
+review shows [Verification] and [Return]: `v`
 accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
 in the minibuffer); `m`, a message, opens the same box, since any
@@ -14453,8 +14639,8 @@ resolving the conflicts -- saying so on its card until the branch is in
 and it moves to completed.  A card of a task that handed a report in
 also shows [Review], popping the report out; it is one of the items
 `harness-ui-popout-at-point-functions' offers.  While the task waits
-for review, the report ends with the banner of its session, [Verify]
-and [Send back], and a box for the feedback.  Ready for review's
+for review, the report ends with the banner of its session, [Verification]
+and [Return], and a box for the feedback.  Ready for review's
 heading counts the tasks to review, as each column's heading counts its
 own, and `task/review` says in the echo area that one is ready
 (`harness-ui-tasks--notify-review`).  The mode line notifier counts
@@ -14508,7 +14694,7 @@ the session is where a task is handled.  Above its compose box a task in
 review has the review banner, a task waiting in the backlog its own, and
 every other task's state is on the session's settings line, in the
 board's words, with the buttons that move it through the queue --
-[Start now], [Pause] and [Resume] (`harness-ui-tasks--queue-items',
+[Start], [Pause] and [Resume] (`harness-ui-tasks--queue-items',
 `harness-ui-tasks-session-pause' and its kind, each one request of the
 task's `_harness/task/*` method, the answer becoming the session's task
 at once).  The rest of a card's actions and keys stay on the board.
@@ -14610,7 +14796,7 @@ hour, a later one has its day).  `u` and the card's [Pause] send
 work goes back to Pending and stays there, a waiting one is held where it
 is (`harness-ui-tasks--pausable-p`).  The first action of a paused card is
 [Resume] (`U`, `harness-ui-tasks-resume`, `_harness/task/resume`), then
-[Start now]; a waiting card has Pause in its menu, after the actions that
+[Start]; a waiting card has Pause in its menu, after the actions that
 keep the two buttons it shows.  A reply to a held task says that it is
 kept for its start.  The task's session shows the same state on its
 settings line, with the same three buttons and the same requests (see
@@ -14746,7 +14932,7 @@ the highest priority first, and within one the work sent back from
 review, then the tasks returned to the queue (paused, pre-empted, their
 borrowed slot taken back), the first returned first, then the oldest;
 each card's place in line counts down that order.  The backlog and
-Requires your input go by priority, then the oldest
+Your input go by priority, then the oldest
 (`harness-ui-tasks--ranks-before-p`); only queued tasks have a place in
 line.
 
@@ -15545,7 +15731,7 @@ end of a budget's long line were out of sight.  [delete] or `d` deletes
 the budget with `usage/remove-budget`, or a session's own one with
 `session/update :budget nil`, and says the Budget setting's is changed
 with `M-x harness-settings`; `harness-delete-budget` (`C-c h B`,
-"Delete budget" in the harness menu) does it from anywhere, the budget
+"Budget removal" in the harness menu) does it from anywhere, the budget
 read by name (on a budget's line, that one is the default).  A hard
 budget's refusal says it is deleted there, or the setting's, where it
 is changed.
@@ -15815,7 +16001,7 @@ and its lines; a demo is evidence with [Open demo], [Run demo] or
 with the report's brief, voice on where the voice module is loaded), the changes the task made (what
 `harness-ui-review-changes-functions` draw for it, indented as the
 banner's text: the review module's tree of the files and the threads
-below it), then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`) and
+below it), then [Verification] (`C-c C-v`), [Return] (`C-c C-x`) and
 [Review] -- shown above the compose box of the task's session, a chat
 panel (`harness-chat-panel-functions`), and at the end of its report
 popout (`harness-ui-report-panel-functions`); the merge queue of a
@@ -15873,7 +16059,7 @@ the panel is decoration, so one that fails to draw leaves the tail as
 it was); the session's box sends
 as always and the harness takes any message the user sends the task's
 session for the feedback that sends it back (`harness-tasks--on-message'), so
-[Send back] only points at the box, while
+[Return] only points at the box, while
 `harness-ui-report-compose-functions` gives the report box's text to
 `task/reject` as the feedback; `harness-ui-review-minor-mode` puts
 those two keys over the buffer's own, only for as long as it shows; it
@@ -16321,7 +16507,7 @@ set draws every surface through the library's own refresh):
 - the review banner of the task's session: `ui-review` has a hook of its
   own, `harness-ui-review-changes-functions`, called in the chat buffer on
   every draw of the banner's tail with the task, whose strings go between
-  the report the task handed in and [Verify], indented as the banner's
+  the report the task handed in and [Verification], indented as the banner's
   text (a function that fails says so in a line and the banner stays);
   the module's function (`harness-ui-patch-review--banner-panel`) draws
   the changes of a task in review that has a branch, remembers the chat
@@ -16360,7 +16546,7 @@ its older definition made wrong -- the slots after the new one are shifted
 by one, and the last ones lie past the end -- so the report failed with
 `args-out-of-range`, whose message printed the whole review (the task, its
 hand-in, the files with their patches); the panel's failure took the
-panels after it, the review banner with [Verify] and [Send back], out of
+panels after it, the review banner with [Verification] and [Return], out of
 the report; and the module's listener of `task/changed` and `task/review`,
 ahead of the review banner's own in `harness-ui-event-functions`, failed
 on the task's events and kept the banner from hearing the task was handed

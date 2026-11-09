@@ -177,7 +177,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     final error = _localError ?? app.error;
     return [
       Text(
-        'Your agents,\nwithin reach.',
+        'Agent harness\nclient',
         style: theme.textTheme.displaySmall?.copyWith(
           fontSize: 42,
           height: 1.02,
@@ -187,9 +187,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
       ),
       const SizedBox(height: 14),
       Text(
-        'A native client for the emacs-agent-harness. '
-        'Watch every step, answer when it needs you, and keep '
-        'the work moving from your phone or desktop.',
+        'Native client · live transcript · approvals · task board · '
+        'phone and desktop',
         style: theme.textTheme.bodyLarge?.copyWith(
           color: theme.colorScheme.onSurfaceVariant,
           height: 1.5,
@@ -254,7 +253,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
   /// with the session it kept, and the person has nothing to type.
   List<Widget> _resumeSection(ThemeData theme) => [
     Text(
-      'Welcome\nback.',
+      'Session\nresume',
       style: theme.textTheme.displaySmall?.copyWith(
         fontSize: 42,
         height: 1.02,
@@ -264,8 +263,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     ),
     const SizedBox(height: 14),
     Text(
-      'This device is signed in. The app is going back into the harness by '
-      'itself, with the session it kept: there is nothing to type.',
+      'Device signed in · harness session kept · automatic reconnection',
       style: theme.textTheme.bodyLarge?.copyWith(
         color: theme.colorScheme.onSurfaceVariant,
         height: 1.5,
@@ -297,10 +295,9 @@ class _PersistenceNotice extends StatelessWidget {
           child: HarnessNotice(
             key: const Key('persistence-problem'),
             icon: Icons.warning_amber_rounded,
-            message: 'This device cannot remember the harness',
+            message: 'Settings not kept',
             detail:
-                '$problem The address and the session secret are asked for '
-                'again each time the app opens.',
+                '$problem · address and session secret needed at each start',
             detailLines: 8,
             margin: EdgeInsets.zero,
           ),
@@ -393,7 +390,7 @@ class _ConnectionCard extends StatelessWidget {
             child: HarnessTextField(
               key: const Key('connect-token'),
               controller: token,
-              hint: 'Only if you were given one',
+              hint: 'Optional',
               obscure: obscure,
               textInputAction: TextInputAction.go,
               onSubmitted: (_) => onConnect?.call(),
@@ -406,7 +403,7 @@ class _ConnectionCard extends StatelessWidget {
                 icon: obscure
                     ? Icons.visibility_rounded
                     : Icons.visibility_off_rounded,
-                label: obscure ? 'Show token' : 'Hide token',
+                label: obscure ? 'Token visible' : 'Token hidden',
                 size: 18,
                 onPressed: onObscure,
               ),
@@ -417,7 +414,7 @@ class _ConnectionCard extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  'Stay signed in here: reconnect when the app opens.',
+                  'Remembered connection',
                   style: HarnessText.subtitle(context).copyWith(height: 1.35),
                 ),
               ),
@@ -448,9 +445,7 @@ class _ConnectionCard extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  'In Emacs press C-c h P, start serving, and enter the ACP '
-                  'address it shows. This app then asks how to sign in: '
-                  'choose Approve in Emacs and press Approve there.',
+                  'Emacs · C-c h P · serving · ACP address · Approve in Emacs',
                   style: HarnessText.caption(context).copyWith(height: 1.4),
                 ),
               ),
@@ -573,7 +568,7 @@ class _ResumeCard extends StatelessWidget {
                 ),
               HarnessTextButton(
                 key: const Key('resume-change'),
-                label: 'Use another address',
+                label: 'Address change',
                 onPressed: app.cancelResume,
               ),
             ],
@@ -652,10 +647,8 @@ class _AuthCard extends StatelessWidget {
           else ...[
             Text(
               methods.isEmpty
-                  ? 'This harness needs this device to sign in with a '
-                        'session secret: put it in the field above.'
-                  : 'Choose how this device signs in. The harness keeps a '
-                        'session for it, so the next connection needs none.',
+                  ? 'Session secret required · field above'
+                  : 'Sign-in method · harness session kept · no secret next time',
               style: HarnessText.subtitle(context).copyWith(height: 1.4),
             ),
             if (busy) ...[
@@ -737,8 +730,8 @@ class _Waiting extends StatelessWidget {
             Expanded(
               child: Text(
                 method.isOidc
-                    ? 'Waiting for your sign-in'
-                    : 'Waiting for approval in Emacs',
+                    ? 'Sign-in waiting'
+                    : 'Approval in Emacs',
                 style: HarnessText.body(context)
                     .copyWith(fontWeight: FontWeight.w600),
               ),
@@ -763,8 +756,8 @@ class _Waiting extends StatelessWidget {
         const SizedBox(height: 10),
         Text(
           method.isOidc
-              ? 'Come back here once the page says you are signed in.'
-              : 'Then press Approve there (C-c h y). Nothing to type here.',
+              ? 'After sign-in on the page · back here'
+              : 'Approve there (C-c h y) · no input here',
           style: HarnessText.subtitle(context).copyWith(height: 1.4),
         ),
         const SizedBox(height: 12),
@@ -847,18 +840,18 @@ class _FeatureTeaser extends StatelessWidget {
     final items = [
       (
         Icons.bolt_rounded,
-        'Watch it think',
-        'Streaming answers, tool calls, plans and the exact step the agent is on.',
+        'Live thinking',
+        'Streaming answers · tool calls · plans · current step',
       ),
       (
         Icons.shield_outlined,
-        'Answer in context',
-        'Approve a command, allow a directory, or answer a question with its diagrams.',
+        'In-context answers',
+        'Command approvals · directory grants · questions and diagrams',
       ),
       (
         Icons.grid_view_rounded,
-        'Go beyond chat',
-        'The task board, usage and project views appear when your harness offers them.',
+        'Beyond chat',
+        'Task board · usage · project views when the harness offers them',
       ),
     ];
     return LayoutBuilder(

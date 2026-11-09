@@ -17,7 +17,7 @@ Task mode manages sessions by the task each one completes (see the
 `tasks` module).  Its buffer is a small kanban for the current
 project, one section per column, most urgent first:
 
-  Requires your input   blocked on a permission or question, stopped,
+  Your input   blocked on a permission or question, stopped,
                         or refused by its write-up as a duplicate:
                         drop it, or have it written up all the same;
                         by priority, then oldest first
@@ -25,14 +25,14 @@ project, one section per column, most urgent first:
                         merges it, or send it back with feedback (R);
                         by priority, then the last to finish first.
                         A task at work reaches it by handing in, or by
-                        hand (H, or [Put in review] in its menu); K, or
-                        [Keep working], takes it back out, into the
+                        hand (H, or [Manual review] in its menu); K, or
+                        [Working phase], takes it back out, into the
                         working phase
   Merging               in the merge queue, in the order it takes them:
                         queued, merging, or resolving the conflicts
   In progress           working, with its current todo and progress,
                         in the working phase between hand-ins: put it
-                        in review by hand (H, or [Put in review] in its
+                        in review by hand (H, or [Manual review] in its
                         menu) if it does not hand in itself; by
                         priority, then the last to start first
   Pending               waiting for a slot, so it starts on its own
@@ -112,19 +112,19 @@ and the sessions and commands it found above them
 
 A backlog task's own session shows a banner above its compose box:
 that it waits in the Backlog, or is being written up, with the card's
-[Start now] and, while it waits, [Queue it].  A message typed in that
+[Start] and, while it waits, [Queue].  A message typed in that
 session starts the task, whether it waits or its write-up still runs,
 which the message stops; feedback on the write-up is the board's
-[Refine].  [Start now] supersedes a write-up that runs the same way:
+[Refine].  [Start] supersedes a write-up that runs the same way:
 it stops it and starts the task with the write-up it has when the
 turn has ended.
 
 A task is handled in its session, whatever its state.  In review it
-has the review banner (harness-ui-review.el: [Verify], [Send back],
-[Keep working], the report and the changes); in the backlog, the
+has the review banner (harness-ui-review.el: [Verification], [Return],
+[Working phase], the report and the changes); in the backlog, the
 banner above.  In every other state its session's settings line says
 where the task stands, in the board's words, with the buttons that
-move it through the queue -- [Start now], [Pause] and [Resume] -- and
+move it through the queue -- [Start], [Pause] and [Resume] -- and
 nothing else above the compose box: the status is the settings line's,
 as it is for every session, and the board keeps the rest of its card's
 actions and keys.
@@ -147,7 +147,7 @@ setting, at once, mark their sessions in the session list
 on every marked session, and on the tasks they work on.
 
 The columns go by priority where there is something left to run:
-Requires your input, Ready for review, In progress, Pending and the
+Your input, Ready for review, In progress, Pending and the
 Backlog list the higher priority first, then in the order each has
 always had; Merging stays the queue's, and the columns of tasks that are
 over, Completed and Cancelled, go by when they were completed, as a
@@ -237,10 +237,10 @@ figures that change with every model call.
 Looking at a task's files.  Its worktree is a directory below the
 project, and a project's commands -- `project-find-file`,
 `project-dired`, projectile's -- work on the project, not on that.  w on
-a card, or Assume worktree in its menu, assumes the task's worktree as
+a card, or Worktree assumption in its menu, assumes the task's worktree as
 the project (the worktree-assume library, lisp/vendor/worktree-assume):
 from any buffer of the project those commands then work on the
-worktree, until w again, or Reset to main worktree, makes the project its main
+worktree, until w again, or Main worktree reset, makes the project its main
 checkout again.  The board, the session list and the rest of the
 harness go on finding the project itself, so the task stays there to be
 answered.  The mode line says while a worktree is assumed.

@@ -211,6 +211,120 @@ process's session, so one session's relay cannot reach another's tools.
 - `lisp/modules/harness-sandbox-test.el`: `:env` reaches the command through
   bwrap and systemd-run.
 
+## Computers: machines beyond this one
+
+A registered computer is another machine a session may act on, and the
+boundary is two-sided (harness-computers.el; the design is in
+[computers.md](computers.md)).
+
+### What is exposed
+
+A computer's tools are an `:external` MCP server whose transport is the
+ACP connection of the client running there: every message is an ACP
+request `_harness/computer/mcp {computer, server, message, token}`.  There
+is no listener on the computer for the harness and no port the harness
+opens for it.  The harness serves a computer's messages only on the
+connection of the client bound to that record; a client on the harness's
+own machine is bound by its registration like any other.
+
+### The adversary
+
+- **A client that knows the harness's ACP token but not the computer's
+  secret.**  It must not attach to, update, unregister or drive another
+  machine's tools.
+- **A client that knows the secret but is not the client bound to the
+  computer.**  It must not take the computer over while another client
+  serves it.
+- **A stale connection or token.**  A token of a registration that has
+  gone must not drive a server, and a message from another ACP connection
+  must not answer for a computer.
+- **A computer that lies about itself.**  Its name, resources and
+  capabilities are its word; the harness uses them to route calls and to
+  refuse what is not allowed, but it does not verify that a resource path
+  exists or that a screen capture shows what it says.
+
+Not in scope: a process running as the same user on the computer, which
+can read the client's secret file (mode 0600) or ptrace the client.  It
+has that user's authority already.  Nor a compromised client: it runs the
+MCP servers, so it can do what that user can.
+
+### The mechanism
+
+- **The secret.**  The client makes 256 random bits, keeps them mode 0600
+  in `harness-computer-endpoint-secret-file`, and sends them once at
+  registration.  The record keeps a random salt and the SHA-256 of
+  `SALT:SECRET`; it never keeps the secret.  `computer/attach` presents
+  it again, and the comparison is constant-time
+  (`harness-instance-equal-p`).
+- **The MCP token.**  The harness answers a registration or attachment
+  with a fresh 256-bit token and sends it with every MCP message; the
+  client checks it before answering, and a message without it or with
+  another is refused.  The token is not stored in the computer record
+  that pages read and not written to disk.
+- **The binding.**  `harness-computers--client-hosts-record-p` permits a
+  client on another machine only the record it registered or attached to
+  (one computer per client), and a client on this machine any record,
+  because it shares the harness's own authority.  A record read at start
+  has no client: its tools are not served until a client attaches.
+- **The grant.**  Registration is not access.  The same permission chain
+  decides every call, and the computers gate at 7 fails closed: a
+  computer the session may not use, one not connected, one without the
+  capability the tool needs, or one a person has taken control of, is
+  refused for good with the reason and the way to ask.  A grant may name
+  one window, when the implementation is window-scoped.
+- **The person.**  A client may watch and drive any computer it can
+  reach: viewing is not a session permission, and `computer/take-control`
+  holds the agent's input until the person gives it back.  This is a
+  convenience for the user in front of the machine, not a proof that the
+  person is the only one who can see the screen.
+
+### Configuration
+
+- `harness-computers-access` (`auto` by default, `all` or `none`) and
+  `harness-computer` (the preferred computer) are ordinary layered
+  settings: a project's `.dir-locals.el` can widen or narrow them, and
+  the policy file can fix them.
+- The client's secret and id are under
+  `harness-computer-endpoint-secret-file` and `-id-file`
+  (`~/.emacs.d/harness/` by default), mode 0600.  Every registered
+  computer needs a secret, including one on the server's own machine:
+  the machine is registered by the client that runs there, not by the
+  server.
+- The endpoint's limits (`-max-image-bytes`, `-max-text`,
+  `-max-audio-seconds`) bound what one call can send back.
+
+### What is not covered yet
+
+- **The SSH provider.**  An SSH record is inert until a client on that
+  machine attaches; the harness does not yet start an MCP server there
+  over a key of its own.  Until it does, an SSH record gives no tools.
+- **A computer's own authority.**  Once a session may use a computer,
+  its tools act with the authority of the user logged in there: its
+  files, its clipboard, its screen and its programs.  A window-scoped
+  grant narrows what the tools offer; it is not a claim that the machine
+  is jailed.  The sandbox is the harness's, around the harness's own
+  commands; the computer's implementation decides what it runs.
+- **What a picture shows.**  The harness cannot tell a real screen
+  capture from one an implementation draws.  A computer is trusted to
+  answer for itself, and a session's grant is a grant to that
+  implementation.
+- **A person's control.**  It keeps the agent's input out while the
+  client's control record holds; a client that crashes with control
+  taken leaves the record to be given back by hand or by the client
+  leaving (`harness-computers--on-client-left` clears it).
+
+### Checking it
+
+- `lisp/modules/harness-computers-test.el`: the registry, the salted secret, a
+  second registration refused, attachment bound to the client, the
+  access defaults, the gate's refusals, a person's control, the store
+  round trip, and the events.
+- `lisp/harness-computer-endpoint-test.el`: what a client advertises,
+  the MCP server's tools and failures, and the token check.
+- `lisp/modules/harness-tools-computers-test.el`: the tools' requests and
+  answers.
+- `lisp/ui/harness-ui-computers-test.el`: the page's words and controls.
+
 ## Parsing still exists, as a courtesy
 
 The harness still reads shell command lines in a few places, and none

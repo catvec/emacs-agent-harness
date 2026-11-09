@@ -202,9 +202,9 @@ void main() {
     _desktopTest('Enter sends, and the box says so', (tester) async {
       final sent = <String>[];
       await _pumpComposer(tester, await _settings(), onSend: sent.add);
-      expect(find.text('Message · Enter to send'), findsOneWidget);
+      expect(find.text('Message · Enter'), findsOneWidget);
       expect(
-        find.text('Enter to send · Shift + Enter for a new line'),
+        find.text('Enter · send · Shift+Enter · newline'),
         findsOneWidget,
       );
 
@@ -230,9 +230,9 @@ void main() {
         await _settings(sendKey: SendKey.ctrlCctrlC),
         onSend: sent.add,
       );
-      expect(find.text('Message · C-c C-c to send'), findsOneWidget);
+      expect(find.text('Message · C-c C-c'), findsOneWidget);
       expect(
-        find.text('C-c C-c to send · Enter for a new line'),
+        find.text('C-c C-c · send · Enter · newline'),
         findsOneWidget,
       );
 

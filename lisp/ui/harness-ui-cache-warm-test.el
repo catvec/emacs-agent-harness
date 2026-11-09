@@ -799,7 +799,7 @@ it takes them away, and a key another module bound is left alone."
           (harness-ui-cache-warm--init)
           (should (eq #'harness-cache-keep-warm (lookup-key harness-ui-map (kbd "K"))))
           (should (eq 'harness-cache-keep-warm (harness-ui-cache-warm--suffix-command "K")))
-          (should (equal "Keep cache warm"
+          (should (equal "Cache warming"
                          (plist-get (cdr (transient-get-suffix 'harness-menu "K")) :description)))
           (should (memq #'harness-ui-cache-warm--header harness-chat-header-end-functions))
           (should (memq #'harness-ui-cache-warm--on-event harness-ui-event-functions))

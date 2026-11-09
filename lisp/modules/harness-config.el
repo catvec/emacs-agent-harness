@@ -173,7 +173,8 @@ non-interactive anyway."
     harness-btw-model
     harness-allowed-directories harness-sandbox-policy harness-non-interactive
     harness-supervisor harness-supervisor-tasks
-    harness-commit-msg-strip-attribution harness-commit-attribution)
+    harness-commit-msg-strip-attribution harness-commit-attribution
+    harness-computers-access harness-computer)
   "Settings that take part in layering.
 A module defines some of them: `harness-supervisor' the supervisor
 plugin, `harness-commit-msg-strip-attribution' the commit-msg module.
@@ -186,6 +187,10 @@ reader of the layers skips it (see `harness-config--layered-keys').")
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
      :keys (harness-model harness-thinking harness-btw-thinking harness-btw-model
             harness-permission-mode harness-non-interactive harness-supervisor))
+    (computers
+     :title "Computers"
+     :doc "Which computers a session may use, and which one a call uses when it names none. No computer is registered by default; a client on a computer registers it there. A project can override these in its .dir-locals.el."
+     :keys (harness-computers-access harness-computer))
     (supervisor
      :title "Supervisor mode"
      :doc "Top-level sessions plan and delegate: the session's model investigates and writes a plan, and worker sub-agents on cheaper models carry it out. The supervisor cannot change files itself."

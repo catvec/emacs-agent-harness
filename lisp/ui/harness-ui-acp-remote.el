@@ -658,18 +658,18 @@ from its own screen: it presents the token as it connects."
 (put 'harness-ui-acp-remote-mode 'harness-menu-group
      '("Remote control"
        ["Serving"
-        (". s" "Start or stop serving" harness-ui-acp-remote-toggle-serving)
-        (". S" "Turn serving off, and stop trying" harness-ui-acp-remote-turn-off)
+        (". s" "Serving" harness-ui-acp-remote-toggle-serving)
+        (". S" "Serving off" harness-ui-acp-remote-turn-off)
         (". a" "Address of this machine" harness-ui-acp-remote-set-address)
-        (". w" "Copy the ACP address" harness-ui-acp-remote-copy-address)
+        (". w" "ACP address copy" harness-ui-acp-remote-copy-address)
         (". g" "Refresh" harness-ui-acp-remote-refresh)]
        ["Devices"
-        (". y" "Approve the device that waits" harness-ui-acp-remote-approve)
-        (". n" "Refuse the device that waits" harness-ui-acp-remote-deny)
-        (". t" "Make a token for a device" harness-ui-acp-remote-create-token)
-        (". l" "Copy the OpenID Connect sign-in link" harness-ui-acp-remote-copy-login-link)
-        (". k" "Revoke device at point" harness-ui-acp-remote-revoke)
-        (". K" "Revoke every device" harness-ui-acp-remote-revoke-all)]))
+        (". y" "Waiting device approval" harness-ui-acp-remote-approve)
+        (". n" "Waiting device refusal" harness-ui-acp-remote-deny)
+        (". t" "Device token" harness-ui-acp-remote-create-token)
+        (". l" "Sign-in link copy" harness-ui-acp-remote-copy-login-link)
+        (". k" "Device revocation" harness-ui-acp-remote-revoke)
+        (". K" "All device revocation" harness-ui-acp-remote-revoke-all)]))
 
 ;;;###autoload
 (defun harness-remote-control ()

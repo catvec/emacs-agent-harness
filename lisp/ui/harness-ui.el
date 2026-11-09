@@ -49,6 +49,7 @@
 (require 'harness-acp)
 (require 'harness-server)
 (require 'harness-emacs-endpoint)
+(require 'harness-computer-endpoint)
 (require 'harness-files)
 (require 'harness-notifications-desktop)
 (require 'harness-ui-drag)
@@ -502,8 +503,12 @@ initialize: one it let go of for another closes on purpose."
                                  (when (eq conn harness-ui-connection)
                                    (harness-ui--on-close))))
     ;; This Emacs lends itself to the harness: its tools about the
-    ;; user's Emacs ask it (lisp/harness-emacs-endpoint.el).
-    (harness-then (harness-acp-initialize conn (harness-emacs-endpoint-client-capabilities))
+    ;; user's Emacs ask it (lisp/harness-emacs-endpoint.el), and the
+    ;; computer it runs on lends its screen, pointer and keyboard
+    ;; (lisp/harness-computer-endpoint.el).
+    (harness-then (harness-acp-initialize
+                   conn (harness-computer-endpoint-client-capabilities
+                         (harness-emacs-endpoint-client-capabilities)))
                   (lambda (_)
                     (when (eq conn harness-ui-connection)
                       (setq harness-ui-connected-since (float-time)))
@@ -799,16 +804,21 @@ in this Emacs, whose modules `harness-describe-modules' lists anyway."
 After a reload, so that a connection opened by older code, which lent
 nothing, lends this Emacs from now on."
   (when (harness-acp-open-p harness-ui-connection)
-    (harness-catch (harness-acp-initialize harness-ui-connection
-                                           (harness-emacs-endpoint-client-capabilities))
+    (harness-catch (harness-acp-initialize
+                    harness-ui-connection
+                    (harness-computer-endpoint-client-capabilities
+                     (harness-emacs-endpoint-client-capabilities)))
                    (lambda (e) (harness-log 'warn "ui: advertising this Emacs failed: %s"
                                             (harness-error-message e))))))
 
 (defun harness-ui--dispatch (method params respond)
   "Route an incoming METHOD with PARAMS; RESPOND is non-nil for requests.
 The harness's requests for this Emacs, which it lent the harness, are
-answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
-  (unless (harness-emacs-endpoint-answer method params respond)
+answered by `harness-emacs-endpoint-answer'; those for the computer it
+runs on, by `harness-computer-endpoint-answer'; everything else is the
+UI's."
+  (unless (or (harness-computer-endpoint-answer method params respond)
+              (harness-emacs-endpoint-answer method params respond))
     (harness-ui--dispatch-ui method params respond)))
 
 (defun harness-ui--dispatch-ui (method params respond)
@@ -2810,10 +2820,10 @@ for (`harness-ui-session-help-function')."
             (if (match-string 3 name) (concat "." (match-string 3 name)) ""))))
 
 (defconst harness-ui-permission-modes
-  '(("ask" "Ask" "Ask before writes, commands and network")
-    ("accept-edits" "Accept Edits" "Allow reads and edits inside the project")
-    ("auto" "Auto" "Judge each call with a cheap model")
-    ("yolo" "YOLO" "Allow everything inside the jail"))
+  '(("ask" "Ask" "Writes, commands, network · ask")
+    ("accept-edits" "Accept Edits" "Project reads and edits")
+    ("auto" "Auto" "Cheap-model judge")
+    ("yolo" "YOLO" "Full jail access"))
   "Permission modes as (ID LABEL DESCRIPTION), least to most permissive.")
 
 (defun harness-ui-permission-mode-label (mode)
@@ -7488,24 +7498,24 @@ leaves the buffer's commands out, never the whole menu."
   :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [["Sessions"
     ("n" "New session" harness-new-session)
-    ("s" "Switch session" harness-switch-session)
-    (">" "Prompt with the region" harness-prompt-region
+    ("s" "Session switch" harness-switch-session)
+    (">" "Region prompt" harness-prompt-region
      :if (lambda () (harness-ui--command-available-p 'harness-prompt-region)))
-    ("<" "Reply in a thread to the region" harness-thread-region
+    ("<" "Region thread reply" harness-thread-region
      :if (lambda () (harness-ui--command-available-p 'harness-thread-region)))
     ("l" "Session list" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
-    ("g" "Search sessions" harness-search-sessions
+    ("g" "Session search" harness-search-sessions
      :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))
     ("a" "Task mode" harness-tasks :if (lambda () (harness-ui--command-available-p 'harness-tasks)))
-    ("G" "Task mode, every project" harness-tasks-all
+    ("G" "Task mode · every project" harness-tasks-all
      :if (lambda () (harness-ui--command-available-p 'harness-tasks-all)))
     ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
     ("b" "BTW side conversation" harness-btw :if (lambda () (harness-ui--command-available-p 'harness-btw)))
-    ("F" (lambda () (if (harness-ui--fullscreen-layout) "End fullscreen" "Fullscreen overview"))
+    ("F" (lambda () (if (harness-ui--fullscreen-layout) "Fullscreen exit" "Fullscreen overview"))
      harness-fullscreen)
-    ("f" "Fork session" harness-fork-session)
-    ("k" "Cancel turn" harness-cancel-turn)
-    ("D" "Delete session" harness-delete-session)]
+    ("f" "Session fork" harness-fork-session)
+    ("k" "Turn cancellation" harness-cancel-turn)
+    ("D" "Session deletion" harness-delete-session)]
    ["Session settings"
     ("m" "Model" harness-set-model)
     ("M" "Model for all sessions" harness-set-model-all)
@@ -7522,30 +7532,30 @@ leaves the buffer's commands out, never the whole menu."
     ("V" "Supervisor mode for all sessions" harness-set-supervisor-all
      :if (lambda () (harness-ui--command-available-p 'harness-set-supervisor-all)))
     ("r" "Rename" harness-rename-session)
-    ("W" "Move to another directory" harness-move-session)]
+    ("W" "Session move" harness-move-session)]
    ;; A priority is the session's, so its commands stand beside the
    ;; session's other settings, in a column of their own: they are four,
    ;; and the settings column is long already.
    ["Priority"
-    ("+" "Raise priority" harness-priority-raise
+    ("+" "Priority raise" harness-priority-raise
      :if (lambda () (harness-ui--command-available-p 'harness-priority-raise)))
-    ("-" "Lower priority" harness-priority-lower
+    ("-" "Priority lower" harness-priority-lower
      :if (lambda () (harness-ui--command-available-p 'harness-priority-lower)))
-    ("y" "Set priority…" harness-set-priority
+    ("y" "Priority…" harness-set-priority
      :if (lambda () (harness-ui--command-available-p 'harness-set-priority)))
     ("Y" "Priority for all sessions…" harness-set-priority-all
      :if (lambda () (harness-ui--command-available-p 'harness-set-priority-all)))]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("A" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))
-    ("B" "Delete budget" harness-delete-budget :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
+    ("B" "Budget removal" harness-delete-budget :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("Q" "Task slots" harness-slots :if (lambda () (harness-ui--command-available-p 'harness-slots)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
     ;; Out of the box only the core modules load: these say which do
     ;; and enable another.
     ("O" "Modules" harness-describe-modules)
-    ("X" "Enable a module" harness-enable-module)
+    ("X" "Module enablement" harness-enable-module)
     ("z" "Companion pet" harness-pet :if (lambda () (harness-ui--command-available-p 'harness-pet)))
     ("c" "Server connection…" harness-connect-server
      :if (lambda () (harness-ui--command-available-p 'harness-connect-server))
@@ -7555,11 +7565,11 @@ leaves the buffer's commands out, never the whole menu."
     ("P" "Remote control" harness-remote-control
      :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
      :inapt-if harness-corporate-p)
-    ("N" "Test notifications" harness-test-notifications)
+    ("N" "Notification test" harness-test-notifications)
     ("U" (lambda () (if (fboundp 'harness-ui-version-menu-label) (harness-ui-version-menu-label) "Version"))
      harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
-    ("R" "Reload harness" harness-reload)
-    ("M-u" "Update harness" harness-update)
+    ("R" "Harness reload" harness-reload)
+    ("M-u" "Harness update" harness-update)
     ("L" "Log" harness-show-log)]]
   ;; The commands of the buffer the menu is opened from, when its modes
   ;; list some in their `harness-menu-group'.
@@ -7586,8 +7596,7 @@ leaves the buffer's commands out, never the whole menu."
   (harness-ui--menu-modes))
 
 (transient-define-prefix harness-groups-menu ()
-  "The harness commands, by group.
-Choosing a group opens its menu, as a directory opens what it holds."
+  "Harness commands, by group."
   :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [["Command groups"
     ("s" "Sessions…" harness-session-menu)
@@ -7624,24 +7633,24 @@ Choosing a group opens its menu, as a directory opens what it holds."
      :if (lambda () (harness-ui--command-available-p 'harness-quick-search)))
     ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
     ("f" "Fork" harness-fork-session)
-    ("C" "Compact context" harness-compact
+    ("C" "Context compaction" harness-compact
      :if (lambda () (harness-ui--command-available-p 'harness-compact)))
-    ("K" "Keep cache warm" harness-cache-keep-warm
+    ("K" "Cache warming" harness-cache-keep-warm
      :if (lambda () (harness-ui--command-available-p 'harness-cache-keep-warm)))
-    ("k" "Cancel turn" harness-cancel-turn)
-    ("D" "Delete" harness-delete-session)
+    ("k" "Turn cancellation" harness-cancel-turn)
+    ("D" "Deletion" harness-delete-session)
     ("b" "BTW side conversation" harness-btw
      :if (lambda () (harness-ui--command-available-p 'harness-btw)))
-    ("r" "Record audio" harness-record-audio
+    ("r" "Audio recording" harness-record-audio
      :if (lambda () (harness-ui--command-available-p 'harness-record-audio)))
     ("F" "Fullscreen overview" harness-fullscreen)
-    (">" "Prompt with the region" harness-prompt-region
+    (">" "Region prompt" harness-prompt-region
      :if (lambda () (harness-ui--command-available-p 'harness-prompt-region)))
-    ("<" "Reply in a thread to the region" harness-thread-region
+    ("<" "Region thread reply" harness-thread-region
      :if (lambda () (harness-ui--command-available-p 'harness-thread-region)))
-    ("o" "Open latest session" harness-open-latest-session
+    ("o" "Latest session" harness-open-latest-session
      :if (lambda () (harness-ui--command-available-p 'harness-open-latest-session)))
-    ("O" "Open session" harness-open-session
+    ("O" "Session open" harness-open-session
      :if (lambda () (harness-ui--command-available-p 'harness-open-session)))]])
 
 (transient-define-prefix harness-settings-menu ()
@@ -7652,7 +7661,7 @@ Choosing a group opens its menu, as a directory opens what it holds."
     ("M" "Model for all sessions" harness-set-model-all)
     ("=" "Model complexity" harness-model-complexity
      :if (lambda () (harness-ui--command-available-p 'harness-model-complexity)))
-    ("!" "Check provider & model" harness-provider-check
+    ("!" "Provider & model check" harness-provider-check
      :if (lambda () (harness-ui--command-available-p 'harness-provider-check)))
     ("T" "Thinking" harness-set-thinking)
     ("H" "Thinking for all sessions" harness-set-thinking-all)
@@ -7669,17 +7678,17 @@ Choosing a group opens its menu, as a directory opens what it holds."
     ("V" "Supervisor mode for all sessions" harness-set-supervisor-all
      :if (lambda () (harness-ui--command-available-p 'harness-set-supervisor-all)))
     ("r" "Rename" harness-rename-session)
-    ("W" "Move to another directory" harness-move-session)]])
+    ("W" "Session move" harness-move-session)]])
 
 (transient-define-prefix harness-priority-menu ()
   "Session priority commands."
   :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [["Priority"
-    ("+" "Raise priority" harness-priority-raise
+    ("+" "Priority raise" harness-priority-raise
      :if (lambda () (harness-ui--command-available-p 'harness-priority-raise)))
-    ("-" "Lower priority" harness-priority-lower
+    ("-" "Priority lower" harness-priority-lower
      :if (lambda () (harness-ui--command-available-p 'harness-priority-lower)))
-    ("y" "Set priority…" harness-set-priority
+    ("y" "Priority…" harness-set-priority
      :if (lambda () (harness-ui--command-available-p 'harness-set-priority)))
     ("Y" "Priority for all sessions…" harness-set-priority-all
      :if (lambda () (harness-ui--command-available-p 'harness-set-priority-all)))]])
@@ -7692,7 +7701,7 @@ Choosing a group opens its menu, as a directory opens what it holds."
      :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("A" "Insights" harness-insights
      :if (lambda () (harness-ui--command-available-p 'harness-insights)))
-    ("B" "Delete budget" harness-delete-budget
+    ("B" "Budget removal" harness-delete-budget
      :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
     ("h" "ChatGPT plan…" harness-chatgpt-plan-page
      :if (lambda () (harness-ui--command-available-p 'harness-chatgpt-plan-page)))]
@@ -7702,12 +7711,12 @@ Choosing a group opens its menu, as a directory opens what it holds."
     ("Q" "Task slots" harness-slots
      :if (lambda () (harness-ui--command-available-p 'harness-slots)))]
    ["Memory"
-    ("m" "Remember…" harness-remember
+    ("m" "Memory…" harness-remember
      :if (lambda () (harness-ui--command-available-p 'harness-remember)))
     ("M" "Memory" harness-memories
      :if (lambda () (harness-ui--command-available-p 'harness-memories)))]
    ["Secrets"
-    ("x" "Redact a secret…" harness-redact-secret
+    ("x" "Secret redaction…" harness-redact-secret
      :if (lambda () (harness-ui--command-available-p 'harness-redact-secret)))
     ("E" "Secret sources" harness-secrets-list-sources
      :if (lambda () (harness-ui--command-available-p 'harness-secrets-list-sources)))]])
@@ -7719,9 +7728,9 @@ Choosing a group opens its menu, as a directory opens what it holds."
     ("S" "Settings" harness-settings
      :if (lambda () (harness-ui--command-available-p 'harness-settings)))
     ("O" "Modules" harness-describe-modules)
-    ("X" "Enable a module" harness-enable-module
+    ("X" "Module enablement" harness-enable-module
      :if (lambda () (harness-ui--command-available-p 'harness-enable-module)))
-    ("N" "Test notifications" harness-test-notifications)
+    ("N" "Notification test" harness-test-notifications)
     ("z" "Companion pet" harness-pet
      :if (lambda () (harness-ui--command-available-p 'harness-pet)))]
    ["Remote"
@@ -7736,14 +7745,14 @@ Choosing a group opens its menu, as a directory opens what it holds."
    ["Upkeep"
     ("U" (lambda () (if (fboundp 'harness-ui-version-menu-label) (harness-ui-version-menu-label) "Version"))
      harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
-    ("R" "Reload harness" harness-reload
+    ("R" "Harness reload" harness-reload
      :if (lambda () (harness-ui--command-available-p 'harness-reload)))
-    ("M-u" "Update harness" harness-update
+    ("M-u" "Harness update" harness-update
      :if (lambda () (harness-ui--command-available-p 'harness-update)))
     ("L" "Log" harness-show-log)]])
 
 (transient-define-prefix harness-buffer-menu ()
-  "The commands of the buffer the menu was opened from."
+  "Buffer commands."
   :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [:class transient-columns
    :description (lambda () harness-ui--menu-heading)

@@ -1342,6 +1342,16 @@ refuses to give one the jail would not pass on."
 ;; attribute added to `harness-access-attributes' later cannot be
 ;; raised, or lowered, any other way without a test saying so.
 
+(defun harness-access-test--fake-computer ()
+  "Put a computer this session may not use into the registry; return its id.
+The access tests load no computers module, so its event and its store are
+out of the picture: this is a record the escalation has to name."
+  (let ((id "test-remote"))
+    (puthash id (list :id id :name id :kind 'client :state 'connected
+                      :capabilities '("view" "pointer"))
+             harness-computers--computers)
+    id))
+
 (defun harness-access-test--attribute-case (attribute mode &rest session-options)
   "Return (SID . INPUT): a session in MODE lacking ATTRIBUTE, and the request raising it.
 SESSION-OPTIONS are more options for the session."
@@ -1355,6 +1365,9 @@ SESSION-OPTIONS are more options for the session."
                  ("permission_mode" (list nil (list :attribute attribute :value "yolo")))
                  ("non_interactive" (list nil (list :attribute attribute)))
                  ("capability" (list nil (list :attribute attribute :value "CAP_SYS_PTRACE")))
+                 ("computer" (list nil (list :attribute attribute
+                                             :value (harness-access-test--fake-computer)
+                                             :capabilities ["view"])))
                  (_ (ert-fail (list "Add a case for the attribute" attribute "to the rule's test")))))
          (sid (apply #'harness-access-test-session :permission-mode mode
                      (append (and (car spec) (list :ext (car spec))) session-options))))
@@ -1419,12 +1432,16 @@ against a rule that denies every call, and its call asks nobody."
     (dolist (attribute (remove "read_directory" harness-access-attributes))
       (dolist (mode harness-access-modes)
         (let* ((cwd nil)
+               (_ (when (equal attribute "computer")
+                    (harness-access-test--fake-computer)))
                (sid (pcase attribute
                       ("permission_mode" (harness-access-test-session :permission-mode 'yolo))
                       (_ (harness-access-test-session :permission-mode mode
                                                       :non-interactive (equal attribute "non_interactive")
-                                                      :ext (and (equal attribute "capability")
-                                                                '(:access (:caps ("CAP_SYS_PTRACE")))))))))
+                                                      :ext (cond ((equal attribute "capability")
+                                                                  '(:access (:caps ("CAP_SYS_PTRACE"))))
+                                                                 ((equal attribute "computer")
+                                                                  '(:computers ("test-remote")))))))))
           (setq cwd (plist-get (harness-call 'session/get sid) :cwd))
           (puthash sid (list (list :behavior 'deny)) harness-perms--session-rules)
           (let* ((input (pcase attribute
@@ -1432,6 +1449,7 @@ against a rule that denies every call, and its call asks nobody."
                           ("tool" (list :attribute attribute :value "test_note"))
                           ("permission_mode" (list :attribute attribute :value "ask"))
                           ("capability" (list :attribute attribute :value "all"))
+                          ("computer" (list :attribute attribute :value "test-remote"))
                           (_ (list :attribute attribute))))
                  (d (harness-access-test-decide sid "drop_access" 'meta nil input)))
             (should (eq 'allow (plist-get d :behavior)))
@@ -1464,10 +1482,10 @@ them, the tool that gives access up all but read_directory."
     (let ((r (harness-access-test-result (harness-access-test-session) "request_escalation" '(:reason "x"))))
       (should (plist-get r :is-error)))
     (let ((d (harness-access-test-decide (harness-access-test-session) "request_escalation" 'meta nil '(:reason "x"))))
-      (should (string-match-p "directory, read_directory, writes, network, tool, permission_mode, non_interactive, capability"
+      (should (string-match-p "directory, read_directory, writes, network, tool, permission_mode, non_interactive, capability, computer"
                               (plist-get d :reason))))
     (let ((r (harness-access-test-result (harness-access-test-session) "drop_access" '(:reason "x"))))
-      (should (string-match-p "directory, writes, network, tool, permission_mode, non_interactive, capability"
+      (should (string-match-p "directory, writes, network, tool, permission_mode, non_interactive, capability, computer"
                               (plist-get r :content))))))
 
 ;;;; With the real jail

@@ -75,6 +75,7 @@ The user reads your messages in Emacs, where a link to something in the harness 
 - [text](harness:call/last) -- a tool call of this session: last is the newest, #3 the third newest, bash#2 the second newest bash call, or give a node id. For another session's: harness:session/ID/call/NODE.
 - [text](harness:message/last) -- a message of this session: last is your newest, first the first user message, #2, user#1, assistant#2, or a node id.
 - [text](harness:thread/ID) -- a thread of your task's review, the id in its `<thread id=\"...\">` tag; harness:task/TASK/thread/ID for another task's; harness:task/ID is a task.
+- [text](harness:computer/ID) -- a computer's screen share, by its id or name: computer_list gives both. Write [browser screen share](harness:computer/ID) when the person should watch or drive it.
 Use them to point at evidence (\"all tests pass: [the run](harness:call/bash)\"), at the sessions you report on or ask for something, and at the threads you answer. They work in your messages, in the texts of hand_in, ask_user and plan, and in what you send to other sessions. last, #3 and the like mean what they mean when you write them: the harness writes them out as ids. A link that names nothing is left as you wrote it (the result of a call that carries it says so); check the ids. Inside backquotes or a fenced block a link is plain text."
   "The Links section of the system prompt.
 It is added after the Planning section (`harness-linking--system-prompt'),
@@ -362,6 +363,25 @@ KIND is `message' or `call'."
             (and sid (list :session sid))
             (and sid (harness-linking--session-name sid) (list :session-name (harness-linking--session-name sid))))))
 
+(defun harness-linking--computer-result (record)
+  "Return the answer for RECORD, a computer as `computer/get' gives it."
+  (let ((id (plist-get record :id))
+        (name (or (plist-get record :name) (plist-get record :id))))
+    (list :kind "computer"
+          :url (harness-links-computer-url id)
+          :label (format "computer %s" name)
+          :computer id
+          :computer-name name
+          :vnc (plist-get record :vnc)
+          :vnc-socket (plist-get record :vnc-socket)
+          :state (plist-get record :state)
+          :control (plist-get record :control))))
+
+(defun harness-linking--computer (ref)
+  "Return the record of the computer REF names, or nil."
+  (and (harness-method-exists-p 'computer/get)
+       (harness-call 'computer/get ref)))
+
 (defun harness-linking--resolve (link session before)
   "Return the answer for LINK, parsed, written in SESSION before the node BEFORE.
 Give up with a sentence when it names nothing."
@@ -385,7 +405,12 @@ Give up with a sentence when it names nothing."
                    (harness-linking--miss "No thread %s in the review of the task %s"
                                           (plist-get link :thread) (harness-linking--task-name task)))
                  (harness-linking--thread-result task thread))))
-    (kind (harness-linking--miss "%S is no kind of link" kind))))
+    ('computer (let ((record (harness-linking--computer (plist-get link :computer))))
+                 (unless record
+                   (harness-linking--miss "No computer · %s · computer_list gives ids and names"
+                                          (plist-get link :computer)))
+                 (harness-linking--computer-result record)))
+    (kind (harness-linking--miss "Unknown link kind · %S" kind))))
 
 (cl-defun harness-linking-resolve (url &key session before)
   "Return what the harness link URL names, or why it names nothing.
@@ -394,11 +419,12 @@ names no session is in; BEFORE is the id of the node, or of the provider's
 call, that wrote it, for the handles that count the nodes before it.
 
 The answer is a plist.  When the link names something it has `:kind',
-one of \"session\", \"message\", \"call\", \"thread\" and \"task\"; `:url',
+one of \"session\", \"message\", \"call\", \"thread\", \"task\" and \"computer\"; `:url',
 the link written out in full, from ids alone; `:label', words for it; and
 what it is by its ids: `:session' and `:session-name', `:node' (the
 message's, or the call's node), `:call-id', `:tool', `:task' and
-`:task-name', `:thread' and `:status'.  When it names nothing the
+`:task-name', `:thread' and `:status', `:computer', `:computer-name',
+`:vnc' and `:vnc-socket'.  When it names nothing the
 answer is `:error' alone, a sentence."
   (let ((answer (catch 'harness-linking--miss
                   (condition-case err
@@ -453,10 +479,10 @@ it is."
 SESSION is the session whose text holds the link: a link that names no
 session is in it, and a handle such as `last' or `bash#2' counts its
 nodes.  The answer is a plist: `:kind', one of \"session\", \"message\",
-\"call\", \"thread\" and \"task\"; `:url', the link written out in full,
+\"call\", \"thread\", \"task\" and \"computer\"; `:url', the link written out in full,
 from ids alone; `:label', words for it; and its ids: `:session' and
 `:session-name', `:node' (the message's, or the call's node), `:call-id',
-`:task' and `:task-name', `:thread'.  A link that names nothing has
+`:task' and `:task-name', `:thread', `:computer' and `:computer-name'.  A link that names nothing has
 `:error' alone, a sentence for the user to read.  The UI follows a link
 with it, and a client that shows one asks it what the link is."
   (harness-linking-resolve url :session session))

@@ -166,7 +166,7 @@ class _ChatThreadCardState extends State<ChatThreadCard> {
                       _CardAction(
                         key: ValueKey('open-thread-${thread.id ?? 'new'}'),
                         icon: Icons.open_in_new_rounded,
-                        label: 'Open thread',
+                        label: 'Thread',
                         onTap: widget.onOpenThread!,
                       ),
                     if (widget.onReply != null)
@@ -234,7 +234,7 @@ class _ChatThreadCardState extends State<ChatThreadCard> {
                     visualDensity: VisualDensity.compact,
                   ),
                   child: Text(
-                    'Show more',
+                    'More',
                     style: HarnessText.caption(context).copyWith(
                       fontWeight: FontWeight.w700,
                       color: theme.colorScheme.primary,
@@ -253,7 +253,7 @@ class _ChatThreadCardState extends State<ChatThreadCard> {
                     visualDensity: VisualDensity.compact,
                   ),
                   child: Text(
-                    'Show less',
+                    'Less',
                     style: HarnessText.caption(context).copyWith(
                       fontWeight: FontWeight.w700,
                       color: theme.colorScheme.primary,
@@ -312,7 +312,7 @@ class _QuotePartState extends State<_QuotePart> {
     ].join(' · ');
     return Semantics(
       button: widget.onShow != null,
-      label: widget.onShow == null ? null : 'Show message',
+      label: widget.onShow == null ? null : 'Message',
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: widget.onShow,
@@ -359,7 +359,7 @@ class _QuotePartState extends State<_QuotePart> {
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
                     child: Text(
-                      _expanded ? 'Show less' : 'Show more',
+                      _expanded ? 'Less' : 'More',
                       style: HarnessText.caption(context).copyWith(
                         fontWeight: FontWeight.w700,
                         color: theme.colorScheme.primary,

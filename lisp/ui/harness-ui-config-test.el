@@ -278,7 +278,7 @@ state directory, as they would the user's."
     ;; The Budget is one for all sessions, set globally only.
     (should-not (harness-ui-config--setting-start "harness-budget"))
     (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-      (should (string-match-p "more settings have a global value only" text))
+      (should (string-match-p "more settings · global value · same in every project" text))
       (should-not (string-match-p "Advanced" text))
       (should-not (string-match-p "Log level: " text)))
     ;; And back, with the advanced settings still shown.
@@ -482,7 +482,7 @@ state directory, as they would the user's."
     (let (group)
       (cl-letf (((symbol-function 'customize-group) (lambda (g &rest _) (setq group g))))
         (goto-char (point-min))
-        (search-forward "Customize the interface")
+        (search-forward "Interface customization")
         (widget-button-press (match-beginning 0)))
       (should (eq 'harness-ui group)))
     ;; The menu lists the page's commands.
@@ -504,7 +504,7 @@ stopped drawing at that setting and never set its widgets up."
     (harness-ui-config-toggle-advanced)
     (should (string-match-p "Hours" (harness-ui-config-test-block "harness-ui-config-test-hours")))
     ;; The page goes on to its end.
-    (should (string-match-p "Customize the interface"
+    (should (string-match-p "Interface customization"
                             (buffer-substring-no-properties (point-min) (point-max))))))
 
 (ert-deftest harness-ui-config-entry-points ()

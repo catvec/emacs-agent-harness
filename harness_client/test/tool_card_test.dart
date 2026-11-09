@@ -144,7 +144,7 @@ void main() {
         findsOneWidget,
       );
       // It said one line and was given short texts: there is no more to read.
-      expect(find.text('Open full view'), findsNothing);
+      expect(find.text('Full view'), findsNothing);
     });
 
     testWidgets('cuts a long result to a screenful, and shows all of it', (
@@ -156,21 +156,21 @@ void main() {
         find.textContaining('00:17 +148: All tests passed!'),
         findsNothing,
       );
-      expect(find.text('Show all 35 lines'), findsOneWidget);
+      expect(find.text('All 35 lines'), findsOneWidget);
 
-      await _tap(tester, find.text('Show all 35 lines'));
+      await _tap(tester, find.text('All 35 lines'));
       expect(
         find.textContaining('00:17 +148: All tests passed!'),
         findsOneWidget,
       );
-      expect(find.text('Show less'), findsOneWidget);
+      expect(find.text('Less'), findsOneWidget);
 
-      await _tap(tester, find.text('Show less'));
+      await _tap(tester, find.text('Less'));
       expect(
         find.textContaining('00:17 +148: All tests passed!'),
         findsNothing,
       );
-      expect(find.text('Show all 35 lines'), findsOneWidget);
+      expect(find.text('All 35 lines'), findsOneWidget);
     });
 
     testWidgets('that failed says so, and why, before it is opened', (
@@ -294,7 +294,7 @@ void main() {
       );
       await _tap(tester, _header('Bash: cd harness_client'));
       expect(find.text('INPUT'), findsOneWidget);
-      expect(find.text('Show all 35 lines'), findsOneWidget);
+      expect(find.text('All 35 lines'), findsOneWidget);
     });
   });
 
@@ -304,7 +304,7 @@ void main() {
     ) async {
       await _pump(tester, _transcript(_call('call-test')));
       await _tap(tester, _header('Bash: cd harness_client'));
-      await _tap(tester, find.text('Open full view'));
+      await _tap(tester, find.text('Full view'));
       // The page says what the call was, in full, and what it said.
       expect(find.text('Command'), findsOneWidget);
       expect(find.text('Done'), findsOneWidget);
@@ -319,7 +319,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.textContaining('Resolving dependencies...'), findsOneWidget);
-      expect(find.text('Show all 35 lines'), findsNothing);
+      expect(find.text('All 35 lines'), findsNothing);
     });
 
     testWidgets('is built a screenful at a time on that page', (tester) async {
@@ -343,8 +343,8 @@ void main() {
       await _pump(tester, transcript);
       await _tap(tester, _header('Bash: make'));
       // Cut in the card, with the number of lines said.
-      expect(find.text('Show all 1000 lines'), findsOneWidget);
-      await _tap(tester, find.text('Open full view'));
+      expect(find.text('All 1000 lines'), findsOneWidget);
+      await _tap(tester, find.text('Full view'));
       expect(find.textContaining('line 1 of the log'), findsOneWidget);
       // A thousand lines are not all built to open the page.
       expect(find.textContaining('line 1000 of the log'), findsNothing);
@@ -425,17 +425,17 @@ void main() {
       await _tap(tester, _header('Hand in the finished work'));
       final quoted = find.text('The whole client suite passes: 148 tests');
       expect(quoted, findsOneWidget);
-      expect(find.text('Show all 35 lines'), findsNothing);
+      expect(find.text('All 35 lines'), findsNothing);
       await _tap(tester, quoted);
-      expect(find.text('Show all 35 lines'), findsOneWidget);
+      expect(find.text('All 35 lines'), findsOneWidget);
       expect(find.textContaining('Resolving dependencies...'), findsOneWidget);
       await _tap(tester, quoted);
-      expect(find.text('Show all 35 lines'), findsNothing);
+      expect(find.text('All 35 lines'), findsNothing);
     });
 
     for (final (flag, words) in [
-      ('cannot_continue', 'This task cannot continue: it waits for you'),
-      ('no_merge', 'Nothing to merge: verifying it completes the task'),
+      ('cannot_continue', 'Cannot continue · your input'),
+      ('no_merge', 'Nothing to merge · verification completes'),
     ]) {
       testWidgets('says so when it asked for $flag', (tester) async {
         final transcript = _transcript([
@@ -486,7 +486,7 @@ void main() {
       await _pump(tester, transcript);
       expect(find.text('Failed'), findsOneWidget);
       await _tap(tester, _header('Hand in: why'));
-      // No report was handed in: what was asked for, and why it was refused.
+      // No report: what was asked for, and why it was refused.
       expect(find.text('ERROR'), findsOneWidget);
       expect(find.textContaining('hand_in needs evidence'), findsWidgets);
       expect(find.text('PROBLEM'), findsNothing);

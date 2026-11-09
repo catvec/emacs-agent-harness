@@ -41,7 +41,7 @@ class ConnectionBanner extends StatelessWidget {
         final banner = Semantics(
           container: true,
           liveRegion: true,
-          label: 'Connection lost. Reconnecting.',
+          label: 'Connection lost · reconnecting',
           child: HarnessNotice(
             key: const Key('connection-banner'),
             leading: HarnessActivity(radius: 8, color: color),

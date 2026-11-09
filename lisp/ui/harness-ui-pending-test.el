@@ -174,10 +174,10 @@ goes over ACP when no client holds the request."
       (should (equal "c1" (plist-get (harness-ui-pending-record sid "p1") :call-id)))
       ;; The one line views say, and the status a list column would show.
       (let ((session (list :id sid :pending (list (list :id "q1" :kind "question")))))
-        (should (equal "has a question for you" (harness-ui-pending-summary session)))
+        (should (equal "question" (harness-ui-pending-summary session)))
         (should (equal "question" (harness-ui-pending-status session))))
       (let ((session (list :id "not-in-the-store" :pending (list (list :id "p1" :kind "permission")))))
-        (should (equal "needs your permission" (harness-ui-pending-summary session)))
+        (should (equal "permission" (harness-ui-pending-summary session)))
         (should (equal "permission" (harness-ui-pending-status session))))
       (should-not (harness-ui-pending-summary (list :id "not-in-the-store")))
       ;; Answering takes the request off the panels and reaches the session.
@@ -529,7 +529,7 @@ answers the tool call, [Answer…] pops the question out."
         (goto-char (point-min))
         (search-forward "[Allow")
         (should (equal runner (tabulated-list-get-id)))
-        (should (string-match-p "needs your permission · Bash: ls -la"
+        (should (string-match-p "permission · Bash: ls -la"
                                 (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
         (harness-ui-action-push))
       (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the permission answered from the list")
@@ -1269,7 +1269,7 @@ picked."
           ;; two steps narrower is the very command line.
           (let ((call (funcall ask "t_run" '(:command "gcloud compute instances list --project p"))))
             (harness-ui-pending-popout sid)
-            (dolist (line '("Lasting answers (s, a, N) cover:"
+            (dolist (line '("Lasting answers (s, a, N)"
                             "every t_run call whose command is exactly \"gcloud compute instances list --project p\""
                             "every gcloud compute instances call (any arguments)"
                             "every gcloud call (any arguments)"
@@ -1378,9 +1378,9 @@ offset it had, whatever the popout drew again when a request left."
         (should (= (point) (+ harness-compose-start 2)))
         ;; Only the question is left: it has no y, nor a fourth option.
         (let ((err (should-error (harness-ui-pending-test-panel-key "y") :type 'user-error)))
-          (should (equal "The panel above the box does not have y" (cadr err))))
+          (should (equal "Panel · no y" (cadr err))))
         (let ((err (should-error (harness-ui-pending-test-panel-key "4") :type 'user-error)))
-          (should (string-match-p "\\`4 has nothing to act on from the box" (cadr err))))
+          (should (string-match-p "\\`No 4 at point" (cadr err))))
         (should (= 2 (length (funcall answers))))
         ;; Its second option answers it.
         (execute-kbd-macro (kbd "C-c . 2"))
@@ -1888,7 +1888,7 @@ deny; Allow and Deny, which cover the one call, are above it."
         (should (string-search
                  (concat "   command: gcloud compute instances list --project p\n"
                          "   [Allow] y  [Deny] n  \n"
-                         "   Lasting answers (s, a, N) cover:\n"
+                         "   Lasting answers (s, a, N)\n"
                          (harness-ui-pending-test-step-line nil "every bash call with this exact command") "\n"
                          (harness-ui-pending-test-step-line nil "every gcloud compute instances call (any arguments)") "\n"
                          (harness-ui-pending-test-step-line t "every gcloud call (any arguments)") "\n"
@@ -1971,7 +1971,7 @@ different request will record."
                                       :ladder '((:id "tool" :label "every spawn_agent call (any arguments)"))
                                       :cover "tool" :options harness-ui-pending-test-options))))
       (let ((text (harness-ui-pending-test-rendered sid "spawn")))
-        (should (string-search "   Lasting answers (s, a, N) cover: every spawn_agent call (any arguments)\n" text))
+        (should (string-search "   Lasting answers (s, a, N) every spawn_agent call (any arguments)\n" text))
         (should-not (string-search "[Narrower]" text))
         (should-not (string-search "[Wider]" text)))
       ;; Its tooltips and echo say it too; nothing to pick, so < and > type.
@@ -1992,7 +1992,7 @@ and no facts line either."
                  (harness-ui-pending-test-ladder-item "none" '("allow-once" "deny-once"))))
       (let ((some (harness-ui-pending-test-rendered sid "some")))
         (should (string-search (concat "   [Allow] y  [Deny] n  \n"
-                                       "   Lasting answers (s) cover:\n")
+                                       "   Lasting answers (s)\n")
                                some))
         (should (string-search "   [Narrower] <  [Wider] >\n   [Allow for session] s  \n" some)))
       (with-temp-buffer
@@ -2047,7 +2047,7 @@ every answer holds for, stands over the one line of all five."
         (should-not (string-search "[Allow] y" text))
         (should-not (string-search "[Deny] n" text))
         (should (string-search (concat "   command: gcloud compute instances list --project p\n"
-                                       "   Lasting answers (s, a, N) cover:\n")
+                                       "   Lasting answers (s, a, N)\n")
                                text))
         (should (string-search "   [Allow for session] s  [Always allow] a  [Always deny] N  \n" text)))
       ;; A pattern is every answer's: the block, then all five on one line.
@@ -2250,7 +2250,7 @@ so the keys go on working; the lasting answers hold for the new pick."
       (with-current-buffer buf
         (should (eq 'harness-ui-pending-cover-narrower (key-binding (kbd "<"))))
         (should (eq 'harness-ui-pending-cover-wider (key-binding (kbd ">"))))
-        (should (equal "Lasting answers now cover every bash call (any command)" (funcall press ">")))
+        (should (equal "Lasting answers · every bash call (any command)" (funcall press ">")))
         (should (equal "tool" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
         ;; Point went back to the picked line, which is on the panel.
         (should (equal "ladder" (get-text-property (point) 'harness-ui-pending-selected)))
@@ -2258,10 +2258,10 @@ so the keys go on working; the lasting answers hold for the new pick."
         (should (equal "Already the widest cover: every bash call (any command)" (funcall press ">")))
         (should (equal "tool" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
         (should (string-search (harness-ui-pending-test-step-line t "every bash call (any command)") (buffer-string)))
-        (should (equal "Lasting answers now cover every gcloud call (any arguments)" (funcall press "<")))
-        (should (equal "Lasting answers now cover every gcloud compute instances call (any arguments)"
+        (should (equal "Lasting answers · every gcloud call (any arguments)" (funcall press "<")))
+        (should (equal "Lasting answers · every gcloud compute instances call (any arguments)"
                        (funcall press "<")))
-        (should (equal "Lasting answers now cover every bash call with this exact command" (funcall press "<")))
+        (should (equal "Lasting answers · every bash call with this exact command" (funcall press "<")))
         (should (equal "Already the narrowest cover: every bash call with this exact command" (funcall press "<")))
         (should (equal "exact" (harness-ui-pending--cover-id (harness-ui-pending-record sid "ladder"))))
         ;; The end a pick cannot go on to has its button dim.
@@ -2657,14 +2657,14 @@ nothing is wider; < goes back, the pattern the answer carries following."
                     (car shown))))
       (harness-test-without-connections
         (with-current-buffer buf
-          (should (equal (format "Answers now hold for %s/**" host) (funcall press ">")))
+          (should (equal (format "Answers · %s/**" host) (funcall press ">")))
           (should (equal (concat host "/**") (plist-get (harness-ui-pending-record sid "ssh-jail") :edited-pattern)))
           (should (equal (format "Already the widest pattern: %s/**" host) (funcall press ">")))
           (should (equal (concat host "/**") (harness-ui-pending-test-picked sid "ssh-jail")))
-          (should (equal (format "Answers now hold for %s~/**" host) (funcall press "<")))
+          (should (equal (format "Answers · %s~/**" host) (funcall press "<")))
           ;; Back on the request's own pattern: no edit.
           (should-not (plist-get (harness-ui-pending-record sid "ssh-jail") :edited-pattern))
-          (should (equal (format "Answers now hold for %s~/" host) (funcall press "<")))
+          (should (equal (format "Answers · %s~/" host) (funcall press "<")))
           (should (equal (format "Already the narrowest pattern: %s~/" host) (funcall press "<")))
           (funcall press ">")
           (funcall press ">")
@@ -2753,7 +2753,7 @@ tooltips say what the pick covers, and the answer carries the pick."
         (let ((text (harness-ui-pending-test-rendered sid "ssh-tool")))
           (should (string-search (format "   kind: exec   runs in: %s~/\n" host) text))
           (should (string-search
-                   (concat "   Lasting answers (s, a, N) cover:\n"
+                   (concat "   Lasting answers (s, a, N)\n"
                            (harness-ui-pending-test-step-line nil "every ssh call whose host is exactly \"admin@laptop-0:4358\" and command is exactly \"journalctl -u k3s | tail -50\"") "\n"
                            (harness-ui-pending-test-step-line t "every journalctl and tail call on admin@laptop-0:4358 (any arguments)") "\n"
                            (harness-ui-pending-test-step-line nil "every ssh call on admin@laptop-0:4358 (any command)") "\n"
@@ -2831,9 +2831,9 @@ sits under the call and why it is asked, above the answers."
           (progn
             (harness-ui-pending-sync sid (list (harness-ui-pending-test-summary-item "p1" '(:summarizing t))))
             (let ((text (harness-ui-pending-test-rendered sid "p1")))
-              (should (string-search "   Model summary: summarizing…\n" text))
+              (should (string-search "   Model summary · summarizing…\n" text))
               (should (< (string-search "The permission judge would deny" text)
-                         (string-search "Model summary:" text)
+                         (string-search "Model summary ·" text)
                          (string-search "[Allow]" text)))
               ;; Dim, like what is not known yet.
               (with-temp-buffer
@@ -2850,10 +2850,10 @@ sits under the call and why it is asked, above the answers."
                               :summary-model "claude:claude-haiku-4-5" :summarizing nil)))
             (should (equal (list sid) harness-ui-pending-test-changed))
             (let ((text (harness-ui-pending-test-rendered sid "p1")))
-              (should (string-search "   Model summary: Deletes the build directory, then rebuilds the project.\n" text))
+              (should (string-search "   Model summary · Deletes the build directory, then rebuilds the project.\n" text))
               (should-not (string-search "summarizing" text))
               (should (< (string-search "The permission judge would deny" text)
-                         (string-search "Model summary:" text)
+                         (string-search "Model summary ·" text)
                          (string-search "[Allow]" text))))
             (with-temp-buffer
               (let ((harness-ui-session-id sid))
@@ -2863,16 +2863,16 @@ sits under the call and why it is asked, above the answers."
               (should (harness-ui-pending-test-face-p (1- (point)) 'harness-ui-pending-summary-face))
               (let ((help (get-text-property (1- (point)) 'help-echo)))
                 (should (string-search "the model claude:claude-haiku-4-5" help))
-                (should (string-search "can be wrong" help))
+                (should (string-search "may be wrong" help))
                 (should (string-search "decides nothing" help)))
               (goto-char (point-min))
-              (search-forward "Model summary:")
+              (search-forward "Model summary ·")
               (should (harness-ui-pending-test-face-p (1- (point)) 'harness-dim-face)))
             ;; A request the harness made with the summary in it, the same call asked about before.
             (harness-ui-pending-sync
              sid (list (harness-ui-pending-test-summary-item
                         "p2" '(:summary "Runs make." :summary-model "claude:haiku"))))
-            (should (string-search "   Model summary: Runs make.\n" (harness-ui-pending-test-rendered sid "p2"))))
+            (should (string-search "   Model summary · Runs make.\n" (harness-ui-pending-test-rendered sid "p2"))))
         (remove-hook 'harness-ui-pending-changed-hook #'harness-ui-pending-test-hear-changes)))))
 
 (ert-deftest harness-ui-pending-panel-without-a-summary-is-as-it-was ()
@@ -3009,7 +3009,7 @@ does: both are drawn from the one store."
       (let ((buf (harness-ui-popout-buffer key)))
         (should (buffer-live-p buf))
         (with-current-buffer buf
-          (should (string-search "Model summary: summarizing…" (buffer-string)))
+          (should (string-search "Model summary · summarizing…" (buffer-string)))
           (should-not (string-search "Deletes the build" (buffer-string))))
         (harness-ui-pending--on-event
          "session/pending-updated"
@@ -3017,7 +3017,7 @@ does: both are drawn from the one store."
         (harness-test-wait (lambda () (with-current-buffer buf (string-search "Deletes the build" (buffer-string))))
                            5 "the popout to show the summary")
         (with-current-buffer buf
-          (should (string-search "Model summary: Deletes the build directory." (buffer-string)))
+          (should (string-search "Model summary · Deletes the build directory." (buffer-string)))
           (should-not (string-search "summarizing" (buffer-string))))))))
 
 (provide 'harness-ui-pending-test)

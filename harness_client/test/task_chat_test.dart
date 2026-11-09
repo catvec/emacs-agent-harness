@@ -62,7 +62,7 @@ void main() {
     test('says what to do, in a line', () {
       final line = TaskStateLine.of(task);
       expect(line.heading, 'Review');
-      expect(line.message, contains('type what should change'));
+      expect(line.message, contains('Verification or feedback'));
     });
 
     test('has no conversation to open, no message to write and no answer', () {
@@ -89,7 +89,7 @@ void main() {
         TaskAction.delete,
       ]);
       expect(TaskStateLine.of(task).heading, 'Backlog');
-      expect(TaskStateLine.of(task).message, contains('A message here starts'));
+      expect(TaskStateLine.of(task).message, contains('message starts it'));
     });
 
     test('being written up can be stopped, and has no button', () {
@@ -102,7 +102,7 @@ void main() {
         TaskAction.stop,
         TaskAction.delete,
       ]);
-      expect(TaskStateLine.of(task).message, contains('writing it up'));
+      expect(TaskStateLine.of(task).message, contains('Write-up running'));
     });
 
     test('waiting for a slot is started at once, or paused', () {
@@ -116,7 +116,7 @@ void main() {
         TaskAction.drop,
         TaskAction.delete,
       ]);
-      expect(TaskStateLine.of(task).message, 'Waiting for a free slot.');
+      expect(TaskStateLine.of(task).message, 'Queue · waiting for a slot');
     });
 
     test('that is paused is resumed first, and started second', () {
@@ -124,23 +124,23 @@ void main() {
       final bar = _bar(task);
       expect(bar.primary, TaskAction.resume);
       expect(bar.buttons, [TaskAction.start]);
-      expect(TaskStateLine.of(task).message, contains('until you resume'));
+      expect(TaskStateLine.of(task).message, contains('held until resume'));
     });
 
     test('that waits for quota or a budget says which', () {
       expect(
         TaskStateLine.of(_task('pending', hold: 'quota')).message,
-        contains('quota'),
+        contains('Quota'),
       );
       expect(
         TaskStateLine.of(_task('pending', hold: 'budget')).message,
-        contains('budget'),
+        contains('Budget'),
       );
     });
 
     test('that was put back in the queue carries on where it stopped', () {
       final task = _task('pending', returned: true);
-      expect(TaskStateLine.of(task).message, contains('carries on'));
+      expect(TaskStateLine.of(task).message, contains('carries on from its stop'));
     });
   });
 
@@ -171,21 +171,21 @@ void main() {
         TaskAction.stop,
         TaskAction.delete,
       ]);
-      expect(TaskStateLine.of(task).message, 'In the merge queue.');
+      expect(TaskStateLine.of(task).message, 'Merge queue');
     });
 
     test('whose merge has conflicts names the files', () {
       final line = TaskStateLine.of(
         _task('merging', conflicts: const ['a.dart', 'b.dart']),
       );
-      expect(line.message, 'Conflicts in a.dart, b.dart.');
+      expect(line.message, 'Merge conflicts · a.dart, b.dart');
     });
 
     test('with many conflicts names three and counts the rest', () {
       final line = TaskStateLine.of(
         _task('merging', conflicts: const ['a', 'b', 'c', 'd', 'e']),
       );
-      expect(line.message, 'Conflicts in a, b, c and 2 more.');
+      expect(line.message, 'Merge conflicts · a, b, c · 2 more');
     });
   });
 
@@ -196,10 +196,10 @@ void main() {
       expect(bar.primary, isNull);
       expect(bar.buttons, isEmpty);
       expect(bar.menu, contains(TaskAction.stop));
-      expect(TaskStateLine.of(task).heading, 'Needs input');
+      expect(TaskStateLine.of(task).heading, 'Your input');
       expect(
         TaskStateLine.of(task).message,
-        contains('answer in this conversation'),
+        contains('Your answer · this conversation'),
       );
     });
 
@@ -227,7 +227,7 @@ void main() {
       final bar = _bar(task);
       expect(bar.primary, TaskAction.retryMerge);
       expect(TaskAction.retryMerge.labelFor(task), 'Retry merge');
-      expect(TaskStateLine.of(task).message, contains('conflicts in a'));
+      expect(TaskStateLine.of(task).message, contains('Merge failure · conflicts in a'));
     });
 
     test('that cannot continue is not retried: it says why, here', () {
@@ -235,7 +235,7 @@ void main() {
       final bar = _bar(task);
       expect(bar.primary, isNull);
       expect(bar.all, isNot(contains(TaskAction.retry)));
-      expect(TaskStateLine.of(task).message, contains('Reply here'));
+      expect(TaskStateLine.of(task).message, contains('reply or completion'));
     });
 
     test('whose write-up found it a duplicate may be started all the same', () {
@@ -253,7 +253,7 @@ void main() {
 
     test('that stopped for a reason nobody named still says it', () {
       final task = _task('needs-input', outcome: 'gone');
-      expect(TaskStateLine.of(task).message, 'It stopped (gone).');
+      expect(TaskStateLine.of(task).message, 'Stopped · gone');
     });
   });
 

@@ -242,32 +242,32 @@ class PlanDetails extends StatelessWidget {
       children: [
         if (quota.limitStatus == 'rejected')
           _Notice(
-            "The plan's limit is reached: calls fail until it resets.",
+            "Plan limit · calls fail until reset",
             theme.colorScheme.error,
             Icons.block_rounded,
           )
         else if (quota.limitStatus == 'allowed_warning')
           const _Notice(
-            "Close to the plan's limit.",
+            "Near plan limit",
             HarnessColors.amber,
             Icons.warning_amber_rounded,
           ),
         if (quota.usingExtra)
           const _Notice(
-            'Calls are drawing on extra usage, billed at API prices.',
+            'Extra usage · API prices',
             HarnessColors.amber,
             Icons.add_card_rounded,
           ),
         if (quota.quotaNote != null || quota.informational)
           _Notice(
-            quota.quotaNote ?? 'Codex CLI quota is informational; this app may have separate limits.',
+            quota.quotaNote ?? 'Codex CLI quota · informational · separate limits possible',
             HarnessColors.amber,
             Icons.info_outline_rounded,
           ),
         if (quota.windows.isEmpty && quota.quotaNote == null)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Text('No quota reported yet.', style: quiet),
+            child: Text('No quota reported', style: quiet),
           )
         else
           for (final window in quota.windows)
@@ -382,8 +382,7 @@ class PlanCard extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: 6, bottom: 8),
             child: Text(
-              'Calls the plan covers are not billed; their value at API '
-              'prices shows as covered by the plan.',
+              'Plan-covered calls · not billed · API value covered',
               style: quiet,
             ),
           ),
@@ -409,9 +408,8 @@ class PlanCard extends StatelessWidget {
                   ),
                   TextSpan(
                     text:
-                        ' bills per token'
-                        '${quota.auth == null ? '' : ' (${quota.auth})'}: '
-                        'what it cost is what you pay.',
+                        ' · per token'
+                        '${quota.auth == null ? '' : ' (${quota.auth})'} · cost only',
                   ),
                 ],
               ),
@@ -428,7 +426,7 @@ class PlanCard extends StatelessWidget {
               text: label,
               style: const TextStyle(fontWeight: FontWeight.w700),
             ),
-            const TextSpan(text: ' has not said how it bills yet.'),
+            const TextSpan(text: ' billing · not reported'),
           ],
         ),
         style: quiet,
@@ -473,7 +471,7 @@ class _PlanSheet extends StatelessWidget {
     final quota = status.quota;
     final title = status.planned
         ? planTitleOf(quota)
-        : (status.billing == 'api' ? 'Billed per token' : 'Cost');
+        : (status.billing == 'api' ? 'Per-token billing' : 'Cost');
     return SingleChildScrollView(
       key: const Key('plan-sheet'),
       padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),

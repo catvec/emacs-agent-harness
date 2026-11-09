@@ -157,7 +157,7 @@ class _HarnessPictureState extends State<HarnessPicture> {
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return _PictureFailure(
-            title: 'The picture could not be loaded',
+            title: 'Picture load failure',
             reason: pictureFailure(snapshot.error!),
             onRetry: () => setState(_ask),
           );
@@ -307,7 +307,7 @@ class _PictureNotDrawn extends StatelessWidget {
       alignment: Alignment.center,
       color: theme.colorScheme.surfaceContainerHigh,
       child: Text(
-        'The picture could not be drawn.',
+        'Picture draw failure',
         style: HarnessText.caption(context),
       ),
     );
@@ -458,7 +458,7 @@ class _PictureViewerScreenState extends State<PictureViewerScreen> {
             filterQuality: FilterQuality.medium,
             errorBuilder: (context, _, _) => const Center(
               child: Text(
-                'The picture could not be drawn.',
+                'Picture draw failure',
                 style: TextStyle(color: Colors.white70),
               ),
             ),

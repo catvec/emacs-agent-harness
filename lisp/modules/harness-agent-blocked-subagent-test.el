@@ -123,7 +123,7 @@ shown, with a link to answer, in its parent's chat."
                (lines (split-string text "\n")))
           (should (string-match-p "↳ needs-access" text))
           (should (string-match-p "↳ needs-access .*blocked" text))
-          (should (cl-some (lambda (line) (string-match-p "\\[Allow\\] \\[Deny\\]  needs your permission · .*Access .*shared-types" line))
+          (should (cl-some (lambda (line) (string-match-p "\\[Allow\\] \\[Deny\\]  permission · .*Access .*shared-types" line))
                            lines))
           ;; Under its parent: the parent's row comes first.
           (should (< (string-match "Lead" text) (string-match "↳ needs-access" text)))))

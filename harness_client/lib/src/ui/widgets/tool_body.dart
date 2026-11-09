@@ -325,10 +325,10 @@ class _ToolTextState extends State<ToolText> {
               alignment: AlignmentDirectional.centerStart,
               child: HarnessTextButton(
                 label: _all
-                    ? 'Show less'
+                    ? 'Less'
                     : lines.length > widget.collapsedLines
-                    ? 'Show all ${linesLabel(lines.length)}'
-                    : 'Show all ${_size(text.length)}',
+                    ? 'All ${linesLabel(lines.length)}'
+                    : 'All ${_size(text.length)}',
                 icon: _all
                     ? Icons.unfold_less_rounded
                     : Icons.unfold_more_rounded,
@@ -620,7 +620,7 @@ class HandInReportView extends StatelessWidget {
           const Padding(
             padding: EdgeInsets.only(bottom: 8),
             child: HarnessStatusLabel(
-              label: 'No report was handed in',
+              label: 'Report missing',
               color: HarnessColors.amber,
               icon: Icons.error_outline_rounded,
             ),
@@ -630,8 +630,8 @@ class HandInReportView extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: 8),
             child: HarnessStatusLabel(
               label: report.cannotContinue
-                  ? 'This task cannot continue: it waits for you'
-                  : 'Nothing to merge: verifying it completes the task',
+                  ? 'Cannot continue · your input'
+                  : 'Nothing to merge · verification completes',
               color: report.cannotContinue
                   ? HarnessColors.amber
                   : theme.colorScheme.onSurfaceVariant,
@@ -697,7 +697,7 @@ class HandInReportView extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(bottom: 4),
               child: Text(
-                'The session wrote none.',
+                'None written',
                 style: HarnessText.caption(context)
                     .copyWith(fontStyle: FontStyle.italic),
               ),

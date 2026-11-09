@@ -243,7 +243,7 @@ Future<void> main() async {
           await settle(6);
           await tester.tap(find.text('Stop'));
           await settle(6);
-          expect(find.text('Stop this task?'), findsOneWidget);
+          expect(find.text('Task stop'), findsOneWidget);
         case _Scene.paused:
           await open('Cache the model catalogue');
           await tester.tap(find.text('Pause'));
@@ -258,7 +258,7 @@ Future<void> main() async {
           await settle(4);
           await tester.tap(find.text('Pause all'));
           await settle(6);
-          expect(find.text('Paused 3 tasks.'), findsOneWidget);
+          expect(find.text('Paused · 3 tasks'), findsOneWidget);
         case _Scene.feedback:
           await open('Review the emulator screenshots');
           await tester.tap(find.text('Send back'));

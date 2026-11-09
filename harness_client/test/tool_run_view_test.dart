@@ -380,7 +380,7 @@ void main() {
         ..call('c4', 'bash', title: 'Bash: rm', error: true, denied: true);
       await _show(tester, log);
       expect(find.text('4 tool calls'), findsOneWidget);
-      expect(find.text('2 failed'), findsOneWidget);
+      expect(find.text('2 failure'), findsOneWidget);
       expect(find.text('1 denied'), findsOneWidget);
       // The check that says all went well is not there.
       expect(

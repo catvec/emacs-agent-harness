@@ -4780,7 +4780,7 @@ wire too.  The effort is `harness-btw-thinking' as ever."
 (ert-deftest harness-tasks-review-user-message-sends-it-back ()
   "A message the user sends the session of a task in review sends it back.
 That is as `task/reject' does, wherever the user wrote it: the
-session's chat, without [Send back] (`agent/prompt'), or the board's
+session's chat, without [Return] (`agent/prompt'), or the board's
 reply (`task/prompt').  The task is active at once, the round of
 feedback is kept and the agent gets the message opened by the reject
 text, as the user's.  The harness's own messages do not count, and
@@ -5393,7 +5393,7 @@ The merge decides what happens to the task, whatever is outstanding."
 The task is active in the working phase, with the outcome `conversing';
 no report is made for it and it does not go to review.  Between turns
 its session says `blocked', as one waiting on a request does, and the
-board shows it in Requires your input; its next turn is the same, and
+board shows it in Your input; its next turn is the same, and
 `hand_in' is what puts it in review, where its session is idle again."
   (harness-tasks-test-with
     (harness-test-load-module 'tools-handin)
@@ -5413,7 +5413,7 @@ board shows it in Requires your input; its next turn is the same, and
           (should (equal "working" (plist-get task :phase)))
           ;; Its turn is over: it waits for the user's reply, and its
           ;; session says so as one waiting on a request does.  The board
-          ;; shows it in Requires your input, the session list in blocked.
+          ;; shows it in Your input, the session list in blocked.
           (let ((session (harness-call 'session/get sid)))
             (should (eq 'blocked (plist-get session :status)))
             (should (harness-session-waiting-on-user-p session))

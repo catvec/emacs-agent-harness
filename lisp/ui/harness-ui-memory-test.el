@@ -179,7 +179,7 @@ under User -- with the buttons and tooltips it offers."
       (should (harness-ui-memory-test--line-with buffer "Preference · "))
       ;; Buttons, with their tooltips.
       (should (equal "New memory" (harness-ui-memory-test--button "Add")))
-      (should (equal "Search memories" (harness-ui-memory-test--button "Search")))
+      (should (equal "Memory search" (harness-ui-memory-test--button "Search")))
       (should (equal "Merge duplicate project memories"
                      (harness-ui-memory-test--button "Consolidate")))
       (should (equal "Load the memories again"

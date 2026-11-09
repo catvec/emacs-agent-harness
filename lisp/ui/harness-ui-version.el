@@ -83,7 +83,7 @@
   "Headings of the version page." :group 'harness-ui)
 
 (harness-ui-define-icon harness-icon-update "update" "↑" "update"
-                        "Not the latest: the harness has a newer version to run.")
+                        "Newer version available")
 
 (defcustom harness-ui-version-nag-places '(mode-line chat-header board-header)
   "Where a small icon nags while the harness is not the latest.
@@ -1003,9 +1003,9 @@ works its text out again."
 (put 'harness-ui-version-mode 'harness-menu-group
      '("Version"
        ["Version and update"
-        (". g" "Check again" harness-ui-version-refresh)
-        (". r" "Reload harness" harness-reload)
-        (". u" "Update harness" harness-ui-version-update)]))
+        (". g" "Check" harness-ui-version-refresh)
+        (". r" "Harness reload" harness-reload)
+        (". u" "Harness update" harness-ui-version-update)]))
 
 ;;;###autoload
 (defun harness-version ()

@@ -8,7 +8,7 @@ Directory jail, directory requests, permission modes, auto judge, user prompts w
 - **Source:** [lisp/modules/harness-perms.el](../../lisp/modules/harness-perms.el)
 - **Loaded:** by default
 - **Requires:** [config](config.md), [tools](tools.md)
-- **Required by:** [access](access.md), [secret-sandbox](secret-sandbox.md)
+- **Required by:** [access](access.md), [computers](computers.md), [secret-sandbox](secret-sandbox.md)
 - **Brings along:** [small](small.md) (its file requires it)
 
 ## About

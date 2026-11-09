@@ -214,7 +214,7 @@ class _DemoScreenState extends State<DemoScreen> {
     } catch (_) {
       if (!mounted) return;
       setState(() => _changingControl = false);
-      _snack('Control failed');
+      _snack('Control failure');
     }
   }
 
@@ -229,7 +229,7 @@ class _DemoScreenState extends State<DemoScreen> {
     } catch (_) {
       if (!mounted) return;
       setState(() => _stopping = false);
-      _snack('Stop failed');
+      _snack('Stop failure');
       return;
     }
     if (mounted) Navigator.of(context).maybePop();
@@ -341,7 +341,7 @@ class _DemoScreenState extends State<DemoScreen> {
       DemoState.stopped || DemoState.missing => 'Demo stopped',
       DemoState.lost => 'Demo lost',
       DemoState.notReady => 'Not ready',
-      DemoState.denied || DemoState.error => 'Demo failed',
+      DemoState.denied || DemoState.error => 'Demo failure',
       _ => 'Demo stopped',
     };
   }
@@ -683,7 +683,7 @@ class _DemoScreenState extends State<DemoScreen> {
   String _presenterStatus(VoiceController voice) {
     if (!voice.configured) return 'Voice not set up';
     final phase = voice.displayPhase;
-    if (phase == VoicePhase.failed) return 'Voice failed';
+    if (phase == VoicePhase.failed) return 'Voice failure';
     if (voice.muted || phase == VoicePhase.muted) return 'Muted';
     if (phase == VoicePhase.interrupted) return 'Interrupted';
     if (phase == VoicePhase.thinking || phase == VoicePhase.transcribing) {

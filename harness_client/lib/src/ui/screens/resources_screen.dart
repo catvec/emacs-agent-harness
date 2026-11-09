@@ -412,7 +412,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       ],
     );
     final action = _action(
-      'Clear all…',
+      'Deletion…',
       enabled: _controller.canManageBrowser,
       reason: _controller.preview ? 'Preview' : 'Computer off',
       onPressed: _confirmClearProfile,
@@ -581,7 +581,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             ),
           ),
           _action(
-            'Forget',
+            'Removal',
             enabled: _controller.canManageBrowser,
             reason: _controller.preview ? 'Preview' : 'Computer off',
             onPressed: () => _confirmForget(login),
@@ -622,7 +622,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         ),
       _disabledRow(
         'Add card…',
-        'Needs wallet provider',
+        'No wallet provider',
         Icons.add_card_rounded,
       ),
       const SizedBox(height: HarnessSpace.lg),
@@ -656,7 +656,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       if (!_controller.canManageWallet) ...[
         const SizedBox(height: 4),
         Text(
-          _controller.preview ? 'Preview · read-only' : 'Needs wallet provider',
+          _controller.preview ? 'Preview · read-only' : 'No wallet provider',
           style: HarnessText.caption(context),
         ),
       ],
@@ -1104,7 +1104,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
               ],
               const SizedBox(height: HarnessSpace.md),
               Text(
-                'A locked command reads the value from a file; its output and the value never reach the agent.',
+                'Locked command · value from a file · output and value not sent',
                 style: HarnessText.caption(context),
               ),
             ],
@@ -1172,7 +1172,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           ),
           const SizedBox(width: 4),
           _action(
-            'Revoke',
+            'Revocation',
             enabled: revocable,
             reason: _controller.preview ? 'Preview' : 'Later stage',
             onPressed: () => _confirmRevoke(grant),
@@ -1208,9 +1208,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     final browser = _controller.resources?.browser;
     final sites = browser?.sites.length ?? 0;
     final ok = await _confirm(
-      'Clear all browser data',
-      'Profile · ${browser?.profile.label ?? 'default'} · $sites sites · cannot be undone',
-      'Clear all',
+      'Browser data deletion',
+      'Profile · ${browser?.profile.label ?? 'default'} · $sites sites · irreversible',
+      'Deletion',
     );
     if (!ok || !mounted) return;
     await _controller.clearProfile();
@@ -1219,9 +1219,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
 
   Future<void> _confirmForget(BrowserLogin login) async {
     final ok = await _confirm(
-      'Forget login',
+      'Login removal',
       'Site · ${login.host} · session ends · cookies cleared',
-      'Forget',
+      'Removal',
     );
     if (!ok || !mounted) return;
     await _controller.forgetLogin(login.id);
@@ -1230,9 +1230,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
 
   Future<void> _confirmRevoke(AccessGrant grant) async {
     final ok = await _confirm(
-      'Revoke authorization',
+      'Authorization revocation',
       '${grant.label} · agent access ends',
-      'Revoke',
+      'Revocation',
     );
     if (!ok || !mounted) return;
     final id = _authorizationId(grant);
@@ -1373,14 +1373,14 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                   onPressed: _controller.canManageBrowser
                       ? () => _clearSiteAll(site, setSheet)
                       : null,
-                  child: const Text('Clear site data'),
+                  child: const Text('Site data deletion'),
                 ),
                 if (login != null)
                   OutlinedButton(
                     onPressed: _controller.canManageBrowser
                         ? () => _forgetLogin(login, setSheet)
                         : null,
-                    child: const Text('Forget login'),
+                    child: const Text('Login removal'),
                   ),
               ],
             ),
@@ -1414,7 +1414,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           Text(value, style: HarnessText.meta(context)),
           const SizedBox(width: 8),
           _action(
-            'Clear',
+            'Deletion',
             enabled: _controller.canManageBrowser,
             reason: _controller.preview ? 'Preview' : 'Later stage',
             onPressed: clear,
@@ -1430,13 +1430,14 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     StateSetter setSheet,
   ) async {
     final ok = await _confirm(
-      'Clear ${kind == 'cookies'
-          ? 'cookies'
-          : kind == 'storage'
-          ? 'site data'
-          : kind}',
-      'Site · ${site.host} · ${kind == 'cookies' ? '${site.cookies} cookies' : 'cannot be undone'}',
-      'Clear',
+      switch (kind) {
+        'cookies' => 'Cookie deletion',
+        'storage' => 'Site data deletion',
+        'cache' => 'Cache deletion',
+        _ => 'Permission deletion',
+      },
+      'Site · ${site.host} · ${kind == 'cookies' ? '${site.cookies} cookies' : 'irreversible'}',
+      'Deletion',
     );
     if (!ok || !mounted) return;
     await _controller.clearSite(site.origin, [kind]);
@@ -1446,9 +1447,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
 
   Future<void> _clearSiteAll(BrowserSite site, StateSetter setSheet) async {
     final ok = await _confirm(
-      'Clear site data',
+      'Site data deletion',
       'Site · ${site.host} · cookies · storage · cache · permissions',
-      'Clear site',
+      'Deletion',
     );
     if (!ok || !mounted) return;
     await _controller.clearSite(site.origin, const [
@@ -1463,9 +1464,9 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
 
   Future<void> _forgetLogin(BrowserLogin login, StateSetter setSheet) async {
     final ok = await _confirm(
-      'Forget login',
+      'Login removal',
       'Site · ${login.host} · session ends · cookies cleared',
-      'Forget',
+      'Removal',
     );
     if (!ok || !mounted) return;
     await _controller.forgetLogin(login.id);
@@ -1561,19 +1562,19 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             Align(
               alignment: AlignmentDirectional.centerStart,
               child: _action(
-                'Revoke…',
+                'Revocation…',
                 enabled:
                     _controller.canManageWallet &&
                     authorization.status == 'active',
                 reason: _controller.preview
                     ? 'Preview'
-                    : 'Needs wallet provider',
+                    : 'No wallet provider',
                 onPressed: () async {
                   final navigator = Navigator.of(context);
                   final ok = await _confirm(
-                    'Revoke authorization',
+                    'Authorization revocation',
                     '${_money(authorization.amount, authorization.currency)} · ${authorization.scopeLabel} · agent access ends',
-                    'Revoke',
+                    'Revocation',
                   );
                   if (!ok || !mounted) return;
                   await _controller.revokeAuthorization(authorization.id);

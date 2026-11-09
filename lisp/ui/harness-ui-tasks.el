@@ -6,7 +6,7 @@
 ;; `tasks' module).  Its buffer is a small kanban for the current
 ;; project, one section per column, most urgent first:
 ;;
-;;   Requires your input   blocked on a permission or question, stopped,
+;;   Your input   blocked on a permission or question, stopped,
 ;;                         or refused by its write-up as a duplicate:
 ;;                         drop it, or have it written up all the same;
 ;;                         by priority, then oldest first
@@ -14,14 +14,14 @@
 ;;                         merges it, or send it back with feedback (R);
 ;;                         by priority, then the last to finish first.
 ;;                         A task at work reaches it by handing in, or by
-;;                         hand (H, or [Put in review] in its menu); K, or
-;;                         [Keep working], takes it back out, into the
+;;                         hand (H, or [Manual review] in its menu); K, or
+;;                         [Working phase], takes it back out, into the
 ;;                         working phase
 ;;   Merging               in the merge queue, in the order it takes them:
 ;;                         queued, merging, or resolving the conflicts
 ;;   In progress           working, with its current todo and progress,
 ;;                         in the working phase between hand-ins: put it
-;;                         in review by hand (H, or [Put in review] in its
+;;                         in review by hand (H, or [Manual review] in its
 ;;                         menu) if it does not hand in itself; by
 ;;                         priority, then the last to start first
 ;;   Pending               waiting for a slot, so it starts on its own
@@ -101,19 +101,19 @@
 ;;
 ;; A backlog task's own session shows a banner above its compose box:
 ;; that it waits in the Backlog, or is being written up, with the card's
-;; [Start now] and, while it waits, [Queue it].  A message typed in that
+;; [Start] and, while it waits, [Queue].  A message typed in that
 ;; session starts the task, whether it waits or its write-up still runs,
 ;; which the message stops; feedback on the write-up is the board's
-;; [Refine].  [Start now] supersedes a write-up that runs the same way:
+;; [Refine].  [Start] supersedes a write-up that runs the same way:
 ;; it stops it and starts the task with the write-up it has when the
 ;; turn has ended.
 ;;
 ;; A task is handled in its session, whatever its state.  In review it
-;; has the review banner (harness-ui-review.el: [Verify], [Send back],
-;; [Keep working], the report and the changes); in the backlog, the
+;; has the review banner (harness-ui-review.el: [Verification], [Return],
+;; [Working phase], the report and the changes); in the backlog, the
 ;; banner above.  In every other state its session's settings line says
 ;; where the task stands, in the board's words, with the buttons that
-;; move it through the queue -- [Start now], [Pause] and [Resume] -- and
+;; move it through the queue -- [Start], [Pause] and [Resume] -- and
 ;; nothing else above the compose box: the status is the settings line's,
 ;; as it is for every session, and the board keeps the rest of its card's
 ;; actions and keys.
@@ -136,7 +136,7 @@
 ;; on every marked session, and on the tasks they work on.
 ;;
 ;; The columns go by priority where there is something left to run:
-;; Requires your input, Ready for review, In progress, Pending and the
+;; Your input, Ready for review, In progress, Pending and the
 ;; Backlog list the higher priority first, then in the order each has
 ;; always had; Merging stays the queue's, and the columns of tasks that are
 ;; over, Completed and Cancelled, go by when they were completed, as a
@@ -226,10 +226,10 @@
 ;; Looking at a task's files.  Its worktree is a directory below the
 ;; project, and a project's commands -- `project-find-file',
 ;; `project-dired', projectile's -- work on the project, not on that.  w on
-;; a card, or Assume worktree in its menu, assumes the task's worktree as
+;; a card, or Worktree assumption in its menu, assumes the task's worktree as
 ;; the project (the worktree-assume library, lisp/vendor/worktree-assume):
 ;; from any buffer of the project those commands then work on the
-;; worktree, until w again, or Reset to main worktree, makes the project its main
+;; worktree, until w again, or Main worktree reset, makes the project its main
 ;; checkout again.  The board, the session list and the rest of the
 ;; harness go on finding the project itself, so the task stays there to be
 ;; answered.  The mode line says while a worktree is assumed.
@@ -399,7 +399,7 @@ The blue of links, without their underline." :group 'harness-ui-tasks)
 ;; so a card, a header line and a list row show the same one.
 
 (defconst harness-ui-tasks--columns
-  '((needs-input "Requires your input" t) (review "Ready for review") (merging "Merging")
+  '((needs-input "Your input" t) (review "Ready for review") (merging "Merging")
     (active "In progress") (pending "Pending") (backlog "Backlog") (done "Completed")
     (cancelled "Cancelled"))
   "Columns in display order: (COLUMN HEADING &optional SUBTITLE-SHOWN).
@@ -772,7 +772,7 @@ session (`harness-priority-of-task')."
 
 (defun harness-ui-tasks--ranks-before-p (a b)
   "Non-nil when task A goes before B by priority: a higher one, else the older.
-The backlog, which the queue never starts, and Requires your input list
+The backlog, which the queue never starts, and Your input list
 their tasks so; Pending goes by the order its tasks start in, which
 puts the tasks returned to the queue first of their priority
 \(`harness-ui-tasks--starts-before-p')."
@@ -1499,8 +1499,8 @@ Reset when it is the worktree assumed already; nothing when TASK has no
 worktree to assume.  Both are the command `harness-ui-tasks-assume-worktree'."
   (when-let* ((worktree (harness-ui-tasks--assumable-worktree task)))
     (if (worktree-assume-parent worktree)
-        '(("Reset to main worktree" harness-ui-tasks-assume-worktree))
-      '(("Assume worktree" harness-ui-tasks-assume-worktree)))))
+        '(("Main worktree reset" harness-ui-tasks-assume-worktree))
+      '(("Worktree assumption" harness-ui-tasks-assume-worktree)))))
 
 ;;;; Actions (shared by keys, buttons and the context menu)
 
@@ -1550,7 +1550,7 @@ come alone, as for the card's buttons."
        ('pending
         (cond
          ((harness-ui-tasks--refining-p task)
-          '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
+          '(("Open" harness-ui-tasks-open) ("Steering" harness-ui-tasks-reply)
             ("Stop" harness-ui-tasks-cancel)))
          ;; A paused task is resumed first; a waiting one can be paused,
          ;; last, so the two buttons its card shows stay what they were.
@@ -1558,37 +1558,37 @@ come alone, as for the card's buttons."
          ;; starting it carries on rather than opens it.
          ((plist-get task :returned)
           (harness-ui-tasks--pause-actions
-           task '(("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
+           task '(("Start" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
                   ("Reply" harness-ui-tasks-reply) ("Drop" harness-ui-tasks-cancel))))
          ((plist-get task :session)
           (harness-ui-tasks--pause-actions
-           task '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
-                  ("Open" harness-ui-tasks-open) ("Refine" harness-ui-tasks-refine)
+           task '(("Start" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
+                  ("Open" harness-ui-tasks-open) ("Refinement" harness-ui-tasks-refine)
                   ("Drop" harness-ui-tasks-cancel))))
          (t (harness-ui-tasks--pause-actions
-             task '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
-                    ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel))))))
+             task '(("Start" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
+                    ("Refinement" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel))))))
        ;; A backlog task waits for you; one being written up is steered
        ;; or stopped, like a refining task in the pending column was.
        ('backlog
         (let ((actions
                (cond
                 ((harness-ui-tasks--refining-p task)
-                 '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
+                 '(("Open" harness-ui-tasks-open) ("Steering" harness-ui-tasks-reply)
                    ("Stop" harness-ui-tasks-cancel)))
                 ((plist-get task :returned)
-                 '(("Queue it" harness-ui-tasks-queue) ("Start now" harness-ui-tasks-start)
+                 '(("Queue" harness-ui-tasks-queue) ("Start" harness-ui-tasks-start)
                    ("Open" harness-ui-tasks-open) ("Reply" harness-ui-tasks-reply)
                    ("Drop" harness-ui-tasks-cancel)))
                 (t
                  (append
-                  '(("Queue it" harness-ui-tasks-queue) ("Start now" harness-ui-tasks-start)
+                  '(("Queue" harness-ui-tasks-queue) ("Start" harness-ui-tasks-start)
                     ("Edit" harness-ui-tasks-edit) ("Open" harness-ui-tasks-open))
                   ;; A parked task keeps the prompt it waited with: a
                   ;; write-up would rewrite it, which its card does not
                   ;; offer (`harness-ui-tasks-refine').
                   (unless (harness-json-true-p (plist-get task :parked))
-                    '(("Refine" harness-ui-tasks-refine)))
+                    '(("Refinement" harness-ui-tasks-refine)))
                   '(("Drop" harness-ui-tasks-cancel)))))))
           ;; A paused parked task is resumed first, as a paused task in
           ;; Pending is: only a parked task can be paused in the backlog.
@@ -1597,7 +1597,7 @@ come alone, as for the card's buttons."
             actions)))
        ('needs-input
         (pcase (plist-get (harness-ui-tasks--pending task) :kind)
-          ("permission" '(("Allow" harness-ui-tasks-allow) ("Deny" harness-ui-tasks-deny)
+          ("permission" '(("Approval" harness-ui-tasks-allow) ("Denial" harness-ui-tasks-deny)
                           ("Request…" harness-ui-tasks-requests)
                           ("Open" harness-ui-tasks-open) ("Stop" harness-ui-tasks-cancel)))
           ("question" '(("Answer…" harness-ui-tasks-requests) ("Reply" harness-ui-tasks-reply)
@@ -1605,31 +1605,31 @@ come alone, as for the card's buttons."
                         ("Stop" harness-ui-tasks-cancel)))
           ;; The agent found the board has it already: you decide.
           ((guard (harness-ui-tasks--duplicate-p task))
-           '(("Drop" harness-ui-tasks-cancel) ("Write it up" harness-ui-tasks-refine)
+           '(("Drop" harness-ui-tasks-cancel) ("Write-up" harness-ui-tasks-refine)
              ("Reply" harness-ui-tasks-reply) ("Edit" harness-ui-tasks-edit)
-             ("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)))
+             ("Start" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)))
           ((guard (harness-ui-tasks--refining-p task))
            '(("Retry" harness-ui-tasks-refine) ("Edit" harness-ui-tasks-edit)
-             ("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
+             ("Start" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
              ("Drop" harness-ui-tasks-cancel)))
           (_ (cond
               ((equal (plist-get task :outcome) "conversing")
                '(("Reply" harness-ui-tasks-reply) ("Pause" harness-ui-tasks-pause)
-                 ("Open" harness-ui-tasks-open) ("Mark done" harness-ui-tasks-complete)))
+                 ("Open" harness-ui-tasks-open) ("Completion" harness-ui-tasks-complete)))
               ((equal (plist-get task :outcome) "merge-failed")
-               '(("Retry merge" harness-ui-tasks-merge) ("Pause" harness-ui-tasks-pause)
+               '(("Merge retry" harness-ui-tasks-merge) ("Pause" harness-ui-tasks-pause)
                  ("Reply" harness-ui-tasks-reply) ("Open" harness-ui-tasks-open)
-                 ("Mark done" harness-ui-tasks-complete)))
+                 ("Completion" harness-ui-tasks-complete)))
               ((equal (plist-get task :outcome) "cannot-continue")
                '(("Reply" harness-ui-tasks-reply) ("Pause" harness-ui-tasks-pause)
-                 ("Mark done" harness-ui-tasks-complete) ("Open" harness-ui-tasks-open)))
+                 ("Completion" harness-ui-tasks-complete) ("Open" harness-ui-tasks-open)))
               ((member (plist-get task :outcome) '("error" "cancelled" "interrupted" "max-tokens"))
                '(("Retry" harness-ui-tasks-retry) ("Pause" harness-ui-tasks-pause)
                  ("Reply" harness-ui-tasks-reply) ("Open" harness-ui-tasks-open)
-                 ("Mark done" harness-ui-tasks-complete)))
+                 ("Completion" harness-ui-tasks-complete)))
               (t '(("Open" harness-ui-tasks-open) ("Pause" harness-ui-tasks-pause)
-                   ("Reply" harness-ui-tasks-reply) ("Mark done" harness-ui-tasks-complete)))))))
-       ('active '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
+                   ("Reply" harness-ui-tasks-reply) ("Completion" harness-ui-tasks-complete)))))))
+       ('active '(("Open" harness-ui-tasks-open) ("Steering" harness-ui-tasks-reply)
                   ("Pause" harness-ui-tasks-pause) ("Stop" harness-ui-tasks-cancel)))
        ;; In the queue there is nothing to do but watch; a conflict is
        ;; resolved by its own session, which can be stopped, and a task
@@ -1639,21 +1639,21 @@ come alone, as for the card's buttons."
                    '(("Open" harness-ui-tasks-open) ("Reply" harness-ui-tasks-reply)
                      ("Stop" harness-ui-tasks-cancel))))
        ('review (if (harness-ui-tasks--archived-p task)
-                    '(("Unarchive" harness-ui-tasks-archive) ("Verify" harness-ui-tasks-verify)
+                    '(("Restoration" harness-ui-tasks-archive) ("Verification" harness-ui-tasks-verify)
                       ("Open" harness-ui-tasks-open))
                   ;; No Reply: a message to a task in review sends it back.
-                  '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
-                    ("Keep working" harness-ui-tasks-return-to-work)
+                  '(("Verification" harness-ui-tasks-verify) ("Return" harness-ui-tasks-reject)
+                    ("Working phase" harness-ui-tasks-return-to-work)
                     ("Open" harness-ui-tasks-open) ("Archive" harness-ui-tasks-archive))))
        ((or 'done 'cancelled)
         (if (harness-ui-tasks--archived-p task)
-            '(("Unarchive" harness-ui-tasks-archive) ("Open" harness-ui-tasks-open))
+            '(("Restoration" harness-ui-tasks-archive) ("Open" harness-ui-tasks-open))
           '(("Archive" harness-ui-tasks-archive) ("Reply" harness-ui-tasks-reply)
             ("Open" harness-ui-tasks-open)))))
      ;; A task at work can be put in review by hand, whichever column of
      ;; work it shows in: in the menu only, never among the card's buttons.
      (when (and (not own) (memq column '(active needs-input)))
-       '(("Put in review" harness-ui-tasks-force-review)))
+       '(("Manual review" harness-ui-tasks-force-review)))
      ;; In the menu only, never among the card's buttons (OWN).
      (unless own (harness-ui-tasks--extra-actions task))
      (unless own (harness-ui-tasks--assume-actions task))
@@ -1665,17 +1665,17 @@ come alone, as for the card's buttons."
      ;; Priority orders the tasks still to start.
      (when (harness-ui-tasks--unstarted-p task)
        (harness-ui-tasks--priority-actions task))
-     '(("Delete…" harness-ui-tasks-delete)))))
+     '(("Deletion…" harness-ui-tasks-delete)))))
 
 (defun harness-ui-tasks--priority-actions (task)
   "The actions that move TASK's priority a step up or down, as they apply."
   (let ((rank (harness-ui-tasks--priority-rank task))
         (top (1- (length harness-ui-priority-levels))))
     (append (and (< rank top)
-                 (list (list (format "Raise priority to %s" (nth (1+ rank) harness-ui-priority-levels))
+                 (list (list (format "Priority raise to %s" (nth (1+ rank) harness-ui-priority-levels))
                              'harness-ui-tasks-raise-priority)))
             (and (> rank 0)
-                 (list (list (format "Lower priority to %s" (nth (1- rank) harness-ui-priority-levels))
+                 (list (list (format "Priority lower to %s" (nth (1- rank) harness-ui-priority-levels))
                              'harness-ui-tasks-lower-priority))))))
 
 (defvar harness-ui-tasks-button-map (make-sparse-keymap)
@@ -1706,7 +1706,7 @@ come alone, as for the card's buttons."
 ;; The buttons held down are kept by KEY, (OWNER . ID): ID is what the
 ;; button is called (`harness-task-button'), OWNER what it belongs to --
 ;; the id of the task whose card it is on, the column of a section's own
-;; line, nil elsewhere -- so the [Start now] of one card is held down
+;; line, nil elsewhere -- so the [Start] of one card is held down
 ;; without the others'.  A redraw draws a button whose key is held down in
 ;; `harness-task-button-pressed-face'; the key outlives the redraws, not
 ;; the button, which may be gone from the board by the time the harness
@@ -1837,7 +1837,7 @@ it is still working instead."
 (defun harness-ui-tasks--command-key ()
   "The key of the card's button for `this-command', or nil.
 The card is the one at point.  The keys of the board run the commands its
-buttons run: `s' the one of [Start now], `v' that of [Verify].  An action
+buttons run: `s' the one of [Start], `v' that of [Verification].  An action
 button is named by its command (`harness-ui-tasks--action-buttons'), so
 this finds the button of the command being run when the card offers one."
   (when-let* (((symbolp this-command))
@@ -2006,7 +2006,7 @@ which stays in the card's menu (`mouse-3')."
                      (if missing "[No report]" "[Review Changes]")
                      (lambda () (harness-ui-report-popout task))
                      (if missing
-                         "No report handed in"
+                         "No report"
                        "The changes, the summary and the evidence")
                      "report"))))))
 
@@ -2496,8 +2496,8 @@ asked when the shape changes, not on every redraw."
 ;; characters that stand for it, cannot move what follows.
 ;;
 ;;   TITLE START                          FACTS (right-aligned)   BUTTONS
-;;   v ● ↑ Fix stuck model response in the dispatcher   1/4  12m  [Steer] [Pause]
-;;   v ●   Write the OpenAPI schema for the endpoints        4m  [Steer] [Pause]
+;;   v ● ↑ Fix stuck model response in the dispatcher   1/4  12m  [Steering] [Pause]
+;;   v ●   Write the OpenAPI schema for the endpoints        4m  [Steering] [Pause]
 ;;
 ;; The title comes first.  A row states little -- state flags, how far
 ;; along a task is, when -- and says what is left to say about the
@@ -2927,7 +2927,7 @@ CAPS is the alist of (COLUMN SHOW . MORE), or nil to draw everything."
       (when filter
         (insert (or (ignore-errors (funcall (plist-get filter :banner))) "")))
       (if (and (null harness-ui-tasks--tasks) (null harness-ui-tasks--submitting) (null filter))
-          (insert (propertize "  No tasks yet.\n\n" 'face 'harness-dim-face))
+          (insert (propertize "  No tasks\n\n" 'face 'harness-dim-face))
         (dolist (c harness-ui-tasks--columns)
           (let ((tasks (cdr (assq (car c) groups))))
             ;; With review off nothing comes to review: the column shows
@@ -4883,58 +4883,58 @@ act on from there.
 (put 'harness-ui-tasks-mode 'harness-menu-group
      '("Task board"
        ["Task at point"
-        (". RET" "Open its session" harness-ui-tasks-open)
-        (". o" "Open in position" harness-ui-tasks-open-other)
-        (". TAB" "Fold the section or the recap" harness-ui-tasks-tab)
-        (". s" "Start now" harness-ui-tasks-start)
-        (". Q" "Queue it (start it when a slot frees)" harness-ui-tasks-queue)
-        (". B" "Move pending task to Backlog" harness-ui-tasks-park)
-        (". e" "Edit prompt" harness-ui-tasks-edit)
-        (". m" "Message session" harness-ui-tasks-reply)
-        (". t" "Retry a task that stopped" harness-ui-tasks-retry)
-        (". SPC" "View what point needs" harness-ui-tasks-requests)
-        (". r" "Refine" harness-ui-tasks-refine)
-        (". +" "Raise priority" harness-ui-tasks-raise-priority)
-        (". -" "Lower priority" harness-ui-tasks-lower-priority)
-        (". @" "Attach to the box" harness-ui-tasks-attach)
-        (". w" "Assume its worktree as the project, or reset" harness-ui-tasks-assume-worktree)
-        (". y" "Allow request" harness-ui-tasks-allow)
-        (". n" "Deny request" harness-ui-tasks-deny)]
+        (". RET" "Session" harness-ui-tasks-open)
+        (". o" "Position open" harness-ui-tasks-open-other)
+        (". TAB" "Fold" harness-ui-tasks-tab)
+        (". s" "Start" harness-ui-tasks-start)
+        (". Q" "Queue" harness-ui-tasks-queue)
+        (". B" "Backlog move" harness-ui-tasks-park)
+        (". e" "Prompt edit" harness-ui-tasks-edit)
+        (". m" "Session message" harness-ui-tasks-reply)
+        (". t" "Stopped task retry" harness-ui-tasks-retry)
+        (". SPC" "Request at point" harness-ui-tasks-requests)
+        (". r" "Refinement" harness-ui-tasks-refine)
+        (". +" "Priority raise" harness-ui-tasks-raise-priority)
+        (". -" "Priority lower" harness-ui-tasks-lower-priority)
+        (". @" "Box attachment" harness-ui-tasks-attach)
+        (". w" "Worktree assumption" harness-ui-tasks-assume-worktree)
+        (". y" "Request approval" harness-ui-tasks-allow)
+        (". n" "Request denial" harness-ui-tasks-deny)]
        ["Finish"
         (". k" "Stop or drop" harness-ui-tasks-cancel)
-        (". u" "Pause (hold in the queue)" harness-ui-tasks-pause)
-        (". U" "Resume a paused task" harness-ui-tasks-resume)
-        (". v" "Verify (accept)" harness-ui-tasks-verify)
-        (". R" "Send back with feedback" harness-ui-tasks-reject)
-        (". K" "Keep working (leave review)" harness-ui-tasks-return-to-work)
-        (". H" "Put in review by hand" harness-ui-tasks-force-review)
-        (". d" "Mark completed" harness-ui-tasks-complete)
-        (". M" "Merge again" harness-ui-tasks-merge)
+        (". u" "Pause" harness-ui-tasks-pause)
+        (". U" "Paused task resume" harness-ui-tasks-resume)
+        (". v" "Verification" harness-ui-tasks-verify)
+        (". R" "Return with feedback" harness-ui-tasks-reject)
+        (". K" "Working phase" harness-ui-tasks-return-to-work)
+        (". H" "Manual review" harness-ui-tasks-force-review)
+        (". d" "Completion" harness-ui-tasks-complete)
+        (". M" "Merge retry" harness-ui-tasks-merge)
         (". x" "Archive or restore" harness-ui-tasks-archive)
-        (". D" "Delete" harness-ui-tasks-delete)]
+        (". D" "Deletion" harness-ui-tasks-delete)]
        ["Board"
         (". a" "New task" harness-ui-tasks-compose)
-        (". /" "Search: tasks, sessions, commands" harness-ui-tasks-search)
-        (". I" "Adopt a session" harness-ui-tasks-adopt)
-        (". X" "Archive completed or cancelled" harness-ui-tasks-archive-done)
-        (". A" "Show archived" harness-ui-tasks-toggle-archived)
+        (". /" "Task, session and command search" harness-ui-tasks-search)
+        (". I" "Session adoption" harness-ui-tasks-adopt)
+        (". X" "Finished archive" harness-ui-tasks-archive-done)
+        (". A" "Archived" harness-ui-tasks-toggle-archived)
         (". G" "Every project, or this one" harness-ui-tasks-toggle-projects)
-        (". f" "Filter by project" harness-ui-tasks-filter-project)
+        (". f" "Project filter" harness-ui-tasks-filter-project)
         (". W" "Backlog: manual or auto queue" harness-ui-tasks-toggle-backlog-mode)
-        (". P" "Suspend or resume the queue" harness-ui-tasks-toggle-queue)
-        (". S" "Task slots: who holds them, who waits" harness-ui-tasks-slots)
-        (". V" "Review on or off" harness-ui-tasks-toggle-review)
+        (". P" "Queue suspension" harness-ui-tasks-toggle-queue)
+        (". S" "Task slots" harness-ui-tasks-slots)
+        (". V" "Review" harness-ui-tasks-toggle-review)
         (". F" "Fullscreen layout" harness-fullscreen)
         (". g" "Refresh" harness-ui-tasks-refresh)
-        ("C-c C-o" "What the bar cut off" harness-ui-overflow-show)
-        ("C-c C-z" "Bury (q)" harness-ui-bury)]
+        ("C-c C-o" "Bar overflow" harness-ui-overflow-show)
+        ("C-c C-z" "Previous buffer" harness-ui-bury)]
        ["Compose box"
-        ("C-c C-c" "Submit" harness-ui-tasks-submit)
-        ("C-c C-t" "Submit, Refine or Plan" harness-ui-tasks-cycle-mode)
-        ("C-c C-k" "Clear" harness-ui-tasks-compose-reset)
-        ("C-c C-a" "Attach file or task" harness-compose-add-attachment)
-        ("C-c ." "A board key, from the box" harness-compose-panel-key)
-        ("C-y" "Paste; an image attaches" harness-compose-yank)]))
+        ("C-c C-c" "Submission" harness-ui-tasks-submit)
+        ("C-c C-t" "Submission mode" harness-ui-tasks-cycle-mode)
+        ("C-c C-k" "Reset" harness-ui-tasks-compose-reset)
+        ("C-c C-a" "File or task attachment" harness-compose-add-attachment)
+        ("C-c ." "Board key, from the box" harness-compose-panel-key)
+        ("C-y" "Paste (image attachment)" harness-compose-yank)]))
 
 (defun harness-ui-tasks--plain-name (root)
   "Return the name of the directory of project ROOT."
@@ -5835,7 +5835,7 @@ and with a backlog task the session that wrote it up."
   "Return the task at point, which has to wait for your review."
   (let ((task (harness-ui-tasks--task)))
     (unless (equal (plist-get task :state) "review")
-      (user-error "This task is not waiting for your review"))
+      (user-error "Task not in review"))
     task))
 
 (defun harness-ui-tasks-verify ()
@@ -5861,12 +5861,12 @@ for your review when a turn hands it in again, or by hand
   (let ((task (harness-ui-tasks--review-task)))
     (harness-ui-tasks--request-then "_harness/task/return-to-work" (list :id (plist-get task :id))
                                     "Taking the task back to work")
-    (message "Back to work: the agent goes on with the task")))
+    (message "Working phase · agent continues")))
 
 (defun harness-ui-tasks-force-review ()
   "Put the task at point in review by hand, as if it handed its work in.
 For a task at work whose agent has not handed in yet: the review banner
-is there at once, with [Verify] and [Send back].  The report handed in
+is there at once, with [Verification] and [Return].  The report handed in
 last stands when it speaks for this round; otherwise the review shows
 that none was handed in, with the session's last message as its
 summary.  A task whose turn runs, or whose session waits on your
@@ -5928,7 +5928,7 @@ this one does not wait for them."
 (defun harness-ui-tasks-toggle-queue (&optional arg)
   "Suspend the pending queue of the board's project, or resume it.
 While the queue is suspended, no waiting task of the project starts on
-its own: the board is clear for one urgent task, which [Start now]
+its own: the board is clear for one urgent task, which [Start]
 \(\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]) still starts, as task_control start
 does.  A task at work goes on; pausing one
 \(\\[harness-ui-tasks-pause]) frees its slot, and no waiting task takes it
@@ -5969,7 +5969,7 @@ shortly; this one does not wait for them."
 (defun harness-ui-tasks-toggle-backlog-mode (&optional arg)
   "Switch the board's backlog between a manual and an auto queue.
 With a manual queue, the default, a task written up for the backlog
-waits there until you queue it (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-queue], [Queue it]) or start it
+waits there until you queue it (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-queue], [Queue]) or start it
 \(\\[harness-ui-tasks-start]).  With an auto queue it joins the queue by itself as soon as
 its write-up is done, a write-up done again after your feedback too,
 and the queue starts it like any waiting task: by priority, as slots
@@ -6266,7 +6266,7 @@ search and the settings are concerned: they are its own."
 ;; was or how to start it: the board was the only place with [Start
 ;; now].  So a session whose task waits in the backlog, or is being
 ;; written up, gets a banner above its compose box saying so, with the
-;; same [Start now] and [Queue it] as the card.  The box says what a
+;; same [Start] and [Queue] as the card.  The box says what a
 ;; message does there: it starts the task (harness-tasks.el), whether
 ;; the write-up waits in the backlog or still runs, in which case the
 ;; message stops it first; feedback on the write-up is the board's
@@ -6389,12 +6389,12 @@ That is one waiting in the backlog, or being written up for it."
 (defun harness-ui-tasks--backlog-banner (task)
   "Return the banner of TASK, a session's backlog task.
 It says whether the task waits for the user or is being written up,
-and offers the card's [Start now] and, while it waits, [Queue it]."
+and offers the card's [Start] and, while it waits, [Queue]."
   (let* ((writing (harness-ui-tasks--writing-p task))
          (stopped (and (harness-ui-tasks--refining-p task) (not writing)))
          (title (harness-ui-tasks--title task))
          (start (harness-ui-tasks--chat-button
-                 "[Start now]" #'harness-ui-tasks-session-start
+                 "[Start]" #'harness-ui-tasks-session-start
                  (if (harness-json-true-p (plist-get task :parked))
                      "Start the task now, continuing any existing work"
                    "Start the task now with its write-up, even while it is being written up")))
@@ -6403,7 +6403,7 @@ and offers the card's [Start now] and, while it waits, [Queue it]."
                            (harness-ui-tasks--backlog-p task))
                   (concat " "
                           (harness-ui-tasks--chat-button
-                           "[Queue it]" #'harness-ui-tasks-session-queue
+                           "[Queue]" #'harness-ui-tasks-session-queue
                            "Put it in the pending queue, to start when a slot frees"))))
          (line (cond
                 (writing "An agent is writing it up: a message stops it and starts the task.")
@@ -6506,7 +6506,7 @@ A refusal is said as failing to WHAT."
   "Start this session's task now, even with every slot busy.
 A backlog task starts with its write-up; a write-up still running is
 stopped first, and the task starts once it has ended.  One waiting in
-the queue, or held there, starts at once.  This is the [Start now] of
+the queue, or held there, starts at once.  This is the [Start] of
 the banner above the session's compose box, as the card's."
   (interactive)
   (harness-ui-tasks--session-request (harness-ui-tasks--session-unstarted-task)
@@ -6515,7 +6515,7 @@ the banner above the session's compose box, as the card's."
 (defun harness-ui-tasks-session-queue ()
   "Put this session's backlog task in the pending queue.
 It starts on its own as soon as its project has a free slot; the
-banner's [Start now] starts it at once instead."
+banner's [Start] starts it at once instead."
   (interactive)
   (let ((task (harness-ui-tasks--session-backlog-task)))
     (unless (and (equal (plist-get task :state) "pending")
@@ -6528,7 +6528,7 @@ banner's [Start now] starts it at once instead."
 ;; The banners above handle the two states a task waits for you in:
 ;; the backlog here, review in harness-ui-review.el.  Every other state
 ;; shows on the session's settings line, in the board's words, with the
-;; buttons that move the task through the queue -- [Start now], [Pause]
+;; buttons that move the task through the queue -- [Start], [Pause]
 ;; and [Resume] (`harness-ui-tasks--queue-items').  There is no panel of
 ;; its own above the compose box: the status is the settings line's, as
 ;; it is for every session, and the board keeps the rest of the card's
@@ -6560,7 +6560,7 @@ own session."
 ;; settings line under its compose box (`harness-chat-settings-functions'):
 ;; the state -- in progress, or pending with its place in line, what holds
 ;; it back and a suspended queue -- and the card's buttons for it: [Pause]
-;; for a task at work or waiting, [Resume] for a paused one, [Start now]
+;; for a task at work or waiting, [Resume] for a paused one, [Start]
 ;; for one that waits.  They are the board's actions
 ;; (`harness-ui-tasks-pause', `harness-ui-tasks-resume',
 ;; `harness-ui-tasks-start') run from the session, on its task.  A
@@ -6594,7 +6594,7 @@ answer differs."
 (defun harness-ui-tasks-session-start-now ()
   "Start this session's task now, even with every slot busy.
 A task waiting in the queue or paused there carries on in this session,
-where it stopped.  This is the [Start now] of the settings line under
+where it stopped.  This is the [Start] of the settings line under
 the compose box, and the card's (`harness-ui-tasks-start'); a task in
 the backlog has the banner's (`harness-ui-tasks-session-start')."
   (interactive)
@@ -6628,7 +6628,7 @@ what holds it back -- \"paused\", \"quota · resets 19:00\", \"budget\"
 
 (defun harness-ui-tasks--queue-buttons (task)
   "Return the buttons of the queue for TASK, a list of strings, or nil.
-[Resume] and [Start now] for a paused task, [Start now] and [Pause] for
+[Resume] and [Start] for a paused task, [Start] and [Pause] for
 one that waits, [Pause] for one at work; none for the rest."
   (let ((pause (harness-ui-tasks--session-queue-button
                 "[Pause]" #'harness-ui-tasks-session-pause
@@ -6637,8 +6637,8 @@ one that waits, [Pause] for one at work; none for the rest."
                  "[Resume]" #'harness-ui-tasks-session-resume
                  "Resume: the queue starts it when its turn comes"))
         (start (harness-ui-tasks--session-queue-button
-                "[Start now]" #'harness-ui-tasks-session-start-now
-                "Start now, whatever the limit")))
+                "[Start]" #'harness-ui-tasks-session-start-now
+                "Start, whatever the limit")))
     (pcase (harness-ui-tasks--column task)
       ('pending (if (harness-ui-tasks--paused-p task) (list resume start) (list start pause)))
       ((or 'active 'needs-input) (and (harness-ui-tasks--pausable-p task) (list pause))))))
@@ -6820,31 +6820,30 @@ or sent back."
       (harness-ui-tasks-visit-task (plist-get task :id) (car entry) (plist-get task :session)))))
 
 (transient-define-prefix harness-task-menu ()
-  "Task board and task-at-point commands.
-Task actions apply to the task at point on a task board."
+  "Task board and task-at-point commands."
   :display-action '(harness-ui--display-menu (inhibit-same-window . t))
   [["Boards"
     ("a" "This project" harness-tasks)
     ("G" "All projects" harness-tasks-all)]
    ["Task at point (on a board)"
     :if (lambda () (derived-mode-p 'harness-ui-tasks-mode))
-    ("RET" "Open session" harness-ui-tasks-open)
+    ("RET" "Session open" harness-ui-tasks-open)
     ("s" "Start" harness-ui-tasks-start)
     ("Q" "Queue" harness-ui-tasks-queue)
     ("m" "Message" harness-ui-tasks-reply)
     ("k" "Stop or drop" harness-ui-tasks-cancel)
     ("u" "Pause" harness-ui-tasks-pause)
     ("U" "Resume" harness-ui-tasks-resume)
-    ("v" "Verify" harness-ui-tasks-verify)
-    ("R" "Send back" harness-ui-tasks-reject)
-    ("M" "Merge again" harness-ui-tasks-merge)
+    ("v" "Verification" harness-ui-tasks-verify)
+    ("R" "Return" harness-ui-tasks-reject)
+    ("M" "Merge retry" harness-ui-tasks-merge)
     ("x" "Archive or restore" harness-ui-tasks-archive)
-    ("D" "Delete" harness-ui-tasks-delete)]
+    ("D" "Deletion" harness-ui-tasks-delete)]
    ["Board"
     :if (lambda () (derived-mode-p 'harness-ui-tasks-mode))
     ("n" "New task" harness-ui-tasks-compose)
     ("/" "Search" harness-ui-tasks-search)
-    ("P" "Suspend or resume queue" harness-ui-tasks-toggle-queue)
+    ("P" "Queue suspension" harness-ui-tasks-toggle-queue)
     ("g" "Refresh" harness-ui-tasks-refresh)]])
 
 ;;;; Module

@@ -435,7 +435,7 @@ It is empty for a session on its model's default.  The tooltip names the
 level and the command that changes it, `harness-set-thinking'."
   (let ((level (plist-get s :thinking)))
     (if (and (stringp level) (not (harness-string-blank-p level)))
-        (propertize level 'help-echo (format "Thinking level: %s.  M-x harness-set-thinking changes it."
+        (propertize level 'help-echo (format "Thinking level · %s (M-x harness-set-thinking)"
                                              level))
       "")))
 
@@ -448,7 +448,7 @@ level and the command that changes it, `harness-set-thinking'."
           ((plist-get s :updated)
            (format "No message time is recorded for this session; its last change of any kind: %s"
                    (format-time-string "%F %H:%M" time)))
-          (t "No time is recorded for this session"))))
+          (t "No session time"))))
 
 (defun harness-ui-sessions--last-message-cell (s &optional _depth)
   "Return the Last msg cell of session S: how long ago its last message came.
@@ -677,7 +677,7 @@ wrap in a narrow window."
                        (mapconcat (lambda (a) (harness-ui-sessions--button (nth 0 a) (nth 1 a) (nth 2 a)))
                                   (harness-ui-pending-view-actions id) " ")
                        "  "
-                       (propertize (or (harness-ui-pending-summary session) "waits for you")
+                       (propertize (or (harness-ui-pending-summary session) "attention")
                                    'face 'harness-status-blocked-face)
                        (propertize " · " 'face 'harness-dim-face))))
     (concat head
@@ -690,9 +690,9 @@ wrap in a narrow window."
   (let ((n (length tabulated-list-entries)))
     (concat " " (harness-ui-status-icon "blocked") " "
             (propertize (pcase n
-                          (0 "No session waits for you")
-                          (1 "1 session waits for you")
-                          (_ (format "%d sessions wait for you" n)))
+                          (0 "No session · attention")
+                          (1 "1 session · attention")
+                          (_ (format "%d sessions · attention" n)))
                         'face 'bold)
             (propertize (concat (if harness-ui-sessions--project " in this project" " in any project")
                                 (if (string-empty-p harness-ui-sessions--filter) ""
@@ -1067,34 +1067,34 @@ setting commands, such as `harness-set-model' and
 (put 'harness-ui-sessions-mode 'harness-menu-group
      '("Session list"
        ["Session at point, or the marked ones"
-        (". RET" "Open, in its project" harness-ui-sessions-open)
-        (". o" "Open in position" harness-ui-sessions-open-other)
+        (". RET" "Project session" harness-ui-sessions-open)
+        (". o" "Position open" harness-ui-sessions-open-other)
         (". f" "Fork" harness-ui-sessions-fork)
         (". r" "Rename" harness-ui-sessions-rename)
-        (". M" "Move to another directory" harness-ui-sessions-move)
-        (". k" "Cancel turn" harness-ui-sessions-cancel)
-        (". x" "Deactivate" harness-ui-sessions-deactivate)
-        (". SPC" "View what it waits on" harness-ui-sessions-requests)
-        (". y" "Allow request" harness-ui-sessions-allow)
-        (". n" "Deny request" harness-ui-sessions-deny)
-        ("M-t" "Make it a task" harness-ui-sessions-make-task)
-        (". +" "Raise priority" harness-ui-sessions-raise-priority)
-        (". -" "Lower priority" harness-ui-sessions-lower-priority)
-        (". p" "Set priority…" harness-ui-sessions-set-priority)
-        (". d" "Delete" harness-ui-sessions-delete)
+        (". M" "Session move" harness-ui-sessions-move)
+        (". k" "Turn cancellation" harness-ui-sessions-cancel)
+        (". x" "Deactivation" harness-ui-sessions-deactivate)
+        (". SPC" "Waiting request" harness-ui-sessions-requests)
+        (". y" "Request approval" harness-ui-sessions-allow)
+        (". n" "Request denial" harness-ui-sessions-deny)
+        ("M-t" "Task creation" harness-ui-sessions-make-task)
+        (". +" "Priority raise" harness-ui-sessions-raise-priority)
+        (". -" "Priority lower" harness-ui-sessions-lower-priority)
+        (". p" "Priority…" harness-ui-sessions-set-priority)
+        (". d" "Deletion" harness-ui-sessions-delete)
         (". m" "Mark" harness-ui-sessions-mark)
-        (". u" "Unmark" harness-ui-sessions-unmark)
-        (". U" "Unmark all" harness-ui-sessions-unmark-all)
-        (". t" "Invert marks" harness-ui-sessions-toggle-marks)]
+        (". u" "Mark removal" harness-ui-sessions-unmark)
+        (". U" "All mark removal" harness-ui-sessions-unmark-all)
+        (". t" "Mark inversion" harness-ui-sessions-toggle-marks)]
        ["List"
         (". /" "Filter" harness-ui-sessions-filter)
         (". a" "This project or all" harness-ui-sessions-toggle-scope)
-        (". b" "Only those waiting for you" harness-ui-sessions-toggle-blocked)
-        (". i" "Show or hide inactive" harness-ui-sessions-toggle-inactive)
+        (". b" "Attention" harness-ui-sessions-toggle-blocked)
+        (". i" "Inactive sessions" harness-ui-sessions-toggle-inactive)
         (". T" "Only the tasks' sessions" harness-ui-sessions-toggle-tasks-only)
-        (". I" "Show or hide internal sessions" harness-ui-sessions-toggle-internal)
-        (". P" "Pause or resume live updates" harness-ui-sessions-toggle-pause)
-        (". C" "Show or hide a column" harness-ui-sessions-toggle-column)
+        (". I" "Internal sessions" harness-ui-sessions-toggle-internal)
+        (". P" "Live updates" harness-ui-sessions-toggle-pause)
+        (". C" "Column visibility" harness-ui-sessions-toggle-column)
         (". F" "Fullscreen layout" harness-fullscreen)
         (". g" "Reload" harness-ui-sessions-reload)]))
 
@@ -1617,7 +1617,7 @@ With a numeric prefix argument COUNT unmark that many rows going up."
   (let ((unmarked (harness-ui-sessions--unmark-all)))
     (harness-ui-sessions--show-marks)
     (if (zerop unmarked)
-        (message "No session was marked")
+        (message "No marked sessions")
       (message "Unmarked %s" (harness-ui--count unmarked "session")))))
 
 (defun harness-ui-sessions-toggle-marks ()
@@ -1838,7 +1838,7 @@ error of a request that failed."
                       lossy label (length checks) nil host
                       (lambda (mode)
                         (if (eq mode 'cancel)
-                            (message "Models unchanged")
+                            (message "Models · unchanged")
                           (harness-ui-call "_harness/handoff/switch-all"
                                            (list :model model :filter filter
                                                  :mode (symbol-name mode))
@@ -1863,7 +1863,7 @@ so each task starts again with it.  One message says how many sessions
 and tasks changed, and a request that fails says why."
   (pcase-let ((`(,ids . ,tasks) (harness-ui-sessions--marked-and-tasks)))
     (if (null ids)
-        (message "No session is marked")
+        (message "No marked sessions")
       (let* ((what (harness-ui-sessions--setting-text key value))
              (wire (harness-ui-sessions--wire-value key value))
              (filter (list :ids ids))
@@ -2164,7 +2164,7 @@ shown or hidden in this list now."
         (shown (mapcar (lambda (column) (plist-get column :name))
                        (harness-ui-sessions--shown-columns))))
     (completing-read
-     "Show or hide column: "
+     "Column: "
      (lambda (string pred action)
        (if (eq action 'metadata)
            `(metadata (display-sort-function . identity)
@@ -2299,7 +2299,7 @@ a turn."
     (pcase (harness-ui-pending-status session)
       ("question" "blocked on a question; SPC shows it, to answer it")
       ("permission" "blocked on a permission request; y allows it, n denies it, SPC shows it")
-      (_ "blocked, waiting for you: its turn ended and it waits for your reply, in the session or in a thread"))))
+      (_ "blocked · your input · turn ended · reply in the session or a thread"))))
 
 (defun harness-ui-sessions-requests ()
   "Pop out what the session at point waits on.

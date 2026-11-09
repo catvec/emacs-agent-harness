@@ -490,8 +490,8 @@ kind it is, and ends with the strip of the pages."
     (when (eq harness-ui-access--page 'overview)
       (harness-ui-access--wrap
        (mapcar (lambda (word) (propertize word 'face 'harness-dim-face))
-               '("Immediate effect ·" "agent tools:" "request_escalation (ask for more),"
-                 "drop_access (give up)"))
+               '("Immediate effect ·" "agent tools ·" "request_escalation,"
+                 "drop_access"))
        (harness-ui-access--width) "" " "))
     (insert "\n")
     (harness-ui-access--insert-strip)))
@@ -591,7 +591,7 @@ said under them; a policy that sets the mode leaves no choice to make."
                                (format "%s: %s (%s)" (nth 1 m) (nth 2 m)
                                        (cond (pinned "set by the policy")
                                              ((equal (car m) mode) "in effect")
-                                             (t "click to choose it")))))
+                                             (t "choice")))))
                             harness-ui-permission-modes)))
      (concat (or (nth 2 entry) "")
              (if pinned (concat (and entry " · ") "set by the policy") "")))))
@@ -607,11 +607,11 @@ nobody is asked and the auto-mode judge decides."
      (harness-ui-access--choices
       (harness-ui-access--choice "Interactive" (not away)
                                  (unless pinned (lambda () (harness-ui-access-set-interaction nil)))
-                                 "Ask you about undecided calls (i)")
+                                 "Ask mode · undecided calls (i)")
       (harness-ui-access--choice "Non-interactive" away
                                  (unless pinned (lambda () (harness-ui-access-set-interaction t)))
-                                 "Stop prompting, use the auto-mode judge (i)"))
-     (concat (if away "No prompts · decisions by the auto-mode judge" "Prompts for undecided calls")
+                                 "Auto mode · judge decisions (i)"))
+     (concat (if away "No prompts · decisions by the auto-mode judge" "prompts · undecided calls")
              (if pinned " · set by the policy" "")))))
 
 (defun harness-ui-access--insert-network (d)
@@ -621,7 +621,7 @@ nobody is asked and the auto-mode judge decides."
      'network "Network"
      (harness-ui-access--choices
       (harness-ui-access--choice "On" network (lambda () (harness-ui-access-set-network t))
-                                 "Allow the network (N)")
+                                 "network access (N)")
       (harness-ui-access--choice "Off" (not network) (lambda () (harness-ui-access-set-network nil))
                                  "Block the network (N)"))
      (unless network "No web tools or ssh · bash and elisp offline"))))
@@ -638,7 +638,7 @@ A session read-only by another module's policy has no choice to make."
      (harness-ui-access--choices
       (harness-ui-access--choice "On" (not read-only)
                                  (unless fixed (lambda () (harness-ui-access-set-read-only nil)))
-                                 "Allow writing, where the directories allow (w)")
+                                 "writing · directory permitting (w)")
       (harness-ui-access--choice "Read-only" read-only
                                  (unless fixed (lambda () (harness-ui-access-set-read-only t)))
                                  "Block writing (w)"))
@@ -677,7 +677,7 @@ CAPABILITIES is the `:capabilities' of `access/describe'."
   "Return the capabilities this buffer's description gives, or signal.
 A harness that does not say (an older one) cannot be asked for any."
   (or (plist-get harness-ui-access--describe :capabilities)
-      (user-error "No capability data from this harness")))
+      (user-error "No capability data")))
 
 (defun harness-ui-access--capabilities-held (capabilities)
   "Return the names of the capabilities CAPABILITIES says the commands hold."
@@ -745,7 +745,7 @@ give one and take them away.  Nothing is drawn when D has no
                            (and offer (not why)
                                 (harness-ui-access--button
                                  "[Give…]" #'harness-ui-access-grant-capability
-                                 "Give the session's commands a Linux capability, inside the sandbox only (C)"))
+                                 "Linux capability · sandboxed commands (C)"))
                            (and held
                                 (harness-ui-access--button
                                  "[Take away…]" #'harness-ui-access-revoke-capability
@@ -807,22 +807,22 @@ give one and take them away.  Nothing is drawn when D has no
                                       (lambda () (harness-ui-access-revoke dir t))
                                       (format "Take %s out of the directories every session may reach" shown))))))
       ((or "session" "turn")
-       (list (harness-ui-access--button "[Revoke]" (lambda () (harness-ui-access-revoke dir nil))
-                                        (format "Revoke the grant of %s" shown))
+       (list (harness-ui-access--button "[Revocation]" (lambda () (harness-ui-access-revoke dir nil))
+                                        (format "grant revocation · %s" shown))
              (funcall give-up t)))
       ("read" (list (harness-ui-access--button "[Remove]" (lambda () (harness-ui-access-remove-read-dir dir))
-                                               (format "Stop the session reading %s" shown))
+                                               (format "read removal · %s" shown))
                     (if (harness-ui-access--true-p (plist-get entry :given-up))
                         (harness-ui-access--button "[Restore]" (lambda () (harness-ui-access-restore-dir dir))
-                                                   (format "Give %s back to the session, for writing too" shown))
+                                                   (format "writing return · %s" shown))
                       (harness-ui-access--button "[Make writable]" (lambda () (harness-ui-access-make-writable dir))
                                                  (format "Grant %s to the session for writing" shown)))))
       ("child" (list (harness-ui-access--button "[Remove]" (lambda () (harness-ui-access-drop-dir dir))
-                                                (format "Stop the session reading %s" shown))
+                                                (format "read removal · %s" shown))
                      (harness-ui-access--button "[Make writable]" (lambda () (harness-ui-access-make-writable dir t))
                                                 (format "Grant %s to the session for writing" shown))))
       ("dropped" (list (harness-ui-access--button "[Restore]" (lambda () (harness-ui-access-restore-dir dir))
-                                                  (format "Give %s back to the session" shown))))
+                                                  (format "directory return · %s" shown))))
       (_ (ignore sid) nil))))
 
 (defun harness-ui-access--elide-path (path width)
@@ -895,7 +895,7 @@ buttons go on a line of their own under it."
            (harness-ui-access--button "[Allow reading a directory…]" #'harness-ui-access-allow-read-dir
                                       "Let the session read a directory, not write it (r)")
            (harness-ui-access--button "[Move the session…]" #'harness-ui-access-move
-                                      "Move the session to another working directory (m)"))
+                                      "session move (m)"))
      avail "  " " ")
     (let ((inspect (plist-get d :inspect))
           (skills (plist-get d :skills)))
@@ -913,7 +913,7 @@ buttons go on a line of their own under it."
                                                 what (if more "," ""))
                                         'face 'harness-dim-face))))
           (insert "  ")
-          (harness-ui-access--wrap (cons (propertize "Also readable:" 'face 'harness-dim-face) items)
+          (harness-ui-access--wrap (cons (propertize "Also readable ·" 'face 'harness-dim-face) items)
                                    avail "  " " "))))))
 
 ;;;; Drawing: tools and rules
@@ -967,14 +967,14 @@ BUILTIN are the names the session's provider runs itself, marked with a *."
   (harness-ui-access--button
    (if (member name builtin) (concat name "*") name)
    (if on
-       (lambda () (when (y-or-n-p (format "Turn %s off for this session? " name))
+       (lambda () (when (y-or-n-p (format "Tool off · %s" name))
                     (harness-ui-access-set-tool name nil)))
      (lambda () (harness-ui-access-set-tool name t)))
    (if on
-       (format "%s%s: click to turn it off for this session"
+       (format "tool %s%s · off for this session"
                (harness-ui-tool-label name)
-               (if (member name builtin) " (run by the session's provider)" ""))
-     (format "%s: click to offer it to the session again" (harness-ui-tool-label name)))
+               (if (member name builtin) " (provider-run)" ""))
+     (format "tool %s · offer to session" (harness-ui-tool-label name)))
    'harness-ui-access-tool-face))
 
 (defun harness-ui-access--insert-tools (d)
@@ -986,7 +986,7 @@ those that belong to other kinds of session."
                (groups (harness-ui-access--tool-groups off))
                (width (min 32 (max 12 (apply #'max 0 (mapcar (lambda (g) (string-width (car g))) groups))))))
     (harness-ui-access--heading "Tools" 'tools (harness-ui-access--tools-summary d))
-    (harness-ui-access--insert-note "Click a tool to turn it off or on for this session" "  ")
+    (harness-ui-access--insert-note "tool toggle for this session" "  ")
     (harness-ui-access--heading "Offered" 'offered (format "%d" (length on)))
     (let ((start (point)))
       (insert "  ")
@@ -994,7 +994,7 @@ those that belong to other kinds of session."
                                (harness-ui-access--width) "  ")
       (put-text-property start (point) 'harness-ui-access-anchor (cons 'tools-on t)))
     (when builtin
-      (insert (propertize "  * run by the session's provider, under the harness's permission\n" 'face 'harness-dim-face)))
+      (insert (propertize "  * provider-run · harness permission\n" 'face 'harness-dim-face)))
     (when off
       (harness-ui-access--heading "Off" 'off (format "%d" (length off)))
       (dolist (group groups)
@@ -1393,14 +1393,14 @@ J is what `access/judgements' said."
           (funcall choice "Waiting" "ask" (plist-get counts :ask))
           (harness-ui-access--button (format "[decided by: %s]" (if-let* ((by (plist-get harness-ui-access--filter :by)))
                                                                    (harness-ui-access--by-label by) "anyone"))
-                                     #'harness-ui-access-filter-by "Show the calls one decider judged (b)")
+                                     #'harness-ui-access-filter-by "judgements of one decider (b)")
           (harness-ui-access--button (format "[tool: %s]" (or (plist-get harness-ui-access--filter :tool) "any"))
-                                     #'harness-ui-access-filter-tool "Show the calls of one tool (t)")
+                                     #'harness-ui-access-filter-tool "judgements of one tool (t)")
           (harness-ui-access--button (format "[text: %s]" (or (plist-get harness-ui-access--filter :query) "—"))
                                      #'harness-ui-access-filter-text
-                                     "Show the calls with some text in tool, reason, handle or title (s)")
+                                     "judgements matching text (s)")
           (and harness-ui-access--filter
-               (harness-ui-access--button "[Clear]" #'harness-ui-access-filter-clear "Show every judgement (c)")))))
+               (harness-ui-access--button "[Clear]" #'harness-ui-access-filter-clear "all judgements (c)")))))
 
 (defun harness-ui-access--insert-judgements (j expanded)
   "Insert the judgements J, from `access/judgements'.
@@ -1631,7 +1631,7 @@ chosen when the harness starts, and again only by this.  It names the
 backend in use, and why OpenShell is not when it was asked for."
   (interactive)
   (let ((buffer (current-buffer)))
-    (message "Looking for the sandbox backends...")
+    (message "Sandbox backend search…")
     (harness-ui-call "_harness/sandbox/detect" nil
                      (lambda (status)
                        (let ((backend (or (harness-ui-access--str (plist-get status :backend)) "none"))
@@ -1647,11 +1647,11 @@ cannot: a gateway that refuses the bind mounts, an image without bash,
 a kernel without Landlock."
   (interactive)
   (let ((buffer (current-buffer)))
-    (message "Starting an OpenShell sandbox...")
+    (message "OpenShell sandbox · starting…")
     (harness-ui-call "_harness/sandbox/check" nil
                      (lambda (result)
                        (message "%s" (or (harness-ui-access--str (plist-get result :message))
-                                         "OpenShell did not say how it went"))
+                                         "OpenShell · no result"))
                        (when (buffer-live-p buffer) (harness-ui-access-refresh buffer))))))
 
 (defun harness-ui-access-set-read-only (on)
@@ -1665,7 +1665,7 @@ a kernel without Landlock."
   (let ((d harness-ui-access--describe))
     (when (and (harness-ui-access--true-p (plist-get d :read-only))
                (not (harness-ui-access--true-p (plist-get d :read-only-profile))))
-      (user-error "Read-only by %s: not changeable here"
+      (user-error "Read-only · %s · not changeable here"
                   (or (harness-ui-access--str (plist-get d :read-only-by)) "another module")))
     (harness-ui-access-set-read-only (not (harness-ui-access--true-p (plist-get d :read-only-profile))))))
 
@@ -1684,7 +1684,7 @@ a kernel without Landlock."
                        :key (lambda (e) (plist-get e :name)) :test #'equal)))
     (cond ((null off) (harness-ui-access-set-tool tool nil))
           ((harness-ui-access--true-p (plist-get off :profile)) (harness-ui-access-set-tool tool t))
-          (t (user-error "%s off: %s (not changeable here)" tool (plist-get off :why))))))
+          (t (user-error "%s off · %s · not changeable here" tool (plist-get off :why))))))
 
 (defun harness-ui-access-set-capability (name on)
   "Give the session's commands the capability NAME when ON, else take it away.
@@ -1723,8 +1723,8 @@ can (bwrap, for a session that may write)."
    (let* ((c (harness-ui-access--capabilities))
           (why (harness-ui-access--str (plist-get c :why)))
           (offer (harness-ui-access--capabilities-offer c)))
-     (when why (user-error "No capability available: %s" why))
-     (unless offer (user-error "All grantable capabilities given"))
+     (when why (user-error "No capability · %s" why))
+     (unless offer (user-error "All capabilities granted"))
      (list (harness-ui-access--read-capability "Give the session's commands: " offer))))
   (harness-ui-access-set-capability name t))
 
@@ -1734,7 +1734,7 @@ NAME is `all' to take every one away.  Interactively choose one of those
 the commands hold."
   (interactive
    (let ((held (harness-ui-access--capabilities-held (harness-ui-access--capabilities))))
-     (unless held (user-error "No capability held"))
+     (unless held (user-error "No capability"))
      (list (harness-ui-access--read-capability "Take away: " held))))
   (harness-ui-access-set-capability name nil))
 
@@ -1754,7 +1754,7 @@ offered."
                          (and (null why) (mapcar (lambda (capability) (cons capability capability))
                                                  (harness-ui-access--capabilities-offer c)))
                          (and held (list (cons "all (take every one away)" "all"))))))
-     (when (and why (null held)) (user-error "No capability available: %s" why))
+     (when (and why (null held)) (user-error "No capability · %s" why))
      (list (cdr (assoc (harness-ui-access--read-capability "Give or take away: " (mapcar #'car table))
                        table)))))
   (harness-ui-access-set-capability
@@ -1765,7 +1765,7 @@ offered."
 (defun harness-ui-access--dir-at-point ()
   "Return the directory entry at point, or signal."
   (or (get-text-property (point) 'harness-ui-access-dir)
-      (user-error "No directory here")))
+      (user-error "No directory")))
 
 (defun harness-ui-access-drop-dir (dir &optional keep-read)
   "Take DIR away from this buffer's session; with KEEP-READ keep it readable."
@@ -1779,9 +1779,9 @@ offered."
 EVERYWHERE says DIR is one every session may reach: it is taken out of
 `harness-allowed-directories', after you confirm."
   (when (or (not everywhere)
-            (y-or-n-p (format "Revoke %s for every session? " (harness-abbreviate-file-name dir))))
+            (y-or-n-p (format "Revocation · every session · %s" (harness-abbreviate-file-name dir))))
     (harness-ui-call "_harness/permission/revoke-dir" (list :session-id (harness-ui-access--session) :dir dir)
-                     (harness-ui-access--after (format "Revoked %s" (harness-abbreviate-file-name dir))))))
+                     (harness-ui-access--after (format "Revocation · %s" (harness-abbreviate-file-name dir))))))
 
 (defun harness-ui-access-remove-read-dir (dir)
   "Stop this buffer's session reading DIR."
@@ -1823,8 +1823,8 @@ That is nil for a remote session, so that no TRAMP connection opens."
   "Grant this buffer's session DIR to write.
 With a prefix argument ALWAYS, every session: DIR joins
 `harness-allowed-directories'."
-  (interactive (list (harness-ui-access--read-dir (if current-prefix-arg "Allow for every session: "
-                                                    "Allow for this session: "))
+  (interactive (list (harness-ui-access--read-dir (if current-prefix-arg "Every session: "
+                                                    "This session: "))
                      current-prefix-arg))
   (harness-ui-call "_harness/permission/allow-dir"
                    (append (list :session-id (harness-ui-access--session) :dir dir) (and always (list :scope "always")))
@@ -1833,7 +1833,7 @@ With a prefix argument ALWAYS, every session: DIR joins
 
 (defun harness-ui-access-allow-read-dir (dir)
   "Let this buffer's session read DIR, not write it."
-  (interactive (list (harness-ui-access--read-dir "Allow reading: ")))
+  (interactive (list (harness-ui-access--read-dir "Reading: ")))
   (harness-ui-call "_harness/access/add-read-dir" (list :session-id (harness-ui-access--session) :dir dir)
                    (harness-ui-access--after nil)))
 
@@ -1858,9 +1858,9 @@ given up for this session alone, after you confirm."
       ((or "session" "turn") (harness-ui-access-revoke dir))
       ("read" (harness-ui-access-remove-read-dir dir))
       ("child" (harness-ui-access-drop-dir dir))
-      ("dropped" (user-error "Given up already: %s (R restores)" shown))
-      ("outputs" (user-error "Tool output directory: fixed"))
-      (_ (when (y-or-n-p (format "Give up %s for this session? " shown))
+      ("dropped" (user-error "Already given up · %s (R restores)" shown))
+      ("outputs" (user-error "Tool output directory · fixed"))
+      (_ (when (y-or-n-p (format "Give up · %s" shown))
            (harness-ui-access-drop-dir dir))))))
 
 (defun harness-ui-access-restore-at-point ()
@@ -1869,7 +1869,7 @@ given up for this session alone, after you confirm."
   (let ((e (harness-ui-access--dir-at-point)))
     (unless (or (harness-ui-access--true-p (plist-get e :dropped))
                 (harness-ui-access--true-p (plist-get e :given-up)))
-      (user-error "Not given up: %s" (harness-abbreviate-file-name (plist-get e :dir))))
+      (user-error "Not given up · %s" (harness-abbreviate-file-name (plist-get e :dir))))
     (harness-ui-access-restore-dir (plist-get e :dir))))
 
 (defun harness-ui-access-set-mode ()
@@ -1890,7 +1890,7 @@ given up for this session alone, after you confirm."
         ((get-text-property (point) 'harness-ui-access-dir)
          (let ((dir (plist-get (get-text-property (point) 'harness-ui-access-dir) :dir)))
            (if (file-directory-p dir) (dired-other-window dir) (message "Not a directory here: %s" dir))))
-        (t (user-error "Nothing to do here"))))
+        (t (user-error "Nothing to do"))))
 
 (defun harness-ui-access--action-at (pos)
   "Return the action of the button at POS, or nil.
@@ -2095,26 +2095,26 @@ show the pages, q goes back to the Overview.
         (". 3" "Rules" harness-ui-access-show-rules)
         (". 4" "Judgements" harness-ui-access-show-judgements)
         (". 5" "Secrets" harness-ui-access-show-secrets)
-        (". q" "Back to the Overview" harness-ui-access-quit)]
+        (". q" "Overview" harness-ui-access-quit)]
        ["Settings"
         (". M" "Permission mode" harness-ui-access-set-mode)
         (". i" "Interactive or not" harness-ui-access-toggle-interaction)
         (". N" "Network on or off" harness-ui-access-toggle-network)
         (". w" "Writing on or off" harness-ui-access-toggle-writing)
         (". T" "A tool on or off" harness-ui-access-toggle-tool)
-        (". C" "Capability give or take away" harness-ui-access-toggle-capability)]
+        (". C" "Capability" harness-ui-access-toggle-capability)]
        ["Directories"
-        (". a" "Allow a directory" harness-ui-access-allow-dir)
-        (". r" "Allow reading a directory" harness-ui-access-allow-read-dir)
-        (". k" "Take away at point" harness-ui-access-take-away)
-        (". R" "Restore at point" harness-ui-access-restore-at-point)
-        (". m" "Move the session" harness-ui-access-move)]
+        (". a" "Directory allowance" harness-ui-access-allow-dir)
+        (". r" "Read directory allowance" harness-ui-access-allow-read-dir)
+        (". k" "Removal at point" harness-ui-access-take-away)
+        (". R" "Restoration at point" harness-ui-access-restore-at-point)
+        (". m" "Session move" harness-ui-access-move)]
        ["Judgements"
-        (". f" "Show allowed, denied…" harness-ui-access-filter-behavior)
+        (". f" "Allowed, denied…" harness-ui-access-filter-behavior)
         (". b" "Decided by" harness-ui-access-filter-by)
         (". t" "Tool" harness-ui-access-filter-tool)
         (". s" "Text" harness-ui-access-filter-text)
-        (". c" "Clear the filter" harness-ui-access-filter-clear)
+        (". c" "Filter clear" harness-ui-access-filter-clear)
         (". g" "Reload" harness-ui-access-refresh)]))
 
 ;;;; Following the session

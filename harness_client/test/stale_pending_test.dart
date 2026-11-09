@@ -462,7 +462,7 @@ void main() {
       }
       rig.app.closeSession();
       await tester.pump(const Duration(milliseconds: 120));
-      expect(find.text('NEEDS YOU'), findsOneWidget);
+      expect(find.text('YOUR INPUT'), findsOneWidget);
 
       // It was decided in Emacs while the phone was away.
       rig.harness.refuseConnects = 1000000;
@@ -478,7 +478,7 @@ void main() {
       }
 
       expect(rig.app.phase, ConnectionPhase.connected);
-      expect(find.text('NEEDS YOU'), findsNothing);
+      expect(find.text('YOUR INPUT'), findsNothing);
       expect(rig.app.attentionCount, 0);
       expect(find.byType(HarnessNotice), findsNothing);
     });
@@ -542,7 +542,7 @@ void main() {
       for (var i = 0; i < 8; i++) {
         await tester.pump(const Duration(milliseconds: 120));
       }
-      expect(find.text('One session needs your answer'), findsOneWidget);
+      expect(find.text('1 session · your answer'), findsOneWidget);
       expect(find.byType(HarnessErrorBanner), findsNothing);
 
       // Answered in Emacs: nothing is left on the page that says otherwise.

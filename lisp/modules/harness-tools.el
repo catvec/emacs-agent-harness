@@ -176,7 +176,8 @@ own."
 (cl-defstruct (harness-tool (:copier nil))
   ;; New slots go last, so a tool registered before a reload still reads
   ;; right should its module fail to load again (see `harness-tools--label').
-  name description schema handler kind paths-fn coalescable subject-fn module timeout label)
+  name description schema handler kind paths-fn coalescable subject-fn module timeout label
+  computer capability)
 
 (defvar harness-tools (make-hash-table :test 'equal)
   "Tool name -> `harness-tool'.")
@@ -196,7 +197,7 @@ Claude Code drops every tool of the harness from the turn."
     schema))
 
 (cl-defun harness-define-tool (name &key label description schema handler (kind 'meta)
-                                    paths coalescable subject timeout)
+                                    paths coalescable subject timeout computer capability)
   "Register tool NAME.  See docs/architecture.md for the keyword arguments.
 LABEL is required: the name people read, such as \"Read file\" for
 read_file, which the UI shows wherever it names the tool.  DESCRIPTION
@@ -226,6 +227,7 @@ harness's own modules do."
                                    :schema (or (harness-tools--clean-schema schema)
                                                '(:type "object" :properties :empty))
                                    :handler handler :kind kind :paths-fn paths
+                                   :computer computer :capability capability
                                    :coalescable coalescable :subject-fn subject
                                    :timeout timeout
                                    :module (harness-loading-module))
@@ -249,6 +251,16 @@ A tool nobody registered, one a model made up say, has no label."
   (let ((tool (and name (harness-tool-get name))))
     (if tool (harness-tools--label tool) (format "%s" (or name "tool")))))
 
+(defun harness-tools--computer-of (tool)
+  "Return TOOL's computer, or nil for a record from before the slot.
+A tool registered before tools ran on computers has no such slot, and
+reading it would signal; its module may fail to load again in a reload."
+  (and tool (ignore-errors (harness-tool-computer tool))))
+
+(defun harness-tools--capability-of (tool)
+  "Return the capability TOOL needs, or nil for a record from before the slot."
+  (and tool (ignore-errors (harness-tool-capability tool))))
+
 (defun harness-tool-spec (tool)
   "Return the public spec plist of TOOL."
   (list :name (harness-tool-name tool)
@@ -256,7 +268,9 @@ A tool nobody registered, one a model made up say, has no label."
         :description (harness-tool-description tool)
         :schema (harness-tool-schema tool)
         :kind (harness-tool-kind tool)
-        :coalescable (and (harness-tool-coalescable tool) t)))
+        :coalescable (and (harness-tool-coalescable tool) t)
+        :requires-computer (and (harness-tools--computer-of tool) t)
+        :capability (harness-tools--capability-of tool)))
 
 (defun harness-tools--subject (tool input)
   "Return what a call of TOOL (a struct or nil) with INPUT is about, or nil.
@@ -516,6 +530,40 @@ permission request does not use it, since \"no paths\" there reads as
   (condition-case err
       (harness-tools--call-paths tool input ctx)
     (error (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err) nil)))
+
+(defun harness-tools--computer-fields (tool input ctx)
+  "Return the `:computer' of the permission request for a call of TOOL.
+It is (:computer SUBJECT) where SUBJECT is a plist `(:computer NAME
+:capability NAME :window NAME :input BOOL)', or (:computer nil) for a
+tool that runs on no computer.  A tool whose computer function fails is
+refused before the chain, as a call whose paths cannot be told is:
+(:computer nil :computer-error WHY)."
+  (let ((spec (harness-tools--computer-of tool))
+        (capability (harness-tools--capability-of tool)))
+    (cond
+     ((null spec) (list :computer nil))
+     ((functionp spec)
+      (condition-case err
+          (let ((value (if (harness-tools--takes-context-p spec)
+                           (funcall spec input ctx)
+                         (funcall spec input))))
+            (list :computer (harness-tools--computer-subject value capability)))
+        (error
+         (harness-log 'warn "tool %s: computer function failed: %S" (harness-tool-name tool) err)
+         (list :computer nil :computer-error (harness-error-message err)))))
+     (t (list :computer (harness-tools--computer-subject spec capability))))))
+
+(defun harness-tools--computer-subject (value capability)
+  "Return VALUE, what a tool's computer function said, as a subject plist.
+VALUE is a name, a plist, or nil; CAPABILITY fills a plist that names
+none."
+  (cond
+   ((null value) nil)
+   ((and (listp value) (keywordp (car value)))
+    (append value (and capability (not (plist-get value :capability))
+                       (list :capability capability))))
+   (t (append (list :computer (format "%s" value))
+              (and capability (list :capability capability))))))
 
 (defun harness-tools--path-fields (tool input ctx)
   "Return the `:paths' of the permission request for a call of TOOL, as a plist.
@@ -1202,8 +1250,9 @@ model is told."
                                 :call-id call-id
                                 :builtin t)
                           (if tool
-                              (harness-tools--path-fields tool input ctx)
-                            (list :paths nil)))))
+                              (append (harness-tools--path-fields tool input ctx)
+                                      (harness-tools--computer-fields tool input ctx))
+                            (list :paths nil :computer nil)))))
     (harness-then
      (harness-tools--decide request)
      (lambda (decision)
@@ -1317,7 +1366,8 @@ secrets in all three."
       (let* ((request (append (list :session session :tool name :input input
                                     :kind (harness-tool-kind tool)
                                     :call-id call-id)
-                              (harness-tools--path-fields tool input ctx)))
+                              (harness-tools--path-fields tool input ctx)
+                              (harness-tools--computer-fields tool input ctx)))
              (decision (harness-tools--decide request)))
         (harness-then
          decision
@@ -1326,7 +1376,11 @@ secrets in all three."
              (harness-emit 'permission/decided session-id request decision)
              (harness-then
               (if (eq behavior 'allow)
-                  (harness-tools--run-handler tool (or (plist-get decision :input) input) ctx)
+                  (let* ((computer (plist-get decision :computer))
+                         (ctx (if computer
+                                  (plist-put (copy-sequence ctx) :computer computer)
+                                ctx)))
+                    (harness-tools--run-handler tool (or (plist-get decision :input) input) ctx))
                 (harness-resolved
                  (harness-tool-error (harness-tools-denial-message decision session-id request)
                                      :denied t)))

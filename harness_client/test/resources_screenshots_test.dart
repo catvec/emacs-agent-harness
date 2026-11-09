@@ -102,7 +102,7 @@ void main() {
     for (var i = 0; i < 6; i++) {
       await tester.pump(const Duration(milliseconds: 100));
     }
-    expect(find.text('Clear site data'), findsOneWidget);
+    expect(find.text('Site data deletion'), findsOneWidget);
     expect(tester.takeException(), isNull);
     if (shots != null) {
       await _write(tester, boundary, '$shots/resources-phone-site.png');

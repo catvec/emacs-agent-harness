@@ -89,7 +89,7 @@ void main() {
       expect(find.text('Connection lost. Reconnecting…'), findsOneWidget);
       // Nothing was thrown away: the connection screen did not come up,
       // the conversation is where it was, and so is the message.
-      expect(find.textContaining('within reach'), findsNothing);
+      expect(find.textContaining('Agent harness'), findsNothing);
       expect(find.byType(MessageComposer), findsOneWidget);
       expect(find.text('a long thought, half written'), findsOneWidget);
       expect(
@@ -215,7 +215,7 @@ void main() {
     expect(rig.app.phase, ConnectionPhase.connected);
     // Still on Settings: no trip through the connection screen, which would
     // have put the app back on the sessions.
-    expect(find.textContaining('within reach'), findsNothing);
+    expect(find.textContaining('Agent harness'), findsNothing);
     expect(find.byKey(const Key('settings-reconnect')), findsOneWidget);
     expect(find.text('Connected'), findsOneWidget);
   });

@@ -380,20 +380,20 @@ Images with a map are measured on the selected frame; see
                         'face 'harness-dim-face)
             "\n")
     (insert " " (propertize
-                 (concat (format "Made %s from the harness's own records" (format-time-string "%H:%M" (plist-get data :generated)))
+                 (concat (format "Made %s · harness records" (format-time-string "%H:%M" (plist-get data :generated)))
                          (if scan
-                             (format ": %s, read in %.1fs" (harness-ui-insights--count (plist-get scan :files) "transcript")
+                             (format " · %s read in %.1fs" (harness-ui-insights--count (plist-get scan :files) "transcript")
                                      (or (plist-get scan :seconds) 0))
                            "")
-                         ".  They read the same for every provider.")
+                         " · same for every provider")
                  'face 'harness-dim-face)
             "\n")
     (when-let* ((problem (plist-get data :scan-error)))
-      (insert " " (propertize (format "The transcripts could not be read (%s): sessions, tools and activity are missing." problem)
+      (insert " " (propertize (format "Transcripts unreadable · %s · sessions, tools, activity missing" problem)
                               'face 'warning)
               "\n"))
     (when-let* ((problem (plist-get (plist-get data :usage) :error)))
-      (insert " " (propertize (format "Usage could not be read: %s" problem) 'face 'warning) "\n"))))
+      (insert " " (propertize (format "Usage unreadable · %s" problem) 'face 'warning) "\n"))))
 
 (defun harness-ui-insights--insert-totals (data)
   "Insert the headline figures of report DATA."
@@ -454,15 +454,15 @@ Images with a map are measured on the selected frame; see
       (insert "\n"))
      ((equal mode "nil")
       (harness-ui-insights--dim
-       "Written summaries are off: the figures below never leave the harness.  Set harness-insights-narrative to have one."))
+       "Written summaries off · figures never leave the harness · harness-insights-narrative"))
      ((not (harness-ui-insights--active-p data))
-      (harness-ui-insights--dim "Nothing happened in this period to write about."))
+      (harness-ui-insights--dim "No activity in this period"))
      ((plist-get n :skipped)
       (insert "   " (propertize (plist-get n :skipped) 'face (if (plist-get n :error) 'warning 'harness-dim-face)) "  ")
       (harness-ui-insights--write-button "[try again]")
       (insert "\n"))
      (t
-      (insert "   " (propertize "No summary yet; one is written by your model from these figures.  " 'face 'harness-dim-face))
+      (insert "   " (propertize "No summary · model-written from these figures · " 'face 'harness-dim-face))
       (harness-ui-insights--write-button "[write one]")
       (insert "\n")))))
 
@@ -562,9 +562,9 @@ Only for a report of every project."
          (rows (plist-get data :busiest-sessions)))
     (harness-ui-insights--heading "Sessions" (and (> n 0) (harness-ui-insights--kinds-text sessions)))
     (if (zerop n)
-        (harness-ui-insights--dim "No session worked in this period.")
+        (harness-ui-insights--dim "No session in this period")
       (harness-ui-insights--dim
-       (format "%s and %s active per session on average; you wrote %s."
+       (format "%s and %s per session on average · %s written"
                (format "%.1f turns" (/ (float (or (plist-get sessions :turns) 0)) n))
                (harness-ui-insights--duration (/ (or (plist-get sessions :active-seconds) 0) n))
                (harness-ui-insights--count (plist-get sessions :messages) "message")))
@@ -634,33 +634,32 @@ Only for a report of every project."
      ((> decisions 0)
       (let ((asked (or (plist-get perms :asked) 0)))
         (harness-ui-insights--paragraph
-         (concat (format "%s on tool calls.  " (harness-ui-insights--count decisions "permission decision"))
+         (concat (format "%s on tool calls" (harness-ui-insights--count decisions "permission decision"))
                  (if (> asked 0)
-                     (format "You were asked about %s and allowed %s of them; "
+                     (format " · %s asked · %s allowed"
                              (harness-ui-insights--count asked "call")
                              (harness-ui-insights--percent (plist-get perms :asked-allowed) asked))
-                   "You were never asked; ")
-                 (format "%s %s settled by a rule or the permission mode%s."
+                   " · none asked")
+                 (format " · %s settled by a rule or the permission mode%s"
                          (harness-ui-insights--number (- decisions asked))
-                         (if (= (- decisions asked) 1) "was" "were")
                          (let ((auto-denied (- (or (plist-get perms :denied) 0) (or (plist-get perms :asked-denied) 0))))
-                           (if (> auto-denied 0) (format ", %d of them denied" auto-denied) ""))))
+                           (if (> auto-denied 0) (format " · %d denied" auto-denied) ""))))
          3)
         (when-let* ((asked-tools (seq-take (cl-remove-if-not (lambda (tl) (> (plist-get tl :asked) 0))
                                                              (sort (copy-sequence (plist-get perms :tools))
                                                                    (lambda (a b) (> (plist-get a :asked) (plist-get b :asked)))))
                                            5)))
           (harness-ui-insights--dim
-           (concat "Asked most about: "
+           (concat "Most asked · "
                    (mapconcat (lambda (tl) (format "%s %d×%s" (plist-get tl :tool) (plist-get tl :asked)
                                                    (if (> (plist-get tl :asked-denied) 0)
                                                        (format " (%d denied)" (plist-get tl :asked-denied))
                                                      "")))
                               asked-tools ", "))))))
      ((> denied-calls 0)
-      (harness-ui-insights--dim (format "%s denied.  Decisions are logged from now on, which says how often you are asked."
+      (harness-ui-insights--dim (format "%s denied · decisions logged from now on · how often you are asked"
                                         (harness-ui-insights--count denied-calls "tool call"))))
-     (t (harness-ui-insights--dim "No permission decisions logged in this period.")))))
+     (t (harness-ui-insights--dim "No permission decisions in this period")))))
 
 (defconst harness-ui-insights--why
   '(("failed" "✗" error) ("sent-back" "↩" warning) ("review" "◆" harness-dim-face) ("done" "✓" success))
@@ -735,7 +734,7 @@ Only for a report of every project."
            3 'harness-dim-face)))
       (when open
         (harness-ui-insights--parts
-         (cons (format "On the board now: %s" (harness-ui-insights--open-text (car open)))
+         (cons (format "On the board · %s" (harness-ui-insights--open-text (car open)))
                (mapcar #'harness-ui-insights--open-text (cdr open)))
          3 'harness-dim-face))
       (when notable
@@ -763,7 +762,7 @@ Only for a report of every project."
          (busiest (plist-get activity :busiest-day)))
     (harness-ui-insights--heading "Activity" "the messages you wrote")
     (if (zerop messages)
-        (harness-ui-insights--dim "You wrote no messages in this period.")
+        (harness-ui-insights--dim "No messages in this period")
       (if (harness-ui-usage--graphic-p)
           (let* ((width (harness-ui-usage--chart-width))
                  (hour-w (round (* 0.62 width)))
@@ -793,7 +792,7 @@ Only for a report of every project."
                 "   " (propertize "By day " 'face 'bold) "  " (harness-ui-insights--spark weekdays)
                 (propertize "  Mon–Sun" 'face 'harness-dim-face) "\n"))
       (harness-ui-insights--parts
-       (list (format "Active on %s" (harness-ui-insights--count (plist-get activity :active-days) "day"))
+       (list (format "Active · %s" (harness-ui-insights--count (plist-get activity :active-days) "day"))
              (and (> (or (plist-get activity :longest-streak) 0) 1)
                   (format "longest streak %s%s"
                           (harness-ui-insights--count (plist-get activity :longest-streak) "day")
@@ -822,10 +821,10 @@ Only for a report of every project."
     (setq header-line-format (harness-ui-insights--header))
     (cond
      ((and (null data) harness-ui-insights--error)
-      (insert "\n " (propertize (format "The report could not be made: %s" harness-ui-insights--error) 'face 'error) "\n"))
+      (insert "\n " (propertize (format "Report failure · %s" harness-ui-insights--error) 'face 'error) "\n"))
      ((null data)
       (insert "\n " (propertize "Gathering insights…" 'face 'harness-usage-heading-face) "\n\n "
-              (propertize "The harness reads the period's transcripts, usage and tasks in the background;\n Emacs stays yours meanwhile."
+              (propertize "Background read · transcripts, usage and tasks · Emacs stays yours"
                           'face 'harness-dim-face)
               "\n"))
      (t
@@ -917,10 +916,10 @@ Only for a report of every project."
        ["View"
         (". t" "Next period" harness-ui-insights-cycle-period)
         (". p" "Project…" harness-ui-insights-set-project)
-        (". RET" "Open the session at point" harness-ui-insights-open)
-        (". g" "Compute again" harness-ui-insights-refresh)]
+        (". RET" "Session at point" harness-ui-insights-open)
+        (". g" "Recomputation" harness-ui-insights-refresh)]
        ["Summary"
-        (". n" "Write it again" harness-ui-insights-write)]))
+        (". n" "Recap rewrite" harness-ui-insights-write)]))
 
 (defun harness-ui-insights--on-resize ()
   "Draw the report again so the charts and paragraphs fit the window."

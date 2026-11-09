@@ -75,7 +75,7 @@ the chat, so the same mode can run a life and run a task board.
 | How does it work on non-code work? | The workspace root is an ordinary project; task mode already works outside git.  Daily-life tasks, routines, notes, decisions, people and projects all live in the graph; the box is where the results are used. |
 | How does voice fit? | A call attaches to a thread.  Live voice delegates each utterance to `workspace/prompt`; replies stream back to speech.  Voice turns are ordinary chat turns marked `voice`. |
 | Where does it run? | In the harness process, with the UI in Emacs and the ACP client (Flutter) as a remote front end.  The box is a separate sandbox; the memory graph is local. |
-| What is the implementation status? | The core chat, threads, episodes, the Logseq markdown knowledge graph and its tools, the Emacs UI, the local computer and its VNC screen are implemented; the Logseq CLI and DB graphs, the index, dreaming, the container backend, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md) and [the computer](workspace-computer.md). |
+| What is the implementation status? | The core chat, threads, episodes, the Logseq markdown knowledge graph and its tools, the Emacs UI, a workspace computer and its VNC screen are implemented; the Logseq CLI and DB graphs, the index, dreaming, the container backend, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md) and [the computer](workspace-computer.md). |
 
 ## Why this mode
 
@@ -435,7 +435,7 @@ forces `New thread`.
 
 The decision is never hidden: the divider says what happened, and its
 buttons offer `Keep in this thread` (merge the new episode back into
-the old thread), `New thread` (split), `Rename`, and `Open episode`.
+the old thread), `New thread` (split), `Rename`, and `Episode`.
 A wrong decision costs one click, not a lost conversation.
 
 ### The brief
@@ -483,7 +483,7 @@ invent.  A recall failure never blocks the turn; it is a hint
   `forget` something.  The memory browser (see the UI section of the
   [implementation page](workspace-mode-implementation.md)) shows what
   the scribe wrote and where it came from.
-- **Correct the episode.**  `Open episode` opens the ordinary session
+- **Correct the episode.**  `Episode` opens the ordinary session
   behind the thread: its full transcript, its model, its context, its
   tools.  The user can read, fork, compact or delete it like any
   session; the timeline follows the deletion.  A fork is a session of

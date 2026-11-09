@@ -7,6 +7,10 @@
 ;; markdown rendering can be exercised in a live Emacs without cost.
 ;; The script is chosen from the last user message:
 ;;
+;;   "computer demo"  the computer tools on the demo desktop: look, fill
+;;                 in the form and say hello
+;;   "mobile computer demo"  a phone as a computer: camera, screen and
+;;                 its scoped files
 ;;   "tour"        thinking, text, a read_file call, markdown
 ;;   "tools"       two searches, then a bash call: a run of three calls
 ;;                 that fold into one summary
@@ -278,6 +282,40 @@ one (see the Commentary)."
      ;; which a reply may well hold.
      ((harness-provider-demo--thread-ids request)
       (harness-provider-demo--thread request))
+     ((string-match-p "\\bmobile computer demo\\b" text)
+      ;; A phone registered as a computer: its camera, its screen and its
+      ;; scoped files, through the same computer tools a desktop uses.
+      `((:type text :delta "Let me look at the phone and its files.\n")
+        (:type tool-call :id "demo-m1" :name "computer_list" :input nil)
+        (:type tool-call :id "demo-m2" :name "computer_camera" :input nil)
+        (:type tool-call :id "demo-m3" :name "computer_view" :input nil)
+        (:type tool-call :id "demo-m4" :name "computer_call"
+               :input (:tool "list_dir" :capability "files" :server "files"
+                       :arguments (:path "imports")))
+        (:type tool-call :id "demo-m5" :name "computer_call"
+               :input (:tool "read_file" :capability "files" :server "files"
+                       :arguments (:path "imports/hello.txt")))
+        (:type text :delta "The phone's camera, screen and scoped files all answered.")
+        (:type usage :input 1500 :output 100 :cache-read 700 :cost 0.003 :context 1800)
+        (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bcomputer demo\\b" text)
+      ;; The page `demo/computer-use/index.html' on the demo desktop: the
+      ;; agent looks, fills the form and says hello, all through the
+      ;; computer tools.  The coordinates are the page's at 1280x800.
+      `((:type text :delta "Let me look at the desktop, then fill in the form.\n")
+        (:type tool-call :id "demo-c1" :name "computer_list" :input nil)
+        (:type tool-call :id "demo-c2" :name "computer_view" :input nil)
+        (:type tool-call :id "demo-c3" :name "computer_windows" :input nil)
+        (:type tool-call :id "demo-c4" :name "computer_pointer"
+               :input (:action "click" :x 640 :y 350))
+        (:type tool-call :id "demo-c5" :name "computer_keyboard"
+               :input (:action "type" :text "Noah"))
+        (:type tool-call :id "demo-c6" :name "computer_pointer"
+               :input (:action "click" :x 332 :y 426))
+        (:type tool-call :id "demo-c7" :name "computer_view" :input nil)
+        (:type text :delta "Filled in the form, said hello, and looked at the result.")
+        (:type usage :input 1800 :output 120 :cache-read 900 :cost 0.004 :context 2200)
+        (:type done :stop-reason end-turn)))
      ((string-match-p "\\btour\\b" text)
       `((:type thinking :delta "The user wants a tour. ")
         (:type thinking :delta "I will read a file, then summarise.")

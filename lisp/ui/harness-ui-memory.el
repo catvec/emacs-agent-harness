@@ -286,7 +286,7 @@ MEMORIES defaults to every memory the page holds."
             "\n\n")
     (harness-ui-memories--insert-buttons
      (list (list "Add" (lambda () (harness-ui-memories-add 'project)) "New memory")
-           (list "Search" #'harness-ui-memories-search "Search memories")
+           (list "Search" #'harness-ui-memories-search "Memory search")
            (list "Consolidate" (lambda () (harness-ui-memories-consolidate 'project))
                  "Merge duplicate project memories")
            (list "Refresh" #'harness-ui-memories-refresh "Load the memories again")))
@@ -526,12 +526,12 @@ memory at point, as [Edit] does."
 (put 'harness-ui-memories-mode 'harness-menu-group
      '("Memory"
        ["Memory"
-        ("RET" "Edit memory" harness-ui-memories-edit)
+        ("RET" "Memory edit" harness-ui-memories-edit)
         ("a" "New project memory" harness-ui-memories-add)
         ("A" "New user memory" harness-ui-memories-add-user)
-        ("e" "Edit memory" harness-ui-memories-edit)
-        ("d" "Forget memory" harness-ui-memories-forget)
-        ("/" "Search memories" harness-ui-memories-search)
+        ("e" "Memory edit" harness-ui-memories-edit)
+        ("d" "Memory removal" harness-ui-memories-forget)
+        ("/" "Memory search" harness-ui-memories-search)
         ("g" "Refresh" harness-ui-memories-refresh)]))
 
 ;;;###autoload

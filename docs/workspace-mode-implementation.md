@@ -788,7 +788,7 @@ header line, a thread sidebar, the timeline and the compose box.
 |---|---|---|
 | user message | the chat's "You" style, with a voice icon when it came from a call | click opens the episode at the node |
 | agent reply | the chat's "Agent" style | streamed in place; tool calls are folded as in a chat |
-| thread divider | a rule with the thread name, reason and `[Pin] [Open episode] [Merge]` | separates threads; explains why |
+| thread divider | a rule with the thread name, reason and `[Pin] [Episode] [Merge]` | separates threads; explains why |
 | brief card | one line `Recalled · 8 notes · 3 tasks`, a plus to open the sections and sources | shows exactly what the model got |
 | memory footnote | one muted line under a reply: `Memory · 2 notes · Decision/Countertop` | opens the written blocks; tooltip lists pages |
 | event card | an icon, the event title, a state, and the actions the event has | task, routine, dream, box or routine event |
@@ -920,8 +920,8 @@ the header buttons are clickable.
 |---|---|
 | `C-c . n` | New thread |
 | `C-c . t` | Threads |
-| `C-c . RET` | Open episode |
-| `C-c . o` | Open episode in another window |
+| `C-c . RET` | Episode |
+| `C-c . o` | Episode in another window |
 | `C-c . p` | Pin or unpin thread |
 | `C-c . k` | Park thread |
 | `C-c . e` | Rename thread |
@@ -1061,7 +1061,7 @@ bodies in a picture are data.
 |---|---|
 | `Workspace` | page title when there is no workspace |
 | `Home` | page title, the workspace's name (data) |
-| `Threads` / `New thread` / `Call` / `Computer` / `Open episode` / `Refresh` | header actions and their tooltips |
+| `Threads` / `New thread` / `Call` / `Computer` / `Episode` / `Refresh` | header actions and their tooltips |
 | `Live` / `Waiting` / `Parked` / `Done` | thread state in the subtitle |
 | `Tag · Kitchen` | subtitle and thread rail, a chosen concept |
 
@@ -1142,10 +1142,10 @@ bodies in a picture are data.
 | `Authorizations` / `$10.00 · Cumulative` / `Remaining $0.60` | authorizations |
 | `Per transaction` / `Cap excludes fees` / `Advisory · no broker` | cap and enforcement facts |
 | `New authorization` / `Amount` / `Merchant` / `Expires` / `Create` | form |
-| `Agent access` / `Allowed` / `Ask` / `None` / `Revoke` | access |
+| `Agent access` / `Allowed` / `Ask` / `None` / `Revocation` | access |
 | `Audit` / `Created` / `Used` / `Forgotten` | history |
 | `Credentials` / `Secrets module` / `Locked run · ready` / `SHA-256 4f9c2a1b` | the secrets module's declared credentials |
-| `Unavailable` / `Computer tools` / `Computer off` / `Needs wallet provider` / `Preview · no changes` | states |
+| `Unavailable` / `Computer tools` / `Computer off` / `No wallet provider` / `Preview · no changes` | states |
 | `No sites` / `No logins` / `No cards` / `No authorizations` / `No purchases` | empty states |
 
 The resource rows are metadata by construction; the credentials come
@@ -1187,7 +1187,7 @@ against the rendered buffer and the final diff.
 | `Memory · ready` / `Memory · indexing` / `Memory · keyword` / `Memory · unavailable` / `Memory · synced` / `Memory · 3 to review` / `Memory · disk full` | header, memory panel |
 | `Dream · 2h ago` / `Dream · now` / `Dream · 3 to review` / `Dream · failed` | header, dream panel |
 | `Tasks` / `Computer` / `Memory` / `Dream` / `Call` / `Menu` | header buttons |
-| `Open episode` | header and thread action |
+| `Episode` | header and thread action |
 | `live` / `parked` / `done` / `waiting` | thread states |
 | `Routing…` / `Recalling…` / `Working` / `Waiting` / `Thinking` / `Waiting for the model…` / `Running <tool>…` | activity |
 
@@ -1198,7 +1198,7 @@ against the rendered buffer and the final diff.
 | `New thread` / `Voice` / `Attach` / `Send` | compose |
 | `Message…` | compose placeholder |
 | `Pin` / `Unpin` / `Park` / `Rename` / `Merge` / `Done` / `Delete` | thread actions |
-| `Open` / `Open episode` / `Open in other window` / `Open board` | cards, thread and work panel |
+| `Open` / `Episode` / `Open in other window` / `Open board` | cards, thread and work panel |
 | `Keep in this thread` / `New thread` / `Rename` | divider |
 | `Start over` / `Forget this episode` / `Add to thread` / `Make a task` / `Promote to thread` / `Follow as thread` | thread and task actions |
 | `This thread` / `This workspace` | settings scope |
@@ -1300,7 +1300,7 @@ against the rendered buffer and the final diff.
 | `Context recalled for this turn` | brief card |
 | `Thread started by a topic change` | divider |
 | `Memory written from this turn` | memory footnote |
-| `The session behind this thread` | `Open episode` |
+| `The session behind this thread` | `Episode` |
 | `The computer inside the sandbox` | `Computer` |
 | `Hide computer` / `Show computer` | the desk's fold control |
 | `Knowledge base review` | `Dream` |

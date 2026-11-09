@@ -25,6 +25,10 @@
 ;;   :caps       the Linux capabilities (CAP_SYS_PTRACE...) the user gave
 ;;               its bash and elisp commands: unlike the rest, a grant,
 ;;               not a restriction
+;;   :computers  the computers it may use, each a grant
+;;               (:computer ID :capabilities (NAMES...) :window NAME);
+;;               :computers-off the computers it may not use at all.
+;;               The computers module's gate at 7 enforces them.
 ;;
 ;; A session without one has the access it always had.  The profile is
 ;; held by the harness, not by a prompt:
@@ -148,6 +152,7 @@
 (require 'harness-tools)
 (require 'harness-perms)
 (require 'harness-readonly)
+(require 'harness-computers)
 
 (defvar harness-corporate-mode)
 
@@ -161,7 +166,7 @@
 
 (defconst harness-access-attributes
   '("directory" "read_directory" "writes" "network" "tool" "permission_mode" "non_interactive"
-    "capability")
+    "capability" "computer")
   "The attributes `request_escalation' and `drop_access' take.
 `read_directory' is for an escalation only: `drop_access' gives up a
 directory whatever it may do there.  Every one is raised only by the
@@ -271,12 +276,22 @@ a profile of them alone is a profile."
         (tools (delete-dups (copy-sequence (harness-access--strings (plist-get profile :tools-off)))))
         (read-dirs (delete-dups (copy-sequence (harness-access--strings (plist-get profile :read-dirs)))))
         (dropped (delete-dups (copy-sequence (harness-access--strings (plist-get profile :dropped)))))
-        (caps (delete-dups (copy-sequence (harness-access--strings (plist-get profile :caps))))))
+        (caps (delete-dups (copy-sequence (harness-access--strings (plist-get profile :caps)))))
+        (computers (delq nil (mapcar #'harness-computers--grant (plist-get profile :computers))))
+        (computers-off (delete-dups
+                        (delq nil (mapcar (lambda (id)
+                                           (or (harness-computers-resolve id) (harness-access--name id)))
+                                         (let ((v (plist-get profile :computers-off)))
+                                           (cond ((stringp v) (list v))
+                                                 ((listp v) v)
+                                                 (t nil))))))))
     (append (and (eq network :false) (list :network :false))
             (and (harness-json-true-p read-only) (list :read-only t))
             (and tools (list :tools-off tools))
             (and read-dirs (list :read-dirs read-dirs))
             (and dropped (list :dropped dropped))
+            (and computers (list :computers computers))
+            (and computers-off (list :computers-off computers-off))
             (and caps (list :caps caps)))))
 
 (defun harness-access--update (session-id fn &optional hint)
@@ -1062,6 +1077,39 @@ allow that grants nothing when the session has what it asks for."
          (funcall next (harness-access--nothing attribute nil "this session is non-interactive already")))
         (t (harness-access--confirm request next attribute nil "Turn non-interactive mode on for this session"
                                     "Nobody is asked anything there until it is turned off again: the auto-mode judge decides what would ask you."))))
+      ("computer"
+       (let* ((record (and value (harness-computers-get value)))
+              (caps (harness-computers--normalise-capabilities
+                     (plist-get input :capabilities)))
+              (window (harness-computers--name (plist-get input :window)))
+              (access (and record (harness-computers-access (plist-get session :id))))
+              (entry (and access (harness-computers--entry access (plist-get record :id)))))
+         (cond
+          ((null value)
+           (funcall next (harness-access--refuse
+                          "computer needs value: the computer's id or name"
+                          "Call it again with the computer you need; computer_list names them.")))
+          ((null record)
+           (funcall next (harness-access--refuse
+                          (format "no computer is named %s" value)
+                          "Call computer_list for the computers the harness has, and ask the user to register one if none is.")))
+          ((and (plist-get entry :allowed)
+                (or (null caps)
+                    (cl-every (lambda (c) (member c (plist-get entry :capabilities-allowed))) caps)))
+           (funcall next (harness-access--nothing
+                          attribute (plist-get record :id)
+                          (format "this session may use the computer %s already, with %s"
+                                  (plist-get record :name)
+                                  (or (and caps (string-join caps ", ")) "any capability")))))
+          (t
+           (harness-access--confirm
+            request next attribute (plist-get record :id)
+            (format "Let the agent use the computer %s" (plist-get record :name))
+            (format "It offers %s.%s%s  A client on that computer runs its tools; a call that needs a capability the session is not given is refused. The computer's screen is not part of this: only a session's agent is gated, and a client may watch it."
+                    (or (string-join (plist-get entry :capability-names) ", ") "no computer-use capability")
+                    (if caps (format "  The agent asks for %s only." (string-join caps ", ")) "")
+                    (if window (format "  It asks for the window %s only." window) "")))))))
+
       ("capability"
        (let* ((check (harness-access--capability-check session value))
               (name (plist-get check :name)))
@@ -1129,6 +1177,18 @@ session.  A directory the user granted at the prompt was granted there
          ((equal attribute "non_interactive")
           (harness-call 'session/update sid :non-interactive t)
           (harness-tool-ok "The user turned non-interactive mode on for this session: from now on the auto-mode judge decides what would ask them, and a denied call is to be worked around rather than waited on."))
+         ((equal attribute "computer")
+          (let* ((record (or (harness-computers-get value)
+                             (signal 'harness-error (list (format "No computer is named %s" value)))))
+                 (caps (harness-computers--normalise-capabilities
+                        (plist-get input :capabilities)))
+                 (window (harness-computers--name (plist-get input :window))))
+            (harness-computers-grant sid (plist-get record :id) caps window 'user)
+            (harness-tool-ok
+             (format "The user let this session use the computer %s, with %s%s. Its tools are offered from the next request on; take it away with drop_access (attribute computer) when you are done."
+                     (plist-get record :name)
+                     (or (and caps (string-join caps ", ")) "any capability")
+                     (if window (format " in window %s" window) "")))))
          ((equal attribute "capability")
           (harness-access-grant-capability sid value 'user)
           (let* ((session (harness-access--session sid))
@@ -1143,12 +1203,14 @@ session.  A directory the user granted at the prompt was granted there
 
 (harness-define-tool harness-access-escalation-tool
   :label "Request escalation"
-  :description "Ask the user for more access for this session: a directory to write (attribute directory) or only to read (read_directory), the network back (network), writing back (writes), a tool turned off (tool), a more permissive permission mode (permission_mode: ask, accept-edits, auto or yolo), non-interactive mode (non_interactive), or a Linux capability for your bash and elisp commands (capability, value such as CAP_SYS_PTRACE to strace or gdb a process of your own; they run in a sandbox that drops every capability, and one counts inside that sandbox only, never on the host or on another machine, so it changes nothing for ssh or a remote session). This is the only way a session's access grows: the user always decides, in every permission mode, and the call waits for the answer; no rule or judge answers it, and a non-interactive session is refused at once. Ask only for what the task needs, and say why. If the user says no, do not ask again. To give access up instead, use drop_access, which never asks."
+  :description "Ask the user for more access for this session: a directory to write (attribute directory) or only to read (read_directory), the network back (network), writing back (writes), a tool turned off (tool), a more permissive permission mode (permission_mode: ask, accept-edits, auto or yolo), non-interactive mode (non_interactive), a Linux capability for your bash and elisp commands (capability, value such as CAP_SYS_PTRACE to strace or gdb a process of your own; they run in a sandbox that drops every capability, and one counts inside that sandbox only, never on the host or on another machine, so it changes nothing for ssh or a remote session), or a computer the computer_* tools may use (computer, value its id or name, capabilities to narrow to, window to narrow to one window). This is the only way a session's access grows: the user always decides, in every permission mode, and the call waits for the answer; no rule or judge answers it, and a non-interactive session is refused at once. Ask only for what the task needs, and say why. If the user says no, do not ask again. To give access up instead, use drop_access, which never asks."
   :schema '(:type "object"
             :properties (:attribute (:type "string"
-                                     :enum ["directory" "read_directory" "writes" "network" "tool" "permission_mode" "non_interactive" "capability"]
+                                     :enum ["directory" "read_directory" "writes" "network" "tool" "permission_mode" "non_interactive" "capability" "computer"]
                                      :description "What to ask for.")
-                         :value (:type "string" :description "The directory (absolute or relative to the working directory) for directory and read_directory, the tool's name for tool, the mode for permission_mode, the capability's name for capability (CAP_SYS_PTRACE, CAP_NET_RAW...); nothing for the others.")
+                         :value (:type "string" :description "The directory (absolute or relative to the working directory) for directory and read_directory, the tool's name for tool, the mode for permission_mode, the capability's name for capability (CAP_SYS_PTRACE, CAP_NET_RAW...), the computer's id or name for computer; nothing for the others.")
+                         :capabilities (:type "array" :items (:type "string") :description "For computer: the computer-use capabilities to ask for (view, windows, pointer, keyboard, clipboard, audio, sandbox, exec), all when left out.")
+                         :window (:type "string" :description "For computer: one window to limit the grant to, when the implementation is window-scoped.")
                          :reason (:type "string" :description "Why you need it; shown to the user."))
             :required ("attribute" "reason"))
   :kind 'meta
@@ -1208,6 +1270,16 @@ a session may always take access away from itself."
                  (harness-tool-ok "The session is interactive already: the user is asked.")
                (harness-call 'session/update sid :non-interactive :false)
                (harness-tool-ok "Non-interactive mode is off for this session: the user is asked again what its permission mode leaves open."))))
+          ("computer"
+           (if (null value)
+               (harness-tool-error "Give value: the computer to give up")
+             (let ((record (harness-computers-get value)))
+               (unless record
+                 (signal 'harness-error (list (format "No computer is named %s" value))))
+               (harness-computers-revoke sid (plist-get record :id) nil 'agent)
+               (harness-tool-ok
+                (format "This session may no longer use the computer %s: its tools are gone from the next request on. %s"
+                        (plist-get record :name) back)))))
           ("capability"
            (if (null value)
                (harness-tool-error "Give value: the capability to give up, or all")
@@ -1226,12 +1298,12 @@ a session may always take access away from itself."
 
 (harness-define-tool harness-access-drop-tool
   :label "Drop access"
-  :description "Give up access this session has, at once and without asking anyone: a directory (attribute directory: a grant, the working directory, the worktree, the temporary directory or a configured directory; keep_read keeps it readable), the network (network), writing (writes: the session becomes read-only), a tool (tool), a permission mode for a less permissive one (permission_mode), non-interactive mode (non_interactive), or a Linux capability of your bash and elisp commands (capability: its name, or all). Use it when you are done with something or want to be sure you cannot touch it. Sub-agents you start keep what you gave up. Getting it back takes the user's answer to request_escalation."
+  :description "Give up access this session has, at once and without asking anyone: a directory (attribute directory: a grant, the working directory, the worktree, the temporary directory or a configured directory; keep_read keeps it readable), the network (network), writing (writes: the session becomes read-only), a tool (tool), a permission mode for a less permissive one (permission_mode), non-interactive mode (non_interactive), a Linux capability of your bash and elisp commands (capability: its name, or all), or a computer (computer: its id or name; giving it up leaves you with the harness's state, its model and web requests only). Use it when you are done with something or want to be sure you cannot touch it. Sub-agents you start keep what you gave up. Getting it back takes the user's answer to request_escalation."
   :schema '(:type "object"
             :properties (:attribute (:type "string"
-                                     :enum ["directory" "writes" "network" "tool" "permission_mode" "non_interactive" "capability"]
+                                     :enum ["directory" "writes" "network" "tool" "permission_mode" "non_interactive" "capability" "computer"]
                                      :description "What to give up.")
-                         :value (:type "string" :description "The directory for directory, the tool's name for tool, the less permissive mode for permission_mode, the capability's name (CAP_SYS_PTRACE...) or all for capability; nothing for the others.")
+                         :value (:type "string" :description "The directory for directory, the tool's name for tool, the less permissive mode for permission_mode, the capability's name (CAP_SYS_PTRACE...) or all for capability, the computer's id or name for computer; nothing for the others.")
                          :keep_read (:type "boolean" :description "For directory: keep reading it, give up writing it only (default false).")
                          :reason (:type "string" :description "Why, for the record."))
             :required ("attribute"))
@@ -1261,9 +1333,11 @@ Nothing is copied when the parent has no profile."
           (when-let* ((parent (ignore-errors (harness-call 'session/get parent-id)))
                       (profile (harness-access-profile parent)))
             (let ((inherited (harness-access--normalise
-                              (append (harness-plist-remove profile :read-dirs :caps)
+                              (append (harness-plist-remove profile :read-dirs :caps :computers)
+                                      (list :computers-off (plist-get profile :computers-off))
                                       (and (plist-get plist :fork-node)
                                            (list :read-dirs (plist-get profile :read-dirs)
+                                                 :computers (plist-get profile :computers)
                                                  :caps (plist-get profile :caps)))))))
               (when inherited
                 (harness-access--update session-id
@@ -1275,6 +1349,10 @@ Nothing is copied when the parent has no profile."
                                                 :tools-off (append (plist-get own :tools-off) (plist-get inherited :tools-off))
                                                 :read-dirs (append (plist-get own :read-dirs) (plist-get inherited :read-dirs))
                                                 :dropped (append (plist-get own :dropped) (plist-get inherited :dropped))
+                                                :computers (append (plist-get own :computers)
+                                                                   (plist-get inherited :computers))
+                                                :computers-off (append (plist-get own :computers-off)
+                                                                       (plist-get inherited :computers-off))
                                                 :caps (append (plist-get own :caps) (plist-get inherited :caps))))
                                         (if (plist-get inherited :caps)
                                             "Access: the restrictions of the session that forked this one, and the capabilities it gave its commands (set by its parent)."
@@ -1614,6 +1692,8 @@ Never copy an unexpected error payload, which may quote a secret."
           :skills (plist-get rules :skills)
           :tools (harness-access--tool-entries session-id session)
           :never-ask (plist-get rules :auto-allow)
+          :computers (and (harness-method-exists-p 'computer/access)
+                          (ignore-errors (harness-call 'computer/access session-id)))
           :rules (list :session (plist-get rules :session) :always (plist-get rules :always)
                        :pinned (and (harness-policy-pinned-p 'harness-perms-rules) t)))))
 

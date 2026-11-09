@@ -520,7 +520,7 @@ A tool row's key names when its call began, so it is found by its start."
              (request (harness-ui-slots-test--line-with lines "\\[Answer…\\]")))
         (should request)
         (should (< (string-width request) width))
-        (should (string-match-p "has a question for you · Should /health" request))))
+        (should (string-match-p "question · Should /health" request))))
     ;; Wide enough, the question is whole.
     (should (string-match-p "or only the process\\?"
                             (harness-ui-slots-test--line-with
@@ -543,7 +543,7 @@ A tool row's key names when its call began, so it is found by its start."
                (at (cl-position-if (lambda (line) (string-match-p "Add secret redaction tools" line)) lines))
                (request (nth (1+ at) lines)))
           ;; Under the row, as under the session list's: the buttons that answer, what it is.
-          (should (string-match-p "\\[Allow\\].*\\[Deny\\].*needs your permission.*Bash" request))
+          (should (string-match-p "\\[Allow\\].*\\[Deny\\].*permission.*Bash" request))
           ;; The line is the task's: its keys, and the permission keys of the session list.
           (harness-ui-slots-test--goto "task:t-low" 1 6)
           (should (equal "s-t-low" (get-text-property (point) 'harness-slot-session)))

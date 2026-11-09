@@ -138,11 +138,11 @@ class TaskActionRunner {
       case TaskAction.sendBack:
         final feedback = await showHarnessTextPrompt(
           context: context,
-          title: 'Send it back',
-          message: 'What should change? It goes to the task’s own session.',
+          title: 'Return',
+          message: 'Feedback · task session',
           hint: 'Feedback',
           multiline: true,
-          confirmLabel: 'Send back',
+          confirmLabel: 'Return',
         );
         if (feedback != null && feedback.trim().isNotEmpty) {
           await controller.reject(id, feedback.trim());
@@ -150,33 +150,31 @@ class TaskActionRunner {
       case TaskAction.stop:
         if (await _confirm(
           context,
-          title: 'Stop this task?',
+          title: 'Task stop',
           message:
-              'Its session stops what it is doing. The task stays on the '
-              'board, where it can be retried or marked done.',
-          confirm: 'Stop task',
-          cancel: 'Keep going',
+              'Session stop · task on the board · retry or completion',
+          confirm: 'Stop',
+          cancel: 'Cancel',
         )) {
           await controller.cancelTask(id);
         }
       case TaskAction.drop:
         if (await _confirm(
           context,
-          title: 'Drop this task?',
+          title: 'Task drop',
           message:
-              'It has not started. It comes off the board, and its session '
-              'goes with it.',
-          confirm: 'Drop task',
-          cancel: 'Keep it',
+              'Not started · off the board · session too',
+          confirm: 'Drop',
+          cancel: 'Cancel',
         )) {
           await controller.cancelTask(id);
         }
       case TaskAction.complete:
         if (await _confirm(
           context,
-          title: 'Mark this task complete?',
-          message: 'That accepts the work without waiting for a merge.',
-          confirm: 'Complete',
+          title: 'Task completion',
+          message: 'Work accepted · no merge wait',
+          confirm: 'Completion',
           cancel: 'Cancel',
           destructive: false,
         )) {
@@ -199,23 +197,22 @@ class TaskActionRunner {
   Future<String?> _askMessage(BuildContext context, HarnessTask task) async {
     final (title, help) = switch (task.columnName) {
       'active' => (
-        'Steer the task',
-        'It goes to the task’s session, which reads it as it works.',
+        'Task steering',
+        'Task session · read while working',
       ),
       'backlog' => (
         'Feedback on the write-up',
-        'The task is written up again with it.',
+        'Write-up again',
       ),
       'done' => (
-        'Follow up',
-        'The task’s session takes it up again, and the task goes back to '
-            'work.',
+        'Follow-up',
+        'Task session resume · back to work',
       ),
       'pending' => (
-        'Message the task',
-        'The task starts again with it, or keeps it for when it starts.',
+        'Task message',
+        'Task start · message kept until then',
       ),
-      _ => ('Message the task', 'It goes to the task’s own session.'),
+      _ => ('Task message', 'Task session'),
     };
     final text = await showHarnessTextPrompt(
       context: context,
@@ -223,7 +220,7 @@ class TaskActionRunner {
       message: help,
       hint: 'Message',
       multiline: true,
-      confirmLabel: 'Send',
+      confirmLabel: 'Message',
     );
     final trimmed = text?.trim() ?? '';
     return trimmed.isEmpty ? null : trimmed;
@@ -240,7 +237,7 @@ class TaskActionRunner {
     ];
     return showHarnessMenu<String>(
       context: context,
-      title: 'Priority is ${task.priorityLabel.toLowerCase()}',
+      title: 'Priority · ${task.priorityLabel.toLowerCase()}',
       items: [
         for (final (value, label, icon) in levels)
           if (value != current)
@@ -258,15 +255,14 @@ class TaskActionRunner {
     var alsoSession = false;
     final confirmed = await showHarnessDialog<bool>(
       context: context,
-      title: 'Delete this task?',
+      title: 'Task deletion',
       content: StatefulBuilder(
         builder: (context, setState) => Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'The harness forgets the task. Its worktree and branch stay, in '
-              'case they hold work nobody merged.',
+              'Task forgotten · worktree and branch kept · unmerged work',
               style: HarnessText.body(context),
             ),
             if (asks) ...[
@@ -275,7 +271,7 @@ class TaskActionRunner {
                 children: [
                   Expanded(
                     child: Text(
-                      'Also delete its session',
+                      'Session deletion too',
                       style: HarnessText.rowTitle(context),
                     ),
                   ),
@@ -289,7 +285,7 @@ class TaskActionRunner {
           ],
         ),
       ),
-      confirmLabel: 'Delete',
+      confirmLabel: 'Deletion',
       cancelLabel: 'Cancel',
       destructive: true,
     );

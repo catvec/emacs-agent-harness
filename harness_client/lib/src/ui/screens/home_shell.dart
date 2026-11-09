@@ -264,8 +264,8 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
           HarnessNotice(
             icon: Icons.front_hand_rounded,
             message: count == 1
-                ? 'One session needs your answer'
-                : '$count sessions need your answer',
+                ? '1 session · your answer'
+                : '$count sessions · your answer',
             onTap: _openAttentionSession,
             margin: const EdgeInsets.fromLTRB(
               HarnessSpace.gutter,
@@ -1009,7 +1009,7 @@ class _WideEmptyDetail extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            'The transcript, tools and requests show here.',
+            'Transcript · tools · requests',
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),

@@ -14,7 +14,8 @@ Following the links agents write: a click on a harness: link opens the session, 
 
 An agent points at something in the harness from its own words: a
 session, a message or a tool call in one, a task, a thread of a task's
-review.  It writes a harness: link (lisp/harness-links.el), the
+review, a computer's screen share.  It writes a harness: link
+(lisp/harness-links.el), the
 Markdown renderer draws it as a link like any other, and this module is
 what a click or RET on it does -- the UI half of the linking module,
 which resolves a link and writes it out in full where the agent wrote

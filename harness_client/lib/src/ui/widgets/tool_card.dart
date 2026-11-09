@@ -261,7 +261,7 @@ class _ToolCardState extends State<ToolCard>
             Align(
               alignment: AlignmentDirectional.centerStart,
               child: HarnessTextButton(
-                label: 'Open full view',
+                label: 'Full view',
                 icon: Icons.open_in_full_rounded,
                 dense: true,
                 onPressed: _openFull,

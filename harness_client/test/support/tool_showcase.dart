@@ -151,7 +151,7 @@ A tool call's result was drawn as raw JSON and plain text in two small boxes tha
 ## What I changed
 
 - **Input** is a list of labelled fields. A command is shown as the command, a long text keeps its line breaks, and an edit shows the text it removes and the text it puts in its place.
-- **Output** is cut to a screenful with *Show all ${toolShowcaseTestLog().split('\n').length} lines*, can be copied, and opens on a page of its own where the whole of it can be read and selected.
+- **Output** is cut to a screenful with *All ${toolShowcaseTestLog().split('\n').length} lines*, can be copied, and opens on a page of its own where the whole of it can be read and selected.
 - **A refused call** says *Denied* and why, in amber; one that failed says *Failed*, in red, and shows its error on the line under its title.
 - **`hand_in`** shows its report: the problem, the summary as written, how to reproduce it and every piece of evidence, the calls it quotes opening to what they said.
 
@@ -168,7 +168,7 @@ final _reproduction =
     '1. Open a task\'s session in the app.\n'
     '2. Tap the *Hand in the finished work* call at the end: its report is '
     'a screenful of text, then the evidence.\n'
-    '3. Tap *Bash: flutter test* and *Show all '
+    '3. Tap *Bash: flutter test* and *All '
     '${toolShowcaseTestLog().split('\n').length} lines*.';
 
 /// The nodes of the session, oldest first.

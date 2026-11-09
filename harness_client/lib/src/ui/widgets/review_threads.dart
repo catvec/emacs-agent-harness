@@ -652,7 +652,7 @@ class _ThreadHeader extends StatelessWidget {
               HarnessIconButton(
                 key: const ValueKey('thread-show-place'),
                 icon: Icons.my_location_rounded,
-                label: 'Show in the diff',
+                label: 'Diff position',
                 onPressed: location == null ? null : onShowPlace,
               ),
             ],
@@ -733,7 +733,7 @@ class _ExcerptState extends State<_Excerpt> {
             ),
           if (lines.length > 6)
             HarnessTextButton(
-              label: _open ? 'Show less' : 'Show more',
+              label: _open ? 'Less' : 'More',
               dense: true,
               onPressed: () => setState(() => _open = !_open),
             ),
@@ -869,7 +869,7 @@ class _CommentCard extends StatelessWidget {
           if (long)
             HarnessTextButton(
               key: ValueKey('review-comment-more-${comment.id}'),
-              label: expanded ? 'Show less' : 'Show more',
+              label: expanded ? 'Less' : 'More',
               dense: true,
               onPressed: onToggle,
             ),

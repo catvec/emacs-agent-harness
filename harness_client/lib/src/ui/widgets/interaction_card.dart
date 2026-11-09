@@ -142,9 +142,9 @@ class _PendingActionCardState extends State<PendingActionCard> {
     final value = await showHarnessTextPrompt(
       context: context,
       title: 'Path pattern',
-      message: 'The lasting answer covers paths matching this pattern.',
+      message: 'Lasting answer · paths matching this pattern',
       initial: _selectedPattern ?? '',
-      confirmLabel: 'Use pattern',
+      confirmLabel: 'Pattern',
     );
     if (value != null) setState(() => _selectedPattern = value.trim());
   }
@@ -874,7 +874,7 @@ class _DiagramView extends StatelessWidget {
               borderRadius: BorderRadius.circular(9),
             ),
             child: const Text(
-              'The image could not be loaded.',
+              'Image load failure',
               style: TextStyle(fontSize: 12),
             ),
           );
@@ -896,7 +896,7 @@ class _DiagramView extends StatelessWidget {
             height: maxHeight,
             errorBuilder: (_, _, _) => const SizedBox(
               height: 80,
-              child: Center(child: Text('The image could not be displayed.')),
+              child: Center(child: Text('Image display failure')),
             ),
           ),
         );
@@ -924,10 +924,10 @@ class _SummaryNote extends StatelessWidget {
     return Semantics(
       container: true,
       label: text == null || text.isEmpty
-          ? 'A model is summarizing what this call does'
-          : 'Summary written by '
-                '${writer == null || writer.isEmpty ? 'a model' : writer}, '
-                'which can be wrong: $text',
+          ? 'Model summary · writing'
+          : 'Model summary · '
+                '${writer == null || writer.isEmpty ? 'a model' : writer} · '
+                'may be wrong · $text',
       child: Container(
         key: const ValueKey('permission-summary'),
         width: double.infinity,
@@ -961,7 +961,7 @@ class _SummaryNote extends StatelessWidget {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      text == null || text.isEmpty ? '' : 'advice, can be wrong',
+                      text == null || text.isEmpty ? '' : 'advice · may be wrong',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: HarnessText.caption(context),

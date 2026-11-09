@@ -142,7 +142,8 @@ after changing it run \\[harness-restart]."
     replay resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo
-    ui ui-chat ui-compose ui-notify ui-pending ui-server ui-sessions)
+    computers tools-computers
+    ui ui-chat ui-compose ui-notify ui-pending ui-server ui-sessions ui-computers)
   "The modules that load whatever `harness-enabled-modules' says.
 They make a harness to work with: sessions and the turn loop, Claude
 Code for the default model, compaction and retries, carrying sessions
@@ -285,6 +286,7 @@ every file (see `harness--compiled-fresh-p').")
                                   "lisp/harness-claude-plugin.el"
                                   "lisp/harness-mcp-protocol.el"
                                   "lisp/harness-emacs-endpoint.el"
+                                  "lisp/harness-computer-endpoint.el"
                                   "lisp/harness-notifications-desktop.el" "lisp/harness-server.el"
                                   "lisp/harness-revision.el" "lisp/harness-module-docs.el"
                                   "lisp/harness-slots.el"

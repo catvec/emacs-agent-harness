@@ -334,7 +334,7 @@ Turned off, it leaves the buffer a normal session's."
 (put 'harness-ui-btw-minor-mode 'harness-menu-group
      '("BTW"
        ["Side conversation"
-        ("C-c C-o" "Keep as session" harness-ui-btw-promote)]))
+        ("C-c C-o" "Session promotion" harness-ui-btw-promote)]))
 
 (defun harness-ui-btw--init ()
   "Bind `harness-btw' in `harness-ui-map'."

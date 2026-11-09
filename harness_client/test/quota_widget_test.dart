@@ -207,7 +207,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        inSheet(r'Extra usage: off (out of credits), $0.00 used of $50.0'),
+        inSheet(r'Extra usage: off (out of credits), $0.00 used of $50.00'),
         findsOneWidget,
       );
     });
@@ -305,7 +305,7 @@ void main() {
       expect(find.text('41%'), findsOneWidget);
       expect(find.textContaining('Resets in 3h1'), findsOneWidget);
       expect(
-        find.textContaining('Calls the plan covers are not billed'),
+        find.textContaining('Plan-covered calls · not billed'),
         findsWidgets,
       );
       // Four minutes before the harness started; a slow run may say five.
@@ -412,7 +412,7 @@ void main() {
         scrollable: _usageScrollable(),
       );
       expect(
-        find.text(r'Extra usage: off (out of credits), $0.00 used of $50.0'),
+        find.text(r'Extra usage: off (out of credits), $0.00 used of $50.00'),
         findsOneWidget,
       );
     });
@@ -430,7 +430,7 @@ void main() {
         _claudeAt(0.97, more: {'limit-status': 'allowed_warning'}),
       );
       await _settle(tester, 6);
-      expect(find.text("Close to the plan's limit."), findsOneWidget);
+      expect(find.text("Near plan limit"), findsOneWidget);
 
       rig.harness.updateQuota(
         'claude',
@@ -438,11 +438,11 @@ void main() {
       );
       await _settle(tester, 6);
       expect(
-        find.text("The plan's limit is reached: calls fail until it resets."),
+        find.text("Plan limit · calls fail until reset"),
         findsOneWidget,
       );
       expect(
-        find.text('Calls are drawing on extra usage, billed at API prices.'),
+        find.text('Extra usage · API prices'),
         findsOneWidget,
       );
       expect(find.text('100%'), findsOneWidget);
@@ -458,13 +458,13 @@ void main() {
       });
       await _settle(tester, 6);
       await tester.scrollUntilVisible(
-        find.textContaining('bills per token'),
+        find.textContaining('per token'),
         200,
         scrollable: _usageScrollable(),
       );
       expect(
         find.textContaining(
-          'bills per token (DEEPSEEK_API_KEY): what it cost is what you pay.',
+          ' · per token (DEEPSEEK_API_KEY) · cost only',
           findRichText: true,
         ),
         findsOneWidget,
@@ -483,13 +483,13 @@ void main() {
       });
       await _settle(tester, 6);
       await tester.scrollUntilVisible(
-        find.textContaining('has not said how it bills yet'),
+        find.textContaining('billing · not reported'),
         200,
         scrollable: _usageScrollable(),
       );
       expect(
         find.textContaining(
-          'DeepSeek has not said how it bills yet.',
+          'DeepSeek billing · not reported',
           findRichText: true,
         ),
         findsOneWidget,
@@ -519,7 +519,7 @@ void main() {
       );
       expect(
         find.text(
-          'Budgets count billed cost; calls a plan covers do not spend them.',
+          'Budgets · billed cost · plan-covered calls free',
         ),
         findsOneWidget,
       );

@@ -315,7 +315,7 @@ class _Toolbar extends StatelessWidget {
             ),
             HarnessTab(
               value: _SessionFilter.needsYou,
-              label: 'Needs you',
+              label: 'Your input',
               count: attention,
               color: attention > 0 ? HarnessColors.amber : null,
             ),
@@ -343,8 +343,7 @@ class _Toolbar extends StatelessWidget {
                 const SizedBox(width: HarnessSpace.sm),
                 Expanded(
                   child: Text(
-                    'Standard ACP agent · the task board and usage views are '
-                    'hidden.',
+                    'Standard ACP agent · task board and usage views hidden',
                     style: HarnessText.caption(context),
                   ),
                 ),
@@ -388,9 +387,8 @@ class _SessionList extends StatelessWidget {
               ),
         title: filtered ? 'Nothing matches' : 'No conversations yet',
         message: filtered
-            ? 'Try a different search, filter or project.'
-            : 'Start a session on your harness and it will appear here, with its '
-                  'live status, model and cost.',
+            ? 'No match · different search, filter or project'
+            : 'No sessions · status, model and cost show here',
         action: filtered
             ? null
             : HarnessPrimaryButton(
@@ -406,9 +404,9 @@ class _SessionList extends StatelessWidget {
     for (final session in sessions) {
       final wants = app.needsAttention(session.id) || session.isBlocked;
       final nextSection = wants
-          ? 'Needs you'
+          ? 'Your input'
           : session.isActive
-          ? 'Active now'
+          ? 'Active'
           : 'Recent';
       if (nextSection != section) {
         section = nextSection;
@@ -418,9 +416,9 @@ class _SessionList extends StatelessWidget {
             count: sessions
                 .where(
                   (s) => (app.needsAttention(s.id) || s.isBlocked)
-                      ? nextSection == 'Needs you'
+                      ? nextSection == 'Your input'
                       : s.isActive
-                      ? nextSection == 'Active now'
+                      ? nextSection == 'Active'
                       : nextSection == 'Recent',
                 )
                 .length,
@@ -547,7 +545,7 @@ class _SessionRow extends StatelessWidget {
     return Semantics(
       button: true,
       selected: selected,
-      label: 'Open ${live.displayTitle}, ${statusLabel(status)}',
+      label: '${live.displayTitle} · ${statusLabel(status)}',
       child: HarnessTap(
         onTap: onTap,
         child: AnimatedContainer(
@@ -770,7 +768,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
   Future<void> _create() async {
     final cwd = (_project ?? _cwd.text).trim();
     if (cwd.isEmpty) {
-      setState(() => _error = 'Choose a project or type an absolute path.');
+      setState(() => _error = 'Project or absolute path required');
       return;
     }
     setState(() {
@@ -788,7 +786,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
         _busy = false;
         _error =
             widget.app.lastActionError ??
-            'The harness could not create the session.';
+            'Session creation failure';
       });
       return;
     }
@@ -814,7 +812,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
             Text('New session', style: HarnessText.sheetTitle(context)),
             const SizedBox(height: 4),
             Text(
-              'A conversation is scoped to a directory.',
+              'Conversation scope · directory',
               style: HarnessText.subtitle(context),
             ),
             const SizedBox(height: 20),
@@ -854,7 +852,7 @@ class _NewSessionSheetState extends State<_NewSessionSheet> {
             const SizedBox(height: 7),
             HarnessTextField(
               controller: _name,
-              hint: 'What is this conversation about?',
+              hint: 'Conversation topic',
             ),
             if (app.capability?.isHarness == true) ...[
               const SizedBox(height: 14),

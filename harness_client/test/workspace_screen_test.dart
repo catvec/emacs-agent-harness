@@ -310,7 +310,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(controller.selectedThread, 't2');
 
-    await tester.tap(find.byTooltip('Computer'));
+    await tester.tap(find.byTooltip('Computer').first);
     await tester.pumpAndSettle();
     expect(find.text('Take over'), findsOneWidget);
     await tester.tap(find.text('Take over'));
@@ -446,7 +446,7 @@ void main() {
       ('Memory', 2),
       ('Computer', 1),
       ('Hide computer', 1),
-      ('Open episode', 1),
+      ('Episode', 1),
       ('Refresh', 1),
     ]) {
       expect(find.byTooltip(tooltip), findsNWidgets(count), reason: tooltip);
@@ -482,17 +482,17 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(VncTakeover), findsNothing);
-    expect(find.byTooltip('Show computer'), findsOneWidget);
+    expect(find.byKey(const ValueKey('computer-rail')), findsOneWidget);
     expect(find.byTooltip('Details'), findsOneWidget);
     // The rail says what it holds and its state, in words.
     expect(find.text('Computer · Live'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Show computer'));
+    await tester.tap(find.byKey(const ValueKey('computer-rail')));
     await tester.pumpAndSettle();
 
     expect(find.byType(VncTakeover), findsOneWidget);
     expect(find.byTooltip('Hide computer'), findsOneWidget);
-    expect(find.byTooltip('Show computer'), findsNothing);
+    expect(find.byKey(const ValueKey('computer-rail')), findsNothing);
     expect(find.text('Live'), findsOneWidget);
   });
 
@@ -629,7 +629,7 @@ void main() {
   ) async {
     final controller = _preview();
     await _pump(tester, controller, size: const Size(1440, 900));
-    await tester.tap(find.byTooltip('Computer'));
+    await tester.tap(find.byTooltip('Computer').first);
     await tester.pumpAndSettle();
 
     final screen = find.byKey(const ValueKey('computer-screen-sheet'));
@@ -655,7 +655,7 @@ void main() {
   ) async {
     final controller = _preview();
     await _pump(tester, controller, size: const Size(390, 844));
-    await tester.tap(find.byTooltip('Computer'));
+    await tester.tap(find.byTooltip('Computer').first);
     await tester.pumpAndSettle();
     expect(find.byType(VncTakeover), findsOneWidget);
 
@@ -681,7 +681,7 @@ void main() {
   ) async {
     final controller = _preview();
     await _pump(tester, controller, size: const Size(390, 844), textScale: 2);
-    await tester.tap(find.byTooltip('Computer'));
+    await tester.tap(find.byTooltip('Computer').first);
     await tester.pumpAndSettle();
     await tester.tap(
       find.descendant(
@@ -729,7 +729,7 @@ void main() {
       expect(find.text(copy), findsWidgets, reason: copy);
     }
     for (final tooltip in const ['New thread', 'Threads', 'Call', 'Computer']) {
-      expect(find.byTooltip(tooltip), findsOneWidget, reason: tooltip);
+      expect(find.byTooltip(tooltip), findsWidgets, reason: tooltip);
     }
   });
 
@@ -766,7 +766,7 @@ void main() {
     harness.workspacePromptFail = true;
     await tester.tap(find.byKey(const Key('composer-send')));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Send failed'), findsOneWidget);
+    expect(find.textContaining('Send failure ·'), findsOneWidget);
     expect(tester.widget<TextField>(find.byType(TextField).last).controller!.text, 'quote-for-kitchen');
     await tester.tap(find.text('Harness memory'));
     await tester.pumpAndSettle();
@@ -832,7 +832,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Kitchen renovation'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Send failed'), findsOneWidget);
+    expect(find.textContaining('Send failure ·'), findsOneWidget);
     expect(tester.widget<TextField>(find.byType(TextField).last).controller!.text, 'quote-for-kitchen');
   });
 

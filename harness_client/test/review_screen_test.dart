@@ -378,7 +378,7 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     await _pumpFile(tester, rig, 'lib/src/ui/chat_screen.dart', width: 320);
-    expect(find.byTooltip('Select lines'), findsOneWidget);
+    expect(find.byTooltip('Line selection'), findsOneWidget);
     expect(find.text('Comment on lines'), findsNothing);
     expect(tester.takeException(), isNull);
   });
@@ -604,7 +604,7 @@ void main() {
     expect(find.text('Viewed'), findsOneWidget);
     expect(find.text('Not approved'), findsOneWidget);
     expect(find.text('Threads'), findsOneWidget);
-    expect(find.byTooltip('Select lines'), findsOneWidget);
+    expect(find.byTooltip('Line selection'), findsOneWidget);
     expect(find.byTooltip('Wrap lines'), findsOneWidget);
     expect(find.byTooltip('Previous hunk'), findsOneWidget);
     expect(find.byTooltip('Next hunk'), findsOneWidget);
@@ -931,12 +931,12 @@ void main() {
       find.byKey(const ValueKey('review-comment-more-c-long-2')),
       findsOneWidget,
     );
-    expect(find.text('Show more'), findsOneWidget);
+    expect(find.text('More'), findsOneWidget);
     await tester.tap(
       find.byKey(const ValueKey('review-comment-more-c-long-2')),
     );
     await _settle(tester, 3);
-    expect(find.text('Show less'), findsOneWidget);
+    expect(find.text('Less'), findsOneWidget);
     expect(find.textContaining('The tests in'), findsOneWidget);
   });
 
@@ -1258,7 +1258,7 @@ void main() {
     expect(find.text('Closed'), findsOneWidget);
     await tester.tap(find.textContaining('This re-reads every task'));
     await _settle(tester, 8);
-    await tester.tap(find.byTooltip('Show in the diff'));
+    await tester.tap(find.byTooltip('Diff position'));
     await _settle(tester, 10);
     expect(controller.selectedVersion, reviewEarlier);
     expect(controller.changes!.revision, reviewEarlier);
@@ -1312,7 +1312,7 @@ void main() {
     await _settle(tester, 4);
     await tester.tap(find.textContaining('This panel went away'));
     await _settle(tester, 8);
-    await tester.tap(find.byTooltip('Show in the diff'));
+    await tester.tap(find.byTooltip('Diff position'));
     await _settle(tester, 10);
     expect(controller.selectedVersion, reviewEarlier);
     expect(controller.selectedPath, 'lib/src/ui/removed_panel.dart');

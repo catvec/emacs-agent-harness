@@ -1,5 +1,5 @@
 // The report a task's work was handed in with is read on one page, whichever
-// way it is come to: the "Open full view" of the `hand_in` call in the task's
+// way it is come to: the "Full view" of the `hand_in` call in the task's
 // session, and the "View report" on the bar of the task's conversation (a tap
 // on the task, on the board, opens the conversation; there is no sheet).  The
 // two used to be drawn by two pieces of code (a sheet drew the summary, how to
@@ -146,7 +146,7 @@ Future<void> main() async {
       final fromTask = await readPage(tester, frame);
 
       // From the session of the task: the call that handed the work in,
-      // opened, and its "Open full view".  A new app, so that nothing of the
+      // opened, and its "Full view".  A new app, so that nothing of the
       // first is left on the screen.
       await tester.pumpWidget(const SizedBox());
       frame = await openApp(tester, seed: seedHandedInTask);
@@ -186,7 +186,7 @@ Future<void> main() async {
       expect(find.text('INPUT'), findsOneWidget);
       expect(find.text('OUTPUT'), findsOneWidget);
       expect(find.textContaining('Resolving dependencies...'), findsWidgets);
-      expect(find.text('Open full view'), findsNothing);
+      expect(find.text('Full view'), findsNothing);
     });
 
     testWidgets('has a line on the task\'s bar that leads to it and draws none '
@@ -277,7 +277,7 @@ Future<void> main() async {
       await openApp(tester, seed: seedUnreportedTask);
       await openTask(tester, unreportedTaskName);
       // The bar says so before the report is opened.
-      expect(find.text('No report was handed in'), findsOneWidget);
+      expect(find.text('Report missing'), findsOneWidget);
       expect(find.textContaining('piece'), findsNothing);
       await tester.ensureVisible(find.text('View report'));
       await tester.pump();
@@ -287,7 +287,7 @@ Future<void> main() async {
       // The page says it, and shows what the session said last, as what it
       // is: not a summary, and nothing to reproduce or to show.
       expect(find.byType(HandInReportScreen), findsOneWidget);
-      expect(find.text('No report was handed in'), findsOneWidget);
+      expect(find.text('Report missing'), findsOneWidget);
       expect(find.text('LAST MESSAGE'), findsOneWidget);
       expect(find.textContaining('could not reach'), findsOneWidget);
       for (final heading in [
@@ -541,7 +541,7 @@ Future<void> main() async {
     testWidgets('is not what the full view of a refused hand-in is', (
       tester,
     ) async {
-      // No report was handed in: what was asked for, and why it was refused.
+      // No report: what was asked for, and why it was refused.
       await _pumpFullView(
         tester,
         ToolView(

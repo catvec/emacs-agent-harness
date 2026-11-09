@@ -3,6 +3,7 @@ import 'dart:async';
 import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../acp/capabilities.dart';
+import '../models/computer.dart';
 import '../models/demo_session.dart';
 import '../models/memory.dart';
 import '../models/picture.dart';
@@ -967,6 +968,111 @@ class HarnessApi {
   void forgetTools() {
     _catalogue = null;
     _catalogueGeneration++;
+  }
+
+  // Computers.  A computer is a machine the harness may use; a session runs
+  // on none of them and uses the tools of the ones it may reach.  The methods
+  // are the ones the Emacs page talks to (`lisp/modules/harness-computers.el`).
+
+  Future<List<Computer>> computers({String? sessionId}) async {
+    final result = await extensionRaw(
+      'computer/list',
+      sessionId == null || sessionId.isEmpty
+          ? null
+          : {'sessionId': sessionId},
+    );
+    return [
+      for (final wire in asMapList(result)) Computer.fromWire(wire),
+    ];
+  }
+
+  Future<ComputerAccess> computerAccess(String sessionId) async {
+    return ComputerAccess.fromWire(
+      await extension('computer/access', {'sessionId': sessionId}),
+    );
+  }
+
+  Future<List<ComputerResource>> computerResources({
+    String? computer,
+    String? kind,
+  }) async {
+    final result = await extensionRaw('computer/resources', {
+      if (computer != null && computer.isNotEmpty) 'computer': computer,
+      if (kind != null && kind.isNotEmpty) 'kind': kind,
+    });
+    return [
+      for (final wire in asMapList(result)) ComputerResource.fromWire(wire),
+    ];
+  }
+
+  Future<ComputerAccess> computerGrant(
+    String sessionId,
+    String computer, {
+    List<String>? capabilities,
+    String? window,
+  }) async {
+    return ComputerAccess.fromWire(
+      await extension('computer/grant', {
+        'sessionId': sessionId,
+        'computer': computer,
+        if (capabilities != null) 'capabilities': capabilities,
+        if (window != null) 'window': window,
+      }),
+    );
+  }
+
+  Future<ComputerAccess> computerRevoke(
+    String sessionId,
+    String computer, {
+    String? capability,
+  }) async {
+    return ComputerAccess.fromWire(
+      await extension('computer/revoke', {
+        'sessionId': sessionId,
+        'computer': computer,
+        if (capability != null) 'capability': capability,
+      }),
+    );
+  }
+
+  Future<ComputerAccess> computerGrantCapability(
+    String sessionId,
+    String computer,
+    String capability,
+    bool on,
+  ) async {
+    return ComputerAccess.fromWire(
+      await extension('computer/grant-capability', {
+        'sessionId': sessionId,
+        'computer': computer,
+        'capability': capability,
+        'on': on,
+      }),
+    );
+  }
+
+  Future<ComputerAccess> computerPrefer(
+    String sessionId,
+    String computer,
+  ) async {
+    return ComputerAccess.fromWire(
+      await extension('computer/set-preference', {
+        'sessionId': sessionId,
+        'computer': computer,
+      }),
+    );
+  }
+
+  Future<Computer> computerTakeControl(String computer) async {
+    return Computer.fromWire(
+      await extension('computer/take-control', {'id': computer}),
+    );
+  }
+
+  Future<Computer> computerReleaseControl(String computer) async {
+    return Computer.fromWire(
+      await extension('computer/release-control', {'id': computer}),
+    );
   }
 
   // Workspace mode.  The harness's workspace methods are read through the

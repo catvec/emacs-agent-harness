@@ -51,7 +51,7 @@ String providerName(String? model) {
 
 String statusLabel(String? status) => switch (status) {
   'running' => 'Running',
-  'blocked' => 'Needs you',
+  'blocked' => 'Your input',
   'idle' => 'Idle',
   'inactive' => 'Closed',
   null => 'Unknown',

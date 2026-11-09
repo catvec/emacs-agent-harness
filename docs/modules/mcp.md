@@ -8,6 +8,7 @@ MCP host: starts tool servers in the session's sandbox and calls them.
 - **Source:** [lisp/modules/harness-mcp.el](../../lisp/modules/harness-mcp.el)
 - **Loaded:** by default
 - **Requires:** [config](config.md)
+- **Required by:** [computers](computers.md)
 
 ## About
 

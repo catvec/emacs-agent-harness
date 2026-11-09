@@ -146,9 +146,9 @@ void main() {
         size: const Size(900, 400),
         brightness: Brightness.dark,
       );
-      expect(find.text('Message · C-c C-c to send'), findsOneWidget);
+      expect(find.text('Message · C-c C-c'), findsOneWidget);
       expect(
-        find.text('C-c C-c to send · Enter for a new line'),
+        find.text('C-c C-c · send · Enter · newline'),
         findsOneWidget,
       );
       expect(tester.takeException(), isNull);

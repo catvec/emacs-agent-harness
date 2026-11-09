@@ -637,7 +637,7 @@ it asks.  One that cannot be read keeps the text in the box."
   "Put `harness-cache-keep-warm' in the harness menu, after Fork session."
   (condition-case err
       (pcase (harness-ui-cache-warm--suffix-command "K")
-        ((pred null) (transient-append-suffix 'harness-menu "f" '("K" "Keep cache warm" harness-cache-keep-warm)))
+        ((pred null) (transient-append-suffix 'harness-menu "f" '("K" "Cache warming" harness-cache-keep-warm)))
         ('harness-cache-keep-warm nil)
         (other (harness-log 'warn "cache-warm: the menu key K is %s's: no entry for keeping a cache warm" other)))
     (error (harness-log 'warn "cache-warm: no menu entry: %s" (error-message-string err)))))

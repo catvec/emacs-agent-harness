@@ -381,11 +381,10 @@ class _SessionScreenState extends State<SessionScreen> {
   Future<void> _delete() async {
     final confirmed = await showHarnessDialog<bool>(
       context: context,
-      title: 'Delete this session?',
+      title: 'Session deletion',
       message:
-          'The transcript and its temporary files are removed from the harness. '
-          'This cannot be undone.',
-      confirmLabel: 'Delete',
+          'Transcript and temporary files removed · irreversible',
+      confirmLabel: 'Deletion',
       cancelLabel: 'Cancel',
       destructive: true,
     );
@@ -444,11 +443,11 @@ class _SessionScreenState extends State<SessionScreen> {
     if (models.isEmpty) {
       final value = await showHarnessTextPrompt(
         context: context,
-        title: 'Change model',
-        message: 'The harness takes provider:model.',
+        title: 'Model change',
+        message: 'Provider:model',
         initial: _controller.summary?.model ?? '',
         hint: 'provider:model',
-        confirmLabel: 'Use model',
+        confirmLabel: 'Model',
       );
       if (value != null && value.trim().isNotEmpty) {
         await _controller.setModel(value.trim());
@@ -565,15 +564,15 @@ class _SessionScreenState extends State<SessionScreen> {
                 HarnessMenuItem(
                   value: 'interactive',
                   label: _controller.summary?.nonInteractive == true
-                      ? 'Make interactive'
-                      : 'Make non-interactive',
+                      ? 'Interactive'
+                      : 'Non-interactive',
                   icon: _controller.summary?.nonInteractive == true
                       ? Icons.touch_app_outlined
                       : Icons.hourglass_disabled_rounded,
                 ),
               const HarnessMenuItem(
                 value: 'model',
-                label: 'Change model',
+                label: 'Model change',
                 icon: Icons.memory_rounded,
               ),
               if (_controller.canChangeMode)
@@ -690,9 +689,9 @@ class _SessionScreenState extends State<SessionScreen> {
             child: HarnessEmptyState(
               icon: Icons.delete_outline_rounded,
               title: 'Session deleted',
-              message: 'This conversation is gone from the harness.',
+              message: 'No conversation in the harness',
               action: HarnessPrimaryButton(
-                label: 'Back to sessions',
+                label: 'Sessions',
                 onPressed: () {
                   if (widget.embedded) {
                     _app.closeSession();
@@ -1036,7 +1035,7 @@ class _SessionContext extends StatelessWidget {
             dropWhatDoesNotFit: true,
             parts: [
               HarnessMetaPart(
-                waiting ? 'Needs you' : statusLabel(status),
+                waiting ? 'Your input' : statusLabel(status),
                 color: color,
                 weight: FontWeight.w600,
               ),

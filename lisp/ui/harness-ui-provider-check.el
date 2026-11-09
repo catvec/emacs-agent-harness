@@ -715,13 +715,13 @@ requests before the run starts."
 (put 'harness-ui-provider-check-mode 'harness-menu-group
      '("Provider check"
        ["Check"
-        (". g" "Run the same checks again" harness-ui-provider-check-rerun)
+        (". g" "Check rerun" harness-ui-provider-check-rerun)
         (". p" "Provider contract only" harness-ui-provider-check-provider-suite)
         (". m" "Model behavior only" harness-ui-provider-check-model-suite)
-        (". M" "Check another model…" harness-ui-provider-check-other-model)
-        (". E" "Check an embedding model…" harness-ui-provider-check-embedding-model)
+        (". M" "Model check…" harness-ui-provider-check-other-model)
+        (". E" "Embedding model check…" harness-ui-provider-check-embedding-model)
         (". S" "Cache stress · 12 sessions" harness-ui-provider-check-cache-stress)
-        (". c" "Cancel the running checks" harness-ui-provider-check-cancel)]))
+        (". c" "Check cancellation" harness-ui-provider-check-cancel)]))
 
 ;;;; The command
 
@@ -822,7 +822,7 @@ and c cancels the run."
       (pcase (harness-ui-provider-check--suffix-command "!")
         ((pred null)
          (transient-append-suffix
-          'harness-menu "m" '("!" "Check provider & model" harness-provider-check)))
+          'harness-menu "m" '("!" "Provider & model check" harness-provider-check)))
         ('harness-provider-check nil)
         (other
          (harness-log 'warn "provider-check: the menu key ! is %s's: no entry"

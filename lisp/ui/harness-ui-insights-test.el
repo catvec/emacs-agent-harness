@@ -170,8 +170,8 @@
       (should (string-match-p "◆ Docs pass +waits for your review" text))
       (should (string-match-p "1 chat · 1 task$" text))
       (should (string-match-p "1 tool call " text))
-      (should (string-match-p "On the board now: 1 in review" text))
-      (should (string-match-p "Active on 2 days" text)))
+      (should (string-match-p "On the board · 1 in review" text))
+      (should (string-match-p "Active · 2 days" text)))
     ;; The demo model writes the summary as the report opens.
     (with-current-buffer harness-ui-insights--buffer-name
       (harness-test-wait (lambda () (and (not harness-ui-insights--writing) harness-ui-insights--narrative)) 30 "the summary")
@@ -217,7 +217,7 @@
                  ((symbol-function 'harness-method/provider/complete)
                   (lambda (req) (cl-incf asked) (funcall orig req))))
         (let ((text (harness-ui-insights-test-open)))
-          (should (string-match-p "Written summaries are off" text))
+          (should (string-match-p "Written summaries off" text))
           (with-current-buffer harness-ui-insights--buffer-name
             (should-error (harness-ui-insights-write) :type 'user-error))
           (should (= 0 asked)))))))
@@ -262,7 +262,7 @@
         (harness-ui-insights-set-project (harness-test-temp-dir))
         (harness-test-wait (lambda () (and harness-ui-insights--data (not harness-ui-insights--loading))) 60 "elsewhere")
         (should (= 0 (plist-get (plist-get harness-ui-insights--data :sessions) :active)))
-        (should (string-match-p "No session worked in this period" (harness-ui-insights-test-text)))
+        (should (string-match-p "No session in this period" (harness-ui-insights-test-text)))
         (harness-ui-insights-set-project (plist-get fx :project))
         (harness-test-wait (lambda () (and harness-ui-insights--data (not harness-ui-insights--loading))) 60 "the project")
         (should (= 2 (plist-get (plist-get harness-ui-insights--data :sessions) :active)))
@@ -279,7 +279,7 @@
       (harness-insights)
       (with-current-buffer harness-ui-insights--buffer-name
         (harness-test-wait (lambda () harness-ui-insights--error) 10 "the error")
-        (should (string-match-p "could not be made: No transcripts here" (harness-ui-insights-test-text)))))))
+        (should (string-match-p "Report failure · No transcripts here" (harness-ui-insights-test-text)))))))
 
 (ert-deftest harness-ui-insights-words ()
   "Shares, counts and tasks read as sentences."

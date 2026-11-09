@@ -2,7 +2,7 @@
 // the means to compare what they end on: the words of a page and every pixel
 // of the app.  One is the task's: tap it on the board, and *View report* is on
 // the bar of its conversation.  The other is the session's: the call that
-// handed the work in, opened, and its *Open full view*.  The tests of the
+// handed the work in, opened, and its *Full view*.  The tests of the
 // report (`hand_in_report_test.dart`) and its pictures
 // (`hand_in_report_screenshots_test.dart`) share them.
 //
@@ -134,20 +134,20 @@ Future<void> openHandInCard(WidgetTester tester) async {
   await settle(tester, 8);
 }
 
-/// "Open full view", on the call of the session that handed the work in: the
+/// "Full view", on the call of the session that handed the work in: the
 /// session's way.
 Future<void> openFullView(WidgetTester tester) async {
   await openHandInCard(tester);
   await tapOpenFullView(tester);
 }
 
-/// "Open full view" on the card that is open.  The screenshots in the card
+/// "Full view" on the card that is open.  The screenshots in the card
 /// have come, and the transcript is as long as it will be, before the
 /// button is looked for: it is at the foot of the card, below them.
 Future<void> tapOpenFullView(WidgetTester tester) async {
   await settleDecoded(tester);
   await settle(tester, 6);
-  final button = find.text('Open full view');
+  final button = find.text('Full view');
   // The list is scrolled to the button, and once more, as it is not the
   // length it was a moment ago.
   for (var i = 0; i < 2; i++) {

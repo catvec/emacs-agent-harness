@@ -325,7 +325,7 @@ class _TranscriptViewState extends State<TranscriptView> {
               ),
               const SizedBox(height: 16),
               Text(
-                'The line is open',
+                'Line open',
                 style: theme.textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.w700,
                 ),
@@ -334,8 +334,7 @@ class _TranscriptViewState extends State<TranscriptView> {
               ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 330),
                 child: Text(
-                  'Send a message to start. You will see the agent’s thoughts, '
-                  'tool calls and requests as they happen.',
+                  'Message · agent thoughts, tool calls and requests',
                   textAlign: TextAlign.center,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
@@ -1063,7 +1062,7 @@ class _HintLineState extends State<_HintLine>
                         words,
                         const SizedBox(height: 4),
                         Text(
-                          _open ? 'Show less' : 'Show more',
+                          _open ? 'Less' : 'More',
                           textAlign: TextAlign.center,
                           style: HarnessText.meta(context).copyWith(
                             color: theme.colorScheme.primary,

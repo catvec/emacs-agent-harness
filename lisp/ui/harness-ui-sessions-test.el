@@ -612,7 +612,7 @@ goes ends; one by a column that stays does not."
           ;; Mode is hidden by default: C shows it.
           (setq answer "Mode")
           (call-interactively (key-binding (kbd "C")))
-          (should (equal "Show or hide column: " (car asked)))
+          (should (equal "Column: " (car asked)))
           (should (equal '("Name" "Status" "Kind" "Model" "Think" "Mode" "Priority" "Context"
                            "Output" "Avg tok/s" "Cost" "Last msg" "Project")
                          (all-completions "" (cadr asked))))
@@ -692,7 +692,7 @@ sessions without a level, or with one that order does not know, first."
     (should (equal "Think" (nth (1+ (cl-position "Model" (harness-ui-sessions-test--names) :test #'equal))
                                 (harness-ui-sessions-test--names))))
     (let ((help (harness-ui-sessions-test--help "deep" "Think")))
-      (should (string-match-p "\\`Thinking level: xhigh" help))
+      (should (string-match-p "\\`Thinking level · xhigh" help))
       (should (string-match-p "harness-set-thinking" help))
       (should-not (string-match-p "\n" help)))
     (with-current-buffer harness-ui-sessions--buffer-name
@@ -1824,7 +1824,7 @@ unmarked row is as it was printed."
         (should-not (harness-ui-sessions--marked-ids))
         (should (= 0 (hash-table-count harness-ui-sessions--marked)))
         (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))
-        (should (equal '("No session was marked")
+        (should (equal '("No marked sessions")
                        (harness-ui-sessions-test--messages
                         (lambda () (harness-ui-sessions-test--press "U")))))
         (should (= 0 redraws))
@@ -2350,17 +2350,17 @@ at M now that m marks."
     (should (equal "Session list" (car group)))
     (should column)
     (dolist (entry '((". m" "Mark" harness-ui-sessions-mark)
-                     (". u" "Unmark" harness-ui-sessions-unmark)
-                     (". U" "Unmark all" harness-ui-sessions-unmark-all)
-                     (". t" "Invert marks" harness-ui-sessions-toggle-marks)
-                     (". M" "Move to another directory" harness-ui-sessions-move)
+                     (". u" "Mark removal" harness-ui-sessions-unmark)
+                     (". U" "All mark removal" harness-ui-sessions-unmark-all)
+                     (". t" "Mark inversion" harness-ui-sessions-toggle-marks)
+                     (". M" "Session move" harness-ui-sessions-move)
                      (". f" "Fork" harness-ui-sessions-fork)
-                     (". d" "Delete" harness-ui-sessions-delete)
-                     (". k" "Cancel turn" harness-ui-sessions-cancel)
-                     (". x" "Deactivate" harness-ui-sessions-deactivate)
-                     ("M-t" "Make it a task" harness-ui-sessions-make-task)
-                     (". +" "Raise priority" harness-ui-sessions-raise-priority)
-                     (". p" "Set priority…" harness-ui-sessions-set-priority)))
+                     (". d" "Deletion" harness-ui-sessions-delete)
+                     (". k" "Turn cancellation" harness-ui-sessions-cancel)
+                     (". x" "Deactivation" harness-ui-sessions-deactivate)
+                     ("M-t" "Task creation" harness-ui-sessions-make-task)
+                     (". +" "Priority raise" harness-ui-sessions-raise-priority)
+                     (". p" "Priority…" harness-ui-sessions-set-priority)))
       (ert-info ((format "%S" entry))
         (should (member entry entries))))
     ;; Each key is listed once, and move has only the key M now.
@@ -2582,7 +2582,7 @@ nothing."
         ;; Nothing marked: nothing is sent.
         (harness-ui-sessions-test--press "U")
         (setq harness-ui-sessions-test--requests nil)
-        (should (equal '("No session is marked")
+        (should (equal '("No marked sessions")
                        (harness-ui-sessions-test--messages
                         (lambda () (harness-ui-sessions--set-marked :thinking "high")))))
         (should-not (harness-ui-sessions-test--answers))))))
@@ -2651,7 +2651,7 @@ the model after the sessions, and the default model stays."
                            (cadr (cadr (harness-ui-sessions-test--answers)))))
             ;; Cancelled: nothing more is sent, and the marks stay.
             (switch)
-            (should (equal '("Models unchanged")
+            (should (equal '("Models · unchanged")
                            (harness-ui-sessions-test--messages (lambda () (funcall answer 'cancel)))))
             (should (equal '("_harness/handoff/check-all")
                            (mapcar #'car (harness-ui-sessions-test--answers))))
@@ -2958,7 +2958,7 @@ notifier opens the list so for every project, whatever its filter."
       (should (equal '("asks") (harness-ui-sessions-test--shown)))
       (should (equal " [Pause] [project blocked]" (harness-ui-sessions-test--mode-line)))
       ;; The banner first, which is no session's, then the rows.
-      (should (string-match-p "\\` .+ 1 session waits for you in this project  \\[Show all\\] b\n"
+      (should (string-match-p "\\` .+ 1 session · attention in this project  \\[Show all\\] b\n"
                               (harness-ui-sessions-test--text)))
       (should (equal "asks" (tabulated-list-get-id)))
       (should-not (tabulated-list-get-id (point-min)))
@@ -2974,14 +2974,14 @@ notifier opens the list so for every project, whatever its filter."
       (harness-ui-sessions-filter "busy")
       (should-not (harness-ui-sessions-test--shown))
       (should (string-match-p
-               "\\` .+ No session waits for you in this project matching /busy  \\[Show all\\] b\n\\'"
+               "\\` .+ No session · attention in this project matching /busy  \\[Show all\\] b\n\\'"
                (harness-ui-sessions-test--text))))
     ;; The notifier's: every project, whatever the filter was.
     (harness-sessions-waiting)
     (with-current-buffer harness-ui-sessions--buffer-name
       (should (equal '("asks" "elsewhere") (harness-ui-sessions-test--shown)))
       (should (equal " [Pause] [all projects blocked]" (harness-ui-sessions-test--mode-line)))
-      (should (string-match-p "\\` .+ 2 sessions wait for you in any project  \\[Show all\\] b\n"
+      (should (string-match-p "\\` .+ 2 sessions · attention in any project  \\[Show all\\] b\n"
                               (harness-ui-sessions-test--text))))
     ;; The list opened as ever shows them all again.
     (let ((default-directory root)) (harness-sessions))
@@ -3004,9 +3004,9 @@ before the session says it waits no more."
         (let ((default-directory root)) (harness-sessions))
         (with-current-buffer harness-ui-sessions--buffer-name
           ;; Under the name, the buttons, then what it waits on.
-          (should (equal "    [Allow] [Deny]  needs your permission · Bash: rm -rf build/"
+          (should (equal "    [Allow] [Deny]  permission · Bash: rm -rf build/"
                          (harness-ui-sessions-test--line "asks")))
-          (should (equal "        [Answer…]  has a question for you · Which colour?"
+          (should (equal "        [Answer…]  question · Which colour?"
                          (harness-ui-sessions-test--line "child")))
           (should-not (harness-ui-sessions-test--line "busy"))
           (should (string-match-p "y allows it, n denies it"
@@ -3014,7 +3014,7 @@ before the session says it waits no more."
           ;; Blocked between turns, with nothing pending, it waits for the
           ;; user's reply (`harness-session-blocked-on-request-p').
           (should (string-match-p
-                   "waits for your reply"
+                   "blocked · your input · turn ended · reply in the session or a thread"
                    (harness-ui-sessions--waiting-help
                     (plist-put (copy-sequence (harness-ui-session "asks")) :pending nil))))
           ;; [Allow] answers over the bus, and the line goes at once.
@@ -3750,7 +3750,7 @@ the footer is no session's: RET and the row commands find none there."
       (harness-ui-sessions--redraw)
       (with-current-buffer harness-ui-sessions--buffer-name
         (should (equal '("busy" "idle" "asks") (mapcar #'car tabulated-list-entries)))
-        (should (equal "    [Allow] [Deny]  needs your permission · Bash: rm -rf build/"
+        (should (equal "    [Allow] [Deny]  permission · Bash: rm -rf build/"
                        (harness-ui-sessions-test--line "asks")))
         (should (equal "FIRST\nMOVED\nSECOND\n" (harness-ui-sessions-test--after-rows)))
         (should (= 1 (save-excursion (goto-char (point-min)) (how-many "FIRST"))))
@@ -3811,7 +3811,7 @@ filter, if that is on."
         ;; With the banner of the blocked filter above it.
         (harness-ui-sessions-toggle-blocked)
         (should (string-match-p
-                 "\\` .+ No session waits for you in this project matching /nothing like it  \\[Show all\\] b\nFOOTER\n\\'"
+                 "\\` .+ No session · attention in this project matching /nothing like it  \\[Show all\\] b\nFOOTER\n\\'"
                  (harness-ui-sessions-test--text)))
         ;; Rows come back, and the footer goes under them.
         (harness-ui-sessions-filter "")

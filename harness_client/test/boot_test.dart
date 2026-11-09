@@ -60,7 +60,7 @@ void main() {
     await _show(tester, settings, app: app);
     // The first screen is where a person types the harness address, so it
     // must appear even while the preference store is unresponsive.
-    expect(find.text('Your agents,\nwithin reach.'), findsOneWidget);
+    expect(find.text('Agent harness\nclient'), findsOneWidget);
     expect(find.byKey(const Key('connect-address')), findsOneWidget);
     expect(find.textContaining('Opening the line'), findsNothing);
 
@@ -83,7 +83,7 @@ void main() {
     });
     final settings = SettingsController();
     await _show(tester, settings);
-    expect(find.text('Your agents,\nwithin reach.'), findsOneWidget);
+    expect(find.text('Agent harness\nclient'), findsOneWidget);
     await tester.pump(const Duration(milliseconds: 50));
     expect(settings.loaded, isTrue);
     expect(

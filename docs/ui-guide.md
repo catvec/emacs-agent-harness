@@ -25,6 +25,32 @@ been up and its round trip, its version and Emacs, the sessions it runs
 and the modules it loaded.  Both are in `lisp/ui/harness-ui-server.el`
 (module `ui-server').
 
+`harness-computers` (`C-c h E`) is the page about the computers the
+harness may use (`lisp/ui/harness-ui-computers.el`, module
+`ui-computers'): the machine this client runs on and what it lends, the
+registered computers with their state, computer-use capabilities and
+resources, the current session's grants and preferred computer, and the
+resources across computers.  It talks ACP only (`_harness/computer/*`),
+so it shows the harness it is connected to, on this machine or another,
+the same way.  `[View]` opens the screen a computer offers, a person's
+use rather than a session's, and `[Control]` holds the agent's input
+while they use it.
+
+The Flutter client's Computers page follows the same copy rule: headings
+`Computers`, `Session`, `Machines`, `Resources`, `This client`; buttons
+`View`, `Control`, `Return`, `Grant`, `Revocation`, `Preference`,
+`Registration`, `Reconnection`, `Disconnection`, `Capture off`, `File
+import`; states `No computers`, `No resources`, `No session`, `No screen
+socket`, `View only`, `Screen lost`, `Not registered`, `Registered`,
+`Disconnected`, `Not checked`, `Off on this phone`; capabilities `View`,
+`Windows`, `Pointer`, `Keyboard`, `Clipboard`, `Audio`, `Sandbox`, `Exec`,
+and on this client `Screen`, `Camera`, `Microphone`, `Files`, `Clipboard`;
+notes `Capture only · no pointer or keyboard control`, `Screen capture ·
+broadcast extension required`, `File writing`, `Outbox only`.
+`harness_client/test/computers_test.dart` asserts them and
+`test/computers_screenshots_test.dart` takes the pictures, including the
+this-client card.
+
 ## What `harness-ui` gives you
 
 Connection and requests
@@ -85,6 +111,7 @@ Display
 - Built-in widgets only: `button.el`, `widget.el`, `tabulated-list-mode`, `transient`, `icons.el`, `svg.el`, `image.el`, header and mode lines.  No box-drawing UI except where the medium is a graph.
 - Never block: the UI runs in the user's Emacs and the harness in its own process (see "Processes" in architecture.md), so the only way to freeze the user is UI code itself.  Never call the bus (`harness-call`, `harness-method-exists-p`): the modules are not loaded here.  Project roots and file lists come from `harness-files` (`harness-files-project-root`, `harness-files-list` → promise).  Every request is asynchronous; show a lightweight loading state (`harness-dim-face` text, a header-line spinner) and replace it when the result arrives; failures show in the buffer, not just the echo area.
 - Interface text is nouns, noun phrases and adjectives: `Network`, `No web tools · bash offline`, `3 offered · 2 off`, `connected`, `local harness`. No full sentences in headings, labels, buttons, notes, forms, tooltips, menus, status lines or echo-area messages. Say the state, not a story about it: `local harness`, not `This Emacs runs the harness itself`. Remove explanatory paragraphs rather than merely their punctuation. Prose belongs only in explicit help or setting descriptions (for example, the defcustom documentation on the settings page). User/model messages, logs and server error payloads are data, not interface copy. Follow the copy-first checklist below.
+- Menus, transient and popup alike, follow the same rule: an entry names its command as a noun phrase, `Session switch` rather than `Switch session`, `Turn cancellation` rather than `Cancel turn`, and its column headings and prefix description are noun phrases too. `harness-ui-menus-are-noun-phrases` (`test/harness-ui-test.el`) holds the harness's own menus to their exact words; a mode whose `harness-menu-group` the menu shows has the same assertion in its own test, as the computers page does.
 - Every keyboard command has a mouse target: a button, a header-line segment or a mode-line segment with `help-echo`.
 - Help text is one line: with tooltips off (`tooltip-mode` nil) it shows in the echo area, where a second line grows the mini window, shrinks every window and moves the button under the mouse, so hovering it makes it hard to click.  Build `help-echo` text from parts through `harness-ui-one-line`, never with newlines.
 - Redraw incrementally with markers and `inhibit-read-only`; never re-render the whole transcript on a delta.

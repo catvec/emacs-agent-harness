@@ -25,13 +25,12 @@ class TaskStateLine {
       // A round of work that ended without `hand_in` has no report, only the
       // last message of its session, which is in the conversation above.
       final none = task.report?.missing == true
-          ? 'Its last message is above. '
+          ? 'No report · last message above · '
           : '';
       return TaskStateLine(
         heading: heading,
         message:
-            '${none}Verify it, or type what should change below to send it '
-            'back.',
+            '${none}Verification or feedback below',
       );
     }
     if (task.isClosed) return TaskStateLine(heading: heading);
@@ -39,9 +38,8 @@ class TaskStateLine {
       return TaskStateLine(
         heading: heading,
         message: task.isRefining
-            ? 'An agent is writing it up. A message here starts the task '
-                  'instead.'
-            : 'Waiting for you to start it. A message here starts it too.',
+            ? 'Write-up running · message starts the task'
+            : 'Backlog · message starts it',
       );
     }
     if (task.isPending) {
@@ -49,13 +47,13 @@ class TaskStateLine {
       return TaskStateLine(
         heading: heading,
         message: switch (hold?.kind) {
-          'paused' => 'Held in the queue until you resume it.',
-          'quota' => 'Waiting for quota to come back.',
-          'budget' => 'Waiting for a budget to be raised.',
+          'paused' => 'Queue · held until resume',
+          'quota' => 'Quota · waiting',
+          'budget' => 'Budget · waiting for raise',
           _ =>
             task.returned
-                ? 'Back in the queue: it carries on where it stopped.'
-                : 'Waiting for a free slot.',
+                ? 'Queue · carries on from its stop'
+                : 'Queue · waiting for a slot',
         },
       );
     }
@@ -63,8 +61,8 @@ class TaskStateLine {
       return TaskStateLine(
         heading: heading,
         message: task.conflicts.isEmpty
-            ? 'In the merge queue.'
-            : 'Conflicts in ${_files(task.conflicts)}.',
+            ? 'Merge queue'
+            : 'Merge conflicts · ${_files(task.conflicts)}',
       );
     }
     final outcome = task.outcome;
@@ -77,7 +75,7 @@ class TaskStateLine {
     if (task.needsInput) {
       return TaskStateLine(
         heading: heading,
-        message: 'Waiting for your answer in this conversation.',
+        message: 'Your answer · this conversation',
       );
     }
     return TaskStateLine(heading: heading);
@@ -87,24 +85,22 @@ class TaskStateLine {
   static String _stopped(HarnessTask task, String outcome) => switch (outcome) {
     'merge-failed' =>
       task.conflicts.isEmpty
-          ? 'Merging its branch failed.'
-          : 'Merging its branch failed: conflicts in '
-                '${_files(task.conflicts)}.',
+          ? 'Merge failure'
+          : 'Merge failure · conflicts in ${_files(task.conflicts)}',
     'cannot-continue' =>
-      'It said it cannot continue. Reply here to help it, or mark it '
-          'complete.',
-    'duplicate' => 'Its write-up found the board has it already.',
-    'error' => 'Its last turn ended in an error.',
-    'cancelled' => 'It was stopped before it finished.',
-    'interrupted' => 'It was interrupted before it finished.',
-    'max-tokens' => 'It ran out of output tokens.',
-    _ => 'It stopped ($outcome).',
+      'Cannot continue · reply or completion',
+    'duplicate' => 'Duplicate · board has it',
+    'error' => 'Turn error',
+    'cancelled' => 'Stopped before finish',
+    'interrupted' => 'Interrupted',
+    'max-tokens' => 'Output token limit',
+    _ => 'Stopped · $outcome',
   };
 
   static String _files(List<String> files) {
     final shown = files.take(3).join(', ');
     final left = files.length - 3;
-    return left > 0 ? '$shown and $left more' : shown;
+    return left > 0 ? '$shown · $left more' : shown;
   }
 }
 
@@ -210,7 +206,7 @@ String? taskMessageHint(HarnessTask? task) {
 
 /// A column of the board in words.
 String taskColumnLabel(String column) => switch (column) {
-  'needs-input' => 'Needs input',
+  'needs-input' => 'Your input',
   'active' => 'Active',
   'review' => 'Review',
   'pending' => 'Pending',

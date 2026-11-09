@@ -99,6 +99,7 @@ class FakeHarness {
     this.workspace = false,
     this.reviews = false,
     this.resources = false,
+    this.computers = false,
     this.resourcesCredentialsOnly = false,
     this.demo = true,
     List<Map<String, Object?>>? availableModes,
@@ -130,6 +131,17 @@ class FakeHarness {
         'question/image',
         'question/cancel',
         if (sessionPictures) 'session/image',
+        if (computers) ...[
+          'computer/list',
+          'computer/access',
+          'computer/resources',
+          'computer/grant',
+          'computer/revoke',
+          'computer/grant-capability',
+          'computer/set-preference',
+          'computer/take-control',
+          'computer/release-control',
+        ],
         if (workspace) ...[
           'workspace/list',
           'workspace/get',
@@ -335,6 +347,10 @@ class FakeHarness {
   /// wallet sections hold mock metadata (never a value) and the mutations
   /// change the fake's lists.  Without it the page is unavailable.
   final bool resources;
+
+  /// A harness whose computers module is loaded: the registry answers one
+  /// local computer with computer use, a session's grants and resources.
+  final bool computers;
 
   /// A harness whose secrets module is loaded while the box and wallet are
   /// not: the credentials are real metadata, the other sections are empty.
@@ -2217,6 +2233,39 @@ class FakeHarness {
         _respond(id, answer);
         return;
       }
+      if (method == '_harness/computer/list') {
+        _respond(id, _computerFixture());
+        return;
+      }
+      if (method == '_harness/computer/access') {
+        _respond(id, _computerAccessFixture());
+        return;
+      }
+      if (method == '_harness/computer/resources') {
+        _respond(id, _computerResourcesFixture());
+        return;
+      }
+      if (method == '_harness/computer/grant' ||
+          method == '_harness/computer/revoke' ||
+          method == '_harness/computer/grant-capability') {
+        _respond(id, _computerAccessFixture());
+        return;
+      }
+      if (method == '_harness/computer/set-preference') {
+        computerPreferred = asString(params['computer']);
+        _respond(id, _computerAccessFixture());
+        return;
+      }
+      if (method == '_harness/computer/take-control') {
+        computerControl = 'user';
+        _respond(id, _computerFixture().first);
+        return;
+      }
+      if (method == '_harness/computer/release-control') {
+        computerControl = 'agent';
+        _respond(id, _computerFixture().first);
+        return;
+      }
       if (method == '_harness/workspace/list') {
         _respond(id, [_workspaceFixture()]);
         return;
@@ -2882,6 +2931,146 @@ class FakeHarness {
   List<String> _workspaceTags(String title) => [
     for (final word in title.split(RegExp(r'[^A-Za-z0-9]+')))
       if (word.length > 3) word[0].toUpperCase() + word.substring(1),
+  ];
+
+  /// The computer the fake's registry answers first: the local machine, with
+  /// computer use and a screen; [computerControl] changes with the toggle.
+  String computerControl = 'agent';
+  String? computerPreferred = 'local';
+
+  List<Map<String, Object?>> _computerFixture() => [
+    {
+      'id': 'local',
+      'name': 'marcuse',
+      'kind': 'local',
+      'state': 'connected',
+      'implicit': true,
+      'connected': true,
+      'host': 'marcuse',
+      'os': 'linux',
+      'arch': 'x86_64',
+      'display': ':99',
+      'vnc': 'http://127.0.0.1:6080/vnc_lite.html',
+      'vnc-socket': 'ws://127.0.0.1:6080/websockify?token=demo-token',
+      'window-scoped': false,
+      'control': computerControl,
+      'capabilities': const [
+        {'name': 'view', 'doc': 'See the screen, or one window'},
+        {'name': 'windows', 'doc': "List the desktop's windows"},
+        {'name': 'pointer', 'doc': 'Move, click, scroll, drag'},
+        {'name': 'keyboard', 'doc': 'Type text, press a key'},
+        {'name': 'sandbox', 'doc': 'A desktop separate from the computer\'s own'},
+      ],
+      'capability-names': const [
+        'view',
+        'windows',
+        'pointer',
+        'keyboard',
+        'sandbox',
+      ],
+      'servers': const ['computer'],
+      'resources': [
+        {
+          'id': 'git-repo-harness',
+          'kind': 'git-repo',
+          'name': 'harness',
+          'path': '/home/noah/documents/ai/emacs-agent-harness',
+          'branch': 'main',
+          'computer': 'local',
+          'computer-name': 'marcuse',
+          'project': true,
+        },
+      ],
+      'allowed': true,
+      'why': 'the local computer',
+      'capabilities-allowed': const [
+        'view',
+        'windows',
+        'pointer',
+        'keyboard',
+        'sandbox',
+      ],
+      'last-seen': 1762614600.0,
+    },
+    {
+      'id': 'cmp-studio-a1b2c3',
+      'name': 'studio',
+      'kind': 'client',
+      'state': 'connected',
+      'connected': true,
+      'host': 'studio',
+      'os': 'darwin',
+      'arch': 'arm64',
+      'display': ':0',
+      'vnc': 'http://studio:6080/vnc_lite.html',
+      'vnc-socket': 'ws://studio:6080/websockify',
+      'capability-names': const ['view', 'pointer', 'keyboard'],
+      'capabilities': const [
+        {'name': 'view', 'doc': 'See the screen, or one window'},
+        {'name': 'pointer', 'doc': 'Move, click, scroll, drag'},
+        {'name': 'keyboard', 'doc': 'Type text, press a key'},
+      ],
+      'servers': const ['computer'],
+      'resources': const [
+        {
+          'id': 'git-repo-atlas',
+          'kind': 'git-repo',
+          'name': 'atlas',
+          'path': '/Users/noah/src/atlas',
+          'branch': 'trunk',
+          'computer': 'cmp-studio-a1b2c3',
+          'computer-name': 'studio',
+          'project': true,
+        },
+      ],
+      'allowed': false,
+      'why': 'a grant is not held',
+      'capabilities-allowed': const [],
+      'last-seen': 1762614600.0,
+    },
+  ];
+
+  Map<String, Object?> _computerAccessFixture() => {
+    'session': 's1',
+    'policy': 'local',
+    'preferred': computerPreferred,
+    'revoked': const <String>[],
+    'available': const ['local', 'cmp-studio-a1b2c3'],
+    'computers': [
+      {
+        'id': 'local',
+        'name': 'marcuse',
+        'kind': 'local',
+        'state': 'connected',
+        'connected': true,
+        'allowed': true,
+        'why': 'the local computer',
+        'capabilities-allowed': const [
+          'view',
+          'windows',
+          'pointer',
+          'keyboard',
+          'sandbox',
+        ],
+        'control': computerControl,
+      },
+      {
+        'id': 'cmp-studio-a1b2c3',
+        'name': 'studio',
+        'kind': 'client',
+        'state': 'connected',
+        'connected': true,
+        'allowed': false,
+        'why': 'a grant is not held',
+        'capabilities-allowed': const <String>[],
+      },
+    ],
+  };
+
+  List<Map<String, Object?>> _computerResourcesFixture() => [
+    for (final computer in _computerFixture())
+      for (final resource in asMapList(computer['resources']))
+        resource,
   ];
 
   Map<String, Object?> _workspaceFixture() => {

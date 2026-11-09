@@ -89,7 +89,7 @@ void main() {
   ) async {
     final rig = await _rig(connect: false);
     await _pump(tester, rig);
-    expect(find.textContaining('within reach'), findsOneWidget);
+    expect(find.textContaining('Agent harness'), findsOneWidget);
     await tester.enterText(find.byType(TextField).at(0), 'ws://memory/acp');
     await tester.tap(find.text('Connect'));
     await _settle(tester, 12);
@@ -139,7 +139,7 @@ void main() {
     await _settle(tester, 6);
     // It waits for the person at Emacs, and shows the code to compare.
     expect(rig.harness.waitingForApproval, isTrue);
-    expect(find.text('Waiting for approval in Emacs'), findsOneWidget);
+    expect(find.text('Approval in Emacs'), findsOneWidget);
     expect(find.byKey(const Key('signin-code')), findsOneWidget);
     expect(find.text('4719'), findsOneWidget);
     rig.harness.approve();
@@ -326,7 +326,7 @@ void main() {
     );
     await tester.tap(find.text('Start session'));
     await _settle(tester, 10);
-    expect(find.text('The line is open'), findsOneWidget);
+    expect(find.text('Line open'), findsOneWidget);
     expect(rig.harness.sessions.length, 5);
     expect(rig.harness.sessions['s5']!['cwd'], rig.app.selectedProject);
   });
@@ -421,7 +421,7 @@ void main() {
     expect(find.text('Tasks'), findsNothing);
     expect(
       find.text(
-        'Standard ACP agent · the task board and usage views are hidden.',
+        'Standard ACP agent · task board and usage views hidden',
       ),
       findsOneWidget,
     );

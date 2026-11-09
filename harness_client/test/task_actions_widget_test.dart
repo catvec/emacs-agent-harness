@@ -177,19 +177,19 @@ void main() {
 
       // Stopping is in the menu, asks first, and asking again changes nothing.
       await _menu(tester, 'Stop');
-      expect(find.text('Stop this task?'), findsOneWidget);
-      await _tap(tester, find.text('Keep going'));
+      expect(find.text('Task stop'), findsOneWidget);
+      await _tap(tester, find.text('Cancel'));
       expect(rig.harness.calls('_harness/task/cancel'), isEmpty);
       expect(rig.harness.tasks['task-1']!['outcome'], isNull);
 
       await _menu(tester, 'Stop');
-      await _tap(tester, find.text('Stop task'));
+      await _tap(tester, find.text('Stop'));
       expect(rig.harness.calls('_harness/task/cancel'), [
         {'id': 'task-1'},
       ]);
       // The task is stopped, not gone: it waits for the person, who can retry.
       expect(rig.harness.tasks['task-1']!['outcome'], 'cancelled');
-      expect(_inBar(find.text('Needs input')), findsOneWidget);
+      expect(_inBar(find.text('Your input')), findsOneWidget);
       expect(_inBar(find.text('Retry')), findsOneWidget);
     });
 
@@ -201,13 +201,13 @@ void main() {
         await _open(tester, 'Cache the model catalogue');
 
         await _menu(tester, 'Drop');
-        expect(find.text('Drop this task?'), findsOneWidget);
-        await _tap(tester, find.text('Keep it'));
+        expect(find.text('Task drop'), findsOneWidget);
+        await _tap(tester, find.text('Cancel'));
         expect(rig.harness.calls('_harness/task/cancel'), isEmpty);
         expect(rig.harness.tasks.containsKey('task-3'), isTrue);
 
         await _menu(tester, 'Drop');
-        await _tap(tester, find.text('Drop task'));
+        await _tap(tester, find.text('Drop'));
         expect(rig.harness.calls('_harness/task/cancel'), [
           {'id': 'task-3'},
         ]);
@@ -330,7 +330,7 @@ void main() {
       final sheet = find.byType(BottomSheet);
       Finder inSheet(String text) =>
           find.descendant(of: sheet, matching: find.text(text));
-      expect(inSheet('Priority is low'), findsOneWidget);
+      expect(inSheet('Priority · low'), findsOneWidget);
       expect(inSheet('Low priority'), findsNothing);
       expect(inSheet('Medium priority'), findsOneWidget);
       await _tap(tester, inSheet('High priority'));
@@ -388,12 +388,12 @@ void main() {
       await _openBoard(tester, rig);
       await _open(tester, 'Review the emulator screenshots');
       await _menu(tester, 'Mark complete');
-      expect(find.text('Mark this task complete?'), findsOneWidget);
+      expect(find.text('Task completion'), findsOneWidget);
       await _tap(tester, find.text('Cancel'));
       expect(rig.harness.calls('_harness/task/complete'), isEmpty);
 
       await _menu(tester, 'Mark complete');
-      await _tap(tester, find.text('Complete'));
+      await _tap(tester, find.text('Completion'));
       expect(rig.harness.calls('_harness/task/complete'), [
         {'id': 'task-2'},
       ]);
@@ -404,15 +404,15 @@ void main() {
       await _openBoard(tester, rig);
       await _open(tester, 'Build the Flutter ACP client');
       await _menu(tester, 'Delete task…');
-      expect(find.text('Delete this task?'), findsOneWidget);
+      expect(find.text('Task deletion'), findsOneWidget);
       // Asked first: nothing is gone until the person says so.
       await _tap(tester, find.text('Cancel'));
       expect(rig.harness.calls('_harness/task/delete'), isEmpty);
 
       await _menu(tester, 'Delete task…');
-      expect(find.text('Also delete its session'), findsOneWidget);
+      expect(find.text('Session deletion too'), findsOneWidget);
       await _tap(tester, find.byType(Switch));
-      await _tap(tester, find.text('Delete'));
+      await _tap(tester, find.text('Deletion'));
       expect(rig.harness.calls('_harness/task/delete'), [
         {'id': 'task-1', 'delete-session': true},
       ]);
@@ -428,9 +428,9 @@ void main() {
       await _openBoard(tester, rig);
       await _open(tester, 'Cache the model catalogue');
       await _menu(tester, 'Delete task…');
-      expect(find.text('Delete this task?'), findsOneWidget);
+      expect(find.text('Task deletion'), findsOneWidget);
       // The harness takes the session of a task that never started with it.
-      expect(find.text('Also delete its session'), findsNothing);
+      expect(find.text('Session deletion too'), findsNothing);
     });
 
     testWidgets('says what the harness said when it refuses', (tester) async {
@@ -480,10 +480,10 @@ void main() {
       await _openBoard(tester, rig);
       // Nothing else is done: the board does not even have the column.
       expect(find.text('Done'), findsNothing);
-      expect(find.byTooltip('Show archived tasks'), findsOneWidget);
+      expect(find.byTooltip('Archived tasks'), findsOneWidget);
 
-      await _tap(tester, find.byTooltip('Show archived tasks'));
-      expect(find.byTooltip('Hide archived tasks'), findsOneWidget);
+      await _tap(tester, find.byTooltip('Archived tasks'));
+      expect(find.byTooltip('Archived tasks'), findsOneWidget);
       await _showTask(tester, 'Ship the session list');
       expect(_card('Ship the session list'), findsOneWidget);
       expect(
@@ -502,7 +502,7 @@ void main() {
     testWidgets('have no button on a board that has none', (tester) async {
       final rig = await _rig();
       await _openBoard(tester, rig);
-      expect(find.byTooltip('Show archived tasks'), findsNothing);
+      expect(find.byTooltip('Archived tasks'), findsNothing);
     });
   });
 
@@ -563,9 +563,9 @@ void main() {
       expect(rig.harness.calls('_harness/task/pause-all'), [
         {'cwd': _main},
       ]);
-      expect(find.text('Paused 3 tasks.'), findsOneWidget);
+      expect(find.text('Paused · 3 tasks'), findsOneWidget);
       await _tap(tester, find.text('Resume all'));
-      expect(find.text('Resumed 3 tasks.'), findsOneWidget);
+      expect(find.text('Resumed · 3 tasks'), findsOneWidget);
     });
 
     testWidgets('follows Emacs when it pauses the queue', (tester) async {
@@ -595,10 +595,10 @@ void main() {
         hasLength(1),
       );
       expect(rig.harness.suspendedQueues, hasLength(2));
-      expect(find.text('Paused 2 queues.'), findsOneWidget);
+      expect(find.text('Paused · 2 queues'), findsOneWidget);
       await _tap(tester, find.text('Resume every queue'));
       expect(rig.harness.suspendedQueues, isEmpty);
-      expect(find.text('Resumed 2 queues.'), findsOneWidget);
+      expect(find.text('Resumed · 2 queues'), findsOneWidget);
       await _tap(tester, find.text('Pause all'));
       expect(rig.harness.calls('_harness/task/pause-all'), [
         <String, Object?>{},

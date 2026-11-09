@@ -7,7 +7,7 @@
 ;; chip with their progress, web pages go in as text, data: links and
 ;; dropped text land in the box, images and videos show thumbnails, and
 ;; yanking takes images and copied files off the clipboard into the
-;; media ring, and C-c C-v is no longer the box's, so a chat's [Verify]
+;; media ring, and C-c C-v is no longer the box's, so a chat's [Verification]
 ;; keeps it.  Typing outside the box goes into it (the keys go through
 ;; the real command loop), except the keys that are commands where they
 ;; are typed.  C-c . presses a key on a panel above the box from the
@@ -446,7 +446,7 @@ only taking the thread back; its card says so."
   (harness-ui-compose-test-with
     (let ((att (harness-compose-add-thread nil)))
       (should-error (harness-compose-edit-thread att) :type 'user-error)
-      (should (equal '("Remove the thread, keep my words")
+      (should (equal '("Thread removal")
                      (mapcar #'car (harness-compose--thread-actions att))))
       (should (equal "a new thread" (harness-compose--chip-what att)))
       (insert "A question.")
@@ -1497,7 +1497,7 @@ card with nothing to answer."
   (harness-ui-compose-test-with
     (let ((message (error-message-string
                     (should-error (harness-compose-download "https://") :type 'user-error))))
-      (should (string-match-p "not a link I can fetch" message))
+      (should (string-match-p "No fetchable link" message))
       (should (string-match-p "\"https://\"" message)))
     (should-not harness-compose-attachments)
     (should-not (harness-ui-compose-test--pending))))
@@ -1936,7 +1936,7 @@ Point starts after the box, where a command loop's hooks move it from."
 (ert-deftest harness-ui-compose-c-c-c-v-is-not-the-boxes ()
   "C-c C-v is not the box's key: pasting is C-y, and Verify keeps C-c C-v.
 The box leaves C-c C-v unbound, so in a chat the review banner's
-[Verify] owns it and nothing shadows it."
+[Verification] owns it and nothing shadows it."
   (harness-ui-compose-test-with
     (should-not (lookup-key harness-compose-map (kbd "C-c C-v")))
     (should-not (key-binding (kbd "C-c C-v")))
@@ -3264,7 +3264,7 @@ place, unless the panel itself is gone."
                    (should-not (harness-ui-compose-test--targets))
                    "k")))
         (let ((err (should-error (harness-compose-panel-key) :type 'user-error)))
-          (should (string-match-p "panel above the box is gone" (cadr err)))))
+          (should (string-match-p "Panel gone" (cadr err)))))
       (should-not harness-ui-compose-test--pressed))))
 
 (ert-deftest harness-ui-compose-panel-target-cleans-up-on-quit-error-and-redraw ()
@@ -3304,18 +3304,18 @@ for a panel above the top is said too, and no key is read."
       ;; The nearest panel, two, binds none of these.
       (dolist (keys '("q" "x" "\C-f" "\r" "\C-c\C-a"))
         (let ((err (should-error (harness-ui-compose-test--panel-key keys) :type 'user-error)))
-          (should (equal (format "The panel above the box does not have %s"
+          (should (equal (format "Panel · no %s"
                                  (key-description keys))
                          (cadr err)))))
       ;; z is one's, not the nearest's: it is not pressed anywhere.
       (let ((err (should-error (harness-ui-compose-test--panel-key "z") :type 'user-error)))
-        (should (equal "The panel above the box does not have z" (cadr err))))
+        (should (equal "Panel · no z" (cadr err))))
       ;; Asking for a panel above the top is said before a key is read.
       (let ((reads 0))
         (cl-letf (((symbol-function 'read-key-sequence)
                    (lambda (&rest _) (cl-incf reads) "k")))
           (let ((err (should-error (harness-compose-panel-key 3) :type 'user-error)))
-            (should (equal "There is no panel 3 above the box" (cadr err)))))
+            (should (equal "No panel 3 above the box" (cadr err)))))
         (should (= 0 reads)))
       (should-not harness-ui-compose-test--pressed)
       (should (= (point) (+ harness-compose-start 2)))
@@ -3324,9 +3324,9 @@ for a panel above the top is said too, and no key is read."
       (setq harness-ui-compose-test--panels nil)
       (harness-ui-compose-test--draw)
       (let ((err (should-error (harness-compose-panel-key) :type 'user-error)))
-        (should (equal "There is no panel above the box" (cadr err))))
+        (should (equal "No panel above the box" (cadr err))))
       (let ((err (should-error (harness-compose-panel-key 2) :type 'user-error)))
-        (should (equal "There is no panel 2 above the box" (cadr err)))))
+        (should (equal "No panel 2 above the box" (cadr err)))))
     ;; The prompt says how to go up and how to get out.
     (setq harness-ui-compose-test--panels (harness-ui-compose-test--two-panels))
     (harness-ui-compose-test--draw)
@@ -3353,7 +3353,7 @@ tried.  Navigating up to the panel that has it runs it there."
       (goto-char harness-compose-end)
       ;; Panel two, the nearest, holds nothing for `i' to act on.
       (let ((err (should-error (harness-ui-compose-test--panel-key "i") :type 'user-error)))
-        (should (string-match-p "\\`i has nothing to act on from the box" (cadr err))))
+        (should (string-match-p "\\`No i at point" (cadr err))))
       (should-not harness-ui-compose-test--ran)
       ;; Panel one holds a thing: C-c . again goes up to it and `i' acts.
       (execute-kbd-macro (kbd "C-c . C-c . i"))
@@ -3362,7 +3362,7 @@ tried.  Navigating up to the panel that has it runs it there."
       (let ((inhibit-read-only t))
         (remove-text-properties (point-min) (point-max) '(harness-ui-compose-test-thing nil)))
       (let ((err (should-error (harness-ui-compose-test--panel-key "i") :type 'user-error)))
-        (should (string-match-p "\\`i has nothing to act on from the box" (cadr err))))
+        (should (string-match-p "\\`No i at point" (cadr err))))
       (should (equal '(act) harness-ui-compose-test--ran))
       (should (= (point) harness-compose-end)))))
 
@@ -3436,7 +3436,7 @@ panel starts at its first piece, and the pieces are not counted twice."
         (execute-kbd-macro (kbd "C-u 2 C-c . k"))
         (should (equal `("one" "k" ,one) (car harness-ui-compose-test--pressed)))
         (let ((err (should-error (harness-ui-compose-test--panel-key "k" 3) :type 'user-error)))
-          (should (equal "There is no panel 3 above the box" (cadr err))))))))
+          (should (equal "No panel 3 above the box" (cadr err))))))))
 
 (ert-deftest harness-ui-compose-panel-key-hint-follows-the-binding ()
   "The hints name the key where `harness-compose-panel-key' is bound.
@@ -3783,16 +3783,16 @@ copies its path."
                 (opened nil))
             (should (equal "file" (car (harness-compose--chip-menu att))))
             (should (equal "image 1" (car (harness-compose--chip-menu (overlay-get image-chip 'harness-compose-attachment)))))
-            (should (equal '("Open" "Remove from the message" "Copy the path")
+            (should (equal '("Open" "Message removal" "Path copy")
                            (mapcar (lambda (item) (aref item 0)) (cdr (harness-compose--chip-menu att)))))
             (dolist (item (cdr (harness-compose--chip-menu att)))
               (should (commandp (aref item 1))))
             (cl-letf (((symbol-function 'find-file-other-window) (lambda (file &rest _) (setq opened file))))
               (call-interactively (harness-ui-compose-test--menu-item att "Open")))
             (should (equal notes opened))
-            (call-interactively (harness-ui-compose-test--menu-item att "Copy the path"))
+            (call-interactively (harness-ui-compose-test--menu-item att "Path copy"))
             (should (equal notes (current-kill 0)))
-            (call-interactively (harness-ui-compose-test--menu-item att "Remove from the message"))
+            (call-interactively (harness-ui-compose-test--menu-item att "Message removal"))
             (should (equal "[image 1] " (harness-compose-text)))
             (should (equal (list image) (harness-ui-compose-test--paths)))))))))
 
@@ -3862,7 +3862,7 @@ the reference detaches the task, and undo brings it back."
         (let ((kill-ring nil) (kill-ring-yank-pointer nil)
               (interprogram-cut-function nil) (interprogram-paste-function nil))
           (should (equal "task t-1a2b3c4d" (car (harness-compose--chip-menu att))))
-          (call-interactively (harness-ui-compose-test--menu-item att "Copy the task id"))
+          (call-interactively (harness-ui-compose-test--menu-item att "Task id copy"))
           (should (equal fix (current-kill 0)))))
       ;; A click opens the task's session; one with none, its card on the board.
       (harness-compose-attach-task docs)

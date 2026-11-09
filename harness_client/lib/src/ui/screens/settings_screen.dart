@@ -143,12 +143,10 @@ class SettingsScreen extends StatelessWidget {
                             onPressed: () async {
                               final confirmed = await showHarnessDialog<bool>(
                                 context: context,
-                                title: 'Disconnect?',
+                                title: 'Disconnection',
                                 message:
-                                    'The conversations stay on the harness. '
-                                    'The app will not go back in by itself '
-                                    'until you connect again.',
-                                confirmLabel: 'Disconnect',
+                                    'Conversations stay on the harness · no automatic reconnection',
+                                confirmLabel: 'Disconnection',
                                 cancelLabel: 'Stay',
                               );
                               if (confirmed == true) await app.disconnect();
@@ -160,19 +158,17 @@ class SettingsScreen extends StatelessWidget {
                     if (app.canSignOut) ...[
                       const SizedBox(height: HarnessSpace.sm),
                       HarnessSecondaryButton(
-                        label: 'Sign out of this harness',
+                        label: 'Device sign-out',
                         icon: Icons.key_off_rounded,
                         destructive: true,
                         expand: true,
                         onPressed: () async {
                           final confirmed = await showHarnessDialog<bool>(
                             context: context,
-                            title: 'Sign out?',
+                            title: 'Sign-out',
                             message:
-                                'This ends the session of this device on the '
-                                'harness and forgets its secret here. Sign '
-                                'in again to reconnect.',
-                            confirmLabel: 'Sign out',
+                                'Device session ends · secret forgotten · sign-in needed',
+                            confirmLabel: 'Sign-out',
                             cancelLabel: 'Stay',
                           );
                           if (confirmed == true) await app.signOut();
@@ -190,7 +186,7 @@ class SettingsScreen extends StatelessWidget {
                     _SettingRow(
                       icon: Icons.brightness_6_outlined,
                       title: 'Theme',
-                      subtitle: 'Follow the system, or pin light or dark.',
+                      subtitle: 'System, light or dark',
                       below: HarnessSegmented<ThemeMode>(
                         options: const [
                           (ThemeMode.system, 'System'),
@@ -257,9 +253,9 @@ class SettingsScreen extends StatelessWidget {
                   children: [
                     _SettingRow(
                       icon: Icons.psychology_outlined,
-                      title: 'Show thinking',
+                      title: 'Thinking display',
                       subtitle:
-                          'Show the agent’s streamed thoughts, collapsed.',
+                          'Agent thoughts · streamed, collapsed',
                       trailing: HarnessSwitch(
                         value: settings.showThinking,
                         onChanged: settings.setShowThinking,
@@ -279,7 +275,7 @@ class SettingsScreen extends StatelessWidget {
                       // instead of promising what the switch cannot do.
                       subtitle:
                           settings.persistenceProblem ??
-                          'Stay signed in: keep the address and session here.',
+                          'Remembered connection · address and session kept',
                       trailing: HarnessSwitch(
                         value: settings.rememberConnection,
                         onChanged: settings.setRememberConnection,
@@ -351,9 +347,7 @@ class SettingsScreen extends StatelessWidget {
                     icon: Icons.hourglass_disabled_rounded,
                     title: 'Non-interactive',
                     subtitle:
-                        'Every conversation and task runs without waiting '
-                        'for you, and new ones start that way. Each '
-                        'conversation can still be switched on its own.',
+                        'No waiting · every conversation and task · each switchable',
                     trailing: HarnessSwitch(
                       key: const Key('settings-non-interactive'),
                       value: app.defaultNonInteractive ?? false,
@@ -393,10 +387,7 @@ class SettingsScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: HarnessSpace.md),
                     Text(
-                      'A native client for the emacs-agent-harness. It detects '
-                      'the harness’s extensions one by one; when only standard '
-                      'ACP is offered, the chat and permissions still work and '
-                      'the enhanced views stay out of the way.',
+                      'Native client · emacs-agent-harness · ACP extensions · chat and permissions without them',
                       style: HarnessText.subtitle(context)
                           .copyWith(height: 1.5),
                     ),
@@ -428,7 +419,7 @@ class SettingsScreen extends StatelessWidget {
               const SizedBox(height: HarnessSpace.xl),
               Center(
                 child: Text(
-                  'Made for people who run agents on their own machines.',
+                  'Agent harness · own machines',
                   textAlign: TextAlign.center,
                   style: HarnessText.caption(context).copyWith(fontSize: 11.5),
                 ),

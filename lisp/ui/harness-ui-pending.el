@@ -229,7 +229,7 @@ while the session's own pending list may lag a round trip behind."
 This is for cards and rows that say what a session needs without
 opening it."
   (when-let* ((kind (harness-ui-pending--session-kind session)))
-    (if (equal kind "question") "has a question for you" "needs your permission")))
+    (if (equal kind "question") "question" "permission")))
 
 (defun harness-ui-pending-status (session)
   "Return \"question\", \"permission\" or nil: what SESSION waits on."
@@ -830,14 +830,14 @@ the request's own; an empty answer goes back to it."
                           (reverse (harness-ui-pending-items session-id)))
             pid (plist-get r :id)))
     (unless r
-      (user-error "No request about a path outside the allowed directories is waiting"))
+      (user-error "No path request outside allowed directories"))
     (let* ((own (harness-abbreviate-file-name (plist-get r :pattern)))
            (typed (string-trim (read-string "Pattern (* within a name, ** across directories): "
                                             (harness-ui-pending--permission-pattern r) nil
                                             (harness-ui-pending--pattern-suggestions r)))))
       (harness-ui-pending-set-pattern session-id pid
                                       (unless (or (string-empty-p typed) (equal typed own)) typed))
-      (message "Answers now hold for %s"
+      (message "Answers · %s"
                (harness-ui-pending--permission-pattern (harness-ui-pending-record session-id pid))))))
 
 ;;;; What the lasting answers cover
@@ -1012,7 +1012,7 @@ area says so."
                  (cadr (nth i steps))))
        (t
         (harness-ui-pending--choose session-id r (car (nth j steps)))
-        (message (if ladder "Lasting answers now cover %s" "Answers now hold for %s")
+        (message (if ladder "Lasting answers · %s" "Answers · %s")
                  (cadr (nth j steps))))))))
 
 (defun harness-ui-pending-cover-narrower (&optional pid)
@@ -1101,7 +1101,7 @@ header's line.  Nothing is drawn when R offers no answer that lasts."
            (names (harness-ui-pending--lasting-names r))
            (ladder (harness-ui-pending--ladder r))
            (selected (harness-ui-pending--cover-id r))
-           (header (propertize (format "   Lasting answers (%s) cover:" keys) 'face 'harness-dim-face))
+           (header (propertize (format "   Lasting answers (%s)" keys) 'face 'harness-dim-face))
            (start (point)))
       (if (null (cdr ladder))
           (insert header " " (propertize (plist-get (car ladder) :label) 'wrap-prefix "     ") "\n")
@@ -1466,12 +1466,12 @@ pattern, so it stays over the one line."
 ;; line says so, and its tooltip says that they can be wrong and decide
 ;; nothing: the user judges the call by what the panel shows above it.
 
-(defconst harness-ui-pending--summary-label "Model summary:"
+(defconst harness-ui-pending--summary-label "Model summary ·"
   "What starts the line of a model's summary of a request's call.")
 
 (defun harness-ui-pending--summary-help (r)
   "Return the tooltip of the summary line of permission record R."
-  (format "Written by %s from the call's arguments. It can be wrong and it decides nothing: judge the call by what is shown above it."
+  (format "Model summary · %s · from the call's arguments · may be wrong · decides nothing"
           (if-let* ((model (plist-get r :summary-model))
                     ((stringp model)))
               (format "the model %s" model)
@@ -1492,7 +1492,7 @@ panel as it was."
                           'help-echo (harness-ui-pending--summary-help r))))
      ((plist-get r :summarizing)
       (insert (propertize (format "   %s summarizing…\n" label) 'face 'harness-dim-face
-                          'help-echo "A model is writing a summary of what this call does."))))))
+                          'help-echo "Model summary · writing"))))))
 
 ;;;;; A long input, whole
 ;;

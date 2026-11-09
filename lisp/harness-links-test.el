@@ -27,7 +27,9 @@
                    ("harness:call/toolu_01AbC" (:kind call :call "toolu_01AbC"))
                    ("harness:thread/t-3" (:kind thread :thread "t-3"))
                    ("harness:task/t-4" (:kind task :task "t-4"))
-                   ("harness:task/t-4/thread/t-3" (:kind thread :task "t-4" :thread "t-3"))))
+                   ("harness:task/t-4/thread/t-3" (:kind thread :task "t-4" :thread "t-3"))
+                   ("harness:computer/cmp-1" (:kind computer :computer "cmp-1"))
+                   ("harness:screen/my%20box" (:kind computer :computer "my box"))))
     (ert-info (url)
       (should (equal expected (harness-links-parse url))))))
 
@@ -91,6 +93,7 @@
   (should (equal "harness:task/t-4" (harness-links-task-url "t-4")))
   (should (equal "harness:task/t-4/thread/t-3" (harness-links-thread-url "t-4" "t-3")))
   (should (equal "harness:thread/t-3" (harness-links-thread-url nil "t-3")))
+  (should (equal "harness:computer/cmp-1" (harness-links-computer-url "cmp-1")))
   (should (equal "harness:session/abc/thread/t-3"
                  (harness-links-url '(:kind thread :session "abc" :thread "t-3"))))
   ;; A thread under a task is written under it, whatever else is given.
@@ -129,6 +132,9 @@
   (should (equal "tool call bash#2" (harness-links-label '(:kind call :call "bash#2"))))
   (should (equal "thread t-3" (harness-links-label '(:kind thread :thread "t-3"))))
   (should (equal "task t-4" (harness-links-label '(:kind task :task "t-4"))))
+  (should (equal "computer cmp-1" (harness-links-label '(:kind computer :computer "cmp-1"))))
+  (should (equal "browser screen share"
+                 (harness-links-label '(:kind computer :computer "cmp-1") "browser screen share")))
   (should (equal "Build" (harness-links-label '(:kind task :task "t-4") "Build")))
   ;; A long id is cut.
   (should (< (length (harness-links-label (list :kind 'call :call (make-string 80 ?x)))) 40)))

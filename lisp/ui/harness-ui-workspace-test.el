@@ -60,15 +60,17 @@ must see the fixture as it was."
     (:kind "message" :thread "th-1" :role "user" :text "The tile is matte.")
     (:kind "message" :thread "th-1" :role "assistant" :text "Noted.")))
 
-(defun harness-ui-workspace-test-render ()
-  "Render a test workspace in the current buffer and return its text."
+(defun harness-ui-workspace-test-render (&optional computers)
+  "Render a test workspace in the current buffer and return its text.
+COMPUTERS, when given, is what the registered computers are."
   (harness-ui-workspace-mode)
   (setq harness-ui-workspace--id "w-1"
         harness-ui-workspace--thread "th-1"
         harness-ui-workspace--state 'ready
         harness-ui-workspace--data (harness-ui-workspace-test-data)
         harness-ui-workspace--entries (harness-ui-workspace-test-entries)
-        harness-ui-workspace--knowledge nil)
+        harness-ui-workspace--knowledge nil
+        harness-ui-workspace--computers computers)
   (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
     (harness-ui-workspace--render))
   (buffer-string))
@@ -93,6 +95,33 @@ must see the fixture as it was."
         (should (string-match-p "Agent" text))
         (should (string-match-p "Noted." text))
         (should (equal "Message…" (funcall harness-compose-placeholder-function)))))))
+
+(ert-deftest harness-ui-workspace-computers-are-one-click-away ()
+  "The workspace shows the registered computers, their screen share and control."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (let* ((computers '((:id "local" :name "marcuse" :connected t
+                           :vnc "http://127.0.0.1:6080/vnc_lite.html" :control nil)
+                          (:id "cmp-box" :name "box" :state "registered"
+                           :vnc nil :control "user")))
+             (text (harness-ui-workspace-test-render computers)))
+        (should (string-match-p "Computers" text))
+        (should (string-match-p "marcuse" text))
+        (should (string-match-p "Live" text))
+        (should (string-match-p "box" text))
+        (should (string-match-p "Registered" text))
+        (should (string-match-p "View" text))
+        (should (string-match-p "Control" text))
+        (should (string-match-p "Return" text))
+        (goto-char (point-min))
+        (search-forward "All computers")
+        (should (equal "The computers page" (get-text-property (1- (point)) 'help-echo)))
+        (search-forward "View")
+        (should (equal "screen share of marcuse" (get-text-property (1- (point)) 'help-echo)))
+        (search-forward "Control")
+        (should (equal "control of marcuse" (get-text-property (1- (point)) 'help-echo)))
+        (search-forward "Return")
+        (should (equal "control return of box" (get-text-property (1- (point)) 'help-echo)))))))
 
 (ert-deftest harness-ui-workspace-loading-draws-before-the-first-answer ()
   "The loading state draws without a workspace root to list files from."
@@ -122,15 +151,15 @@ must see the fixture as it was."
         (harness-ui-workspace--render))
       (goto-char (point-min))
       (should (equal (buffer-substring-no-properties (line-beginning-position) (line-end-position))
-                     "Workspace · Home   Thread · Kitchen renovation · Running   Knowledge · ready   Computer · off   Tasks New thread Open episode Stop Refresh Computer Resources"))
+                     "Workspace · Home   Thread · Kitchen renovation · Running   Knowledge · ready   Computer · off   Tasks New thread Episode Stop Refresh Workspace computer Resources"))
       (search-forward "Tasks")
       (should (equal "The task board of this workspace" (get-text-property (1- (point)) 'help-echo)))
       (search-forward "New thread")
       (should (equal "Start a new topic" (get-text-property (1- (point)) 'help-echo)))
       (search-forward "Refresh")
       (should (equal "Read the workspace again" (get-text-property (1- (point)) 'help-echo)))
-      (search-forward "Computer")
-      (should (equal "The workspace computer's screen"
+      (search-forward "Workspace computer")
+      (should (equal "workspace computer page"
                      (get-text-property (1- (point)) 'help-echo))))))
 
 (ert-deftest harness-ui-workspace-empty-and-error-states ()
@@ -563,19 +592,19 @@ It says Permission, the call, and the answers every view offers."
         (should (string-match-p "Screen  1280 × 800" text))
         (should (string-match-p "VNC  http://127.0.0.1:6080/vnc_lite.html" text))
         (should (string-match-p "Socket  ws://127.0.0.1:6080/websockify" text))
-        (dolist (label '("Start" "Stop" "Restart" "Take over" "Return control"
-                         "Open VNC" "Screenshot" "Refresh"))
+        (dolist (label '("Startup" "Stop" "Restart" "Takeover" "Control return"
+                         "VNC page" "Screenshot" "Refresh"))
           (should (string-match-p label text)))
         (should-not (string-match-p "Preview\\|staged\\|mock" text)))
       (goto-char (point-min))
-      (dolist (pair '(("Start" . "Start the workspace computer")
-                      ("Stop" . "Stop the workspace computer")
-                      ("Restart" . "Restart the workspace computer")
-                      ("Take over" . "Reviewer control of the screen")
-                      ("Return control" . "Agent control of the screen")
-                      ("Open VNC" . "The computer's noVNC page")
-                      ("Screenshot" . "A picture of the current screen")
-                      ("Refresh" . "Read the computer again")))
+      (dolist (pair '(("Startup" . "workspace computer startup")
+                      ("Stop" . "workspace computer stop")
+                      ("Restart" . "workspace computer restart")
+                      ("Takeover" . "reviewer control")
+                      ("Control return" . "agent control")
+                      ("VNC page" . "noVNC page")
+                      ("Screenshot" . "current screen picture")
+                      ("Refresh" . "computer refresh")))
         (goto-char (point-min))
         (search-forward (car pair))
         (should (equal (cdr pair)
@@ -707,7 +736,7 @@ so before the first token arrives."
         (goto-char (point-min))
         (should (equal (concat "Workspace · Home   Thread · Kitchen renovation · Running · "
                                "Waiting for the model…   Knowledge · unavailable   Computer · off   "
-                               "Tasks New thread Open episode Stop Refresh Computer Resources")
+                               "Tasks New thread Episode Stop Refresh Workspace computer Resources")
                        (buffer-substring-no-properties
                         (line-beginning-position) (line-end-position)))))))
 

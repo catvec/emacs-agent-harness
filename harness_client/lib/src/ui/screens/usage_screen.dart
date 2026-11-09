@@ -157,8 +157,7 @@ class UsageScreen extends StatelessWidget {
                           Padding(
                             padding: const EdgeInsets.only(bottom: 8),
                             child: Text(
-                              'Budgets count billed cost; calls a plan covers '
-                              'do not spend them.',
+                              'Budgets · billed cost · plan-covered calls free',
                               style: HarnessText.caption(context),
                             ),
                           ),
@@ -174,10 +173,9 @@ class UsageScreen extends StatelessWidget {
                         const SizedBox(height: 30),
                         HarnessEmptyState(
                           icon: Icons.insights_rounded,
-                          title: 'No usage recorded yet',
+                          title: 'No usage recorded',
                           message:
-                              'Once this harness makes model calls, its spend, '
-                              'tokens and cache use appear here.',
+                              'Model calls · spend, tokens, cache use here',
                         ),
                       ],
                       if (controller.loading)
@@ -454,7 +452,7 @@ class _SpendChart extends StatelessWidget {
           height: 88,
           child: Center(
             child: Text(
-              'No daily spend yet.',
+              'No daily spend',
               style: HarnessText.subtitle(context),
             ),
           ),

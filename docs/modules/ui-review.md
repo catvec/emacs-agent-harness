@@ -14,9 +14,9 @@ Reviewing a task where it is looked at: its report in full in its session; verif
 
 A task waiting for review shows a banner wherever its work is looked
 at: that the work is done and waits for the user, and the buttons that
-act on it -- [Verify], which accepts the work and merges its branch,
-[Send back], which sends it back with the feedback in the box, and
-[Keep working], which takes it out of review into the working phase
+act on it -- [Verification], which accepts the work and merges its branch,
+[Return], which sends it back with the feedback in the box, and
+[Working phase], which takes it out of review into the working phase
 (`harness-tasks-working-phase`): the agent goes on with the task, the
 report kept for its next hand-in, and no feedback is recorded.  It is
 the board's Ready for review: the same mark and the same wording, so
@@ -84,9 +84,9 @@ are those of `harness-ui-review-minor-mode`, on only while the banner
 shows: the rest of the time the buffer's own keys stand, C-c C-v
 attaching the clipboard.  The banner disappears when the task leaves
 review, whoever moved it -- verified, sent back, taken back to work by
-its [Keep working], or put back at work by `task/force-review` -- and
+its [Working phase], or put back at work by `task/force-review` -- and
 its keys with it.  A task put in review by hand, without `hand_in`
-(`task/force-review`, the board's [Put in review]), shows the banner
+(`task/force-review`, the board's [Manual review]), shows the banner
 with the report it handed in last, or says that none came if it
 handed none in.
 

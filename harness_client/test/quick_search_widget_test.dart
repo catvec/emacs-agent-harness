@@ -243,7 +243,7 @@ void main() {
       expect(
         find.descendant(
           of: hint,
-          matching: find.text('Say what you want, in words, for instance:'),
+          matching: find.text('Search examples'),
         ),
         findsOneWidget,
       );
@@ -1120,7 +1120,7 @@ void main() {
         await _open(tester);
         await _ask(tester, 'a slow one');
         expect(
-          find.text('The search failed: The model took longer than 45s'),
+          find.text('Search failure · The model took longer than 45s'),
           findsOneWidget,
         );
         expect(find.text('Retry'), findsOneWidget);
@@ -1146,7 +1146,7 @@ void main() {
       await _pump(tester, rig);
       await _open(tester);
       expect(find.byKey(const Key('quick-search-unsupported')), findsOneWidget);
-      expect(find.text('This harness cannot search'), findsOneWidget);
+      expect(find.text('No search in this harness'), findsOneWidget);
       // Nothing can be sent, and nothing is.
       await tester.enterText(_field, 'how do I attach an image?');
       await tester.pump();
@@ -1225,7 +1225,7 @@ void main() {
         await rig.harness.dropConnection('The network went away.');
         await _settle(tester, 6);
         expect(find.byKey(const Key('quick-search-error')), findsOneWidget);
-        expect(find.textContaining('The search failed:'), findsOneWidget);
+        expect(find.textContaining('Search failure ·'), findsOneWidget);
         expect(find.byKey(const Key('quick-search-waiting')), findsNothing);
       },
     );

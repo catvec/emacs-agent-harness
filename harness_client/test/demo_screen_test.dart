@@ -530,6 +530,6 @@ void main() {
     await tester.tap(find.byKey(const Key('demo-stop')));
     await _settle(tester, 8);
     expect(find.byType(DemoScreen), findsOneWidget);
-    expect(find.text('Stop failed'), findsOneWidget);
+    expect(find.text('Stop failure'), findsOneWidget);
   });
 }

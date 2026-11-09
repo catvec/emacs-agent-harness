@@ -826,7 +826,7 @@ the session's branch is built on has to be in it first."
                                   (harness-tools-with-note
                                    (cond
                                     (cannot
-                                     (format "Recorded: this task cannot continue. %s\n\nThe task goes to Requires your input for the user's decision, and nothing merges; this turn ends."
+                                     (format "Recorded: this task cannot continue. %s\n\nThe task goes to Your input for the user's decision, and nothing merges; this turn ends."
                                              (harness-first-line summary 200)))
                                     (no-merge
                                      (format "Handed in (nothing to merge): %s\n\n%d piece%s of evidence; the task waits for the user's review, and verifying it completes it without merging."

@@ -846,7 +846,7 @@ since, with [INS], starts open, and one within another record folded."
            (when (markerp (widget-get fold :from))
              (let ((bad (widget-apply fold :validate)))
                (if bad
-                   (message "%s" (or (widget-get bad :error) "This entry holds an invalid value"))
+                   (message "%s" (or (widget-get bad :error) "Invalid value"))
                  (widget-put fold :open (if (eq (widget-get fold :open) 'yes) 'no 'yes))
                  (widget-value-set fold (widget-value fold))
                  (widget-setup)
@@ -869,7 +869,7 @@ since, with [INS], starts open, and one within another record folded."
   (if-let* ((child (car (widget-get widget :children))))
       (widget-apply child :validate)
     (unless (widget-apply (car (widget-get widget :args)) :match (widget-get widget :value))
-      (widget-put widget :error "This entry holds an invalid value")
+      (widget-put widget :error "Invalid value")
       widget)))
 
 (defun harness-ui-config--fold-match (widget value)
@@ -1194,7 +1194,7 @@ while the picker is open, a setting's pick goes to the setting drawn."
                                               (and (eq (widget-type child) 'harness-ui-config-model) child))))))
                          (if target
                              (harness-ui-config--model-set target (car picked))
-                           (message "The page changed meanwhile: pick again")))))))))
+                           (message "Page changed · pick again")))))))))
     (harness-ui-refresh-models pick pick)))
 
 ;;;;; Summaries
@@ -1398,7 +1398,7 @@ BUTTONS are (LABEL HELP FUNCTION)."
             (push (propertize (format "global is %s" (funcall show global)) 'face 'harness-settings-doc-face)
                   parts)
             (push (list "Remove override"
-                        "Delete this setting from the .dir-locals.el, so the global value applies (d)"
+                        "setting deletion · global value applies (d)"
                         (lambda () (harness-ui-config--unset key)))
                   buttons))
         (push (propertize "uses the global value" 'face 'harness-settings-doc-face) parts)))
@@ -1408,7 +1408,7 @@ BUTTONS are (LABEL HELP FUNCTION)."
             (push (propertize "customized" 'face 'harness-settings-global-face) parts)
             (push (propertize (format "default is %s" (funcall show standard)) 'face 'harness-settings-doc-face)
                   parts)
-            (push (list "Reset to default" "Set the global value back to the default (d)"
+            (push (list "Reset to default" "global value reset (d)"
                         (lambda () (harness-ui-config--unset key)))
                   buttons)))
       (when (and layered project)
@@ -1604,9 +1604,9 @@ ORIGINAL is the value saved in the page's scope."
   "Return what the scope shown edits and where it is saved."
   (let ((files (plist-get harness-ui-config--data :files)))
     (if (eq harness-ui-config--scope 'global)
-        (format "Global values apply to every project that does not override them.  Saved in %s."
+        (format "Global scope · every project without an override · saved in %s"
                 (if custom-file (abbreviate-file-name custom-file) "your init file, through customize"))
-      (format "Values set here override the global ones for sessions in %s.  Saved in its .dir-locals.el%s."
+      (format "Project scope · overrides global for %s · .dir-locals.el%s"
               (if (harness-ui-config--in-project-p) (harness-ui-config--project-name) "this directory")
               (if (harness-ui-config--true (plist-get files :project-exists)) "" ", created on the first save")))))
 
@@ -1636,7 +1636,7 @@ ORIGINAL is the value saved in the page's scope."
 
 (defconst harness-ui-config--fallback-section
   '(:name "sessions" :title "Session defaults"
-    :doc "New sessions start with these.  Each project can override them in its .dir-locals.el.")
+    :doc "New session defaults · project overrides in .dir-locals.el")
   "The one section of a harness that names none: its layered settings.")
 
 (defun harness-ui-config--sections ()
@@ -1720,11 +1720,11 @@ One the policy sets counts as not: it was not changed here."
   "Insert the line about OTHERS, the settings with a global value only."
   (when others
     (harness-ui-config--insert-heading "Other settings")
-    (insert " " (propertize (format "%d more settings have a global value only, the same in every project."
+    (insert " " (propertize (format "%d more settings · global value · same in every project"
                                     (length others))
                             'face 'harness-settings-doc-face)
             "\n ")
-    (harness-ui-config--button "Edit global settings" "Show the Global scope (s)"
+    (harness-ui-config--button "Global settings" "Show the Global scope (s)"
                                (lambda () (harness-ui-config-set-scope 'global)) t)
     (insert "\n")))
 
@@ -1734,7 +1734,7 @@ One the policy sets counts as not: it was not changed here."
    "Interface"
    "Where windows open, the prefix key, labels and faces: options of this Emacs, set with Customize.")
   (insert " ")
-  (harness-ui-config--button "Customize the interface" "M-x customize-group harness-ui (C)"
+  (harness-ui-config--button "Interface customization" "M-x customize-group harness-ui (C)"
                              #'harness-ui-config-customize-interface)
   (insert "\n"))
 
@@ -1949,7 +1949,7 @@ with what it shows rather than a blank while another request is out."
            (with-current-buffer buf
              (puthash (harness-ui-config--edit-key key scope) t harness-ui-config--edited)
              (harness-ui-config--set-state key (cons 'error msg) scope)))
-         (message "Could not save %s: %s" label msg))))))
+         (message "Save failure · %s · %s" label msg))))))
 
 (defun harness-ui-config--save (key)
   "Save the value the widget of KEY holds in the page's scope."
@@ -1971,9 +1971,9 @@ with what it shows rather than a blank while another request is out."
      (list :key key :scope (symbol-name scope) :cwd harness-ui-config--cwd)
      (lambda (_)
        (if (eq scope 'project)
-           (message "%s: %s uses the global value again" label
+           (message "%s · %s · global value" label
                     (if (buffer-live-p buf) (with-current-buffer buf (harness-ui-config--place)) "the project"))
-         (message "%s: back to the default" label))
+         (message "%s · back to default" label))
        (when (buffer-live-p buf)
          (with-current-buffer buf
            (harness-ui-config--set-state key nil scope)
@@ -1982,7 +1982,7 @@ with what it shows rather than a blank while another request is out."
        (let ((msg (harness-error-message e)))
          (when (buffer-live-p buf)
            (with-current-buffer buf (harness-ui-config--set-state key (cons 'error msg) scope)))
-         (message "Could not change %s: %s" label msg))))))
+         (message "Change failure · %s · %s" label msg))))))
 
 (defun harness-ui-config--read-secret (key label)
   "Read a new value for secret KEY named LABEL and save it globally."
@@ -2086,7 +2086,7 @@ with what it shows rather than a blank while another request is out."
           harness-ui-config--scope scope)
     (harness-ui-config--render)
     (force-mode-line-update)
-    (message "Editing the %s values" (downcase (harness-ui-config--scope-label scope)))))
+    (message "Editing · %s values" (downcase (harness-ui-config--scope-label scope)))))
 
 (defun harness-ui-config-toggle-scope ()
   "Switch between the Global and the Project scope."
@@ -2206,13 +2206,13 @@ They have a global value only, so showing them shows the Global scope."
      '("Settings"
        ["Page"
         (". s" "Global or project scope" harness-ui-config-toggle-scope)
-        (". a" "Show or hide advanced settings" harness-ui-config-toggle-advanced)
-        (". C" "Customize the interface" harness-ui-config-customize-interface)
+        (". a" "Advanced settings" harness-ui-config-toggle-advanced)
+        (". C" "Interface customization" harness-ui-config-customize-interface)
         (". g" "Reload" harness-ui-config-refresh)]
        ["Setting at point"
-        ("C-c C-c" "Save it" harness-ui-config-save-setting)
-        ("C-c C-k" "Drop the edit" harness-ui-config-revert-setting)
-        (". d" "Remove override or reset" harness-ui-config-unset-setting)]))
+        ("C-c C-c" "Save" harness-ui-config-save-setting)
+        ("C-c C-k" "Edit discard" harness-ui-config-revert-setting)
+        (". d" "Override removal" harness-ui-config-unset-setting)]))
 
 (define-derived-mode harness-ui-config-mode nil "Settings"
   "Major mode of the harness settings page.
@@ -2248,7 +2248,7 @@ advanced settings, and \\[harness-ui-config-customize-interface] customizes the 
     (when harness-ui-config--edited
       (maphash (lambda (_ _v) (cl-incf n)) harness-ui-config--edited))
     (when (> n 0)
-      (message "Harness settings: %d %s not saved" n (if (= n 1) "edit was" "edits were")))))
+      (message "Harness settings · %d %s not saved" n (if (= n 1) "edit" "edits")))))
 
 ;;;; Opening
 

@@ -420,7 +420,7 @@ ARGS names the kind (`harness-ui-compact-parse-kind'), or is empty to ask."
   "Bind `harness-compact', put it in the menu and take /compact in the chat."
   (define-key harness-ui-map (kbd "C") #'harness-compact)
   (condition-case err
-      (transient-append-suffix 'harness-menu "f" '("C" "Compact context" harness-compact))
+      (transient-append-suffix 'harness-menu "f" '("C" "Context compaction" harness-compact))
     (error (harness-log 'warn "compact: no menu entry: %s" (error-message-string err))))
   (setf (alist-get "compact" harness-chat-commands nil nil #'equal) #'harness-ui-compact--chat-command))
 

@@ -79,6 +79,7 @@ the ids and the handles for its own calls and messages.
 
 ### Methods it calls
 
+- `computer/get` ([computers](computers.md)), when it is loaded
 - `review/find-thread` ([patch-review](patch-review.md)), when it is loaded
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))

@@ -57,7 +57,7 @@ is the adapter that gives that library a task to review, in this Emacs:
 
 THE CHANGES, drawn the same on four surfaces: in the review banner of
 the task's session, between the report the agent handed in and
-[Verify], so the work is looked over where it is handed in, with no
+[Verification], so the work is looked over where it is handed in, with no
 click on [Review Changes] (the banner asks for them through
 `harness-ui-review-changes-functions`); in a hand_in call in the
 transcript, under that round's report, the same hand-in the banner
@@ -464,8 +464,8 @@ banner that showed it are drawn again once the module starts, which
 makes the review again, from the threads and the files viewed the
 harness keeps and from the branch.  Changes that cannot be drawn for
 any other reason say so in one short line with a [Try again] button,
-which makes the review again, and the rest of the report -- [Verify]
-and [Send back] -- and of the banner is drawn all the same.
+which makes the review again, and the rest of the report -- [Verification]
+and [Return] -- and of the banner is drawn all the same.
 
 A LINK TO A THREAD.  An agent that answers a thread, or points at one,
 writes a link to it (harness:thread/ID, lisp/harness-links.el), and a

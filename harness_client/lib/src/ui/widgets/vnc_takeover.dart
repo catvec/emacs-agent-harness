@@ -100,8 +100,8 @@ class _VncTakeoverState extends State<VncTakeover>
         return Semantics(
           container: true,
           label: widget.active
-              ? 'Computer, you have control'
-              : 'Computer, the agent has control',
+              ? 'Your control'
+              : 'Agent control',
           child: Stack(
             clipBehavior: Clip.none,
             children: [

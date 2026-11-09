@@ -852,9 +852,9 @@ a value.
      '("Secret sources"
        ["Sources"
         (". a" "New source…" harness-secrets-add-source)
-        (". d" "Stop masking the source at point" harness-ui-secrets-remove-source)
-        (". l" "Redactions that were run" harness-redactions)
-        (". g" "Read the sources again" harness-ui-secrets-reload)]))
+        (". d" "Source masking" harness-ui-secrets-remove-source)
+        (". l" "Redaction log" harness-redactions)
+        (". g" "Source reload" harness-ui-secrets-reload)]))
 
 ;;;###autoload
 (defun harness-secrets-list-sources ()
@@ -1457,9 +1457,9 @@ a secret in it.
 (put 'harness-ui-secrets-log-mode 'harness-menu-group
      '("Redactions"
        ["Redactions"
-        (". RET" "Show the redaction at point" harness-ui-secrets-log-visit)
-        (". s" "Sources of the secrets masked" harness-secrets-list-sources)
-        (". g" "Read the log again" harness-ui-secrets-log-reload)]))
+        (". RET" "Redaction at point" harness-ui-secrets-log-visit)
+        (". s" "Secret sources" harness-secrets-list-sources)
+        (". g" "Log reload" harness-ui-secrets-log-reload)]))
 
 (defun harness-ui-secrets-log-reload ()
   "Read the redactions again."
@@ -1531,7 +1531,7 @@ other files, so it is not followed."
   "Put the commands of this module in the harness menu, after Log, in Tools."
   (condition-case err
       (let ((after "L"))
-        (dolist (entry '(("x" "Redact a secret…" harness-redact-secret)
+        (dolist (entry '(("x" "Secret redaction…" harness-redact-secret)
                          ("E" "Secret sources" harness-secrets-list-sources)))
           (pcase (harness-ui-secrets--suffix-command (car entry))
             ((pred null) (transient-append-suffix 'harness-menu after entry))

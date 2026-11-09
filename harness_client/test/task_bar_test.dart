@@ -132,7 +132,7 @@ Future<void> main() async {
   group('a tap on a task, in any column,', () {
     const columns = [
       // column, task, the conversation it opens, what its bar says.
-      ('Needs input', 'Answer the permission', 'Fix duplicate task titles'),
+      ('Your input', 'Answer the permission', 'Fix duplicate task titles'),
       ('Active', 'Build the Flutter ACP client', 'Polish the iOS sheet'),
       ('Review', 'Review the emulator screenshots', 'Tidy the tool cards'),
       ('Pending', 'Cache the model catalogue', 'Cache the model catalogue'),
@@ -154,7 +154,7 @@ Future<void> main() async {
         );
         // Where the task stands is said there, but for a task that waits
         // for an answer, whose conversation has the question in its place.
-        if (column == 'Needs input') {
+        if (column == 'Your input') {
           expect(find.byType(InteractionCard), findsOneWidget);
           expect(find.byKey(_bar), findsNothing);
         } else {
@@ -244,7 +244,7 @@ Future<void> main() async {
       expect(find.byType(SessionScreen), findsNothing);
       expect(
         find.text(
-          '“Review the emulator screenshots” has no conversation to open.',
+          'No conversation for “Review the emulator screenshots”',
         ),
         findsOneWidget,
       );
@@ -359,7 +359,7 @@ Future<void> main() async {
       await _settle(tester, 4);
       await tester.tap(find.text('Mark complete'));
       await _settle(tester, 4);
-      expect(find.text('Mark this task complete?'), findsOneWidget);
+      expect(find.text('Task completion'), findsOneWidget);
       await tester.tap(find.text('Cancel'));
       await _settle(tester, 4);
       expect(harness.tasks['task-2']!['state'], 'review');
@@ -368,7 +368,7 @@ Future<void> main() async {
       await _settle(tester, 4);
       await tester.tap(find.text('Mark complete'));
       await _settle(tester, 4);
-      await tester.tap(find.text('Complete'));
+      await tester.tap(find.text('Completion'));
       await _settle(tester, 8);
       expect(harness.tasks['task-2']!['state'], 'done');
     });
@@ -465,8 +465,8 @@ Future<void> main() async {
         },
       );
       await openTask(tester, 'Answer the permission');
-      expect(heading(tester), 'Needs input');
-      expect(find.text('Its last turn ended in an error.'), findsOneWidget);
+      expect(heading(tester), 'Your input');
+      expect(find.text('Turn error'), findsOneWidget);
       expect(find.text('The model said: overloaded'), findsOneWidget);
 
       await tester.tap(find.text('Retry'));

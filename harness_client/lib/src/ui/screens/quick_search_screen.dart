@@ -254,7 +254,7 @@ class _Header extends StatelessWidget {
                 key: const Key('quick-search-field'),
                 controller: field,
                 focusNode: focus,
-                hint: 'Say what you want…',
+                hint: 'Search words…',
                 autofocus: true,
                 // A question is a sentence: it wraps, from one line to three,
                 // and the keyboard's key still searches rather than breaking
@@ -380,25 +380,22 @@ class _Unavailable extends StatelessWidget {
         leading: HarnessActivity(radius: 8),
         message: 'Reconnecting to the harness…',
         detail:
-            'A search needs the harness. It works again as soon as the app '
-            'is back in.',
+            'Search · harness connection needed',
         detailLines: 3,
       ),
       QuickSearchAvailability.unsupported => const HarnessNotice(
         key: Key('quick-search-unsupported'),
         icon: Icons.search_off_rounded,
-        message: 'This harness cannot search',
+        message: 'No search in this harness',
         detail:
-            'The quick search is the harness’s own, and this one does not '
-            'offer it: its search module (tasks-search) is off, or the '
-            'harness is older. The rest of the app works as ever.',
+            'Quick search is the harness’s · tasks-search off, or older harness',
         detailLines: 4,
       ),
       QuickSearchAvailability.disconnected => const HarnessNotice(
         key: Key('quick-search-disconnected'),
         icon: Icons.link_off_rounded,
-        message: 'Not connected to a harness',
-        detail: 'Connect to one to search it.',
+        message: 'No harness connection',
+        detail: 'Harness connection needed',
       ),
       QuickSearchAvailability.ready => const SizedBox.shrink(),
     };
@@ -433,7 +430,7 @@ class _Body extends StatelessWidget {
       QuickSearchStatus.failed => [
         HarnessErrorBanner(
           key: const Key('quick-search-error'),
-          message: 'The search failed: ${controller.error}',
+          message: 'Search failure · ${controller.error}',
           actionLabel: 'Retry',
           onAction: controller.retry,
           margin: EdgeInsets.zero,
@@ -493,7 +490,7 @@ class _Hint extends StatelessWidget {
       children: [
         const SizedBox(height: HarnessSpace.sm),
         Text(
-          'Say what you want, in words, for instance:',
+          'Search examples',
           style: HarnessText.subtitle(context),
         ),
         const SizedBox(height: HarnessSpace.sm),
@@ -826,8 +823,7 @@ class _Nothing extends StatelessWidget {
           Text('Nothing found', style: HarnessText.rowTitle(context)),
           const SizedBox(height: 4),
           Text(
-            'No action, session or task for “$query”, even searching wider. '
-            'Try other words.',
+            'No action, session or task for “$query” · other words',
             textAlign: TextAlign.center,
             style: HarnessText.subtitle(context),
           ),
@@ -1132,7 +1128,7 @@ class _TaskRow extends StatelessWidget {
   /// The color of the column a task's status line names.
   static Color colorOf(String? status, Brightness brightness) {
     final column = switch (status?.split(':').first.trim()) {
-      'needs input' => 'needs-input',
+      'your input' => 'needs-input',
       'in progress' => 'active',
       final other? => other,
       null => '',
@@ -1182,7 +1178,7 @@ class _TaskRow extends StatelessWidget {
           : _RowAction(
               key: Key('quick-search-board-${task.id}'),
               icon: Icons.view_kanban_outlined,
-              label: 'Show on the board',
+              label: 'Task board',
               onTap: () => onChoose(_board),
             ),
     );
@@ -1271,7 +1267,7 @@ class _Proposal extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(left: 29),
               child: Text(
-                'The search proposes it; nothing is done until you say so.',
+                'Proposal only · nothing done',
                 style: HarnessText.caption(context),
               ),
             ),

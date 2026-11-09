@@ -27,7 +27,7 @@ String demoStateLabel(String state) => switch (state) {
   DemoState.missing => 'Demo not found',
   DemoState.notReady => 'Not ready',
   DemoState.denied => 'Access denied',
-  _ => 'Demo failed',
+  _ => 'Demo failure',
 };
 
 /// A task's report on a page of its own, read to its end: the design it was
@@ -177,10 +177,10 @@ class _HandInReportScreenState extends State<HandInReportScreen> {
       if (!mounted) return;
       setState(() {
         _startingDemo = false;
-        _demoState = 'Demo failed';
+        _demoState = 'Demo failure';
       });
       ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(const SnackBar(content: Text('Demo failed')));
+          ?.showSnackBar(const SnackBar(content: Text('Demo failure')));
     }
   }
 
@@ -273,7 +273,7 @@ class _HandInReportScreenState extends State<HandInReportScreen> {
     if (!mounted) return;
     setState(() => _starting = false);
     ScaffoldMessenger.maybeOf(context)
-        ?.showSnackBar(const SnackBar(content: Text('Walkthrough failed')));
+        ?.showSnackBar(const SnackBar(content: Text('Walkthrough failure')));
   }
 
   @override

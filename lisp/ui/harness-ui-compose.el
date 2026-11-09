@@ -306,7 +306,7 @@ a string, already fitted to the window, or nil.")
   (define-key map (kbd "M->") #'harness-compose-end-of-buffer)
   (define-key map [remap beginning-of-buffer] #'harness-compose-beginning-of-buffer)
   (define-key map [remap end-of-buffer] #'harness-compose-end-of-buffer)
-  ;; C-c C-v, the clipboard's key once, is the review banner's [Verify]
+  ;; C-c C-v, the clipboard's key once, is the review banner's [Verification]
   ;; in a chat; unbound here so a reload frees it there too.  Other
   ;; MIME types are chosen from with M-x harness-compose-attach-clipboard.
   (define-key map (kbd "C-c C-v") nil t)
@@ -989,15 +989,15 @@ not bind, or binds to a command with nothing to act on where it starts,
 is said, and nothing runs."
   (let ((panel (harness-compose--panel-named id)))
     (unless panel
-      (user-error "The panel above the box is gone; %s was not pressed"
+      (user-error "Panel gone · %s not pressed"
                   (key-description keys)))
     (let* ((pos (car panel))
            (command (harness-compose--panel-command keys pos)))
       (unless command
-        (user-error "The panel above the box does not have %s"
+        (user-error "Panel · no %s"
                     (key-description keys)))
       (when (save-excursion (goto-char pos) (harness-compose--idle-p command))
-        (user-error "%s has nothing to act on from the box: it works on what point is on"
+        (user-error "No %s at point"
                     (key-description keys)))
       (harness-compose--press-on-panel keys command pos))))
 
@@ -1026,8 +1026,8 @@ said, and nothing runs."
          (keys nil))
     (unless panel
       (if (= index 1)
-          (user-error "There is no panel above the box")
-        (user-error "There is no panel %d above the box" index)))
+          (user-error "No panel above the box")
+        (user-error "No panel %d above the box" index)))
     (while (not keys)
       (setq id (get-char-property (car panel) 'harness-compose-panel))
       (let* ((cell (list (harness-compose--panel-target-overlays panel)))
@@ -1042,7 +1042,7 @@ said, and nothing runs."
                     (progn
                       (setq panel (harness-compose--panel-next
                                    (or (harness-compose--panel-named id) panel)))
-                      (unless panel (user-error "There is no panel above the box")))
+                      (unless panel (user-error "No panel above the box")))
                   (setq keys read))))
           (cancel-timer timer)
           (harness-compose--panel-target-delete (car cell)))))
@@ -1425,10 +1425,10 @@ its reference, a task."
          (threads (cdr split)))
     (when (and (string-empty-p whole) (null atts)) (user-error "Nothing to send"))
     (when-let* ((pending (cl-find-if (lambda (a) (plist-get a :pending)) atts)))
-      (user-error "%s is still downloading: wait for it, or remove it (×)"
+      (user-error "%s downloading · wait or remove (×)"
                   (or (plist-get pending :name) "An attachment")))
     (when-let* ((bare (cl-find-if (lambda (a) (string-empty-p (plist-get a :response))) threads)))
-      (user-error "Write your reply under the card of %s, or remove it (×)"
+      (user-error "Reply under the card of %s · or remove (×)"
                   (harness-compose--chip-what bare)))
     (cons text (append threads
                        (cl-remove-if #'harness-compose--thread-attachment-p atts)
@@ -2470,14 +2470,14 @@ task's id; a reply in a thread offers what its card does
 (defun harness-compose--chip-file-actions (att)
   "Return what the chip of ATT, a file or a task, offers: (NAME . FUNCTION) each."
   (list (cons "Open" (lambda () (harness-compose-open-attachment att)))
-        (cons "Remove from the message" (lambda () (harness-compose-remove-attachment att)))
+        (cons "Message removal" (lambda () (harness-compose-remove-attachment att)))
         (if (plist-get att :task)
-            (cons "Copy the task id" (lambda ()
+            (cons "Task id copy" (lambda ()
                                        (kill-new (plist-get att :task))
-                                       (message "Copied %s" (plist-get att :task))))
-          (cons "Copy the path" (lambda ()
+                                       (message "Copy: %s" (plist-get att :task))))
+          (cons "Path copy" (lambda ()
                                   (kill-new (plist-get att :path))
-                                  (message "Copied %s" (plist-get att :path)))))))
+                                  (message "Copy: %s" (plist-get att :path)))))))
 
 (defun harness-compose--chip-menu (att)
   "Return the menu of the chip of attachment ATT, for `popup-menu'.
@@ -2646,7 +2646,7 @@ the task is read with completion (`harness-compose-read-task')."
            (harness-ui-display-session session))
           ((fboundp 'harness-ui-tasks-show-task)
            (harness-ui-tasks-show-task (plist-get att :task) (harness-compose--root)))
-          (t (user-error "Task %s has no session yet, and the task board is not loaded"
+          (t (user-error "Task %s · no session, no task board"
                          (plist-get att :task))))))
 
 ;;;; Threads
@@ -3079,13 +3079,13 @@ answers nothing, so there is nothing to show, and this says so."
   "Return what the card of ATT offers: (NAME . FUNCTION) each.
 A new thread has no quote to show, edit or copy: only taking it back."
   (if (null (harness-thread-refs (plist-get att :thread)))
-      (list (cons "Remove the thread, keep my words" (lambda () (harness-compose-remove-attachment att))))
-    (list (cons "Show what this replies to" (lambda () (harness-compose-open-thread att)))
-          (cons "Edit what this replies to…" (lambda () (harness-compose-edit-thread att)))
-          (cons "Remove the thread, keep my words" (lambda () (harness-compose-remove-attachment att)))
-          (cons "Copy the quote" (lambda ()
+      (list (cons "Thread removal" (lambda () (harness-compose-remove-attachment att))))
+    (list (cons "Quoted message" (lambda () (harness-compose-open-thread att)))
+          (cons "Quoted message edit…" (lambda () (harness-compose-edit-thread att)))
+          (cons "Thread removal" (lambda () (harness-compose-remove-attachment att)))
+          (cons "Quote copy" (lambda ()
                                    (kill-new (harness-thread-quote (plist-get att :thread) t))
-                                   (message "Copied the quote"))))))
+                                   (message "Quote copy"))))))
 
 ;;;; Quote targets
 
@@ -3232,7 +3232,7 @@ popout, the task board, any other box.  The card shows what each
 reference is and its words; what is written under it is the reply, sent
 as a <thread> block."
   (unless (harness-compose-live-p)
-    (user-error "No reply is being composed here"))
+    (user-error "No reply here"))
   (harness-compose-add-thread refs))
 
 (defun harness-compose--thread-at-point (&optional pos)
@@ -3430,7 +3430,7 @@ with the part above, and the part below starts empty."
   (when (or (harness-compose-edit-thread--line-property 'harness-thread-edit-header)
             (harness-compose-edit-thread--line-property 'harness-thread-edit-note)
             (harness-compose-edit-thread--line-property 'harness-thread-edit-split))
-    (user-error "Point must be in the quote, not on a header or a split"))
+    (user-error "Point outside quote"))
   (let ((inhibit-read-only t))
     (insert "\n\n")
     (let ((start (point)))
@@ -3451,7 +3451,7 @@ The split below point goes, and the quoted parts become one reply."
         (when (get-text-property (line-beginning-position) 'harness-thread-edit-split)
           (setq start (line-beginning-position)))
         (unless start (forward-line 1))))
-    (unless start (user-error "There is no reply below to join"))
+    (unless start (user-error "No reply below"))
     (let ((inhibit-read-only t))
       (delete-region start (min (point-max) (1+ (save-excursion (goto-char start) (line-end-position)))))
       (message "The replies are one again"))))
@@ -3460,7 +3460,7 @@ The split below point goes, and the quoted parts become one reply."
   "Replace the region with `compose-quote-elision', as a mail omits a part."
   (interactive "r")
   (when (and (called-interactively-p 'any) (not (use-region-p)))
-    (user-error "Mark the part of the quote to elide"))
+    (user-error "No quote part marked"))
   (let ((inhibit-read-only t))
     (goto-char beg)
     (delete-region beg end)
@@ -3535,8 +3535,8 @@ part gets its own card and the words written under it."
   (let ((parts (harness-compose-edit-thread--parts))
         (box harness-compose-edit-thread--box)
         (att harness-compose-edit-thread--attachment))
-    (unless parts (user-error "The quote is empty: write what the reply answers"))
-    (unless (buffer-live-p box) (user-error "The compose box this reply is in is gone"))
+    (unless parts (user-error "Empty quote · reply text needed"))
+    (unless (buffer-live-p box) (user-error "Reply box gone"))
     (with-current-buffer box
       (harness-compose--edit-thread-replace att parts))
     (quit-windows-on (current-buffer) t)
@@ -3577,9 +3577,9 @@ its own card and answer.  C-c C-c puts the parts back in the box.  A new
 thread has no quote to edit."
   (interactive)
   (let ((att (or att (harness-compose--thread-here)
-                 (user-error "Point is not in a reply in a thread"))))
+                 (user-error "No reply at point"))))
     (when (null (harness-thread-refs (plist-get att :thread)))
-      (user-error "This thread is new: it has no quote to edit"))
+      (user-error "New thread · no quote"))
     (harness-compose-edit-thread--start att)))
 
 (defun harness-compose--thread-here ()
@@ -3932,7 +3932,7 @@ instead (`harness-compose-attach-from-ring')."
   (interactive "P")
   (if from-ring
       (call-interactively #'harness-compose-attach-from-ring)
-    (unless (display-graphic-p) (user-error "The clipboard needs a graphical display"))
+    (unless (display-graphic-p) (user-error "Clipboard · graphical display only"))
     (let* ((targets (harness-media-ring-clipboard-targets))
            (image (harness-media-ring-capture-image targets))
            (files (and (not image) (harness-media-ring-clipboard-files targets)))
@@ -3943,12 +3943,12 @@ instead (`harness-compose-attach-from-ring')."
        (mimes
         (let* ((choice (intern (completing-read "Clipboard type: " (mapcar #'symbol-name mimes) nil t)))
                (att (harness-media-ring-capture choice)))
-          (unless att (user-error "The clipboard gave nothing as %s" choice))
+          (unless att (user-error "Clipboard · nothing as %s" choice))
           (harness-compose--attach-captures (list att))))
        (t
         (let ((text (ignore-errors (gui-get-selection 'CLIPBOARD 'UTF8_STRING))))
           (unless (and (stringp text) (not (string-empty-p text)))
-            (user-error "Nothing usable in the clipboard"))
+            (user-error "No usable clipboard content"))
           (unless (harness-compose-in-p) (goto-char harness-compose-end))
           (insert (substring-no-properties text))))))))
 
@@ -4318,8 +4318,8 @@ while it has no session (`harness-compose--open-task')."
   (let ((path (plist-get att :path)))
     (cond ((plist-get att :thread) (harness-compose-open-thread att))
           ((plist-get att :task) (harness-compose--open-task att))
-          ((null path) (user-error "%s is no file to open" (or (plist-get att :name) "This attachment")))
-          ((not (file-exists-p path)) (user-error "%s is gone" (abbreviate-file-name path)))
+          ((null path) (user-error "No file %s" (or (plist-get att :name) "This attachment")))
+          ((not (file-exists-p path)) (user-error "%s gone" (abbreviate-file-name path)))
           ((and (string-match-p "\\`\\(?:video\\|audio\\)/" (or (plist-get att :mime) ""))
                 (fboundp 'harness-ui-media-open))
            (harness-ui-media-open path))
@@ -4525,9 +4525,9 @@ shows."
       (harness-log 'info "compose: link arrived as %S, cleaned to %S" raw url)))
   (harness-log 'debug "compose: link to download: %S" url)
   (unless (and (string-match-p "\\`\\(?:https?\\|ftps?\\)://" url) (harness-http-link-p url))
-    (user-error "That is not a link I can fetch: %S" url))
+    (user-error "No fetchable link: %S" url))
   (unless harness-http--curl-program
-    (user-error "Downloading a link needs curl"))
+    (user-error "Link download · curl needed"))
   (harness-compose--clean-partials)
   (if (cl-find url harness-compose-attachments :key (lambda (a) (plist-get a :url)) :test #'equal)
       (message "%s is attached already" url)
@@ -4910,7 +4910,7 @@ the message to the caller."
   (interactive)
   (let ((entries (harness-media-ring-entries)))
     (unless entries
-      (user-error "%s" (substitute-command-keys "The media ring is empty: copy an image, then \\[yank] it here")))
+      (user-error "%s" (substitute-command-keys "Media ring empty · copy an image, then yank")))
     (let* ((choices (mapcar (lambda (e) (cons (harness-media-ring-describe e) e)) entries))
            (table (lambda (string pred action)
                     (if (eq action 'metadata)
@@ -4975,7 +4975,7 @@ a yank of media, run `yank-pop' as it runs without the box."
   (if (not (and (eq last-command 'harness-compose-yank) harness-compose--yanked))
       (harness-compose--yank-text 'yank-pop)
     (let ((entries (harness-media-ring-entries)))
-      (unless entries (user-error "The media ring is empty"))
+      (unless entries (user-error "Media ring empty"))
       (let* ((index (mod (+ (plist-get harness-compose--yanked :index) (or n 1)) (length entries)))
              (entry (nth index entries))
              (paths (plist-get harness-compose--yanked :paths))

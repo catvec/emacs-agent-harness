@@ -569,7 +569,7 @@ On a session's line it opens at its best match."
 (put 'harness-ui-search-mode 'harness-menu-group
      '("Search"
        ["Results"
-        (". RET" "Open the session there" harness-ui-search-open)
+        (". RET" "Session" harness-ui-search-open)
         (". n" "Next match" harness-ui-search-next)
         (". p" "Previous match" harness-ui-search-previous)
         (". +" "More sessions" harness-ui-search-more)]
@@ -577,7 +577,7 @@ On a session's line it opens at its best match."
         (". s" "Something else…" harness-ui-search-new)
         (". m" "Next mode" harness-ui-search-cycle-mode)
         (". a" "Every project or this one" harness-ui-search-toggle-scope)
-        (". g" "Again" harness-ui-search-again)]))
+        (". g" "Rerun" harness-ui-search-again)]))
 
 ;;;; Module
 

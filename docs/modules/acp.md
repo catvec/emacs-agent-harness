@@ -8,7 +8,7 @@ Agent Client Protocol: local and TCP transports, server and client.
 - **Source:** [lisp/modules/harness-acp.el](../../lisp/modules/harness-acp.el)
 - **Loaded:** by default
 - **Requires:** nothing
-- **Required by:** [acp-remote](acp-remote.md), [ui](ui.md)
+- **Required by:** [acp-remote](acp-remote.md), [computers](computers.md), [ui](ui.md)
 
 ## About
 
@@ -75,6 +75,7 @@ one; see docs/trust-model.md.
 - `harness-acp-auth-methods-functions` — Functions returning extra auth methods `initialize` advertises to a client.
 - `harness-acp-authenticate-functions` — Functions answering `authenticate` for the auth methods they advertise.
 - `harness-acp-authorize-functions` — Functions deciding that a client may call methods without authenticating.
+- `harness-acp-client-left-functions` — Functions called with a client after it disconnects.
 - `harness-acp-initialize-extras-functions` — Functions adding to the `_harness` object `initialize` answers a client.
 - `harness-acp-initialized-functions` — Functions called with a client and the params of its `initialize`.
 - `harness-acp-received-hook` — Hook run after each slice of received messages, before Emacs redisplays.

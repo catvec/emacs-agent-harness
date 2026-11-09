@@ -8,7 +8,7 @@ What a session may reach, in one place: its access profile (network, writing, to
 - **Source:** [lisp/modules/harness-access.el](../../lisp/modules/harness-access.el)
 - **Loaded:** by default
 - **Requires:** [perms](perms.md), [session](session.md), [tools](tools.md), [readonly](readonly.md)
-- **Brings along:** [ui-access](ui-access.md) (its UI)
+- **Brings along:** [ui-access](ui-access.md) (its UI), [computers](computers.md) (its file requires it)
 
 ## About
 
@@ -35,6 +35,10 @@ Each session may have an access profile, kept in its record's
   :caps       the Linux capabilities (CAP_SYS_PTRACE...) the user gave
               its bash and elisp commands: unlike the rest, a grant,
               not a restriction
+  :computers  the computers it may use, each a grant
+              (:computer ID :capabilities (NAMES...) :window NAME);
+              :computers-off the computers it may not use at all.
+              The computers module's gate at 7 enforces them.
 
 A session without one has the access it always had.  The profile is
 held by the harness, not by a prompt:
@@ -174,6 +178,7 @@ a call was judged.
 
 ### Methods it calls
 
+- `computer/access` ([computers](computers.md)), when it is loaded
 - `config/get` ([config](config.md)), when it is loaded
 - `permission/allow-dir` ([perms](perms.md))
 - `permission/dirs` ([perms](perms.md))

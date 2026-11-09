@@ -238,13 +238,13 @@ for a remote repository, which the library leaves alone."
                                (and (harness-json-true-p (plist-get wt :bare)) "bare")
                                (and (harness-ui-worktree--assumed-p (plist-get wt :path))
                                     (propertize "assumed" 'face 'harness-worktree-assumed-face
-                                                'help-echo (concat "Assumed as the project: its commands work on this worktree."
+                                                'help-echo (concat "Assumed worktree · commands here"
                                                                    "  r resets to the main worktree")))
                                (and (harness-json-true-p (plist-get wt :locked))
                                     (propertize "locked" 'face 'warning 'help-echo (harness-ui-worktree--lock-help wt)))
                                (and (harness-json-true-p (plist-get wt :detached)) (propertize "detached" 'face 'harness-dim-face))
                                (and (harness-json-true-p (plist-get wt :missing))
-                                    (propertize "missing" 'face 'error 'help-echo "Its directory is gone"))
+                                    (propertize "missing" 'face 'error 'help-echo "Directory gone"))
                                (and (harness-json-true-p (plist-get wt :prunable)) (propertize "prunable" 'face 'error))))
                " "))
 
@@ -342,8 +342,8 @@ for every row."
   (when (and (null harness-ui-worktree--worktrees) (= (point-min) (point-max)))
     (let ((inhibit-read-only t))
       (insert (propertize (cond (harness-ui-worktree--loading "Listing worktrees…")
-                                (harness-ui-worktree--error (format "Could not list worktrees: %s" harness-ui-worktree--error))
-                                (t "No worktrees."))
+                                (harness-ui-worktree--error (format "Worktree list failure: %s" harness-ui-worktree--error))
+                                (t "No worktrees"))
                           'face (if harness-ui-worktree--error 'error 'harness-dim-face))
               "\n"))))
 
@@ -471,19 +471,19 @@ dropped: a reload clears the cache, so it would carry stale data."
 (put 'harness-ui-worktree-mode 'harness-menu-group
      '("Worktrees"
        ["Worktree at point"
-        (". RET" "Open in Dired" harness-ui-worktree-dired)
-        (". s" "New session in it" harness-ui-worktree-new-session)
-        (". m" "Merge its session" harness-ui-worktree-merge)
-        (". a" "Assume it as the project" harness-ui-worktree-assume)
-        (". l" "Lock or unlock" harness-ui-worktree-toggle-lock)
-        (". d" "Remove" harness-ui-worktree-remove)]
+        (". RET" "Dired" harness-ui-worktree-dired)
+        (". s" "Session in it" harness-ui-worktree-new-session)
+        (". m" "Session merge" harness-ui-worktree-merge)
+        (". a" "Project assumption" harness-ui-worktree-assume)
+        (". l" "Lock" harness-ui-worktree-toggle-lock)
+        (". d" "Removal" harness-ui-worktree-remove)]
        ["Repository"
         (". n" "New worktree" harness-ui-worktree-create)
-        (". f" "Fork a session into one" harness-ui-worktree-fork-session)
-        (". p" "Prune stale records" harness-ui-worktree-prune)
-        (". P" "Remove merged worktrees" harness-ui-worktree-prune-merged)
-        (". L" "Lock the harness's worktrees" harness-ui-worktree-lock-existing)
-        (". r" "Reset to the main worktree" harness-ui-worktree-assume-reset)
+        (". f" "Session fork" harness-ui-worktree-fork-session)
+        (". p" "Stale record pruning" harness-ui-worktree-prune)
+        (". P" "Merged worktree removal" harness-ui-worktree-prune-merged)
+        (". L" "Harness worktree lock" harness-ui-worktree-lock-existing)
+        (". r" "Main worktree reset" harness-ui-worktree-assume-reset)
         (". g" "Refresh" harness-ui-worktree-refresh)]))
 
 ;;;; Commands
@@ -774,7 +774,7 @@ Every assumption that stands in this repository, as the rows show them."
   (interactive)
   (let ((assumptions (harness-ui-worktree--assumptions)))
     (unless assumptions
-      (user-error "No worktree is assumed for this project"))
+      (user-error "No assumed worktree"))
     (dolist (assumption assumptions)
       (worktree-assume-reset (car assumption)))
     (message "%s is its own worktree again"

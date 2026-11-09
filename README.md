@@ -184,7 +184,7 @@ A non-comprehensive list of all the different functionality offered by modules s
     task board -- has what changes what the session does: the model, thinking
     level, permission mode and interactive switch, and, in a task's
     session, where its task stands in the queue with [Pause], [Resume]
-    and [Start now].  A chat's header line keeps what it used: the
+    and [Start].  A chat's header line keeps what it used: the
     context, the total tokens and the cost.  A narrow window drops the
     least important items first and ends in a clickable `…` that shows
     every one it cut, in full
@@ -211,6 +211,12 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Event watches, the watches a session still has live pinned above its compose box
   - Harness introspection and control
   - Limit number of concurrent tool calls
+- Computers
+  - A client and a computer are separate: a client speaks ACP to the harness, a computer offers tools (MCP servers a client on it keeps) and resources (git repositories, directories, displays, GPUs)
+  - Register a computer from a client running on it; it authenticates with a secret the harness keeps only as a salted hash, and its MCP messages carry a token bound to the registration
+  - Computer use as a fixed vocabulary of tools -- screen view, windows, pointer, keyboard, clipboard, audio -- with capabilities an implementation declares, and grants that can be narrowed to one window
+  - A page for the computers (`C-c h E`), the access view and `session_info` show what a session may use
+  - Access follows the ordinary permission system: defaults, project overrides, per-session grants, `request_escalation` and `drop_access`, and a stage of the chain that fails closed
 - Git worktrees 
 - Private commit attribution (optional, git-ai): which model and prompt wrote each commit, kept off the code remote
 - Permissions

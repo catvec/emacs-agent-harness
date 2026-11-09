@@ -518,8 +518,8 @@ Future<void> main() async {
         });
       }
       await _pump(tester, transcript);
-      expect(find.text('Show more'), findsNothing);
-      expect(find.text('Show less'), findsNothing);
+      expect(find.text('More'), findsNothing);
+      expect(find.text('Less'), findsNothing);
       for (final start in [
         'non-interactive on',
         'Slots changed due to system load (2 changes)',
@@ -539,22 +539,22 @@ Future<void> main() async {
       const first = 'Slots changed due to system load (8 changes)';
       expect(paragraph(tester, first).didExceedMaxLines, isTrue);
       final cut = tester.getSize(find.textContaining(first)).height;
-      expect(find.text('Show more'), findsOneWidget);
+      expect(find.text('More'), findsOneWidget);
       // The short note after it is whole.
       expect(paragraph(tester, 'Handed in').didExceedMaxLines, isFalse);
 
-      await _tap(tester, find.text('Show more'));
+      await _tap(tester, find.text('More'));
       expect(paragraph(tester, first).didExceedMaxLines, isFalse);
       expect(
         tester.getSize(find.textContaining(first)).height,
         greaterThan(2 * cut),
       );
-      expect(find.text('Show less'), findsOneWidget);
-      expect(find.text('Show more'), findsNothing);
+      expect(find.text('Less'), findsOneWidget);
+      expect(find.text('More'), findsNothing);
 
-      await _tap(tester, find.text('Show less'));
+      await _tap(tester, find.text('Less'));
       expect(paragraph(tester, first).didExceedMaxLines, isTrue);
-      expect(find.text('Show more'), findsOneWidget);
+      expect(find.text('More'), findsOneWidget);
     });
 
     testWidgets('that is one long line (an error) is cut too', (tester) async {
@@ -568,7 +568,7 @@ Future<void> main() async {
         paragraph(tester, 'Error: the provider').didExceedMaxLines,
         isTrue,
       );
-      await _tap(tester, find.text('Show more'));
+      await _tap(tester, find.text('More'));
       expect(
         paragraph(tester, 'Error: the provider').didExceedMaxLines,
         isFalse,

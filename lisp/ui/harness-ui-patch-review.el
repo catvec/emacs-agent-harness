@@ -47,7 +47,7 @@
 ;;
 ;; THE CHANGES, drawn the same on four surfaces: in the review banner of
 ;; the task's session, between the report the agent handed in and
-;; [Verify], so the work is looked over where it is handed in, with no
+;; [Verification], so the work is looked over where it is handed in, with no
 ;; click on [Review Changes] (the banner asks for them through
 ;; `harness-ui-review-changes-functions'); in a hand_in call in the
 ;; transcript, under that round's report, the same hand-in the banner
@@ -454,8 +454,8 @@
 ;; makes the review again, from the threads and the files viewed the
 ;; harness keeps and from the branch.  Changes that cannot be drawn for
 ;; any other reason say so in one short line with a [Try again] button,
-;; which makes the review again, and the rest of the report -- [Verify]
-;; and [Send back] -- and of the banner is drawn all the same.
+;; which makes the review again, and the rest of the report -- [Verification]
+;; and [Return] -- and of the banner is drawn all the same.
 ;;
 ;; A LINK TO A THREAD.  An agent that answers a thread, or points at one,
 ;; writes a link to it (harness:thread/ID, lisp/harness-links.el), and a
@@ -4244,11 +4244,11 @@ its key.  COMPACT uses shorter words."
              (and (> drafts 0)
                   (not (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review)))
                   (propertize
-                   (format "%s to send: they go with the feedback that sends the task back, an empty box included."
+                   (format "%s to send · feedback sends the task back · empty box included"
                            (harness-ui-patch-review--plural drafts "draft"))
                    'face 'change-review-ui-draft-face)))
            (and (harness-ui-patch-review--r-dirty review)
-                (propertize "Its worktree has changes not committed: they are not on the branch, so not here."
+                (propertize "Worktree changes · not committed · not on the branch"
                             'face 'warning))
            (and tip (null (harness-ui-patch-review--r-files review))
                 (propertize (harness-ui-patch-review--nothing-text review) 'face 'harness-dim-face))))))
@@ -4258,11 +4258,11 @@ its key.  COMPACT uses shorter words."
   (let ((old-name (harness-ui-patch-review--old-name review)))
     (pcase (harness-ui-patch-review--kind review)
       ('since-review
-       (format "Nothing changed since %s (%s): the branch is where it was at the last review."
+       (format "No change since %s (%s) · branch at last review"
                old-name (harness-ui-patch-review--short (harness-ui-patch-review--r-merge-base review))))
       ('custom
-       (format "Nothing differs between %s and %s." old-name (harness-ui-patch-review--new-name review)))
-      (_ (format "The branch changes nothing against %s." (harness-ui-patch-review--r-base review))))))
+       (format "No difference · %s and %s" old-name (harness-ui-patch-review--new-name review)))
+      (_ (format "No branch changes against %s" (harness-ui-patch-review--r-base review))))))
 
 (defconst harness-ui-patch-review--hint-detail
   "RET or a click compares a file in Ediff (a directory: folds it), n and p move between files, a approves one (✔ approved, ✓ only viewed: only the approved are skipped), A all of them, V takes the files the newest commit left alone as viewed; s and u switch skipping the approved files and approving those you go through without a comment, t the tree, E opens every directory and C folds every one, d chooses the diff shown, T goes to the threads, c starts a new thread in the box, e on a thread edits one of its drafts, k deletes one and K the thread when it is only drafts, m marks a thread the agent closed as reviewed (M all of them).  In Ediff c comments, r replies, e edits a draft or goes to the box, k deletes a draft and K a thread of drafts, N and P go to the next and previous file, q comes back."
@@ -4725,7 +4725,7 @@ an older version of the harness left behind may need."
 (defmacro harness-ui-patch-review--drawing-safely (task &rest body)
   "Run BODY, which draws the changes of TASK, and return what it returns.
 An error is no reason for a surface to lose the rest of what it draws --
-the report's [Verify] and [Send back] come after the changes -- so it
+the report's [Verification] and [Return] come after the changes -- so it
 returns the lines that say it instead (`harness-ui-patch-review--draw-failed')."
   (declare (indent 1))
   `(condition-case err
@@ -5414,7 +5414,7 @@ does; a comment of the review is a reply in its thread, with the quote
           (harness-ui-patch-review-edit-feedback
            (concat "A reply in a thread is waiting for your words."
                    (and (harness-ui-patch-review--withdraw-approval review file t)
-                        (format " %s is no longer approved." (change-review-file-path file))))))))))
+                        (format " %s · no longer approved" (change-review-file-path file))))))))))
 
 (defun harness-ui-patch-review--control-quote-target (beg end)
   "Return what C-c > quotes in the control panel, from BEG to END.
@@ -7270,8 +7270,8 @@ the count, the button and the key that sends them."
            (propertize
             (cond (close
                    (if (> replies 0)
-                       (format "To send: %s and the harness's message that the last thread is closed.  " count)
-                     "To send: the harness's message that the last thread is closed.  "))
+                       (format "To send · %s · harness message that the last thread is closed · " count)
+                     "To send · harness message that the last thread is closed · "))
                   (t (format "%s waiting: C-c C-c saves one; " count)))
             'face 'change-review-ui-draft-face)
            (propertize (buttonize "[Send drafts]"
@@ -7446,11 +7446,11 @@ or has left it."
 
 (put 'harness-ui-patch-review-mode 'harness-menu-group
      '("Changes"
-       ["Review the changes"
-        ("C-c C-d" "Review the changes" harness-ui-patch-review-open)]
+       ["Change review"
+        ("C-c C-d" "Change review" harness-ui-patch-review-open)]
        ["Settings"
-        (". s" "Skip the files already approved" harness-ui-patch-review-toggle-skip-approved)
-        (". u" "Approve the files gone through without a comment" harness-ui-patch-review-toggle-auto-approve)
+        (". s" "Approved files" harness-ui-patch-review-toggle-skip-approved)
+        (". u" "Bulk approval" harness-ui-patch-review-toggle-auto-approve)
         (". t" "Files as a tree or a flat list" harness-ui-patch-review-toggle-file-tree)]))
 
 (defun harness-ui-patch-review--setup-chat ()

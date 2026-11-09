@@ -93,13 +93,13 @@ Other modules add to the popout as they add to a chat:
 `harness-ui-report-panel-functions` draws a panel at the end of the
 report and `harness-ui-report-compose-functions` gives it a compose
 box.  The review module puts the banner a task's session shows there,
-[Verify] and [Send back], with the box taking the feedback, so work
+[Verification] and [Return], with the box taking the feedback, so work
 can be accepted from its report.
 
 What cannot be drawn does not take the rest down.  A piece of evidence
 that fails says so in a line and the others draw; a report that fails
 says so and its panels draw; a panel that fails says so and the panels
-after it draw -- the review banner's [Verify] and [Send back] come
+after it draw -- the review banner's [Verification] and [Return] come
 after the changes, and the work must be acceptable whether or not they
 could be read.  The line is short, whatever the error carries
 (`harness-error-short-message`): an `args-out-of-range` names the

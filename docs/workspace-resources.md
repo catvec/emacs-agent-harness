@@ -237,7 +237,7 @@ not card data:
   broker exchanges it when a purchase is made.  **No provider is
   implemented in this slice**; the wallet is mock data in the client
   and a blocked contract on the harness.  The UI does not offer `Add
-  card`; it says `Needs wallet provider`.
+  card`; it says `No wallet provider`.
 
 The fixtures and screenshots use a made-up `Visa •••• 4242`, and the
 test suite asserts that no `pan`, `cvv`, `number`, `token` or `secret`
@@ -332,7 +332,7 @@ the agent use, and how?**
 | Authorization | — | — | the authorization is active and in scope |
 | Permission | denied | asks | allowed for the session or the workspace |
 
-`Revoke` removes the access, not the resource: a revoked site login
+`Revocation` removes the access, not the resource: a revoked site login
 keeps the cookies for the person, and the agent must ask again.  A
 revoked authorization cannot be used; the card stays.  A revoked
 permission is the harness's existing permission ladder, reused
@@ -570,10 +570,10 @@ changes`; its destructive actions are disabled.
 | `Per transaction` / `Cap excludes fees` | cap facts |
 | `Advisory · no broker` | enforcement fact |
 | `New authorization` / `Amount` / `Merchant` / `Expires` | form |
-| `Allow` / `Deny` / `Revoke` / `Cancel` | confirmations |
-| `Access` / `Allowed` / `Ask` / `None` / `Revoke` | access rows |
+| `Allow` / `Deny` / `Revocation` / `Cancel` | confirmations |
+| `Access` / `Allowed` / `Ask` / `None` / `Revocation` | access rows |
 | `Audit` / `Created` / `Revised` / `Revoked` / `Cleared` | history |
-| `Unavailable · Computer tools` / `Unavailable · Computer off` / `Needs wallet provider` / `Needs approval` | states |
+| `Unavailable · Computer tools` / `Unavailable · Computer off` / `No wallet provider` / `Needs approval` | states |
 | `No sites` / `No logins` / `No cards` / `No authorizations` | empty states |
 
 The two dialogs carry a short factual body (`Site · stoneco.example ·

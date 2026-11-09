@@ -120,6 +120,7 @@ and supervisor load only when they are named.
 | [commit-attribution](commit-attribution.md) |  | [config](config.md), [worktree](worktree.md), [store](store.md), [session](session.md), [tools](tools.md), [agent](agent.md), [usage](usage.md), [secrets](secrets.md) | Which model and prompt wrote each commit, private and synced. |
 | [commit-msg](commit-msg.md) |  | [config](config.md), [worktree](worktree.md) | A commit-msg hook stripping Claude attribution, in the repositories that turn it on. |
 | [compaction](compaction.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Summarise the transcript when it nears the context window, before a turn or in the middle of one, asking the user first with what each kind costs; queue or interrupt one while a turn runs. |
+| [computers](computers.md) | by default | [acp](acp.md), [mcp](mcp.md), [store](store.md), [project](project.md), [session](session.md), [perms](perms.md) | Computers the harness may use: the ones clients register, their tool servers over MCP and their resources, the computer-use capabilities of each, who has control of it, and the session grants that limit which computer and which capability a call may use. |
 | [config](config.md) | by default | [project](project.md) | Layered settings through customize and dir-locals. |
 | [container-runtime](container-runtime.md) |  |  | Container runtimes for stacks: Docker over its socket, or rootless Podman, with a selectable backend. |
 | [cost-compare](cost-compare.md) |  | [usage](usage.md), [provider](provider.md) | What the recorded usage would have cost at other models' prices. |
@@ -182,6 +183,7 @@ and supervisor load only when they are named.
 | [tools](tools.md) | by default |  | Tool registry, permission-gated execution and context-bomb guard. |
 | [tools-agent](tools-agent.md) | by default | [tools](tools.md), [session](session.md), [agent](agent.md) | The Sub-agent tool (spawn_agent), and the Planning section of the system prompt. |
 | [tools-compact](tools-compact.md) |  | [tools](tools.md), [compaction](compaction.md) | The compact tool: an agent compacts its own conversation, on a running turn by queueing it or interrupting it. |
+| [tools-computers](tools-computers.md) | by default | [computers](computers.md), [tools](tools.md) | The tools that use a computer: computer_list, computer_view, computer_windows, computer_pointer, computer_keyboard, computer_clipboard, computer_tools, computer_call and computer_use. Each names the computer it acts on, or leaves it to the session's preference, and the fixed vocabulary is what a computer's MCP server answers. |
 | [tools-emacs](tools-emacs.md) | by default | [tools](tools.md) | Bounded tools into the user's Emacs without evaluation: buffers, windows, text, symbols, traces and messages, plus harness_views and harness_open for discovering and opening harness pages. |
 | [tools-events](tools-events.md) |  | [tools](tools.md), [session](session.md), [agent](agent.md), [tools-sessions](tools-sessions.md) | watch_events and unwatch_events: a session watches harness events, and a cheap model decides which call for it to act. |
 | [tools-fs](tools-fs.md) | by default | [tools](tools.md) | Read file, Write file, Edit file, List directory, Find files, Search files and File info. |
@@ -222,6 +224,7 @@ and supervisor load only when they are named.
 | [ui-compact](ui-compact.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Compact a session's conversation by hand, at a known cost. |
 | [ui-compaction-ask](ui-compaction-ask.md) |  | [ui](ui.md), [ui-pending](ui-pending.md), [ui-carry](ui-carry.md) | The question before an automatic compaction as a panel: one list of ways, what each choice costs, and carrying on. |
 | [ui-compose](ui-compose.md) | by default | [ui](ui.md) | The compose box shared by chat buffers and the task board. |
+| [ui-computers](ui-computers.md) | by default | [ui](ui.md) | The computers page (harness-computers, E in the harness map): the machines the harness may use, their capabilities and resources, a screen view and the control toggle, and the current session's grants. |
 | [ui-config](ui-config.md) | by default | [ui](ui.md) | Settings page: every harness setting, edited globally or for the project. |
 | [ui-cost-compare](ui-cost-compare.md) |  | [ui](ui.md), [ui-usage](ui-usage.md) | Compare what the recorded usage would have cost at other models' prices. |
 | [ui-cowboy](ui-cowboy.md) |  | [ui](ui.md), [ui-pending](ui-pending.md), [ui-carry](ui-carry.md) | The cold-cache question as a panel: what goes first, at what cost. |
@@ -297,6 +300,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `compaction/asked` | [compaction](compaction.md) | [compaction](compaction.md) |  |  |
 | `compaction/done` | [compaction](compaction.md) | [compaction](compaction.md) | [pet](pet.md), [replay](replay.md) |  |
 | `compaction/failed` | [compaction](compaction.md) | [compaction](compaction.md) |  |  |
+| `computers/changed` | [computers](computers.md) | [computers](computers.md) | [ui-computers](ui-computers.md), [ui-workspace](ui-workspace.md) | yes |
 | `config/changed` | [config](config.md) | [config](config.md), [perms](perms.md) | [pet](pet.md), [provider-responses](provider-responses.md), [tasks](tasks.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `cowboy/asked` | [cowboy](cowboy.md) | [cowboy](cowboy.md) |  |  |
 | `cowboy/decided` | [cowboy](cowboy.md) | [cowboy](cowboy.md) |  |  |
@@ -345,7 +349,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `secrets/redacted` | [redact](redact.md) | [redact](redact.md) | [ui-secrets](ui-secrets.md), [ui-voice](ui-voice.md) | yes |
 | `secrets/sources-changed` | [secrets](secrets.md) | [secrets](secrets.md) |  | yes |
 | `session/changed` | [session](session.md) | [session](session.md) | [acp](acp.md), [cache](cache.md), [cache-warm](cache-warm.md), [tools](tools.md), [tools-sessions](tools-sessions.md) |  |
-| `session/created` | [session](session.md) | [session](session.md) | [access](access.md), [plugins](plugins.md), [supervisor](supervisor.md), [ui-server](ui-server.md), [ui-tree](ui-tree.md) | yes |
+| `session/created` | [session](session.md) | [session](session.md) | [access](access.md), [computers](computers.md), [plugins](plugins.md), [supervisor](supervisor.md), [ui-server](ui-server.md), [ui-tree](ui-tree.md) | yes |
 | `session/deactivated` | [session](session.md) | [session](session.md) | [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md) |  |
 | `session/deleted` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache](cache.md), [cache-compact](cache-compact.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cowboy](cowboy.md), [fallback](fallback.md), [handoff](handoff.md), [images](images.md), [mcp](mcp.md), [perms](perms.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [redact](redact.md), [replay](replay.md), [resilience](resilience.md), [secrets](secrets.md), [session-search](session-search.md), [supervisor](supervisor.md), [tasks](tasks.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-server](ui-server.md), [ui-tree](ui-tree.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md) | yes |
 | `session/ext-changed` | [session](session.md) | [session](session.md) | [supervisor](supervisor.md), [tasks](tasks.md), [ui-priority](ui-priority.md), [ui-tasks](ui-tasks.md) | yes |
@@ -419,12 +423,12 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/step-error` | [agent](agent.md) | [fallback](fallback.md) (50), [retry](retry.md) (60) |
 | `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50), [thread-reply](thread-reply.md) (60) |
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50) |
-| `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [memory](memory.md) (55), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40), [workspace](workspace.md) (50) |
+| `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [memory](memory.md) (55), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40), [tools-computers](tools-computers.md) (60), [workspace](workspace.md) (50) |
 | `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [workspace-knowledge](workspace-knowledge.md) (40) |
 | `naming/auto-p` | [naming](naming.md) | [tasks](tasks.md) (50) |
 | `naming/system-prompt` | [naming](naming.md) | [tasks](tasks.md) (60) |
 | `notification/before-send` | [notifications](notifications.md) |  |
-| `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [perms](perms.md) (5, 6, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secret-sandbox](secret-sandbox.md) (2, 21), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
+| `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [computers](computers.md) (7), [perms](perms.md) (5, 6, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secret-sandbox](secret-sandbox.md) (2, 21), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
 | `permission/dir-entries` | [perms](perms.md) | [access](access.md) (50) |
 | `session/before-move` | [session](session.md) | [merge](merge.md) (50), [tasks](tasks.md) (50) |
 | `task/before-hand-in` | [tools-handin](tools-handin.md) |  |
@@ -454,8 +458,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-auth-methods-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-authenticate-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-authorize-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
+| `harness-acp-client-left-functions` | [acp](acp.md) | [computers](computers.md) |
 | `harness-acp-initialize-extras-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
-| `harness-acp-initialized-functions` | [acp](acp.md) | [acp](acp.md) |
+| `harness-acp-initialized-functions` | [acp](acp.md) | [acp](acp.md), [computers](computers.md) |
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-chat-hand-in-fold-functions` | [ui-chat](ui-chat.md) | [ui-review](ui-review.md) |
 | `harness-chat-header-end-functions` | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md) | [ui-cache-warm](ui-cache-warm.md), [ui-version](ui-version.md) |
@@ -483,9 +488,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-cache-warm-functions` | [ui-cache-warm](ui-cache-warm.md) |  |
 | `harness-ui-config-load-hooks` |  | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
 | `harness-ui-config-sections-functions` | [ui-config](ui-config.md) | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
-| `harness-ui-connected-hook` | [ui](ui.md) | [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-server](ui-server.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [ui-workspace](ui-workspace.md) |
+| `harness-ui-connected-hook` | [ui](ui.md) | [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-computers](ui-computers.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-server](ui-server.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [ui-workspace](ui-workspace.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |
-| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md), [ui-watches](ui-watches.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-children](ui-children.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-memory](ui-memory.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-provider-check](ui-provider-check.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-server](ui-server.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-voice](ui-voice.md), [ui-watches](ui-watches.md), [ui-workspace](ui-workspace.md), [ui-worktree](ui-worktree.md) |
+| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md), [ui-watches](ui-watches.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-children](ui-children.md), [ui-computers](ui-computers.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-memory](ui-memory.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-provider-check](ui-provider-check.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-server](ui-server.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-version](ui-version.md), [ui-voice](ui-voice.md), [ui-watches](ui-watches.md), [ui-workspace](ui-workspace.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-linking-context-functions` | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-media-recording-blocked-p-functions` | [ui-media](ui-media.md) | [ui-voice](ui-voice.md) |

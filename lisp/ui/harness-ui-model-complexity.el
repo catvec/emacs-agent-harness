@@ -166,8 +166,8 @@ Fall back to the normal picker when the connected harness cannot rank."
 (put 'harness-ui-model-complexity-mode 'harness-menu-group
      '("Model complexity"
        ["Guide"
-        (". g" "Refresh model catalogue" harness-ui-model-complexity-refresh)
-        (". w" "Copy model ID" harness-ui-model-complexity-copy-id)]))
+        (". g" "Model catalogue refresh" harness-ui-model-complexity-refresh)
+        (". w" "Model ID copy" harness-ui-model-complexity-copy-id)]))
 
 ;;;###autoload
 (defun harness-model-complexity ()

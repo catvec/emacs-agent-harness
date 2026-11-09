@@ -63,8 +63,8 @@ class _TasksScreenState extends State<TasksScreen> {
                     ? Icons.archive_rounded
                     : Icons.archive_outlined,
                 label: controller.showArchived
-                    ? 'Hide archived tasks'
-                    : 'Show archived tasks',
+                    ? 'Archived tasks'
+                    : 'Archived tasks',
                 onPressed: () =>
                     controller.setShowArchived(!controller.showArchived),
               ),
@@ -112,10 +112,9 @@ class _TasksScreenState extends State<TasksScreen> {
                 Expanded(
                   child: HarnessEmptyState(
                     icon: Icons.checklist_rtl_rounded,
-                    title: 'The board is clear',
+                    title: 'No tasks',
                     message:
-                        'Submit a task and the harness gives it a session, a '
-                        'worktree and a place in the merge queue.',
+                        'New tasks · session · worktree · merge queue place',
                     action: HarnessPrimaryButton(
                       label: 'New task',
                       icon: Icons.add_rounded,
@@ -194,7 +193,7 @@ class _TasksScreenState extends State<TasksScreen> {
   void _openTask(HarnessTask task) {
     final session = task.sessionId;
     if (session == null || session.isEmpty) {
-      setState(() => _notice = '“${task.title}” has no conversation to open.');
+      setState(() => _notice = 'No conversation for “${task.title}”');
       return;
     }
     if (_notice != null) setState(() => _notice = null);
@@ -298,8 +297,7 @@ class _TaskHeader extends StatelessWidget {
                     child: Padding(
                       padding: const EdgeInsets.symmetric(vertical: 8),
                       child: Text(
-                        'The tasks of every project. Pick a project to pause '
-                        'its queue or change how its backlog starts.',
+                        'All projects · project queue and backlog settings',
                         style: Theme.of(context).textTheme.labelSmall?.copyWith(
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
@@ -495,8 +493,7 @@ class _QueueSheetState extends State<_QueueSheet> {
                   icon: Icons.pause_rounded,
                   title: 'Pause the queue',
                   subtitle:
-                      'Waiting tasks do not start on their own until it '
-                      'resumes.',
+                      'Queue paused · waiting tasks held',
                   value: suspended,
                   onChanged: busy ? null : controller.setQueueSuspended,
                 ),
@@ -504,8 +501,7 @@ class _QueueSheetState extends State<_QueueSheet> {
                   icon: Icons.auto_mode_rounded,
                   title: 'Queue the backlog automatically',
                   subtitle:
-                      'A task that is written up joins the queue by itself, '
-                      'instead of waiting to be started.',
+                      'Written-up tasks join the queue automatically',
                   value: autoQueue,
                   onChanged: busy ? null : controller.setAutoQueue,
                 ),
@@ -525,8 +521,8 @@ class _QueueSheetState extends State<_QueueSheet> {
                 HarnessInfoRow(
                   label: 'Review',
                   value: review
-                      ? 'Required: finished work waits for you to verify it.'
-                      : 'Not required: finished work merges on its own.',
+                      ? 'Verification required · finished work waits'
+                      : 'Verification off · finished work merges',
                 ),
               ],
             ),
@@ -550,16 +546,16 @@ bool _hasPauseAll(TaskController controller) =>
 
 /// What pausing or resuming [count] tasks did, as the board in Emacs says it.
 String _countNote(int count, {required bool pause}) {
-  if (count == 0) return pause ? 'No task to pause.' : 'No paused task.';
+  if (count == 0) return pause ? 'Paused · 0 tasks' : 'Resumed · 0 tasks';
   final tasks = count == 1 ? '1 task' : '$count tasks';
-  return pause ? 'Paused $tasks.' : 'Resumed $tasks.';
+  return pause ? 'Paused · $tasks' : 'Resumed · $tasks';
 }
 
 /// The same for [count] queues.
 String _queuesNote(int count, {required bool pause}) {
-  if (count == 0) return pause ? 'No queue to pause.' : 'No paused queue.';
+  if (count == 0) return pause ? 'Paused · 0 queues' : 'Resumed · 0 queues';
   final queues = count == 1 ? '1 queue' : '$count queues';
-  return pause ? 'Paused $queues.' : 'Resumed $queues.';
+  return pause ? 'Paused · $queues' : 'Resumed · $queues';
 }
 
 /// The two buttons that pause every task and let them go again, with what
@@ -585,8 +581,7 @@ class _AllTasksRow extends StatelessWidget {
         Text('TASKS', style: HarnessText.label(context)),
         const SizedBox(height: 4),
         Text(
-          'Pausing a task puts it back in the queue and holds it there; the '
-          'ones at work stop first.',
+          'Pause · task back in the queue · work stops first',
           style: HarnessText.caption(context),
         ),
         const SizedBox(height: HarnessSpace.sm),
@@ -671,8 +666,7 @@ class _AllQueuesSheetState extends State<_AllQueuesSheet> {
                 Text('Every project', style: HarnessText.sheetTitle(context)),
                 const SizedBox(height: 4),
                 Text(
-                  'Pick a project to pause its queue or change how its '
-                  'backlog starts. These act on all of them.',
+                  'Project queue and backlog settings · all projects',
                   style: HarnessText.subtitle(context),
                 ),
                 if (api.can('task/suspend-all-queues') &&
@@ -1189,6 +1183,16 @@ class _TaskLanes extends StatelessWidget {
                             onDragStarted: onDragStarted,
                             onDragEnded: onDragEnded,
                           ),
+                      if (controller.countFor(selected) == 0)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 40),
+                          child: Center(
+                            child: Text(
+                              'No tasks',
+                              style: HarnessText.subtitle(context),
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -1602,11 +1606,11 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
             for (final mime in accepted) mime.split('/').last.toUpperCase(),
           ];
           problems.add(
-            '${image.name} is not a picture a task takes (${types.join(', ')}).',
+            'Unsupported image · ${image.name} · ${types.join(', ')}',
           );
         } else if (image.bytes.length > maxTaskImageBytes) {
           problems.add(
-            '${image.name} is larger than ${maxTaskImageBytes ~/ (1024 * 1024)} MB.',
+            'Image too large · ${image.name} · max ${maxTaskImageBytes ~/ (1024 * 1024)} MB',
           );
         } else {
           kept.add(image);
@@ -1621,7 +1625,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
       if (!mounted) return;
       setState(
         () => _attachmentError =
-            'This platform cannot open the photo picker: ${error.toString().split('\n').first}',
+            'Photo picker unavailable · ${error.toString().split('\n').first}',
       );
     } finally {
       if (mounted) setState(() => _picking = false);
@@ -1676,7 +1680,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
     if (controller == null || _prompt.text.trim().isEmpty) return;
     final cwd = (_project ?? _cwd.text).trim();
     if (cwd.isEmpty) {
-      setState(() => _error = 'Choose a project or type an absolute path.');
+      setState(() => _error = 'Project or absolute path required');
       return;
     }
     setState(() {
@@ -1696,7 +1700,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
     if (task == null) {
       setState(() {
         _busy = false;
-        _error = controller.error ?? 'The harness could not submit the task.';
+        _error = controller.error ?? 'Task submission failure';
       });
       return;
     }
@@ -1723,8 +1727,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
             Text('New task', style: HarnessText.sheetTitle(context)),
             const SizedBox(height: 4),
             Text(
-              'The harness gives it a session, a worktree and a place in the '
-              'queue.',
+              'Session · worktree · merge queue place',
               style: HarnessText.subtitle(context),
             ),
             // The sheet covers the banner of the screens under it. What is
@@ -1794,7 +1797,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               ),
               const SizedBox(height: 14),
             ],
-            Text('WHAT SHOULD IT DO?', style: HarnessText.label(context)),
+            Text('TASK BRIEF', style: HarnessText.label(context)),
             const SizedBox(height: 7),
             HarnessTextField(
               controller: _prompt,
@@ -1823,7 +1826,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               icon: Icons.edit_note_rounded,
               title: 'Write it up first',
               subtitle:
-                  'Wait in the backlog; refines the prompt before it starts.',
+                  'Backlog · prompt refinement before start',
               value: _refine,
               onChanged: (value) => _setChoice(() => _refine = value),
             ),
@@ -1831,7 +1834,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               key: const Key('task-plan'),
               icon: Icons.map_outlined,
               title: 'Plan first',
-              subtitle: 'A strong model plans; a medium model carries it out.',
+              subtitle: 'Strong model plan · medium model work',
               value: _plan,
               onChanged: (value) => _setChoice(() => _plan = value),
             ),
@@ -1840,7 +1843,7 @@ class _NewTaskSheetState extends State<_NewTaskSheet> {
               icon: Icons.account_tree_outlined,
               title: 'Work in the main tree',
               subtitle:
-                  'No worktree or branch; changes land in the checkout itself.',
+                  'Main tree · no worktree or branch',
               value: _mainTree,
               onChanged: (value) => _setChoice(() => _mainTree = value),
             ),

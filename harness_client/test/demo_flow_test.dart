@@ -247,9 +247,9 @@ void main() {
     expect(find.byType(SnackBar), findsOneWidget);
     expect(
       tester.widget<Text>(find.byKey(const Key('report-demo-state'))).data,
-      'Demo failed',
+      'Demo failure',
     );
-    expect(find.text('Demo failed'), findsNWidgets(2));
+    expect(find.text('Demo failure'), findsNWidgets(2));
   });
 
   testWidgets('a harness without demo/start offers no button', (tester) async {

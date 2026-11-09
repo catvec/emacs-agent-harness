@@ -167,9 +167,9 @@ void main() {
     // Marked as written by a model, and that it is advice; which model is
     // said to a screen reader.
     expect(find.text('Model summary'), findsOneWidget);
-    expect(find.text('advice, can be wrong'), findsOneWidget);
+    expect(find.text('advice · may be wrong'), findsOneWidget);
     expect(
-      find.bySemanticsLabel(RegExp('written by claude:claude-haiku-4-5')),
+      find.bySemanticsLabel(RegExp('claude:claude-haiku-4-5')),
       findsOneWidget,
     );
     // The call itself is still what is shown above it.

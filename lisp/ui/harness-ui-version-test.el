@@ -739,7 +739,7 @@ until one."
   ;; q comes from the shared view map, which buries the page.
   (should (eq harness-ui-view-map (keymap-parent harness-ui-version-mode-map)))
   (should (equal "Version" (car (get 'harness-ui-version-mode 'harness-menu-group))))
-  (should (equal '(". u" "Update harness" harness-ui-version-update)
+  (should (equal '(". u" "Harness update" harness-ui-version-update)
                  (aref (cadr (get 'harness-ui-version-mode 'harness-menu-group)) 3))))
 
 ;;;; The shortcut, beside voice
@@ -885,7 +885,7 @@ Voice adds v to the session menu while it is enabled."
       (should-not (harness-ui-version-test--suffix menu "v"))
       (let ((update (harness-ui-version-test--suffix menu "M-u")))
         (should (eq #'harness-update (plist-get update :command)))
-        (should (equal "Update harness" (plist-get update :description)))))
+        (should (equal "Harness update" (plist-get update :description)))))
     (harness-voice--init)
     (let ((voice (harness-ui-version-test--suffix 'harness-session-menu "v")))
       (should (eq #'harness-voice (plist-get voice :command)))

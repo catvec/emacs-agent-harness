@@ -33,6 +33,25 @@
     ;; One nobody registered, as a model may make up, goes by its name.
     (should (equal "t_unknown" (harness-tools-label "t_unknown")))))
 
+(ert-deftest harness-tools-execute-sends-the-computer-through-the-chain ()
+  "A call of a tool that runs on a computer goes through the computer gate.
+The permission request carries the tool's computer requirement, and the
+handler is given the computer the chain resolved."
+  (harness-tools-test-with
+    (let (request handler-ctx)
+      (harness-define-tool "t_computer"
+        :label "Computer tool"
+        :computer (lambda (_input) (list :computer "box" :capability "view"))
+        :handler (lambda (_input ctx) (setq handler-ctx ctx) (harness-tool-ok "ok")))
+      (cl-letf (((symbol-function 'harness-tools--decide)
+                 (lambda (r) (setq request r)
+                   (harness-resolved (list :behavior 'allow :computer "cmp-box")))))
+        (harness-test-await
+         (harness-call 'tools/execute nil (list :id "c1" :name "t_computer" :input nil))))
+      (should (equal (list :computer "box" :capability "view")
+                     (plist-get request :computer)))
+      (should (equal "cmp-box" (plist-get handler-ctx :computer))))))
+
 (ert-deftest harness-tools-specs-carry-the-label ()
   "UIs learn the labels from the specs `tools/list' and `tools/get' return."
   (harness-tools-test-with

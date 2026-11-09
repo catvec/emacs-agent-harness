@@ -131,6 +131,7 @@ prompt blocks with `harness-compose-attachment-block`.
 - `harness-compose-edit-thread-split` — Split the quote at point into another reply.
 - `harness-compose-end-of-buffer` — Move to the bottom of the compose box; from there, to the bottom of the buffer.
 - `harness-compose-enter-reply` — Move point into a reply: to the end of the words under its card.
+- `harness-compose-focus` — Focus a compose box in this frame; repeated calls cycle through the boxes.
 - `harness-compose-leave-reply` — Move point out of the reply, to your own message above the first card.
 - `harness-compose-newline` — Insert a newline in the box, or jump there from elsewhere.
 - `harness-compose-panel-key` — Press a key on a panel above the box, from the box.

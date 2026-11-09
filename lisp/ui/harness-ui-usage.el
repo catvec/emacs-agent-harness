@@ -103,9 +103,9 @@
   "Groupings as (SYMBOL LABEL).")
 
 (defconst harness-ui-usage--billing-labels
-  '(("api" . "API, billed per token")
-    ("subscription" . "Subscription, covered by the plan")
-    ("extra-usage" . "Extra usage, billed beyond the plan")
+  '(("api" . "API · per token")
+    ("subscription" . "Subscription · covered by plan")
+    ("extra-usage" . "Extra usage · beyond plan")
     ("" . "Not recorded"))
   "Table labels of the billing keys of `usage/summary'.")
 
@@ -698,7 +698,7 @@ every label, folded ones too, so unfolding moves no column."
     (pcase (harness-billing-of quota)
       ('api
        (insert "  " label
-               (propertize (format " bills per token%s: the costs above are what you pay.\n"
+               (propertize (format " · per token%s · cost as above\n"
                                    (if-let* ((auth (plist-get quota :auth))) (format " (%s)" auth) ""))
                            'face 'harness-dim-face)))
       ((or 'subscription 'extra-usage)
@@ -706,18 +706,18 @@ every label, folded ones too, so unfolding moves no column."
                (propertize (or (plist-get quota :plan-label) "Subscription") 'face 'harness-plan-face)
                (if email (propertize (concat "  " email) 'face 'harness-dim-face) "")
                "\n"
-               (propertize "  Calls the plan covers are not billed; their value at API prices shows as covered by plan.\n"
+               (propertize "  Plan-covered calls · not billed · API value covered\n"
                            'face 'harness-dim-face))
        (pcase (plist-get quota :limit-status)
-         ("rejected" (insert (propertize "  The plan's limit is reached: calls fail until it resets.\n" 'face 'error)))
-         ("allowed_warning" (insert (propertize "  Close to the plan's limit.\n" 'face 'warning))))
+         ("rejected" (insert (propertize "  Plan limit · calls fail until reset\n" 'face 'error)))
+         ("allowed_warning" (insert (propertize "  Near plan limit\n" 'face 'warning))))
        (when (harness-json-true-p (plist-get quota :using-extra))
-         (insert (propertize "  Calls are drawing on extra usage, billed at API prices.\n" 'face 'warning)))
+         (insert (propertize "  Extra usage · API prices\n" 'face 'warning)))
        (when (and (plist-get quota :informational) (plist-get quota :windows))
-         (insert (propertize "  Codex CLI reference (not this app's limit):\n" 'face 'harness-dim-face)))
+         (insert (propertize "  Codex CLI reference · not this app's limit\n" 'face 'harness-dim-face)))
        (if (plist-get quota :windows)
            (mapc #'harness-ui-usage--insert-window (plist-get quota :windows))
-         (insert (propertize "  no quota reported yet\n" 'face 'harness-dim-face)))
+         (insert (propertize "  No quota reported\n" 'face 'harness-dim-face)))
        (when-let* ((note (plist-get quota :quota-note)))
          (insert "  " (propertize note 'face 'harness-dim-face) "\n"))
        (when-let* ((url (plist-get quota :quota-url)))
@@ -1038,23 +1038,23 @@ so neither a refresh nor a fold scrolls it."
      '("Usage & cost"
        ["View"
         (". t" "Next period" harness-ui-usage-cycle-period)
-        (". b" "Group by next" harness-ui-usage-cycle-group)
-        (". RET" "Open or fold at point" harness-ui-usage-open)
-        (". TAB" "Fold or unfold project" harness-ui-usage-tab)
-        (". w" "Fold or unfold all projects" harness-ui-usage-toggle-worktrees)
+        (". b" "Grouping" harness-ui-usage-cycle-group)
+        (". RET" "Row at point" harness-ui-usage-open)
+        (". TAB" "Project fold" harness-ui-usage-tab)
+        (". w" "All projects fold" harness-ui-usage-toggle-worktrees)
         (". g" "Refresh" harness-ui-usage-refresh)]
        ["Budgets and plan"
-        (". a" "Add budget" harness-ui-usage-add-budget)
+        (". a" "Budget addition" harness-ui-usage-add-budget)
         (". s" "Already spent (baseline)" harness-ui-usage-set-baseline)
-        (". I" "Import API cost (Anthropic)" harness-ui-usage-import-api-cost)
-        (". d" "Delete budget (or fallback) at point" harness-ui-usage-remove)
-        (". P" "Plan a budget" harness-ui-usage-plan)
-        (". r" "Refresh plan quota" harness-ui-usage-refresh-plan)]
+        (". I" "API cost import (Anthropic)" harness-ui-usage-import-api-cost)
+        (". d" "Budget removal" harness-ui-usage-remove)
+        (". P" "Budget plan" harness-ui-usage-plan)
+        (". r" "Plan quota refresh" harness-ui-usage-refresh-plan)]
        ["Fallback"
-        (". f" "Add fallback model" harness-ui-usage-add-fallback)
-        (". c" "Try the fallback at point again" harness-ui-usage-fallback-try)
-        (". M-<up>" "Move it earlier" harness-ui-usage-fallback-up)
-        (". M-<down>" "Move it later" harness-ui-usage-fallback-down)]))
+        (". f" "Fallback model addition" harness-ui-usage-add-fallback)
+        (". c" "Fallback retry" harness-ui-usage-fallback-try)
+        (". M-<up>" "Earlier position" harness-ui-usage-fallback-up)
+        (". M-<down>" "Later position" harness-ui-usage-fallback-down)]))
 
 (defun harness-ui-usage--on-resize ()
   "Redraw so the chart fits the new window width."
@@ -1533,7 +1533,7 @@ this says.  BUDGET is a budget plist as the harness gives it
   (if budget
       (harness-ui-usage--delete-budget budget)
     (harness-ui-usage--choose-budget
-     "Delete budget" #'harness-ui-usage--delete-budget
+     "Budget removal" #'harness-ui-usage--delete-budget
      (and (derived-mode-p 'harness-ui-usage-mode)
           (plist-get (plist-get (harness-ui-usage--budget-at-point) :budget) :id)))))
 

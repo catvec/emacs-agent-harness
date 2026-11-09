@@ -252,7 +252,7 @@ class _ReviewFileScreenState extends State<ReviewFileScreen> {
                   icon: Icons.new_releases_outlined,
                   message: 'New revision',
                   detail:
-                      '${controller.revisionLabel(controller.staleRevision)} · the diff shown is ${controller.revisionLabel(controller.changes?.revision)}',
+                      'Review revision ${controller.revisionLabel(controller.staleRevision)} · current ${controller.revisionLabel(controller.changes?.revision)}',
                   color: HarnessColors.amber,
                   actionLabel: 'Reload',
                   onAction: controller.takeNewRevision,

@@ -302,7 +302,7 @@ class _SessionTaskBarState extends State<SessionTaskBar> {
     if (task.noMerge) 'No merge',
     if (task.cannotContinue)
       const HarnessMetaPart(
-        'Cannot continue',
+        'Blocked',
         color: HarnessColors.amber,
         weight: FontWeight.w700,
       ),
@@ -342,7 +342,7 @@ class _ReportRow extends StatelessWidget {
               parts: [
                 if (report.missing)
                   const HarnessMetaPart(
-                    'No report was handed in',
+                    'Report missing',
                     color: HarnessColors.amber,
                     weight: FontWeight.w700,
                   )

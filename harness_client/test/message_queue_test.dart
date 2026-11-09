@@ -335,7 +335,7 @@ void main() {
       await _startSlowTurn(tester);
 
       expect(find.byKey(const Key('composer-queue')), findsNothing);
-      expect(find.text('The agent is working…'), findsOneWidget);
+      expect(find.text('Agent working…'), findsOneWidget);
       expect(find.text('Message for the next turn'), findsNothing);
       await _rest(tester);
     });

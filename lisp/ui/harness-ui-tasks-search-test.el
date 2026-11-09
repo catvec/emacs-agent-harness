@@ -365,10 +365,10 @@ names it, and [Undo] gives each task the priority it had."
       (setq harness-ui-tasks-search-test--replies
             (list (format "{\"show\":[\"%s\"],\"do\":[{\"task\":\"%s\",\"action\":\"verify\"}]}" id id)))
       (harness-ui-tasks-search-test--search board "ship the flaky fix")
-      (harness-ui-tasks-search-test--wait-text board "Verify .*Fix the flaky test")
+      (harness-ui-tasks-search-test--wait-text board "Verification of .*Fix the flaky test")
       (with-current-buffer board
         (should (plist-get harness-ui-tasks-search--state :proposed))
-        (should (string-match-p "\\[Verify\\]" (harness-ui-tasks-search--banner)))
+        (should (string-match-p "\\[Verification\\]" (harness-ui-tasks-search--banner)))
         (should (string-match-p "\\[Skip\\]" (harness-ui-tasks-search--banner))))
       ;; Nothing happened yet.
       (should-not (plist-get (harness-call 'task/get id) :verified))
@@ -398,7 +398,7 @@ it takes."
                     :proposed (list (list :task id :action "archive" :title "Old work to remove"
                                           :confirm t))))
         (harness-ui-tasks-search--install)
-        (should (string-match-p "RET: stop and archive “Old work to remove”"
+        (should (string-match-p "RET: Archive “Old work to remove”"
                                 (harness-ui-tasks-search-test--placeholder board)))
         ;; Blanks are an empty box: RET does the proposal, and the box
         ;; is a task's again.
@@ -592,7 +592,7 @@ match, from the board's catalogue."
       (should (string-match-p "^Context: the task board of project .*\\. Favour tasks; sessions and commands count too\\.$"
                               text))
       (should (string-match-p "^Commands (name | keys | where | what it does):$" text))
-      (should (string-match-p "^harness-ui-tasks-archive-done | .*Archive completed" text))
+      (should (string-match-p "^harness-ui-tasks-archive-done | .*Finished archive" text))
       (should (string-match-p "Query: archive the completed tasks" text)))))
 
 (ert-deftest harness-ui-tasks-search-banner-shows-sessions-and-commands ()
@@ -623,7 +623,7 @@ the board."
         (should (string-match-p "1 task · 1 session · 1 command" text))
         (should (string-match-p "Its session talks of it too\\." text))
         (should (string-match-p "\\[Open\\]" text))
-        (should (string-match-p "Archive completed.*\\[Run\\] \\[Describe\\]" text)))
+        (should (string-match-p "Finished archive.*\\[Run\\] \\[Describe\\]" text)))
       ;; [Open] opens the session, [Run] runs the command on the board.
       (cl-letf (((symbol-function 'harness-ui-visit-session) (lambda (sid &rest _) (setq opened sid)))
                 ((symbol-function 'harness-ui-tasks-archive-done)

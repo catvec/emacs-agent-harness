@@ -468,6 +468,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             onPressed: _openMemory,
           ),
           HarnessIconButton(
+            key: const ValueKey('computer-header'),
             icon: Icons.desktop_windows_outlined,
             label: 'Computer',
             onPressed: _showComputer,
@@ -476,7 +477,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             if (thread?.live != null)
               HarnessIconButton(
                 icon: Icons.open_in_new_rounded,
-                label: 'Open episode',
+                label: 'Episode',
                 onPressed: _openEpisode,
               ),
             HarnessIconButton(
@@ -1072,7 +1073,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
                   child: Tooltip(
                     message: controller.error!,
                     child: Text(
-                      'Send failed · ${_threadTitle(controller, _failed!.thread)}',
+                      'Send failure · ${_threadTitle(controller, _failed!.thread)}',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: HarnessText.caption(context).copyWith(
@@ -1591,8 +1592,9 @@ class _DeskRail extends StatelessWidget {
         children: [
           const SizedBox(height: HarnessSpace.sm),
           HarnessIconButton(
+            key: const ValueKey('computer-rail'),
             icon: Icons.desktop_windows_outlined,
-            label: 'Show computer',
+            label: 'Computer',
             size: 20,
             onPressed: onShow,
           ),

@@ -4,7 +4,8 @@
 
 ;; An agent points at something in the harness from its own words: a
 ;; session, a message or a tool call in one, a task, a thread of a task's
-;; review.  It writes a harness: link (lisp/harness-links.el), the
+;; review, a computer's screen share.  It writes a harness: link
+;; (lisp/harness-links.el), the
 ;; Markdown renderer draws it as a link like any other, and this module is
 ;; what a click or RET on it does -- the UI half of the linking module,
 ;; which resolves a link and writes it out in full where the agent wrote
@@ -63,8 +64,8 @@
 
 (defvar harness-ui-linking-handlers nil
   "How a link the harness resolved is opened: an alist of (KIND . FUNCTION).
-KIND is a string, \"session\", \"message\", \"call\", \"task\" or
-\"thread\"; FUNCTION is called with the harness's answer, a plist
+KIND is a string, \"session\", \"message\", \"call\", \"task\",
+\"thread\" or \"computer\"; FUNCTION is called with the harness's answer, a plist
 \(`:kind', `:url', `:label', `:session', `:session-name', `:node',
 `:call-id', `:task', `:thread'; a key the link has no use for is
 missing), and opens what it names.  A module that can show something
@@ -181,6 +182,8 @@ it is made of (`harness-links-label')."
                   ('call (format "mouse-1, RET: open that tool call%s" where))
                   ('thread "mouse-1, RET: open that thread of a review")
                   ('task "mouse-1, RET: open that task")
+                  ('computer (format "screen share of %s (mouse-1, RET)"
+                                    (or (plist-get link :computer) "a computer")))
                   (_ "mouse-1, RET: open this link")))))
 
 (defun harness-ui-linking-describe (url)
@@ -331,6 +334,23 @@ it has loaded as far back as it takes (`harness-ui-chat-goto-node')."
      (session (harness-ui-visit-session session))
      (t (user-error "The harness named no task for this link")))))
 
+(defun harness-ui-linking--open-computer (result)
+  "Open the screen share of the computer RESULT names.
+A computer with a VNC page opens in the browser; one without opens the
+computers page, where its screen and controls are."
+  (let ((url (plist-get result :vnc))
+        (name (plist-get result :computer-name)))
+    (cond
+     ((and (stringp url) (not (string-blank-p url)))
+      (if (fboundp 'harness-computer-endpoint-view)
+          (harness-computer-endpoint-view url)
+        (browse-url url))
+      (message "Screen share · %s" (or name "computer")))
+     ((fboundp 'harness-computers)
+      (harness-computers)
+      (message "No screen share · computers page"))
+     (t (user-error "No screen share · %s" (or name "computer"))))))
+
 ;;;; Module
 
 (defun harness-ui-linking--init ()
@@ -343,7 +363,8 @@ it has loaded as far back as it takes (`harness-ui-chat-goto-node')."
                  '(("session" . harness-ui-linking--open-session)
                    ("message" . harness-ui-linking--open-node)
                    ("call" . harness-ui-linking--open-node)
-                   ("task" . harness-ui-linking--open-task)))
+                   ("task" . harness-ui-linking--open-task)
+                   ("computer" . harness-ui-linking--open-computer)))
     (setf (alist-get kind harness-ui-linking-handlers nil nil #'equal) function))
   (add-hook 'harness-ui-linking-context-functions #'harness-ui-linking--report-context))
 

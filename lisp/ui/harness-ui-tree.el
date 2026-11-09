@@ -642,11 +642,11 @@ own, is no fork of any: its creation and deletion refresh no tree
 (put 'harness-ui-tree-mode 'harness-menu-group
      '("Conversation tree"
        ["Node at point"
-        (". RET" "Open its session" harness-ui-tree-open)
-        (". c" "Check out (time travel)" harness-ui-tree-checkout)
-        (". f" "Fork here" harness-ui-tree-fork)
-        (". b" "BTW over its session" harness-ui-tree-btw)
-        (". TAB" "Expand or collapse" harness-ui-tree-toggle)]
+        (". RET" "Session" harness-ui-tree-open)
+        (". c" "Checkout" harness-ui-tree-checkout)
+        (". f" "Fork" harness-ui-tree-fork)
+        (". b" "BTW" harness-ui-tree-btw)
+        (". TAB" "Expansion" harness-ui-tree-toggle)]
        ["Move"
         (". n" "Next in lane" harness-ui-tree-next-in-lane)
         (". p" "Previous in lane" harness-ui-tree-previous-in-lane)

@@ -2764,13 +2764,13 @@ Then which of its attributes are set by hand, when any are."
 (put 'harness-ui-pet-mode 'harness-menu-group
      '("Companion pet"
        ["Pet"
-        (". p" "Pet it" harness-ui-pet-pet)
-        (". h" "Hatch the egg" harness-ui-pet-hatch)
+        (". p" "Pet" harness-ui-pet-pet)
+        (". h" "Hatch" harness-ui-pet-hatch)
         (". r" "Rename" harness-ui-pet-rename)
-        (". m" "Mute or unmute" harness-ui-pet-toggle-mute)
-        (". s" "Spin it" harness-ui-pet-spin)
+        (". m" "Mute" harness-ui-pet-toggle-mute)
+        (". s" "Spin" harness-ui-pet-spin)
         (". R" "Release" harness-ui-pet-release)
-        (". O" "Turn off or on" harness-ui-pet-toggle-enabled)
+        (". O" "Power" harness-ui-pet-toggle-enabled)
         (". g" "Refresh" harness-ui-pet-refresh)]))
 
 (defun harness-ui-pet--in-buffer (&optional while-off)

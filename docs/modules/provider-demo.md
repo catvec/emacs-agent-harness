@@ -16,6 +16,10 @@ events with small delays so streaming, tool calls, permissions and
 markdown rendering can be exercised in a live Emacs without cost.
 The script is chosen from the last user message:
 
+  "computer demo"  the computer tools on the demo desktop: look, fill
+                in the form and say hello
+  "mobile computer demo"  a phone as a computer: camera, screen and
+                its scoped files
   "tour"        thinking, text, a read_file call, markdown
   "tools"       two searches, then a bash call: a run of three calls
                 that fold into one summary

@@ -1652,17 +1652,17 @@ answer a permission request on its line, as in the session list;
 (put 'harness-ui-slots-mode 'harness-menu-group
      '("Task slots"
        ["Task at point"
-        (". RET" "Open its session" harness-ui-slots-open)
-        (". SPC" "View what it waits on" harness-ui-sessions-requests)
+        (". RET" "Session" harness-ui-slots-open)
+        (". SPC" "Waiting request" harness-ui-sessions-requests)
         (". TAB" "Next task" harness-ui-slots-next-row)]
        ["Queues"
-        (". P" "Pause or resume the queue at point" harness-ui-slots-toggle-queue)
-        (". s" "Pause every queue" harness-ui-slots-pause-queues)
-        (". S" "Resume every queue" harness-ui-slots-resume-queues)
-        (". u" "Pause every task" harness-ui-slots-pause-tasks)
-        (". U" "Resume every task" harness-ui-slots-resume-tasks)]
+        (". P" "Queue at point" harness-ui-slots-toggle-queue)
+        (". s" "Queue pause (all)" harness-ui-slots-pause-queues)
+        (". S" "Queue resume (all)" harness-ui-slots-resume-queues)
+        (". u" "Task pause (all)" harness-ui-slots-pause-tasks)
+        (". U" "Task resume (all)" harness-ui-slots-resume-tasks)]
        ["Page"
-        (". l" "Set how many tasks work at once" harness-ui-slots-set-limit)
+        (". l" "Task slots" harness-ui-slots-set-limit)
         (". g" "Refresh" harness-ui-slots-refresh)]))
 
 (defun harness-ui-slots--session-at-point ()

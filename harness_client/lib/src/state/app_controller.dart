@@ -8,6 +8,8 @@ import '../acp/acp_message.dart';
 import '../acp/capabilities.dart';
 import '../acp/acp_transport.dart';
 import '../acp/connection_target.dart';
+import '../computer/mobile_computer_controller.dart';
+import '../computer/mobile_computer_endpoint.dart';
 import '../models/project_roots.dart';
 import '../models/quota.dart';
 import '../models/server_info.dart';
@@ -141,6 +143,10 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   /// search is done on: see [QuickSearchHistory].
   final QuickSearchHistory quickSearchHistory = QuickSearchHistory();
   AcpClient? _client;
+
+  /// This phone as a computer: registration, its MCP servers and the
+  /// per-capability opt-in the Computers page shows.
+  final MobileComputerController mobileComputer = MobileComputerController();
   HarnessApi? api;
 
   /// The pictures of the harness's machine that the conversations and the
@@ -510,8 +516,10 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
       );
       _client = client;
       _subscription = client.notifications.listen(_onNotification);
+      await mobileComputer.ready();
       final initialized = await client.initialize(
         clientTitle: deviceName(),
+        clientCapabilities: mobileComputer.clientCapabilities(),
         timeout: handshake,
       );
       if (generation != _connectionGeneration) {
@@ -589,6 +597,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     _degradedSubscription?.cancel();
     _degradedSubscription = api!.degraded.listen(_onDegraded);
     client.requestHandler = _onAgentRequest;
+    unawaited(mobileComputer.bind(HarnessComputerTransport(api!)));
   }
 
   /// Start using the connection: the first loads, then the app opens.
@@ -629,7 +638,11 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   ) async {
     var kept = _handedSecret(answer) ?? secret;
     if (kept != secret) _keepReplacement(shown, secret, kept);
-    final full = await client.initialize(clientTitle: deviceName());
+    await mobileComputer.ready();
+    final full = await client.initialize(
+      clientTitle: deviceName(),
+      clientCapabilities: mobileComputer.clientCapabilities(),
+    );
     _adopt(client, full);
     kept = _keepReplacement(shown, kept, _replacementSecret(full));
     return kept;
@@ -1135,6 +1148,8 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   }
 
   Future<Object?> _onAgentRequest(String method, JsonMap params) async {
+    final computer = await mobileComputer.handleRequest(method, params);
+    if (computer != null) return computer;
     if (method == 'session/request_permission' ||
         method == '_harness/ask_user') {
       final sid = asString(params['sessionId']);
@@ -1818,6 +1833,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     _degradedSubscription = null;
     final client = _client;
     _client = null;
+    unawaited(mobileComputer.disconnect());
     api?.dispose();
     api = null;
     pictures.clear();
@@ -1916,6 +1932,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     }
     _sessions.clear();
     api?.dispose();
+    mobileComputer.dispose();
     unawaited(_client?.close());
     drafts.dispose();
     super.dispose();

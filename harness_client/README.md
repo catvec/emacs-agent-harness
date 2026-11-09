@@ -119,7 +119,7 @@ time it opens. It asks again only when the harness does.
   nothing of it, is gone as soon as the app reads the sessions again -- when the
   connection is back (every conversation, not only the open one), on
   pull-to-refresh, and as the harness's records of a session arrive. What the
-  harness says of a session replaces what the app knew of it, so *Needs you*,
+  harness says of a session replaces what the app knew of it, so *Your input*,
   the count on its tab and the notice that sessions need an answer match what
   Emacs shows. A tap on a task that waits opens its conversation, where the
   question it asks is answered.
@@ -1438,6 +1438,31 @@ narrows the thread rail and the timeline to the threads that carry it; that is
 the question the prototype asks -- whether the graph helps a person move
 between threads that belong together. The taxonomy itself is the dreaming
 process's to maintain; the client only draws the tags the workspace carries.
+
+## Computers
+
+The machines the harness may use, under **Server -> Computers**: the local
+computer, the ones clients registered, their state and computer-use
+capabilities, the open session's grants and preferred computer, and the
+resources each offers.  The page reads the harness's `computer/*` methods
+over ACP and follows `computers/changed`, so it shows the harness it is
+connected to, on this machine or another.  Viewing a screen is not a
+session's permission; the controls only change what the session's agent may
+do there.
+
+A computer that offers an RFB socket opens its screen in the app: the same
+`RfbClient` the workspace desk uses draws the framebuffer, and the app sends
+the pointer and the keyboard back while a person has control.  A computer
+that offers only a noVNC page says `No screen socket` and shows the page's
+address.
+
+| Computers on the desktop | A computer's live screen | The screen on a phone |
+|---|---|---|
+| ![The computers page: the local computer with view, windows, pointer, keyboard, audio and sandbox, its resources, and the session's grants](screenshots/computers-live-desktop.png) | ![The Flutter app drawing a real VNC framebuffer: a form filled with Noah, and Hello, Noah.](screenshots/computers-live-vnc.png) | ![The computers page on a phone](screenshots/computers-phone.png) |
+
+The app does not run MCP servers, so it does not register a computer of its
+own yet; a client that runs them (the Emacs UI) does.  The design and the
+wire contract are in [docs/computers.md](../docs/computers.md).
 
 ## Memory
 

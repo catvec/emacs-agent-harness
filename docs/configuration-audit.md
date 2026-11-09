@@ -40,7 +40,7 @@ customize-face` and themes to restyle them, and a face cannot break an
 implementation the way an option can.  The interface's own options
 (`harness-ui-*`, `harness-chat-*`, 11 of them) are likewise left alone:
 they live in this Emacs, not in the harness process, and now have a
-button on the settings page (*Customize the interface*) rather than
+button on the settings page (*Interface customization*) rather than
 being mixed into the harness's settings.
 
 ## Result

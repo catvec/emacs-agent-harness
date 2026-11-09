@@ -123,6 +123,15 @@ class HarnessCapabilities {
   /// payment broker exist, so the surface shows what is blocked rather than
   /// hiding it.
   bool get workspaceResources => has('workspace/resources/status');
+
+  /// The computers the harness may use: the registry, the session's grants
+  /// and the resources each offers.  `computer/list` alone shows what this
+  /// client may see; the access and resource methods are what the page reads
+  /// beside it.
+  bool get computers =>
+      has('computer/list') &&
+      has('computer/access') &&
+      has('computer/resources');
   bool get taskActions => has('task/start') && has('task/verify');
   bool get taskSubmit => has('task/submit');
   bool get usage => has('usage/totals') || has('usage/summary');
@@ -205,6 +214,11 @@ class HarnessCapabilities {
       'Workspace computer',
       'A desktop and browser the agent can use',
       workspaceComputer,
+    ),
+    CapabilityFeature(
+      'Computers',
+      'The machines the harness may use, and their screens',
+      computers,
     ),
     CapabilityFeature(
       'Usage',

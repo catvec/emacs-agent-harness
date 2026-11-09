@@ -1514,7 +1514,7 @@ Nil while the whole message shows."
                (if (> rest harness-chat--message-limit) "more" "the rest")
                rest)
        (lambda () (harness-chat--show-more (harness-chat-block-id block)))
-       :help (format "Show the next %d characters of this message" harness-chat--message-limit)))))
+       :help (format "more of this message · %d characters" harness-chat--message-limit)))))
 
 (defun harness-chat--more-line (block)
   "Return the line holding BLOCK's \"show more\" button, or \"\"."
@@ -1625,7 +1625,7 @@ TIME, when given, is shown after the name (`harness-chat--time-string')."
                          (name (harness-chat--session-name id (plist-get from :name))))
                     (cons harness-chat-session-label
                           (if id
-                              (harness-ui-session-link id name (format "Open the session %s" name))
+                              (harness-ui-session-link id name (format "session %s" name))
                             (propertize name 'face 'harness-dim-face)))))
                  (_ (let ((source (plist-get from :source)))
                       (cons harness-chat-system-label
@@ -1765,9 +1765,9 @@ holds -- the compaction under way, the question about the prompt cache
           (harness-chat--queued-buttons
            (append (when (harness-chat--steering-editable-p node)
                      (list (list "[edit]" "e" (lambda () (harness-chat-edit-steering id))
-                                 "Take this message back into the box to edit it")))
+                                 "Edit · message back in the box")))
                    (list (list "[delete]" "d" (lambda () (harness-chat-delete-steering id))
-                               "Delete this message: the model does not get it"))))))
+                               "Message deletion · model does not see it"))))))
 
 (defun harness-chat--delivery-note (block)
   "Return the note about the delivery of user BLOCK, for its sender line, or nil.
@@ -2029,7 +2029,7 @@ name a session link (`harness-ui-session-link')."
                              (let ((name (harness-chat--session-name
                                           id (and (equal id child)
                                                   (plist-get (plist-get call :input) :name)))))
-                               (harness-ui-session-link id name (format "Open the session %s" name))))
+                               (harness-ui-session-link id name (format "session %s" name))))
                            ids (propertize ", " 'face 'harness-dim-face))
                 "\n"))
     ""))
@@ -2823,7 +2823,7 @@ when none is there, say so."
                                        (harness-chat--reply-start (car reply) (cdr reply)))
                                      replies))))
     (unless positions
-      (user-error "The reply is not in the transcript shown here"))
+      (user-error "No reply in this transcript"))
     (let ((pos (car positions)))
       (goto-char pos)
       (pulse-momentary-highlight-region
@@ -3091,8 +3091,8 @@ decision's kind says (`harness-ui-decision-help')."
     (cond ((and record (eq way 'undo)) (harness-chat--permission-undo-help record))
           (record "Record this answer again")
           ((fboundp 'harness-ui-decision-help) (harness-ui-decision-help id way))
-          ((eq way 'undo) "Take this decision back")
-          (t "Make this decision again"))))
+          ((eq way 'undo) "decision undo")
+          (t "decision repeat"))))
 
 (defun harness-chat--decision-label (id way)
   "Return the label of the WAY button of decision ID, WAY `undo' or `redo'.
@@ -3542,7 +3542,7 @@ subject: \"1 tool call: Read file x.el\"."
              "  "
              (harness-chat--button (if (harness-chat-group-expanded group) "[collapse]" "[expand]")
                                    (lambda () (harness-chat-toggle-group gid))
-                                   :help "Show or hide the individual tool calls")
+                                   :help "tool call display")
              "\n")))))
 
 (defun harness-chat--mark-thread-cards (text)
@@ -3705,7 +3705,7 @@ reader's place in a long report stays."
          (block (and id (gethash id harness-chat--blocks))))
     (cond
      ((null block) (user-error "No block here"))
-     ((null (harness-chat-block-fold block)) (user-error "This block has nothing to fold"))
+     ((null (harness-chat-block-fold block)) (user-error "No fold here"))
      (t (let ((collapsed (not (harness-chat-block-collapsed block))))
           (if (and (not collapsed) (harness-chat--hand-in-p block)
                    (harness-chat-block-result block))
@@ -4692,9 +4692,9 @@ approved, is not something to approve."
          (handle (or (plist-get result :call-id) (plist-get node :call-id)))
          (state (and result (harness-chat--denied-state result))))
     (unless (and handle state)
-      (user-error "No call the permission system refused is here"))
+      (user-error "No refused call here"))
     (when (plist-get state :approved)
-      (user-error "The user already approved that call"))
+      (user-error "Call already approved"))
     (harness-chat--approve-denied harness-ui-session-id handle)))
 
 (defun harness-chat-next-diagram (&optional n)
@@ -5018,7 +5018,7 @@ left through every draw of the tail.  A list longer than
 The list starts folded (`harness-chat-todos-collapsed'); what you leave
 it as stays so in this chat, however often the tail is drawn again."
   (interactive)
-  (unless harness-chat--todos (user-error "This session has no todo list"))
+  (unless harness-chat--todos (user-error "No todo list"))
   (setq harness-chat--todos-choice (if (harness-chat--todos-collapsed-p) 'open 'folded))
   (harness-chat--render-tail))
 
@@ -5200,7 +5200,7 @@ box's words are kept for \[harness-chat-show-compose]."
     (unless (and (functionp harness-chat-threads-function)
                  (funcall harness-chat-threads-function compose))
       (insert (propertize "Threads  " 'face 'harness-label-face) compose "\n")
-      (insert (propertize "  Threads belong to a task's review.\n"
+      (insert (propertize "  Threads · task review only\n"
                           'face 'harness-dim-face 'wrap-prefix "  ")))))
 
 (defun harness-chat--render-tail ()
@@ -5252,7 +5252,7 @@ box's words are kept for \[harness-chat-show-compose]."
           (harness-chat--mark-tail-region from (point) '(attachments)))
         (when harness-chat--dead
           (let ((from (point)))
-            (insert (propertize " This session was deleted; the transcript stays readable.\n" 'face 'harness-hint-face))
+            (insert (propertize " Session deleted · transcript readable\n" 'face 'harness-hint-face))
             (harness-chat--mark-tail-region from (point) '(notice dead))))
         (when (and harness-chat--inactive (not harness-chat--dead))
           (let ((from (point)))
@@ -5876,7 +5876,7 @@ See `harness-chat-commands'."
 
 (defun harness-chat--take-message ()
   "Return (TEXT . ATTACHMENTS) from the compose box, or signal when empty."
-  (when harness-chat--dead (user-error "This session was deleted"))
+  (when harness-chat--dead (user-error "Session deleted"))
   (harness-compose-take))
 
 (defun harness-chat--drop-edited-queue-item ()
@@ -5961,7 +5961,7 @@ A module showing something of its own in this buffer
           (funcall send text atts))))
      ;; /compact and the like run here instead of going to the session.
      ((and (null harness-compose-attachments) (harness-chat--command typed))
-      (when harness-chat--dead (user-error "This session was deleted"))
+      (when harness-chat--dead (user-error "Session deleted"))
       (pcase-let ((`(,fn . ,args) (harness-chat--command typed))
                   (buf (current-buffer)))
         (funcall fn args)
@@ -6177,9 +6177,9 @@ cannot be put back in the box."
          (node (and item (harness-queued-message-node item))))
     (unless node (user-error "No queued message to edit"))
     (when (harness-node-sender node)
-      (user-error "Only a message you wrote can be edited"))
+      (user-error "Your messages only"))
     (let ((message (or (harness-chat--editable-message node)
-                       (user-error "This message has an attachment that cannot be put back in the box: delete it and send it again"))))
+                       (user-error "Attachment not restorable · resend"))))
       (harness-chat--withdraw id (lambda () (harness-chat--put-back message))))))
 
 (defun harness-chat-cancel ()
@@ -7342,7 +7342,7 @@ message too."
                         when (and block (or (equal (harness-chat-block-kind block) "assistant")
                                             (harness-chat--thread-message-p block)))
                         return block)))
-    (unless block (user-error "No agent response yet"))
+    (unless block (user-error "No agent response"))
     (kill-new (or (harness-chat--block-markdown block) ""))
     (message "Copied the last response")))
 
@@ -7786,7 +7786,7 @@ words lit; a region of a diff or another buffer is visited
   (pcase (harness-thread-ref-kind ref)
     ("chat"
      (let ((block (and (stringp (plist-get ref :node)) (gethash (plist-get ref :node) harness-chat--blocks))))
-       (unless block (user-error "That message is not in the transcript shown here"))
+       (unless block (user-error "No such message in this transcript"))
        (let* ((start (marker-position (harness-chat-block-start block)))
               (end (marker-position (harness-chat-block-end block)))
               (hit (harness-chat--find-quote start end ref)))
@@ -7843,10 +7843,10 @@ another, or whose parent the harness no longer has, says so instead."
   (let ((id (harness-chat--parent-id)))
     (unless id
       (if (harness-chat--parent-is-seed-p)
-          (user-error "This session was started from a seed conversation, which is not opened")
-        (user-error "This session was not started from another")))
+          (user-error "Seed conversation · not opened")
+        (user-error "No parent session")))
     (unless (harness-ui-session id)
-      (user-error "The session this one was started from is gone (%s)"
+      (user-error "Parent session gone (%s)"
                   (harness-chat--session-name id)))
     (unless harness-ui-open-session-function
       (user-error "No chat module loaded"))
@@ -7947,7 +7947,7 @@ text are left out; the lines named are those of what is left."
   (let* ((from (save-excursion (goto-char beg) (skip-chars-forward " \t\n" end) (point)))
          (to (save-excursion (goto-char end) (skip-chars-backward " \t\n" beg) (point))))
     (when (>= from to)
-      (user-error "The region is blank: select the text to prompt with"))
+      (user-error "Blank region · no prompt text"))
     (let ((text (string-trim (buffer-substring-no-properties beg end) "\\(?:[ \t]*\n\\)+" "[ \t\n]+")))
       (concat (harness-chat--region-origin (line-number-at-pos from t) (line-number-at-pos (1- to) t) root)
               "\n\n"
@@ -8015,7 +8015,7 @@ With a prefix argument CHOOSE, choose the session among the project's,
 or a new one."
   (interactive "P")
   (unless (use-region-p)
-    (user-error "Select the text to prompt with first"))
+    (user-error "No selected text"))
   (if (harness-compose-live-p)
       (compose-quote-reply (region-beginning) (region-end))
     (let* ((root (harness-chat--project-root default-directory))
@@ -8057,7 +8057,7 @@ text, and the text itself."
          (text (string-trim (buffer-substring-no-properties beg end)))
          (first (save-excursion (goto-char beg) (skip-chars-forward " \t\n" end) (line-number-at-pos)))
          (last (save-excursion (goto-char end) (skip-chars-backward " \t\n" beg) (line-number-at-pos))))
-    (when (string-empty-p text) (user-error "The region is blank: select the text to reply to"))
+    (when (string-empty-p text) (user-error "Blank region · no reply text"))
     (append (list :kind "buffer" :name (buffer-name))
             (and buffer-file-name
                  (list :file (if (string-prefix-p root (expand-file-name buffer-file-name))
@@ -8097,7 +8097,7 @@ With a prefix argument CHOOSE, choose the session among the project's, or
 a new one."
   (interactive "P")
   (unless (use-region-p)
-    (user-error "Select the text to reply to first"))
+    (user-error "No selected text"))
   (if (derived-mode-p 'harness-chat-mode)
       (harness-chat-thread-reply)
     (let* ((root (harness-chat--project-root default-directory))
@@ -8307,48 +8307,48 @@ the id of a session written in a message is a link to it.
      '("Chat"
        ["Message"
         ("C-c C-c" "Send" harness-chat-send)
-        ("C-c C-q" "Queue for next turn" harness-chat-queue)
-        (". e" "Edit a queued message: back into the box" harness-chat-edit-queued)
-        (". d" "Delete a queued message" harness-chat-remove-queued)
-        (". s" "Send a queued message now" harness-chat-send-queued)
-        ("C-c C-a" "Attach file or task" harness-compose-add-attachment)
-        ("C-y" "Paste; an image attaches" harness-compose-yank)
-        ("C-c >" "Reply in a thread" harness-chat-thread-reply)
-        ("C-c T" "Threads of the hand-in, in place of the box" harness-chat-toggle-threads)
-        ("C-c <" "Out of the reply to your message, and back" harness-compose-toggle-reply)
-        ("M-RET" "Split a quote to answer inline" compose-quote-split)
-        ("C-c [" "Elide part of a quote: [...]" compose-quote-elide)
-        ("M-<" "Top of the box, then the buffer" harness-compose-beginning-of-buffer)
-        ("M->" "Bottom of the box, then the buffer" harness-compose-end-of-buffer)]
+        ("C-c C-q" "Next-turn queue" harness-chat-queue)
+        (". e" "Queued message edit" harness-chat-edit-queued)
+        (". d" "Queued message removal" harness-chat-remove-queued)
+        (". s" "Queued message send" harness-chat-send-queued)
+        ("C-c C-a" "File or task attachment" harness-compose-add-attachment)
+        ("C-y" "Paste (image attachment)" harness-compose-yank)
+        ("C-c >" "Thread reply" harness-chat-thread-reply)
+        ("C-c T" "Hand-in threads" harness-chat-toggle-threads)
+        ("C-c <" "Reply exit" harness-compose-toggle-reply)
+        ("M-RET" "Quote split" compose-quote-split)
+        ("C-c [" "Quote elision" compose-quote-elide)
+        ("M-<" "Box top, then buffer" harness-compose-beginning-of-buffer)
+        ("M->" "Box bottom, then buffer" harness-compose-end-of-buffer)]
        ["Agent"
-        ("C-c C-y" "Allow request" harness-chat-allow-newest)
-        ("C-c C-n" "Deny request" harness-chat-deny-newest)
-        ("C-c C-p" "Edit request's pattern" harness-chat-edit-permission-pattern)
-        ("C-c ." "A key of the panel above, from the box" harness-compose-panel-key)
+        ("C-c C-y" "Request approval" harness-chat-allow-newest)
+        ("C-c C-n" "Request denial" harness-chat-deny-newest)
+        ("C-c C-p" "Request pattern edit" harness-chat-edit-permission-pattern)
+        ("C-c ." "Panel key, from the box" harness-compose-panel-key)
         ("C-c C-f" "Next diagram" harness-chat-next-diagram)
         ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
-        ("C-c C-t" "Show or hide the todo list" harness-chat-toggle-todos)
-        ("C-c C-j" "Show or hide the earlier recaps of the turn" harness-chat-toggle-recap)
-        ("C-c C-k" "Cancel turn" harness-chat-cancel)]
+        ("C-c C-t" "Todo list" harness-chat-toggle-todos)
+        ("C-c C-j" "Turn recaps" harness-chat-toggle-recap)
+        ("C-c C-k" "Turn cancellation" harness-chat-cancel)]
        ["Session"
-        ("C-c C-u" "Go to the session this one came from" harness-up-to-parent)
-        ("C-c M-k" "Close session" harness-close-session)
-        ("C-c M-l" "Copy a link to this session" harness-chat-copy-session-link)
-        ("C-c C-o" "What the bar cut off" harness-ui-overflow-show)]
+        ("C-c C-u" "Parent session" harness-up-to-parent)
+        ("C-c M-k" "Session close" harness-close-session)
+        ("C-c M-l" "Session link" harness-chat-copy-session-link)
+        ("C-c C-o" "Bar overflow" harness-ui-overflow-show)]
        ["Transcript"
-        (". TAB" "Fold block" harness-chat-tab)
+        (". TAB" "Block fold" harness-chat-tab)
         ("M-n" "Next message" harness-chat-next-message)
         ("M-p" "Previous message" harness-chat-previous-message)
-        ("M-N" "Next message you wrote" harness-chat-next-user-message)
-        ("M-P" "Previous message you wrote" harness-chat-previous-user-message)
-        ("C-M-n" "Next tool call or thinking" harness-chat-next-action)
-        ("C-M-p" "Previous tool call or thinking" harness-chat-previous-action)
+        ("M-N" "Next user message" harness-chat-next-user-message)
+        ("M-P" "Previous user message" harness-chat-previous-user-message)
+        ("C-M-n" "Next tool call or thought" harness-chat-next-action)
+        ("C-M-p" "Previous tool call or thought" harness-chat-previous-action)
         ("C-c C-s" "Search" harness-chat-search)
-        ("C-c C-w" "Copy last reply" harness-chat-copy-last-response)
-        ("C-c C-l" "Copy a link to the message or tool call at point" harness-chat-copy-link)
-        ("C-c C-e" "Jump to bottom" harness-chat-scroll-to-bottom)
+        ("C-c C-w" "Last reply copy" harness-chat-copy-last-response)
+        ("C-c C-l" "Link of the message or tool call at point" harness-chat-copy-link)
+        ("C-c C-e" "Bottom" harness-chat-scroll-to-bottom)
         ("C-c C-r" "Redraw" harness-chat-redraw)
-        ("C-c C-z" "Bury: back to the buffer before" harness-ui-bury)]))
+        ("C-c C-z" "Previous buffer" harness-ui-bury)]))
 
 (defun harness-chat--post-command ()
   "Keep the newer-messages notice current.
@@ -8415,7 +8415,7 @@ Point moved onto an option of a question with diagrams shows its diagram."
   (define-key harness-ui-map (kbd "o") #'harness-open-latest-session)
   (define-key harness-ui-map (kbd "O") #'harness-open-session)
   (ignore-errors
-    (transient-append-suffix 'harness-menu "s" '("o" "Open latest session" harness-open-latest-session))))
+    (transient-append-suffix 'harness-menu "s" '("o" "Latest session" harness-open-latest-session))))
 
 (harness-define-module 'ui-chat
   :doc "The chat buffer: transcript, pending panel, queue, attachments and compose box."

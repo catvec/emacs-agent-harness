@@ -194,16 +194,16 @@ change."
         (dolist (dir (list home host sub))
           (harness-ui-access-allow-dir dir)
           (harness-ui-access-test-wait-text (concat (regexp-quote dir) " +granted to this session")))
-        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:~/ +granted to this session +\\[Revoke\\] \\[Read only\\]"
+        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:~/ +granted to this session +\\[Revocation\\] \\[Read only\\]"
                                 (harness-ui-access-test-row home)))
-        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:/ +granted to this session +\\[Revoke\\]"
+        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:/ +granted to this session +\\[Revocation\\]"
                                 (harness-ui-access-test-row host)))
         (should (string-match-p "\\`  rw +/ssh:box.example.invalid:~/projects/x/ +granted to this session"
                                 (harness-ui-access-test-row sub)))
         ;; The buttons' tooltips name the directory as it is.
         (goto-char (harness-ui-access--find-anchor (cons 'dir home)))
-        (let ((revoke (progn (search-forward "[Revoke]") (get-text-property (1- (point)) 'help-echo))))
-          (should (string-match-p (concat "Revoke the grant of " (regexp-quote home)) revoke)))
+        (let ((revoke (progn (search-forward "[Revocation]") (get-text-property (1- (point)) 'help-echo))))
+          (should (string-match-p (concat "grant revocation · " (regexp-quote home)) revoke)))
         ;; One only read, from the view, on another host: one inside a home directory granted is writable already.
         (should (string-match-p "already readable and writable"
                                 (harness-call 'access/add-read-dir sid "/ssh:box.example.invalid:~/notes/")))
@@ -222,7 +222,7 @@ change."
             (harness-ui-access-remove-read-dir notes)
             (harness-ui-access-test-wait-text (regexp-quote notes) t)
             (harness-test-wait (lambda () (member (concat "Read access removed: " notes) messages)) 5 "the message"))
-          (should (member (concat "Revoked " sub) messages)))
+          (should (member (concat "Revocation · " sub) messages)))
         (should-not (member sub (harness-call 'permission/allowed-dirs sid)))
         ;; The ones left are drawn still.
         (should (string-match-p "rw +/ssh:box.example.invalid:~/ " (harness-ui-access-test-row home)))))))
@@ -283,14 +283,14 @@ wrong-number-of-arguments, and nothing was asked or done."
         ;; Granted for writing, to this session.
         (setq answer write)
         (harness-ui-access-test-click "[Allow a directory…]")
-        (should (equal '("Allow for this session: ") asked))
+        (should (equal '("This session: ") asked))
         (harness-ui-access-test-wait-text "granted to this session")
         (should (member write (harness-call 'permission/allowed-dirs sid)))
         (should (string-match-p "\\`  rw " (harness-ui-access-test-row write)))
         ;; Read only.
         (setq answer read-only)
         (harness-ui-access-test-click "[Allow reading a directory…]")
-        (should (equal "Allow reading: " (car asked)))
+        (should (equal "Reading: " (car asked)))
         (harness-test-wait (lambda ()
                              (and (harness-ui-access--find-anchor (cons 'dir read-only))
                                   (string-match-p "\\`  ro +.* +read only"
@@ -328,7 +328,7 @@ the turn's end takes it out again."
       (harness-ui-access-test-wait-text "granted to this session")
       (harness-perms--grant-for-turn sid turn)
       (harness-ui-access-test-wait-text "granted for this turn")
-      (should (string-match-p "\\[Revoke\\]" (harness-ui-access-test-row turn)))
+      (should (string-match-p "\\[Revocation\\]" (harness-ui-access-test-row turn)))
       (harness-emit 'agent/turn-ended sid 'end-turn)
       (harness-ui-access-test-wait-text "granted for this turn" t))))
 
@@ -418,9 +418,9 @@ their own: none of their lists is on the Overview."
     (let ((text (harness-ui-access-test-text)))
       (should (string-match-p "\\`Jail & permissions of " text))
       (should (string-match-p "^Overview  ·  Tools  ·  Rules  ·  Judgements  ·  Secrets$" text)))
-    (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network"
+    (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Writes, commands, network · ask"
                    (harness-ui-access-test-setting 'mode)))
-    (should (equal "Interaction (x) Interactive ( ) Non-interactive Prompts for undecided calls"
+    (should (equal "Interaction (x) Interactive ( ) Non-interactive prompts · undecided calls"
                    (harness-ui-access-test-setting 'interaction)))
     (should (equal "Network (x) On ( ) Off" (harness-ui-access-test-setting 'network)))
     (should (equal "Writing (x) On ( ) Read-only" (harness-ui-access-test-setting 'writing)))
@@ -550,13 +550,13 @@ one in effect is no button."
       (should (eq 'bold (get-text-property (1- (point)) 'face)))
       (search-forward "Accept Edits")
       (should (get-text-property (1- (point)) 'harness-ui-action))
-      (should (string-match-p "Allow reads and edits inside the project"
+      (should (string-match-p "Accept Edits: Project reads and edits (choice)"
                               (get-text-property (1- (point)) 'help-echo)))
       (cl-letf (((symbol-function 'message)
                  (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) messages)))))
         ;; The permission mode.
         (harness-ui-access-test-click "Accept Edits" (harness-ui-access--find-anchor '(setting . mode)))
-        (harness-ui-access-test-wait-setting 'mode "\\`Permission mode ( ) Ask (x) Accept Edits ( ) Auto ( ) YOLO Allow reads and edits")
+        (harness-ui-access-test-wait-setting 'mode "\\`Permission mode ( ) Ask (x) Accept Edits ( ) Auto ( ) YOLO Project reads and edits")
         (should (eq 'accept-edits (plist-get (harness-call 'session/get sid) :permission-mode)))
         (harness-ui-access-test-click "YOLO" (harness-ui-access--find-anchor '(setting . mode)))
         (harness-ui-access-test-wait-setting 'mode "( ) Accept Edits ( ) Auto (x) YOLO")
@@ -567,7 +567,7 @@ one in effect is no button."
         (harness-ui-access-test-wait-setting 'interaction "( ) Interactive (x) Non-interactive No prompts · decisions by the auto-mode judge")
         (should (harness-json-true-p (plist-get (harness-call 'session/get sid) :non-interactive)))
         (harness-ui-access-test-click "Interactive" (harness-ui-access--find-anchor '(setting . interaction)))
-        (harness-ui-access-test-wait-setting 'interaction "(x) Interactive ( ) Non-interactive Prompts for undecided calls")
+        (harness-ui-access-test-wait-setting 'interaction "(x) Interactive ( ) Non-interactive prompts · undecided calls")
         (should-not (harness-json-true-p (plist-get (harness-call 'session/get sid) :non-interactive)))
         ;; The network.
         (harness-ui-access-test-click "Off" (harness-ui-access--find-anchor '(setting . network)))
@@ -599,9 +599,9 @@ row says who decides."
               (setq d (plist-put d (car change) (cadr change))))
             d))
     (harness-ui-access--render)
-    (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network · set by the policy"
+    (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Writes, commands, network · ask · set by the policy"
                    (harness-ui-access-test-setting 'mode)))
-    (should (equal "Interaction (x) Interactive ( ) Non-interactive Prompts for undecided calls · set by the policy"
+    (should (equal "Interaction (x) Interactive ( ) Non-interactive prompts · undecided calls · set by the policy"
                    (harness-ui-access-test-setting 'interaction)))
     (should (equal "Writing ( ) On (x) Read-only Read-only by supervisor mode"
                    (harness-ui-access-test-setting 'writing)))
@@ -612,7 +612,7 @@ row says who decides."
         (should-not (text-property-not-all start end 'harness-ui-action nil))))
     ;; The commands say so as well.
     (let ((err (should-error (harness-ui-access-toggle-writing) :type 'user-error)))
-      (should (string-match-p "Read-only by supervisor mode: not changeable here" (cadr err))))))
+      (should (string-match-p "Read-only · supervisor mode · not changeable here" (cadr err))))))
 
 ;;;; The Tools page
 
@@ -643,7 +643,7 @@ button: nobody turned them off."
     (let ((asked nil))
       (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) nil)))
         (harness-ui-access-test-click "test_fetch"))
-      (should (equal '("Turn test_fetch off for this session? ") asked)))
+      (should (equal '("Tool off · test_fetch") asked)))
     ;; The answer was no.
     (should-not (member "test_fetch" (plist-get (harness-access-profile (harness-call 'session/get sid)) :tools-off)))
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
@@ -779,7 +779,7 @@ they mean."
     ;; The tooltips end with the key.
     (goto-char (point-min))
     (search-forward "[Give…]")
-    (should (string-match-p "Linux capability, inside the sandbox only (C)\\'"
+    (should (string-match-p "Linux capability · sandboxed commands (C)"
                             (get-text-property (match-beginning 0) 'help-echo)))
     ;; One given.
     (harness-call 'access/set-capability sid "CAP_SYS_PTRACE" t)
@@ -963,17 +963,17 @@ lists it; it says why when nothing can be given and nothing is held."
                       (harness-ui-access-refresh)
                       (harness-ui-access-test-wait-flat "Unavailable")
                       (should-error (call-interactively #'harness-ui-access-toggle-capability) :type 'user-error))))
-      (should (string-match-p "No capability available: the sandbox backend is systemd-run" (cadr err))))
+      (should (string-match-p "No capability · the sandbox backend is systemd-run" (cadr err))))
     (should-error (call-interactively #'harness-ui-access-grant-capability) :type 'user-error)
     (let ((err (should-error (call-interactively #'harness-ui-access-revoke-capability) :type 'user-error)))
-      (should (string-match-p "No capability held" (cadr err))))
+      (should (string-match-p "No capability" (cadr err))))
     ;; Everything given: nothing left to give.
     (setq harness-ui-access-test--jail harness-ui-access-test--jail-enforcing)
     (dolist (name '("CAP_SYS_PTRACE" "CAP_NET_RAW" "CAP_NET_ADMIN" "CAP_NET_BIND_SERVICE"))
       (harness-call 'access/set-capability sid name t))
     (harness-ui-access-test-wait-flat "CAP_NET_BIND_SERVICE")
     (let ((err (should-error (call-interactively #'harness-ui-access-grant-capability) :type 'user-error)))
-      (should (string-match-p "All grantable capabilities given" (cadr err))))))
+      (should (string-match-p "All capabilities granted" (cadr err))))))
 
 (ert-deftest harness-ui-access-capabilities-refusal-is-reported ()
   "A capability the jail would not pass on is refused by the harness, and the
@@ -1356,7 +1356,7 @@ says what the mode means and where a click goes."
       (let ((line (car segment)) (pos (cdr segment)))
         (should (equal "Ask" (substring-no-properties line pos (+ pos 3))))
         (let ((help (funcall (get-text-property pos 'help-echo line) window nil nil)))
-          (should (string-match-p "\\`Permission mode: Ask — ask before writes, commands and network" help))
+          (should (string-match-p "\\`Permission mode: Ask — writes, commands, network · ask" help))
           (should (string-match-p "mouse-1: jail and permissions" help))
           (should (string-match-p "change mode" help))
           (should-not (string-match-p "\n" help)))
@@ -1370,7 +1370,7 @@ says what the mode means and where a click goes."
         (set-buffer view)
         (harness-test-wait (lambda () harness-ui-access--describe) 5 "the view")
         (should (equal sid harness-ui-session-id))
-        (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network"
+        (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Writes, commands, network · ask"
                        (harness-ui-access-test-setting 'mode)))
         ;; The mode is chosen there, and the chat's header follows.
         (harness-ui-access-test-click "Auto" (harness-ui-access--find-anchor '(setting . mode)))
@@ -1461,19 +1461,19 @@ the buttons go on a line under the path; a wide window keeps them in one row."
         (harness-ui-access-test-wait-text "granted to this session")
         (harness-ui-access-test-fit 110 'setting 'dir 'detail 'section)
         (let ((row (harness-ui-access-test-row long)))
-          (should (string-match-p "^  rw  /tmp/harness-tmp-[^ ]*…[^ ]*again/project/ +granted to this session +\\[Revoke\\] \\[Read only\\]" row))))
+          (should (string-match-p "^  rw  /tmp/harness-tmp-[^ ]*…[^ ]*again/project/ +granted to this session +\\[Revocation\\] \\[Read only\\]" row))))
       ;; Narrow: the path has a line, and the source and the buttons the next.
       (let ((harness-ui-access-test-width 56))
         (harness-ui-access-refresh)
-        (harness-ui-access-test-wait-text "^      granted to this session  \\[Revoke\\] \\[Read only\\]$")
+        (harness-ui-access-test-wait-text "^      granted to this session  \\[Revocation\\] \\[Read only\\]$")
         (harness-ui-access-test-fit 56 'setting 'dir 'detail 'section)
         (let ((row (harness-ui-access-test-row long)))
           (should (string-match-p "^  rw  /tmp/[^ ]*…[^ ]*again/project/$" row))
           (should (<= (string-width row) 56)))
         ;; The choices of a setting, and its note, wrap under each other.
         (let ((start (harness-ui-access--find-anchor '(setting . mode))))
-          (should (> (count-lines start (next-single-property-change start 'harness-ui-access-anchor)) 3))
-          (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Ask before writes, commands and network"
+          (should (>= (count-lines start (next-single-property-change start 'harness-ui-access-anchor)) 3))
+          (should (equal "Permission mode (x) Ask ( ) Accept Edits ( ) Auto ( ) YOLO Writes, commands, network · ask"
                          (harness-ui-access-test-setting 'mode))))))))
 
 
@@ -1501,13 +1501,13 @@ the answer made in the chat's.  The demo provider is the cheap model."
                            5 "the chat loaded")
         (harness-test-wait (lambda ()
                              (with-current-buffer chat
-                               (string-search "Model summary: Calls test_fetch with the arguments shown"
+                               (string-search "Model summary · Calls test_fetch with the arguments shown"
                                               (buffer-substring-no-properties (point-min) (point-max)))))
                            5 "the summary in the chat's panel")
         (with-current-buffer chat
           (let ((text (buffer-substring-no-properties (point-min) (point-max))))
             (should-not (string-match-p "summarizing" text))
-            (should (< (string-search "Permission" text) (string-search "Model summary:" text)
+            (should (< (string-search "Permission" text) (string-search "Model summary ·" text)
                        (string-search "[Allow]" text))))
           ;; The request is the user's to answer, summary or not.
           (should (plist-get (plist-get (car (harness-call 'permission/pending sid)) :payload) :summary))

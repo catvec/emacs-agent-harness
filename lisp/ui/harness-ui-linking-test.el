@@ -153,6 +153,36 @@ chat is made for it."
     (should-not (harness-ui-linking-describe "harness:nothing/here"))
     (should-not (harness-ui-linking-describe "https://example.org"))))
 
+
+(ert-deftest harness-ui-linking-describes-a-computer-screen-share ()
+  "A computer link reads as the computer and says a click opens its screen share."
+  (harness-ui-linking-test-with
+    (let ((words (harness-ui-linking-describe "harness:computer/cmp-box")))
+      (should (equal "computer cmp-box" (plist-get words :label)))
+      (should (string-match-p "screen share" (plist-get words :help))))
+    (should (eq (cdr (assoc "computer" harness-ui-linking-handlers))
+                #'harness-ui-linking--open-computer))))
+
+(ert-deftest harness-ui-linking-opens-a-computer-screen-share ()
+  "A click on a computer link opens its VNC page, or the computers page without one."
+  (harness-ui-linking-test-with
+    (let ((opened nil)
+          (page nil))
+      (cl-letf (((symbol-function 'harness-computer-endpoint-view)
+                 (lambda (url) (push url opened)))
+                ((symbol-function 'browse-url)
+                 (lambda (url &rest _) (push url opened)))
+                ((symbol-function 'harness-computers)
+                 (lambda (&rest _) (setq page t))))
+        (harness-ui-linking--dispatch
+         '(:kind "computer" :computer "cmp-box" :computer-name "box"
+           :vnc "http://127.0.0.1:6080/vnc_lite.html"))
+        (should (equal '("http://127.0.0.1:6080/vnc_lite.html") opened))
+        (should-not page)
+        (harness-ui-linking--dispatch
+         '(:kind "computer" :computer "cmp-box" :computer-name "box"))
+        (should page)))))
+
 (ert-deftest harness-ui-linking-gives-the-renderer-its-words ()
   "A link with no words of its own shows the session's name; the author's words stay."
   (harness-ui-linking-test-with

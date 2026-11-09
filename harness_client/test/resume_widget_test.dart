@@ -80,7 +80,7 @@ void main() {
       await _settle(tester);
       expect(find.text('Design the merge queue'), findsOneWidget);
       // The form for an address and a secret never came up, nor a sign-in.
-      expect(find.textContaining('within reach'), findsNothing);
+      expect(find.textContaining('Agent harness'), findsNothing);
       expect(_form, findsNothing);
       expect(find.text('Sign in to this harness'), findsNothing);
       expect(rig.harness.signInAttempts, isEmpty);
@@ -95,7 +95,7 @@ void main() {
     await _open(tester, rig);
     // Before anything was answered: the app is already going back in.
     expect(_resumeCard, findsOneWidget);
-    expect(find.text('Welcome\nback.'), findsOneWidget);
+    expect(find.text('Session\nresume'), findsOneWidget);
     expect(_form, findsNothing);
     expect(find.text('Connect'), findsNothing);
     await _settle(tester);
@@ -118,7 +118,7 @@ void main() {
     final rig = await _launch(stored: const {});
     await _open(tester, rig);
     await _settle(tester, 4);
-    expect(find.textContaining('within reach'), findsOneWidget);
+    expect(find.textContaining('Agent harness'), findsOneWidget);
     expect(_form, findsOneWidget);
     expect(_resumeCard, findsNothing);
     expect(rig.harness.connects, 0);
@@ -155,7 +155,7 @@ void main() {
   );
 
   testWidgets(
-    '"Use another address" shows the form with what is remembered in it',
+    '"Address change" shows the form with what is remembered in it',
     (tester) async {
       final rig = await _launch(delays: const [Duration(minutes: 10)]);
       rig.harness.refuseConnects = 1000000;
@@ -166,7 +166,7 @@ void main() {
       await tester.tap(find.byKey(const Key('resume-change')));
       await _settle(tester, 4);
       expect(_resumeCard, findsNothing);
-      expect(find.textContaining('within reach'), findsOneWidget);
+      expect(find.textContaining('Agent harness'), findsOneWidget);
       expect(_fieldText(tester, 'connect-address'), _address);
       expect(_fieldText(tester, 'connect-token'), 'hs1_device');
       expect(rig.app.phase, ConnectionPhase.disconnected);

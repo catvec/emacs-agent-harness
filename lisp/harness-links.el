@@ -24,6 +24,7 @@
 ;;   harness:thread/THREAD                a thread of the review of that session's task
 ;;   harness:task/TASK                    a task
 ;;   harness:task/TASK/thread/THREAD      a thread of the review of that task
+;;   harness:computer/REF                 a computer's screen share, by id or name
 ;;
 ;; The kinds also go by `msg' and `node' (a message), and `tool-call',
 ;; `tool_call' and `tool' (a call).  A REF is written as the harness names
@@ -58,7 +59,8 @@
     ("message" . message) ("msg" . message) ("node" . message)
     ("call" . call) ("tool-call" . call) ("tool_call" . call) ("toolcall" . call) ("tool" . call)
     ("thread" . thread)
-    ("task" . task))
+    ("task" . task)
+    ("computer" . computer) ("screen" . computer) ("vnc" . computer))
   "The names a pair of a link path may start with, and the kind each means.")
 
 (defun harness-links-p (string)
@@ -85,10 +87,10 @@ That is only about how it starts, `harness:': it may still name nothing
 
 (defun harness-links-parse (url)
   "Return the plist URL reads as, or nil when it is no valid harness link.
-The plist has `:kind', one of `session', `message', `call', `thread' and
-`task', and what it names: `:session', `:message', `:call', `:task' and
-`:thread', each the REF as written (decoded), the ones the link does not
-name left out.  A message or call of the session the text is in has no
+The plist has `:kind', one of `session', `message', `call', `thread',
+`task' and `computer', and what it names: `:session', `:message',
+`:call', `:task', `:thread' and `:computer', each the REF as written
+(decoded), the ones the link does not name left out.  A message or call of the session the text is in has no
 `:session'; so has a thread with no task or session.  `:message' is the
 node's id, or a handle; so is `:call', and it may be the call's own id."
   (let ((case-fold-search t)
@@ -115,7 +117,8 @@ node's id, or a handle; so is `:call', and it may be the call's own id."
     ('(call) (list :kind 'call :call (cdar pairs)))
     ('(thread) (list :kind 'thread :thread (cdar pairs)))
     ('(task) (list :kind 'task :task (cdar pairs)))
-    ('(task thread) (list :kind 'thread :task (cdar pairs) :thread (cdadr pairs)))))
+    ('(task thread) (list :kind 'thread :task (cdar pairs) :thread (cdadr pairs)))
+    ('(computer) (list :kind 'computer :computer (cdar pairs)))))
 
 (defun harness-links-parse-handle (ref)
   "Return the handle REF is, a plist, or nil when it is none.
@@ -173,7 +176,9 @@ when it has one, else alone.  Return nil when LINK names too little."
                                    (cond ((funcall enc :task)
                                           (concat "task/" (funcall enc :task) "/thread/" thread))
                                          (session (concat "session/" session "/thread/" thread))
-                                         (t (concat "thread/" thread))))))))
+                                         (t (concat "thread/" thread)))))
+                        ('computer (when-let* ((computer (funcall enc :computer)))
+                                     (concat "computer/" computer))))))
       (concat harness-links-scheme ":" path))))
 
 (defun harness-links-session-url (session)
@@ -196,6 +201,10 @@ when it has one, else alone.  Return nil when LINK names too little."
   "Return the URL of the task TASK."
   (harness-links-url (list :kind 'task :task task)))
 
+(defun harness-links-computer-url (computer)
+  "Return the URL of the computer COMPUTER, by its id or name."
+  (harness-links-url (list :kind 'computer :computer computer)))
+
 (defun harness-links-markdown (label url)
   "Return the Markdown link to URL that reads LABEL.
 Brackets in LABEL would end it early; they become parentheses."
@@ -216,13 +225,14 @@ session's name, for a session link and the message or call in it."
                      (if name (format " of %s" name) "")))
       ('thread (format "thread %s" (funcall shorten (plist-get link :thread))))
       ('task (or name (format "task %s" (funcall shorten (plist-get link :task)))))
+      ('computer (or name (format "computer %s" (funcall shorten (plist-get link :computer)))))
       (_ "link"))))
 
 ;;;; Finding links in text
 
 (defconst harness-links-bare-regexp
   (concat "harness:"
-          "\\(?:session\\|message\\|msg\\|node\\|call\\|tool-call\\|tool_call\\|toolcall\\|tool\\|thread\\|task\\)"
+          "\\(?:session\\|message\\|msg\\|node\\|call\\|tool-call\\|tool_call\\|toolcall\\|tool\\|thread\\|task\\|computer\\|screen\\|vnc\\)"
           "/[A-Za-z0-9_~%#=&+@:/.-]+")
   "Regexp for a bare link: a URL that starts with a kind and has no blank in it.
 It may take a full stop or a colon that closes a sentence with it, which

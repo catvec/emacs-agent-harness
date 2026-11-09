@@ -7,7 +7,7 @@ question, while its thread looked parked or silently stopped.  The
 Emacs workspace buffer drew the divider, brief and messages, and the
 Flutter screen did the same; neither drew the request the episode was
 waiting on.  A user who saw no answer from a workspace message had to
-discover *Open episode* to find the prompt that held the turn.
+discover *Episode* to find the prompt that held the turn.
 
 ## What the workspace now shows
 
