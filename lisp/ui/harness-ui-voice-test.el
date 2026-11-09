@@ -36,6 +36,7 @@
            (harness-compose-controls-functions nil) (harness-voice-process-timeout 5)
            (harness-voice-recording-limit 5)
            (harness-voice-transcribe-command '("python3" "-c" "print('héllo')" :file))
+           (harness-voice-pipeline-status '(:state "running" :detail "2 of 2 services"))
            (harness-ui-voice-test--notifications nil) (global-mode-string nil)
            (default-directory dir) (buf (generate-new-buffer " *voice compose test*")))
        (unwind-protect
@@ -189,14 +190,22 @@
       (should-not (file-exists-p private)))))
 
 (ert-deftest harness-ui-voice-unconfigured-service-keeps-the-microphone-off ()
-  "Configuration is validated before any recorder process exists."
+  "Configuration is validated before any recorder process exists.
+A client with no commands of its own uses the harness's pipeline; a
+pipeline that is not running is refused before the microphone is on."
   (harness-ui-voice-test-with
     (setq harness-voice-transcribe-command nil)
-    (harness-voice-dictate)
-    (should-not harness-voice--job)
-    (should-not harness-voice--release-mode)
-    (should (eq harness-voice--state 'failed))
-    (should (equal harness-voice--error "Voice command unconfigured · :file argument required"))))
+    (let ((harness-voice-pipeline-status '(:state "stopped" :reason "Local voice pipeline · stopped")))
+      (harness-voice-dictate)
+      (should-not harness-voice--job)
+      (should-not harness-voice--release-mode)
+      (should (eq harness-voice--state 'failed))
+      (should (equal harness-voice--error "Local voice pipeline · stopped")))
+    ;; A harness that never answered is not a running pipeline either.
+    (let ((harness-voice-pipeline-status nil))
+      (harness-voice-dictate)
+      (should-not harness-voice--job)
+      (should (equal harness-voice--error "Local voice pipeline · not checked")))))
 
 (ert-deftest harness-ui-voice-streams-sentences-once-and-ignores-other-content ()
   "Announcements, chunks and rewritten finals produce no duplicate speech."
@@ -389,18 +398,79 @@
       (should (equal (concat " Listening · Microphone on · [Transcribe C-c v] · [Interrupt C-c V]"
                              " · [Talking · release] · [Voice off] · [Setup]")
                      (substring-no-properties (harness-voice--controls))))
+      ;; With no commands of its own and no running pipeline, the
+      ;; controls say what to start rather than opening the microphone.
       (setq harness-voice-transcribe-command nil)
-      (harness-voice-hold)
-      (should-not harness-voice--job)
-      (should-not harness-voice--release-mode)
-      (should (equal "Voice command unconfigured · :file argument required" harness-voice--error))
-      (let* ((line (harness-voice--controls))
-             (at (string-search "Voice failed" line)))
-        (should (equal (concat " Voice failed · Microphone off · [Dictate C-c v] · [Interrupt C-c V]"
-                               " · Voice command unconfigured · :file argument required · [Hold to talk]"
-                               " · [Voice off] · [Setup]")
-                       (substring-no-properties line)))
-        (should (equal "Voice command unconfigured · :file argument required" (get-text-property at 'help-echo line)))))))
+      (let ((harness-voice-pipeline-status '(:state "stopped" :reason "Local voice pipeline · stopped")))
+        (harness-voice-hold)
+        (should-not harness-voice--job)
+        (should-not harness-voice--release-mode)
+        (should (equal "Local voice pipeline · stopped" harness-voice--error))
+        (let* ((line (harness-voice--controls))
+               (at (string-search "Voice failed" line)))
+          (should (equal (concat " Voice failed · Microphone off · [Dictate C-c v] · [Interrupt C-c V]"
+                                 " · Local voice pipeline · stopped · [Hold to talk]"
+                                 " · [Voice off] · [Setup]")
+                         (substring-no-properties line)))
+          (should (equal "Local voice pipeline · stopped" (get-text-property at 'help-echo line))))))))
+
+(ert-deftest harness-ui-voice-dictation-uses-the-harness-pipeline ()
+  "A client with no command of its own transcribes with the harness.
+The audio goes over ACP (`_harness/speech/transcribe'), so the client
+needs no whisper.cpp: the harness server runs the pipeline."
+  (harness-ui-voice-test-with
+    (setq harness-voice-transcribe-command nil)
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params callback &optional _error)
+                   (push (cons method params) calls)
+                   (funcall callback '(:text "spoken into the harness")))))
+        (harness-ui-voice-test--record)
+        (harness-voice-release)
+        (harness-test-wait (lambda () (null harness-voice--job)) 5 "pipeline transcription")
+        (should (equal "spoken into the harness" (harness-compose-text)))
+        (should (eq harness-voice--state 'ready))
+        (should (equal "_harness/speech/transcribe" (caar calls)))
+        ;; The audio went as base64 WAV, never as a path.
+        (let ((audio (plist-get (cdar calls) :audio)))
+          (should (stringp audio))
+          (should (string-prefix-p "RIFF" (base64-decode-string audio))))))))
+
+(ert-deftest harness-ui-voice-spoken-replies-use-the-harness-pipeline ()
+  "A client with no command of its own speaks with the harness.
+It asks for the audio over ACP and plays the WAV that comes back with
+this machine's player, so the speaker stays local."
+  (harness-ui-voice-test-with
+    (setq harness-voice-synthesize-command nil
+          harness-voice-mode t)
+    (let ((calls nil) (played nil))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params callback &optional _error)
+                   (push (cons method params) calls)
+                   (funcall callback (list :audio (base64-encode-string
+                                                   (concat "RIFF" (make-string 60 ?0)) t)
+                                           :mime "audio/wav"))))
+                ((symbol-function 'harness-voice--player)
+                 (lambda (_file) '("true" "audio.wav")))
+                ((symbol-function 'harness-voice--new-job)
+                 (lambda ()
+                   (setq harness-voice--job
+                         (harness-voice--make-job :buffer (current-buffer)
+                                                 :session harness-ui-session-id
+                                                 :dir (make-temp-file "harness-voice-test-" t)))
+                   harness-voice--job))
+                ((symbol-function 'harness-voice--run)
+                 (lambda (job phase command &optional input)
+                   (push (list phase command) played)
+                   (setf (harness-voice--job-phase job) phase))))
+        (harness-voice--set-state 'synthesizing)
+        (setq harness-voice--queue (list "Spoken by the harness"))
+        (harness-voice--speak-next)
+        (harness-test-wait (lambda () calls) 3 "the harness's audio")
+        (should (equal "_harness/speech/synthesize" (caar calls)))
+        (should (equal "Spoken by the harness" (plist-get (cdar calls) :text)))
+        ;; The player is this machine's; only the speech crossed the wire.
+        (should (equal '(speaking ("true" "audio.wav")) (car played)))))))
 
 (ert-deftest harness-ui-voice-recording-cap-transcribes-the-utterance ()
   "The recording cap acts as a release, unlike a speech-process timeout."
@@ -478,8 +548,17 @@
 (ert-deftest harness-ui-voice-validation-copy-and-exclusive-microphone ()
   "Validation has exact noun-phrase copy, before recording or playback."
   (harness-ui-voice-test-with
-    (should (equal "Voice command unconfigured · :file argument required"
+    (should (equal "Speech command unset"
                    (error-message-string (should-error (harness-voice--command '("python3") "audio.wav")))))
+    ;; A client with no command of its own is ready when the harness
+    ;; pipeline runs, and refused, naming it, when it does not.
+    (let ((harness-voice-transcribe-command nil)
+          (harness-voice-pipeline-status '(:state "running" :detail "2 of 2 services")))
+      (should-not (harness-voice--transcriber-error))
+      (should (harness-voice--pipeline-transcribes-p)))
+    (let ((harness-voice-transcribe-command nil)
+          (harness-voice-pipeline-status '(:state "stopped" :reason "Local voice pipeline · stopped")))
+      (should (equal "Local voice pipeline · stopped" (harness-voice--transcriber-error))))
     (should (equal "Voice executable unavailable · harness-no-such-executable"
                    (error-message-string
                     (should-error (harness-voice--command '("harness-no-such-executable" :file) "audio.wav")))))

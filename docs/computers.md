@@ -338,6 +338,20 @@ an MCP server only when its tools act on that computer.  This keeps the
 server the only place state and inference live, and keeps a client on a
 computer from becoming a second server by accident.
 
+The local voice pipeline follows that rule to the letter.  The `speech`
+module (`lisp/modules/harness-speech.el`) runs whisper.cpp and Kokoro as
+the harness server's children, or the bundled `voice-local` compose stack,
+and keeps them on loopback: the services answer no authentication, so they
+are not published to the network.  A client anywhere asks the harness for
+speech on the connection it already has -- `_harness/speech/transcribe`
+takes base64 WAV and answers text, `_harness/speech/synthesize` takes text
+and answers a WAV -- so a phone's dictation needs no whisper.cpp, no Kokoro
+and no docker, and a client on the harness's own machine may use the
+loopback URLs `_harness/speech/status` reports instead.  The microphone and
+the speaker stay with the client; only the speech crosses.  See
+[voice](voice.md) and
+[the design](design/server-voice-pipeline.md).
+
 ## Resources and projects
 
 A resource is identified by its computer and a stable id, not by a path of

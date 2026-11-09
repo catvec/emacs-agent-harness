@@ -8,6 +8,7 @@ Compose stacks that modules and plugins declare: start, stop, state, dynamic por
 - **Source:** [lisp/modules/harness-stacks.el](../../lisp/modules/harness-stacks.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** nothing
+- **Required by:** [speech](speech.md)
 - **Brings along:** [container-runtime](container-runtime.md) (its file requires it)
 
 ## About

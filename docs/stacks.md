@@ -81,7 +81,8 @@ docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local \
     --profile whisper up -d
 ```
 
-The harness starts it from the voice setup list (**Local voice stack**,
+The `speech` module declares this stack as the harness server's local
+voice pipeline and starts it from any client's voice setup list (`Pipeline`,
 `[Start]`), or from `M-x harness-stacks`. Whisper and Parakeet are
 profile services, so exactly one speech model runs beside Kokoro, and
 the voice setup page's **Speech to text** choice names the profile. A
@@ -91,26 +92,29 @@ image and downloads a 460 MB model into the stack's volume. The first
 pull, that build and Kokoro's twenty-second model load are the large
 part of a first start.
 
-The `unmute` voice provider takes its speech-to-text URL from the
-running stack's service for the selected model, so the random port is
-never typed by hand, and its text-to-speech URL from the stack's `tts`
-service, or from `harness-voice-unmute-tts-url` when you point it at a
-service of your own. With `harness-voice-stt-model` at `auto`, the
-whisper model is the one `harness-voice-effort` picks:
-`ggml-tiny.en.bin` at **low**, `ggml-base.en.bin` at **medium**,
-`ggml-small.en.bin` at **high**; `parakeet-0.6b` and
-`parakeet-0.6b-v3` are the Parakeet models, as
-[voice.md](voice.md#speech-models) describes. `harness-voice-unmute-voice`
-names the Kokoro voice (`af_heart` by default); `DEFAULT_VOICE` in the
-stack does the same. The images are overridable with
-`HARNESS_WHISPER_IMAGE`, `HARNESS_PARAKEET_IMAGE` and `HARNESS_TTS_IMAGE`;
-see the stack's README for the CPU and GPU cases and for a service of
-your own.
+The `unmute` voice provider takes its speech-to-text URL from what the
+harness reports for the running stack's service for the selected model
+(`speech/status`), so the random port is never typed by hand, and its
+text-to-speech URL from the stack's `tts` service, or from
+`harness-voice-unmute-tts-url` when you point it at a service of your
+own. With `harness-voice-stt-model` at `auto`, the whisper model is the
+one `harness-voice-effort` picks: `ggml-tiny.en.bin` at **low**,
+`ggml-base.en.bin` at **medium**, `ggml-small.en.bin` at **high**; the
+server's `harness-speech-local-whisper` names it outright, and
+`parakeet-0.6b` and `parakeet-0.6b-v3` are the Parakeet models, as
+[voice.md](voice.md#speech-models) describes. The Kokoro voice is the
+server's `harness-speech-local-voice` (`af_heart` by default), and the
+client's `harness-voice-unmute-voice` names the voice it asks for;
+`DEFAULT_VOICE` in the stack does the same. Both are harness server
+settings. The images are overridable with `HARNESS_WHISPER_IMAGE`,
+`HARNESS_PARAKEET_IMAGE` and `HARNESS_TTS_IMAGE`; see the stack's
+README for the CPU and GPU cases and for a service of your own.
 
-The stack is a plugin: the voice module requires `harness-stacks` when it is
-there, registers its stack, and shows the state in its setup list. A client
-without a container runtime still has every voice provider; the stack line
-says what the runtime still needs, such as `Socket unavailable ·
+The stack belongs to the server: `harness-speech` requires
+`harness-stacks`, registers the stack and calls it the local voice pipeline.
+A client shows its state over ACP (`speech/status`) and needs no container
+runtime of its own; when the harness's runtime is unavailable, the pipeline
+line says what it still needs, such as `Socket unavailable ·
 /var/run/docker.sock` or `Executable unavailable · podman`.
 
 ## What is verified

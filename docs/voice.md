@@ -10,7 +10,7 @@ model providers have capabilities of their own:
 
 | Capability | Shape | Needs |
 | --- | --- | --- |
-| `wav` | Record a completed utterance, transcribe it into the compose box, speak reply sentences | `harness-voice-transcribe-command` and `harness-voice-synthesize-command` |
+| `wav` | Record a completed utterance, transcribe it into the compose box, speak reply sentences | The harness's local pipeline, or `harness-voice-transcribe-command` and `harness-voice-synthesize-command` on this client |
 | `live` | A sidecar owns the microphone, speaker and speech model; Emacs keeps the chat, tools and permissions | The provider's command and what that provider needs |
 
 `harness-voice-provider` selects a provider:
@@ -19,7 +19,7 @@ model providers have capabilities of their own:
 | --- | --- | --- |
 | `wav` (the default) | `wav` | Local push-to-talk dictation and spoken replies |
 | `chatgpt` | `live` | GPT-Live over the API, delegating work to this chat |
-| `unmute` | `live` | A local pipeline: whisper.cpp or Parakeet for speech to text and Kokoro for text to speech |
+| `unmute` | `live` | The harness's local pipeline: whisper.cpp or Parakeet for speech to text and Kokoro for text to speech |
 | `fixture` | `live` | The scripted sidecar: the whole loop without a microphone, key or model |
 | `custom` | `live` | Any sidecar in `harness-voice-live-command` |
 
@@ -165,37 +165,59 @@ to, so the harness agent still runs the workspace.
 
 ### Local pipeline
 
-`unmute` runs `scripts/harness-voice-live-unmute`, a local pipeline around two
-OpenAI-compatible endpoints: a speech model for speech to text, and Kokoro for
-text to speech. It records with an energy voice detector, posts each utterance
-to the speech-to-text endpoint, delegates the text, and posts the answer to the
+`unmute` runs `scripts/harness-voice-live-unmute`, a sidecar around the
+**harness server's** local voice pipeline: two OpenAI-compatible endpoints,
+a speech model for speech to text -- whisper.cpp or the bundled Parakeet
+server, as `harness-voice-stt-model` chooses -- and Kokoro for text to
+speech, run by the `speech` server module as the harness's child
+(`lisp/modules/harness-speech.el`).  It records with an energy voice
+detector, posts each utterance to the speech-to-text endpoint, delegates
+the text, and posts the answer to the
 text-to-speech endpoint for playback. No hosted model and no API key are
 involved; audio goes only to the loopback addresses below unless changed.
 
+The pipeline is the harness's, not this client's, so a client on a phone or
+another machine needs no docker, whisper.cpp or Kokoro: the `[Setup]` list's
+pipeline line asks the harness for its state over ACP and its `[Start]` runs
+it there. The WAV dictation likewise transcribes and speaks through the
+harness when this client has no commands of its own
+(`_harness/speech/transcribe`, `_harness/speech/synthesize`), so the
+microphone and the speaker are the only local parts. One settings pair is the
+server's: `harness-speech-local-whisper` picks the whisper model and
+`harness-speech-local-voice` the Kokoro voice.
+
+![The voice setup list of a client, its pipeline line running](media/voice-setup.png)
+
+The picture is a client's setup list with the harness's pipeline running:
+the harness started the bundled speech fixture as its two children, and
+the client drew what `speech/status' answered. Regenerate it with
+`scripts/media.sh voice-setup'.
+
 ```elisp
 (setq harness-voice-provider 'unmute
-      ;; nil: the running voice-local stack's service for the selected model
+      ;; nil: the harness pipeline's service for the selected model
       harness-voice-unmute-stt-url nil
-      ;; nil: the running voice-local stack's Kokoro service
+      ;; nil: the harness pipeline's Kokoro service
       harness-voice-unmute-tts-url nil
       harness-voice-unmute-voice "af_heart"
       harness-voice-unmute-threshold 0.004)
 ```
 
-Speech to text defaults to the `voice-local` stack: the provider reads the
-random loopback port the stack published for the selected speech model and
-posts to its `/inference` route, so nothing has to be copied by hand. Set
-`harness-voice-unmute-stt-url` to point at a whisper.cpp or Parakeet server you
-run yourself.
+Speech to text defaults to the harness's pipeline: the provider reads the
+random loopback URL the harness reports for the service of the selected
+speech model (`speech/status`) and posts to its `/inference` route, so
+nothing has to be copied by hand. Set `harness-voice-unmute-stt-url` to
+point at a whisper.cpp or Parakeet server you run yourself.
 
-Text to speech defaults to the same stack's `tts` service: Kokoro-FastAPI's CPU
-image, whose `/v1/audio/speech` route takes the OpenAI request shape and
-answers WAV. The provider reads its random loopback port the same way, so
-starting the stack from the voice setup list is all it takes. Set
+Text to speech defaults to the same pipeline's `tts` service: Kokoro-FastAPI's
+CPU image, whose `/v1/audio/speech` route takes the OpenAI request shape and
+answers WAV. The provider reads its URL the same way, so a `[Start]` in any
+client's voice setup list is all it takes. Set
 `harness-voice-unmute-tts-url` to point at a service you run yourself, such as
 a Piper server behind a small OpenAI-compatible wrapper; `alloy` is a
 convenient voice name for OpenAI's own endpoint. Without any endpoint, the
-setup list says `Text to speech endpoint unset`. The sidecar resamples the
+setup list names the pipeline's own reason (`Local voice pipeline · stopped`
+or the harness's failure line). The sidecar resamples the
 reply WAV -- Kokoro and OpenAI answer at 24 kHz -- to the pipeline's 16 kHz
 before playback, so speech keeps its speed and pitch.
 
@@ -214,13 +236,15 @@ has the measurements and the tests.
 
 #### Speech models
 
-The local stack in `scripts/stacks/voice-local/` runs one speech model and
+The bundled stack in `scripts/stacks/voice-local/` runs one speech model and
 Kokoro-FastAPI in containers on a network of its own, each published on a
-random loopback port; `M-x harness-stacks` starts both
-([compose stacks](stacks.md)) on the
-[selected container runtime](container-runtime.md).
+random loopback port. The `speech` module declares it and starts it as the
+harness's pipeline, on the [selected container runtime](container-runtime.md)
+([compose stacks](stacks.md)); the voice setup list's pipeline line starts and
+stops it from any client. Whisper and Parakeet sit behind compose profiles, so
+exactly one speech model runs beside Kokoro.
 
-`harness-voice-stt-model` picks the speech model:
+`harness-voice-stt-model` picks the model, and the harness server loads it:
 
 | Model | Engine | Download | Notes |
 | --- | --- | --- | --- |
@@ -229,27 +253,30 @@ random loopback port; `M-x harness-stacks` starts both
 | `parakeet-0.6b` | sherpa-onnx | 650 MB | NVIDIA Parakeet TDT 0.6B v2, English, punctuation and case |
 | `parakeet-0.6b-v3` | sherpa-onnx | 650 MB | Parakeet TDT 0.6B v3, 25 European languages, punctuation and case |
 
-![The voice setup list: the local pipeline with Parakeet 0.6B selected, its
-sherpa-onnx engine and 650 MB download, and a running local stack](media/voice-setup.png)
-
 `M-x harness-voice-setup` shows the choice as a **Speech to text** line under
-the local stack, with the model's engine and download size and a `[Change]`
+the pipeline, with the model's engine and download size and a `[Change]`
 control; `M-x harness-voice-select-stt-model` is the same list from anywhere.
 Selecting a model stops a running live session -- its sidecar holds the
-previous endpoint -- and restarts a running stack, so exactly one speech
+previous endpoint -- and restarts a running pipeline, so exactly one speech
 engine runs beside Kokoro. The first Parakeet start builds its small image and
 downloads the model into the stack's volume; the container log names the URL
 and the unpack. `PARAKEET_MODEL_URL` points at a mirror, and
 `HARNESS_PARAKEET_IMAGE` at another locally built image.
 
 The whisper model the effort presets choose is still the one `auto` runs:
-**low** is `ggml-tiny.en.bin`, **medium** (the default) is
-`ggml-base.en.bin`, and **high** is `ggml-small.en.bin`. The setup list has the
-same three buttons. With a model chosen, the level changes only a provider's
-own fragments, never the model. A provider that declares no fragments passes
-none; with no model chosen, the local stack uses the level for its whisper
-model, and changing it restarts a running stack the way the model choice
-does.
+**low** is `ggml-tiny.en.bin` (75 MB, the quickest), **medium** (the default)
+is `ggml-base.en.bin` (142 MB, the balance) and **high** is
+`ggml-small.en.bin` (466 MB, the most accurate of the English models). The
+setup list has the same three buttons. With a model chosen, the level changes
+only a provider's own fragments, never the model. A provider that declares no
+fragments passes none; with no model chosen, the pipeline loads the level's
+whisper model, and changing it restarts a running pipeline the way the model
+choice does.
+
+The whisper model and the voice are the harness server's settings, not a
+client's, because the pipeline runs there: `harness-speech-local-whisper` names
+the whisper file the stack loads, and `harness-speech-local-voice` the Kokoro
+voice.
 
 #### Measuring the stages
 

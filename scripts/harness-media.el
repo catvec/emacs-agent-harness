@@ -137,7 +137,18 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-quick-search "harness-ui-quick-search")
 (declare-function harness-voice "harness-ui-voice")
 (declare-function harness-voice-mode "harness-ui-voice")
+(declare-function harness-voice-setup "harness-ui-voice-providers")
+(declare-function harness-voice-pipeline-refresh "harness-ui-voice-providers")
+(declare-function harness-voice-pipeline-state "harness-ui-voice-providers")
+(declare-function harness-speech-running-p "harness-speech")
+(declare-function harness-speech--stop-all "harness-speech")
 (defvar harness-voice--owner)
+(defvar harness-voice-provider)
+(defvar harness-speech--processes)
+(defvar harness-speech-local-stt-command)
+(defvar harness-speech-local-tts-command)
+(defvar harness-speech-local-stt-url)
+(defvar harness-speech-local-tts-url)
 (declare-function harness-quick-search-box-submit "harness-ui-quick-search")
 (declare-function harness-ui-popout-close "harness-ui-popout")
 (declare-function harness-ui-report-popout "harness-ui-report")
@@ -3475,27 +3486,6 @@ No microphone or speech service is used for the documentation picture."
         (with-current-buffer buffer (harness-voice-mode -1))
         (harness-call 'session/delete (buffer-local-value 'harness-ui-session-id buffer))))))
 
-(defun harness-media-shot-voice-setup ()
-  "The voice setup list: the local pipeline, its Parakeet model and the stack.
-The stack state is scripted and no container runtime, model or microphone
-is used for the documentation picture."
-  (let ((harness-voice-provider 'unmute)
-        (harness-voice-stt-model 'parakeet-0.6b)
-        (harness-voice-effort 'medium))
-    (cl-letf (((symbol-function 'harness-compose-stack-status)
-               (lambda (id &optional callback)
-                 (let ((state '(:state running :detail "2 of 2 services"
-                                :ports (("whisper" (8080 . 32768))
-                                        ("parakeet" (8081 . 32769))
-                                        ("tts" (8880 . 32770))))))
-                   (puthash id state harness-stacks--states)
-                   (when callback (funcall callback state))
-                   state)))
-              ((symbol-function 'harness-ui-media-audio-backend)
-               (lambda (&optional _) '(pipewire "PipeWire" "pw-record" "pw-play"))))
-      (harness-media--view #'harness-voice-setup nil 20))
-    (harness-media--capture "voice-setup")))
-
 (defun harness-media--voice-pipeline-session ()
   "Feed one scripted session through the live voice pipeline's handlers.
 The events are the sidecar protocol's own with fixture values: no
@@ -3650,6 +3640,46 @@ the line is drawn from the same scripted events as the strip."
             (harness-media--capture "voice-pipeline-compose"))
         (with-current-buffer buffer (harness-voice-mode -1))
         (harness-call 'session/delete (buffer-local-value 'harness-ui-session-id buffer))))))
+
+(defun harness-media--free-port ()
+  "Return a free loopback TCP port for a shot's own service."
+  (let* ((server (make-network-process :name "harness-media-port"
+                                       :server t :host "127.0.0.1" :service t
+                                       :family 'ipv4 :noquery t))
+         (port (process-contact server :service)))
+    (delete-process server)
+    (if (consp port) (cdr port) port)))
+
+(defun harness-media-shot-voice-setup ()
+  "The voice setup list while the harness server's pipeline runs.
+The pipeline is real: the harness process starts the bundled speech
+fixture (test/harness-speech-service.py) as its two children, and the
+client's page draws what `speech/status' answered over ACP.  It is
+stopped again after the picture, so no other picture shows it."
+  (harness-media--reset-layout)
+  (let* ((fixture (expand-file-name "test/harness-speech-service.py" harness-media-root))
+         (python (or (executable-find "python3") "python3"))
+         (stt (harness-media--free-port))
+         (tts (harness-media--free-port))
+         (harness-voice-provider 'unmute)
+         (harness-speech-local-stt-command
+          (list python fixture "--stt-only" "--port" (number-to-string stt)))
+         (harness-speech-local-tts-command
+          (list python fixture "--tts-only" "--port" (number-to-string tts)))
+         (harness-speech-local-stt-url (format "http://127.0.0.1:%d/inference" stt))
+         (harness-speech-local-tts-url (format "http://127.0.0.1:%d/v1/audio/speech" tts)))
+    (unwind-protect
+        (progn
+          (harness-call 'speech/start)
+          (harness-media--wait #'harness-speech-running-p 40 "the pipeline running")
+          (harness-media--view #'harness-voice-setup)
+          (harness-voice-pipeline-refresh)
+          (harness-media--wait (lambda () (eq (harness-voice-pipeline-state) 'running))
+                               20 "the client to see the pipeline running")
+          (harness-media--settle 0.5)
+          (harness-media--capture "voice-setup"))
+      (harness-call 'speech/stop)
+      (harness-speech--stop-all))))
 
 (defun harness-media-shot-sessions ()
   "The session list, in a frame wide enough for its last column, the project.

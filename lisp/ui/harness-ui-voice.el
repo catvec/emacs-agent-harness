@@ -56,9 +56,12 @@
 An argv list, with the symbol `:file' for the input WAV.  No shell is
 used.  For a persistent local whisper.cpp server, use for example:
   (\"python3\" \"/path/to/scripts/harness-voice-stt\" :file)
-Nil leaves dictation unavailable.  Audio goes only to the service this
-command selects; nothing is downloaded or uploaded implicitly.  This is
-client configuration, not a safe directory-local option."
+Nil uses the harness server's local voice pipeline, which transcribes
+the audio where it runs (`speech/transcribe' over ACP, see
+harness-speech.el), so a client needs no whisper.cpp of its own.  With
+neither, dictation is unavailable.  Audio goes only to the service this
+selects; nothing is downloaded or uploaded implicitly.  This is client
+configuration, not a safe directory-local option."
   :type '(choice (const :tag "Unconfigured" nil)
                  (repeat (choice string (const :file))))
   :group 'harness-voice)
@@ -68,8 +71,11 @@ client configuration, not a safe directory-local option."
 An argv list, never a shell command.  For local speech, for example:
   (\"python3\" \"-m\" \"piper\" \"-m\" \"/models/voice.onnx\" \"-f\" :file)
 or (\"espeak-ng\" \"-w\" :file \"--stdin\").
-Nil leaves spoken replies unavailable; dictation still works.  Only
-assistant text is spoken, never thinking or tool output."
+Nil uses the harness server's local voice pipeline, which speaks the
+text where it runs (`speech/synthesize' over ACP), so a client needs no
+Kokoro or Piper of its own; with neither, spoken replies are
+unavailable.  Only assistant text is spoken, never thinking or tool
+output."
   :type '(choice (const :tag "Unconfigured" nil)
                  (repeat (choice string (const :file))))
   :group 'harness-voice)
@@ -219,7 +225,7 @@ down, so the control shows the state the user is creating."
   (unless (and (consp template) (stringp (car template))
                (cl-every (lambda (x) (or (stringp x) (eq x :file))) template)
                (memq :file template))
-    (user-error "Voice command unconfigured · :file argument required"))
+    (user-error "Speech command unset"))
   (unless (executable-find (car template))
     (user-error "Voice executable unavailable · %s" (car template)))
   (mapcar (lambda (x) (if (eq x :file) file x)) template))
@@ -368,8 +374,10 @@ down, so the control shows the state the user is creating."
           (cond
            ((and (eq phase 'recording) (harness-voice--job-stopping job) audio)
             (harness-voice--set-state 'transcribing)
-            (harness-voice--run job 'transcribing
-                                (harness-voice--command harness-voice-transcribe-command file)))
+            (if harness-voice-transcribe-command
+                (harness-voice--run job 'transcribing
+                                    (harness-voice--command harness-voice-transcribe-command file))
+              (harness-voice--transcribe-over-acp job file)))
            ((not ok)
             (harness-voice--fail
              job (format "Voice %s failed · %s" phase
@@ -425,8 +433,10 @@ The mouse and keyboard entry points both surface validation failures
 in the controls, before changing audio ownership or microphone power."
   (when (process-live-p harness-ui-media--recorder)
     (user-error "Audio recording active"))
-  ;; Validate transcription before turning on the microphone.
-  (harness-voice--command harness-voice-transcribe-command "audio.wav")
+  ;; Validate transcription before turning on the microphone:
+  ;; a command of your own, or the harness's pipeline.
+  (let ((reason (harness-voice--transcriber-error)))
+    (when reason (user-error "%s" reason)))
   (harness-voice--adopt)
   (harness-voice-interrupt)
   (let* ((job (harness-voice--new-job))
@@ -585,9 +595,11 @@ session/cancel path and never answers permissions automatically."
           (condition-case err
               (progn
                 (harness-voice--player file) ; Validate playback before synthesis.
-                (harness-voice--run job 'synthesizing
-                                    (harness-voice--command harness-voice-synthesize-command file)
-                                    (concat text "\n"))
+                (if harness-voice-synthesize-command
+                    (harness-voice--run job 'synthesizing
+                                        (harness-voice--command harness-voice-synthesize-command file)
+                                        (concat text "\n"))
+                  (harness-voice--synthesize-over-acp job text file))
                 (harness-voice--set-state 'synthesizing))
             (error (harness-voice--fail job (error-message-string err)))))
       (unless (eq harness-voice--state 'failed)
@@ -693,6 +705,122 @@ session/cancel path and never answers permissions automatically."
             harness-voice--streams (make-hash-table :test 'equal))
       (harness-voice--set-state 'ready)
       (harness-voice--refresh))))
+
+;;;; The harness's local pipeline
+
+;; A client with no speech commands of its own uses the harness server's
+;; local voice pipeline (`speech/transcribe' and `speech/synthesize'
+;; over ACP, see harness-speech.el).  That is what puts whisper.cpp and
+;; Kokoro next to the harness instead of on every client: a phone
+;; records and plays, and the harness does the speech, as
+;; docs/computers.md says a shared service runs next to the server.
+;;
+;; The pipeline has no process of this client's to wait on, so its
+;; answer comes as a promise: the job keeps its phase and its timer, and
+;; the two callbacks below finish what a process sentinel finishes.
+
+(defun harness-voice--pipeline-transcribes-p ()
+  "Non-nil when dictation would transcribe with the harness's pipeline.
+That is a client with no transcription command of its own."
+  (null harness-voice-transcribe-command))
+
+(defun harness-voice--pipeline-speaks-p ()
+  "Non-nil when spoken replies would come from the harness's pipeline.
+That is a client with no synthesis command of its own."
+  (null harness-voice-synthesize-command))
+
+(defun harness-voice--transcriber-error ()
+  "Return why dictation cannot transcribe, or nil when it can.
+A command of your own is checked here; with none, the harness's pipeline
+must be running, so a stopped one refuses before the microphone is on."
+  (if harness-voice-transcribe-command
+      (condition-case err
+          (progn (harness-voice--command harness-voice-transcribe-command "audio.wav") nil)
+        (error (error-message-string err)))
+    (harness-voice-pipeline-reason)))
+
+(defun harness-voice--synthesizer-error ()
+  "Return why spoken replies cannot be spoken, or nil when they can."
+  (if harness-voice-synthesize-command
+      (condition-case err
+          (progn (harness-voice--command harness-voice-synthesize-command "audio.wav") nil)
+        (error (error-message-string err)))
+    (harness-voice-pipeline-reason)))
+
+(defun harness-voice--pipeline-call (method params on-ok)
+  "Call the harness's METHOD with PARAMS, then ON-OK with the result.
+A failure is the job's, in the one line a client shows; without a job,
+it is reported where the controls show it."
+  (harness-ui-call
+   method params
+   on-ok
+   (lambda (err)
+     (if-let* ((job harness-voice--job))
+         (harness-voice--fail job (error-message-string err))
+       (when (buffer-live-p harness-voice--owner)
+         (with-current-buffer harness-voice--owner
+           (harness-voice--set-state 'failed (error-message-string err))))))))
+
+(defun harness-voice--wav-base64 (file)
+  "Return the WAV at FILE as base64, or signal when it is empty."
+  (let ((size (nth 7 (file-attributes file))))
+    (unless (and (numberp size) (> size 44))
+      (error "Recorder stopped · No transcription"))
+    (base64-encode-string
+     (with-temp-buffer
+       (set-buffer-multibyte nil)
+       (insert-file-contents-literally file)
+       (buffer-string))
+     t)))
+
+(defun harness-voice--transcribe-over-acp (job file)
+  "Transcribe JOB's recording at FILE with the harness's pipeline.
+The answer is inserted at the job's compose offset, as a command's
+output would be."
+  (let ((payload (harness-voice--wav-base64 file)))
+    (harness-voice--pipeline-call
+     "_harness/speech/transcribe" (list :audio payload)
+     (lambda (result)
+       (cond
+        ((not (eq job harness-voice--job)) nil)
+        ((not (buffer-live-p (harness-voice--job-buffer job)))
+         (harness-voice--fail job "Voice compose unavailable"))
+        (t
+         (let ((text (string-trim (or (plist-get result :text) ""))))
+           (when (timerp (harness-voice--job-timer job))
+             (cancel-timer (harness-voice--job-timer job)))
+           (if (string-empty-p text)
+               (harness-voice--fail job "Empty transcription")
+             (setq harness-voice--job nil)
+             (harness-voice--dispose job)
+             (harness-voice--insert-transcript job text)))))))))
+
+(defun harness-voice--synthesize-over-acp (job text file)
+  "Speak TEXT for JOB with the harness's pipeline, into FILE.
+The WAV that comes back is played by the same player a command's
+output is played by."
+  (harness-voice--pipeline-call
+   "_harness/speech/synthesize" (list :text text)
+   (lambda (result)
+     (cond
+      ((not (eq job harness-voice--job)) nil)
+      ((not (buffer-live-p (harness-voice--job-buffer job)))
+       (harness-voice--fail job "Voice compose unavailable"))
+      (t
+       (let ((audio (plist-get result :audio)))
+         (when (timerp (harness-voice--job-timer job))
+           (cancel-timer (harness-voice--job-timer job)))
+         (condition-case err
+             (progn
+               (unless (and (stringp audio) (not (string-empty-p audio)))
+                 (error "Local voice pipeline · no audio"))
+               (with-temp-buffer
+                 (set-buffer-multibyte nil)
+                 (insert (base64-decode-string audio))
+                 (write-region (point-min) (point-max) file nil 'silent))
+               (harness-voice--set-state 'speaking)
+               (harness-voice--run job 'speaking (harness-voice--player file)))
+           (error (harness-voice--fail job (error-message-string err))))))))))
 
 ;;;; Entry points
 

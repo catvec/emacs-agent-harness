@@ -53,6 +53,7 @@ and supervisor load only when they are named.
  ;;secrets            ; Secret references, masking of tool output and the guard against…
  ;;session-search     ; Searches session transcripts: an SQLite full-text index, grep, and…
  ;;skills             ; Skill discovery (SKILL.md directories), search, loading and prompt…
+ ;;speech             ; The local speech service the harness runs for its clients: the…
  ;;stacks             ; Compose stacks that modules and plugins declare: start, stop, state,…
  ;;supervisor         ; Supervisor mode: sessions that plan and delegate, enforced by the…
  ;;tasks              ; Task mode: one session per task, through review and the merge queue,…
@@ -100,7 +101,7 @@ and supervisor load only when they are named.
  ;;slots              ; The task slots page: the tasks that hold slots… (with tool-slots-load)
  ;;sticky-compose     ; The compose box, docked in the mode line of a chat window scrolled…
  ;;tree               ; Conversation tree: the fork family of a session as a git-like graph.
- ;;voice              ; WAV dictation or live voice through a provider, with ChatGPT Live, a…
+ ;;voice              ; WAV dictation or live voice through a provider, with… (with speech)
  ;;watches            ; Event watches of a session, pinned above its… (with tools-events)
  )
 ```
@@ -170,6 +171,7 @@ and supervisor load only when they are named.
 | [session-search](session-search.md) |  | [store](store.md), [session](session.md) | Searches session transcripts: an SQLite full-text index, grep, and semantic search by embeddings. |
 | [skills](skills.md) |  | [tools](tools.md) | Skill discovery (SKILL.md directories), search, loading and prompt index. |
 | [small](small.md) | by default |  | One-off model calls the harness makes on its own, tried again like a step of a turn when they fail transiently. |
+| [speech](speech.md) |  | [stacks](stacks.md) | The local speech service the harness runs for its clients: the whisper.cpp and Kokoro pipeline as the harness server's child, its state and endpoints, and transcription and synthesis over ACP so a phone needs no speech model. |
 | [stacks](stacks.md) |  |  | Compose stacks that modules and plugins declare: start, stop, state, dynamic ports and the harness server's network. |
 | [store](store.md) | by default |  | JSON, JSONL and SQLite persistence under the state directory. |
 | [supervisor](supervisor.md) | when named | [session](session.md), [agent](agent.md), [tools](tools.md), [readonly](readonly.md) | Supervisor mode: sessions that plan and delegate, enforced by the harness. |
@@ -372,6 +374,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/todos` | [session](session.md) | [session](session.md) | [acp](acp.md), [todo-sync](todo-sync.md) |  |
 | `session/updated` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache-warm](cache-warm.md), [fallback](fallback.md), [perms](perms.md), [pet](pet.md) |  |
 | `session/usage` | [session](session.md) | [session](session.md) | [cache-warm](cache-warm.md), [tools](tools.md), [usage](usage.md) |  |
+| `speech/changed` | [speech](speech.md) | [speech](speech.md) |  | yes |
 | `supervisor/changed` | [supervisor](supervisor.md) | [supervisor](supervisor.md) |  | yes |
 | `task/backlog-mode` | [tasks](tasks.md) | [tasks](tasks.md) |  | yes |
 | `task/changed` | [tasks](tasks.md) | [tasks](tasks.md) | [supervisor](supervisor.md), [tools-sessions](tools-sessions.md), [ui-patch-review](ui-patch-review.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-sessions](ui-sessions.md), [ui-tasks](ui-tasks.md) | yes |
@@ -528,7 +531,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-update-hook` | [ui-version](ui-version.md), `harness.el` | [ui-version](ui-version.md) |
 | `harness-websearch-ready-functions` | [tools-web](tools-web.md) |  |
 | `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-provider-check](ui-provider-check.md), [ui-server](ui-server.md), [ui-voice](ui-voice.md), [ui-workspace](ui-workspace.md) |
-| `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [session](session.md), [tasks](tasks.md), [ui](ui.md), [ui-voice](ui-voice.md) |
+| `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [session](session.md), [speech](speech.md), [tasks](tasks.md), [ui](ui.md), [ui-voice](ui-voice.md) |
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
 | `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-patch-review](ui-patch-review.md), [ui-sticky-compose](ui-sticky-compose.md), `compose-quote.el`, `change-review-ui.el` |
 | `pre-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) |

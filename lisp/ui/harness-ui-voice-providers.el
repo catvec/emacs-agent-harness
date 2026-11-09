@@ -47,20 +47,13 @@
 (require 'harness-util)
 (require 'harness-ui)
 (require 'harness-ui-media)
-;; The local stack is optional: a client that has no docker keeps the
-;; provider, and the setup list says the stack is unavailable.
-(require 'harness-stacks nil t)
+;; The local voice pipeline is the harness server's (`speech/status'
+;; over ACP, see harness-speech.el): a client has no docker, no
+;; whisper.cpp and no Kokoro of its own, and a phone has none at all.
 
 (declare-function harness-voice--refresh "harness-ui-voice")
 (declare-function harness-voice-live--active-p "harness-ui-voice-live")
 (declare-function harness-voice-live-stop "harness-ui-voice-live")
-(declare-function harness-compose-stack-status "harness-stacks")
-(declare-function harness-compose-stack-up "harness-stacks")
-(declare-function harness-compose-stack-down "harness-stacks")
-(declare-function harness-compose-stack-available-p "harness-stacks")
-(declare-function harness-compose-stack-endpoint "harness-stacks")
-(declare-function harness-container-runtime-need-reason "harness-container-runtime")
-(declare-function harness-define-compose-stack "harness-stacks")
 
 (defvar harness-directory)
 
@@ -72,6 +65,12 @@
 (defgroup harness-voice nil
   "Client-side dictation and spoken replies, with any coding provider."
   :group 'harness-ui)
+
+(defvar harness-voice-pipeline-status nil
+  "The last status of the harness's local voice pipeline, or nil.
+It is `speech/status' as the harness answered it, kept so the setup list
+draws it without asking again on every redraw.  The pipeline is the
+harness server's; a client only ever reads this.")
 
 ;;;; Capabilities
 
@@ -91,18 +90,17 @@
 
 (defvar harness-voice-providers (make-hash-table :test 'eq)
   "Voice provider id -> plist of :id, :label, :capability, :doc,
-:command and :needs.")
+:command, :needs and :efforts.")
 
-(cl-defun harness-define-voice-provider (id &key label capability doc command needs efforts stack)
+(cl-defun harness-define-voice-provider (id &key label capability doc command needs efforts)
   "Register voice provider ID.
 LABEL names it in the UI, CAPABILITY is `wav' or `live' (`live' when
 omitted), DOC explains it, COMMAND is an argv list or a function of no
 arguments returning one, and NEEDS is a list of things the provider
 needs: `(env NAME)', `(executable NAME)' or a function returning a
 one-line reason when it cannot run.  EFFORTS maps `low', `medium' and
-`high' to argv fragments this provider adds at that effort.  STACK
-names the compose stack this provider needs beside it (see
-`harness-define-compose-stack').  Defining ID again replaces it."
+`high' to argv fragments this provider adds at that effort.  Defining
+ID again replaces it."
   (unless (memq capability harness-voice-capabilities)
     (setq capability 'live))
   (puthash id (list :id id
@@ -111,8 +109,7 @@ names the compose stack this provider needs beside it (see
                     :doc doc
                     :command command
                     :needs needs
-                    :efforts efforts
-                    :stack stack)
+                    :efforts efforts)
            harness-voice-providers)
   id)
 
@@ -311,8 +308,11 @@ runs now."
     (cdr (assoc answer choices))))
 
 (defun harness-voice--insert-stt-model ()
-  "Insert the local speech model line under the stack line."
-  (when (and (harness-voice--stack-id) (featurep 'harness-stacks))
+  "Insert the speech model line under the pipeline's.
+The model is the one the harness server's pipeline loads, so the line is
+drawn only for a client the harness has answered: a client with no
+pipeline has no speech model of its own to name."
+  (when (harness-voice-pipeline-status-cached)
     (let* ((chosen (harness-voice-stt-model-chosen-p))
            (record (harness-voice-stt-model-resolved))
            (parts (if chosen
@@ -332,39 +332,45 @@ runs now."
                #'harness-voice-select-stt-model)
               "\n"))))
 
-(defun harness-voice--stack-running-p ()
-  "Non-nil when the selected provider's stack reports running."
-  (let ((id (harness-voice--stack-id)))
-    (and id (featurep 'harness-stacks)
-         (eq 'running (plist-get (harness-compose-stack-status id) :state)))))
+(defun harness-voice--pipeline-running-p ()
+  "Non-nil when the harness reports its local voice pipeline running."
+  (eq 'running (harness-voice-pipeline-state)))
 
-(defun harness-voice--restart-stack ()
-  "Restart the selected provider's stack so its new model loads.
-Compose recreates a service whose environment changed, but a profile
-switch needs the old service stopped first: `down' enables every
-profile the stack can use, so the previous engine's container goes with
-it."
-  (let ((id (harness-voice--stack-id)))
-    (when (and id (featurep 'harness-stacks) (harness-voice--stack-running-p))
-      (message "Local voice stack · restarting")
-      (harness-compose-stack-down
-       id (lambda (state)
-            (if (eq 'stopped (plist-get state :state))
-                (harness-compose-stack-up
-                 id (lambda (state)
-                      (message "Local voice stack · %s" (harness-voice--stack-result state))
-                      (harness-voice-setup--refresh)))
-              ;; The previous engine may still run: an up over it would
-              ;; leave two speech services on one stack.
-              (message "Local voice stack · %s" (harness-voice--stack-result state))
-              (harness-voice-setup--refresh)))))))
+(defun harness-voice--restart-pipeline ()
+  "Restart the harness's pipeline so the newly selected model loads.
+The pipeline is the harness server's, so this client only asks it: stop,
+then start once the stop answered, which is what makes the harness
+recreate the speech service with the new engine and model.  A stop that
+failed leaves the pipeline alone rather than starting a second speech
+service beside the one still running."
+  (when (harness-voice--pipeline-running-p)
+    (message "Local voice pipeline · restarting")
+    (harness-ui-call
+     "_harness/speech/stop" nil
+     (lambda (status)
+       (if (eq 'stopped (intern-soft (plist-get status :state)))
+           (harness-ui-call "_harness/speech/start" nil
+                            (lambda (status)
+                              (message "%s" (harness-voice--pipeline-result status))
+                              (harness-voice-pipeline-receive status))
+                            (lambda (err)
+                              (message "Local voice pipeline · %s"
+                                       (harness-error-message err))
+                              (harness-voice-pipeline-refresh)))
+         ;; The previous engine may still run: a start over it would
+         ;; leave two speech services on one stack.
+         (message "%s" (harness-voice--pipeline-result status))
+         (harness-voice-pipeline-receive status)))
+     (lambda (err)
+       (message "Local voice pipeline · %s" (harness-error-message err))
+       (harness-voice-pipeline-refresh)))))
 
 (defun harness-voice-select-stt-model (&optional model)
   "Select local speech-to-text MODEL for this client, prompting when nil.
 A running live session ends first, so the sidecar is not left with the
-previous model's endpoint.  A stack that runs restarts when the model
-it would load changes, since compose has to recreate the speech service
-with the new engine and model."
+previous model's endpoint.  A pipeline that runs restarts when the
+model it would load changes, since the harness has to recreate the
+speech service with the new engine and model; the harness loads it."
   (interactive)
   (unless model
     (setq model (harness-voice-read-stt-model)))
@@ -376,12 +382,12 @@ with the new engine and model."
       (harness-voice-live-stop))
     (setq harness-voice-stt-model model)
     (unless (eq previous (harness-voice-stt-model-resolved))
-      (harness-voice--restart-stack))
+      (harness-voice--restart-pipeline))
     (harness-voice-setup--refresh)
     (message "Speech to text · %s" (harness-voice-stt-model-name))
     model))
 
-;;;; Stack wiring
+;;;; The speech model's stack profile and environment
 
 (defun harness-voice-stack-profiles ()
   "Return the compose profile of the selected local speech model."
@@ -487,12 +493,10 @@ inside a redraw would never end.")
 (defun harness-voice-setup--insert ()
   "Insert the voice provider list into the current buffer.
 The buffer is read-only once its mode is on, so this binds that off.
-The selected provider's stack is asked for its state first: the
-provider rows below read the published ports from it, and a stale
-state would keep saying a running service is missing."
+The harness's pipeline state is asked for as the list is drawn, so the
+provider rows read where its services are, and a stale answer would
+keep saying a running service is missing."
   (let ((inhibit-read-only t))
-    (when (and (harness-voice--stack-id) (featurep 'harness-stacks))
-      (harness-compose-stack-status (harness-voice--stack-id)))
     (insert (propertize "Voice providers" 'face 'harness-label-face) "\n\n")
     (dolist (id (harness-voice-provider-ids))
       (let* ((record (harness-voice-provider-get id))
@@ -519,7 +523,7 @@ state would keep saying a running service is missing."
           ;; The chosen provider still says what it lacks.
           (insert " · " (propertize reason 'face 'harness-failure-face)))
         (insert "\n")))
-    (harness-voice--insert-stack)
+    (harness-voice--insert-pipeline)
     (harness-voice--insert-stt-model)
     (harness-voice--insert-audio)
     (insert "\n"
@@ -576,80 +580,151 @@ at all is named, with the programs that would give it one."
                         'help-echo "Voice microphone and speaker")
             "\n")))
 
-(defun harness-voice--stack-id ()
-  "Return the compose stack of the selected provider, or nil."
-  (plist-get (harness-voice-provider-get harness-voice-provider) :stack))
+(defun harness-voice-pipeline-status-cached ()
+  "Return the pipeline status this client last took in, or nil.
+The harness server owns the pipeline (`speech/status' over ACP, see
+harness-speech.el); the setup list draws what arrived, and a request in
+flight leaves the last answer in place rather than blanking the line."
+  harness-voice-pipeline-status)
 
-(defun harness-voice--insert-stack ()
-  "Insert the local stack line when the selected provider has one.
-The setup list asked for the state before its provider rows, so it is
-read from the cache here; a redraw inside a redraw would never end."
-  (when (and (harness-voice--stack-id) (featurep 'harness-stacks))
-    (let* ((id (harness-voice--stack-id))
-           (record (or (gethash id harness-stacks--states)
-                       (harness-compose-stack-status id)))
-           (state (or (plist-get record :state) 'stopped))
-           (detail (or (plist-get record :detail) "Local voice stack"))
-           (running (eq state 'running)))
-      (insert "\n"
-              (propertize "Local voice stack" 'face 'harness-label-face)
-              "  "
-              (propertize (pcase state
-                            ('running "● running")
-                            ('starting "◐ starting")
-                            ('error "✕ failed")
-                            (_ "○ stopped"))
-                          'face (pcase state
-                                  ('running 'harness-success-face)
-                                  ('starting 'harness-caution-face)
-                                  ('error 'harness-failure-face)
-                                  (_ 'harness-dim-face))
-                          'help-echo detail)
-              "  "
-              (if running
-                  (harness-ui-string-action
-                   (propertize "[Stop]" 'face 'button 'help-echo "Local voice stack · stop")
-                   #'harness-voice-stack-down)
+(defun harness-voice-pipeline-state ()
+  "Return the pipeline's state as a symbol.
+`running', `starting', `stopped' or `failed'; `unknown' before the
+harness has answered this client."
+  (pcase (plist-get (harness-voice-pipeline-status-cached) :state)
+    ("running" 'running)
+    ("starting" 'starting)
+    ("stopped" 'stopped)
+    ("error" 'failed)
+    (_ 'unknown)))
+
+(defun harness-voice-pipeline-word (state)
+  "Return the word the setup list shows for pipeline STATE."
+  (pcase state
+    ('running "running")
+    ('starting "starting")
+    ('stopped "stopped")
+    ('failed "failed")
+    (_ "not checked")))
+
+(defun harness-voice-pipeline-face (state)
+  "Return the face the setup list shows pipeline STATE in."
+  (pcase state
+    ('running 'harness-success-face)
+    ('starting 'harness-caution-face)
+    ('failed 'harness-failure-face)
+    (_ 'harness-dim-face)))
+
+
+(defun harness-voice-pipeline-reason ()
+  "Return the one line why the pipeline cannot speak, or nil.
+The harness says it in `:reason', so every client names the same cause."
+  (let ((status (harness-voice-pipeline-status-cached)))
+    (or (plist-get status :reason)
+        (pcase (harness-voice-pipeline-state)
+          ('running nil)
+          ('unknown "Local voice pipeline · not checked")
+          (state (format "Local voice pipeline · %s"
+                         (harness-voice-pipeline-word state)))))))
+
+(defun harness-voice--insert-pipeline ()
+  "Insert the harness's local voice pipeline: its state and its controls.
+The pipeline runs on the harness server, as a child of it, so a client on
+a phone has dictation and spoken replies without whisper.cpp, Kokoro or
+docker of its own."
+  (let* ((status (harness-voice-pipeline-status-cached))
+         (state (harness-voice-pipeline-state))
+         (detail (or (plist-get status :detail) "Local voice pipeline"))
+         (running (eq state 'running)))
+    (insert "\n"
+            (propertize "Pipeline" 'face 'harness-label-face)
+            "  "
+            (propertize (concat (pcase state
+                                  ('running "● ")
+                                  ('starting "◐ ")
+                                  ('failed "✕ ")
+                                  (_ "○ "))
+                                (harness-voice-pipeline-word state))
+                        'face (harness-voice-pipeline-face state)
+                        'help-echo detail)
+            "  "
+            (if running
                 (harness-ui-string-action
-                 (propertize "[Start]" 'face 'button 'help-echo "Local voice stack · start")
-                 #'harness-voice-stack-up))
-              "\n"))))
+                 (propertize "[Stop]" 'face 'button
+                             'help-echo "Local voice pipeline · stop")
+                 #'harness-voice-pipeline-stop)
+              (harness-ui-string-action
+               (propertize "[Start]" 'face 'button
+                           'help-echo "Local voice pipeline · start")
+               #'harness-voice-pipeline-start))
+            "\n")))
 
-(defun harness-voice--stack-result (state)
-  "Return the one-line echo text for stack STATE.
-A failure keeps its detail, so the cause of a failed start is visible
-in the echo area instead of only the word `error'."
-  (let ((kind (plist-get state :state))
-        (detail (plist-get state :detail)))
-    (if (and (eq kind 'error) detail (not (string-empty-p detail)))
-        (format "%s · %s" kind detail)
-      (format "%s" kind))))
+(defun harness-voice--pipeline-result (status)
+  "Return the one-line echo text for pipeline STATUS.
+A failure keeps its detail, so the cause of a failed start is visible in
+the echo area instead of only the word `failed'."
+  (let ((state (pcase (plist-get status :state)
+                 ("running" 'running)
+                 ("starting" 'starting)
+                 ("stopped" 'stopped)
+                 ("error" 'failed)
+                 (_ 'unknown)))
+        (detail (plist-get status :detail)))
+    (if (and (eq state 'failed) detail (not (string-empty-p detail)))
+        (format "Local voice pipeline · %s · %s"
+                (harness-voice-pipeline-word state) detail)
+      (format "Local voice pipeline · %s" (harness-voice-pipeline-word state)))))
 
-(defun harness-voice-stack-up ()
-  "Start the selected provider's local compose stack."
+
+(defun harness-voice-pipeline-receive (status)
+  "Take in STATUS, the pipeline's state as the harness reported it.
+The setup list redraws, so [Start] and [Stop] follow the one pipeline
+every client shares."
+  (setq harness-voice-pipeline-status status)
+  (harness-voice-setup--refresh))
+
+(defun harness-voice-pipeline-refresh ()
+  "Ask the harness for its pipeline's state.
+The answer is drawn when it arrives, see `harness-voice-pipeline-receive'."
   (interactive)
-  (let ((id (harness-voice--stack-id)))
-    (unless (and id (featurep 'harness-stacks))
-      (user-error "Local stack unavailable"))
-    (unless (harness-compose-stack-available-p)
-      (user-error "%s" (or (harness-container-runtime-need-reason)
-                           "Runtime unavailable")))
-    (harness-compose-stack-up
-     id (lambda (state)
-          (message "Local voice stack · %s" (harness-voice--stack-result state))
-          (harness-voice-setup--refresh)))))
+  (harness-ui-call "_harness/speech/status" nil #'harness-voice-pipeline-receive
+                   (lambda (_err) nil)))
 
-(defun harness-voice-stack-down ()
-  "Stop the selected provider's local compose stack."
+(defun harness-voice-pipeline-start ()
+  "Start the harness server's local voice pipeline, for every client."
   (interactive)
-  (let ((id (harness-voice--stack-id)))
-    (unless (and id (featurep 'harness-stacks))
-      (user-error "Local stack unavailable"))
-    (harness-compose-stack-down
-     id (lambda (state)
-          (message "Local voice stack · %s" (harness-voice--stack-result state))
-          (harness-voice-setup--refresh)))))
+  (harness-ui-call
+   "_harness/speech/start" nil
+   (lambda (status)
+     (message "%s" (harness-voice--pipeline-result status))
+     (harness-voice-pipeline-receive status))
+   (lambda (err)
+     (message "Local voice pipeline · %s" (harness-error-message err))
+     (harness-voice-pipeline-refresh))))
 
+(defun harness-voice-pipeline-stop ()
+  "Stop the harness server's local voice pipeline, for every client."
+  (interactive)
+  (harness-ui-call
+   "_harness/speech/stop" nil
+   (lambda (status)
+     (message "%s" (harness-voice--pipeline-result status))
+     (harness-voice-pipeline-receive status))
+   (lambda (err)
+     (message "Local voice pipeline · %s" (harness-error-message err))
+     (harness-voice-pipeline-refresh))))
+
+(defun harness-voice-pipeline--on-event (event args)
+  "Follow the harness's pipeline from EVENT with ARGS.
+`speech/changed' carries its status, so a start from any client redraws
+every client's setup list."
+  (when (equal event "speech/changed")
+    (harness-voice-pipeline-receive (car args))))
+
+(defun harness-voice-pipeline-watch ()
+  "Ask for the pipeline now and follow it as the harness reports it."
+  (add-hook 'harness-ui-event-functions #'harness-voice-pipeline--on-event)
+  (harness-voice-pipeline-refresh))
 (defun harness-voice-select-effort (effort)
   "Select voice EFFORT and redraw an open setup list.
 With `harness-voice-stt-model' at `auto' the effort level picks the
@@ -660,7 +735,7 @@ chosen model leaves the level to the provider's own fragments only."
   (let ((previous (harness-voice-stt-model-resolved)))
     (setq harness-voice-effort effort)
     (unless (eq previous (harness-voice-stt-model-resolved))
-      (harness-voice--restart-stack)))
+      (harness-voice--restart-pipeline)))
   (harness-voice-setup--refresh)
   (message "Voice effort · %s" (capitalize (symbol-name effort)))
   effort)
@@ -672,9 +747,10 @@ chosen model leaves the level to the provider's own fragments only."
 `low' picks the smallest, most quantized models, for a laptop on
 battery; `medium' balances size and quality; `high' picks the largest
 models a provider offers.  Providers declare their own fragments (see
-`harness-define-voice-provider'), and with `harness-voice-stt-model'
-left at `auto' the local stack picks its whisper.cpp model from the
-same setting; a provider that declares no fragments passes none."
+`harness-define-voice-provider').  With `harness-voice-stt-model' left
+at `auto' the level also picks the local speech model, so a running
+pipeline restarts when that model changes; a provider that declares no
+fragments passes none."
   :type '(choice (const :tag "Low · fastest" low)
                  (const :tag "Medium · balanced" medium)
                  (const :tag "High · best" high))
@@ -685,15 +761,6 @@ same setting; a provider that declares no fragments passes none."
   (let ((efforts (plist-get (harness-voice-provider-get (or provider harness-voice-provider))
                             :efforts)))
     (cdr (assq harness-voice-effort efforts))))
-
-(defun harness-voice-whisper-model (&optional effort)
-  "Return the whisper.cpp model file for EFFORT, or the current one.
-These are the files `auto' in `harness-voice-stt-model' runs at that
-effort; the registered whisper models hold the same names."
-  (let* ((record (or (harness-voice-stt-model-get (harness-voice-effort-model effort))
-                     (harness-voice-stt-model-get 'whisper-base-en)))
-         (env (plist-get record :env)))
-    (or (cdr (assoc "WHISPER_MODEL" env)) "ggml-base.en.bin")))
 
 (defcustom harness-voice-live-command nil
   "Command running a custom live voice sidecar.
@@ -735,20 +802,20 @@ text is appended to that prompt."
 
 (defcustom harness-voice-unmute-stt-url nil
   "Speech-to-text endpoint the local voice provider posts WAV files to.
-Nil uses the running `voice-local' stack's service for the selected
-speech model: whisper.cpp's `/inference' under the effort presets, or
-the Parakeet server's `/inference' for `parakeet-0.6b'.  The stack's
-random loopback port needs no copying.  Set it to point at a service
-you run yourself, such as whisper.cpp's `/inference'."
-  :type '(choice (const :tag "The local stack" nil) string)
+Nil uses the harness server's local voice pipeline, whose state the
+setup list shows (`speech/status' over ACP); the pipeline's speech
+model answers, whisper.cpp under the effort presets or the Parakeet
+server for `parakeet-0.6b'.  Set it to point at a service you run
+yourself, such as whisper.cpp's `/inference'."
+  :type '(choice (const :tag "The harness pipeline" nil) string)
   :group 'harness-voice)
 
 (defcustom harness-voice-unmute-tts-url nil
   "Text-to-speech endpoint the local voice provider posts replies to.
-Nil uses the running `voice-local' stack's Kokoro service.  Set it to
-point at a text-to-speech service you run yourself, such as a Piper
-server with the same OpenAI-compatible shape."
-  :type '(choice (const :tag "The local stack" nil) string)
+Nil uses the harness server's local voice pipeline.  Set it to point at
+a text-to-speech service you run yourself, such as a Piper server with
+the same OpenAI-compatible shape."
+  :type '(choice (const :tag "The harness pipeline" nil) string)
   :group 'harness-voice)
 
 (defcustom harness-voice-unmute-voice "af_heart"
@@ -779,51 +846,47 @@ leaves a speaking mouth below it."
           (when harness-voice-chatgpt-instructions
             (list "--instructions" harness-voice-chatgpt-instructions))))
 
-(defun harness-voice-unmute--endpoint (service path)
-  "Return the running voice-local stack's URL for SERVICE/PATH, or nil."
-  (and (featurep 'harness-stacks)
-       (harness-compose-stack-endpoint 'voice-local service path)))
-
-(defun harness-voice-unmute--stt-endpoint ()
-  "Return the running stack's URL for the selected speech model, or nil."
-  (let ((record (harness-voice-stt-model-resolved)))
-    (and record
-         (harness-voice-unmute--endpoint (plist-get record :service)
-                                         (plist-get record :path)))))
+(defun harness-voice-unmute--pipeline-url (key)
+  "Return the harness pipeline's URL for KEY, or nil.
+KEY is `:stt-url' or `:tts-url'; it is read from the status the
+harness last reported (`speech/status'), so the client needs no port of
+its own and no docker beside it."
+  (let ((status (harness-voice-pipeline-status-cached)))
+    (or (plist-get harness-voice-pipeline-status key)
+        (when (equal (plist-get status :state) "running")
+          (plist-get status key)))))
 
 (defun harness-voice-unmute--stt-url ()
   "Return the local provider's speech-to-text URL, or signal.
-The bundled stack's whisper.cpp and Parakeet services both answer
-`/inference'; the selected model names which one runs."
+The harness pipeline's whisper.cpp service answers `/inference'."
   (or harness-voice-unmute-stt-url
-      (harness-voice-unmute--stt-endpoint)
-      (user-error "Speech to text service · not running")))
+      (harness-voice-unmute--pipeline-url :stt-url)
+      (user-error "Local voice pipeline · stopped")))
 
 (defun harness-voice-unmute--tts-url ()
   "Return the local provider's text-to-speech URL, or signal.
-The bundled stack's Kokoro service answers the OpenAI speech route."
+The harness pipeline's Kokoro service answers the OpenAI speech route."
   (or harness-voice-unmute-tts-url
-      (harness-voice-unmute--endpoint 'tts "v1/audio/speech")
-      (user-error "Text to speech endpoint unset")))
+      (harness-voice-unmute--pipeline-url :tts-url)
+      (user-error "Local voice pipeline · stopped")))
 
 (defun harness-voice-unmute-need ()
   "Return why the local provider cannot run, or nil.
-Speech to text comes from the running stack's service for the selected
-model; text to speech from `harness-voice-unmute-tts-url' or the
-stack's Kokoro service.  The reason is one line, for the setup list."
+Speech to text and text to speech both come from the harness server's
+local voice pipeline, unless a service of your own is named.  The
+reason is one line, for the setup list."
   (or (unless (or harness-voice-unmute-stt-url
-                  (harness-voice-unmute--stt-endpoint))
-        "Speech to text service · not running")
+                  (harness-voice-unmute--pipeline-url :stt-url))
+        (harness-voice-pipeline-reason))
       (unless (or harness-voice-unmute-tts-url
-                  (harness-voice-unmute--endpoint 'tts "v1/audio/speech"))
-        "Text to speech endpoint unset")))
+                  (harness-voice-unmute--pipeline-url :tts-url))
+        (harness-voice-pipeline-reason))))
 
 (defun harness-voice-unmute-command ()
   "Return the argv list running the bundled local pipeline sidecar.
-Speech to text comes from the running `voice-local' stack's service for
-the selected speech model unless `harness-voice-unmute-stt-url' names a
-service of your own; text to speech from `harness-voice-unmute-tts-url'
-or the stack's Kokoro service."
+Speech to text comes from the harness server's pipeline unless
+`harness-voice-unmute-stt-url' names a service of your own; text to
+speech from `harness-voice-unmute-tts-url' or the same pipeline."
   (list "python3" (harness-voice--script "harness-voice-live-unmute")
         "--stt-url" (harness-voice-unmute--stt-url)
         "--tts-url" (harness-voice-unmute--tts-url)
@@ -909,9 +972,16 @@ the reason names the programs that would make it work."
   :capability 'wav
   :doc "Record one utterance, transcribe it into the compose box, and speak reply sentences."
   :needs (list (lambda ()
-                 (unless (and (consp harness-voice-transcribe-command)
-                              (consp harness-voice-synthesize-command))
-                   "Transcription and synthesis commands unset"))))
+                 ;; A command of your own, or the harness's pipeline, which
+                 ;; this client reads over ACP (`harness-voice-pipeline-reason').
+                 (unless (or (and (consp harness-voice-transcribe-command)
+                                  (consp harness-voice-synthesize-command))
+                             (and (null harness-voice-transcribe-command)
+                                  (null harness-voice-synthesize-command)
+                                  (not (harness-voice-pipeline-reason))))
+                   (or (and (null harness-voice-transcribe-command)
+                            (harness-voice-pipeline-reason))
+                       "Transcription and synthesis commands unset")))))
 
 (harness-define-voice-provider 'chatgpt
   :label "ChatGPT Live"
@@ -925,8 +995,7 @@ the reason names the programs that would make it work."
   :capability 'live
   :doc "Local whisper.cpp or Parakeet speech to text and Kokoro text to speech · no hosted model, no key."
   :command #'harness-voice-unmute-command
-  :needs '(harness-voice--audio-need harness-voice-unmute-need)
-  :stack 'voice-local)
+  :needs '(harness-voice--audio-need harness-voice-unmute-need))
 
 (harness-define-voice-provider 'fixture
   :label "Scripted fixture"
@@ -935,28 +1004,16 @@ the reason names the programs that would make it work."
   :command #'harness-voice-fixture-command
   :needs '((executable "python3")))
 
-(when (featurep 'harness-stacks)
-  ;; whisper.cpp, the Parakeet server and Kokoro all run on the CPU, so
-  ;; the stack carries them and the local provider needs no endpoint
-  ;; typed by hand.  The speech services sit behind their own profiles,
-  ;; so exactly the selected model's engine runs beside Kokoro.
-  (harness-define-compose-stack 'voice-local
-    :label "Local voice"
-    :doc "whisper.cpp or Parakeet for speech to text and Kokoro for text to speech, on loopback."
-    :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
-    :project "voice-local"
-    :network "voice"
-    :endpoints '((whisper 8080) (parakeet 8081) (tts 8880))
-    :profiles #'harness-voice-stack-profiles
-    :all-profiles '("whisper" "parakeet")
-    :env #'harness-voice-stack-env))
-
 (harness-define-voice-provider 'custom
   :label "Custom sidecar"
   :capability 'live
   :doc "Any sidecar that speaks the JSON-lines protocol, from `harness-voice-live-command'."
   :command (lambda () harness-voice-live-command)
   :needs (list #'harness-voice--custom-need))
+
+;; The pipeline is the harness server's; this client asks for it and
+;; follows it, and the setup list draws what arrived.
+(harness-voice-pipeline-watch)
 
 (provide 'harness-ui-voice-providers)
 ;;; harness-ui-voice-providers.el ends here

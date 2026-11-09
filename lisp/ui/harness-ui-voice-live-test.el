@@ -361,16 +361,18 @@ which used to leave the line reading Off after a rejected Start."
     (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 500))
               ((symbol-function 'harness-compose--room)
                (lambda () (* 500 (frame-char-width))))
-              ((symbol-function 'harness-voice-unmute--endpoint)
-               (lambda (&rest _) nil)))
+              ((symbol-function 'harness-voice-unmute--pipeline-url)
+               (lambda (&rest _) nil))
+              ((symbol-function 'harness-voice-pipeline-reason)
+               (lambda () "Local voice pipeline · stopped")))
       (should (string-search "Live · Off"
                              (buffer-substring-no-properties (point-min) (point-max))))
       (harness-voice-live--start-here)
       (should (eq harness-voice-live--state 'failed))
-      (should (equal "Speech to text service · not running"
+      (should (equal "Local voice pipeline · stopped"
                      harness-voice-live--error))
-      (should (equal (concat " Live · Failed · [Start] · Speech to text service"
-                             " · not running · [Transcript] · [Setup]")
+      (should (equal (concat " Live · Failed · [Start] · Local voice pipeline"
+                             " · stopped · [Transcript] · [Setup]")
                      (substring-no-properties (harness-voice-live--controls))))
       (should (string-search "Live · Failed"
                              (buffer-substring-no-properties (point-min) (point-max))))

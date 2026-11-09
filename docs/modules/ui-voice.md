@@ -66,6 +66,11 @@ on completion, interruption, failure, buffer death and shutdown.
 
 ## Uses
 
+### Methods it calls
+
+- `speech/synthesize` ([speech](speech.md))
+- `speech/transcribe` ([speech](speech.md))
+
 ### Events it hears over ACP
 
 - `harness/reloaded` → `harness-voice--on-event`

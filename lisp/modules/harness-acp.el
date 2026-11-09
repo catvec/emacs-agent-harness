@@ -166,7 +166,7 @@ is never used for any other failure.")
     "secrets/" "commit-msg/" "errors/"
     "decision/" "access/" "patch-review/" "tool-slots/" "cache/" "link/" "todo-sync/"
     "event-watch/" "chatgpt-plan/" "model-complexity/" "memory/" "demo/"
-    "computer/")
+    "computer/" "speech/")
   "Bus method name prefixes callable as `_harness/NAME'.
 Modules of the user's own add theirs to
 `harness-acp-extra-method-prefixes'.")
@@ -255,7 +255,8 @@ it can answer for another one.")
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked
     decision/changed access/changed access/judged patch-review/changed tool-slots/changed
     patch-review/last-close
-    cache/warm-changed event-watch/changed chatgpt-plan/accounts-changed memory/changed)
+    cache/warm-changed event-watch/changed chatgpt-plan/accounts-changed memory/changed
+    speech/changed)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 
 (defvar harness-acp-authorize-functions nil
