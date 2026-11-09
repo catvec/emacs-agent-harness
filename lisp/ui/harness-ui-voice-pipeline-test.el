@@ -440,6 +440,7 @@
                   (failed . "failed")))
     (should (equal (cdr case) (harness-voice-pipeline--reply-label (car case)))))
   (dolist (case '((too-short . "too short") (no-words . "no words")
+                  (no-request . "no request")
                   (cancelled . "cancelled") (failed . "failed")))
     (should (equal (cdr case) (harness-voice-pipeline--drop-label (car case)))))
   (dolist (case '((queued . "queued") (working . "working") (replied . "replied")

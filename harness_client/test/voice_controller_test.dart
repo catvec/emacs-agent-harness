@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/voice/voice_backend.dart';
 import 'package:harness_client/src/voice/voice_models.dart';
+import 'package:harness_client/src/voice/voice_pipeline.dart';
 import 'package:harness_client/src/voice/voice_settings.dart';
 
 import 'support/voice_fakes.dart';
@@ -435,5 +436,99 @@ void main() {
       'first',
     ]);
     await rig.controller.stop();
+  });
+
+  test('a mumbly prompt is distilled before the session sees it', () async {
+    final rig = Rig();
+    await rig.controller.start();
+    await settle();
+    const raw = 'Uh, add a docstring, um, to the the parser.';
+    rig.backend.emit(
+      const VoicePromptEvent(VoicePrompt(text: raw, id: 'u-1')),
+    );
+    await settle();
+    final prompt = rig.session.sent.single;
+    expect(prompt.text, 'add a docstring to the parser.');
+    expect(prompt.displayText, raw);
+    final turn = rig.controller.conversation.turns.single;
+    expect(turn.raw, raw);
+    expect(turn.text, 'add a docstring to the parser.');
+    expect(turn.sent, 'add a docstring to the parser.');
+    await rig.controller.stop();
+  });
+
+  test('a burst of mumbles sends no request and says why', () async {
+    final rig = Rig();
+    await rig.controller.start();
+    await settle();
+    rig.backend.emit(
+      const VoiceSegmentEvent(
+        id: 'u-1',
+        stage: VoiceSegmentStage.accepted,
+      ),
+    );
+    await settle();
+    rig.backend.emit(
+      const VoicePromptEvent(
+        VoicePrompt(text: 'Um, uh, hmm.', id: 'd-1', segmentId: 'u-1'),
+      ),
+    );
+    await settle();
+    expect(rig.session.sent, isEmpty);
+    final segment = rig.controller.pipelineState.segments.single;
+    expect(segment.stage, VoicePipelineStage.dropped);
+    expect(segment.drop, VoiceSegmentDrop.noRequest);
+    expect(segment.dropLabel, 'no request');
+    final turn = rig.controller.conversation.turns.single;
+    expect(turn.raw, 'Um, uh, hmm.');
+    expect(turn.text, isNull);
+    await rig.controller.stop();
+  });
+
+  test('a dependent prompt carries the voice conversation', () async {
+    final rig = Rig();
+    await rig.controller.start();
+    await settle();
+    rig.backend.emit(
+      const VoiceCaptionEvent(
+        VoiceSpeaker.agent,
+        'The timer wakes it every 200 ms.',
+        finalized: true,
+      ),
+    );
+    await settle();
+    rig.backend.emit(
+      const VoicePromptEvent(
+        VoicePrompt(text: 'Do that instead.', id: 'u-1'),
+      ),
+    );
+    await settle();
+    final prompt = rig.session.sent.single;
+    expect(prompt.text, startsWith('Do that instead.\n\n'));
+    expect(prompt.text, contains('Voice conversation before this request:'));
+    expect(prompt.text, contains('Voice: The timer wakes it every 200 ms.'));
+    expect(prompt.displayText, 'Do that instead.');
+
+    rig.backend.emit(
+      const VoicePromptEvent(
+        VoicePrompt(text: 'Add a docstring to parse.', id: 'u-2'),
+      ),
+    );
+    await settle();
+    expect(rig.session.sent.last.text, 'Add a docstring to parse.');
+    await rig.controller.stop();
+  });
+
+  test('ending the call forgets the voice conversation', () async {
+    final rig = Rig();
+    await rig.controller.start();
+    await settle();
+    rig.backend.emit(
+      const VoicePromptEvent(VoicePrompt(text: 'Add a test.', id: 'u-1')),
+    );
+    await settle();
+    expect(rig.controller.conversation.turns, isNotEmpty);
+    await rig.controller.stop();
+    expect(rig.controller.conversation.turns, isEmpty);
   });
 }

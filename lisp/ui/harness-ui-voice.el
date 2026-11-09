@@ -18,9 +18,10 @@
 ;; the agent turn and every permission decision.  The bundled live
 ;; providers are ChatGPT Live (GPT-Live over the API), a local
 ;; whisper.cpp or Parakeet and Kokoro pipeline, and a scripted fixture;
-;; a sidecar delegation becomes a normal prompt in the chat, and
-;; assistant text streams back as commentary.  Audio never crosses the
-;; control pipe.
+;; a sidecar delegation becomes a distilled request in the chat (a
+;; bounded piece of the voice conversation travels with it when the
+;; request needs one), and assistant text streams back as commentary.
+;; Audio never crosses the control pipe.
 ;;
 ;; The local pipeline's speech-to-text model is a choice of its own
 ;; (`harness-voice-stt-model'), listed on the voice setup page: the
@@ -740,41 +741,27 @@ ownership; disabling stops audio, not work."
     (harness-voice-mode (if harness-voice-mode -1 1))))
 
 (defun harness-voice--context ()
-  "Return visible origin context for a quick voice chat, without file contents."
+  "Return the visible origin of a quick voice chat, without file contents.
+This is a draft seed only: it names the file and line where voice was
+opened.  No other session is looked up or listed, and a live delegation
+does not repeat it."
   (let* ((root (harness-files-project-root default-directory))
-         (related (cl-remove-if-not
-                   (lambda (s) (and (equal (plist-get s :project) root)
-                                    (member (plist-get s :status) '("running" "blocked" "idle"))
-                                    (not (harness-ui-internal-session-p s))
-                                    (harness-ui-navigable-session-p s)))
-                   (harness-ui-sessions)))
-         (sessions (cl-subseq
-                    (sort related (lambda (a b)
-                                    (let ((active-a (member (plist-get a :status) '("running" "blocked")))
-                                          (active-b (member (plist-get b :status) '("running" "blocked"))))
-                                      (if (eq (not active-a) (not active-b))
-                                          (> (or (plist-get a :updated) 0) (or (plist-get b :updated) 0))
-                                        active-a))))
-                    0 (min 8 (length related))))
          (origin (if buffer-file-name
-                     (format "%s:%d" (file-relative-name buffer-file-name root) (line-number-at-pos))
+                     (format "%s:%d"
+                             (file-relative-name buffer-file-name root)
+                             (line-number-at-pos))
                    (buffer-name))))
-    (concat "Voice request context: " origin "\n"
-            (when sessions
-              (concat "Related sessions:\n"
-                      (mapconcat (lambda (s) (format "- [%s](harness:session/%s) · %s"
-                                                     (or (plist-get s :name) (plist-get s :id))
-                                                     (plist-get s :id) (plist-get s :status))) sessions "\n") "\n"))
-            "\n")))
+    (concat "Voice request context: " origin "\n\n")))
 
 ;;;###autoload
 (defun harness-voice ()
   "Open voice controls here, or a quick voice chat from an ordinary buffer.
-The quick chat starts on the configured coding provider, with file and
-line and related session links visible in its draft.  No file contents
-are sent automatically; live audio stays in the sidecar you configured.
-The normal send and tool paths keep threads, questions and permissions
-in the existing harness workflow."
+The quick chat starts on the configured coding provider, with the file
+and line where it was opened visible in its draft.  That is the only
+context: no other session is looked up or listed, and a live delegation
+repeats none of it.  No file contents are sent automatically; live audio
+stays in the sidecar you configured.  The normal send and tool paths keep
+threads, questions and permissions in the existing harness workflow."
   (interactive)
   (if (harness-compose-live-p)
       (progn
@@ -797,7 +784,6 @@ in the existing harness workflow."
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
              (harness-compose-set context)
-             (setq-local harness-voice--live-context context)
              (harness-voice-mode 1)
              (when (harness-voice-live-p)
                (harness-voice-live--start-here))

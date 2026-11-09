@@ -57,6 +57,26 @@ void main() {
       expect(snapshot.details.single, contains('too short'));
     });
 
+    test('a transcribed burst that leaves no request is dropped late', () {
+      final tracker = VoicePipelineTracker(clock: _now);
+      tracker.begin();
+      tracker.input(VoiceInputState.live);
+      tracker.accept('u-1');
+      tracker.transcript('u-1', 'Um, uh.', finalized: true);
+      tracker.drop(
+        'u-1',
+        drop: VoiceSegmentDrop.noRequest,
+        detail: 'no request',
+      );
+
+      final segment = tracker.snapshot.segments.single;
+      expect(segment.stage, VoicePipelineStage.dropped);
+      expect(segment.drop, VoiceSegmentDrop.noRequest);
+      expect(segment.dropLabel, 'no request');
+      expect(segment.column, VoicePipelineColumn.transcript);
+      expect(tracker.snapshot.details.single, contains('no request'));
+    });
+
     test('a segment waits at each stage and never skips one', () {
       final tracker = VoicePipelineTracker(clock: _now);
       tracker.begin();

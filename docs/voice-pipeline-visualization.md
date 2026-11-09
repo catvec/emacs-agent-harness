@@ -30,7 +30,8 @@ Mic · live · Level · 56% · Speech · heard · 4 accepted · 1 dropped · Tur
   No level is not silence: without telemetry the meter says `Level · no data`
   and the bars stay unlit.
 - **Filter** — the speech gate (`heard` while it hears speech) and the bursts
-  it did **not** keep, with the reason (`too short`, `no words`, `failed`).
+  it did **not** keep, with the reason (`too short`, `no words`, `no
+  request`, `failed`).
   A burst that survives enters here and moves right.
 - **Words** — speech to text: `transcribing`, `transcribed`, with a partial
   transcript replacing the text of the same marker.
@@ -162,7 +163,7 @@ exactly (`test/voice_pipeline_widget_test.dart`, `test/voice_pipeline_test.dart`
 | gate | `heard` (*Speech gate · speech heard*), and `Speech · heard` in the summary |
 | counts | `1 accepted`, `4 accepted`, `1 dropped` |
 | marker stages | `accepted`, `transcribing`, `transcribed`, `in turn`, `answered`, `dropped`, `failed` |
-| drop reasons | `too short`, `no words`, `cancelled`, `failed` |
+| drop reasons | `too short`, `no words`, `no request`, `cancelled`, `failed` |
 | why a burst stopped, in the details | `muted`, `paused`, `interrupted`, `ended`, `restart`, `context` (a reply folded into the next prompt) |
 | turn | `Turn · working`, `Turn · replied`, `Turn · done`, `Turn · failed` |
 | speaker | `Voice · silent`, `Voice · ready`, `Voice · held`, `Voice · handed`, `Voice · speaking`, `Voice · interrupted`, `Voice · failed` |
@@ -209,7 +210,7 @@ Every stage carries the event it comes from:
 | capture | the session's own state | start, `ready`, mute, `error`, an unexpected exit, stop | connecting, live, muted, failed, disconnected, ended |
 | gate | `speech` | the detector's onset and hangover | `active`, `utterance` |
 | accepted | `segment` `state=accepted` | `Vad._finish` (the local sidecar) or the GPT sidecar's gate, the moment the burst is kept | `id` (`u-N`), `seconds` |
-| dropped | `segment` `state=dropped` | the detector's `cancel` (`too short`), or an empty transcription (`no words`) | `id`, `seconds`, `reason` |
+| dropped | `segment` `state=dropped` | the detector's `cancel` (`too short`), an empty transcription (`no words`), or a transcript the client distilled to no request (`no request`) | `id`, `seconds`, `reason` |
 | failed | `segment` `state=failed` | a failed transcription | `id` |
 | transcribing | `transcribing`, `user_delta` | the transcription worker, or a provider's caption | `utterance`, text |
 | transcribed | `user_delta` `final` | the transcript is whole | text |

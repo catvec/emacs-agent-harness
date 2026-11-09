@@ -149,7 +149,8 @@ class VoiceSegment {
     VoicePipelineStage.inTurn ||
     VoicePipelineStage.answered => VoicePipelineColumn.turn,
     VoicePipelineStage.dropped =>
-      drop == VoiceSegmentDrop.noWords
+      drop == VoiceSegmentDrop.noWords ||
+              drop == VoiceSegmentDrop.noRequest
           ? VoicePipelineColumn.transcript
           : VoicePipelineColumn.filter,
     VoicePipelineStage.failed => VoicePipelineColumn.transcript,
@@ -159,6 +160,7 @@ class VoiceSegment {
   String? get dropLabel => switch (drop) {
     VoiceSegmentDrop.tooShort => 'too short',
     VoiceSegmentDrop.noWords => 'no words',
+    VoiceSegmentDrop.noRequest => 'no request',
     VoiceSegmentDrop.cancelled => 'cancelled',
     VoiceSegmentDrop.failed => 'failed',
     null => null,

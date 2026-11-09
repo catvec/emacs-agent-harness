@@ -97,19 +97,43 @@ on/off status. **Voice ready** does not mean the microphone is recording.
 **Voice failed** keeps failures visible rather than relying solely on the
 echo area. The live provider uses its own **Live · …** statuses below.
 
-### Current work and quick-chat context
+### Where voice gets its context
 
 In an existing compose box, dictation stays in that box: a chat, task-board
 message, quick search, popout or threaded reply uses its existing routing. A
 voice chat uses the same session transcript and tools as its typed equivalent.
 
-From an ordinary source buffer, quick voice chat carries source location and
-ongoing-session context into its draft. Review that context alongside the
-transcript. Session identifiers are references, not copies of all previous
-conversations: the selected model can inspect relevant sessions with the usual
-harness tools when those tools are enabled. A model must still resolve an
-ambiguous target or ask which session/file you mean; speech recognition and a
-context list are not guarantees of correct routing.
+From an ordinary source buffer, quick voice chat opens a new session in that
+file's project, with `Voice request context: file.py:42` as a visible draft
+seed. That is the only context: voice looks up no related sessions, and a
+live delegation never repeats the line. The session voice mode is used in is
+the context; for work across several projects or sessions, use the workspaces
+feature, or name the target in the session. The selected model can still
+inspect relevant sessions with the usual harness tools when those tools are
+enabled. A model must resolve an ambiguous target or ask which session/file
+is meant; speech recognition is not a guarantee of correct routing.
+
+### Voice conversation and session messages
+
+A live call keeps two records. The **voice conversation** is the audio side:
+the transcript as the speech model returned it, every line the voice spoke, and
+the request that crossed into the chat. The **session message** is what the
+chat receives: a request distilled from the transcript. `Uh`, `um`, a stutter,
+a comma-set `like` and an explicit `no wait, ...` correction are removed; every
+content word, name, path and number stays. The voice transcript shows the
+caption as it was heard and `Sent · ...` when the session got a different
+text; a burst of nothing but mumbles shows `Not sent · no request`.
+
+Distillation is local and synchronous: no model call, process or timer, so it
+adds no wait between the transcript and the prompt. A request that cannot
+stand alone (`do that`, `yes`, `the second one`, `also ...`) carries the last
+few voice turns as plain text; a self-contained request travels alone, without
+a wrapper. `harness-voice-distill` nil sends the transcript as heard and
+`harness-voice-conversation-carry-context` nil never adds the earlier turns.
+[The design](design/voice-conversation.md) has the rules, bounds and rejected
+alternatives. The Flutter client applies the same rules
+(`harness_client/lib/src/voice/voice_conversation.dart`), so a request
+composed on a phone has the same shape.
 
 ## Live voice with a sidecar
 
@@ -342,12 +366,13 @@ becomes **Talking · release** while the mouse is down, **Mute C-c v** becomes
 turn.
 
 A live session delegates work instead of typing into the draft. When the
-sidecar sends a `delegation`, its text becomes a prompt in the current chat,
-prefixed with the same visible file/line and related-session context as quick
-voice chat. Assistant sentences stream back to the sidecar as `commentary`;
-the turn's complete text returns as `delegate_result`. A second delegation
-waits for the running turn. Tool calls, questions and permission panels stay
-on screen, and no spoken answer can approve a permission.
+sidecar sends a `delegation`, its text becomes the request in the current
+chat. There is no per-message file/line or related-session prefix and no
+lookup of other sessions: the session is the context. Assistant sentences
+stream back to the sidecar as `commentary`; the turn's complete text returns
+as `delegate_result`. A second delegation waits for the running turn. Tool
+calls, questions and permission panels stay on screen, and no spoken answer
+can approve a permission.
 
 The WAV recorder is blocked while the sidecar owns the audio device. The live
 transcript is a separate, read-only buffer: the compose draft stays editable

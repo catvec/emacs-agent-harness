@@ -111,6 +111,9 @@ enum VoiceSegmentDrop {
   /// It was kept, but no words came back for it.
   noWords,
 
+  /// It was kept and transcribed, but distillation left no request.
+  noRequest,
+
   /// Mute, pause, stop or a restart dropped it before it was sent.
   cancelled,
 

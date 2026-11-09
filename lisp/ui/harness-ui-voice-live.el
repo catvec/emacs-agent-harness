@@ -14,12 +14,15 @@
 ;; Emacs to sidecar: start, context, mute, interrupt, stop, commentary,
 ;; thinking, delegate_result.
 ;;
-;; A delegation becomes a prompt in the current chat, through the normal
-;; `session/prompt' path.  Assistant text streams back as speakable
-;; commentary; the turn's full text is the delegate result.  Permissions
-;; and questions stay on screen: the sidecar may say that approval is
-;; needed, never approve anything.  Interruption stops playback only;
-;; cancelling the agent turn is a separate command.
+;; A delegation becomes a distilled request in the current chat, through
+;; the normal `session/prompt' path; the raw words stay in the voice
+;; conversation and the transcript, and a request that points at an
+;; earlier voice turn carries the last few turns with it.  Assistant text
+;; streams back as speakable commentary; the turn's full text is the
+;; delegate result.  Permissions and questions stay on screen: the
+;; sidecar may say that approval is needed, never approve anything.
+;; Interruption stops playback only; cancelling the agent turn is a
+;; separate command.
 
 ;;; Code:
 
@@ -30,11 +33,11 @@
 (require 'harness-util)
 (require 'harness-ui)
 (require 'harness-ui-compose)
+(require 'harness-ui-voice-conversation)
 (require 'harness-ui-voice-pipeline)
 
 (declare-function harness-voice--adopt "harness-ui-voice")
 (declare-function harness-voice--button "harness-ui-voice")
-(declare-function harness-voice--context "harness-ui-voice")
 (declare-function harness-voice--refresh "harness-ui-voice")
 (declare-function harness-voice "harness-ui-voice")
 (declare-function harness-voice-mode "harness-ui-voice")
@@ -80,6 +83,12 @@ One of nil, `starting', `listening', `speaking', `interrupted',
 (defvar harness-voice-live--order nil "Node ids in the order their text arrived.")
 (defvar harness-voice-live--heard ""
   "User transcript since the last delegation, for a delegation without text.")
+(defvar harness-voice-live--conversation (harness-voice-conversation-create)
+  "The voice conversation of the current call.
+It keeps the raw words and the distilled request of every user
+utterance, and what the voice actually spoke.  It is cleared when the
+call ends, so a new call starts empty while the chat keeps its own
+history.")
 (defvar harness-voice-live--speech-active nil
   "Non-nil while the sidecar hears a person speaking right now.")
 (defvar harness-voice-live--held nil
@@ -147,8 +156,6 @@ stage line and the timer read; the state is what the sidecar reported.")
   "Braille frames of the busy indicator.
 A frame every fifth of a second is the oldest trick there is to make a
 wait look alive, and it costs one character.")
-(defvar-local harness-voice--live-context nil
-  "Voice request context captured where this chat was opened.")
 
 ;;;; Status and controls
 
@@ -656,6 +663,7 @@ local pipeline, the fixture or a custom sidecar."
 
 (defun harness-voice-live--dispose ()
   "Kill the sidecar and its buffers without reporting a failure."
+  (harness-voice-conversation-clear harness-voice-live--conversation)
   (when (timerp harness-voice-live--timer)
     (cancel-timer harness-voice-live--timer))
   (when (timerp harness-voice-live--stage-timer)
@@ -750,7 +758,9 @@ utterance sends transcribing first, which cancels it."
         (harness-voice-live--send
          (list :event "commentary"
                :id (plist-get item :id)
-               :text (plist-get item :text)))))
+               :text (plist-get item :text)))
+        (harness-voice-conversation-say
+         harness-voice-live--conversation (plist-get item :text) 'commentary)))
     (unless harness-voice-live--speech-active
       (harness-voice-live--stage-set
        (cond ((not (harness-voice-live--active-p)) nil)
@@ -928,8 +938,9 @@ reported once."
 The stage line at the top says what the session is doing now, and the
 pipeline under it says what reached the microphone, what the speech
 filter kept and dropped, what was transcribed, and what the speaker is
-doing.  The sections below say what you said, what the coding agent did
-and what the voice said back.  `d' shows every pipeline marker,
+doing.  The sections below say what you said, what crossed into the
+session (`Sent`, or `Not sent` for a burst of mumbles), what the coding
+agent did and what the voice said back.  `d' shows every pipeline marker,
 `C-c v' dictates or mutes, `C-c V' interrupts and `q' closes the
 buffer."
   (setq-local mode-line-format '(" Voice transcript")))
@@ -990,6 +1001,8 @@ Return non-nil when a heading was written."
                                 'face (pcase section
                                         ('user 'harness-user-label-face)
                                         ('work 'harness-label-face)
+                                        ('sent 'harness-label-face)
+                                        ('not-sent 'harness-caution-face)
                                         (_ 'harness-agent-label-face)))
                     (propertize (format " · %s" (format-time-string "%H:%M"))
                                 'face 'harness-dim-face)
@@ -1045,6 +1058,21 @@ not the whole path."
    (concat "  ▸ " title "\n")
    'harness-tool-title-face))
 
+(defun harness-voice-live--transcript-sent (text)
+  "Show what crossed into the session: TEXT, or that nothing did.
+TEXT is the distilled request without its context block.  The raw
+caption above it stays as it was heard, so the transcript shows the
+voice conversation and the session message as the two different
+records they are."
+  (if text
+      (progn
+        (harness-voice-live--transcript-section 'sent "Sent")
+        (harness-voice-live--transcript-insert
+         (concat "  " text "\n") 'harness-dim-face))
+    (harness-voice-live--transcript-section 'not-sent "Not sent")
+    (harness-voice-live--transcript-insert
+     "  no request\n" 'harness-dim-face)))
+
 ;;;###autoload
 (defun harness-voice-live-transcript ()
   "Show the live transcript."
@@ -1076,7 +1104,9 @@ commentary to speak later."
             (harness-voice-live--hold piece-id piece)
           (harness-voice-live--pipeline-reply-handed piece-id)
           (harness-voice-live--send
-           (list :event "commentary" :id piece-id :text piece)))
+           (list :event "commentary" :id piece-id :text piece))
+          (harness-voice-conversation-say
+           harness-voice-live--conversation piece 'commentary))
         (setq speech (if (> (length speech) 1200) (substring speech 1200) ""))))))
 
 (defun harness-voice-live--open-fence (text)
@@ -1144,21 +1174,14 @@ commentary to speak later."
 
 ;;;; Delegation
 
-(defun harness-voice-live--context ()
-  "Return the context sent with the session and its delegations."
-  (or (and (buffer-live-p harness-voice-live--buffer)
-           (buffer-local-value 'harness-voice--live-context harness-voice-live--buffer))
-      (and (buffer-live-p harness-voice-live--buffer)
-           (with-current-buffer harness-voice-live--buffer
-             (harness-voice--context)))
-      ""))
-
 (defun harness-voice-live--prompt (text &optional pending)
-  "Return the agent prompt for delegated TEXT and held PENDING items."
-  (let ((context (or (harness-voice-live--context) ""))
-        (block (harness-voice-live--pending-context pending)))
-    (concat (unless (string-empty-p context) (concat context "\n"))
-            text
+  "Return the agent prompt for delegated TEXT and held PENDING items.
+The request is the first thing in the message.  There is no
+related-session lookup and no context block added to a transcript: the
+session a voice request is made in is the context, and a request that
+needs an earlier voice turn carries that turn itself."
+  (let ((block (harness-voice-live--pending-context pending)))
+    (concat text
             (when block (concat "\n\n" block)))))
 
 (defun harness-voice-live--delegate-next ()
@@ -1213,9 +1236,14 @@ commentary to speak later."
 (defun harness-voice-live--delegate (event)
   "Start a delegation from EVENT, or queue it behind the running turn.
 
-The utterance key is delivered once.  Any assistant output held while
-the person spoke travels with this prompt as explicit context; it is
-never spoken afterwards merely because the transcript arrived."
+The utterance key is delivered once.  The transcript is distilled into
+a request; the raw words stay in the voice conversation and the
+transcript.  A request that points at an earlier voice turn carries the
+last few turns as plain context.  Any assistant output held while the
+person spoke travels with this prompt as explicit context; it is never
+spoken afterwards merely because the transcript arrived.  A burst that
+distils to nothing is recorded and answers its delegation without a
+session prompt."
   (let* ((id (or (plist-get event :id) (format "d-%s" (float-time))))
          (text (or (plist-get event :text) (plist-get event :prompt) ""))
          (text (if (string-empty-p text) harness-voice-live--heard text)))
@@ -1223,17 +1251,61 @@ never spoken afterwards merely because the transcript arrived."
         (harness-voice-live--refresh)
       (setq harness-voice-live--heard "")
       (harness-voice-live--cancel-held-timer)
-      (let ((pending (harness-voice-live--pending-items event)))
-        (if (string-empty-p text)
+      (let* ((conversation harness-voice-live--conversation)
+             (distilled (if harness-voice-distill
+                            (harness-voice-distilled-text text)
+                          (let ((trimmed (string-trim (or text ""))))
+                            (unless (string-empty-p trimmed) trimmed)))))
+        (cond
+         ((null distilled)
+          (if (string-empty-p (string-trim (or text "")))
+              (harness-voice-live--send
+               (list :event "delegate_result" :id id :text ""
+                     :error t :message "Live voice delegation empty"))
+            ;; Nothing but mumbles: the voice conversation keeps the
+            ;; words, the session gets no request, and the sidecar is
+            ;; answered so it does not wait for one.
+            (harness-voice-conversation-hear conversation text nil nil)
+            (let ((segment (or harness-voice-live--utterance-done
+                               harness-voice-live--utterance
+                               (and (plist-get event :utterance)
+                                    (format "u-%s"
+                                            (plist-get event :utterance))))))
+              (when segment
+                (harness-voice-live--pipeline-segment
+                 (list :event "segment" :state "dropped" :id segment
+                       :reason "no request"))
+                (when (equal segment harness-voice-live--utterance-done)
+                  (setq harness-voice-live--utterance-done nil))))
+            (harness-voice-live--transcript-sent nil)
             (harness-voice-live--send
-             (list :event "delegate_result" :id id :text ""
-                   :error t :message "Live voice delegation empty"))
-          (setq harness-voice-live--delegations
-                (nconc harness-voice-live--delegations
-                       (list (list :id id :text text :pending pending))))
-          (when harness-voice-live--delegation
-            (harness-voice-live--pipeline-turn-queued id))
-          (harness-voice-live--delegate-next))))))
+             (list :event "delegate_result" :id id :text ""))
+            (harness-voice-live--stage-set
+             (cond ((not (harness-voice-live--active-p)) nil)
+                   (harness-voice-live--muted 'muted)
+                   ((harness-voice-live--holding-output-p) 'holding)
+                   (t 'listening)))
+            (when (harness-voice-live--holding-output-p)
+              (harness-voice-live--schedule-held-release))
+            (harness-voice-live--refresh)))
+         (t
+          (let* ((request (harness-voice-conversation-request
+                           conversation distilled))
+                 (turn (harness-voice-conversation-hear
+                        conversation text distilled request))
+                 (raw (plist-get turn :raw))
+                 (pending (harness-voice-live--pending-items event)))
+            ;; Show the crossing only when the session did not get
+            ;; exactly what was heard: a changed request, or context.
+            (unless (and (equal distilled raw)
+                         (equal request distilled))
+              (harness-voice-live--transcript-sent distilled))
+            (setq harness-voice-live--delegations
+                  (nconc harness-voice-live--delegations
+                         (list (list :id id :text request :pending pending))))
+            (when harness-voice-live--delegation
+              (harness-voice-live--pipeline-turn-queued id))
+            (harness-voice-live--delegate-next))))))))
 
 (defun harness-voice-live--finish-turn (outcome)
   "Finish the agent turn that ended with OUTCOME."
@@ -1277,7 +1349,9 @@ never spoken afterwards merely because the transcript arrived."
                      :id (plist-get delegation :id) :text text :held t)))
           (harness-voice-live--send
            (list :event "delegate_result"
-                 :id (plist-get delegation :id) :text text))))
+                 :id (plist-get delegation :id) :text text))
+          (harness-voice-conversation-say
+           harness-voice-live--conversation text 'result)))
       (setq harness-voice-live--nodes nil
             harness-voice-live--order nil))
     ;; A turn that ends while another delegation waits stays in Working:
@@ -1422,9 +1496,21 @@ never spoken afterwards merely because the transcript arrived."
              (unless (eq harness-voice-live--stage 'transcribing)
                (harness-voice-live--stage-set 'hearing))
              (harness-voice-live--caption "You" text final))
-         (harness-voice-live--caption "Voice" text final))))
+         (progn
+           (harness-voice-live--caption "Voice" text final)
+           ;; A provider's own speech, outside the agent's turn, is
+           ;; voice-only: the session never saw it.  A turn's result is
+           ;; recorded when it is handed back, and held text was not
+           ;; heard, so neither is a voice turn here.
+           (unless (or (harness-voice-live--holding-output-p)
+                       harness-voice-live--turn-active)
+             (harness-voice-conversation-say
+              harness-voice-live--conversation text 'provider nil t))))))
     ("backchannel"
-     (harness-voice-live--backchannel (or (plist-get event :text) "mm-hmm")))
+     (let ((text (or (plist-get event :text) "mm-hmm")))
+       (harness-voice-live--backchannel text)
+       (harness-voice-conversation-say
+        harness-voice-live--conversation text 'backchannel)))
     ("delegation"
      (harness-voice-live--cancel-held-timer)
      (harness-voice-live--stage-set 'thinking)
@@ -1541,8 +1627,7 @@ cannot be interrupted from the UI that is gone."
           (process-send-string
            process
            (harness-voice-live--json
-            (list :event "start" :protocol harness-voice-live--protocol
-                  :context (harness-voice-live--context)))))
+            (list :event "start" :protocol harness-voice-live--protocol))))
       (error
        (harness-voice-live--dispose)
        (setq harness-voice-live--state 'failed

@@ -1264,6 +1264,17 @@ correction said out loud is; the message field does not send then. Voice never
 answers a permission request or a question: the status turns to *Approval
 needed*, *Open* shows the conversation, and the answer is given there.
 
+A live call keeps two records: the voice conversation (what was heard, and
+what the voice spoke) and the session messages it produces. A transcript is
+distilled before it is sent -- hesitation sounds, comma-set `like`, stutters
+and an explicit `no wait, ...` correction go; every content word, name and
+path stays. A request that points at something said earlier (`do that`,
+`yes`, `the second one`, `also ...`) carries the last few voice turns as
+plain text; a self-contained request travels alone. Distillation is local
+and synchronous, so it adds no wait. A burst that leaves nothing is recorded,
+marked `no request` in the pipe and not sent. The rules are in
+[docs/design/voice-conversation.md](../docs/design/voice-conversation.md).
+
 Which provider is used, and how, is a setting of the device, kept in
 `VoiceSettings` (SharedPreferences, `voiceSettings`) and edited in *Voice
 settings* at the top of the screen:
@@ -1672,13 +1683,15 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   and opens and cuts again (pictures written where `HARNESS_SHOTS` says)
 - voice mode (`test/voice_audio_test.dart`, `voice_settings_test.dart`,
   `voice_transcription_test.dart`, `voice_live_protocol_test.dart`,
-  `voice_controller_test.dart`, `voice_clip_backend_test.dart`,
+  `voice_controller_test.dart`, `voice_conversation_test.dart`,
+  `voice_clip_backend_test.dart`,
   `voice_live_backend_test.dart`, `voice_session_test.dart`,
   `voice_ui_test.dart`, `voice_screenshots_test.dart`): the detector's
   pre-roll, trailing keep and the WAV it writes; what the device keeps of the
   settings, and the endpoint a blank one falls back to; the speech endpoint's
   multipart, model, token, timeout, and an answer that is no transcript; both
-  dialects of a live provider, and delegation to the session; what voice puts
+  dialects of a live provider, and delegation to the session; the voice
+  conversation's distillation and bounded context; what voice puts
   on the wire -- a spoken message as a text block, a clip as an `audio` block,
   a spoken message while a turn runs -- and what it hears back, once; the
   screen's status, captions, notices and controls, and the settings sheet, with

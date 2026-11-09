@@ -98,6 +98,7 @@ or a turn already answered.")
 
 (defconst harness-voice-pipeline--drop-labels
   '((too-short . "too short") (no-words . "no words")
+    (no-request . "no request")
     (cancelled . "cancelled") (failed . "failed"))
   "The words for why a burst did not reach a model.")
 

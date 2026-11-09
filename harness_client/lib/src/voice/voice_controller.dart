@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../state/session_controller.dart';
 import 'voice_backend.dart';
+import 'voice_conversation.dart';
 import 'voice_media_buttons.dart';
 import 'voice_models.dart';
 import 'voice_pipeline.dart';
@@ -130,8 +131,10 @@ class VoiceController extends ChangeNotifier {
     required VoiceBackendFactory backendFactory,
     required this.onSettingsChanged,
     VoiceMediaButtons? mediaButtons,
+    VoiceConversation? conversation,
     this.pendingReleaseDelay = const Duration(milliseconds: 1500),
-  }) : _settings = settings,
+  }) : conversation = conversation ?? VoiceConversation(),
+       _settings = settings,
        _harnessAddress = harnessAddress,
        _backendFactory = backendFactory,
        _mediaButtons = mediaButtons ?? defaultVoiceMediaButtons();
@@ -167,6 +170,11 @@ class VoiceController extends ChangeNotifier {
   /// really happened; nothing in it moves on a clock.
   final VoicePipelineTracker pipeline = VoicePipelineTracker();
   VoicePipelineSnapshot get pipelineState => pipeline.snapshot;
+
+  /// The audio side of this call: the raw words, the lines the voice spoke,
+  /// and the request that crossed into the chat.  It is cleared when a call
+  /// starts or ends, so it never becomes a second session transcript.
+  final VoiceConversation conversation;
 
   /// Turns the session has been given and not finished, oldest first.  A
   /// reply belongs to the turn the session is answering, which is the oldest.
@@ -278,6 +286,7 @@ class VoiceController extends ChangeNotifier {
     _stopInProgress = false;
     _levelReported = false;
     captions.clear();
+    conversation.clear();
     problem = null;
     muted = false;
     paused = false;
@@ -441,6 +450,10 @@ class VoiceController extends ChangeNotifier {
         _holdReply(text, id: id);
       case VoiceCaptionEvent(:final speaker, :final text, :final finalized):
         _addCaption(speaker, text, finalized: finalized);
+        if (speaker == VoiceSpeaker.agent && finalized) {
+          // The provider's own spoken line, outside the chat's transcript.
+          conversation.say(text, source: 'provider');
+        }
       case VoicePromptEvent(:final prompt):
         if (prompt.isEmpty) break;
         unawaited(_sendPrompt(prompt));
@@ -503,6 +516,27 @@ class VoiceController extends ChangeNotifier {
     if (prompt.id case final id? when id.isNotEmpty) {
       if (!_sentPrompts.add(id)) return;
     }
+    final raw = prompt.text?.trim() ?? '';
+    final distilled = raw.isEmpty ? null : conversation.distilledText(raw);
+    if (raw.isNotEmpty && distilled == null) {
+      // Nothing but mumbles: the voice conversation keeps the words, the
+      // session gets no request, and the segment says why it stopped.
+      conversation.hear(raw: raw);
+      final segment = prompt.segmentId ?? prompt.id;
+      if (segment != null && segment.isNotEmpty) {
+        pipeline.drop(
+          segment,
+          drop: VoiceSegmentDrop.noRequest,
+          detail: 'no request',
+        );
+      }
+      _scheduleHeldRelease();
+      if (!_disposed) notifyListeners();
+      return;
+    }
+    final request = distilled == null
+        ? prompt.text
+        : conversation.request(distilled);
     _heldTimer?.cancel();
     _heldTimer = null;
     final held = <String>[
@@ -514,7 +548,10 @@ class VoiceController extends ChangeNotifier {
     }
     _heldReplies.clear();
     final context = _pendingContext(held);
-    final text = _withContext(prompt.text, context);
+    final text = _withContext(request, context);
+    if (distilled != null) {
+      conversation.hear(raw: raw, distilled: distilled, sent: text);
+    }
     final display = prompt.spokenText;
     final turnId = 't-${++_turnSequence}';
     _openTurns.add(turnId);
@@ -599,6 +636,7 @@ class VoiceController extends ChangeNotifier {
     for (final piece in held) {
       pipeline.replyReleased(piece.id);
       pipeline.replyHanded(piece.id);
+      conversation.say(piece.text, source: 'commentary');
       await backend.speak(piece.text, replyId: piece.id);
     }
     if (!_disposed) notifyListeners();
@@ -644,6 +682,7 @@ class VoiceController extends ChangeNotifier {
         final backend = _backend;
         if (backend != null) {
           pipeline.replyHanded(replyId);
+          conversation.say(trimmed, source: 'result');
           unawaited(backend.speak(trimmed, replyId: replyId));
         }
       }
@@ -830,6 +869,7 @@ class VoiceController extends ChangeNotifier {
     _heldTimer = null;
     _dropHeld('ended');
     _openTurns.clear();
+    conversation.clear();
     speechActive = false;
     paused = false;
     if (_followSession) {
@@ -866,6 +906,7 @@ class VoiceController extends ChangeNotifier {
       bridge.removeSessionListener(_sessionChanged);
     }
     _stopMediaButtons();
+    conversation.clear();
     pipeline.end();
     unawaited(_closeBackend());
     super.dispose();

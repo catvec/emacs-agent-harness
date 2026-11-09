@@ -367,21 +367,18 @@
             (should-not (lookup-key harness-compose-map (kbd "C-c v"))))
         (harness-voice--shutdown)))))
 
-(ert-deftest harness-ui-voice-related-context-uses-only-matching-sessions ()
-  "Unrelated sessions cannot cause an out-of-range slice or leak into context."
+(ert-deftest harness-ui-voice-quick-chat-context-is-only-the-origin ()
+  "Quick chat names its file/line and looks up no other session."
   (harness-ui-voice-test-with
-    (cl-letf (((symbol-function 'harness-files-project-root) (lambda (_) dir))
-              ((symbol-function 'harness-ui-sessions)
-               (lambda (&optional _)
-                 (list (list :id "wrong" :name "Other" :status "running" :project "/different/")
-                       (list :id "seed" :name "Seed" :status "idle" :project dir :ext '(:seed t))
-                       (list :id "internal" :name "Permission judge" :status "idle" :project dir :kind "internal")
-                       (list :id "mine" :name "Current work" :status "blocked" :project dir)))))
-      (let ((context (harness-voice--context)))
-        (should (string-search "[Current work](harness:session/mine) · blocked" context))
-        (should-not (string-search "session/wrong" context))
-        (should-not (string-search "session/seed" context))
-        (should-not (string-search "session/internal" context))))))
+    (let ((buffer-file-name (expand-file-name "file.py" dir))
+          (lookups 0))
+      (cl-letf (((symbol-function 'harness-files-project-root) (lambda (_) dir))
+                ((symbol-function 'harness-ui-sessions)
+                 (lambda (&optional _) (setq lookups (1+ lookups)) nil)))
+        (should (equal (format "Voice request context: file.py:%d\n\n"
+                               (line-number-at-pos))
+                       (harness-voice--context)))
+        (should (= 0 lookups))))))
 
 (ert-deftest harness-ui-voice-mouse-validation-and-control-copy ()
   "Mouse validation is inline too; every alternate control has exact copy."
@@ -477,25 +474,6 @@
       (should-not (file-exists-p private))
       (should (eq harness-voice--state 'failed))
       (should (equal "Empty speech audio" harness-voice--error)))))
-
-(ert-deftest harness-ui-voice-context-prioritizes-ongoing-work-and-bounds-the-list ()
-  "Quick chat names its file/line and at most eight navigable sessions."
-  (harness-ui-voice-test-with
-    (let ((buffer-file-name (expand-file-name "file.py" dir)))
-      (cl-letf (((symbol-function 'harness-files-project-root) (lambda (_) dir))
-                ((symbol-function 'harness-ui-sessions)
-                 (lambda (&optional _)
-                   (append (list (list :id "ongoing" :name "Ongoing work" :project dir :status "running" :updated 0))
-                           (cl-loop for i from 1 to 10 collect
-                                    (list :id (format "idle-%d" i) :name (format "Idle %d" i)
-                                          :project dir :status "idle" :updated i))))))
-        (let ((context (harness-voice--context)))
-          (should (string-prefix-p (format "Voice request context: file.py:%d\nRelated sessions:\n- [Ongoing work]"
-                                          (line-number-at-pos)) context))
-          (should (string-search "session/idle-10" context))
-          (should (string-search "session/idle-4" context))
-          (should-not (string-search "session/idle-3" context))
-          (should (= 8 (cl-count ?\n context :start (string-search "Related sessions:" context) :end (- (length context) 2)))))))))
 
 (ert-deftest harness-ui-voice-validation-copy-and-exclusive-microphone ()
   "Validation has exact noun-phrase copy, before recording or playback."

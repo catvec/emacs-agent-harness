@@ -87,6 +87,7 @@
            (harness-voice-live--delegation nil) (harness-voice-live--delegations nil)
            (harness-voice-live--nodes nil) (harness-voice-live--order nil)
            (harness-voice-live--heard "") (harness-voice-live--transcript nil)
+           (harness-voice-live--conversation (harness-voice-conversation-create))
            (harness-voice-live--speech-active nil)
            (harness-voice-live--held nil)
            (harness-voice-live--held-timer nil)
@@ -94,6 +95,12 @@
            (harness-voice-live--seen (make-hash-table :test 'equal))
            (harness-voice-live--held-seq 0)
            (harness-voice-live-pending-release-delay 0.15)
+           (harness-voice-distill t)
+           (harness-voice-conversation-carry-context t)
+           (harness-voice-conversation-turns 40)
+           (harness-voice-conversation-context-turns 4)
+           (harness-voice-conversation-context-chars 700)
+           (harness-voice-conversation-turn-chars 240)
            (harness-voice-live--speaker nil) (harness-voice-live--section nil)
            (harness-voice-live--stage nil) (harness-voice-live--stage-since nil)
            (harness-voice-live--stage-timer nil) (harness-voice-live--stage-frame 0)
@@ -384,8 +391,11 @@ which used to leave the line reading Off after a rejected Start."
            (prompt (plist-get (car (plist-get params :prompt)) :text)))
       (should (equal "live-session" (car call)))
       (should (equal "session/prompt" (cadr call)))
-      (should (string-prefix-p "Voice request context:" prompt))
-      (should (string-search "Add a docstring to parse." prompt)))
+      ;; No related-session lookup and no per-message context block: the
+      ;; session a voice request is made in is the context.
+      (should (equal "Add a docstring to parse." prompt))
+      (should-not (string-search "Voice request context" prompt))
+      (should-not (string-search "Related sessions" prompt)))
     (harness-voice--on-event "agent/turn-started" '("live-session"))
     (harness-ui-voice-live-test--chunk "The docstring is ready. ")
     (let ((commentary
@@ -417,6 +427,138 @@ which used to leave the line reading Off after a rejected Start."
     (let* ((params (nth 2 (car harness-ui-voice-live-test--calls)))
            (prompt (plist-get (car (plist-get params :prompt)) :text)))
       (should (string-search "Second." prompt)))))
+
+(ert-deftest harness-ui-voice-live-distils-a-delegation ()
+  "A mumbly transcript reaches the session as its request, without its noise."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (let ((raw "Uh, add a docstring, um, to the the parser."))
+      (harness-voice-live--handle
+       (list :event "user_delta" :text raw :final t :utterance 1))
+      (harness-voice-live--handle
+       (list :event "delegation" :id "d-mumble" :utterance 1 :text raw))
+      (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
+        (should (string-search "add a docstring to the parser." prompt))
+        (should-not (string-search "Uh," prompt))
+        (should-not (string-search "um," prompt)))
+      (let ((turns (harness-voice-conversation-turns
+                    harness-voice-live--conversation)))
+        (should (= 1 (length turns)))
+        (should (equal raw (plist-get (car turns) :raw)))
+        (should (equal "add a docstring to the parser."
+                       (plist-get (car turns) :text)))
+        (should (equal "add a docstring to the parser."
+                       (plist-get (car turns) :sent))))
+      (let ((transcript (harness-ui-voice-live-test--transcript)))
+        (should (string-search raw transcript))
+        (should (string-search "Sent · " transcript))
+        (should (string-search "add a docstring to the parser." transcript))))))
+
+(ert-deftest harness-ui-voice-live-distillation-can-be-turned-off ()
+  "The option sends the transcript as heard, while the record keeps both."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet")
+          harness-voice-distill nil)
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (harness-voice-live--handle
+     (list :event "delegation" :id "d-raw" :utterance 1
+           :text "Uh, add a docstring, um, to the parser."))
+    (should (string-search "Uh, add a docstring, um, to the parser."
+                           (harness-ui-voice-live-test--latest-prompt)))
+    (let ((transcript (harness-ui-voice-live-test--transcript)))
+      (should-not (string-search "Sent ·" transcript)))))
+
+(ert-deftest harness-ui-voice-live-noise-only-delegation-sends-nothing ()
+  "A burst of mumbles is recorded, not forwarded, and its sidecar answered."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (harness-voice-live--handle
+     (list :event "delegation" :id "d-noise" :utterance 1
+           :text "Um, uh, hmm."))
+    (should-not harness-ui-voice-live-test--calls)
+    (let ((result (harness-ui-voice-live-test--wait-event
+                   harness-ui-voice-live-test--inbox "delegate_result")))
+      (should (equal "d-noise" (plist-get result :id)))
+      (should (equal "" (plist-get result :text)))
+      (should-not (plist-get result :error)))
+    (let ((turns (harness-voice-conversation-turns
+                  harness-voice-live--conversation)))
+      (should (= 1 (length turns)))
+      (should (equal "Um, uh, hmm." (plist-get (car turns) :raw)))
+      (should-not (plist-get (car turns) :text)))
+    (let ((segment (harness-voice-pipeline--segment
+                    harness-voice-live--pipeline "u-1")))
+      (should (eq 'dropped (plist-get segment :stage)))
+      (should (eq 'no-request (plist-get segment :reason)))
+      (should (equal "no request"
+                     (harness-voice-pipeline--drop-label
+                      (plist-get segment :reason)))))
+    (let ((transcript (harness-ui-voice-live-test--transcript)))
+      (should (string-search "Not sent · " transcript))
+      (should (string-search "no request" transcript)))))
+
+(ert-deftest harness-ui-voice-live-carries-voice-context-when-needed ()
+  "A dependent request carries the voice's own earlier words; a plain one does not."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    ;; The provider's own speech, outside an agent turn: the session
+    ;; never saw these words.
+    (harness-voice-live--handle
+     (list :event "assistant_delta" :final t
+           :text "The timer wakes it every 200 ms."))
+    (harness-voice-live--handle
+     (list :event "delegation" :id "d-ctx" :utterance 1
+           :text "Do that instead."))
+    (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
+      (should (string-search "Do that instead." prompt))
+      (should (string-search "Voice conversation before this request:" prompt))
+      (should (string-search "Voice: The timer wakes it every 200 ms." prompt)))
+    (harness-voice-live--finish-turn "end-turn")
+    (harness-voice-live--handle
+     (list :event "delegation" :id "d-plain" :utterance 2
+           :text "Add a docstring to parse."))
+    (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
+      (should (string-search "Add a docstring to parse." prompt))
+      (should-not (string-search "Voice conversation before this request:"
+                                 prompt)))))
+
+(ert-deftest harness-ui-voice-live-conversation-ends-with-the-call ()
+  "Ending the call forgets the voice conversation; the chat keeps its history."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (harness-voice-live--handle
+     (list :event "delegation" :id "d-1" :utterance 1 :text "Add a test."))
+    (should (harness-voice-conversation-turns
+             harness-voice-live--conversation))
+    (harness-voice-live-stop)
+    (harness-test-wait (lambda () (null harness-voice-live--state))
+                       5 "the call to end")
+    (should-not (harness-voice-conversation-turns
+                 harness-voice-live--conversation))))
 
 (ert-deftest harness-ui-voice-live-announcement-only-reply-still-returns ()
   "A provider that only announces a final node still answers the delegation."

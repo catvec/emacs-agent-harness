@@ -3500,7 +3500,15 @@ is used for the documentation picture."
   "Feed one scripted session through the live voice pipeline's handlers.
 The events are the sidecar protocol's own with fixture values: no
 microphone measured them, and the sidecar process is not started.  The
-handlers, the model and the drawing are the ones a real session uses."
+handlers, the model and the drawing are the ones a real session uses.
+The utterance has its own mumbles so the picture shows the raw caption
+and the distilled request that crossed into the session."
+  (harness-voice-conversation-clear harness-voice-live--conversation)
+  (setq harness-voice-live--seen (make-hash-table :test 'equal)
+        harness-voice-live--utterance nil
+        harness-voice-live--utterance-done nil
+        harness-voice-live--speaker nil
+        harness-voice-live--section nil)
   (harness-voice-live--pipeline-bump 'live)
   (dolist (event '((:event "level" :input 0.19)
                    (:event "level" :input 0.56)
@@ -3512,10 +3520,10 @@ handlers, the model and the drawing are the ones a real session uses."
                    (:event "segment" :state "dropped" :id "u-2" :seconds 0.08
                            :reason "too short")
                    (:event "user_delta" :final t :utterance 1
-                           :text "Add a comment to TokenBucket.take about its refill and retry behavior.")
+                           :text "Uh, add a comment, um, to TokenBucket.take about its refill and retry behavior.")
                    (:event "segment" :state "transcribed" :id "u-1")
                    (:event "delegation" :id "d-1"
-                           :text "Add a comment to TokenBucket.take about its refill and retry behavior.")))
+                           :text "Uh, add a comment, um, to TokenBucket.take about its refill and retry behavior.")))
     (harness-voice-live--handle event))
   (harness-voice-live--pipeline-turn-sent "d-1")
   (harness-voice-live--pipeline-reply-ready

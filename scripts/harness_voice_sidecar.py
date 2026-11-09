@@ -9,7 +9,7 @@ small WebSocket client, all in the Python standard library.
 
 Protocol (both directions unless said otherwise), one object per line:
 
-    start   Emacs -> sidecar   session start; ``protocol`` and ``context``
+    start   Emacs -> sidecar   session start; ``protocol``
     ready   sidecar -> Emacs   the sidecar is up
     listening / speaking       playback state for the indicator
     user_delta / assistant_delta  caption text, optional ``final``
@@ -1443,7 +1443,6 @@ class Sidecar:
         self.events = events or Events()
         self.player = player
         self.rate = rate
-        self.context = ""
         self.muted = False
         self.speaking = False
         self.working = False
@@ -1464,7 +1463,6 @@ class Sidecar:
 
     def start_session(self, event):
         """Handle the harness's `start` command."""
-        self.context = event.get("context") or ""
         self.speech_active = False
         self.held = []
         self.announce()
