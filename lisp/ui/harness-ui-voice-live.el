@@ -1457,6 +1457,27 @@ never spoken afterwards merely because the transcript arrived."
 
 ;;;; Commands
 
+(defun harness-voice-live--last-frame-p (frame frames)
+  "Return non-nil when FRAME is the last of FRAMES that can show the UI.
+A graphic frame counts against the other graphic frames; a terminal
+frame counts against every frame.  A daemon keeps an unseen terminal
+frame after its last graphical window closes, and voice must not hold
+the microphone and the speaker for a window nobody can see."
+  (let ((graphic (display-graphic-p frame)))
+    (null (seq-filter (lambda (other)
+                        (and (not (eq other frame))
+                             (if graphic (display-graphic-p other) t)))
+                      frames))))
+
+(defun harness-voice-live--frame-deleted (frame)
+  "End live voice when FRAME was the last frame that could show it.
+Closing the Emacs window must stop the sound: the sidecar owns the
+microphone and the speaker, and a reply playing on to an empty desktop
+cannot be interrupted from the UI that is gone."
+  (when (and (harness-voice-live--active-p)
+             (harness-voice-live--last-frame-p frame (frame-list)))
+    (harness-voice-live-stop)))
+
 (defun harness-voice-live--start-here ()
   "Start live voice, showing validation failures in the controls."
   (interactive)

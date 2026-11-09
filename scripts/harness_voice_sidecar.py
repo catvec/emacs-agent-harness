@@ -34,6 +34,7 @@ import os
 import queue
 import select
 import shutil
+import signal
 import socket
 import ssl
 import struct
@@ -59,6 +60,53 @@ LOCAL_RATE = 16000
 #: cannot block a real-time capture -- overruns and drops the microphone.
 #: Ten ticks of headroom drains a backlog instead of adding to it.
 CAPTURE_SECONDS = 0.2
+
+
+def _libc_prctl():
+    """Return the C library's prctl, or None where the platform has none."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+        return ctypes.CDLL(None, use_errno=True).prctl
+    except (OSError, AttributeError):
+        return None
+
+
+#: Loaded in the parent, so the forked child only makes the call: see
+#: `die_with_parent'.
+_PRCTL = _libc_prctl()
+
+#: Linux's "send me a signal when my parent dies" request.
+PR_SET_PDEATHSIG = 1
+
+
+def die_with_parent():
+    """Return a child setup that ties an audio process to the sidecar.
+
+    Emacs can go away without sending ``stop``: its last window is
+    closed, its process is killed, a session ends.  A player that
+    outlives the sidecar keeps playing the audio it has already read, so
+    a reply is heard long after the UI is gone; a recorder that outlives
+    it keeps the microphone open for a process nobody can see.  Linux's
+    PR_SET_PDEATHSIG makes the kernel kill the child when the sidecar
+    dies, and the parent check closes the race where the sidecar died
+    between the fork and the setting.
+
+    The function that ``preexec_fn`` runs must stay this small: the
+    sidecar has threads, and a child that allocated or waited after the
+    fork could hang before exec.  The call into the C library needs no
+    Python object beyond the two integers.
+    """
+    parent = os.getpid()
+
+    def setup():
+        if _PRCTL is not None:
+            _PRCTL(PR_SET_PDEATHSIG, int(signal.SIGKILL))
+        if os.getppid() != parent:
+            os._exit(1)
+
+    return setup
 
 
 def log(text):
@@ -402,7 +450,8 @@ class Player:
                 try:
                     process = subprocess.Popen(
                         command, stdin=subprocess.PIPE,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        preexec_fn=die_with_parent())
                 except OSError as error:
                     self.error = "speaker failed · %s: %s" % (command[0], error)
                 else:
@@ -615,7 +664,8 @@ class Recorder:
             try:
                 process = subprocess.Popen(
                     command, stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    preexec_fn=die_with_parent())
             except OSError as error:
                 self.error = "microphone failed · %s: %s" % (command[0], error)
                 continue
@@ -841,7 +891,7 @@ class SpeechDetector:
     noise_rise = 0.02
     noise_decay = 0.1
 
-    def __init__(self, rate=LOCAL_RATE, threshold=0.02, frame=0.01,
+    def __init__(self, rate=LOCAL_RATE, threshold=0.004, frame=0.01,
                  onset_hold=0.03, hangover=0.85, echo_hold=0.20,
                  echo_margin=1.8):
         self.rate = rate
@@ -919,6 +969,17 @@ class SpeechDetector:
         return (change / (count * 32768.0)) / level
 
     def _threshold(self):
+        """Return the frame energy this detector calls speech.
+
+        The configured THRESHOLD is the floor under a quiet microphone;
+        the room's learned noise floor raises it to 2.5 times itself, so a
+        fan, a hum or a room loud enough to matter is never speech.  The
+        floor is deliberately far below a normal microphone's speech --
+        0.004 against the 0.03 a speaking mouth gives -- because a quiet
+        interface, an interface with its gain low, or a microphone across
+        the room still carries words worth transcribing, and whisper
+        needs no gain of its own for them.
+        """
         threshold = max(self.threshold, self._noise * 2.5)
         if self._playback > 0.005:
             threshold = max(threshold, self._playback * self.echo_margin)
@@ -998,7 +1059,7 @@ class Vad:
     natural pause.
     """
 
-    def __init__(self, rate=LOCAL_RATE, threshold=0.02, frame=0.01,
+    def __init__(self, rate=LOCAL_RATE, threshold=0.004, frame=0.01,
                  hangover=0.85, pre_roll=0.3, min_speech=0.15,
                  max_speech=120.0, onset_hold=0.03, echo_hold=0.20,
                  echo_margin=1.8):

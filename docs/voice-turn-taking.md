@@ -35,8 +35,12 @@ audio capture path, before the PCM is uploaded or queued for a model.
 - **Local pipeline** (`scripts/harness-voice-live-unmute`): the shared
   `SpeechDetector` in `scripts/harness_voice_sidecar.py` reads 10 ms PCM16
   frames.  A frame counts as likely speech when its energy is above the
-  configured threshold, its zero-crossing rate is voice-like, and its
-  first difference shows change above a steady hum.  Three such frames
+  gate's threshold, its zero-crossing rate is voice-like, and its
+  first difference shows change above a steady hum.  The threshold is a
+  floor (`threshold`, 0.004 by default) raised to 2.5 times the learned
+  noise floor: the floor is far below a normal mouth's level, so a
+  microphone with its gain low still opens the gate, and the room's own
+  noise is what actually decides in a loud one.  Three such frames
   (`onset_hold = 30 ms`) open the gate.  The detector raises its threshold
   above the local player's own level while the assistant speaks and asks
   for a longer echo hold, so a narrow-band speaker echo does not gate the

@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""A probe for each stage of the local voice pipeline.
+
+The sidecar owns the microphone, the speech filter, the speech services
+and the speaker; when a session misbehaves, nothing says which stage lost
+the audio.  This script measures the stages on their own, with the same
+code the sidecar runs:
+
+    scripts/harness-voice-probe listen --seconds 30 --out DIR
+        Record the microphone through the same backend table and read the
+        PCM exactly as a sidecar's tick does.  Write one JSON line per
+        measurement and decision -- the chunk's level, every detector
+        state change, each utterance it keeps with its WAV -- so the
+        capture path and the speech filter can be compared with what the
+        sidecar reported at the same moment.  --wav keeps the whole
+        capture, so a phrase a session missed can be replayed and
+        transcribed later.
+
+    scripts/harness-voice-probe replay FILE.wav [--transcribe]
+        Push a known file through the same filter at the same chunk size,
+        as if it were the microphone, and report every chunk's level and
+        every gate decision.  The timestamps are audio time; each kept
+        utterance is written out, and --transcribe names what the speech
+        service heard.
+
+    scripts/harness-voice-probe transcribe FILE.wav
+        Run one WAV through the speech-to-text service, as the sidecar
+        does, and print the text.
+
+    scripts/harness-voice-probe speak "text" FILE.wav
+        Run one sentence through the text-to-speech service and write the
+        WAV, so the spoken side can be heard and measured without Emacs.
+
+The default endpoints are the bundled stack's fixed ports; pass the URLs
+the running stack publishes (`--stt-url`, `--tts-url`) when they differ.
+``listen`` prints a one-line summary to stderr every second, which reads
+as an oscilloscope in a terminal: ``level`` is the loudest chunk since
+the last line, ``gate`` the detector's state, ``kept`` the utterances so
+far.
+"""
+
+import argparse
+import json
+import math
+import os
+import struct
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from harness_voice_sidecar import (  # noqa: E402
+    AUDIO_AUTO, CAPTURE_SECONDS, LOCAL_RATE, Recorder, Vad,
+    audio_backend_names, http_json, http_multipart, log, pcm_energy,
+    pcm_from_wav, wav_from_pcm,
+)
+
+DEFAULT_STT_URL = "http://127.0.0.1:8080/inference"
+DEFAULT_TTS_URL = "http://127.0.0.1:8880/v1/audio/speech"
+
+
+def emit(trace, event):
+    """Write one JSON event to stdout and to the trace sink TRACE."""
+    line = json.dumps(event, separators=(",", ":"))
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+    if trace is not None:
+        trace.write(line + "\n")
+        trace.flush()
+
+
+class _Null:
+    """A sink that keeps nothing, for a run traced only on stdout."""
+
+    def write(self, text):
+        pass
+
+    def flush(self):
+        pass
+
+
+def rms(pcm):
+    """Return the root-mean-square of PCM16 bytes, in [0, 1]."""
+    if not pcm:
+        return 0.0
+    count = len(pcm) // 2
+    if not count:
+        return 0.0
+    values = struct.unpack("<%dh" % count, pcm[:count * 2])
+    return math.sqrt(sum(sample * sample for sample in values) / count) / 32768.0
+
+
+def emit_capture(trace, start, chunk, vad):
+    """Report one capture chunk as a sidecar's tick measures it."""
+    level = pcm_energy(chunk)
+    emit(trace, {"t": round(time.monotonic() - start, 3),
+                 "stage": "capture", "bytes": len(chunk),
+                 "level": round(level, 5), "rms": round(rms(chunk), 5),
+                 "noise": round(vad.detector._noise, 5),
+                 "threshold": round(vad.detector._threshold(), 5)})
+    return level
+
+
+def emit_decisions(trace, start, results, vad, args, counters):
+    """Report the gate's decisions for one chunk, keeping its utterances.
+
+    COUNTERS carries the run's ``kept``, ``dropped`` and ``wavs`` counts so
+    a recording and a replayed file report them alike.
+    """
+    rate = LOCAL_RATE
+    for result in results:
+        kind = result[0]
+        if kind == "start":
+            emit(trace, {"t": round(time.monotonic() - start, 3),
+                         "stage": "gate", "event": "speech-start",
+                         "uid": result[1]})
+        elif kind == "end":
+            emit(trace, {"t": round(time.monotonic() - start, 3),
+                         "stage": "gate", "event": "speech-end",
+                         "uid": result[1]})
+        elif kind == "speech":
+            pcm, uid = result[1], result[2]
+            seconds = len(pcm) / (2.0 * rate)
+            counters["kept"] += 1
+            counters["wavs"] += 1
+            path = os.path.join(args.out or ".", "utterance-%03d.wav" % counters["wavs"])
+            data = wav_from_pcm(pcm, rate)
+            with open(path, "wb") as handle:
+                handle.write(data)
+            event = {"t": round(time.monotonic() - start, 3),
+                     "stage": "gate", "event": "kept", "uid": uid,
+                     "seconds": round(seconds, 3),
+                     "level": round(pcm_energy(pcm), 5),
+                     "wav": os.path.abspath(path), "bytes": len(pcm)}
+            text = None
+            if args.transcribe:
+                text = transcribe_pcm(pcm, args)
+                event["text"] = text
+            emit(trace, event)
+        elif kind == "cancel":
+            counters["dropped"] += 1
+            emit(trace, {"t": round(time.monotonic() - start, 3),
+                         "stage": "gate", "event": "cancelled",
+                         "uid": result[1],
+                         "seconds": round(result[2], 3)
+                         if len(result) > 2 else None})
+
+
+def listen(args):
+    """Record and report the capture and filter stages."""
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+    recorder = Recorder(LOCAL_RATE, backend=args.audio)
+    reason = recorder.available()
+    if reason:
+        log("probe · %s" % reason)
+        return 2
+    vad = Vad(LOCAL_RATE, threshold=args.threshold,
+              hangover=args.hangover, max_speech=args.max_speech)
+    rate = LOCAL_RATE
+    start = time.monotonic()
+    last_summary = start
+    loudest = 0.0
+    chunks = 0
+    kept = 0
+    dropped = 0
+    wavs = 0
+    captured = bytearray()
+    # Stdout carries the events; --trace keeps a copy in a file.
+    trace = open(args.trace, "w") if args.trace else _Null()
+    log("probe · capture through %s · threshold %.3f · %s"
+        % (recorder.backend or args.audio, args.threshold,
+           ("%.0f s" % args.seconds) if args.seconds else "until Ctrl-C"))
+    count = int(rate * CAPTURE_SECONDS)
+    try:
+        while not args.seconds or time.monotonic() - start < args.seconds:
+            chunk = recorder.read(count)
+            if not chunk:
+                if recorder.exhausted():
+                    log("probe · %s" % (recorder.error or "capture ended"))
+                    break
+                continue
+            chunks += 1
+            if args.wav:
+                captured += chunk
+            level = emit_capture(trace, start, chunk, vad)
+            loudest = max(loudest, level)
+            counters = {"kept": kept, "dropped": dropped, "wavs": wavs}
+            emit_decisions(trace, start, vad.feed(chunk), vad, args, counters)
+            kept, dropped, wavs = (counters["kept"], counters["dropped"],
+                                   counters["wavs"])
+            now = time.monotonic()
+            if now - last_summary >= 1.0:
+                last_summary = now
+                log("probe · %5.1fs level %.4f gate %s kept %d dropped %d"
+                    % (now - start, loudest, "speech" if vad.gate_active else "quiet",
+                       kept, dropped))
+                loudest = 0.0
+    except KeyboardInterrupt:
+        pass
+    finally:
+        recorder.close()
+        if args.trace:
+            trace.close()
+        if args.wav and captured:
+            with open(args.wav, "wb") as handle:
+                handle.write(wav_from_pcm(bytes(captured), rate))
+            log("probe · capture written to %s · %.2f s"
+                % (args.wav, len(captured) / (2.0 * rate)))
+    log("probe · done · %d chunks, %d kept, %d dropped"
+        % (chunks, kept, dropped))
+    return 0
+
+
+def replay(args):
+    """Run one WAV through the capture and filter stages, as a sidecar would.
+
+    The file stands in for the microphone: the same chunk size, the same
+    speech filter and the same level measurement, so a sentence a live
+    session misheard can be replayed and compared stage by stage.  The
+    timestamps in the trace are audio time, not wall time, and PAD
+    seconds of silence follow the file so a last utterance flushes.
+    """
+    with open(args.file, "rb") as handle:
+        pcm = pcm_from_wav(handle.read())
+    if args.pad > 0:
+        pcm += b"\x00\x00" * int(LOCAL_RATE * args.pad)
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+    vad = Vad(LOCAL_RATE, threshold=args.threshold,
+              hangover=args.hangover, max_speech=args.max_speech)
+    trace = open(args.trace, "w") if args.trace else _Null()
+    counters = {"kept": 0, "dropped": 0, "wavs": 0}
+    step = int(LOCAL_RATE * CAPTURE_SECONDS) * 2
+    audio = len(pcm) / (2.0 * LOCAL_RATE)
+    log("probe · replay %s · %.2f s · threshold %.3f · chunk %.2f s"
+        % (args.file, audio, args.threshold, CAPTURE_SECONDS))
+    chunks = 0
+    try:
+        for offset in range(0, len(pcm), step):
+            chunk = pcm[offset:offset + step]
+            if len(chunk) % 2:
+                chunk = chunk[:-1]
+            if not chunk:
+                break
+            chunks += 1
+            # The trace's clock is the audio's: offset 0 is second zero.
+            start = time.monotonic() - offset / 2.0 / LOCAL_RATE
+            emit_capture(trace, start, chunk, vad)
+            emit_decisions(trace, start, vad.feed(chunk), vad, args, counters)
+            if args.pace:
+                time.sleep(CAPTURE_SECONDS)
+    finally:
+        if args.trace:
+            trace.close()
+    log("probe · replayed %d chunks · %d kept · %d dropped"
+        % (chunks, counters["kept"], counters["dropped"]))
+    if vad.gate_active:
+        log("probe · the file ended while speech was open: pad it with silence")
+        return 1
+    return 0
+
+
+def stt_request(pcm, args):
+    """Return the speech-to-text answer for PCM, or nil."""
+    data = wav_from_pcm(pcm, LOCAL_RATE)
+    try:
+        body = http_multipart(
+            args.stt_url,
+            {"model": args.stt_model, "response_format": "json"},
+            "utterance.wav", data, headers=headers(args), timeout=120)
+    except Exception as error:  # noqa: BLE001 - the probe prints it
+        log("probe · speech to text failed · %s" % error)
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except ValueError:
+        log("probe · speech to text · invalid response")
+        return None
+    return (payload.get("text") or "").strip()
+
+
+def transcribe_pcm(pcm, args):
+    """Return the text of PCM, with a human line, or nil."""
+    text = stt_request(pcm, args)
+    if text is not None:
+        log("probe · speech to text · %r" % text)
+    return text
+
+
+def headers(args):
+    """Return the bearer header when a key variable is configured."""
+    name = args.api_key_env
+    if not name:
+        return {}
+    key = os.environ.get(name, "")
+    return {"Authorization": "Bearer %s" % key} if key else {}
+
+
+def transcribe(args):
+    """Transcribe one WAV, as the sidecar transcribes an utterance."""
+    with open(args.file, "rb") as handle:
+        data = handle.read()
+    pcm = pcm_from_wav(data)
+    text = stt_request(pcm, args)
+    if text is None:
+        return 1
+    print(text)
+    return 0
+
+
+def speak(args):
+    """Synthesize one sentence, as the sidecar speaks a reply."""
+    try:
+        body = http_json(
+            args.tts_url,
+            {"model": args.tts_model, "voice": args.voice,
+             "input": args.text, "response_format": "wav"},
+            headers=headers(args), timeout=120)
+    except Exception as error:  # noqa: BLE001 - the probe prints it
+        log("probe · text to speech failed · %s" % error)
+        return 1
+    data = body if isinstance(body, bytes) else b""
+    if not data.startswith(b"RIFF") and isinstance(body, dict):
+        raw = body.get("audio") or body.get("data") or b""
+        if isinstance(raw, bytes):
+            data = raw
+    if not data.startswith(b"RIFF"):
+        log("probe · text to speech · no audio returned")
+        return 1
+    with open(args.file, "wb") as handle:
+        handle.write(data)
+    pcm = pcm_from_wav(data)
+    log("probe · text to speech · %d bytes · %.2f s at %d Hz · level %.4f"
+        % (len(data), len(pcm) / (2.0 * LOCAL_RATE), LOCAL_RATE, pcm_energy(pcm)))
+    return 0
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Measure the local voice pipeline's stages")
+    parser.add_argument("--stt-url", default=DEFAULT_STT_URL)
+    parser.add_argument("--tts-url", default=DEFAULT_TTS_URL)
+    parser.add_argument("--stt-model", default="whisper-1")
+    parser.add_argument("--tts-model", default="tts-1")
+    parser.add_argument("--voice", default="af_heart")
+    parser.add_argument("--api-key-env", default="")
+    parser.add_argument("--audio", default=AUDIO_AUTO,
+                        choices=audio_backend_names(),
+                        help="audio backend (default: the first installed)")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    listen_parser = commands.add_parser(
+        "listen", help="record the microphone and report the filter's decisions")
+    listen_parser.add_argument("--seconds", type=float, default=0,
+                               help="stop after this many seconds (0: until Ctrl-C)")
+    listen_parser.add_argument("--out", default="",
+                               help="directory the kept utterances are written to")
+    listen_parser.add_argument("--trace", default="",
+                               help="JSONL file for the measurements (default: stdout)")
+    listen_parser.add_argument("--wav", default="",
+                               help="write everything the microphone gave to this WAV")
+    listen_parser.add_argument("--threshold", type=float, default=0.004)
+    listen_parser.add_argument("--hangover", type=float, default=0.85)
+    listen_parser.add_argument("--max-speech", type=float, default=120.0)
+    listen_parser.add_argument("--transcribe", action="store_true",
+                               help="also send each kept utterance to speech to text")
+
+    transcribe_parser = commands.add_parser(
+        "transcribe", help="speech-to-text one WAV")
+    transcribe_parser.add_argument("file")
+
+    replay_parser = commands.add_parser(
+        "replay", help="run one WAV through the filter, as the microphone's audio")
+    replay_parser.add_argument("file")
+    replay_parser.add_argument("--out", default="",
+                               help="directory the kept utterances are written to")
+    replay_parser.add_argument("--trace", default="",
+                               help="JSONL file for the measurements (default: stdout)")
+    replay_parser.add_argument("--threshold", type=float, default=0.004)
+    replay_parser.add_argument("--hangover", type=float, default=0.85)
+    replay_parser.add_argument("--max-speech", type=float, default=120.0)
+    replay_parser.add_argument("--pad", type=float, default=1.0,
+                               help="seconds of silence after the file (default: 1)")
+    replay_parser.add_argument("--pace", action="store_true",
+                               help="feed the chunks in real time")
+    replay_parser.add_argument("--transcribe", action="store_true",
+                               help="also send each kept utterance to speech to text")
+
+    speak_parser = commands.add_parser(
+        "speak", help="text-to-speech one sentence")
+    speak_parser.add_argument("text")
+    speak_parser.add_argument("file")
+    return parser.parse_args(argv[1:])
+
+
+def main(argv):
+    args = parse_args(argv)
+    if args.command == "listen":
+        return listen(args)
+    if args.command == "replay":
+        return replay(args)
+    if args.command == "transcribe":
+        return transcribe(args)
+    if args.command == "speak":
+        return speak(args)
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except KeyboardInterrupt:
+        sys.exit(0)

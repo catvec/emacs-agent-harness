@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import argparse
 import array
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import queue
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -29,6 +32,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 sys.path.insert(0, os.path.join(ROOT, "test"))
+
+
+def process_alive(pid):
+    """Return whether PID still runs; a zombie waits only to be reaped."""
+    try:
+        with open("/proc/%d/stat" % pid) as handle:
+            state = handle.read().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state not in ("Z", "X")
 
 import voice_fixtures as fixtures  # noqa: E402
 from harness_voice_sidecar import (  # noqa: E402
@@ -324,10 +337,10 @@ class DetectorTest(unittest.TestCase):
                          "a fresh detector accepts the fixture; the estimator did not")
 
     def test_a_missed_quiet_utterance_does_not_raise_the_floor_for_the_next(self):
-        # 0.048 is below the configured threshold even at its loudest frame,
-        # so this attempt is missed; 0.07 is accepted by a clean detector but
+        # 0.010 is below the threshold floor even at its loudest frame, so
+        # this attempt is missed; 0.07 is accepted by a clean detector but
         # not above a floor the missed attempt would have taught.
-        missed = fixtures.voiced(2.0, amplitude=0.048)
+        missed = fixtures.voiced(2.0, amplitude=0.010)
         next_one = fixtures.voiced(1.5, amplitude=0.07)
         events, detector = detector_events(
             fixtures.concat(missed, fixtures.silence(1.0), next_one))
@@ -345,9 +358,14 @@ class DetectorTest(unittest.TestCase):
         self.assertEqual(detector._threshold(), detector.threshold)
 
     def test_low_level_room_noise_does_not_hide_a_quiet_utterance(self):
-        room = 0.012
+        # A quiet room and a microphone whose gain leaves speech around a
+        # third of a normal mouth's level: the frames of the words sit near
+        # 0.006 and the room near 0.0015, which is a Scarlett Solo with its
+        # gain low.  The gate is a floor under the room, not a level speech
+        # has to reach.
+        room = 0.003
         speech = fixtures.mix(
-            fixtures.voiced(1.5, amplitude=0.08),
+            fixtures.voiced(1.5, amplitude=0.02),
             fixtures.white_noise(1.5, amplitude=room, seed=11))
         events, detector = detector_events(
             fixtures.concat(fixtures.white_noise(1.0, amplitude=room),
@@ -1417,6 +1435,7 @@ class LivePacingTest(unittest.TestCase):
              "--tts-url", base + "/v1/audio/speech", "--threshold", "0.02"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=dict(os.environ), text=True, bufsize=1)
+        self.sidecar = sidecar
         events = queue.Queue()
         seen = []
 
@@ -1536,6 +1555,68 @@ class LivePacingTest(unittest.TestCase):
         finally:
             finish()
 
+    def test_playback_dies_with_the_sidecar(self):
+        """Killing the sidecar, as closing Emacs does, stops the speaker.
+
+        Emacs can go away without sending ``stop``: its last window is
+        closed, its process is killed.  A player that outlives the
+        sidecar has already read the reply out of the pipe, so it plays
+        it on to an empty room; the audio process must be tied to the
+        sidecar's life instead.
+        """
+        if not os.path.isdir("/proc"):
+            self.skipTest("no /proc to watch the player")
+        pidfile = os.path.join(self.work, "player.pid")
+        self.program("pw-record", (
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "while True:\n"
+            "    sys.stdout.buffer.write(b'\\x00' * 640)\n"
+            "    sys.stdout.buffer.flush()\n"
+            "    time.sleep(0.02)\n"))
+        self.program("pw-play", (
+            "#!/usr/bin/env python3\n"
+            "import os, sys, time\n"
+            "open(__PID__, 'w').write(str(os.getpid()))\n"
+            "sys.stdin.buffer.read()\n"
+            "time.sleep(30)\n").replace("__PID__", repr(pidfile)))
+        os.environ["PATH"] = self.work + os.pathsep + self.path
+        send, wait_for, _seen, finish = self.start(
+            [], wav_from_pcm(fixtures.silence(0.3), fixtures.RATE))
+        pid = None
+
+        def silence():
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+        self.addCleanup(silence)
+        try:
+            send(event="start", protocol=1, context="")
+            wait_for("ready")
+            send(event="commentary", id="c-1",
+                 text="A reply that is already being played.")
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not os.path.exists(pidfile):
+                time.sleep(0.02)
+            self.assertTrue(os.path.exists(pidfile),
+                            "the reply never started playing")
+            with open(pidfile) as handle:
+                pid = int(handle.read().strip())
+            self.assertTrue(process_alive(pid))
+            # The sidecar dies the way Emacs kills it: no stop, no finally.
+            self.sidecar.kill()
+            self.sidecar.wait(timeout=10)
+            deadline = time.monotonic() + 5
+            while process_alive(pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(process_alive(pid),
+                             "the player outlived the sidecar")
+        finally:
+            finish()
+
 
 class TtsWavTest(unittest.TestCase):
     """A speech reply is PCM16 mono at the rate the local pipeline plays."""
@@ -1585,9 +1666,78 @@ class TtsWavTest(unittest.TestCase):
     def test_defaults_match_the_bundled_stack(self):
         options = unmute.parse_args(["harness-voice-live-unmute"])
         self.assertEqual("af_heart", options.voice)
+        # The gate's floor, not a level speech must reach: a quiet
+        # interface's words are still speech (see the detector tests).
+        self.assertEqual(0.004, options.threshold)
         self.assertEqual("tts-1", options.tts_model)
         self.assertTrue(options.tts_url.endswith("/v1/audio/speech"))
         self.assertTrue(options.stt_url.endswith("/inference"))
+
+
+class ProbeOutputTest(unittest.TestCase):
+    """A probe run without a trace file prints each measurement once."""
+
+    def test_events_are_printed_once(self):
+        loader = importlib.machinery.SourceFileLoader(
+            "harness_voice_probe",
+            os.path.join(ROOT, "scripts", "harness-voice-probe"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        probe = importlib.util.module_from_spec(spec)
+        loader.exec_module(probe)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            probe.emit(probe._Null(), {"stage": "capture", "level": 0.001})
+            probe.emit(None, {"stage": "capture", "level": 0.001})
+        self.assertEqual(2, len(output.getvalue().splitlines()))
+
+
+class ProbeReplayTest(unittest.TestCase):
+    """The probe's replay reports the capture and filter stages of one WAV."""
+
+    def test_replay_keeps_the_speech_and_reports_each_stage(self):
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, True)
+        wav = os.path.join(work, "speech.wav")
+        with open(wav, "wb") as handle:
+            # One utterance, then the silence that closes it.
+            handle.write(wav_from_pcm(fixtures.voiced(1.2) + fixtures.silence(1.2),
+                                      fixtures.RATE))
+        trace = os.path.join(work, "trace.jsonl")
+        out = os.path.join(work, "out")
+        result = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "harness-voice-probe"),
+             "replay", wav, "--out", out, "--trace", trace],
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, result.returncode, result.stderr)
+        with open(trace) as handle:
+            events = [json.loads(line) for line in handle if line.strip()]
+        stages = [event for event in events if event.get("stage") == "gate"]
+        kinds = [event["event"] for event in stages]
+        self.assertIn("speech-start", kinds)
+        self.assertIn("speech-end", kinds)
+        kept = [event for event in stages if event["event"] == "kept"]
+        self.assertEqual(1, len(kept), events)
+        self.assertGreater(kept[0]["seconds"], 0.5)
+        self.assertTrue(os.path.exists(kept[0]["wav"]))
+        # The trace's clock is audio time: the kept utterance ends the file.
+        self.assertGreater(kept[0]["t"], 1.0)
+
+    def test_replay_keeps_nothing_from_silence(self):
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, True)
+        wav = os.path.join(work, "silence.wav")
+        with open(wav, "wb") as handle:
+            handle.write(wav_from_pcm(fixtures.silence(1.0), fixtures.RATE))
+        trace = os.path.join(work, "trace.jsonl")
+        result = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "harness-voice-probe"),
+             "replay", wav, "--trace", trace],
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, result.returncode, result.stderr)
+        with open(trace) as handle:
+            events = [json.loads(line) for line in handle if line.strip()]
+        self.assertEqual([], [event for event in events
+                              if event.get("event") == "kept"])
 
 
 if __name__ == "__main__":

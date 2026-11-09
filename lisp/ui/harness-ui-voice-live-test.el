@@ -215,6 +215,32 @@
     (harness-test-wait (lambda () (null harness-voice-live--state)) 5 "deletion stop")
     (should-not (harness-voice-live--active-p))))
 
+(ert-deftest harness-ui-voice-live-last-frame-closes-the-session ()
+  "Closing the last frame ends live voice; another frame keeps it.
+The sidecar owns the microphone and the speaker, so a window closing
+must not leave a reply playing to an empty desktop, while closing one
+of several frames changes nothing."
+  (harness-ui-voice-live-test-with
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (frame) (memq frame '(gui-1 gui-2)))))
+      ;; Another graphical frame remains: the last window is still open.
+      (should-not (harness-voice-live--last-frame-p 'gui-1 '(gui-1 gui-2 tty)))
+      ;; The daemon's unseen terminal frame does not keep the session.
+      (should (harness-voice-live--last-frame-p 'gui-1 '(gui-1 tty)))
+      ;; A terminal Emacs keeps the session while another frame shows it.
+      (should-not (harness-voice-live--last-frame-p 'tty-1 '(tty-1 tty-2)))
+      (should (harness-voice-live--last-frame-p 'tty-1 '(tty-1)))
+      (let ((stopped 0))
+        (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t))
+                  ((symbol-function 'harness-voice-live-stop)
+                   (lambda () (cl-incf stopped)))
+                  ((symbol-function 'frame-list) (lambda () '(gui-1 tty))))
+          (harness-voice-live--frame-deleted 'gui-1)
+          (should (= 1 stopped))
+          (cl-letf (((symbol-function 'frame-list) (lambda () '(gui-1 gui-2 tty))))
+            (harness-voice-live--frame-deleted 'gui-1)
+            (should (= 1 stopped))))))))
+
 (ert-deftest harness-ui-voice-live-recording-owns-the-microphone ()
   "The WAV recorder cannot run while the sidecar holds the audio device."
   (harness-ui-voice-live-test-with

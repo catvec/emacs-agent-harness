@@ -10,7 +10,7 @@ servers -- the bundled voice-local stack's whisper.cpp for speech to
 text and Kokoro for text to speech.
 
     scripts/harness-voice-live-unmute [--stt-url URL] [--tts-url URL]
-                                      [--voice af_heart] [--threshold 0.02]
+                                      [--voice af_heart] [--threshold 0.004]
                                       [--self-test]
 
 The two endpoints follow the OpenAI audio API, so whisper.cpp's server,
@@ -483,7 +483,8 @@ def parse_args(argv):
     parser.add_argument("--stt-model", default="whisper-1")
     parser.add_argument("--tts-model", default="tts-1")
     parser.add_argument("--voice", default="af_heart")
-    parser.add_argument("--threshold", type=float, default=0.02)
+    parser.add_argument("--threshold", type=float, default=0.004,
+                        help="quietest frame energy the gate calls speech")
     parser.add_argument("--hangover", type=float, default=0.85)
     parser.add_argument("--max-speech", type=float, default=120.0)
     parser.add_argument("--api-key-env", default="")

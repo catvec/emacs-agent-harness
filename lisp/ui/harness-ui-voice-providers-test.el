@@ -89,7 +89,11 @@
                    (cadr (member "--stt-url" command))))
     (should (equal "http://127.0.0.1:9000/v1/audio/speech"
                    (cadr (member "--tts-url" command))))
-    (should (string-suffix-p "harness-voice-live-unmute" (cadr command))))
+    (should (string-suffix-p "harness-voice-live-unmute" (cadr command)))
+    ;; The gate's floor, not a level a quiet interface must reach.
+    (should (equal (number-to-string harness-voice-unmute-threshold)
+                   (cadr (member "--threshold" command))))
+    (should (equal "0.004" (cadr (member "--threshold" command)))))
   (should (equal '("--demo") (last (harness-voice-fixture-command)))))
 
 (ert-deftest harness-ui-voice-providers-command-validation ()

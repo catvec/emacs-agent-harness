@@ -758,9 +758,12 @@ different endpoint may name another voice, such as OpenAI's \"alloy\"."
   :type 'string
   :group 'harness-voice)
 
-(defcustom harness-voice-unmute-threshold 0.02
-  "Mean sample energy at which the local provider starts an utterance.
-Raise it in a noisy room, lower it for a quiet microphone."
+(defcustom harness-voice-unmute-threshold 0.004
+  "Quietest mean sample energy the local provider calls speech.
+The gate also rises to 2.5 times the room's learned noise floor, so this
+is the floor under a quiet microphone rather than the level speech must
+reach.  Raise it in a noisy room; lower it for an interface whose gain
+leaves a speaking mouth below it."
   :type 'number
   :group 'harness-voice)
 

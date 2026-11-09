@@ -155,7 +155,7 @@ involved; audio goes only to the loopback addresses below unless changed.
       ;; nil: the running voice-local stack's Kokoro service
       harness-voice-unmute-tts-url nil
       harness-voice-unmute-voice "af_heart"
-      harness-voice-unmute-threshold 0.02)
+      harness-voice-unmute-threshold 0.004)
 ```
 
 Speech to text defaults to the `voice-local` stack: the provider reads the
@@ -226,6 +226,44 @@ own fragments, never the model. A provider that declares no fragments passes
 none; with no model chosen, the local stack uses the level for its whisper
 model, and changing it restarts a running stack the way the model choice
 does.
+
+#### Measuring the stages
+
+`scripts/harness-voice-probe` runs the sidecar's own capture, filter and
+service code outside Emacs, so a session that hears nothing can be told
+apart stage by stage:
+
+```sh
+# Record the microphone: one JSON line per chunk and every gate decision.
+# --wav keeps the whole capture, for replaying a phrase the gate missed.
+scripts/harness-voice-probe listen --seconds 30 --out /tmp/voice \
+    --trace /tmp/voice.jsonl --wav /tmp/voice-capture.wav
+
+# Play a WAV through the same filter at the same chunk size, as if it
+# were the microphone; each utterance it accepts is written out.
+scripts/harness-voice-probe replay /tmp/voice/utterance-001.wav --out /tmp/replay
+
+# One WAV through speech to text, and one sentence through text to speech.
+scripts/harness-voice-probe transcribe /tmp/replay/utterance-001.wav
+scripts/harness-voice-probe speak "Add a docstring to parse." /tmp/reply.wav
+```
+
+`listen` prints a level, gate and kept-utterance summary once a second, and
+`--trace` keeps every measurement as JSON, including the detector's noise
+floor and its threshold, so a level that never rises above the threshold is
+visible before any transcript is missing. The level is the mean absolute
+sample of the chunk: a microphone with a mouth in front of it gives 0.02 to
+0.08, and a quiet or distant one gives less, which is still worth
+transcribing -- whisper reads a quarter of that level correctly. The gate
+therefore treats `--threshold` as a floor (0.004 by default) and rises from
+it to 2.5 times the room's learned noise floor, so a quiet interface is
+heard and a loud room is not. Raise `--threshold` in a noisy room; lower it
+only for a microphone quieter still. `replay` prints the same trace for
+a known phrase, with the timestamps in audio time, and reports the text the
+speech service returns for each utterance with `--transcribe`. Each command
+takes `--stt-url` and `--tts-url` (defaults are the ports the stack
+documentation names): pass the ports the running stack actually published,
+which the setup list and `M-x harness-stacks` show.
 
 ### Scripted fixture and custom sidecars
 
