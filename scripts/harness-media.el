@@ -4600,8 +4600,8 @@ and [Verify] and [Send back] are under them."
 (defun harness-media-shot-review-ediff ()
   "Ediff on a file of that review: the files as a tree beside it, the threads below them, the box under it.
 The column on the left has the marks of the files, the file compared
-highlighted, in a tree, and below it the compared file's threads in the
-library's own view, its filters and keys with them, scrolled to them; the version on the
+highlighted, in a tree, and below it the review's threads with the facts
+of the review, its filter and its controls in their groups; the version on the
 branch shows the threads of acme/app.py at the line each is on now,
 drawn to the width of the window: a closed thread is one line, the one
 the agent closed, and the one the reviewer closed is opened to its
@@ -4635,6 +4635,11 @@ through."
           (forward-line (1- (harness-media--review-line "def _application" "acme/app.py")))
           (recenter 1)))
       (harness-media--settle 1.5)
+      ;; The pane starts at its facts and controls, the threads below them.
+      (when-let* ((pane (harness-ui-patch-review--threads-pane-window review)))
+        (with-selected-window pane
+          (goto-char (point-min))
+          (set-window-start nil (point-min))))
       (harness-media--capture "review-ediff")
       ;; Back to the report, as q gives it.
       (with-current-buffer (plist-get (harness-ui-patch-review--r-ediff review) :control)

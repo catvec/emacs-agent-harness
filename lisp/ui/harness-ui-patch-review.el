@@ -3124,23 +3124,391 @@ waiting in the threads, as their [Send drafts] button does.")
   (set-keymap-parent map harness-ui-patch-review--thread-map)
   (define-key map (kbd "C-c C-c") #'harness-ui-patch-review-send-replies))
 
-(defconst harness-ui-patch-review--thread-hint-detail
-  "RET compares the file at the thread's line or shows where a comment was made, r replies, c starts a new thread in the box, S sends the drafts of a task at work to the agent, e edits a draft, k deletes one and K a thread of drafts, x closes a thread or opens it again, o follows an agent's comment, f changes which threads show, TAB folds or opens the file's threads or the thread at point, E opens every one and C folds every one."
-  "The full key list the threads show on hover.  The threads the chat
-shows in place of its box send the waiting drafts with C-c C-c too.")
+(defvar harness-ui-patch-review--thread-view-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map change-review-threads-mode-map)
+    map)
+  "Keys of the review's threads view, below the library's.
+The view has every key of the library's threads view, and the review's:
+RET compares the thread's line in Ediff or shows where a comment was
+made, c starts a new thread, S sends the drafts, E and C open and fold
+every thread, TAB folds what point is on, T returns to Ediff, and ?
+lists every key.")
 
-(defconst harness-ui-patch-review--compose-thread-hint
-  "RET jump · r reply · x close/open · m reviewed · f filter"
-  "The keys the compose view's threads show, in brief.
-`harness-ui-patch-review--thread-hint-detail' is the whole of it, on
-the line's tooltip.")
+;; Filled at top level, so that a reload gives the map its keys again.
+(let ((map harness-ui-patch-review--thread-view-map))
+  (define-key map (kbd "RET") #'harness-ui-patch-review-thread-return)
+  (define-key map (kbd "c") #'harness-ui-patch-review-new-thread)
+  (define-key map (kbd "S") #'harness-ui-patch-review-send-replies)
+  (define-key map (kbd "C-c C-c") #'harness-ui-patch-review-send-replies)
+  (define-key map (kbd "E") #'harness-ui-patch-review-expand-all-threads)
+  (define-key map (kbd "C") #'harness-ui-patch-review-collapse-all-threads)
+  (define-key map (kbd "TAB") #'harness-ui-patch-review-toggle-fold)
+  (define-key map (kbd "<tab>") #'harness-ui-patch-review-toggle-fold)
+  (define-key map (kbd "T") #'harness-ui-patch-review-open)
+  (define-key map (kbd "?") #'harness-ui-patch-review-keys)
+  (define-key map (kbd "C-c ?") #'harness-ui-patch-review-keys))
+
+;;;;; The controls, one model for every surface
+
+;; The Ediff control panel, the threads beside it, the threads in a
+;; report and in a chat, and the threads view opened on its own all offer
+;; the same commands.  They are written once, here, as a label and a
+;; tooltip with the key and command each surface binds: a surface draws
+;; the controls of its groups in rows, and `harness-ui-patch-review-keys'
+;; lists them all in one place.  No surface keeps a key legend of its own.
+
+(defconst harness-ui-patch-review--control-groups
+  '((threads "Threads")
+    (navigate "Navigate")
+    (diff "Diff")
+    (view "View"))
+  "The groups the review's controls are drawn in, with their titles.
+The controls of the threads and those of the file's diff are in groups
+of their own, so neither is ever drawn among the other.")
+
+(defconst harness-ui-patch-review--control-definitions
+  '((comment :group threads :label "Comment"
+     :help "Comment on the current difference"
+     :ediff (c harness-ui-patch-review-comment))
+    (new-thread :group threads :label "New thread"
+     :help "Thread of your own, nothing quoted"
+     :threads (c harness-ui-patch-review-new-thread))
+    (reply :group threads :label "Reply"
+     :help "Reply in the thread at point"
+     :ediff (r harness-ui-patch-review-reply "Reply in the thread at the difference"))
+    (close :group threads :label "Close"
+     :help "Close the thread or open it again"
+     :ediff (x harness-ui-patch-review-toggle-thread "Close the thread at the difference or open it again")
+     :threads (x change-review-ui-toggle-status))
+    (reviewed :group threads :label "Reviewed"
+     :help "Mark the thread reviewed, or make it wait again"
+     :ediff (m harness-ui-patch-review-toggle-reviewed "Mark the thread at the difference reviewed, or make it wait again")
+     :threads (m change-review-ui-toggle-reviewed))
+    (edit-draft :group threads :label "Edit draft"
+     :help "Edit the draft at point"
+     :ediff (e harness-ui-patch-review-edit-comment "Edit the draft at the difference, or the feedback box")
+     :threads (e change-review-ui-edit-draft))
+    (delete-draft :group threads :label "Delete draft"
+     :help "Delete the draft at point"
+     :ediff (k harness-ui-patch-review-delete-comment "Delete the draft at the difference")
+     :threads (k change-review-ui-delete-draft))
+    (delete-thread :group threads :label "Delete thread"
+     :help "Delete a thread of drafts"
+     :ediff (K harness-ui-patch-review-delete-thread "Delete a thread of drafts at the difference")
+     :threads (K change-review-ui-delete-draft-thread))
+    (fold :group threads :label "Fold thread"
+     :help "Fold the thread, or open it"
+     :ediff (TAB harness-ui-patch-review-cycle-fold "Fold the threads at the difference, or open them")
+     :threads (TAB harness-ui-patch-review-toggle-fold))
+    (next-thread :group navigate :label "Next thread"
+     :help "Next thread of the file"
+     :ediff ("M-n" harness-ui-patch-review-next-thread)
+     :threads ("N" change-review-ui-next-thread))
+    (previous-thread :group navigate :label "Previous thread" :short "Prev thread"
+     :help "Previous thread of the file"
+     :ediff ("M-p" harness-ui-patch-review-previous-thread)
+     :threads ("P" change-review-ui-previous-thread))
+    (next-comment :group navigate :label "Next comment"
+     :help "Next comment"
+     :threads (n change-review-ui-next-comment))
+    (previous-comment :group navigate :label "Previous comment" :short "Prev comment"
+     :help "Previous comment"
+     :threads (p change-review-ui-previous-comment))
+    (diff :group navigate :label "Diff"
+     :help "The thread's line in the diff view"
+     :threads (d change-review-ui-show-in-diff))
+    (source :group navigate :label "Source"
+     :help "The code the comment was written on"
+     :threads (D change-review-ui-show-source))
+    (approve :group diff :label "Approve"
+     :help "Approve the file; a second press takes it off"
+     :ediff (a harness-ui-patch-review-approve-ediff))
+    (next-file :group diff :label "Next file"
+     :help "Next file to review"
+     :ediff (N harness-ui-patch-review-ediff-next-file))
+    (previous-file :group diff :label "Previous file" :short "Prev file"
+     :help "Previous file"
+     :ediff (P harness-ui-patch-review-ediff-previous-file))
+    (skip-approved :group view
+     :label harness-ui-patch-review--skip-approved-label
+     :help "Leave out the files already approved"
+     :ediff (s harness-ui-patch-review-toggle-skip-approved))
+    (auto-approve :group view
+     :label harness-ui-patch-review--auto-approve-label
+     :help "Approve the files gone through without a comment"
+     :ediff (u harness-ui-patch-review-toggle-auto-approve))
+    (files :group view
+     :label harness-ui-patch-review--files-label
+     :help "The files in a column beside Ediff"
+     :ediff (t harness-ui-patch-review-toggle-ediff-tree))
+    (expand :group view :label "Expand all"
+     :help "Open every file's threads and every thread"
+     :threads (E harness-ui-patch-review-expand-all-threads))
+    (collapse :group view :label "Collapse all"
+     :help "Fold every file's threads and every thread"
+     :threads (C harness-ui-patch-review-collapse-all-threads))
+    (send :group view
+     :label harness-ui-patch-review--send-drafts-label
+     :help "Send the drafts to the agent together, while the task is at work"
+     :when harness-ui-patch-review--sendable-p
+     :ediff (S harness-ui-patch-review-send-replies)
+     :threads (S harness-ui-patch-review-send-replies))
+    (filter :group view :label "Filter"
+     :help "Which threads show"
+     :threads (f change-review-ui-cycle-filter))
+    (keys :group view :label "Keys"
+     :help "Every key of the review"
+     :ediff ("C-c ?" harness-ui-patch-review-keys)
+     :threads ("C-c ?" harness-ui-patch-review-keys))
+    (report :group view :label "Report"
+     :help "Back to the report"
+     :ediff (q harness-ui-patch-review-ediff-quit))
+    (ediff :group view :label "Ediff"
+     :help "Back to the comparison"
+     :pane (T harness-ui-patch-review-open)))
+  "The review's commands, their labels, tooltips and keys by surface.
+Each entry has a `:group', a `:label' (a string, or a function of the
+review returning one), a `:help' tooltip, and a binding for each surface
+it shows on: `:ediff', `:threads' (a report, a chat's threads, the
+threads view) or `:pane' (the threads beside Ediff).  A binding is
+\(KEY COMMAND), KEY a key description string or a `kbd' form, or
+\(KEY COMMAND HELP) with a tooltip of its own.  A label in square
+brackets is drawn for the button; `:short' is its narrow form.")
+
+(defun harness-ui-patch-review--skip-approved-label (_review)
+  "Return the label of the skip-approved setting, with its check."
+  (format "%s Skip approved" (if harness-ui-patch-review-skip-approved "✓" "✗")))
+
+(defun harness-ui-patch-review--auto-approve-label (_review)
+  "Return the label of the auto-approve setting, with its check."
+  (format "%s Auto-approve" (if harness-ui-patch-review-auto-approve "✓" "✗")))
+
+(defun harness-ui-patch-review--files-label (_review)
+  "Return the label of the files-column setting, with its check."
+  (format "%s Files" (if harness-ui-patch-review-ediff-tree "✓" "✗")))
+
+(defun harness-ui-patch-review--send-drafts-label (review)
+  "Return the label of [Send drafts], with how many wait in REVIEW."
+  (let ((count (and review (harness-ui-patch-review--draft-count review))))
+    (if (and count (> count 0))
+        (format "Send %s" (harness-ui-patch-review--plural count "draft"))
+      "Send drafts")))
+
+(defun harness-ui-patch-review--sendable-p (review)
+  "Non-nil when REVIEW's drafts can go to its agent now, in the working phase.
+A task waiting for review sends them with the feedback that sends it back,
+so [Send drafts] is not a control of that review."
+  (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review)))
+
+(defun harness-ui-patch-review--control-action (id review)
+  "Return what control ID does in REVIEW, or nil for its command.
+The commands that act on the review are buttons of a view of it, but a
+view can be drawn in a buffer that no review is at point in -- a test's,
+or the list of keys -- so they name their review."
+  (pcase id
+    ('expand (lambda () (harness-ui-patch-review--set-comments-folded review nil)))
+    ('collapse (lambda () (harness-ui-patch-review--set-comments-folded review t)))
+    ('send (lambda () (harness-ui-patch-review-send-replies review)))))
+
+(defun harness-ui-patch-review--control-specs (surface &optional review)
+  "Return the controls of the review on SURFACE, in their groups.
+SURFACE is `ediff', `threads' or `pane'; REVIEW is the review whose
+settings and drafts the labels tell, when one is at hand.  Each group is
+\(TITLE . SPECS) and each spec is a plist of `:id', `:label', `:key',
+`:command', `:action' and `:help', for
+`harness-ui-patch-review--control-button'."
+  (let ((surface-key (intern (format ":%s" surface)))
+        ;; The pane beside Ediff has every thread control, and the way back
+        ;; to the comparison.
+        (keys (if (eq surface 'pane) '(:pane :threads) nil))
+        groups)
+    (unless keys (setq keys (list surface-key)))
+    (dolist (entry harness-ui-patch-review--control-definitions)
+      (let ((id (car entry))
+            (definition (cdr entry)))
+        (when-let* ((binding (cl-some (lambda (key) (plist-get definition key)) keys))
+                    ((or (null review)
+                         (null (plist-get definition :when))
+                         (funcall (plist-get definition :when) review))))
+          (let* ((key (nth 0 binding))
+                 (command (nth 1 binding))
+                 (help (or (nth 2 binding) (plist-get definition :help)))
+                 (label (let ((label (plist-get definition :label)))
+                          (if (functionp label) (funcall label review) label)))
+                 (group (plist-get definition :group))
+                 (cell (assq group groups)))
+            (unless cell
+              (setq cell (cons group nil))
+              (push cell groups))
+            (setcdr cell
+                    (append (cdr cell)
+                            (list (list :id id :label label
+                                        :short (plist-get definition :short)
+                                        :key (format "%s" key)
+                                        :command command
+                                        :action (and review
+                                                     (harness-ui-patch-review--control-action id review))
+                                        :help help))))))))
+    (let ((ordered (nreverse groups)))
+      (mapcar (lambda (group)
+                (cons (or (cadr (assq (car group) harness-ui-patch-review--control-groups))
+                          (capitalize (symbol-name (car group))))
+                      (cdr group)))
+              ordered))))
+
+(defun harness-ui-patch-review--control-button (spec &optional narrow)
+  "Return SPEC's button: its label, and its key beside it.
+NARROW takes the short label when SPEC has one.  The button runs the
+spec's command when clicked, and its tooltip is the spec's help."
+  (let* ((label (if (and narrow (plist-get spec :short))
+                    (plist-get spec :short)
+                  (plist-get spec :label)))
+         (command (plist-get spec :command))
+         (action (or (plist-get spec :action) command))
+         (button (buttonize (format "[%s]" label)
+                            (lambda (_button)
+                              (if (commandp action)
+                                  (call-interactively action)
+                                (funcall action)))
+                            nil (harness-ui-one-line (plist-get spec :help)))))
+    (concat (propertize button
+                        'face 'button 'mouse-face 'highlight 'pointer 'hand
+                        'keymap (harness-ui-mouse-keymap command))
+            (if-let* ((key (plist-get spec :key)))
+                (concat " " (harness-ui-kbd key))
+              ""))))
+
+(defun harness-ui-patch-review--control-line (line continuation)
+  "Return LINE, one line of controls, wrapping under CONTINUATION."
+  (propertize (concat line "\n") 'wrap-prefix continuation))
+
+(defun harness-ui-patch-review--control-lines (surface width &optional review)
+  "Return the controls of SURFACE, drawn in their groups at most WIDTH wide.
+Each group starts a line with its title, its controls after it, and goes
+on the next lines when WIDTH has no room for them.  A line is never
+wider than WIDTH when one control fits; a control wider than the room
+left wraps where it is, under the group's controls, so that every one is
+whole and clickable however narrow the window is.  REVIEW tells the
+labels that depend on it, its settings and its drafts."
+  (let* ((groups (harness-ui-patch-review--control-specs surface review))
+         (column (1+ (apply #'max 0
+                            (mapcar (lambda (group) (string-width (car group)))
+                                    groups))))
+         ;; A row of long labels needs the room its longest control takes
+         ;; after the title; a narrower window gets the short labels and a
+         ;; continuation close to the edge, so no control runs off it.
+         (widest (apply #'max 0
+                        (mapcar (lambda (group)
+                                  (apply #'max 0
+                                         (mapcar (lambda (spec)
+                                                   (string-width
+                                                    (harness-ui-patch-review--control-button spec)))
+                                                 (cdr group))))
+                                groups)))
+         (wide (>= width (+ 2 column widest)))
+         (continuation (if wide
+                           (make-string (+ 2 column) ?\s)
+                         "  "))
+         lines)
+    (dolist (group groups)
+      (let* ((title (car group))
+             (head (concat "  " title
+                           (if wide (make-string (- column (string-width title)) ?\s) "")))
+             (line (if wide head continuation))
+             (started nil))
+        (unless wide
+          (push (harness-ui-patch-review--control-line head "  ") lines))
+        (dolist (spec (cdr group))
+          ;; A narrow window gets the short label, when the spec has one.
+          (let* ((item (harness-ui-patch-review--control-button
+                        spec (and (not wide) (plist-get spec :short))))
+                 (addition (if started (concat "  " item) item)))
+            (if (and started
+                     (> (+ (string-width line) (string-width addition)) width))
+                (progn
+                  (push (harness-ui-patch-review--control-line line continuation) lines)
+                  (setq line (concat continuation item)))
+              (setq line (concat line addition)))
+            (setq started t)))
+        (push (harness-ui-patch-review--control-line line continuation) lines)))
+    (mapconcat #'identity (nreverse lines) "")))
+
+(defun harness-ui-patch-review--info-join (segments &optional short)
+  "Return SEGMENTS, facts of the review, joined by a middle dot.
+With SHORT, a fact that has a short form says it."
+  (mapconcat (lambda (segment)
+               (or (and short (nth 2 segment)) (car segment)))
+             segments " · "))
+
+(defun harness-ui-patch-review--info-line (segments width)
+  "Return SEGMENTS, facts of the review, on one line that fits WIDTH.
+SEGMENTS is a list of (TEXT PRIORITY SHORT); the short forms are tried
+first, then the least important facts go when the line has no room.  A
+fact that has to stay wraps under the dim line.  The separators count as
+the room they take."
+  (let ((shown (copy-sequence segments))
+        (short nil))
+    (while (and (> (length shown) 1)
+                (> (string-width (harness-ui-patch-review--info-join shown short)) width))
+      (cond
+       ((and (not short) (cl-some (lambda (item) (nth 2 item)) shown))
+        (setq short t))
+       ((cl-some (lambda (item) (numberp (cadr item))) shown)
+        (let* ((priorities (mapcar #'cadr shown))
+               (lowest (apply #'min (cl-remove-if-not #'numberp priorities)))
+               (pos (cl-position lowest priorities)))
+          (setq shown (append (cl-subseq shown 0 pos) (cl-subseq shown (1+ pos))))))
+       (t (setq shown (list (car shown))))))
+    (propertize (concat (harness-ui-patch-review--info-join shown short) "\n")
+                'face 'harness-dim-face
+                'wrap-prefix "  ")))
+
+(defun harness-ui-patch-review-keys (&optional surface)
+  "Show every key of the review, grouped, in a buffer of its own.
+SURFACE is `ediff', `threads' or `pane', by default the surface this
+buffer is: the thread view, or the Ediff control panel.  This is the one
+place the review's keys, their labels and what they do are listed."
+  (interactive)
+  (let* ((surface (or surface
+                      (if (derived-mode-p 'change-review-threads-mode)
+                          'threads
+                        'ediff)))
+         (review (ignore-errors
+                   (or (harness-ui-patch-review--review-here)
+                       harness-ui-patch-review--review)))
+         (buffer (get-buffer-create "*Review keys*")))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize "Review keys" 'face 'harness-label-face) "\n\n")
+        (dolist (group (harness-ui-patch-review--control-specs surface review))
+          (insert (propertize (car group) 'face 'harness-label-face) "\n")
+          (dolist (spec (cdr group))
+            (insert "  " (harness-ui-kbd (plist-get spec :key))
+                    "  " (plist-get spec :label)
+                    "   "
+                    (propertize (harness-ui-one-line (plist-get spec :help))
+                                'face 'harness-dim-face)
+                    "\n"))
+          (insert "\n"))
+        (insert (propertize "Ediff" 'face 'harness-label-face) "\n"
+                "  " (harness-ui-kbd "?") "  Ediff's own keys, in its control panel\n")
+        (special-mode)
+        (goto-char (point-min))
+        (set-buffer-modified-p nil)))
+    (display-buffer buffer)
+    buffer))
 
 (defun harness-ui-patch-review--text-width (&optional margin)
-  "Return how wide to draw threads in the current buffer, less MARGIN columns.
-That is the body of the widest window showing the buffer, else 100."
-  (let ((windows (get-buffer-window-list (current-buffer) nil t)))
-    (max 36 (- (if windows (apply #'max (mapcar #'window-body-width windows)) 100)
-               (or margin 0)))))
+  "Return how wide to draw the review in the current buffer, less MARGIN.
+That is the narrowest window showing the buffer -- a line has to fit in
+every one -- else `change-review-ui-width', else 100, less MARGIN."
+  (let* ((windows (get-buffer-window-list (current-buffer) nil t))
+         (width (if windows
+                    (apply #'min (mapcar #'window-max-chars-per-line windows))
+                  (or change-review-ui-width 100))))
+    (max 8 (- width (or margin 0)))))
 
 (defun harness-ui-patch-review--wrap-headers (string)
   "Return STRING, threads the library drew, wrapping under their headers.
@@ -3169,29 +3537,118 @@ comment's under its bar, which goes on down the lines."
         (setq pos (1+ end))))
     string))
 
-(defun harness-ui-patch-review--threads-heading (set filter &optional compact fold-buttons omit-drafts trailing)
-  "Return the heading of the threads of SET, its FILTER's buttons.
-COMPACT leaves [New thread] out, as the tree beside Ediff has no box to
-write in.  FOLD-BUTTONS, when given, are drawn after it: the [Expand all]
-and [Collapse all] buttons of the review.  OMIT-DRAFTS leaves the count
-of drafts not sent to the line that sends them, as the chat's threads
-view does.  TRAILING, a string, ends the heading line: the chat puts its
-[Compose] button there."
-  (let ((heading (change-review-ui-threads-heading set filter omit-drafts)))
-    (propertize (if compact
-                    heading
-                  (concat (if (string-suffix-p "\n" heading) (substring heading 0 -1) heading)
-                          "   " (harness-ui-patch-review--new-thread-button)
-                          (if fold-buttons (concat "   " fold-buttons) "")
+(defun harness-ui-patch-review--threads-heading (review &optional trailing surface)
+  "Return the heading of REVIEW's threads: its filters, then its controls.
+The filter buttons are the library's, the one in force marked, and the
+controls are the review's thread controls, drawn by
+`harness-ui-patch-review--control-lines' so that a narrow window gets
+them in rows of their own.  TRAILING, a string, ends the filter line:
+the chat puts its [Compose] button there.  SURFACE is `threads' or
+`pane', `threads' by default: the threads beside Ediff offer the way back
+to it."
+  (let* ((set (harness-ui-patch-review--r-set review))
+         (filter (or change-review-ui--filter 'open))
+         (width (harness-ui-patch-review--text-width))
+         (filters (string-trim-right
+                   ;; At work the send control counts the drafts; a review
+                   ;; waiting for feedback says how many it has here.
+                   (change-review-ui-threads-heading
+                    set filter (and review (harness-ui-patch-review--sendable-p review)))))
+         (heading (concat filters
                           (if trailing (concat "   " trailing) "")
-                          "\n"))
-                'harness-ui-patch-review-threads t 'wrap-prefix "  ")))
+                          "\n"
+                          (harness-ui-patch-review--control-lines
+                           (or surface 'threads) width review))))
+    (propertize heading 'harness-ui-patch-review-threads t 'wrap-prefix "  ")))
 
-(defun harness-ui-patch-review--new-thread-button ()
-  "Return the [New thread] button of the threads heading."
-  (propertize (buttonize "[New thread]" (lambda (_) (harness-ui-patch-review-new-thread))
-                         nil "Write a thread of your own, with nothing quoted; C-c C-c sends it")
-              'mouse-face 'highlight))
+(defun harness-ui-patch-review--threads-facts (review)
+  "Return what the threads view says of REVIEW, as info segments.
+The title, the version its threads are of, how many threads it has and
+how many drafts wait."
+  (let* ((set (harness-ui-patch-review--r-set review))
+         (counts (change-review-thread-counts set))
+         (total (+ (or (plist-get counts :open) 0) (or (plist-get counts :closed) 0)))
+         (drafts (length (change-review-drafts set)))
+         (version (change-review-latest-version set)))
+    (delq nil
+          (list (list (harness-ui-patch-review--title review) t)
+                (and version
+                     (list (format "%s of %d" (change-review-version-name version)
+                                   (length (change-review-set-versions set)))
+                           20))
+                (list (harness-ui-patch-review--plural total "thread") 40)
+                (and (> drafts 0)
+                     (list (harness-ui-patch-review--plural drafts "draft") 30))))))
+
+(defun harness-ui-patch-review--threads-view-info (review width)
+  "Return the line that tells REVIEW's threads apart, fitted to WIDTH."
+  (harness-ui-patch-review--info-line (harness-ui-patch-review--threads-facts review) width))
+
+(defun harness-ui-patch-review--draw-threads-view ()
+  "Draw the review's threads view in the current buffer.
+The facts of the review come first, then the filters and the controls,
+then the threads as the library draws them.  Point stays on what it was
+on, on the row of its window it was on.  The view keeps its own buffer,
+which the pane beside Ediff and the report's [Threads] share."
+  (let* ((inhibit-read-only t)
+         (set change-review-ui--set)
+         (review (and set (harness-ui-patch-review--set-review set)))
+         (anchor (and (fboundp 'change-review-ui--anchor) (change-review-ui--anchor)))
+         (row (and (fboundp 'change-review-ui--screen-row)
+                   (change-review-ui--screen-row)))
+         (width (harness-ui-patch-review--text-width)))
+    (erase-buffer)
+    (when (and set review)
+      (insert (harness-ui-patch-review--threads-view-info review width)
+              (harness-ui-patch-review--threads-heading
+               review nil
+               (if (harness-ui-patch-review--threads-pane-window review) 'pane 'threads))
+              (harness-ui-patch-review--wrap-headers
+               (change-review-ui-threads-string
+                set :filter change-review-ui--filter :details change-review-ui--details
+                :width width
+                :empty (pcase change-review-ui--filter
+                         ('open "No open threads")
+                         ('closed "No closed threads")
+                         ('unreviewed "Nothing to review")
+                         ('reviewed "Nothing reviewed this turn")
+                         (_ "No threads"))))))
+    (goto-char (point-min))
+    (when anchor (change-review-ui--goto-anchor anchor))
+    (when (and row (eq (window-buffer (selected-window)) (current-buffer)))
+      (recenter row))
+    (set-buffer-modified-p nil)
+    (force-mode-line-update)))
+
+(defun harness-ui-patch-review--redraw-threads-view ()
+  "Draw the threads view in its window, keeping the row the reader is on.
+The view beside Ediff is a side window, and the selected window is a
+version there: it is drawn in its own window, as the pane does."
+  (let ((windows (get-buffer-window-list (current-buffer) nil t)))
+    (if-let* ((window (or (cl-find-if (lambda (window)
+                                        (window-parameter window 'window-side))
+                                      windows)
+                          (car windows))))
+        (with-selected-window window (harness-ui-patch-review--draw-threads-view))
+      (harness-ui-patch-review--draw-threads-view))))
+
+(defun harness-ui-patch-review--prepare-threads-view (_review buffer)
+  "Make BUFFER a view of REVIEW's threads with the review's keys and drawing.
+BUFFER is the library's threads view of the review's set: its filters,
+folds and keys stay, and the review's controls, keys and central keys
+line are added.  It is read-only, its lines wrap, and it draws again
+when the set changes."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (use-local-map harness-ui-patch-review--thread-view-map)
+      (setq-local truncate-lines nil
+                  truncate-partial-width-windows nil
+                  word-wrap t
+                  change-review-ui--redraw-function
+                  #'harness-ui-patch-review--redraw-threads-view)
+      (harness-ui-patch-review--install-quote-keys buffer)
+      (change-review-ui-redraw)))
+  buffer)
 
 (defun harness-ui-patch-review-new-thread ()
   "Compose a new thread of the review, with nothing quoted.
@@ -3245,10 +3702,11 @@ task waiting for review, or the chat of its session for a task at work."
 
 (defun harness-ui-patch-review--threads-section (review &optional compact always-open trailing)
   "Return the threads of REVIEW as the changes show them, below the files.
-A heading with the library's filter buttons and [New thread], a line of
-what the keys do (not when COMPACT, as in the tree beside Ediff), then
-the threads of the status the buffer's filter lets through, by file,
-drawn as the library's threads view draws them.  The buffer is a view of
+A heading with the library's filter buttons, then the review's controls
+in their groups -- the threads', the navigation's and the view's, each
+whole however narrow the surface is -- then the threads of the status
+the buffer's filter lets through, by file, drawn as the library's
+threads view draws them.  The buffer is a view of
 the review's set (`harness-ui-patch-review--view'), so the library's
 commands find the thread or comment at point and its buttons draw the
 section again.  ALWAYS-OPEN draws them whole, with no fold button: the
@@ -3278,26 +3736,13 @@ them as they were."
                  (concat
                   (unless (or compact always-open)
                     (harness-ui-patch-review--fold-button review "threads" ""))
-                  (harness-ui-patch-review--threads-heading
-                   set filter compact
-                   (unless (or compact always-open)
-                     (harness-ui-patch-review--fold-all-buttons
-                      (lambda () (harness-ui-patch-review--set-comments-folded review nil))
-                      (lambda () (harness-ui-patch-review--set-comments-folded review t))))
-                   always-open trailing)
+                  (harness-ui-patch-review--threads-heading review trailing)
                   (when always-open
                     (concat
                      (when-let* ((note (harness-ui-patch-review--drafts-note review t)))
                        (propertize (concat "  " note "\n") 'wrap-prefix "  "))
                      (when-let* ((draft (harness-ui-patch-review--last-close-draft-string review)))
                        (propertize (concat "  " draft "\n") 'wrap-prefix "  "))))
-                  (unless compact
-                    (propertize (concat "  " (if always-open
-                                                 harness-ui-patch-review--compose-thread-hint
-                                               "RET: compare/jump  r: reply  c: new thread  S: send drafts  x: close/reopen  f: filter  TAB: fold  E/C: expand/collapse all  (hover for more)")
-                                          "\n")
-                                'help-echo harness-ui-patch-review--thread-hint-detail
-                                'face 'harness-hint-face 'wrap-prefix "  "))
                   (harness-ui-patch-review--wrap-headers
                    (change-review-ui-threads-string
                     set :filter filter :details change-review-ui--details
@@ -3310,10 +3755,10 @@ them as they were."
                                       (lambda (thread)
                                         (harness-ui-patch-review--thread-fold review thread)))
                     :empty (pcase filter
-                             ('open "No open threads.  c starts a new one; f shows the closed ones.")
-                             ('closed "No closed threads.  c starts a new one; f shows the open ones.")
-                             ('unreviewed "Nothing to review: no thread closed by someone else waits for you.  f shows the others.")
-                             (_ "No threads yet.  c starts a new one."))))))))
+                             ('open "No open threads")
+                             ('closed "No closed threads")
+                             ('unreviewed "Nothing to review")
+                             (_ "No threads"))))))))
     (harness-ui-with-keymap
      (propertize text 'harness-ui-patch-review-task (harness-ui-patch-review--r-id review))
      (if always-open
@@ -3839,7 +4284,9 @@ quoted."
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
               (setq default-directory (harness-ui-patch-review--link-directory review)))
-            (harness-ui-patch-review--install-quote-keys buffer))
+            ;; The review's keys, controls and central keys line, as beside
+            ;; Ediff: one view, wherever it opens.
+            (harness-ui-patch-review--prepare-threads-view review buffer))
           buffer)))))
 
 (defun harness-ui-patch-review-toggle-file-tree ()
@@ -6077,39 +6524,33 @@ It is the library's threads view of the review's set
 
 (defun harness-ui-patch-review--draw-threads-pane ()
   "Draw the threads in the current buffer, the pane keeping the row it shows.
-The library's drawing keeps point on what it was on and the row of the
-window it was on when the view's own window is the selected one
-\(`change-review-ui--draw-threads'); beside Ediff the selected window is a
-version, so the drawing is done in the pane's window, which stays where
-the reader had it.  A view in no window is drawn as it is."
-  (let ((windows (get-buffer-window-list (current-buffer) nil t)))
-    (if-let* ((window (or (cl-find-if (lambda (window)
-                                        (window-parameter window 'window-side))
-                                      windows)
-                          (car windows))))
-        (with-selected-window window (change-review-ui--draw-threads))
-      (change-review-ui--draw-threads))))
+The view beside Ediff is a side window, and the selected window is a
+version there: the drawing is done in the pane's window, which stays
+where the reader had it.  A view in no window is drawn as it is."
+  (harness-ui-patch-review--redraw-threads-view))
 
 (defun harness-ui-patch-review--threads-pane (review)
   "Return REVIEW's threads view, made for its pane if there is none.
 The pane is the library's threads view of the review's set
 \(`change-review-open-threads'), shown below the files beside Ediff: all
-its keys are there, its filters and its folds.  The view is the one the
-report opens as well, so what is set in one holds in the other; made
-here, it shows the closed threads too when
-`harness-ui-patch-review-closed-threads' says so."
-  (or (harness-ui-patch-review--threads-pane-buffer review)
-      (save-selected-window
-        (let ((display-buffer-overriding-action
-               ;; Shown where the reader will have it, not popped over the
-               ;; report: the pane's window is made as the view is.
-               `(display-buffer-in-side-window
-                 (side . left) (slot . 0)
-                 (window-width . ,(harness-ui-patch-review--tree-width))
-                 (preserve-size . (t . nil)))))
-          (change-review-open-threads
-           (harness-ui-patch-review--r-set review)
-           (and harness-ui-patch-review-closed-threads 'all))))))
+its keys are there, its filters and its folds, and the review's controls
+and keys.  The view is the one the report opens as well, so what is set
+in one holds in the other; made here, it shows the closed threads too
+when `harness-ui-patch-review-closed-threads' says so."
+  (let ((buffer (or (harness-ui-patch-review--threads-pane-buffer review)
+                    (save-selected-window
+                      (let ((display-buffer-overriding-action
+                             ;; Shown where the reader will have it, not popped
+                             ;; over the report: the pane's window is made as
+                             ;; the view is.
+                             `(display-buffer-in-side-window
+                               (side . left) (slot . 0)
+                               (window-width . ,(harness-ui-patch-review--tree-width))
+                               (preserve-size . (t . nil)))))
+                        (change-review-open-threads
+                         (harness-ui-patch-review--r-set review)
+                         (and harness-ui-patch-review-closed-threads 'all)))))))
+    (harness-ui-patch-review--prepare-threads-view review buffer)))
 
 (defun harness-ui-patch-review--keep-threads (review)
   "Show REVIEW's threads beside Ediff, in a side window below the files.
@@ -6131,12 +6572,11 @@ pane is the library's threads view, drawn to the width of the column."
         (set-window-parameter window 'no-delete-other-windows t)
         (set-window-dedicated-p window t)
         (with-current-buffer buffer
-          ;; A pane is a partial-width window: its lines wrap, not cut.
+          ;; A pane is a partial-width window: its lines wrap, not cut, and
+          ;; its controls are drawn to its own width.
           (setq-local truncate-partial-width-windows nil
-                      ;; Drawn in its window, it keeps the row the reader is on.
-                      change-review-ui--redraw-function
-                      #'harness-ui-patch-review--draw-threads-pane)
-          (change-review-ui-redraw))
+                      word-wrap t)
+          (harness-ui-patch-review--prepare-threads-view review buffer))
         window))))
 
 (defun harness-ui-patch-review--kill-threads (review)
@@ -6512,38 +6952,43 @@ they are, as `harness-ui-patch-review--place-from-texts' gives it)."
       (goto-char (point-min)))
     buffer))
 
-(defun harness-ui-patch-review--help-button (label command key)
-  "Return LABEL followed by KEY, a button running COMMAND, for Ediff's panel."
-  (concat (propertize label 'face 'button 'mouse-face 'highlight
-                      'help-echo (format "%s (%s)" label key)
-                      'keymap (harness-ui-mouse-keymap command))
-          " " (harness-ui-kbd key)))
-
-(defun harness-ui-patch-review--ediff-progress ()
-  "Return where this comparison is, as a prefix for the brief help.
-It is \"File i of M · N viewed · \", or an empty string when the
-panel does not know its review yet: Ediff composes the brief help while
-setting the panel up, before the review's own keys and file are
-installed, so `harness-ui-patch-review--ediff-redraw-help' draws it
-again once they are."
+(defun harness-ui-patch-review--ediff-facts ()
+  "Return where the reviewer is in this Ediff, as info segments.
+Which file of how many, how many were compared, approved or are of an
+earlier commit, and how many threads and drafts the review holds.  The
+segments are (TEXT PRIORITY), for `harness-ui-patch-review--info-line':
+the file is never dropped, the counts go as the panel narrows."
   (let* ((review harness-ui-patch-review--review)
          (index harness-ui-patch-review--index)
          (files (and review (harness-ui-patch-review--r-files review))))
     (if (or (null files) (not (integerp index)) (< index 0) (>= index (length files)))
-        ""
-      (let ((threads (length (harness-ui-patch-review--file-threads review (nth index files))))
-            (approved (cl-count-if (lambda (file) (harness-ui-patch-review--approved-p review file)) files)))
-        (format "File %d of %d · %s%s"
-                (1+ index) (length files)
-                (if (harness-ui-patch-review--r-snapshot review)
-                    ;; Not the branch as it is: not reviewed here either.
-                    (format "as it was at %s · " (harness-ui-patch-review--short (harness-ui-patch-review--r-tip review)))
-                  (format "%d viewed · %s"
-                          (cl-count-if (lambda (file) (harness-ui-patch-review--seen-p review file)) files)
-                          (if (> approved 0) (format "%d approved · " approved) "")))
-                (if (> threads 0)
-                    (format "%s · " (harness-ui-patch-review--plural threads "thread"))
-                  ""))))))
+        (list (list "Ediff" t))
+      (let* ((file (nth index files))
+             (threads (length (harness-ui-patch-review--file-threads review file)))
+             (drafts (harness-ui-patch-review--draft-count review))
+             (approved (cl-count-if (lambda (file)
+                                      (harness-ui-patch-review--approved-p review file))
+                                    files)))
+        (delq nil
+              (list
+               (list (format "File %d of %d" (1+ index) (length files))
+                     t (format "File %d/%d" (1+ index) (length files)))
+               (if (harness-ui-patch-review--r-snapshot review)
+                   ;; Not the branch as it is: not reviewed here either.
+                   (list (format "at %s"
+                                 (harness-ui-patch-review--short
+                                  (harness-ui-patch-review--r-tip review)))
+                         40)
+                 (list (format "%d viewed"
+                               (cl-count-if (lambda (file)
+                                              (harness-ui-patch-review--seen-p review file))
+                                            files))
+                       40))
+               (and (> approved 0) (list (format "%d approved" approved) 30))
+               (and (> threads 0)
+                    (list (harness-ui-patch-review--plural threads "thread") 20))
+               (and (> drafts 0)
+                    (list (harness-ui-patch-review--plural drafts "draft") 10))))))))
 
 (defun harness-ui-patch-review--ediff-redraw-help ()
   "Draw this Ediff control panel's brief help again, with its place in the files.
@@ -6554,86 +6999,76 @@ its file, so on its own the panel would not say where the reviewer is."
     (erase-buffer)
     (ediff-set-help-message)
     (insert ediff-help-message)
-    (unless (ediff-multiframe-setup-p) (ediff-indent-help-message))
+    ;; Not indented: the help is laid out already, and Ediff's indent would
+    ;; take the room the controls need from a narrow panel.
     (ediff-set-help-overlays)
     (set-buffer-modified-p nil)
     (goto-char (point-min))
     (skip-chars-forward ediff-whitespace)
     (harness-ui-patch-review--fit-control)))
 
+(defun harness-ui-patch-review--control-height (window)
+  "Return how many lines the control panel's help takes in WINDOW.
+A control wider than the panel wraps to another line, and the pixels of
+the text say how many lines that is."
+  (max 2 (ceiling (/ (cdr (window-text-pixel-size
+                           window (point-min) (point-max) nil nil t))
+                     (float (frame-char-height (window-frame window)))))))
+
 (defun harness-ui-patch-review--fit-control ()
   "Give this Ediff control panel the height its help takes, when it shows.
 Ediff sizes the panel once, to the help it composes before the review's
-own keys and file are installed; the help drawn again is longer, with
-where the reviewer is and the settings that can be switched, and would
-be cut off at the bottom of the window."
+own keys and file are installed; the help drawn again is longer -- the
+facts of the review, then a row for each group of controls -- and would
+be cut off at the bottom of the window.  The panel takes what it needs,
+up to a share of the frame that leaves the versions their room."
   (when-let* ((window (get-buffer-window (current-buffer))))
-    (let ((window-resize-pixelwise t)
-          (window-min-height 2))
-      (ignore-errors
-        (fit-window-to-buffer
-         window (ceiling (/ (window-total-height (frame-root-window)) 2.0)) 2)))))
+    (let* ((root (window-total-height (frame-root-window window)))
+           ;; How many lines the help takes as it shows: a control wider
+           ;; than the panel wraps to another line.
+           (lines (max 2 (harness-ui-patch-review--control-height window)))
+           (half (ceiling (/ root 2.0)))
+           (most (max 2 (min (max half lines) (- root 8)))))
+      (let ((window-resize-pixelwise t)
+            (window-min-height 2))
+        (ignore-errors (fit-window-to-buffer window most 2))
+        ;; `fit-window-to-buffer' can count a wrapped control as one line:
+        ;; the pixels say how many the help really takes, and the window
+        ;; grows to them rather than cutting the last control off.
+        (let ((deficit (- lines (window-body-height window))))
+          (when (> deficit 0)
+            (ignore-errors (window-resize window deficit))))))))
 
-(defun harness-ui-patch-review--pack (groups width)
-  "Join GROUPS of buttons into lines of WIDTH columns at most.
-GROUPS is a list of lists of strings.  As many groups go on a line as
-fit, three spaces apart, so that a line is cut between groups; a group
-too wide for a line of its own is cut between its buttons, never through
-one."
-  (let (lines line)
-    (cl-flet ((add (piece)
-                (if (and line (> (+ (string-width line) 3 (string-width piece)) (- width 2)))
-                    (progn (push line lines) (setq line piece))
-                  (setq line (if line (concat line "   " piece) piece)))))
-      (dolist (group groups)
-        (let ((joined (mapconcat #'identity group "   ")))
-          (if (<= (string-width joined) (- width 2))
-              (add joined)
-            (mapc #'add group)))))
-    (when line (push line lines))
-    (mapconcat #'identity (nreverse lines) "\n")))
-
-(defun harness-ui-patch-review--setting-button (label on command key)
-  "Return the button of a setting for Ediff's panel: LABEL, with a check when ON.
-It runs COMMAND, which switches the setting, KEY being its key."
-  (harness-ui-patch-review--help-button (format "[%s %s]" (if on "✓" "✗") label) command key))
+(defun harness-ui-patch-review--control-resized (&optional _frame)
+  "Fit this Ediff control panel to its help again soon.
+The panel's width changes when the tree beside Ediff is shown or hidden,
+and its controls wrap to more lines then; the height follows."
+  (when (get-buffer-window (current-buffer))
+    (harness-debounce
+     (list 'harness-ui-patch-review-control (current-buffer)) 0.1
+     (lambda (buffer)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (harness-ui-patch-review--fit-control))))
+     (current-buffer))))
 
 (defun harness-ui-patch-review--ediff-help ()
   "Return the brief help of the Ediff control panel of a review.
-It opens with where the reviewer is: which file of how many, and how
-many were compared already (`harness-ui-patch-review--ediff-progress').
-Then the buttons for what the file allows, for going on, and for the
-settings that can be switched here: skipping the files already approved,
-approving those gone through without a comment, the tree beside Ediff."
-  (let* ((here (list (concat (harness-ui-patch-review--ediff-progress)
-                             (harness-ui-patch-review--help-button "[Comment]" #'harness-ui-patch-review-comment "c"))
-                     (harness-ui-patch-review--help-button "[Reply]" #'harness-ui-patch-review-reply "r")
-                     (harness-ui-patch-review--help-button "[Threads]" #'harness-ui-patch-review-threads "T")
-                     (harness-ui-patch-review--help-button "[Edit draft/box]" #'harness-ui-patch-review-edit-comment "e")
-                     (harness-ui-patch-review--help-button "[Delete draft]" #'harness-ui-patch-review-delete-comment "k")
-                     (harness-ui-patch-review--help-button "[Delete thread]" #'harness-ui-patch-review-delete-thread "K")
-                     (harness-ui-patch-review--help-button "[Approve]" #'harness-ui-patch-review-approve-ediff "a")))
-         (elsewhere (list (harness-ui-patch-review--help-button "[Fold thread]" #'harness-ui-patch-review-cycle-fold "TAB")
-                          (harness-ui-patch-review--help-button "[Next file]" #'harness-ui-patch-review-ediff-next-file "N")
-                          (harness-ui-patch-review--help-button "[Previous file]" #'harness-ui-patch-review-ediff-previous-file "P")
-                          (harness-ui-patch-review--help-button "[Next thread]" #'harness-ui-patch-review-next-thread "M-n")
-                          (harness-ui-patch-review--help-button "[Previous thread]" #'harness-ui-patch-review-previous-thread "M-p")
-                          (harness-ui-patch-review--help-button "[Back to the report]" #'harness-ui-patch-review-ediff-quit "q")
-                          (propertize "? Ediff's keys" 'face 'harness-dim-face)))
-         (settings (list (harness-ui-patch-review--setting-button
-                          "Skip approved" harness-ui-patch-review-skip-approved
-                          #'harness-ui-patch-review-toggle-skip-approved "s")
-                         (harness-ui-patch-review--setting-button
-                          "Auto-approve" harness-ui-patch-review-auto-approve
-                          #'harness-ui-patch-review-toggle-auto-approve "u")
-                         (harness-ui-patch-review--setting-button
-                          "Files" harness-ui-patch-review-ediff-tree
-                          #'harness-ui-patch-review-toggle-ediff-tree "t")))
-         (window (get-buffer-window (current-buffer)))
-         (width (if window (window-width window) (frame-width))))
-    ;; In one line when the panel is wide enough, else in as many as it
-    ;; takes, cut between groups of buttons rather than through one.
-    (harness-ui-patch-review--pack (list here elsewhere settings) width)))
+It is one place for what the reviewer needs to know: where they are in
+the files, as a line of facts (`harness-ui-patch-review--ediff-facts'),
+then the controls in their groups -- the threads, going between them,
+the file's diff and the view's settings -- each drawn by
+`harness-ui-patch-review--control-lines' so that a narrow panel wraps
+them rather than cutting one off.  Every key, with what it does, is one
+button away, in `harness-ui-patch-review-keys'."
+  (let* ((window (get-buffer-window (current-buffer)))
+         (width (max 8 (if window
+                           (window-max-chars-per-line window)
+                         (frame-width)))))
+    (concat (harness-ui-patch-review--info-line
+             (harness-ui-patch-review--ediff-facts) width)
+            (harness-ui-patch-review--control-lines
+             'ediff width harness-ui-patch-review--review))))
 
 (defun harness-ui-patch-review--main-window ()
   "Return the window Ediff goes in: the selected one, when it may be.
@@ -6728,6 +7163,9 @@ GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
                 (with-current-buffer control (harness-ui-patch-review--fit-control)))
               (harness-ui-patch-review--redraw-sides review)
               (harness-ui-patch-review--scroll-box box)
+              ;; The box and the panel settle their heights after Ediff lays
+              ;; the frame out: the threads are drawn to the room left.
+              (harness-ui-patch-review--redraw-sides review)
               (when goto (harness-ui-patch-review--show-line review goto)))
           (error
            (harness-ui-patch-review--ediff-ended review index)
@@ -6743,7 +7181,12 @@ It gets the review's keys and help, and gives the report back as it ends."
               change-review-ui-read-hint-function #'harness-ui-patch-review--read-hint
               harness-quote-target-functions
               (list #'harness-ui-patch-review--control-quote-target)
-              harness-quote-handler-function #'harness-ui-patch-review--quote-reply)
+              harness-quote-handler-function #'harness-ui-patch-review--quote-reply
+              ;; The panel's lines wrap rather than cut: a control is whole
+              ;; at any width.
+              truncate-lines nil
+              truncate-partial-width-windows nil
+              word-wrap t)
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map ediff-mode-map)
     (define-key map "c" #'harness-ui-patch-review-comment)
@@ -6761,6 +7204,8 @@ It gets the review's keys and help, and gives the report back as it ends."
     (define-key map "s" #'harness-ui-patch-review-toggle-skip-approved)
     (define-key map "u" #'harness-ui-patch-review-toggle-auto-approve)
     (define-key map "t" #'harness-ui-patch-review-toggle-ediff-tree)
+    (define-key map "S" #'harness-ui-patch-review-send-replies)
+    (define-key map (kbd "C-c ?") #'harness-ui-patch-review-keys)
     (define-key map "n" #'harness-ui-patch-review-next-difference)
     (define-key map "]" #'harness-ui-patch-review-next-difference)
     (define-key map (kbd "M-n") #'harness-ui-patch-review-next-thread)
@@ -6777,6 +7222,9 @@ It gets the review's keys and help, and gives the report back as it ends."
       (evil-normalize-keymaps)))
   (setf (harness-ui-patch-review--r-ediff review)
         (plist-put (harness-ui-patch-review--r-ediff review) :control (current-buffer)))
+  ;; The panel is fitted to its help when Ediff lays the frame out, and again
+  ;; when a width that wraps it to more lines changes.
+  (add-hook 'window-size-change-functions #'harness-ui-patch-review--control-resized nil t)
   (add-hook 'ediff-after-quit-hook-internal
             (lambda () (harness-ui-patch-review--ediff-ended review index))
             nil t)

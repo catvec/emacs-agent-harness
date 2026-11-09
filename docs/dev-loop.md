@@ -429,10 +429,12 @@ the tool call that ran the command -- rather than describing it.
 
 ## Review and permission messages
 
-Review changes shows the common keys briefly; hover over either key hint for
-its full list, including Ediff and thread commands. For example, the file
-hint starts `RET: compare  a: approve  n/p: files  T: threads`, and the
-threads hint `RET: compare/jump  r: reply  x: close/reopen  f: filter`.
+Review changes shows the review's facts in one line and its controls in
+groups -- Threads, Navigate, Diff and View -- under them; a control's
+tooltip says what it does, and [Keys] (C-c ?) lists every key of the
+review, Ediff's own included, in a buffer of its own. For example, the
+file hint in the tree starts `RET: compare  a: approve  n/p: files
+T: threads`.
 
 A Claude Code native-tool denial identifies both tools, both settings and the
 reason, e.g. `Claude Code denied Bash (harness bash). Its settings or managed

@@ -16752,11 +16752,18 @@ a button with its state in the settings line and in Ediff's help:
   (`harness-ui-patch-review--refresh-approvals`).
 
 THE THREADS, a section below the files and not a view of their own: the
-heading is the library's (`change-review-ui-threads-heading`: the five
-filter buttons with their counts, and the drafts not sent unless the
-view says that elsewhere), with a [New thread] button at its end, then
-the threads
-of the status the buffer's filter lets through
+heading is the library's filter buttons with their counts
+(`change-review-ui-threads-heading`, the drafts not sent left to the
+control that sends them while the task is at work, else counted there),
+then the review's controls in their groups
+(`harness-ui-patch-review--control-lines`): the threads' ([New thread],
+[Close], [Reviewed], [Edit draft], [Delete draft], [Delete thread],
+[Fold thread]), the navigation's ([Next thread], [Previous thread],
+[Next comment], [Previous comment], [Diff], [Source]) and the view's
+([Expand all], [Collapse all], [Send drafts], [Filter], [Keys]).  The
+controls wrap under their group's title where the surface is narrow, so
+a narrow window gets rows of whole controls rather than controls cut
+off.  Then the threads of the status the buffer's filter lets through
 (`change-review-ui-threads-string`: by file, the change as a whole
 first, each as the threads view draws it, with [Reply] [Close] [Diff]
 and `▸ where`), each file under its own heading.  A view that offers the
@@ -16771,10 +16778,12 @@ threads, d and RET
 on the header of a thread compare the file in Ediff at the thread's
 line (`change-review-visit`, with the line the harness placed it at), RET
 on a comment shows where it was made, RET on the name of a file compares
-that file.  The harness's c is not the library's comment: it starts a
-new thread in the compose box (`harness-ui-patch-review-new-thread`),
-one that quotes nothing, as the heading's [New thread] button does; the
-words under its card are the first comment, and C-c C-c sends it -- with
+that file.  The review adds its own keys to the view: c starts a new
+thread in the compose box (`harness-ui-patch-review-new-thread`), E and
+C open and fold every thread, S sends the drafts, TAB folds the thread at
+point, T goes back to Ediff, and [Keys] (C-c ?) lists every one; the
+words under a new thread's card are its first comment, and C-c C-c sends
+it -- with
 the feedback while the task waits for review, to the agent at once while
 it works.  In the chat's threads view the box comes back for it.  T
 (`harness-ui-patch-review-threads`) goes to the heading in
@@ -16813,15 +16822,17 @@ says once that the next difference is the next file, and the same key
 again goes on to it in Ediff -- or says there is no file left to review.
 The control panel's map is a child of Ediff's with c, r, C-c >, x, m (which takes the place of
 Ediff's wide-display toggle: it marks the thread at the current
-difference reviewed, one that waits first), T, TAB, e, a, s,
-u, t, n, M-n, M-p, N, P and q (under evil, `evil-normalize-keymaps` puts it where
+difference reviewed, one that waits first), T, TAB, e, k, K, a, s,
+u, t, S, C-c ?, n, M-n, M-p, N, P and q (under evil, `evil-normalize-keymaps` puts it where
 evil-collection made Ediff's map overriding) and a brief help of its
-own (`ediff-brief-help-message-function`: where the reviewer is and how
-many files were viewed and approved, the buttons for what the file
-allows, for going on, and for the settings, cut between groups of
-buttons to the window's width); Ediff sizes the panel once, to the help
-it composed before the review's keys and file were installed, so the
-review fits the window to the help it draws again
+own (`ediff-brief-help-message-function`): one line of facts about the
+file under comparison and the review, then the controls in their groups
+-- Threads, Navigate, Diff and View -- drawn by the same model the
+threads view and the report draw them with, each whole and wrapping at
+the panel's width rather than cut off, with [Keys] for the whole list.
+Ediff sizes the panel once, to the help it composed before the review's
+keys and file were installed, so the review fits the window to the help
+it draws again, to the lines the controls take
 (`harness-ui-patch-review--fit-control`).  Quitting goes through
 `ediff-really-quit` with `ediff-keep-variants` bound, so it asks
 nothing, and the review kills the two versions itself.
@@ -16855,9 +16866,12 @@ tree (`harness-ui-patch-review--keep-threads'): all its keys are there
 -- the filter buttons, f, n and p between comments, N and P between
 threads, r replies, x closes or opens, m marks reviewed, d shows the
 thread in Ediff, D the code it was written on, TAB where it was made, e
-and k a draft and its thread, I a reply by hand -- and a fold set there
-is the report's.  It is the view the report's [Threads] opens, not a copy
-of it: one view of the set, shown below the tree.  A frame too short for
+and k a draft and its thread, I a reply by hand -- and the review's:
+c a new thread, E and C every thread open or folded, S the drafts sent,
+T back to Ediff, and C-c ? (or ?) every key listed; the view's first
+lines are the facts of the review and its controls in their groups, and
+a fold set there is the report's.  It is the view the report's [Threads]
+opens, not a copy of it: one view of the set, shown below the tree.  A frame too short for
 two panes of the column, the report's box at the bottom of it, has the
 tree draw the threads under the files as before
 (`harness-ui-patch-review--draw-tree'), rather than lose one pane to the
