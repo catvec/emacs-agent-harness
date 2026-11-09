@@ -43,6 +43,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'cus-edit)
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
@@ -148,6 +149,27 @@ the push-to-talk path rather than sending audio somewhere unexpected."
 
 ;;;; Selection
 
+(defun harness-voice--save-choice (symbol value)
+  "Make SYMBOL hold VALUE, and keep it in this client's custom file.
+
+The voice provider, the effort and the speech model are the client's
+own choices (`harness-voice-provider' is client configuration, not a
+harness setting), so they are saved where this Emacs keeps its
+customizations, as Customize would save them -- and read back at the
+next start.  An option the policy sets is refused before anything
+changes.  A client with no custom file -- Emacs started with `-q' --
+takes the value for this session and says so through Customize."
+  (when (fboundp 'harness-policy-refuse)
+    (harness-policy-refuse symbol))
+  (if (custom-file t)
+      (condition-case err
+          (customize-save-variable symbol value)
+        (error
+         (customize-set-variable symbol value)
+         (harness-log 'warn "voice: could not save %s: %s"
+                      symbol (harness-error-message err))))
+    (customize-set-variable symbol value)))
+
 (defcustom harness-voice-provider 'wav
   "The voice provider this client uses.
 A provider is registered with `harness-define-voice-provider'; it
@@ -179,16 +201,17 @@ directory-local option."
     (cdr (assoc answer choices))))
 
 (defun harness-voice-select-provider (provider)
-  "Select voice provider PROVIDER for this client.
+  "Select voice provider PROVIDER for this client, and keep the choice.
 A running live session ends first, so the microphone does not move
-between two providers."
+between two providers.  The choice is saved as this client's own, so the
+next Emacs starts with the same provider instead of the default."
   (interactive (list (harness-voice-read-provider)))
   (unless (harness-voice-provider-get provider)
     (user-error "Unknown voice provider · %s" provider))
   (when (and (fboundp 'harness-voice-live--active-p)
              (harness-voice-live--active-p))
     (harness-voice-live-stop))
-  (setq harness-voice-provider provider)
+  (harness-voice--save-choice 'harness-voice-provider provider)
   (when (fboundp 'harness-voice--refresh)
     (harness-voice--refresh))
   (harness-voice-setup--refresh)
@@ -370,7 +393,9 @@ service beside the one still running."
 A running live session ends first, so the sidecar is not left with the
 previous model's endpoint.  A pipeline that runs restarts when the
 model it would load changes, since the harness has to recreate the
-speech service with the new engine and model; the harness loads it."
+speech service with the new engine and model; the harness loads it.  The
+model is this client's own choice and is saved, so the next Emacs starts
+with it."
   (interactive)
   (unless model
     (setq model (harness-voice-read-stt-model)))
@@ -380,7 +405,7 @@ speech service with the new engine and model; the harness loads it."
     (when (and (fboundp 'harness-voice-live--active-p)
                (harness-voice-live--active-p))
       (harness-voice-live-stop))
-    (setq harness-voice-stt-model model)
+    (harness-voice--save-choice 'harness-voice-stt-model model)
     (unless (eq previous (harness-voice-stt-model-resolved))
       (harness-voice--restart-pipeline))
     (harness-voice-setup--refresh)
@@ -726,14 +751,18 @@ every client's setup list."
   (add-hook 'harness-ui-event-functions #'harness-voice-pipeline--on-event)
   (harness-voice-pipeline-refresh))
 (defun harness-voice-select-effort (effort)
-  "Select voice EFFORT and redraw an open setup list.
+  "Select voice EFFORT, keep it, and redraw an open setup list.
 With `harness-voice-stt-model' at `auto' the effort level picks the
 speech model, so a running stack restarts when that model changes; a
-chosen model leaves the level to the provider's own fragments only."
+chosen model leaves the level to the provider's own fragments only.  The
+level is this client's own choice and is saved, so the next Emacs starts
+with it."
   (interactive (list (intern (completing-read "Voice effort: "
                                               '("low" "medium" "high") nil t))))
+  (unless (memq effort '(low medium high))
+    (user-error "Unknown voice effort · %s" effort))
   (let ((previous (harness-voice-stt-model-resolved)))
-    (setq harness-voice-effort effort)
+    (harness-voice--save-choice 'harness-voice-effort effort)
     (unless (eq previous (harness-voice-stt-model-resolved))
       (harness-voice--restart-pipeline)))
   (harness-voice-setup--refresh)

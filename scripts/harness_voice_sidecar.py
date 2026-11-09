@@ -18,7 +18,12 @@ Protocol (both directions unless said otherwise), one object per line:
     delegate_result  Emacs -> sidecar  ``id``, ``text``, ``error``, ``message``
     commentary / thinking  Emacs -> sidecar  speakable reply, quiet progress
     mute / interrupt / stop    Emacs -> sidecar
-    interrupted / error / closed  sidecar -> Emacs
+    interrupted / notice / error / closed  sidecar -> Emacs
+
+``error`` ends the session: only a failure the sidecar cannot carry on
+from sends it.  ``notice`` says one reply could not be spoken or one
+utterance could not be transcribed; the call goes on, and Emacs shows
+the line without stopping the microphone.
 
 Both bundled sidecars support ``--self-test``: they run their mapping
 against fake audio and a fake service, print one line and exit zero, so
@@ -113,6 +118,16 @@ def log(text):
     """Write a diagnostic line to stderr, where it cannot corrupt stdout."""
     sys.stderr.write("%s\n" % text)
     sys.stderr.flush()
+
+
+# A piece of text with no letters or digits is not speech: an
+# OpenAI-compatible speech server answers "🙂", "—" or a stray "`" with
+# an empty body, which reads as failed synthesis though there was simply
+# nothing to say.
+def speakable(text):
+    """Return TEXT when a speech server could say it, else an empty string."""
+    text = text or ""
+    return text if any(ch.isalnum() for ch in text) else ""
 
 
 #; ------------------------------------------------------------------
@@ -1510,6 +1525,16 @@ class Sidecar:
         """Report the microphone's level before the speech filter."""
         if level is not None:
             self.events.send("level", input=round(float(level), 3))
+
+    def notice(self, message):
+        """Report a problem the session survives, in one line.
+
+        A notice names what one reply or one utterance could not do; the
+        microphone stays open and the next turn is tried as usual.  Only
+        a failure no session can continue from sends ``error``
+        (``fail``), which ends the call.
+        """
+        self.events.send("notice", message=message)
 
     def announce_segment(self, state, uid, seconds=None, reason=None):
         """Report one burst's own decision: accepted, or dropped."""

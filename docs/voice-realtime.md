@@ -305,7 +305,8 @@ model, and the test sidecars do exactly that.
 | sidecar → Emacs | `backchannel` | `text` | Brief listening sound |
 | sidecar → Emacs | `delegation` | `id`, `text`, `utterance`, `pending`, `speech_active` | Backend request: the transcript as heard, and assistant output held while the person spoke; the client distils the request |
 | sidecar → Emacs | `interrupted` | — | Playback stopped |
-| sidecar → Emacs | `error` | `message` | Visible failure |
+| sidecar → Emacs | `notice` | `message` | One reply or utterance could not be done; the session goes on |
+| sidecar → Emacs | `error` | `message` | The sidecar cannot carry on: the client ends the session |
 | sidecar → Emacs | `closed` | `reason` | Clean end |
 | Emacs → sidecar | `start` | `protocol` | Session start |
 | Emacs → sidecar | `mute` | `on` | Microphone off or on |
@@ -322,6 +323,18 @@ neither leaves the meter at `Level · no data` rather than drawing silence.  A
 sidecar must not print anything but its JSON lines to stdout; diagnostics go
 to stderr, which the UI shows, shortened, when the process fails or exits
 unexpectedly.
+
+`notice` and `error` are the two ways to say something went wrong, and the
+difference is what the client does with it.  A `notice` is shown under the
+controls (`Live voice · Local speech · no audio`) and written into the
+transcript, under the heading `Live`, while the session, the microphone and
+the next turn go on; an `error` ends the
+session, so a sidecar sends one only for a failure it cannot carry on from:
+no key, no microphone, a lost connection, its loop dying.  A reply the speech
+service could not say, or one utterance it could not transcribe, is a notice.
+Emacs never sends a sidecar text with no letter or digit in it (`🙂`, `—`, a
+stray backtick), because an OpenAI-compatible speech service answers that with
+an empty body.
 
 ### Mapping to the harness
 

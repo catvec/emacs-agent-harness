@@ -279,7 +279,30 @@ class TelemetryTest(unittest.TestCase):
                 timeout=6.0))
             states = [item["state"] for item in rig.find("segment")]
             self.assertEqual(states, ["accepted", "failed"])
-            self.assertTrue(rig.find("error"))
+            # One burst that could not be transcribed is a notice, not the
+            # end of the call: the next thing said is still heard.
+            self.assertTrue(rig.find("notice"))
+            self.assertFalse(rig.find("error"))
+        finally:
+            rig.stop()
+
+    def test_a_failed_transcription_leaves_the_microphone_listening(self):
+        rig = SidecarRig()
+
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("speech service down")
+
+        try:
+            rig.sidecar.post_multipart = broken
+            rig.feed(fixtures.voiced(0.6) + fixtures.silence(1.0))
+            self.assertTrue(rig.pump(until=lambda: rig.find("notice"),
+                                     timeout=6.0))
+            rig.sidecar.post_multipart = rig._stt
+            self.assertTrue(rig.sidecar.started)
+            rig.feed(fixtures.voiced(0.6) + fixtures.silence(1.0))
+            self.assertTrue(rig.pump(until=lambda: rig.find("delegation"),
+                                     timeout=6.0),
+                            "the call stopped listening after one failure")
         finally:
             rig.stop()
 
@@ -1662,6 +1685,80 @@ class TtsWavTest(unittest.TestCase):
             tone(0.1, rate=24000), 24000)
         pcm = rig.sidecar.synthesize("Hello.")
         self.assertEqual(int(rig.sidecar.rate * 0.1) * 2, len(pcm))
+
+    def test_a_speech_server_with_no_audio_is_a_notice_not_the_end(self):
+        # Kokoro answers an empty body for text it has no phonemes for.
+        # That is one reply lost; the call, the microphone and the next
+        # turn go on, and no error event ends the session.
+        rig = SidecarRig()
+        rig.sidecar.post_json = lambda *args, **kwargs: {"data": b""}
+        try:
+            self.assertIsNone(rig.sidecar.synthesize("🙂"))
+            rig.sidecar.post_json = lambda *args, **kwargs: {}
+            self.assertIsNone(rig.sidecar.synthesize("Hello there."))
+            notices = rig.find("notice")
+            self.assertEqual([item["message"] for item in notices],
+                             ["Local speech · no audio"])
+            self.assertFalse(rig.find("error"))
+            self.assertTrue(rig.sidecar.started)
+        finally:
+            rig.stop()
+
+    def test_a_speech_service_error_is_one_reply_not_the_session(self):
+        rig = SidecarRig()
+
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("speech service down")
+
+        try:
+            rig.sidecar.post_json = broken
+            self.assertIsNone(rig.sidecar.synthesize("Hello there."))
+            notices = rig.find("notice")
+            self.assertEqual(1, len(notices))
+            self.assertTrue(notices[0]["message"].startswith(
+                "Local speech failed · "))
+            self.assertFalse(rig.find("error"))
+            # The next reply is spoken as usual.
+            rig.sidecar.post_json = rig._tts
+            rig.sidecar.handle({"event": "commentary", "text": "Back again.",
+                                "id": "c-2"})
+            self.assertTrue(rig.pump(until=lambda: rig.tts_calls))
+            self.assertEqual("Back again.", rig.tts_calls[-1])
+        finally:
+            rig.stop()
+
+    def test_text_a_voice_cannot_say_is_never_synthesized(self):
+        rig = SidecarRig()
+        try:
+            for text in ("🙂", "—", "…", "`", "**"):
+                self.assertEqual("", unmute.speakable(text))
+                rig.sidecar.handle({"event": "commentary", "text": text,
+                                    "id": "n-" + text.encode("unicode_escape").decode()})
+            self.assertEqual([], rig.tts_calls)
+            self.assertEqual([], rig.sidecar.held)
+            # Text with a letter in it is spoken as it is.
+            self.assertEqual("1, 2, 3", unmute.speakable("1, 2, 3"))
+            self.assertEqual("Hi 🙂", unmute.speakable("Hi 🙂"))
+        finally:
+            rig.stop()
+
+    def test_a_markup_sentence_is_not_spoken_twice(self):
+        # Emacs strips the markup before it sends a piece; the result's
+        # own sentences are compared the same way, or the sentence with
+        # `code` in it never matched and was spoken a second time.
+        rig = SidecarRig()
+        try:
+            rig.sidecar.handle({"event": "commentary",
+                                "text": "The `parse` function is done.",
+                                "id": "c1"})
+            rig.sidecar.handle({"event": "delegate_result", "id": "u-1",
+                                "text": "The `parse` function is done."})
+            rig.pump(until=lambda: rig.tts_calls)
+            time.sleep(0.1)
+            rig.pump(timeout=0.1)
+            self.assertEqual(rig.tts_calls, ["The `parse` function is done."])
+        finally:
+            rig.stop()
 
     def test_defaults_match_the_bundled_stack(self):
         options = unmute.parse_args(["harness-voice-live-unmute"])

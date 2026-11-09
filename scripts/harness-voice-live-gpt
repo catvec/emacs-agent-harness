@@ -288,7 +288,9 @@ class GptSidecar(Sidecar):
             self.finished = True
             self.finish("session closed")
         elif kind == "error":
-            self.events.send("error", message="ChatGPT Live error · %s" % (
+            # One server-side error fails a response, not the call: the
+            # connection is still up, so the session goes on.
+            self.notice("ChatGPT Live error · %s" % (
                 (event.get("error") or {}).get("message") or event.get("message") or "unknown"))
         else:
             log("GPT-Live event %s" % kind)

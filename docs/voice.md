@@ -343,7 +343,11 @@ The live status names what the session is doing now: **Live · Off**, **Live ·
 Starting**, **Live · Listening**, **Live · Hearing you**, **Live ·
 Transcribing**, **Live · Working**, **Live · Holding reply**, **Live ·
 Speaking**, **Live · Interrupted**, **Live · Muted**, **Live · Ending** or
-**Live · Failed**. A stage that runs
+**Live · Failed**. A reply the speech service could not say, or one
+utterance it could not transcribe, does not end the session: the status stays
+what it was, and the controls and the transcript name the loss in a line of
+their own (**Live voice · Local speech · no audio**), so the call, the
+microphone and the next turn go on. A stage that runs
 longer than a third of a second carries its elapsed time (**Live · Working ·
 1.4s**), so a slow turn reads as work rather than as a hang. The stage line at
 the top of the transcript spins while the session hears, transcribes or thinks,
@@ -439,7 +443,8 @@ without a microphone or model:
 | sidecar to Emacs | `backchannel` | A brief listening sound |
 | sidecar to Emacs | `delegation` | Backend request with `id`, `text`, `utterance` and any `pending` held output |
 | sidecar to Emacs | `interrupted` | Playback stopped |
-| sidecar to Emacs | `error` / `closed` | Visible failure or clean end |
+| sidecar to Emacs | `notice` | One reply or utterance failed; the session goes on |
+| sidecar to Emacs | `error` / `closed` | Visible failure that ends the session, or clean end |
 | Emacs to sidecar | `start` | Session start, protocol version and context |
 | Emacs to sidecar | `mute` / `interrupt` / `stop` | Microphone, playback and session lifecycle |
 | Emacs to sidecar | `commentary` / `thinking` | Speakable reply or quiet progress |

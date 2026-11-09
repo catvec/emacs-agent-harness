@@ -73,6 +73,12 @@
 One of nil, `starting', `listening', `speaking', `interrupted',
 `ending' or `failed'.")
 (defvar harness-voice-live--error nil "Failure text shown in the controls.")
+(defvar harness-voice-live--notice nil
+  "The last problem the sidecar survived, or nil.
+It names what one reply or one utterance could not do -- a speech server
+with no audio for the text, one failed transcription -- and is shown
+under the controls.  The session goes on: the microphone stays open and
+the next turn is tried as usual.")
 (defvar harness-voice-live--muted nil "Non-nil while the sidecar microphone is muted.")
 (defvar harness-voice-live--working nil "Non-nil while an agent turn runs.")
 (defvar harness-voice-live--turn-active nil "Non-nil while assistant text is followed.")
@@ -308,6 +314,9 @@ Speaking has its own mark: the reply is arriving, not waited for."
                (and harness-voice-live--error
                     (list (propertize harness-voice-live--error 'face 'harness-failure-face
                                       'help-echo harness-voice-live--error) 85 nil))
+               (and active harness-voice-live--notice
+                    (list (propertize harness-voice-live--notice 'face 'harness-caution-face
+                                      'help-echo harness-voice-live--notice) 83 nil))
                (and active harness-voice-live--working
                     (list (harness-voice--button "Cancel work" #'harness-voice-live-cancel
                                                  "Agent turn · cancellation") 80 nil))
@@ -1047,6 +1056,29 @@ Return non-nil when a heading was written."
    (concat "  " (if (string-empty-p text) "mm-hmm" text) "\n")
    'harness-thinking-face))
 
+(defun harness-voice-live--show-notice (message)
+  "Show MESSAGE, a problem the sidecar survived, without ending the call.
+It is kept for the controls, and written into the transcript under a
+`Live' heading so the reply that went unspoken is visible where it
+happened.  The transcript is made if it was not open yet: a notice is
+part of the call's record."
+  (let ((text (harness-ui-one-line message)))
+    (setq harness-voice-live--notice (concat "Live voice · " text))
+    (let ((buffer (harness-voice-live--transcript-buffer)))
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))
+          (insert "\n"
+                  (propertize "Live" 'face 'harness-caution-face)
+                  "\n"
+                  (propertize (concat "  " text "\n")
+                              'face 'harness-caution-face))
+          (dolist (window (get-buffer-window-list buffer t))
+            (set-window-point window (point-max))))))
+    (setq harness-voice-live--section nil)
+    (harness-voice-live--refresh)))
+
 (defun harness-voice-live--transcript-tool (title)
   "Show a coding-agent tool call TITLE in the transcript.
 A long subject is clipped: the point is what kind of work is happening,
@@ -1085,13 +1117,22 @@ records they are."
 
 ;;;; Speaking the agent's reply
 
+(defun harness-voice-live--speakable-p (text)
+  "Non-nil when TEXT holds something a voice can say.
+A piece of nothing but markup, emoji or punctuation -- the \"🙂\" that
+follows a sentence, a dash, a stray backtick -- is left unsent: a speech
+server answers it with an empty body, which used to fail the whole call
+for a reply that was merely done being said."
+  (and (stringp text) (string-match-p "[[:alnum:]]" text)))
+
 (defun harness-voice-live--speak (text &optional id)
   "Send speakable TEXT to the sidecar as commentary, or hold it.
 
 ID names the piece so a held one is not reported twice.  While speech is
 active, or until a transcript has decided what the held reply means, the
 text stays on this side of the pipe: the sidecar never gets a stale
-commentary to speak later."
+commentary to speak later.  A piece with nothing to say in it is not
+sent at all."
   (let ((speech (harness-voice--speech-text text))
         (part 0))
     (while (and (not (string-empty-p speech)) (harness-voice-live--active-p))
@@ -1100,13 +1141,14 @@ commentary to speak later."
                       speech))
              (piece-id (and id (format "%s:%d" id part))))
         (setq part (1+ part))
-        (if (harness-voice-live--holding-output-p)
-            (harness-voice-live--hold piece-id piece)
-          (harness-voice-live--pipeline-reply-handed piece-id)
-          (harness-voice-live--send
-           (list :event "commentary" :id piece-id :text piece))
-          (harness-voice-conversation-say
-           harness-voice-live--conversation piece 'commentary))
+        (when (harness-voice-live--speakable-p piece)
+          (if (harness-voice-live--holding-output-p)
+              (harness-voice-live--hold piece-id piece)
+            (harness-voice-live--pipeline-reply-handed piece-id)
+            (harness-voice-live--send
+             (list :event "commentary" :id piece-id :text piece))
+            (harness-voice-conversation-say
+             harness-voice-live--conversation piece 'commentary)))
         (setq speech (if (> (length speech) 1200) (substring speech 1200) ""))))))
 
 (defun harness-voice-live--open-fence (text)
@@ -1532,6 +1574,9 @@ session prompt."
      (harness-voice-live--fail
       (format "Live voice failed · %s"
               (or (plist-get event :message) "sidecar error"))))
+    ("notice"
+     (harness-voice-live--show-notice
+      (or (plist-get event :message) "Sidecar notice")))
     ("closed"
      (harness-voice-live--pipeline-end 'ended)
      (setq harness-voice-live--closing t)
@@ -1600,6 +1645,7 @@ cannot be interrupted from the UI that is gone."
           harness-voice-live--stderr stderr
           harness-voice-live--state 'starting
           harness-voice-live--error nil
+          harness-voice-live--notice nil
           harness-voice-live--muted nil
           harness-voice-live--closing nil
           harness-voice-live--tail ""
@@ -1718,6 +1764,7 @@ cannot be interrupted from the UI that is gone."
         (when harness-voice-mode (setq harness-voice-mode nil)))))
   (setq harness-voice-live--state nil
         harness-voice-live--error nil
+        harness-voice-live--notice nil
         harness-voice-live--muted nil
         harness-voice-live--closing nil
         harness-voice-live--buffer nil

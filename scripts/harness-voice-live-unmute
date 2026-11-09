@@ -49,7 +49,8 @@ from harness_voice_sidecar import (  # noqa: E402
     AUDIO_AUTO, CAPTURE_SECONDS, LOCAL_RATE, FakeEvents, Loop, NullAudio,
     Player, Recorder,
     Sidecar, Vad, audio_backend_names, http_json, http_multipart, log,
-    pcm_from_wav, self_test_audio, self_test_failed, self_test_ok, wav_from_pcm,
+    pcm_from_wav, self_test_audio, self_test_failed, self_test_ok, speakable,
+    wav_from_pcm,
 )
 
 DEFAULT_STT_URL = "http://127.0.0.1:8080/inference"
@@ -57,8 +58,20 @@ DEFAULT_TTS_URL = "http://127.0.0.1:8880/v1/audio/speech"
 
 
 def _normal(text):
-    """Return TEXT with whitespace and case flattened, for a duplicate check."""
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
+    """Return TEXT with markup, whitespace and case flattened.
+
+    The duplicate check compares what the reply says with what the
+    commentary already spoke.  Emacs strips the markup before it sends a
+    piece (`harness-voice--speech-text'), so the reply's own sentences are
+    flattened the same way here: otherwise a sentence with `code` or
+    **bold** in it never matched the piece spoken for it and was said
+    twice.
+    """
+    text = re.sub(r"!?\[([^\]\n]+)\]\([^)]*\)", r"\1", text or "")
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"(?m)^[ \t]*[#>*-]+[ \t]*", "", text)
+    text = re.sub(r"[`*_]", "", text)
+    return re.sub(r"\s+", " ", text.strip().lower())
 
 
 class UnmuteSidecar(Sidecar):
@@ -380,7 +393,11 @@ class UnmuteSidecar(Sidecar):
         return {"Authorization": "Bearer %s" % key} if key else {}
 
     def transcribe(self, pcm):
-        """Return the text of one recorded utterance, or nil."""
+        """Return the text of one recorded utterance, or nil.
+
+        A failure is one utterance's: the notice says which, the burst is
+        marked failed, and the microphone keeps listening for the next one.
+        """
         data = wav_from_pcm(pcm, self.rate)
         try:
             body = self.post_multipart(
@@ -389,12 +406,12 @@ class UnmuteSidecar(Sidecar):
                 "utterance.wav", data, headers=self.headers(), timeout=120)
         except Exception as error:  # noqa: BLE001 - shown in Emacs
             self.failures += 1
-            self.events.send("error", message="Local transcription failed · %s" % error)
+            self.notice("Local transcription failed · %s" % error)
             return None
         try:
             payload = json.loads(body.decode("utf-8")) if body else {}
         except ValueError:
-            self.events.send("error", message="Local transcription · invalid response")
+            self.notice("Local transcription · invalid response")
             return None
         text = (payload.get("text") or "").strip()
         if not text:
@@ -402,8 +419,14 @@ class UnmuteSidecar(Sidecar):
         return text
 
     def speak(self, text, item_id=None):
-        """Speak TEXT, or hold it when speech or a transcript owns the floor."""
-        text = (text or "").strip()
+        """Speak TEXT, or hold it when speech or a transcript owns the floor.
+
+        A piece a speech server could say nothing for -- emoji, a dash, a
+        stray backtick -- is dropped here, before it is queued: asking the
+        server for it answers an empty body, which used to read as failed
+        synthesis and cost the call its session.
+        """
+        text = speakable((text or "").strip())
         if not text or self.muted:
             return
         if self.gate_blocked():
@@ -415,7 +438,15 @@ class UnmuteSidecar(Sidecar):
         self.speech_items.put((item_id, text))
 
     def synthesize(self, text):
-        """Return PCM16 for TEXT, or nil when synthesis fails."""
+        """Return PCM16 for TEXT, or None when this reply has no audio.
+
+        A failure is one reply's: it is reported as a notice, and the
+        microphone, the session and the next turn go on.  An empty body
+        names the reply that went unspoken rather than ending the call.
+        """
+        text = speakable(text)
+        if not text:
+            return None
         try:
             body = self.post_json(
                 self.args.tts_url,
@@ -424,8 +455,8 @@ class UnmuteSidecar(Sidecar):
                 headers=self.headers(), timeout=120)
         except Exception as error:  # noqa: BLE001 - shown in Emacs
             self.failures += 1
-            self.events.send("error", message="Local speech failed · %s" % error)
-            return b""
+            self.notice("Local speech failed · %s" % error)
+            return None
         data = body if isinstance(body, bytes) else b""
         if not data.startswith(b"RIFF") and isinstance(body, dict):
             # http_json wraps non-JSON bodies in {"data": bytes}; a server
@@ -438,16 +469,23 @@ class UnmuteSidecar(Sidecar):
                     data = base64.b64decode(raw)
                 except (ValueError, TypeError):
                     data = b""
+        if not data:
+            # An OpenAI-compatible server answers text it has no phonemes
+            # for with an empty body.  After the speakable filter that is
+            # rare, so it is worth naming: the reply went unspoken.
+            self.failures += 1
+            self.notice("Local speech · no audio")
+            return None
         if not data.startswith(b"RIFF"):
             self.failures += 1
-            self.events.send("error", message="Local speech · no audio returned")
-            return b""
+            self.notice("Local speech · no audio")
+            return None
         try:
             return pcm_from_wav(data)
         except (EOFError, ValueError) as error:
             self.failures += 1
-            self.events.send("error", message="Local speech · bad WAV · %s" % error)
-            return b""
+            self.notice("Local speech · bad WAV · %s" % error)
+            return None
 
     # -- replies -----------------------------------------------------
 

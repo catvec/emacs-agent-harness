@@ -82,6 +82,7 @@
            (harness-voice-live--session nil) (harness-voice-live--stderr nil)
            (harness-voice-live--tail "") (harness-voice-live--timer nil)
            (harness-voice-live--state nil) (harness-voice-live--error nil)
+           (harness-voice-live--notice nil)
            (harness-voice-live--muted nil) (harness-voice-live--working nil)
            (harness-voice-live--turn-active nil) (harness-voice-live--closing nil)
            (harness-voice-live--delegation nil) (harness-voice-live--delegations nil)
@@ -663,6 +664,72 @@ which used to leave the line reading Off after a rejected Start."
     (should (equal "Live · Failed" (harness-voice-live--status)))
     (should (string-prefix-p "✕ Failed" (harness-voice-live--stage-text)))
     (should-not (harness-voice-live--active-p))))
+
+(ert-deftest harness-ui-voice-live-notice-keeps-the-call ()
+  "A notice is shown, and the session it happened in goes on."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "notice"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () harness-voice-live--notice) 5 "the notice")
+    (should (equal "Live voice · Local speech · no audio"
+                   harness-voice-live--notice))
+    ;; The session is untouched: still listening, no failure, a Start
+    ;; button nowhere.
+    (should (harness-voice-live--active-p))
+    (should (eq 'listening harness-voice-live--state))
+    (should-not harness-voice-live--error)
+    (should (equal "Live · Listening" (harness-voice-live--status)))
+    (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 500))
+              ((symbol-function 'harness-compose--room)
+               (lambda () (* 500 (frame-char-width)))))
+      (should (equal (concat " Live · Listening · [End] · [Interrupt C-c V]"
+                             " · Live voice · Local speech · no audio"
+                             " · [Mute C-c v] · [Transcript] · [Setup]")
+                     (car (split-string
+                           (substring-no-properties (harness-voice-live--controls))
+                           "\n")))))
+    ;; And the transcript says where it happened, in the caution face.
+    (with-current-buffer harness-voice-live--transcript
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (should (string-match-p "^Live$" text))
+        (should (string-match-p "^  Local speech · no audio$" text)))
+      (goto-char (point-min))
+      (when (search-forward "Local speech · no audio" nil t)
+        (should (eq 'harness-caution-face
+                    (get-text-property (match-beginning 0) 'face)))))))
+
+(ert-deftest harness-ui-voice-live-unspeakable-piece-is-not-sent ()
+  "A piece a voice cannot say is never handed to the sidecar.
+The reply that ends in an emoji used to send the emoji on its own, which
+a speech server answers with no audio at all."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
+    (should-not (harness-voice-live--speakable-p "🙂"))
+    (should-not (harness-voice-live--speakable-p "—"))
+    (should-not (harness-voice-live--speakable-p "`"))
+    (should (harness-voice-live--speakable-p "Hi 🙂"))
+    (harness-voice-live--speak "🙂")
+    (harness-voice-live--speak "Loud and clear. 🙂")
+    (harness-test-wait
+     (lambda ()
+       (cl-find "Loud and clear. 🙂"
+                (mapcar (lambda (e) (plist-get e :text))
+                        (cl-remove-if-not (lambda (e) (equal (plist-get e :event) "commentary"))
+                                          (harness-ui-voice-live-test--events
+                                           harness-ui-voice-live-test--inbox)))
+                :test #'equal))
+     5 "the speakable commentary")
+    (let ((texts (mapcar (lambda (e) (plist-get e :text))
+                         (cl-remove-if-not (lambda (e) (equal (plist-get e :event) "commentary"))
+                                           (harness-ui-voice-live-test--events
+                                            harness-ui-voice-live-test--inbox)))))
+      (should (equal '("Loud and clear. 🙂") texts)))))
 
 (ert-deftest harness-ui-voice-live-startup-timeout ()
   "A silent sidecar cannot leave the UI starting forever."

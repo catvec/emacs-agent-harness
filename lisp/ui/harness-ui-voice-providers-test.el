@@ -537,6 +537,66 @@ selected model needs rather than declaring a stack of its own."
   (should (equal "Whisper tiny (English) · whisper.cpp · 75 MB"
                  (harness-voice-stt-model-choice 'whisper-tiny-en))))
 
+(ert-deftest harness-ui-voice-providers-choices-are-saved ()
+  "The provider, the effort and the speech model are kept for next time.
+They are this client's own settings, so they go to its custom file as
+Customize saves them, and the next Emacs starts with the same ones."
+  (harness-test-with-temp-state
+    (let* ((init-file-user "")
+           (user-init-file (expand-file-name "init.el" harness-state-directory))
+           (custom-file (expand-file-name "custom.el" harness-state-directory))
+           (harness-voice-provider 'wav)
+           (harness-voice-effort 'medium)
+           (harness-voice-stt-model 'auto)
+           (saved nil))
+      (cl-letf (((symbol-function 'harness-voice-setup--refresh) (lambda () nil))
+                ((symbol-function 'harness-voice-live--active-p) (lambda () nil))
+                ((symbol-function 'harness-voice--pipeline-running-p) (lambda () nil))
+                ((symbol-function 'customize-save-variable)
+                 (lambda (symbol value)
+                   (push (cons symbol value) saved)
+                   (set-default symbol value))))
+        (harness-voice-select-provider 'unmute)
+        (harness-voice-select-effort 'high)
+        (harness-voice-select-stt-model 'parakeet-0.6b))
+      (should (equal '((harness-voice-provider . unmute)
+                       (harness-voice-effort . high)
+                       (harness-voice-stt-model . parakeet-0.6b))
+                     (nreverse saved)))
+      (should (eq 'unmute harness-voice-provider))
+      (should (eq 'high harness-voice-effort))
+      (should (eq 'parakeet-0.6b harness-voice-stt-model)))))
+
+(ert-deftest harness-ui-voice-providers-choice-save-writes-the-custom-file ()
+  "Saving a choice writes it where the next Emacs reads it."
+  (harness-test-with-temp-state
+    (let* ((init-file-user "")
+           (user-init-file (expand-file-name "init.el" harness-state-directory))
+           (custom-file (expand-file-name "custom.el" harness-state-directory)))
+      (harness-voice--save-choice 'harness-voice-provider 'unmute)
+      (should (file-exists-p custom-file))
+      (let ((text (with-temp-buffer
+                    (insert-file-contents custom-file)
+                    (buffer-string))))
+        (should (string-match-p "(harness-voice-provider 'unmute)" text)))
+      (should (eq 'unmute harness-voice-provider)))))
+
+(ert-deftest harness-ui-voice-providers-choice-save-refuses-a-policy-value ()
+  "A choice the policy sets is refused before anything is saved."
+  (harness-test-with-temp-state
+    (let* ((init-file-user "")
+           (user-init-file (expand-file-name "init.el" harness-state-directory))
+           (custom-file (expand-file-name "custom.el" harness-state-directory))
+           (harness-voice-provider 'wav))
+      (cl-letf (((symbol-function 'harness-policy-refuse)
+                 (lambda (symbol)
+                   (when (eq symbol 'harness-voice-provider)
+                     (error "harness-voice-provider is set by the policy")))))
+        (should-error (harness-voice--save-choice 'harness-voice-provider 'unmute)
+                      :type 'error))
+      (should (eq 'wav harness-voice-provider))
+      (should-not (file-exists-p custom-file)))))
+
 (ert-deftest harness-ui-voice-providers-stt-model-select ()
   "Selecting a model keeps it, stops a live session and restarts the pipeline."
   (let ((harness-voice-stt-model 'auto)
