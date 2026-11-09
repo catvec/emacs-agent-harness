@@ -341,6 +341,16 @@ checks it compiles and loads it again, as it does the others.")
 ;; the new tree, where the compose box requires `compose-quote'.
 (dolist (dir (harness--vendored-directories))
   (add-to-list 'load-path dir))
+;; The repository's test/ goes last, when there is one: the suites beside
+;; the modules require the shared helper harness-test-helpers from it, and
+;; a harness older than the move of the suites (see
+;; docs/design/co-located-module-tests.md) compiles every file under lisp/
+;; when it checks an update -- test files among them.  That check loads
+;; this file first, so the helper is found only when this file puts test/
+;; on `load-path' as it loads.
+(let ((tests (expand-file-name "test" harness-directory)))
+  (when (file-directory-p tests)
+    (add-to-list 'load-path tests t)))
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-revision)

@@ -2028,6 +2028,42 @@ the files of the new tree, and the compose box requires `compose-quote'."
           (should (equal (file-truename expected)
                          (file-truename (car (last (split-string output "\n" t)))))))))))
 
+(ert-deftest harness-loading-harness-el-finds-the-test-helper ()
+  "An Emacs that only loads harness.el finds the suites' shared helper.
+The suites beside the modules require `harness-test-helpers' from test/,
+and a harness older than the move of the suites into lisp/
+\(docs/design/co-located-module-tests.md) compiles every harness-*.el
+under lisp/ when it checks an update, the tests among them.  That check
+loads the new harness.el first, so harness.el puts test/ on `load-path'
+as it loads; without that, each suite is a problem of the check and the
+update is refused."
+  (let ((emacs (expand-file-name invocation-name invocation-directory))
+        (out (harness-test-temp-dir))
+        (suite (expand-file-name "lisp/modules/harness-tools-todo-test.el" harness-test-root)))
+    (unwind-protect
+        (with-temp-buffer
+          (let* ((status (call-process
+                          emacs nil t nil "-Q" "--batch"
+                          ;; The load path of that older check: the tree
+                          ;; and its lisp directories, and no test/.
+                          "-L" harness-test-root
+                          "-L" (expand-file-name "lisp" harness-test-root)
+                          "-L" (expand-file-name "lisp/modules" harness-test-root)
+                          "-L" (expand-file-name "lisp/ui" harness-test-root)
+                          "-l" (expand-file-name "harness.el" harness-test-root)
+                          "--eval"
+                          (format (concat "(progn"
+                                          " (setq byte-compile-warnings nil"
+                                          "       byte-compile-dest-file-function (lambda (_) %S))"
+                                          " (kill-emacs (cond ((not (locate-library \"harness-test-helpers\")) 2)"
+                                          "                   ((eq t (byte-compile-file %S)) 0)"
+                                          "                   (t 1))))")
+                                  (expand-file-name "checked.elc" out) suite)))
+                 (output (buffer-string)))
+            (ert-info (output)
+              (should (eql 0 status)))))
+      (delete-directory out t))))
+
 (ert-deftest harness-library-files-are-there ()
   "Every library file the harness loads exists, the vendored compose-quote among them.
 The compose box quotes with it, so it loads compiled at start and again

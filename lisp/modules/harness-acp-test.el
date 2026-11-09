@@ -1834,7 +1834,7 @@ its parent's temporary directory is no project of its own either."
               (let ((task-id (plist-get (plist-get r :_harness) :taskId)))
                 (should (stringp task-id))
                 (should (cl-find prompt (harness-call 'task/list dir)
-                                 :key (lambda (t) (plist-get t :prompt)) :test #'equal))
+                                 :key (lambda (task) (plist-get task :prompt)) :test #'equal))
                 (let ((confirm (cl-find-if
                                 (lambda (u)
                                   (and (equal "agent_message_chunk" (plist-get u :sessionUpdate))

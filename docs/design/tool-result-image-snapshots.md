@@ -82,7 +82,7 @@ leaves no `:snapshot`, and requests read the file exactly as before.
 | `harness-agent.el` | `harness-agent--keep-result-images` runs before the result is recorded; `result-images`, `prepare-result` and `hosted-images` know `:snapshot` |
 | `harness-session.el` | `harness-session--result-images` carries `:snapshot` into the request block |
 | `harness-cache.el` | a good read clears the streak but not `:alerted-at`, so the documented cooldown holds across it |
-| tests | `test/harness-images-test.el`, the agent image suite's changed-file/spread/deletion/fallback cases, and the cache cooldown |
+| tests | `lisp/modules/harness-images-test.el`, the agent image suite's changed-file/spread/deletion/fallback cases, and the cache cooldown |
 
 The cache-health change is small but belongs here: the device-aware
 session alerted twice 65 seconds apart because a single good read erased

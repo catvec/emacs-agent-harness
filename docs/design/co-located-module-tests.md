@@ -85,6 +85,34 @@ UI call sites, version headers, frame audit, patch-review ownership)
 also skip `*-test.el`, so a test's own source cannot satisfy a check
 about production code.
 
+## Updating from a version before the move
+
+An installed harness checks an update before installing it, and a
+harness built before this move has a check that knows nothing of it:
+it byte-compiles every `harness-*.el` under `lisp/`, the suites among
+them, with the tree's `lisp` directories and no `test/` on
+`load-path`.  Each suite then fails to load `harness-test-helpers`,
+and the update is refused as broken.
+
+That check loads the new `harness.el` first, so `harness.el` puts the
+tree's `test/` on `load-path` as it loads, at the end and only when the
+directory exists.  The helper is found and the suites compile.
+`harness-loading-harness-el-finds-the-test-helper`
+\(`lisp/harness-core-test.el`) holds this: it loads `harness.el` with
+the older check's `load-path` and compiles a suite that requires the
+helper.
+
+A harness from before the move that is already running, with
+`harness-enabled-modules` t, still takes every file under the module
+directories for a module when it reloads after such an update -- its
+module list leaves out only what its code knew to leave out -- and
+compiles the suites before it loads the new `harness.el`.  The update
+is installed, the reload is refused, and the version page offers
+`[Restart]`: the one-time cost of the move, after which the check and
+the reload both leave the tests out.  Making the old reload find the
+helper instead would load the suites into the running harness as if
+they were modules, which is what this change makes sure never happens.
+
 ## Test runner
 
 `scripts/test.sh` discovers suites in `lisp/`, `lisp/modules/`,

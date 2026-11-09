@@ -147,7 +147,7 @@ No new versions or suffixes were invented: unknown ones stay Unrated.
 - `lisp/modules/harness-provider-openai.el`, `-copilot.el`,
   `-claude.el`: the availability rules.
 - `lisp/modules/harness-model-complexity.el`: namespace matching.
-- Tests: `test/harness-ui-model-picker-test.el` (browsing, search,
+- Tests: `lisp/ui/harness-ui-model-picker-test.el` (browsing, search,
   labels, copy), `test/harness-ui-model-complexity-test.el` (ranked
   order and navigation), the provider suites (availability), and the
   existing UI suites whose model stubs now choose by id.
